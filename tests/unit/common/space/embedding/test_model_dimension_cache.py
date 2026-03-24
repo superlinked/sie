@@ -12,23 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from enum import Enum
-
-from beartype.typing import TypeVar
-
-
-class ModelHandler(Enum):
-    SENTENCE_TRANSFORMERS = "sentence_transformers"
-    OPEN_CLIP = "open_clip"
-    MODAL = "modal"
-    MINIMAX = "minimax"
+from superlinked.framework.common.space.embedding.model_based.model_dimension_cache import (
+    MODEL_DIMENSION_BY_NAME,
+)
 
 
-class TextModelHandler(Enum):
-    SENTENCE_TRANSFORMERS = "sentence_transformers"
-    MODAL = "modal"
-    MINIMAX = "minimax"
-
-
-ModelHandlerType = ModelHandler | TextModelHandler
-ModelHandlerT = TypeVar("ModelHandlerT", bound=ModelHandlerType)
+class TestModelDimensionCache:
+    def test_embo01_dimension_cached(self) -> None:
+        assert "embo-01" in MODEL_DIMENSION_BY_NAME
+        assert MODEL_DIMENSION_BY_NAME["embo-01"] == 1536

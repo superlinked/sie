@@ -21,6 +21,7 @@ from beartype.typing import Any, Mapping, Sequence
 from superlinked.framework.common.interface.comparison_operand import (
     ComparisonOperation,
 )
+from superlinked.framework.common.nlq.minimax import MiniMaxClientConfig
 from superlinked.framework.common.nlq.open_ai import OpenAIClientConfig
 from superlinked.framework.common.schema.schema_object import SchemaField
 from superlinked.framework.dsl.space.space import Space
@@ -53,7 +54,7 @@ class QueryVectorClauseParams:
 
 @dataclass(frozen=True)
 class NLQClauseParams:
-    client_config: OpenAIClientConfig | None = None
+    client_config: OpenAIClientConfig | MiniMaxClientConfig | None = None
     natural_query: str | None = None
     system_prompt: str | None = None
 

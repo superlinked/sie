@@ -32,6 +32,9 @@ from superlinked.framework.common.space.embedding.model_based.engine.embedding_e
 from superlinked.framework.common.space.embedding.model_based.engine.embedding_engine_config import (
     EmbeddingEngineConfig,
 )
+from superlinked.framework.common.space.embedding.model_based.engine.minimax_engine import (
+    MiniMaxEngine,
+)
 from superlinked.framework.common.space.embedding.model_based.engine.modal_engine import (
     ModalEngine,
 )
@@ -54,9 +57,11 @@ from superlinked.framework.common.telemetry.telemetry_registry import telemetry
 ENGINE_BY_HANDLER: Mapping[ModelHandlerType, type[EmbeddingEngine]] = {
     TextModelHandler.SENTENCE_TRANSFORMERS: SentenceTransformersEngine,
     TextModelHandler.MODAL: ModalEngine,
+    TextModelHandler.MINIMAX: MiniMaxEngine,
     ModelHandler.SENTENCE_TRANSFORMERS: SentenceTransformersEngine,
     ModelHandler.OPEN_CLIP: OpenCLIPEngine,
     ModelHandler.MODAL: ModalEngine,
+    ModelHandler.MINIMAX: MiniMaxEngine,
 }
 
 logger = structlog.getLogger()
@@ -103,7 +108,7 @@ class EmbeddingEngineManager:
         if not settings.MODEL_WARMUP and clean_model_name in MODEL_DIMENSION_BY_NAME:
             return MODEL_DIMENSION_BY_NAME[clean_model_name]
         length = await self._get_engine(model_handler, model_name, model_cache_dir, config).length
-        if model_handler not in [ModelHandler.MODAL, TextModelHandler.MODAL]:
+        if model_handler not in [ModelHandler.MODAL, TextModelHandler.MODAL, ModelHandler.MINIMAX, TextModelHandler.MINIMAX]:
             logger.info("Consider caching model dimension.", model_name=clean_model_name, dimension=length)
         return length
 

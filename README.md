@@ -207,6 +207,49 @@ print(json.dumps(result.metadata, indent=2))
 sl.PandasConverter.to_pandas(result)
 ```
 
+### Using MiniMax as LLM and Embedding Provider
+
+Superlinked supports [MiniMax](https://www.minimax.io/) as both an LLM provider for natural language queries and an embedding provider for text similarity.
+
+**Natural Language Querying with MiniMax:**
+
+```python
+import os
+from superlinked import framework as sl
+
+# Use MiniMax for natural language query parameter extraction
+query = (
+    sl.Query(index, weights={...})
+    .find(product)
+    .similar(description_space, sl.Param("description_query"))
+    .limit(sl.Param("limit"))
+    .with_natural_query(
+        sl.Param("natural_language_query"),
+        sl.MiniMaxClientConfig(
+            api_key=os.environ["MINIMAX_API_KEY"],
+            model="MiniMax-M2.7",  # or "MiniMax-M2.5", "MiniMax-M2.5-highspeed"
+        ),
+    )
+)
+```
+
+**Text Embeddings with MiniMax embo-01:**
+
+```python
+import os
+from superlinked import framework as sl
+
+# Use MiniMax embo-01 for text embeddings (1536 dimensions)
+space = sl.TextSimilaritySpace(
+    text=review.text,
+    model="embo-01",
+    model_handler=sl.TextModelHandler.MINIMAX,
+    embedding_engine_config=sl.MiniMaxEngineConfig(
+        api_key=os.environ["MINIMAX_API_KEY"],
+    ),
+)
+```
+
 ## Use-cases
 
 Dive deeper with our notebooks into how each use-case benefits from the Superlinked framework.

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing_extensions import override
 
 from superlinked.framework.common.exception import InvalidInputException
+from superlinked.framework.common.nlq.minimax import MiniMaxClientConfig
 from superlinked.framework.common.nlq.open_ai import OpenAIClientConfig
 from superlinked.framework.dsl.query.clause_params import NLQClauseParams
 from superlinked.framework.dsl.query.param import StringParamType
@@ -30,7 +31,7 @@ from superlinked.framework.dsl.query.query_clause.single_value_param_query_claus
 
 @dataclass(frozen=True)
 class NLQClause(SingleValueParamQueryClause):
-    client_config: OpenAIClientConfig
+    client_config: OpenAIClientConfig | MiniMaxClientConfig
 
     @override
     def get_altered_nql_params(self, nlq_clause_params: NLQClauseParams) -> NLQClauseParams:
@@ -51,6 +52,8 @@ class NLQClause(SingleValueParamQueryClause):
         return value
 
     @classmethod
-    def from_param(cls, natural_query: StringParamType, client_config: OpenAIClientConfig) -> NLQClause:
+    def from_param(
+        cls, natural_query: StringParamType, client_config: OpenAIClientConfig | MiniMaxClientConfig
+    ) -> NLQClause:
         param = QueryClause._to_typed_param(natural_query, [str])
         return NLQClause(param, client_config)

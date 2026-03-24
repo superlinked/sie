@@ -17,6 +17,7 @@ from beartype.typing import Any, Sequence
 from pydantic import BaseModel
 
 from superlinked.framework.common.exception import UnexpectedResponseException
+from superlinked.framework.common.nlq.minimax import MiniMaxClient, MiniMaxClientConfig
 from superlinked.framework.common.nlq.open_ai import OpenAIClient, OpenAIClientConfig
 from superlinked.framework.common.telemetry.telemetry_registry import telemetry
 from superlinked.framework.dsl.query.nlq.nlq_clause_collector import NLQClauseCollector
@@ -31,7 +32,7 @@ from superlinked.framework.dsl.query.space_weight_param_info import SpaceWeightP
 
 
 class NLQHandler:
-    def __init__(self, client_config: OpenAIClientConfig) -> None:
+    def __init__(self, client_config: OpenAIClientConfig | MiniMaxClientConfig) -> None:
         self.__client_config = client_config
 
     async def fill_params(
@@ -57,7 +58,10 @@ class NLQHandler:
 
     async def _execute_query(self, query: str, instructor_prompt: str, model_class: type[BaseModel]) -> dict[str, Any]:
         try:
-            client = OpenAIClient(self.__client_config)
+            if isinstance(self.__client_config, MiniMaxClientConfig):
+                client = MiniMaxClient(self.__client_config)
+            else:
+                client = OpenAIClient(self.__client_config)
             result = await client.query(query, instructor_prompt, model_class)
             return result
         except Exception as e:

@@ -26,6 +26,7 @@ from superlinked.framework.common.interface.comparison_operand import (
     _Or,
 )
 from superlinked.framework.common.interface.evaluated import Evaluated
+from superlinked.framework.common.nlq.minimax import MiniMaxClientConfig
 from superlinked.framework.common.nlq.open_ai import OpenAIClientConfig
 from superlinked.framework.common.schema.id_schema_object import IdSchemaObject
 from superlinked.framework.common.schema.schema_object import (
@@ -276,7 +277,7 @@ class QueryDescriptor:  # pylint: disable=too-many-public-methods
     def with_natural_query(
         self,
         natural_query: StringParamType,
-        client_config: OpenAIClientConfig,
+        client_config: OpenAIClientConfig | MiniMaxClientConfig,
         system_prompt: StringParamType | None = None,
     ) -> QueryDescriptor:
         """
@@ -284,7 +285,8 @@ class QueryDescriptor:  # pylint: disable=too-many-public-methods
 
         Args:
             natural_query (StringParamType): Query containing desired characteristics.
-            client_config (OpenAIClientConfig): Client config to initialize the client with.
+            client_config (OpenAIClientConfig | MiniMaxClientConfig): Client config to initialize the client with.
+                Supports OpenAI and MiniMax LLM providers.
             system_prompt (StringParamType | None): Custom system prompt to use for the query. Defaults to None.
         Returns:
             Self: The query object itself.

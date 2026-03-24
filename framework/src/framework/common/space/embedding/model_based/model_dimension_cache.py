@@ -23,4 +23,5 @@ MODEL_DIMENSION_BY_NAME: Mapping[str, int] = {
     "RN50": 1024,
     "Marqo/marqo-fashionSigLIP": 768,
     "pySilver/marqo-fashionSigLIP-ST": 768,
+    "embo-01": 1536,
 }

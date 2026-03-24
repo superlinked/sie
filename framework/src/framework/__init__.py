@@ -54,6 +54,7 @@ from superlinked.evaluation.vector_sampler import VectorSampler
 from superlinked.framework.blob.blob_handler_factory import BlobHandlerConfig
 from superlinked.framework.common.dag.context import CONTEXT_COMMON, CONTEXT_COMMON_NOW
 from superlinked.framework.common.dag.period_time import PeriodTime
+from superlinked.framework.common.nlq.minimax import MiniMaxClientConfig
 from superlinked.framework.common.nlq.open_ai import OpenAIClientConfig
 from superlinked.framework.common.parser.dataframe_parser import DataFrameParser
 from superlinked.framework.common.parser.json_parser import JsonParser
@@ -89,6 +90,9 @@ from superlinked.framework.common.space.config.embedding.text_similarity_embeddi
 )
 from superlinked.framework.common.space.embedding.model_based.engine.embedding_engine_config import (
     EmbeddingEngineConfig,
+)
+from superlinked.framework.common.space.embedding.model_based.engine.minimax_engine_config import (
+    MiniMaxEngineConfig,
 )
 from superlinked.framework.common.space.embedding.model_based.engine.modal_engine_config import (
     ModalEngineConfig,
@@ -149,6 +153,7 @@ __all__ = [
     "CONTEXT_COMMON_NOW",
     "PeriodTime",
     # Framework Common nlq
+    "MiniMaxClientConfig",
     "OpenAIClientConfig",
     # Framework Common util
     "get_altair_renderer",
@@ -175,6 +180,7 @@ __all__ = [
     "Mode",
     # Text/Image Space Config
     "EmbeddingEngineConfig",
+    "MiniMaxEngineConfig",
     "ModalEngineConfig",
     # Text Similarity Space Config
     "TextModelHandler",

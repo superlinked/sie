@@ -42,6 +42,9 @@ from superlinked.framework.common.space.config.transformation_config import (
 from superlinked.framework.common.space.embedding.model_based.engine.embedding_engine_config import (
     EmbeddingEngineConfig,
 )
+from superlinked.framework.common.space.embedding.model_based.engine.minimax_engine_config import (
+    MiniMaxEngineConfig,
+)
 from superlinked.framework.common.space.embedding.model_based.engine.modal_engine_config import (
     ModalEngineConfig,
 )
@@ -120,6 +123,12 @@ class TextSimilaritySpace(Space[Vector, str], HasSpaceFieldSet):
                 f"Invalid configuration: TextModelHandler.MODAL requires ModalEngineConfig, "
                 f"but received {type(embedding_engine_config).__name__}. "
                 f"Please provide a ModalEngineConfig instance when using MODAL as the model handler."
+            )
+        if model_handler == TextModelHandler.MINIMAX and not isinstance(embedding_engine_config, MiniMaxEngineConfig):
+            raise InvalidInputException(
+                f"Invalid configuration: TextModelHandler.MINIMAX requires MiniMaxEngineConfig, "
+                f"but received {type(embedding_engine_config).__name__}. "
+                f"Please provide a MiniMaxEngineConfig instance when using MINIMAX as the model handler."
             )
 
     def _get_root(self, text: String | Node) -> String:
