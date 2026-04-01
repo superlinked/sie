@@ -1,0 +1,113 @@
+groups:
+  # Worker health alerts
+  - name: sie-worker-health
+    rules:
+      - alert: SIEWorkerDown
+        expr: up{job="sie-worker"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SIE Worker {{ $labels.pod }} is down"
+          description: "Worker pod {{ $labels.pod }} has been unreachable for 2 minutes."
+
+      - alert: SIENoHealthyWorkers
+        expr: sum(up{job="sie-worker"}) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No healthy SIE workers"
+          description: "All SIE worker pods are down. Requests will fail."
+
+      - alert: SIEWorkerHighQueueDepth
+        expr: sie_request_queue_depth > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High queue depth on {{ $labels.pod }}"
+          description: "Worker {{ $labels.pod }} has queue depth {{ $value }} for 5 minutes. Consider scaling up."
+
+  # GPU alerts
+  - name: sie-gpu-health
+    rules:
+      - alert: SIEGPUMemoryHigh
+        expr: DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU memory > 90% on {{ $labels.gpu }}"
+          description: "GPU {{ $labels.gpu }} on {{ $labels.pod }} is at {{ $value | humanizePercentage }} memory."
+
+      - alert: SIEGPUTemperatureHigh
+        expr: DCGM_FI_DEV_GPU_TEMP > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU temperature > 80°C on {{ $labels.gpu }}"
+          description: "GPU {{ $labels.gpu }} temperature is {{ $value }}°C. Check cooling."
+
+      - alert: SIEGPUECCErrors
+        expr: increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[1h]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU ECC double-bit errors on {{ $labels.gpu }}"
+          description: "GPU {{ $labels.gpu }} has uncorrectable ECC errors. Hardware issue likely."
+
+  # Router alerts
+  - name: sie-router-health
+    rules:
+      - alert: SIERouterDown
+        expr: up{job="sie-router"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SIE Router is down"
+          description: "Router pod {{ $labels.pod }} is unreachable. Traffic cannot be routed."
+
+      - alert: SIEHighErrorRate
+        expr: |
+          sum(rate(sie_router_requests_total{status=~"5.."}[5m]))
+          / sum(rate(sie_router_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SIE error rate > 5%"
+          description: "{{ $value | humanizePercentage }} of requests are failing."
+
+      - alert: SIEHighLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(sie_request_duration_seconds_bucket[5m]))) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SIE p95 latency > 5s"
+          description: "95th percentile latency is {{ $value | humanizeDuration }}."
+
+  # Provisioning alerts
+  - name: sie-provisioning
+    rules:
+      - alert: SIEProvisioningStuck
+        expr: |
+          kube_pod_status_phase{namespace="__NAMESPACE__", phase="Pending"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SIE pod stuck in Pending"
+          description: "Pod {{ $labels.pod }} has been Pending for 10 minutes. Check events for scheduling issues."
+
+      - alert: SIEScaleUpFailed
+        expr: |
+          increase(kube_event_count{reason="FailedScheduling", involved_object_namespace="__NAMESPACE__"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "SIE worker failed to schedule"
+          description: "Worker pod failed to schedule. Likely insufficient GPU capacity."

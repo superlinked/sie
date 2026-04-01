@@ -1,0 +1,20 @@
+sie_id: jackboyla/glirel-large-v0
+hf_id: jackboyla/glirel-large-v0
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.glirel:GLiRELAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        threshold: 0.1

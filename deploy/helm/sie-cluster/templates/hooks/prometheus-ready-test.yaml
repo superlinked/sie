@@ -1,0 +1,85 @@
+{{- if and .Values.healthGates.enabled .Values.autoscaling.enabled }}
+{{- /*
+  When kube-prometheus-stack is installed as a sub-chart, Prometheus runs in the release
+  namespace — not the hardcoded "monitoring" namespace. Auto-derive both the namespace
+  and address so the health gate Job can reach Prometheus without manual overrides.
+*/ -}}
+{{- $promNs := .Values.healthGates.monitoringNamespace }}
+{{- $promAddr := .Values.autoscaling.prometheusAddress }}
+{{- if index .Values "kube-prometheus-stack" "install" }}
+{{- $promNs = include "sie-cluster.namespace" . }}
+{{- $promAddr = printf "http://prometheus-operated.%s.svc.cluster.local:9090" (include "sie-cluster.namespace" .) }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "sie-cluster.healthGate.prometheus.serviceAccountName" . }}
+  namespace: {{ $promNs | quote }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: prometheus
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "1"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-health-prometheus-%d" (include "sie-cluster.fullname" .) .Release.Revision | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $promNs | quote }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: prometheus
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "1"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 660
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sie-health-test
+        app.kubernetes.io/component: prometheus
+    spec:
+      serviceAccountName: {{ include "sie-cluster.healthGate.prometheus.serviceAccountName" . }}
+      restartPolicy: Never
+      containers:
+        - name: test
+          image: alpine:3.19
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              PROMETHEUS_URL="{{ $promAddr }}"
+              TIMEOUT=600
+              INTERVAL=5
+              echo "=== Prometheus Readiness Test ==="
+              elapsed=0
+              while [ $elapsed -lt $TIMEOUT ]; do
+                response=$(wget -qO- --timeout=5 "$PROMETHEUS_URL/api/v1/query?query=up" 2>/dev/null || echo "{}")
+                if echo "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"success"'; then
+                  echo "SUCCESS: Prometheus query API is ready"
+                  exit 0
+                fi
+                echo "Waiting... (${elapsed}s/${TIMEOUT}s)"
+                sleep $INTERVAL
+                elapsed=$((elapsed + INTERVAL))
+              done
+              echo "FAILED: Prometheus did not become ready within ${TIMEOUT}s"
+              exit 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+{{- end }}

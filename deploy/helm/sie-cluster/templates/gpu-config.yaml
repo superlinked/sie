@@ -1,0 +1,36 @@
+# ConfigMap containing available GPU types and machine profiles for the cluster
+# Router reads this to report available GPUs/profiles even when workers are scaled to zero
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-gpu-config
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+data:
+  # Comma-separated list of GPU types and machine profiles for routing validation
+  # Includes both raw GPU types (e.g., "l4") and machine profile names (e.g., "l4-spot")
+  # This allows requests with gpu="l4" or gpu="l4-spot" to be routed correctly
+  {{- $gpuTypes := list }}
+  {{- range $poolName, $pool := .Values.workers.pools }}
+  {{- if $pool.enabled }}
+  {{- $gpuTypes = append $gpuTypes $pool.gpuType }}
+  {{- /* Also include machineProfile name if different from gpuType (e.g., "l4-spot" vs "l4") */}}
+  {{- if and $pool.machineProfile (ne $pool.machineProfile $pool.gpuType) }}
+  {{- $gpuTypes = append $gpuTypes $pool.machineProfile }}
+  {{- end }}
+  {{- /* Include pool name if it's different and used as machine profile */}}
+  {{- if and (ne $poolName $pool.gpuType) (ne $poolName $pool.machineProfile) }}
+  {{- $gpuTypes = append $gpuTypes $poolName }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  available-gpus: {{ join "," $gpuTypes | quote }}
+  # Machine profiles JSON for router (used for pool validation and routing)
+  # Format: {"profile_name": {"gpuType": "...", "machineType": "...", "spot": bool}}
+  machine-profiles: |
+    {{- $profiles := dict }}
+    {{- range $name, $profile := .Values.machineProfiles }}
+    {{- $_ := set $profiles $name $profile }}
+    {{- end }}
+    {{ $profiles | toJson }}

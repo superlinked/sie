@@ -1,0 +1,25 @@
+sie_id: laion/CLIP-ViT-B-32-laion2B-s34B-b79K
+hf_id: laion/CLIP-ViT-B-32-laion2B-s34B-b79K
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 512
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 77
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.clip:CLIPAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        normalize: true

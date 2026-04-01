@@ -1,0 +1,12 @@
+SIE Cluster {{ .Chart.Version }} deployed to namespace {{ include "sie-cluster.namespace" . }}.
+
+Router: http://{{ include "sie-cluster.router.serviceName" . }}.{{ include "sie-cluster.namespace" . }}.svc:{{ .Values.router.service.port }}
+
+{{- if index .Values "kube-prometheus-stack" "install" }}
+Prometheus: enabled — kubectl port-forward -n {{ include "sie-cluster.namespace" . }} svc/prometheus-operated 9090
+Grafana:    enabled — kubectl port-forward -n {{ include "sie-cluster.namespace" . }} svc/{{ .Release.Name }}-grafana 3000:80
+Grafana password: kubectl get secret -n {{ include "sie-cluster.namespace" . }} {{ .Release.Name }}-grafana -o jsonpath="{.data.admin-password}" | base64 -d
+{{- end }}
+{{- if .Values.keda.install }}
+KEDA:       enabled
+{{- end }}

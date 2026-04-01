@@ -1,0 +1,227 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_requests_total{namespace=\"$namespace\", model=\"$model\"}[5m]))",
+          "legendFormat": "Requests/s",
+          "refId": "A"
+        }
+      ],
+      "title": "Model QPS",
+      "type": "stat"
+    },
+    {
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", model=\"$model\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p95 Latency (ms)",
+          "refId": "A"
+        }
+      ],
+      "title": "p95 Latency",
+      "type": "stat"
+    },
+    {
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "avg(sie_batch_size{namespace=\"$namespace\", model=\"$model\"})",
+          "legendFormat": "Avg Batch Size",
+          "refId": "A"
+        }
+      ],
+      "title": "Avg Batch Size",
+      "type": "stat"
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 4,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(sie_request_queue_depth{namespace=\"$namespace\", model=\"$model\"}) by (pod)",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Queue Depth by Pod",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 5,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sie_batch_size{namespace=\"$namespace\", model=\"$model\"}",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Batch Size by Pod",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "max"],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", model=\"$model\"}[5m])) by (le, operation)) * 1000",
+          "legendFormat": "{{operation}} p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", model=\"$model\"}[5m])) by (le, operation)) * 1000",
+          "legendFormat": "{{operation}} p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", model=\"$model\"}[5m])) by (le, operation)) * 1000",
+          "legendFormat": "{{operation}} p99",
+          "refId": "C"
+        }
+      ],
+      "title": "Latency Breakdown by Operation",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "id": 7,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_tokens_processed_total{namespace=\"$namespace\", model=\"$model\"}[5m]))",
+          "legendFormat": "Tokens/s",
+          "refId": "A"
+        }
+      ],
+      "title": "Token Throughput",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "id": 8,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_requests_total{namespace=\"$namespace\", model=\"$model\", status=\"error\"}[5m])) / sum(rate(sie_requests_total{namespace=\"$namespace\", model=\"$model\"}[5m])) * 100",
+          "legendFormat": "Error Rate %",
+          "refId": "A"
+        }
+      ],
+      "title": "Error Rate",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": ["sie", "model"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "sie", "value": "sie" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Namespace",
+        "multi": false,
+        "name": "namespace",
+        "options": [],
+        "query": "label_values(up, namespace)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "bge-m3", "value": "bge-m3" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Model",
+        "multi": false,
+        "name": "model",
+        "options": [],
+        "query": "label_values(sie_requests_total{namespace=\"$namespace\"}, model)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "SIE Model Performance",
+  "uid": "sie-model-performance",
+  "version": 1,
+  "weekStart": ""
+}

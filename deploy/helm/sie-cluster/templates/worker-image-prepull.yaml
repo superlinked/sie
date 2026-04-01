@@ -1,0 +1,67 @@
+{{- $root := . -}}
+{{- if $root.Values.workers.common.imagePrepull.enabled }}
+{{- range $poolName, $pool := .Values.workers.pools }}
+{{- if $pool.enabled }}
+{{- $bundle := default $root.Values.workers.common.bundle $pool.bundle }}
+{{- $imageTag := default $root.Chart.AppVersion $root.Values.workers.common.image.tag }}
+{{- $workerImage := printf "%s:%s-%s" $root.Values.workers.common.image.repository $imageTag $bundle }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "sie-cluster.fullname" $root }}-image-prepull-{{ $poolName }}
+  namespace: {{ include "sie-cluster.namespace" $root }}
+  labels:
+    {{- include "sie-cluster.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: image-prepull
+    sie.superlinked.com/pool: {{ $poolName | quote }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "sie-cluster.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: image-prepull
+      sie.superlinked.com/pool: {{ $poolName | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "sie-cluster.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: image-prepull
+        sie.superlinked.com/pool: {{ $poolName | quote }}
+    spec:
+      {{- include "sie-cluster.imagePullSecrets" $root | nindent 6 }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 0
+      initContainers:
+        - name: pull-worker-image
+          image: {{ $workerImage }}
+          imagePullPolicy: {{ $root.Values.workers.common.image.pullPolicy }}
+          command: ["true"]
+          resources:
+            requests:
+              cpu: "1m"
+              memory: "8Mi"
+            limits:
+              cpu: "10m"
+              memory: "16Mi"
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              cpu: "1m"
+              memory: "8Mi"
+            limits:
+              cpu: "10m"
+              memory: "16Mi"
+      {{- with $pool.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $pool.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      priorityClassName: ""
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,120 @@
+# AWS EKS specific values
+fullnameOverride: sie
+
+# Install sub-charts (matches GKE)
+keda:
+  install: true
+
+kube-prometheus-stack:
+  install: true
+  # EKS manages its own control plane — disable control-plane monitors
+  kubeApiServer:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeProxy:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+
+# Autoscaling via KEDA (queries Prometheus for scaling decisions)
+# prometheusAddress is auto-derived when kube-prometheus-stack.install=true
+autoscaling:
+  enabled: true
+  # Match GCP (600s/300s) - must survive gaps between matrix eval task transitions
+  cooldownPeriod: 600
+  scaleDownStabilization: 300
+
+# Enable Prometheus scraping (required for KEDA autoscaling)
+serviceMonitor:
+  enabled: true
+  labels:
+    app.kubernetes.io/part-of: sie
+
+# AWS machine profiles (extends base machineProfiles)
+machineProfiles:
+  # AWS g6.xlarge (NVIDIA L4)
+  g6:
+    gpuType: nvidia-l4
+    machineType: g6.xlarge
+    spot: false
+
+# Ingress via nginx-ingress (matches GCP)
+ingress:
+  enabled: true
+  className: nginx
+
+router:
+  # HA configuration to match GCP
+  replicas: 2
+  # Force repull to get latest image
+  image:
+    pullPolicy: Always
+  # Resources to match GCP baseline
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+workers:
+  pools:
+    # Disable GCP-specific pools
+    l4:
+      enabled: false
+    a100-40gb:
+      enabled: false
+    a100-80gb:
+      enabled: false
+    cpu:
+      enabled: false
+
+    # AWS g6.xlarge pool (NVIDIA L4)
+    g6:
+      enabled: true
+      minReplicas: 0
+      maxReplicas: 10
+      machineProfile: g6
+      gpuType: nvidia-l4
+      # No GCP-specific node selector
+      nodeSelector: {}
+      gpu:
+        count: 1
+        product: NVIDIA-L4
+      resources:
+        requests:
+          cpu: "2"
+          memory: "8Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+# ServiceAccount — Helm manages creation; IRSA annotation must be injected at deploy time.
+# NAMING CONTRACT: name must match module.sie_irsa_role namespace_service_accounts
+#   in deploy/terraform/aws/irsa.tf (currently "sie:sie-server").
+# To inject the IRSA role ARN at deploy time:
+#   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=<ARN>
+# Note: The hf-token secret is NOT created by the Helm chart. It must be created
+#   manually on new clusters before deploying.
+# Bash (read -rsp is bash-only):
+#   read -rsp "HF token: " HF_TOKEN; echo
+#   kubectl create secret generic hf-token --from-literal=token="$HF_TOKEN" -n sie
+#   unset HF_TOKEN
+# Or create from a file (then remove the file): kubectl create secret generic hf-token --from-file=token=/path/to/token -n sie
+serviceAccount:
+  create: true
+  name: "sie-server"
+  annotations: {}
+  # eks.amazonaws.com/role-arn: <ARN>  # inject via --set at deploy time
+
+dcgm-exporter:
+  # AWS GPU nodes use taints, not the GCP accelerator label
+  nodeSelector: {}

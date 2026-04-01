@@ -1,0 +1,187 @@
+# syntax=docker/dockerfile:1.6
+# SIE Server - CPU-only Image (amd64 + arm64)
+# Build from repo root:
+#   docker build -f packages/sie_server/Dockerfile.cpu -t sie-server:cpu-default .
+#   docker build -f packages/sie_server/Dockerfile.cpu --build-arg BUNDLE=sglang -t sie-server:cpu-sglang .
+#   docker buildx build --platform linux/amd64,linux/arm64 -f packages/sie_server/Dockerfile.cpu -t sie-server:cpu .
+#
+# For faster builds with cache mounts (requires BuildKit):
+#   DOCKER_BUILDKIT=1 docker build -f packages/sie_server/Dockerfile.cpu -t sie-server:cpu-default .
+#
+# Layer caching strategy:
+#   - Stage 1 (deps): Install all pip dependencies from pyproject.toml (cached unless deps change)
+#   - Stage 2 (builder): Copy source code and do editable install (quick, uses cached deps)
+#   This ensures code-only changes rebuild only Stage 2, not the slow pip install step.
+
+ARG BUNDLE=default
+
+# =============================================================================
+# Stage 1: Dependencies (changes rarely - cached for code-only changes)
+# =============================================================================
+FROM ubuntu:22.04 AS deps
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.12 and build tools
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    gnupg \
+    ca-certificates \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
+    curl \
+    git \
+    build-essential \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv - pin to specific version for reproducibility
+COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /uvx /bin/
+
+WORKDIR /app
+
+# UV environment variables for optimal builds
+ENV UV_NO_CACHE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+# Copy ONLY dependency specifications first (for layer caching)
+COPY packages/sie_sdk/pyproject.toml /tmp/sie_sdk/pyproject.toml
+COPY packages/sie_server/pyproject.toml ./pyproject.toml
+
+# Create minimal src directories so pip install -e works for dep resolution
+RUN mkdir -p /tmp/sie_sdk/src/sie_sdk src/sie_server \
+    && touch /tmp/sie_sdk/src/sie_sdk/__init__.py \
+    && touch src/sie_server/__init__.py
+
+# Create venv and install dependencies only (without actual source code)
+# This layer is cached as long as pyproject.toml files don't change
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3.12 -m venv .venv \
+    && .venv/bin/pip install --upgrade pip \
+    && .venv/bin/pip install \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple \
+        -e "/tmp/sie_sdk[storage]" \
+        -e ".[gpu-metrics]"
+
+# =============================================================================
+# Stage 2: Source code (changes often - quick rebuild)
+# =============================================================================
+FROM deps AS base
+
+# Now copy the actual source code (this layer rebuilds on code changes)
+COPY packages/sie_sdk/src /tmp/sie_sdk/src
+COPY packages/sie_server/src src/
+
+# Re-install editable packages with actual source (quick, deps already installed)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    .venv/bin/pip install --no-deps \
+        -e /tmp/sie_sdk \
+        -e .
+
+# =============================================================================
+# Stage 2: Builder - bundle-specific deps
+# =============================================================================
+FROM base AS builder
+
+ARG BUNDLE
+
+# Resolve bundle-specific dependencies
+COPY packages/sie_server/bundles bundles/
+COPY packages/sie_server/models models/
+
+# Use --cpu flag to exclude CUDA-only dependencies (flash-attn, xformers)
+RUN .venv/bin/python -m sie_server.cli resolve-deps \
+    --bundle "${BUNDLE}" \
+    --models-dir models \
+    --cpu \
+    > /tmp/bundle-requirements.txt \
+    && echo "Bundle ${BUNDLE} requirements:" \
+    && cat /tmp/bundle-requirements.txt
+
+# Install bundle-specific deps
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ -s /tmp/bundle-requirements.txt ]; then \
+        .venv/bin/pip install \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            -r /tmp/bundle-requirements.txt; \
+    fi
+
+# Clean up to reduce image size
+RUN find .venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true \
+    && find .venv -type f -name "*.pyc" -delete 2>/dev/null || true \
+    && find .venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true \
+    && find .venv -type d -name "test" -exec rm -rf {} + 2>/dev/null || true \
+    && rm -rf .venv/share/jupyter 2>/dev/null || true
+
+# =============================================================================
+# Stage 2: Runtime
+# =============================================================================
+FROM ubuntu:22.04 AS runtime
+
+ARG BUNDLE
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.12 runtime
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    gnupg \
+    ca-certificates \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    libjpeg8 \
+    libpng16-16 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -g 1000 sie && useradd -u 1000 -g sie -m sie
+
+WORKDIR /app
+
+# Copy virtual environment from builder (with correct ownership to avoid chown layer)
+COPY --from=builder --chown=sie:sie /app/.venv /app/.venv
+
+# Copy source code (uv sync creates editable install with .pth pointing to /app/src)
+COPY --from=builder --chown=sie:sie /app/src /app/src
+
+# Copy sie-sdk source (installed as editable in /tmp)
+COPY --from=builder --chown=sie:sie /tmp/sie_sdk/src /tmp/sie_sdk/src
+
+# Copy model configs and bundles (needed for runtime model discovery)
+COPY --from=builder --chown=sie:sie /app/models /app/models
+COPY --from=builder --chown=sie:sie /app/bundles /app/bundles
+
+# Create directories for runtime
+RUN mkdir -p /app/evals /app/.cache/huggingface && chown -R sie:sie /app/evals /app/.cache
+
+# Labels
+LABEL org.opencontainers.image.title="SIE Server" \
+      org.opencontainers.image.description="Search Inference Engine - ${BUNDLE} bundle (CPU)" \
+      sie.bundle="${BUNDLE}"
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME=/app/.cache/huggingface \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    SIE_BUNDLE="${BUNDLE}"
+
+USER sie
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')" || exit 1
+
+ENTRYPOINT ["python", "-m", "sie_server.cli"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8080", "--models-dir", "/app/models", "--device", "cpu"]

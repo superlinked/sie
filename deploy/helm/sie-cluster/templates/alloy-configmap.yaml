@@ -1,0 +1,13 @@
+{{- if .Values.alloy.install }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Name and key must stay in sync with alloy.alloy.configMap.name / key in values.yaml.
+  name: {{ .Values.alloy.alloy.configMap.name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+data:
+  {{ .Values.alloy.alloy.configMap.key }}: |
+    {{- .Files.Get "files/alloy/config.alloy" | nindent 4 }}
+{{- end }}

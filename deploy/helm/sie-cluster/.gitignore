@@ -1,0 +1,3 @@
+# Sub-chart archives fetched by 'helm dependency build'
+# Regenerate with: mise exec -- helm dependency build deploy/helm/sie-cluster
+charts/

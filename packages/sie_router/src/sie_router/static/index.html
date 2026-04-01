@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SIE Router</title>
+    <style>
+      body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 2rem; background:#050816; color:#e5e7eb;}
+      .card { max-width: 640px; padding: 1.75rem 2rem; border-radius: 1rem; background: #020617; box-shadow: 0 20px 40px rgba(0,0,0,0.45); border: 1px solid #1f2937;}
+      h1 { font-size: 1.75rem; margin: 0 0 0.5rem; }
+      p { margin: 0.25rem 0; color: #9ca3af; }
+      code { background: #111827; padding: 0.15rem 0.35rem; border-radius: 0.35rem; font-size: 0.9em; }
+      .pill { display:inline-flex; align-items:center; gap:0.35rem; padding:0.2rem 0.6rem; border-radius:999px; background:#1e3a5f; color:#93c5fd; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.08em; }
+      .links { margin-top: 1.25rem; display:flex; flex-wrap:wrap; gap:0.75rem; }
+      a { color:#93c5fd; text-decoration:none; font-size:0.9rem; }
+      a:hover, a:focus { text-decoration:underline; outline: 2px solid #93c5fd; outline-offset: 2px; }
+      .badge-dot { width:0.4rem; height:0.4rem; border-radius:999px; background:#3b82f6; box-shadow:0 0 0 4px rgba(59,130,246,0.35);}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem;">
+        <h1>SIE Router</h1>
+        <span class="pill"><span class="badge-dot"></span>Router</span>
+      </div>
+      <p>Stateless request router for SIE elastic cloud deployments.</p>
+      <p>Routes requests to workers by GPU type and model affinity.</p>
+      <div class="links">
+        <a href="/healthz">Health: /healthz</a>
+        <a href="/readyz">Readiness: /readyz</a>
+        <a href="/health">Cluster status: /health</a>
+        <a href="/v1/models">Models: /v1/models</a>
+        <a href="/metrics">Metrics: /metrics</a>
+        <a href="/docs">OpenAPI: /docs</a>
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,67 @@
+name: default
+priority: 10
+default: true
+adapters:
+- sie_server.adapters.bert_flash
+- sie_server.adapters.bert_flash_cross_encoder
+- sie_server.adapters.bge_m3_flag
+- sie_server.adapters.bge_m3_flash
+- sie_server.adapters.clip
+- sie_server.adapters.colbert
+- sie_server.adapters.colbert_modernbert_flash
+- sie_server.adapters.colbert_rotary_flash
+- sie_server.adapters.colpali
+- sie_server.adapters.colqwen2
+- sie_server.adapters.grounding_dino
+- sie_server.adapters.gte_sparse_flash
+- sie_server.adapters.jina_flash_cross_encoder
+- sie_server.adapters.modernbert_flash_cross_encoder
+- sie_server.adapters.nemo_colembed
+- sie_server.adapters.nomic_flash
+- sie_server.adapters.owlv2
+- sie_server.adapters.pytorch_embedding
+- sie_server.adapters.qwen2_flash
+- sie_server.adapters.qwen2_flash_cross_encoder
+- sie_server.adapters.rope_flash
+- sie_server.adapters.sentence_transformer
+- sie_server.adapters.siglip
+- sie_server.adapters.splade_flash
+- sie_server.adapters.xlm_roberta_flash
+- sie_server.adapters.nli_classification
+- sie_server.adapters.nli_classification_flash
+- sie_server.adapters.gliner
+- sie_server.adapters.glirel
+- sie_server.adapters.gliclass
+- sie_server.adapters.donut
+- sie_server.adapters.florence2
+deps:
+  # Most flash adapters; sentence_transformer needs >=4.57
+  transformers: '>=4.57'
+  # Pin torch — flash-attn's unpinned torch dep can pull in 2.10+ which breaks torchvision
+  torch: '>=2.9,<2.10'
+  # bge_m3, bge_m3_flash, nemo_colembed, nomic_flash, xlm_roberta_flash
+  huggingface-hub: '>=0.20'
+  # colbert_rotary_flash, jina_flash_cross_encoder
+  einops: '>=0.8'
+  # sentence_transformer
+  sentence-transformers: '>=5.0,<6'
+  # bge_m3_flag
+  FlagEmbedding: '>=1.3'
+  # grounding_dino
+  pillow: ''
+  # grounding_dino
+  requests: ''
+  # gliner
+  gliner: '>=0.2,<1'
+  # glirel
+  glirel: '>=1.0,<2'
+  # gliclass
+  gliclass: '>=0.1,<1'
+  # gliner/glirel/gliclass shared dep
+  loguru: '>=0.7,<1'
+  # donut, florence2
+  timm: '>=0.9.0,<1.0'
+  # Flash Attention 2 — CUDA only, prebuilt wheel
+  flash-attn:
+    url: https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.0/flash_attn-2.7.4+cu128torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
+    marker: sys_platform == 'linux'

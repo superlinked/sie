@@ -1,0 +1,68 @@
+{{- if .Values.rbac.create }}
+# Role for router to discover worker endpoints
+# Namespace-scoped: only needs 'get' on 'endpoints' in the release namespace
+# See: packages/sie_router/src/sie_router/discovery.py (uses read_namespaced_endpoints)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-discovery
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-discovery
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sie-cluster.fullname" . }}-discovery
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sie-cluster.serviceAccountName" . }}
+    namespace: {{ include "sie-cluster.namespace" . }}
+---
+# Role for router to manage resource pools (ConfigMaps + Leases)
+# Per DESIGN.md Section 10.3: Pools use ConfigMap for spec/status, Lease for TTL
+# See: packages/sie_router/src/sie_router/pools.py
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-pools
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+rules:
+  # ConfigMaps for pool spec and status (labeled: sie.superlinked.com/type: pool)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Leases for pool TTL and ownership (coordination.k8s.io/v1)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-pools
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sie-cluster.fullname" . }}-pools
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sie-cluster.serviceAccountName" . }}
+    namespace: {{ include "sie-cluster.namespace" . }}
+{{- end }}

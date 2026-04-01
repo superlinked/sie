@@ -1,0 +1,43 @@
+sie_id: nvidia/llama-nemoretriever-colembed-3b-v1
+hf_id: nvidia/llama-nemoretriever-colembed-3b-v1
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense: null
+    sparse: null
+    multivector:
+      dim: 128
+  score: null
+  extract: null
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 4096
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.nemo_colembed:NemoColEmbedAdapter
+    adapter_options:
+      loadtime:
+        muvera_config:
+          num_repetitions: 40
+          num_simhash_projections: 6
+          projection_dim: null
+          final_projection_dim: 10240
+        token_dim: 128
+      runtime:
+        normalize: true
+        batch_size: 8
+  muvera:
+    extends: default
+    adapter_options:
+      runtime:
+        normalize: true
+        batch_size: 8
+        output_types:
+        - dense
+        output_similarity:
+          dense: dot
+        muvera: {}

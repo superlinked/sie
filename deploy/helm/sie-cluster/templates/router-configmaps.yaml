@@ -1,0 +1,58 @@
+{{- if .Values.router.embeddedConfigs.enabled }}
+# Auto-generated ConfigMaps from files/bundles and files/models
+# These provide the ModelRegistry with bundle and model configs
+# Alternative to gitSync for testing, CI, and ephemeral clusters
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-bundles
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router-config
+data:
+  {{- range $path, $_ := .Files.Glob "files/bundles/*.yaml" }}
+  {{ base $path }}: |
+    {{- $.Files.Get $path | nindent 4 }}
+  {{- end }}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-models
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router-config
+data:
+  # Each key is the YAML filename, value is the config content
+  # With flat YAML structure, configs are directly mounted as files
+  {{- range $path, $_ := .Files.Glob "files/models/*.yaml" }}
+  {{- $parts := splitList "/" $path }}
+  {{- $filename := index $parts (sub (len $parts) 1) }}
+  {{ $filename }}: |
+    {{- $.Files.Get $path | nindent 4 }}
+  {{- end }}
+
+---
+# Helper ConfigMap that lists all model config files for volume mount items
+# This allows dynamic generation of the items list in the deployment
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-models-index
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router-config
+data:
+  models.txt: |
+    {{- range $path, $_ := .Files.Glob "files/models/*.yaml" }}
+    {{- $parts := splitList "/" $path }}
+    {{- $filename := index $parts (sub (len $parts) 1) }}
+    {{ $filename }}
+    {{- end }}
+{{- end }}

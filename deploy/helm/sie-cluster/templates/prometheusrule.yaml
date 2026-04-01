@@ -1,0 +1,13 @@
+{{- if or (index .Values "kube-prometheus-stack" "install") .Values.alertRules.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-alerts
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alert
+    prometheus: kube-prometheus
+spec:
+{{ .Files.Get "files/alerts/sie-rules.yaml" | replace "__NAMESPACE__" (include "sie-cluster.namespace" .) | indent 2 }}
+{{- end }}

@@ -1,0 +1,78 @@
+// Kubernetes log discovery — node-scoped to avoid cluster-wide list on every DaemonSet instance
+discovery.kubernetes "pods" {
+  role = "pod"
+  selectors {
+    role  = "pod"
+    field = "spec.nodeName=" + coalesce(sys.env("HOSTNAME"), constants.hostname)
+  }
+}
+
+// Relabel to filter SIE pods and extract metadata
+discovery.relabel "sie_pods" {
+  targets = discovery.kubernetes.pods.targets
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_part_of"]
+    regex         = "sie"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label  = "namespace"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "pod"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_component"]
+    target_label  = "component"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_sie_superlinked_com_gpu_type"]
+    target_label  = "gpu_type"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+    target_label  = "__path__"
+    separator     = "/"
+    replacement   = "/var/log/pods/*$1/$2/*.log"
+  }
+}
+
+loki.source.file "sie_logs" {
+  targets    = discovery.relabel.sie_pods.output
+  forward_to = [loki.process.sie_json.receiver]
+}
+
+loki.process "sie_json" {
+  forward_to = [loki.write.default.receiver]
+  stage.cri {}
+  stage.json {
+    expressions = {
+      level      = "level",
+      logger     = "logger",
+      message    = "message",
+      model      = "model",
+      request_id = "request_id",
+      trace_id   = "trace_id",
+      latency_ms = "latency_ms",
+    }
+  }
+  stage.labels {
+    values = {
+      level  = "",
+      logger = "",
+    }
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

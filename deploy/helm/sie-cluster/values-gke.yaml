@@ -1,0 +1,132 @@
+# GKE specific values
+fullnameOverride: sie
+
+# -- Sub-charts: batteries-included for GKE
+# KEDA + Prometheus + DCGM Exporter are required for autoscaling.
+# Loki + Alloy + Event Exporter provide optional log aggregation.
+keda:
+  install: true
+
+kube-prometheus-stack:
+  install: true
+  # GKE manages its own control plane — disable control-plane monitors
+  kubeApiServer:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+
+dcgm-exporter:
+  install: true
+  # GKE GPU nodes have this label
+  nodeSelector:
+    cloud.google.com/gke-accelerator-count: "1"
+
+loki:
+  install: true
+
+alloy:
+  install: true
+
+kubernetes-event-exporter:
+  install: true
+
+# -- Autoscaling via KEDA (queries Prometheus for scaling decisions)
+# prometheusAddress is auto-derived when kube-prometheus-stack.install=true
+# (see templates/keda-scaledobject.yaml). Only set it if using an external Prometheus.
+autoscaling:
+  enabled: true
+  cooldownPeriod: 900
+  scaleDownStabilization: 300
+
+# Enable Prometheus scraping
+serviceMonitor:
+  enabled: true
+  labels:
+    app.kubernetes.io/part-of: sie
+
+# Enable alerting rules (PrometheusRule CRD)
+alertRules:
+  enabled: true
+
+# Enable Grafana dashboards
+dashboards:
+  enabled: true
+  labels:
+    grafana_dashboard: "1"
+  folder: SIE
+
+# Health gates block helm install/upgrade until stack is ready
+healthGates:
+  enabled: true
+
+# Ingress via nginx-ingress (install externally or via ingress-nginx chart)
+ingress:
+  enabled: true
+  className: nginx
+
+router:
+  replicas: 2
+  image:
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+workers:
+  pools:
+    # GKE L4 pool (spot)
+    l4:
+      enabled: true
+      minReplicas: 0
+      maxReplicas: 10
+      machineProfile: l4
+      gpuType: l4
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      gpu:
+        count: 1
+        product: NVIDIA-L4
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+    # Disable non-L4 pools by default (enable as needed)
+    a100-40gb:
+      enabled: false
+    a100-80gb:
+      enabled: false
+    cpu:
+      enabled: false
+
+# ServiceAccount — Helm manages creation; Workload Identity annotation injected at deploy time.
+# NAMING CONTRACT: name must match Terraform's Workload Identity binding
+#   in deploy/terraform/gcp/infra/iam.tf (currently "sie:sie-server").
+# To inject the GCP SA at deploy time:
+#   --set serviceAccount.annotations."iam\.gke\.io/gcp-service-account"=<EMAIL>
+# Or use terraform output:
+#   --set serviceAccount.annotations."iam\.gke\.io/gcp-service-account"="$(terraform -chdir=deploy/terraform/gcp/infra output -raw sie_workload_service_account)"
+serviceAccount:
+  create: true
+  name: "sie-server"
+  annotations: {}
+  # iam.gke.io/gcp-service-account: sie@my-project.iam.gserviceaccount.com
+
+logging:
+  level: INFO
+  json: true

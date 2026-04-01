@@ -1,0 +1,31 @@
+sie_id: Alibaba-NLP/gte-Qwen2-1.5B-instruct
+hf_id: Alibaba-NLP/gte-Qwen2-1.5B-instruct
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 1536
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 32768
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.qwen2_flash:Qwen2FlashAdapter
+    adapter_options:
+      loadtime:
+        uses_legacy_transformers_cache: true
+      runtime:
+        pooling: last
+        normalize: true
+        query_template: |-
+          Instruct: {instruction}
+          Query: {text}
+        default_instruction: Given a web search query, retrieve relevant passages that answer the query

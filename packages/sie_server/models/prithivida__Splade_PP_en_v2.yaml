@@ -1,0 +1,24 @@
+sie_id: prithivida/Splade_PP_en_v2
+hf_id: prithivida/Splade_PP_en_v2
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense: null
+    sparse:
+      dim: 30522
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 128
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: null
+    adapter_path: sie_server.adapters.splade_flash:SPLADEFlashAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

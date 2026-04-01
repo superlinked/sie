@@ -1,0 +1,45 @@
+sie_id: colbert-ir/colbertv2.0
+hf_id: colbert-ir/colbertv2.0
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense: null
+    sparse: null
+    multivector:
+      dim: 128
+  score: null
+  extract: null
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.colbert:ColBERTAdapter
+    adapter_options:
+      loadtime:
+        muvera_config:
+          num_repetitions: 40
+          num_simhash_projections: 6
+          projection_dim: null
+          final_projection_dim: 10240
+        token_dim: 128
+        normalize: true
+        query_max_length: 32
+        skip_special_tokens: false
+        query_prefix: '[Q] '
+        doc_prefix: '[D] '
+      runtime:
+        muvera: null
+  muvera:
+    extends: default
+    adapter_options:
+      runtime:
+        muvera: {}
+        output_types:
+        - dense
+        output_similarity:
+          dense: dot

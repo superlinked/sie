@@ -1,0 +1,254 @@
+{{- if or .Values.autoscaling.enabled .Values.keda.install }}
+{{- $root := . -}}
+{{- /*
+  Auto-derive Prometheus address when kube-prometheus-stack is installed as a sub-chart.
+  The sub-chart runs in the release namespace, not a hardcoded "monitoring" namespace.
+*/ -}}
+{{- $promAddr := .Values.autoscaling.prometheusAddress }}
+{{- if index .Values "kube-prometheus-stack" "install" }}
+{{- $promAddr = printf "http://prometheus-operated.%s.svc.cluster.local:9090" (include "sie-cluster.namespace" .) }}
+{{- end }}
+{{- /*
+  ScaledObjects are rendered into a ConfigMap and applied by a post-install/post-upgrade
+  hook Job. This avoids the chicken-and-egg problem where Helm validates ScaledObject CRDs
+  before the KEDA sub-chart has installed them.
+*/ -}}
+# ── RBAC for the apply Job (weight 1 — must exist before the Job at weight 2) ─
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "sie-cluster.keda.apply.serviceAccountName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/component: keda-apply
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "1"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-keda-apply" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/component: keda-apply
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "1"
+rules:
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-keda-apply" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/component: keda-apply
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-keda-apply" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sie-cluster.keda.apply.serviceAccountName" . }}
+    namespace: {{ include "sie-cluster.namespace" . }}
+---
+# ── ConfigMap containing rendered ScaledObject manifests (weight 1 — mounted by Job at weight 2) ─
+# Each key is a separate YAML file applied by the hook Job via kubectl apply -f /config/
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-keda-scaledobjects
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/component: keda-apply
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "1"
+data:
+  # Worker pool ScaledObjects (one per enabled pool)
+{{- range $poolName, $pool := .Values.workers.pools }}
+{{- if $pool.enabled }}
+{{- $bundle := default $root.Values.workers.common.bundle $pool.bundle }}
+{{- $machineProfile := default $pool.gpuType $pool.machineProfile }}
+  scaledobject-worker-{{ $poolName }}.yaml: |
+    apiVersion: keda.sh/v1alpha1
+    kind: ScaledObject
+    metadata:
+      name: {{ include "sie-cluster.fullname" $root }}-worker-{{ $poolName }}-scaler
+      namespace: {{ include "sie-cluster.namespace" $root }}
+      labels:
+        {{- include "sie-cluster.worker.labels" $root | nindent 8 }}
+        sie.superlinked.com/pool: {{ $poolName | quote }}
+        sie.superlinked.com/bundle: {{ $bundle | quote }}
+    spec:
+      scaleTargetRef:
+        kind: StatefulSet
+        name: {{ include "sie-cluster.fullname" $root }}-worker-{{ $poolName }}
+      minReplicaCount: {{ $pool.minReplicas }}
+      maxReplicaCount: {{ $pool.maxReplicas }}
+      pollingInterval: {{ $root.Values.autoscaling.pollingInterval }}
+      cooldownPeriod: {{ $root.Values.autoscaling.cooldownPeriod }}
+      fallback:
+        failureThreshold: 3
+        replicas: {{ $root.Values.autoscaling.fallbackReplicas }}
+      advanced:
+        horizontalPodAutoscalerConfig:
+          behavior:
+            scaleUp:
+              stabilizationWindowSeconds: 0
+              policies:
+                - type: Percent
+                  value: 100
+                  periodSeconds: 15
+                - type: Pods
+                  value: 4
+                  periodSeconds: 15
+              selectPolicy: Max
+            scaleDown:
+              stabilizationWindowSeconds: {{ $root.Values.autoscaling.scaleDownStabilization }}
+              policies:
+                - type: Percent
+                  value: 25
+                  periodSeconds: 60
+                - type: Pods
+                  value: 1
+                  periodSeconds: 60
+              selectPolicy: Max
+      triggers:
+        - type: prometheus
+          metadata:
+            serverAddress: {{ $promAddr }}
+            metricName: sie_router_pending_demand_{{ $poolName }}
+            query: sum(sie_router_pending_demand{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
+            threshold: "1"
+            activationThreshold: "0"
+        - type: prometheus
+          metadata:
+            serverAddress: {{ $promAddr }}
+            metricName: sie_router_queue_depth_{{ $poolName }}
+            query: sum(sie_router_worker_queue_depth{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
+            threshold: {{ $root.Values.autoscaling.queueDepthThreshold | quote }}
+            activationThreshold: {{ $root.Values.autoscaling.queueDepthActivation | quote }}
+        - type: prometheus
+          metadata:
+            serverAddress: {{ $promAddr }}
+            metricName: sie_router_active_lease_gpus_{{ $poolName }}
+            query: sum(sie_router_active_lease_gpus{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
+            threshold: "1"
+            activationThreshold: "0"
+{{- end }}
+{{- end }}
+  # Router ScaledObject
+  scaledobject-router.yaml: |
+    apiVersion: keda.sh/v1alpha1
+    kind: ScaledObject
+    metadata:
+      name: {{ include "sie-cluster.fullname" . }}-router-scaler
+      namespace: {{ include "sie-cluster.namespace" . }}
+      labels:
+        {{- include "sie-cluster.router.labels" . | nindent 8 }}
+    spec:
+      scaleTargetRef:
+        kind: Deployment
+        name: {{ include "sie-cluster.router.serviceName" . }}
+      minReplicaCount: {{ .Values.router.replicas }}
+      maxReplicaCount: 10
+      pollingInterval: 30
+      cooldownPeriod: 300
+      triggers:
+        - type: prometheus
+          metadata:
+            serverAddress: {{ $promAddr }}
+            metricName: sie_router_request_rate
+            query: sum(rate(sie_router_requests_total[1m])) or vector(0)
+            threshold: "100"
+---
+# ── Hook Job: wait for KEDA CRDs then apply ScaledObjects ───────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-keda-apply-%d" (include "sie-cluster.fullname" .) .Release.Revision | trunc 63 | trimSuffix "-" }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/component: keda-apply
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "2"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 240
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: keda-apply
+    spec:
+      serviceAccountName: {{ include "sie-cluster.keda.apply.serviceAccountName" . }}
+      restartPolicy: Never
+      containers:
+        - name: apply
+          image: alpine/k8s:1.29.10
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              NAMESPACE="{{ include "sie-cluster.namespace" . }}"
+              TIMEOUT=180
+              INTERVAL=5
+
+              echo "=== KEDA ScaledObject Apply ==="
+
+              # Step 1: Wait for KEDA CRD to be registered via API discovery
+              echo "Waiting for KEDA CRD..."
+              elapsed=0
+              while [ $elapsed -lt $TIMEOUT ]; do
+                if kubectl api-resources --api-group=keda.sh 2>/dev/null | grep -q scaledobjects; then
+                  echo "KEDA CRD available"
+                  break
+                fi
+                echo "  Waiting... (${elapsed}s/${TIMEOUT}s)"
+                sleep $INTERVAL
+                elapsed=$((elapsed + INTERVAL))
+              done
+
+              if [ $elapsed -ge $TIMEOUT ]; then
+                echo "FAILED: KEDA CRD not available within ${TIMEOUT}s"
+                exit 1
+              fi
+
+              # Step 2: Apply ScaledObjects from mounted ConfigMap
+              echo "Applying ScaledObjects..."
+              kubectl apply -f /config/ -n "$NAMESPACE"
+              echo "SUCCESS: ScaledObjects applied"
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "sie-cluster.fullname" . }}-keda-scaledobjects
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+{{- end }}

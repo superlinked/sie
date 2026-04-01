@@ -1,0 +1,24 @@
+sie_id: opensearch-project/opensearch-neural-sparse-encoding-v1
+hf_id: opensearch-project/opensearch-neural-sparse-encoding-v1
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense: null
+    sparse:
+      dim: 30522
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.splade_flash:SPLADEFlashAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

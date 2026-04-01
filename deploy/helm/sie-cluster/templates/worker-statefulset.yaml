@@ -1,0 +1,176 @@
+{{- $root := . -}}
+{{- range $poolName, $pool := .Values.workers.pools }}
+{{- if $pool.enabled }}
+{{- $bundle := default $root.Values.workers.common.bundle $pool.bundle }}
+{{- $machineProfile := default $pool.gpuType $pool.machineProfile }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "sie-cluster.fullname" $root }}-worker-{{ $poolName }}
+  namespace: {{ include "sie-cluster.namespace" $root }}
+  labels:
+    {{- include "sie-cluster.worker.labels" $root | nindent 4 }}
+    sie.superlinked.com/gpu-type: {{ $pool.gpuType | quote }}
+    sie.superlinked.com/machine-profile: {{ $machineProfile | quote }}
+    sie.superlinked.com/bundle: {{ $bundle | quote }}
+    sie.superlinked.com/pool: {{ $poolName | quote }}
+spec:
+  serviceName: {{ include "sie-cluster.worker.serviceName" $root }}
+  replicas: {{ $pool.minReplicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "sie-cluster.worker.selectorLabels" $root | nindent 6 }}
+      sie.superlinked.com/pool: {{ $poolName | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "sie-cluster.worker.selectorLabels" $root | nindent 8 }}
+        sie.superlinked.com/gpu-type: {{ $pool.gpuType | quote }}
+        sie.superlinked.com/machine-profile: {{ $machineProfile | quote }}
+        sie.superlinked.com/bundle: {{ $bundle | quote }}
+        sie.superlinked.com/pool: {{ $poolName | quote }}
+      annotations:
+        # Prometheus scraping
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      {{- include "sie-cluster.imagePullSecrets" $root | nindent 6 }}
+      {{- if $pool.runtimeClassName }}
+      runtimeClassName: {{ $pool.runtimeClassName | quote }}
+      {{- else if $root.Values.workers.common.runtimeClassName }}
+      runtimeClassName: {{ $root.Values.workers.common.runtimeClassName | quote }}
+      {{- end }}
+      serviceAccountName: {{ include "sie-cluster.serviceAccountName" $root }}
+      terminationGracePeriodSeconds: 65
+      securityContext:
+        # SIE server runs as sie user (uid 1000, gid 1000)
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: worker
+          {{- $imageTag := default $root.Chart.AppVersion $root.Values.workers.common.image.tag }}
+          image: {{ printf "%s:%s-%s" $root.Values.workers.common.image.repository $imageTag $bundle }}
+          imagePullPolicy: {{ $root.Values.workers.common.image.pullPolicy }}
+          args:
+            - serve
+            - --host=0.0.0.0
+            - --port={{ $root.Values.workers.common.port }}
+            - --bundle={{ $bundle }}
+            {{- range $root.Values.workers.common.preloadModels }}
+            - --model={{ . }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $root.Values.workers.common.port }}
+              protocol: TCP
+          env:
+            # GPU type for routing
+            - name: SIE_GPU_TYPE
+              value: {{ $pool.gpuType | quote }}
+            # Machine profile for routing and metrics (e.g., "l4", "l4-spot", "a100-40gb")
+            - name: SIE_MACHINE_PROFILE
+              value: {{ $machineProfile | quote }}
+            # Bundle for multi-bundle routing
+            - name: SIE_BUNDLE
+              value: {{ $bundle | quote }}
+            # Device configuration (cpu if no GPU, cuda otherwise)
+            - name: SIE_DEVICE
+              value: {{ if gt (int $pool.gpu.count) 0 }}cuda{{ else }}cpu{{ end }}
+            # Logging configuration
+            - name: SIE_LOG_LEVEL
+              value: {{ $root.Values.logging.level | quote }}
+            {{- if $root.Values.logging.json }}
+            - name: SIE_LOG_JSON
+              value: "true"
+            {{- end }}
+            # HuggingFace cache
+            - name: HF_HOME
+              value: {{ $root.Values.workers.common.hfCache.home | quote }}
+            {{- if $root.Values.workers.common.hfCache.tokenSecret }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.workers.common.hfCache.tokenSecret }}
+                  key: {{ $root.Values.workers.common.hfCache.tokenSecretKey }}
+            {{- end }}
+            # Cluster cache (S3/GCS)
+            {{- if $root.Values.workers.common.clusterCache.enabled }}
+            - name: SIE_CLUSTER_CACHE
+              value: {{ $root.Values.workers.common.clusterCache.url | quote }}
+            {{- end }}
+          lifecycle:
+            preStop:
+              exec:
+                # Allow in-flight requests to drain before SIGTERM.
+                # The 10s sleep gives the K8s endpoints controller time to
+                # remove this pod from the service, so no new traffic arrives.
+                command: ["sleep", "10"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            # Extended timeouts for large model loading (jina-colbert-v2, Florence-2, etc.)
+            # Total tolerance: 120s + (12 * 10s) = 240s before pod is considered unhealthy
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 12
+          resources:
+            requests:
+              {{- toYaml $pool.resources.requests | nindent 14 }}
+              {{- if gt (int $pool.gpu.count) 0 }}
+              nvidia.com/gpu: {{ $pool.gpu.count | quote }}
+              {{- end }}
+            limits:
+              {{- toYaml $pool.resources.limits | nindent 14 }}
+              {{- if gt (int $pool.gpu.count) 0 }}
+              nvidia.com/gpu: {{ $pool.gpu.count | quote }}
+              {{- end }}
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+      {{- with $pool.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $pool.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        # Prefer spreading across nodes
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "sie-cluster.worker.selectorLabels" $root | nindent 20 }}
+                    sie.superlinked.com/pool: {{ $poolName | quote }}
+                topologyKey: kubernetes.io/hostname
+      volumes:
+        # Shared memory for PyTorch DataLoader
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        # Model cache (emptyDir - ephemeral, no zone-lock issues)
+        - name: model-cache
+          emptyDir:
+            sizeLimit: {{ $root.Values.workers.common.cacheStorageSize }}
+{{- end }}
+{{- end }}

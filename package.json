@@ -1,0 +1,20 @@
+{
+  "name": "sie-typescript-monorepo",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "pnpm -r run lint"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "workspaces": [
+    "packages/sie_ts_sdk",
+    "integrations/sie_ts_langchain",
+    "integrations/sie_ts_llamaindex",
+    "integrations/sie_ts_chroma"
+  ]
+}

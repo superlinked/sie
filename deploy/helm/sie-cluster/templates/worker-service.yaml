@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sie-cluster.worker.serviceName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.worker.labels" . | nindent 4 }}
+spec:
+  # Headless service for StatefulSet DNS resolution
+  clusterIP: None
+  ports:
+    - name: http
+      port: {{ .Values.workers.common.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "sie-cluster.worker.selectorLabels" . | nindent 4 }}

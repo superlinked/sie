@@ -245,7 +245,12 @@ Thumbs.db
 # VIM
 *.swp
 
+# Worktree metadata
+.base-branch
+
 # Temporary files
 tmp/
 .tmp/
 .local/
+
+.requirements-modal.txt

@@ -1,0 +1,165 @@
+# syntax=docker/dockerfile:1.6
+# SIE Server - CUDA 12.4 Image
+# Build from repo root:
+#   docker build -f packages/sie_server/Dockerfile.cuda12 -t sie-server:cuda12-default .
+#   docker build -f packages/sie_server/Dockerfile.cuda12 --build-arg BUNDLE=sglang -t sie-server:cuda12-sglang .
+#
+# For faster builds with cache mounts (requires BuildKit):
+#   DOCKER_BUILDKIT=1 docker build -f packages/sie_server/Dockerfile.cuda12 -t sie-server:cuda12-default .
+
+ARG BUNDLE=default
+
+# =============================================================================
+# Stage 1: Base deps (shared across bundles)
+# =============================================================================
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.12 and build tools
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    gnupg \
+    ca-certificates \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
+    curl \
+    git \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv - pin to specific version for reproducibility
+COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /uvx /bin/
+
+WORKDIR /app
+
+# UV environment variables for optimal builds
+# - UV_NO_CACHE: Don't cache packages in image (saves ~2.5GB)
+# - UV_COMPILE_BYTECODE: Pre-compile for faster startup
+# - UV_LINK_MODE: Use copy mode (required for multi-stage)
+ENV UV_NO_CACHE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+# Copy sie-sdk (dependency of sie-server)
+COPY packages/sie_sdk /tmp/sie_sdk
+
+# Copy sie-server files (delay bundles/models to keep deps cached)
+COPY packages/sie_server/pyproject.toml ./
+COPY packages/sie_server/src src/
+
+# Create venv and install everything with pip (simpler, no workspace issues)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3.12 -m venv .venv \
+    && .venv/bin/pip install --upgrade pip \
+    && .venv/bin/pip install \
+        -e "/tmp/sie_sdk[storage]" \
+        -e ".[gpu-metrics]"
+
+# =============================================================================
+# Stage 2: Builder - bundle-specific deps
+# =============================================================================
+FROM base AS builder
+
+ARG BUNDLE
+
+COPY packages/sie_server/bundles bundles/
+COPY packages/sie_server/models models/
+
+# Resolve bundle-specific dependencies
+RUN .venv/bin/python -m sie_server.cli resolve-deps \
+    --bundle "${BUNDLE}" \
+    --models-dir models \
+    > /tmp/bundle-requirements.txt \
+    && echo "Bundle ${BUNDLE} requirements:" \
+    && cat /tmp/bundle-requirements.txt
+
+# Install bundle-specific deps
+# Note: flash-attn deps have "; sys_platform == 'linux'" markers, so they install
+# automatically on Linux (this image) but are skipped on macOS/Windows dev machines.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ -s /tmp/bundle-requirements.txt ]; then \
+        .venv/bin/pip install -r /tmp/bundle-requirements.txt; \
+    fi
+
+# Clean up to reduce image size
+# Remove .pyc, __pycache__, tests, docs, jupyter files
+RUN find .venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true \
+    && find .venv -type f -name "*.pyc" -delete 2>/dev/null || true \
+    && find .venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true \
+    && find .venv -type d -name "test" -exec rm -rf {} + 2>/dev/null || true \
+    && rm -rf .venv/share/jupyter 2>/dev/null || true
+
+# =============================================================================
+# Stage 2: Runtime
+# =============================================================================
+# Use base image instead of runtime - PyTorch wheels bundle CUDA libs (~2GB savings)
+# cuDNN is included in the torch wheel for CUDA 12.x
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS runtime
+
+ARG BUNDLE
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.12 runtime + gcc (needed for triton kernel compilation)
+# libnuma1 is required by sgl_kernel (SGLang bundle) - without it, imports fail with misleading SM arch errors
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    gnupg \
+    ca-certificates \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    gcc \
+    libc6-dev \
+    libnuma1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -g 1000 sie && useradd -u 1000 -g sie -m sie
+
+WORKDIR /app
+
+# Copy virtual environment from builder (with correct ownership to avoid chown layer)
+COPY --from=builder --chown=sie:sie /app/.venv /app/.venv
+
+# Copy source code (uv sync creates editable install with .pth pointing to /app/src)
+COPY --from=builder --chown=sie:sie /app/src /app/src
+
+# Copy sie-sdk source (installed as editable in /tmp)
+COPY --from=builder --chown=sie:sie /tmp/sie_sdk/src /tmp/sie_sdk/src
+
+# Copy model configs and bundles (needed for runtime model discovery)
+COPY --from=builder --chown=sie:sie /app/models /app/models
+COPY --from=builder --chown=sie:sie /app/bundles /app/bundles
+
+# Create directories for runtime (already owned by sie from COPY --chown)
+RUN mkdir -p /app/evals /app/.cache/huggingface && chown -R sie:sie /app/evals /app/.cache
+
+# Labels
+LABEL org.opencontainers.image.title="SIE Server" \
+      org.opencontainers.image.description="Search Inference Engine - ${BUNDLE} bundle" \
+      sie.bundle="${BUNDLE}"
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME=/app/.cache/huggingface \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    SIE_BUNDLE="${BUNDLE}"
+
+USER sie
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')" || exit 1
+
+ENTRYPOINT ["python", "-m", "sie_server.cli"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8080", "--models-dir", "/app/models"]

@@ -1,0 +1,76 @@
+sie_id: BAAI/bge-m3
+hf_id: BAAI/bge-m3
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 1024
+    sparse:
+      dim: 250002
+    multivector:
+      dim: 1024
+  score: null
+  extract: null
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.bge_m3_flash:BGEM3FlashAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        pooling: cls
+        normalize: true
+  dense:
+    extends: default
+    adapter_options:
+      runtime:
+        pooling: cls
+        normalize: true
+        output_types:
+        - dense
+  sparse:
+    extends: default
+    adapter_options:
+      runtime:
+        pooling: cls
+        normalize: true
+        output_types:
+        - sparse
+  multivector:
+    extends: default
+    adapter_options:
+      runtime:
+        pooling: cls
+        normalize: true
+        output_types:
+        - multivector
+  banking:
+    extends: default
+    adapter_options:
+      runtime:
+        pooling: cls
+        normalize: true
+        lora_id: saivamshiatukuri/bge-m3-banking77-lora
+        instruction: Classify banking intent
+  medical-vn:
+    extends: default
+    adapter_options:
+      runtime:
+        pooling: cls
+        normalize: true
+        lora_id: doanbao/bge-m3-medical-vn-lora
+        instruction: Vietnamese medical retrieval
+  bge_m3_flag:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.bge_m3_flag:BGEM3FlagAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        normalize: true

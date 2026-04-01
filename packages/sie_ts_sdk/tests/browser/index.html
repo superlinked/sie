@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SIE SDK Browser Tests</title>
+  <!-- Import map to resolve bare module specifiers -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@msgpack/msgpack": "/node_modules/@msgpack/msgpack/dist.esm/index.mjs"
+    }
+  }
+  </script>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 800px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+    }
+    pre {
+      background: #f4f4f4;
+      padding: 1rem;
+      overflow-x: auto;
+    }
+    .success { color: green; }
+    .error { color: red; }
+  </style>
+</head>
+<body>
+  <h1>SIE SDK Browser Test Harness</h1>
+  <p>This page loads the SDK for Playwright browser tests.</p>
+
+  <div id="status">Loading SDK...</div>
+  <pre id="log"></pre>
+
+  <script type="module">
+    // Import the SDK from the built ESM bundle
+    import { SIEClient } from '../../dist/index.js';
+    import { maxsim, maxsimBatch } from '../../dist/scoring.js';
+
+    // Expose to window for Playwright tests
+    window.SIEClient = SIEClient;
+    window.maxsim = maxsim;
+    window.maxsimBatch = maxsimBatch;
+
+    // Log helper
+    const log = document.getElementById('log');
+    const status = document.getElementById('status');
+
+    function addLog(message) {
+      log.textContent += message + '\n';
+    }
+
+    // Basic validation that SDK loaded correctly
+    try {
+      addLog('SIEClient loaded: ' + (typeof SIEClient === 'function'));
+      addLog('maxsim loaded: ' + (typeof maxsim === 'function'));
+      addLog('maxsimBatch loaded: ' + (typeof maxsimBatch === 'function'));
+
+      // Check that we can instantiate the client
+      const client = new SIEClient('http://localhost:8080');
+      addLog('Client instantiated: ' + (client !== null));
+      addLog('Client has encode method: ' + (typeof client.encode === 'function'));
+      addLog('Client has score method: ' + (typeof client.score === 'function'));
+      addLog('Client has extract method: ' + (typeof client.extract === 'function'));
+
+      status.textContent = 'SDK loaded successfully!';
+      status.className = 'success';
+
+      // Signal to Playwright that we're ready
+      window.__SDK_READY__ = true;
+    } catch (error) {
+      status.textContent = 'Error loading SDK: ' + error.message;
+      status.className = 'error';
+      addLog('ERROR: ' + error.stack);
+      window.__SDK_ERROR__ = error;
+    }
+  </script>
+</body>
+</html>

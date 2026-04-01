@@ -1,0 +1,101 @@
+{{- if .Values.auth.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sie-cluster.oauth2Proxy.serviceName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: oauth2-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "sie-cluster.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        {{- include "sie-cluster.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: oauth2-proxy
+    spec:
+      containers:
+        - name: oauth2-proxy
+          image: {{ .Values.auth.oauth2Proxy.image.repository }}:{{ .Values.auth.oauth2Proxy.image.tag }}
+          imagePullPolicy: {{ .Values.auth.oauth2Proxy.image.pullPolicy }}
+          args:
+            - --provider=oidc
+            - --oidc-issuer-url={{ required "auth.oauth2Proxy.oidcIssuerUrl is required when auth.enabled=true" .Values.auth.oauth2Proxy.oidcIssuerUrl }}
+            {{- if .Values.auth.oauth2Proxy.redirectUrl }}
+            - --redirect-url={{ .Values.auth.oauth2Proxy.redirectUrl }}
+            {{- end }}
+            {{- if .Values.auth.oauth2Proxy.emailDomain }}
+            - --email-domain={{ .Values.auth.oauth2Proxy.emailDomain }}
+            {{- end }}
+            - --upstream=static://200
+            - --http-address=0.0.0.0:{{ .Values.auth.oauth2Proxy.service.port }}
+            {{- if .Values.auth.oauth2Proxy.reverseProxy }}
+            - --reverse-proxy=true
+            {{- end }}
+            {{- if .Values.auth.oauth2Proxy.skipJwtBearerTokens }}
+            - --skip-jwt-bearer-tokens=true
+            {{- end }}
+            {{- if .Values.auth.oauth2Proxy.passAccessToken }}
+            - --pass-access-token=true
+            {{- end }}
+            {{- if .Values.auth.oauth2Proxy.setAuthorizationHeader }}
+            - --set-authorization-header=true
+            {{- end }}
+            {{- if .Values.auth.oauth2Proxy.passAuthorizationHeader }}
+            - --pass-authorization-header=true
+            {{- end }}
+            {{- range .Values.auth.oauth2Proxy.extraJwtIssuers }}
+            - --extra-jwt-issuers={{ . }}
+            {{- end }}
+            {{- range .Values.auth.oauth2Proxy.extraArgs }}
+            - {{ . }}
+            {{- end }}
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.oauth2Proxy.secret.name }}
+                  key: {{ .Values.auth.oauth2Proxy.secret.clientIDKey }}
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.oauth2Proxy.secret.name }}
+                  key: {{ .Values.auth.oauth2Proxy.secret.clientSecretKey }}
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.oauth2Proxy.secret.name }}
+                  key: {{ .Values.auth.oauth2Proxy.secret.cookieSecretKey }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.auth.oauth2Proxy.service.port }}
+              protocol: TCP
+          {{- with .Values.auth.oauth2Proxy.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sie-cluster.oauth2Proxy.serviceName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: oauth2-proxy
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.auth.oauth2Proxy.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "sie-cluster.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: oauth2-proxy
+{{- end }}

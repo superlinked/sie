@@ -1,0 +1,21 @@
+sie_id: IDEA-Research/grounding-dino-tiny
+hf_id: IDEA-Research/grounding-dino-tiny
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.grounding_dino:GroundingDINOAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        box_threshold: 0.25
+        text_threshold: 0.25

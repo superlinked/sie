@@ -1,0 +1,4 @@
+# Auto-generated files for embeddedConfigs
+# These are copied from packages/sie_server/ by matrix-eval before helm install
+bundles/
+models/

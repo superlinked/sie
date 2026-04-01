@@ -1,0 +1,21 @@
+dependencies:
+- name: keda
+  repository: https://kedacore.github.io/charts
+  version: 2.14.3
+- name: kube-prometheus-stack
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 67.11.0
+- name: dcgm-exporter
+  repository: https://nvidia.github.io/dcgm-exporter/helm-charts
+  version: 3.6.1
+- name: loki
+  repository: https://grafana.github.io/helm-charts
+  version: 6.23.0
+- name: alloy
+  repository: https://grafana.github.io/helm-charts
+  version: 0.10.1
+- name: kubernetes-event-exporter
+  repository: oci://registry-1.docker.io/bitnamicharts
+  version: 3.6.3
+digest: sha256:a1bd008e46d20abacb2a91b48186ec34c5ebe346f5df9f3ecd40a3dac3cffbb3
+generated: "2026-03-23T19:20:04.028801547+01:00"

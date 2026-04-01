@@ -1,0 +1,59 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+  {{- $annotations := dict }}
+  {{- /* nginx default annotations */ -}}
+  {{- /* - proxy-body-size: images can be large (base64 encoded) */ -}}
+  {{- /* - proxy-read/send-timeout: model loading can take 5+ minutes for large models */ -}}
+  {{- $nginxDefaults := dict
+        "nginx.ingress.kubernetes.io/proxy-body-size" "100m"
+        "nginx.ingress.kubernetes.io/proxy-read-timeout" "600"
+        "nginx.ingress.kubernetes.io/proxy-send-timeout" "600"
+  }}
+  {{- $annotations = merge $annotations $nginxDefaults }}
+  {{- if .Values.ingress.annotations }}
+  {{- $annotations = merge $annotations .Values.ingress.annotations }}
+  {{- end }}
+  {{- if .Values.auth.enabled }}
+  {{- $authUrl := printf "http://%s.%s.svc.cluster.local:%d/oauth2/auth" (include "sie-cluster.oauth2Proxy.serviceName" .) (include "sie-cluster.namespace" .) (int .Values.auth.oauth2Proxy.service.port) }}
+  {{- $signinUrl := "http://$host/oauth2/start?rd=$scheme://$host$request_uri" }}
+  {{- $authDefaults := dict
+        "nginx.ingress.kubernetes.io/auth-url" $authUrl
+        "nginx.ingress.kubernetes.io/auth-signin" $signinUrl
+        "nginx.ingress.kubernetes.io/auth-response-headers" (join "," .Values.auth.ingress.authResponseHeaders)
+  }}
+  {{- $annotations = merge $annotations $authDefaults }}
+  {{- end }}
+  {{- if $annotations }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if and .Values.ingress.tls.enabled .Values.ingress.host }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - {{- if .Values.ingress.host }}
+      host: {{ .Values.ingress.host }}
+      {{- end }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sie-cluster.router.serviceName" . }}
+                port:
+                  number: {{ .Values.router.service.port }}
+{{- end }}

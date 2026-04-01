@@ -1,0 +1,20 @@
+sie_id: cross-encoder/ms-marco-MiniLM-L-6-v2
+hf_id: cross-encoder/ms-marco-MiniLM-L-6-v2
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: {}
+  extract: null
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: null
+    adapter_path: sie_server.adapters.bert_flash_cross_encoder:BertFlashCrossEncoderAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

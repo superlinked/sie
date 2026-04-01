@@ -1,0 +1,31 @@
+sie_id: Salesforce/SFR-Embedding-2_R
+hf_id: Salesforce/SFR-Embedding-2_R
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 4096
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 32768
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang:SGLangEmbeddingAdapter
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.85
+      runtime:
+        pooling: last_token
+        normalize: true
+        query_template: |-
+          Instruct: {instruction}
+          Query: {text}
+        default_instruction: Given a web search query, retrieve relevant passages that answer the query

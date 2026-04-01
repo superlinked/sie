@@ -1,0 +1,48 @@
+apiVersion: v2
+name: sie-cluster
+description: >-
+  SIE (Search Inference Engine) Kubernetes deployment with router, GPU workers,
+  and observability
+type: application
+version: 0.1.7
+appVersion: 0.1.7
+keywords:
+  - inference
+  - embedding
+  - reranking
+  - gpu
+  - ml
+home: https://github.com/superlinked/sie
+sources:
+  - https://github.com/superlinked/sie
+maintainers:
+  - name: Superlinked
+    email: support@superlinked.com
+annotations:
+  artifacthub.io/operator: 'false'
+  artifacthub.io/prerelease: 'true'
+dependencies:
+  - name: keda
+    version: 2.14.x
+    repository: https://kedacore.github.io/charts
+    condition: keda.install
+  - name: kube-prometheus-stack
+    version: 67.x.x
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: kube-prometheus-stack.install
+  - name: dcgm-exporter
+    version: 3.6.x
+    repository: https://nvidia.github.io/dcgm-exporter/helm-charts
+    condition: dcgm-exporter.install
+  - name: loki
+    version: 6.23.x
+    repository: https://grafana.github.io/helm-charts
+    condition: loki.install
+  - name: alloy
+    version: 0.10.x
+    repository: https://grafana.github.io/helm-charts
+    condition: alloy.install
+  - name: kubernetes-event-exporter
+    version: 3.6.3
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: kubernetes-event-exporter.install

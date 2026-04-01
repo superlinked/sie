@@ -1,0 +1,83 @@
+[project]
+name = "sie-server"
+version = "0.1.7"
+description = "Search Inference Engine - GPU inference server for search workloads"
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+dependencies = [
+    # SDK for shared types, storage, and cache utilities
+    "sie-sdk[storage]>=0.1",
+    # Web framework
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    # Serialization
+    "msgpack>=1.1,<2",
+    "msgpack-numpy>=0.4,<1",
+    # ML / Inference
+    # torch 2.9.x required - flash-attn prebuilt wheels are version-specific
+    "torch>=2.9,<2.10",
+    "transformers>=4.57,<5",
+    "tokenizers>=0.20,<1",
+    "sentence-transformers>=5.0,<6",
+    "safetensors>=0.4,<1",
+    "FlagEmbedding>=1.3,<2",
+    "einops>=0.8,<1", # Tensor ops (required by NV-Embed-v2 trust_remote_code)
+    # GLiNER / GLiREL / GLiClass extraction adapters
+    "gliner>=0.2,<1",
+    "glirel>=1.0,<2",
+    "gliclass>=0.1,<1",
+    "loguru>=0.7,<1",
+    # Image processing
+    "pillow>=11,<12",
+    "numpy>=2,<3",
+    "torchvision>=0.18,<1", # Required by some HF models (e.g., nvidia/llama-nemoretriever)
+    # Config
+    "pyyaml>=6,<7",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    # Dependency checking
+    "packaging>=24,<25",
+    # Hot-reload
+    "watchdog>=6,<7",
+    # Observability
+    "opentelemetry-api>=1.28,<2",
+    "opentelemetry-sdk>=1.28,<2",
+    "opentelemetry-instrumentation-fastapi>=0.49b0,<1",
+    "opentelemetry-exporter-otlp>=1.28,<2",
+    "prometheus-client>=0.21,<1",
+    # CLI / TUI
+    "typer>=0.14,<1",
+    "rich>=13,<14",
+    "uvloop>=0.22",
+    "timm>=0.9.0,<1.0",
+    "msgspec>=0.20.0",
+]
+
+[project.optional-dependencies]
+# flash-attn for optimized attention (prebuilt wheel from mjun0812 for torch 2.9)
+flash-attn = ["flash-attn>=2.7,<3 ; sys_platform == 'linux'"]
+# xformers for memory-efficient attention (required by Stella models)
+xformers = ["xformers>=0.0.30,<0.1 ; sys_platform == 'linux'"]
+gpu-metrics = ["pynvml>=11.5,<13"]
+# TUI dependencies
+top = ["textual>=3.0,<4"]
+
+[project.scripts]
+sie-server = "sie_server.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sie_server"]
+
+[tool.uv.sources]
+# Prebuilt flash-attn wheel for torch 2.9 + cu128 (official wheels only go up to torch 2.8)
+# Platform-specific: Linux x86_64 only. Non-Linux users should not install the flash-attn extra.
+flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.0/flash_attn-2.7.4+cu128torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux'" }
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]

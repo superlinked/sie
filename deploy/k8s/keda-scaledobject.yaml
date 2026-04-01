@@ -1,0 +1,205 @@
+# SIE KEDA ScaledObject Configuration
+#
+# GPU-optimized autoscaling for SIE inference workloads.
+# Based on research: product/research/cloud_deployment_research.md
+#
+# Prerequisites:
+#   - KEDA installed (via Terraform: install_keda = true)
+#   - Prometheus available for metrics
+#   - SIE deployment created
+#
+# Apply: kubectl apply -f keda-scaledobject.yaml
+
+---
+# =============================================================================
+# KEDA ScaledObject for SIE GPU Workers
+# =============================================================================
+#
+# Key GPU-specific settings from research:
+#   - cooldownPeriod: 600s (10 min) - GPU cold starts take 60-120s for model loading
+#   - activationThreshold: Higher than threshold to prevent 0->1->0 flapping
+#   - stabilizationWindowSeconds: 0 for scale-up (immediate), 300s for scale-down
+#
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: sie-worker-scaler
+  namespace: sie
+  labels:
+    app.kubernetes.io/name: sie
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: sie-worker  # Target deployment name
+
+  # Replica counts
+  minReplicaCount: 0     # Scale to zero when idle (cost optimization)
+  maxReplicaCount: 20    # Adjust based on GPU quota
+
+  # Polling and cooldown
+  pollingInterval: 15    # Check metrics every 15 seconds
+  cooldownPeriod: 600    # 10 minutes before scaling to zero (GPU cold start is long)
+
+  # Initial cooldown: don't scale to 0 immediately after creation
+  # initialCooldownPeriod: 120
+
+  # Fallback configuration (if metrics unavailable)
+  fallback:
+    failureThreshold: 3
+    replicas: 2  # Maintain 2 replicas if Prometheus is down
+
+  # Advanced HPA behavior for fine-grained control
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        # Scale UP: Respond quickly to load
+        scaleUp:
+          stabilizationWindowSeconds: 0  # Scale up immediately
+          policies:
+            - type: Percent
+              value: 100           # Double replicas
+              periodSeconds: 15
+            - type: Pods
+              value: 4             # Or add 4 pods
+              periodSeconds: 15
+          selectPolicy: Max        # Use most aggressive policy
+
+        # Scale DOWN: Be conservative to avoid thrashing
+        scaleDown:
+          stabilizationWindowSeconds: 300  # 5 min observation window
+          policies:
+            - type: Percent
+              value: 25            # Reduce by 25% at a time
+              periodSeconds: 60
+          selectPolicy: Min        # Use most conservative policy
+
+  # Triggers for scaling decisions
+  triggers:
+    # Primary: Queue depth (most responsive)
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        metricName: sie_request_queue_depth
+        query: sum(sie_request_queue_depth{namespace="sie"})
+        threshold: '10'            # Target: 10 queued requests per pod
+        activationThreshold: '2'   # Wake from 0 when >2 requests queued
+      authenticationRef:
+        name: prometheus-auth      # Optional: if Prometheus requires auth
+
+    # Secondary: Active requests (complementary signal)
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        metricName: sie_active_requests
+        query: sum(sie_active_requests{namespace="sie"})
+        threshold: '5'             # Target: 5 concurrent requests per pod
+        activationThreshold: '1'   # Wake from 0 when >1 active request
+
+---
+# =============================================================================
+# KEDA ScaledObject for SIE Router (if needed)
+# =============================================================================
+#
+# The router is typically lightweight and doesn't need GPU-specific settings.
+# Use simpler scaling based on CPU/memory.
+#
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: sie-router-scaler
+  namespace: sie
+  labels:
+    app.kubernetes.io/name: sie
+    app.kubernetes.io/component: router
+spec:
+  scaleTargetRef:
+    name: sie-router
+
+  minReplicaCount: 2     # Always keep 2 for HA
+  maxReplicaCount: 10
+
+  pollingInterval: 30
+  cooldownPeriod: 300    # 5 minutes
+
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        metricName: sie_router_request_rate
+        query: sum(rate(sie_router_requests_total{namespace="sie"}[1m]))
+        threshold: '100'  # Target: 100 req/s per router pod
+
+---
+# =============================================================================
+# TriggerAuthentication (if Prometheus requires authentication)
+# =============================================================================
+#
+# Uncomment if using managed Prometheus with authentication
+#
+# apiVersion: keda.sh/v1alpha1
+# kind: TriggerAuthentication
+# metadata:
+#   name: prometheus-auth
+#   namespace: sie
+# spec:
+#   # For GKE Managed Prometheus with Workload Identity
+#   podIdentity:
+#     provider: gcp
+#
+#   # Or for service account token
+#   # secretTargetRef:
+#   #   - parameter: bearerToken
+#   #     name: prometheus-token
+#   #     key: token
+
+---
+# =============================================================================
+# KEDA HTTP Add-on ScaledObject (Alternative: Scale to Zero with HTTP)
+# =============================================================================
+#
+# Use this if you want HTTP-based scale-to-zero without external metrics.
+# IMPORTANT: Extend timeout to 180s for GPU cold starts!
+#
+# Prerequisites:
+#   - Install KEDA HTTP Add-on: https://github.com/kedacore/http-add-on
+#   - Configure interceptor timeout (see ConfigMap below)
+#
+# apiVersion: http.keda.sh/v1alpha1
+# kind: HTTPScaledObject
+# metadata:
+#   name: sie-worker-http
+#   namespace: sie
+# spec:
+#   hosts:
+#     - sie-worker.sie.svc.cluster.local
+#   scaleTargetRef:
+#     name: sie-worker
+#     service: sie-worker
+#     port: 8080
+#   replicas:
+#     min: 0
+#     max: 20
+#   scalingMetric:
+#     requestRate:
+#       targetValue: 10
+#       granularity: 1s
+#   targetPendingRequests: 100  # Buffer requests during scale-up
+
+---
+# =============================================================================
+# KEDA HTTP Add-on Interceptor Config (Required for GPU cold starts)
+# =============================================================================
+#
+# CRITICAL: Default 30s timeout is too short for GPU pods!
+# Model loading can take 60-120s.
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keda-http-add-on-interceptor-config
+  namespace: keda
+data:
+  # Extend timeout to 180s for GPU pod cold starts
+  responseHeaderTimeout: "180s"
+  # Alternatively, use forceHTTP2 for better streaming
+  # forceHTTP2: "true"

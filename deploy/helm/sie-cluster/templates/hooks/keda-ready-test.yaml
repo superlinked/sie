@@ -1,0 +1,135 @@
+{{- if and .Values.healthGates.enabled .Values.autoscaling.enabled }}
+# RBAC must be at a lower weight than the Job so it is fully propagated before the pod starts.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "sie-cluster.healthGate.scaledobject.serviceAccountName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: scaledobject
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+    helm.sh/hook-weight: "2"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-health-scaledobject-reader" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: scaledobject
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+    helm.sh/hook-weight: "2"
+rules:
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-health-scaledobject-reader" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: scaledobject
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+    helm.sh/hook-weight: "2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-health-scaledobject-reader" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sie-cluster.healthGate.scaledobject.serviceAccountName" . }}
+    namespace: {{ include "sie-cluster.namespace" . }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-health-scaledobject-%d" (include "sie-cluster.fullname" .) .Release.Revision | trunc 63 | trimSuffix "-" }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: scaledobject
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "3"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 240
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sie-health-test
+        app.kubernetes.io/component: scaledobject
+    spec:
+      serviceAccountName: {{ include "sie-cluster.healthGate.scaledobject.serviceAccountName" . }}
+      restartPolicy: Never
+      containers:
+        - name: test
+          image: alpine/k8s:1.29.10
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              NAMESPACE="{{ include "sie-cluster.namespace" . }}"
+              TIMEOUT=180
+              INTERVAL=5
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              CA_CERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              API_SERVER="https://kubernetes.default.svc"
+              API_PATH="/apis/keda.sh/v1alpha1/namespaces/${NAMESPACE}/scaledobjects"
+              echo "=== ScaledObject Health Test ==="
+              k8s_get() {
+                curl -sS --cacert "$CA_CERT" -H "Authorization: Bearer $TOKEN" "$API_SERVER$API_PATH" 2>/dev/null || echo "{}"
+              }
+              elapsed=0
+              while [ $elapsed -lt $TIMEOUT ]; do
+                response=$(k8s_get)
+                count=$(echo "$response" | jq -r '.items | length // 0')
+                # count==0 is intentional: the hook expects at least one ScaledObject to exist.
+                # If autoscaling.enabled=true but no pools are defined, the hook will time out.
+                if [ "$count" -eq "0" ]; then
+                  echo "Waiting for ScaledObjects... (${elapsed}s/${TIMEOUT}s)"
+                  sleep $INTERVAL
+                  elapsed=$((elapsed + INTERVAL))
+                  continue
+                fi
+                fallback_count=$(echo "$response" | jq -r '[.items[].status.conditions[]? | select(.type=="Fallback" and .status=="True")] | length')
+                if [ "$fallback_count" -gt "0" ]; then
+                  echo "FAILED: ScaledObjects in Fallback mode"
+                  exit 1
+                fi
+                ready_count=$(echo "$response" | jq -r '[.items[].status.conditions[]? | select(.type=="Ready" and .status=="True")] | length')
+                if [ "$ready_count" -eq "$count" ]; then
+                  echo "SUCCESS: All ScaledObjects are Ready"
+                  exit 0
+                fi
+                echo "Waiting... (${elapsed}s/${TIMEOUT}s)"
+                sleep $INTERVAL
+                elapsed=$((elapsed + INTERVAL))
+              done
+              echo "FAILED: ScaledObjects did not become Ready"
+              exit 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+{{- end }}

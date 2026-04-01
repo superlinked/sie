@@ -1,0 +1,22 @@
+sie_id: MoritzLaurer/deberta-v3-base-zeroshot-v2.0
+hf_id: MoritzLaurer/deberta-v3-base-zeroshot-v2.0
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.nli_classification_flash:NLIClassificationFlashAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        hypothesis_template: This text is about {}.
+        multi_label: false

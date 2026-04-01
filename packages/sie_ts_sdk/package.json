@@ -1,0 +1,80 @@
+{
+  "name": "@superlinked/sie-sdk",
+  "version": "0.1.7",
+  "description": "Official TypeScript SDK for SIE (Search Inference Engine)",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./scoring": {
+      "import": {
+        "types": "./dist/scoring.d.ts",
+        "default": "./dist/scoring.js"
+      },
+      "require": {
+        "types": "./dist/scoring.d.cts",
+        "default": "./dist/scoring.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:browser": "playwright test",
+    "test:browser:serve": "npx serve -l 3456 -C .",
+    "prepack": "pnpm run build"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "embeddings",
+    "vector",
+    "search",
+    "inference",
+    "reranking",
+    "colbert",
+    "maxsim"
+  ],
+  "author": "SIE Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/superlinked/sie-internal.git",
+    "directory": "packages/sie_ts_sdk"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@playwright/test": "^1.57.0",
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

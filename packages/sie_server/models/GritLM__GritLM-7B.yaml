@@ -1,0 +1,38 @@
+sie_id: GritLM/GritLM-7B
+hf_id: GritLM/GritLM-7B
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 4096
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 4096
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: null
+    adapter_path: sie_server.adapters.pytorch_embedding:PyTorchEmbeddingAdapter
+    adapter_options:
+      loadtime:
+        uses_legacy_transformers_cache: true
+        forward_kwargs:
+          is_causal: false
+      runtime:
+        pooling: mean
+        normalize: true
+        query_template: |-
+          <|user|>
+          {instruction}
+          <|embed|>
+          {text}
+        doc_template: |-
+          <|embed|>
+          {text}
+        default_instruction: Given a web search query, retrieve relevant passages that answer the query

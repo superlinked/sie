@@ -1,49 +1,40 @@
 <div align="center">
 
-<!-- TODO: Replace with actual logo/banner image -->
+<picture>
+  <source srcset="https://cdn.prod.website-files.com/65dce6831bf9f730421e2915/66ef0317ed8616151ee1d451_superlinked_logo_white.png"
+          media="(prefers-color-scheme: dark)">
+  <img width="320"
+       src="https://cdn.prod.website-files.com/65dce6831bf9f730421e2915/65dce6831bf9f730421e2929_superlinked_logo.svg"
+       alt="Superlinked logo">
+</picture>
 
-<h1>⚡ SIE</h1>
-
-Superlinked Inference Engine
+<h1>SIE — Superlinked Inference Engine</h1>
 
 <p><strong>Open-source inference server and production cluster for embeddings, reranking, and extraction.</strong></p>
 <p>85+ models. Three functions. From laptop to Kubernetes. All Apache 2.0.</p>
 
 <p>
-  <a href="https://sie.dev/docs">Docs</a> ·
-  <a href="https://sie.dev/docs/quickstart">Quickstart</a> ·
-  <a href="https://sie.dev/docs/reference/sdk">API Reference</a> ·
-  <a href="https://sie.dev/docs/reference/models">Models</a>
+  <a href="https://sie.dev/docs/">Docs</a> ·
+  <a href="https://sie.dev/docs/quickstart/">Quickstart</a> ·
+  <a href="https://sie.dev/docs/reference/api/">API Reference</a> ·
+  <a href="https://sie.dev/docs/reference/models/">Models</a>
 </p>
-
-<!-- TODO: Add social preview / OG image (1280x640) -->
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/sie-sdk?style=flat-square)](https://pypi.org/project/sie-sdk/)
 [![GitHub stars](https://img.shields.io/github/stars/superlinked/sie?style=flat-square)](https://github.com/superlinked/sie/stargazers)
 
-<!--
-  Badges to add when ready:
-  - CI: ![CI](https://img.shields.io/github/actions/workflow/status/superlinked/sie/ci.yml?style=flat-square)  (needs ci.yml workflow)
-  - Downloads: ![Downloads](https://img.shields.io/pypi/dm/sie-sdk?style=flat-square)  (needs sie-sdk published)
-  - Discord: ![Discord](https://img.shields.io/discord/GUILD_ID?style=flat-square&label=Discord)  (needs real GUILD_ID)
--->
-
 </div>
 
-## About SIE
+## About
 
 SIE is an open-source inference engine that serves embeddings, reranking, and entity extraction through a single unified API. It replaces the patchwork of separate model servers with one system that handles 85+ models across dense, sparse, multi-vector, vision, and cross-encoder architectures.
-
-:star: _If SIE saves you time, star this repo - it helps others find it!_
-
-### SIE Open Source:
 
 - Three functions (`encode`, `score`, `extract`) cover the entire embedding, reranking, and extraction pipeline
 - 85+ pre-configured models, hot-swappable, all quality-verified against MTEB in CI
 - Serves multiple models simultaneously with on-demand loading and LRU eviction
 - Ships the full production stack: load-balancing router, KEDA autoscaling, Grafana dashboards, Terraform for GKE/EKS
-- Integrates with LangChain, LlamaIndex, Haystack, DSPy, CrewAI, and Chroma
+- Integrates with LangChain, LlamaIndex, Haystack, DSPy, CrewAI, Chroma, Qdrant, and Weaviate
 - OpenAI-compatible `/v1/embeddings` endpoint for drop-in migration
 
 ## Quickstart
@@ -60,8 +51,8 @@ sie-server serve            # auto-detects CUDA / Apple Silicon / CPU
 Or with Docker:
 
 ```bash
-docker run -p 8080:8080 ghcr.io/superlinked/sie-server:latest             # CPU
-docker run --gpus all -p 8080:8080 ghcr.io/superlinked/sie-server:latest  # GPU
+docker run -p 8080:8080 ghcr.io/superlinked/sie-server:latest-cpu-default                # CPU
+docker run --gpus all -p 8080:8080 ghcr.io/superlinked/sie-server:latest-cuda12-default  # GPU
 ```
 
 **2. Install the SDK and go**
@@ -103,9 +94,9 @@ print(result["entities"])
 #  {'text': 'Apple', 'label': 'organization', 'score': 0.91}]
 ```
 
-TypeScript: `pnpm add @sie/sdk` - [TypeScript docs ->](https://sie.dev/docs/reference/typescript-sdk)
+TypeScript: `pnpm add @sie/sdk` — [TypeScript docs ->](https://sie.dev/docs/reference/typescript-sdk/)
 
-[Full quickstart guide ->](https://sie.dev/docs/quickstart) · [API reference ->](https://sie.dev/docs/reference/sdk)
+[Full quickstart guide ->](https://sie.dev/docs/quickstart/) · [SDK reference ->](https://sie.dev/docs/reference/sdk/)
 
 ---
 
@@ -114,26 +105,30 @@ TypeScript: `pnpm add @sie/sdk` - [TypeScript docs ->](https://sie.dev/docs/refe
 The same code works against a production cluster. SIE ships a load-balancing router, KEDA autoscaling (scale to zero), Grafana dashboards, and Terraform modules for GKE and EKS. Not just the server, the whole stack. All Apache 2.0.
 
 ```bash
-helm install sie deploy/helm/sie-cluster/ -f values.yaml
+helm upgrade --install sie-cluster deploy/helm/sie-cluster \
+  --namespace sie --create-namespace \
+  --set hfToken.create=true \
+  --set hfToken.value=<TOKEN> \
+  -f deploy/helm/sie-cluster/values-{gke|aws}.yaml
 ```
 
-[Deployment overview ->](https://sie.dev/docs)
+[Deployment guide ->](https://sie.dev/docs/deployment/)
 
 ---
 
 ### Explore
 
-[**85+ models**](https://sie.dev/docs/reference/models) - `Stella v5` · `BGE-M3` · `SPLADE v3` · `SigLIP` · `ColQwen2.5` · `BGE-reranker` · `GLiNER` · `Florence-2` · [and more ->](https://sie.dev/docs/reference/models)
+[**85+ models**](https://sie.dev/docs/reference/models/) — `Stella v5` · `BGE-M3` · `SPLADE v3` · `SigLIP` · `ColQwen2.5` · `BGE-reranker` · `GLiNER` · `Florence-2` · [and more ->](https://sie.dev/docs/reference/models/)
 Dense, sparse, multi-vector, vision, rerankers, extractors. All pre-configured. All quality-verified against MTEB in CI.
 
-[**Integrations**](https://sie.dev/docs/integrations/) - LangChain · LlamaIndex · Haystack · DSPy · CrewAI · Chroma
+[**Integrations**](https://sie.dev/docs/integrations/) — LangChain · LlamaIndex · Haystack · DSPy · CrewAI · Chroma · Qdrant · Weaviate
 
-[**Notebooks**](notebooks/) - Quickstarts and walkthroughs *(in progress)*
+[**Notebooks**](notebooks/) — Quickstarts and walkthroughs
 
-[**Examples**](examples/) - End-to-end project gallery. [Add yours ->](examples/)
+[**Examples**](examples/) — End-to-end project gallery
 
 ---
 
 <p align="center">
-  <a href="https://sie.dev/docs"><strong>sie.dev/docs</strong></a> · Apache 2.0
+  <a href="https://sie.dev/docs/"><strong>sie.dev/docs</strong></a> · Apache 2.0
 </p>

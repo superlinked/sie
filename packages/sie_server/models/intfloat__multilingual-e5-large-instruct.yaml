@@ -1,0 +1,29 @@
+sie_id: intfloat/multilingual-e5-large-instruct
+hf_id: intfloat/multilingual-e5-large-instruct
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 1024
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.xlm_roberta_flash:XLMRobertaFlashAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        pooling: mean
+        normalize: true
+        query_template: 'Instruct: {instruction}\nQuery: {text}'
+        instruction: 'Given a web search query, retrieve relevant passages that answer the query'
+        doc_template: '{text}'

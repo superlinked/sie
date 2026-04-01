@@ -1,0 +1,745 @@
+# SIE Cluster Helm Values
+# Configuration for SIE router and GPU worker pools
+
+# -- Global settings
+global:
+  # -- Image pull secrets for private registries
+  imagePullSecrets: []
+  # -- Namespace override (defaults to release namespace)
+  namespace: ""
+
+# -- Router configuration
+router:
+  # -- Number of router replicas (minimum 2 for HA)
+  replicas: 2
+
+  image:
+    repository: ghcr.io/superlinked/sie-router
+    tag: ""  # Defaults to appVersion
+    pullPolicy: IfNotPresent
+
+  # -- Resource requests/limits
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+  # -- Service configuration
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+
+  # -- Pod annotations
+  podAnnotations: {}
+
+  # -- Node selector
+  nodeSelector: {}
+
+  # -- Tolerations
+  tolerations: []
+
+  # -- Affinity rules
+  affinity: {}
+
+  # -- Router auth (static token)
+  auth:
+    # -- Mode: none | static
+    mode: none
+    # -- Secret with comma-separated tokens
+    tokenSecretName: ""
+    tokenSecretKey: "SIE_AUTH_TOKEN"
+
+  # -- Embedded configs: auto-generate ConfigMaps from files/ in chart
+  # Disabled by default: the router Docker image embeds model and bundle configs
+  # at build time (/app/bundles and /app/models). Enable this only if you need to
+  # override image configs via ConfigMaps (e.g., for testing with modified configs).
+  # For production with hot-reload, use gitSync instead.
+  embeddedConfigs:
+    # -- Enable embedded config delivery (auto-generates ConfigMaps from files/bundles and files/models)
+    enabled: false
+
+  # -- ConfigMap for static config injection (manual ConfigMap creation)
+  # Use this if you want to create ConfigMaps externally and reference them.
+  # For most cases, use embeddedConfigs (simpler) or gitSync (production).
+  configMap:
+    # -- Enable ConfigMap-based config injection (manual)
+    enabled: false
+    # -- Base name for ConfigMaps (creates {name}-bundles and {name}-models)
+    name: "sie-config"
+    # -- Override for bundles ConfigMap name
+    bundlesConfigMap: ""
+    # -- Override for models ConfigMap name
+    modelsConfigMap: ""
+    # -- Bundle configs to mount (key: ConfigMap key, file: target filename)
+    bundles: []
+    # Example:
+    #   - key: default.yaml
+    #     file: default.yaml
+    # -- Model configs to mount (key: ConfigMap key, mounted as models/<key>.yaml)
+    models: []
+    # Example:
+    #   - key: all-MiniLM-L6-v2
+
+  # -- Git-sync sidecar for config hot reload (bundles and models)
+  gitSync:
+    # -- Enable git-sync sidecar for config hot reload
+    enabled: false
+    # -- Git repository URL (HTTPS or SSH)
+    # Examples:
+    #   - https://github.com/org/repo (public)
+    #   - git@github.com:org/repo (private, requires sshSecret)
+    repo: ""
+    # -- Branch to sync
+    branch: main
+    # -- Sync interval (e.g., 60s, 5m)
+    period: 60s
+    # -- Path within repo to bundles directory
+    bundlesPath: packages/sie_server/bundles
+    # -- Path within repo to models directory
+    modelsPath: packages/sie_server/models
+    # -- SSH secret for private repositories
+    # Create with: kubectl create secret generic git-ssh --from-file=ssh=~/.ssh/id_rsa
+    sshSecret: ""
+    # -- Git-sync image
+    image:
+      repository: registry.k8s.io/git-sync/git-sync
+      tag: v4.2.1
+      pullPolicy: IfNotPresent
+    # -- Resources for git-sync sidecar
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+
+# -- Machine profiles configuration
+# Machine profiles abstract cloud-specific hardware configs (GPU type + machine type + spot)
+# Keys are profile names used in SDK pool creation and metrics labels
+machineProfiles:
+  # L4 GPU (on-demand)
+  l4:
+    gpuType: nvidia-l4
+    machineType: g2-standard-8
+    spot: false
+  # L4 GPU (spot/preemptible)
+  l4-spot:
+    gpuType: nvidia-l4
+    machineType: g2-standard-8
+    spot: true
+  # A100 40GB (on-demand)
+  a100-40gb:
+    gpuType: nvidia-tesla-a100
+    machineType: a2-highgpu-1g
+    spot: false
+  # A100 80GB (on-demand)
+  a100-80gb:
+    gpuType: nvidia-a100-80gb
+    machineType: a2-ultragpu-1g
+    spot: false
+  # CPU (no GPU, for testing)
+  cpu:
+    gpuType: ""
+    machineType: ""
+    spot: false
+
+# -- Worker pools configuration (one StatefulSet per pool)
+workers:
+  # -- Common worker settings
+  common:
+    image:
+      repository: ghcr.io/superlinked/sie-server
+      # -- Image tag. Format: "<version>-<bundle>" (e.g. "v0.1.0-default").
+      # -- Leave empty to use .Chart.AppVersion.
+      tag: ""
+      pullPolicy: IfNotPresent
+
+    # -- Image pre-pull DaemonSet (caches worker image on GPU nodes before worker pods schedule)
+    imagePrepull:
+      # -- Enable image pre-pull DaemonSets for worker pools
+      enabled: true
+
+    # -- Port for SIE server
+    port: 8080
+
+    # -- Models to preload on startup (empty = lazy loading)
+    preloadModels: []
+
+    # -- Bundle to use (default)
+    bundle: default
+
+    # -- Runtime class for workers (e.g., "nvidia" to enable GPU runtime)
+    runtimeClassName: ""
+
+    # -- Model cache size limit (emptyDir - ephemeral, no zone-lock issues)
+    cacheStorageSize: 300Gi
+
+    # -- Cluster cache (S3/GCS) configuration
+    clusterCache:
+      enabled: false
+      # -- S3/GCS bucket URL (e.g., s3://my-bucket/models or gs://my-bucket/models)
+      url: ""
+
+    # -- HuggingFace cache configuration
+    hfCache:
+      # -- HuggingFace home directory
+      home: /models/huggingface
+      # -- HuggingFace token secret name (optional)
+      tokenSecret: ""
+      tokenSecretKey: token
+
+  # -- Worker pools (one StatefulSet per pool)
+  # NOTE: All pools are disabled by default. Enable explicitly in your values override.
+  # Each pool creates a WorkerGroup: (poolName, gpuType, bundle)
+  pools:
+    # L4 GPU pool (example configuration)
+    l4:
+      enabled: false
+      # -- Minimum replicas (0 for scale-to-zero)
+      minReplicas: 0
+      # -- Maximum replicas
+      maxReplicas: 10
+      # -- Machine profile name (key from machineProfiles section)
+      # Used for routing, metrics, and KEDA scaling
+      machineProfile: l4
+      # -- GPU type label for routing (short form used by router)
+      gpuType: l4
+      # -- Bundle to use (overrides common.bundle if set)
+      # bundle: default
+      # -- Optional runtime class override for this pool
+      # runtimeClassName: "nvidia"
+      # -- Node selector for GPU nodes
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      # -- GPU resource request
+      gpu:
+        count: 1
+        # -- NVIDIA GPU product name (for node affinity)
+        product: NVIDIA-L4
+      # -- Resource requests/limits
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+      # -- Tolerations for GPU nodes
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+    # A100 40GB pool (scale-to-zero)
+    a100-40gb:
+      enabled: false
+      minReplicas: 0
+      maxReplicas: 5
+      machineProfile: a100-40gb
+      gpuType: a100-40gb
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-tesla-a100
+      gpu:
+        count: 1
+        product: NVIDIA-A100-SXM4-40GB
+      resources:
+        requests:
+          cpu: "8"
+          memory: "64Gi"
+        limits:
+          cpu: "16"
+          memory: "128Gi"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+    # A100 80GB pool (scale-to-zero)
+    a100-80gb:
+      enabled: false
+      minReplicas: 0
+      maxReplicas: 3
+      machineProfile: a100-80gb
+      gpuType: a100-80gb
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-a100-80gb
+      gpu:
+        count: 1
+        product: NVIDIA-A100-SXM4-80GB
+      resources:
+        requests:
+          cpu: "8"
+          memory: "128Gi"
+        limits:
+          cpu: "16"
+          memory: "256Gi"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+    # CPU pool (for local testing with kind, no GPU required)
+    cpu:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 3
+      machineProfile: cpu
+      gpuType: cpu
+      # No node selector - runs on any node
+      nodeSelector: {}
+      gpu:
+        count: 0
+        product: ""
+      resources:
+        requests:
+          cpu: "2"
+          memory: "6Gi"
+        limits:
+          cpu: "4"
+          memory: "12Gi"
+      tolerations: []
+
+# -- Autoscaling configuration using KEDA ScaledObjects.
+# -- Requires KEDA operator. Set keda.install=true to install KEDA as a sub-chart,
+# -- or ensure KEDA is already installed in the cluster before enabling this.
+autoscaling:
+  # -- Enable KEDA autoscaling. Set true when KEDA is pre-installed in the cluster.
+  # When keda.install=true, ScaledObjects are created regardless
+  # of this flag.
+  enabled: false
+
+  # -- Prometheus address for KEDA metrics queries.
+  # Ignored when kube-prometheus-stack.install=true — address is auto-derived from
+  # the release namespace. Set this when using an externally-managed Prometheus.
+  prometheusAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
+
+  # -- Polling interval for metrics (seconds)
+  pollingInterval: 15
+
+  # -- Cooldown period before scaling to zero (seconds)
+  # GPU cold starts take 60-120s, model loading can take 5+ minutes for large models.
+  # Use longer cooldown (15 min) to avoid mid-eval scale-downs.
+  cooldownPeriod: 900
+
+  # -- Scale-down stabilization window (seconds)
+  scaleDownStabilization: 300
+
+  # -- Queue depth threshold per pod
+  queueDepthThreshold: 10
+
+  # -- Queue depth to activate from zero
+  queueDepthActivation: 2
+
+  # -- Fallback replicas if Prometheus is unavailable
+  fallbackReplicas: 2
+
+# -- Ingress configuration
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  # -- Hostname for ingress
+  host: ""
+  # -- TLS configuration
+  tls:
+    enabled: false
+    secretName: sie-tls
+
+# -- Auth configuration (ingress-nginx + oauth2-proxy)
+auth:
+  enabled: false
+
+  oauth2Proxy:
+    image:
+      repository: ghcr.io/oauth2-proxy/oauth2-proxy
+      tag: v7.9.0
+      pullPolicy: IfNotPresent
+
+    service:
+      port: 4180
+
+    secret:
+      name: oauth2-proxy
+      clientIDKey: OAUTH2_PROXY_CLIENT_ID
+      clientSecretKey: OAUTH2_PROXY_CLIENT_SECRET
+      cookieSecretKey: OAUTH2_PROXY_COOKIE_SECRET
+
+    oidcIssuerUrl: ""
+    redirectUrl: ""
+    emailDomain: "*"
+    extraJwtIssuers: []
+    skipJwtBearerTokens: true
+    passAccessToken: true
+    setAuthorizationHeader: true
+    passAuthorizationHeader: true
+    reverseProxy: true
+    extraArgs: []
+    resources: {}
+
+  ingress:
+    authResponseHeaders:
+      - Authorization
+
+# -- Service account configuration
+# NAMING CONTRACT: The KSA name below ("sie-server") MUST match the name used in
+# Terraform's Workload Identity / IRSA binding:
+#   GKE: google_service_account_iam_binding with member "serviceAccount:<project>.svc.id.goog[<ns>/sie-server]"
+#        and pod annotation iam.gke.io/gcp-service-account
+#   EKS: module.sie_irsa_role namespace_service_accounts = ["sie:sie-server"]
+#        and pod annotation eks.amazonaws.com/role-arn
+# If you override serviceAccount.name, update the matching TF variable sie_service_account_name.
+# If you override the Kubernetes namespace (or deploy the SA in a different namespace),
+# also update the corresponding Workload Identity / IRSA bindings and Terraform variables
+# (e.g. sie_service_account_name) and pod annotations (iam.gke.io/gcp-service-account or
+# eks.amazonaws.com/role-arn) so they reference the same namespace and KSA name "sie-server".
+serviceAccount:
+  # -- Create service account
+  create: true
+  # -- Service account name. Must match KSA name in Terraform WI/IRSA binding.
+  name: "sie-server"
+  # -- Annotations (e.g., for Workload Identity)
+  annotations: {}
+  # Example for GKE Workload Identity:
+  # iam.gke.io/gcp-service-account: sie@my-project.iam.gserviceaccount.com
+
+# -- RBAC configuration
+rbac:
+  # -- Create RBAC resources
+  create: true
+
+# -- Prometheus ServiceMonitor configuration
+serviceMonitor:
+  # -- Enable Prometheus ServiceMonitor for metrics scraping.
+  # -- Requires Prometheus Operator (set prometheus.install=true or use external Prometheus Operator).
+  enabled: false
+  # -- Labels to add to ServiceMonitor
+  labels: {}
+  # -- Scrape interval
+  interval: 15s
+  # -- Scrape timeout
+  scrapeTimeout: 10s
+
+# -- Prometheus alerting rules (PrometheusRule CRD)
+# Automatically enabled when kube-prometheus-stack.install=true.
+# Set true when using an external Prometheus Operator.
+alertRules:
+  enabled: false
+
+# -- Grafana dashboard ConfigMaps
+dashboards:
+  # -- Deploy dashboard ConfigMaps for Grafana sidecar discovery.
+  # Set true when using an external Grafana (not the kube-prometheus-stack sub-chart).
+  # Automatically enabled when kube-prometheus-stack.install=true.
+  enabled: false
+
+# -- Health gate hooks (post-install/post-upgrade Jobs)
+# When enabled, helm install/upgrade blocks until Prometheus, KEDA ScaledObjects, and router are ready.
+healthGates:
+  # -- Enable health gate hook Jobs; requires Prometheus and KEDA (set true for GCP installs)
+  enabled: false
+  # -- Namespace for the Prometheus hook Job (SA + Job run in this namespace)
+  monitoringNamespace: "monitoring"
+
+# -- HuggingFace token secret (optional)
+# Create via Helm instead of kubectl for fully declarative deploys.
+# Pass token at install time: --set hfToken.create=true --set hfToken.value=<token>
+hfToken:
+  # -- Create an hf-token Secret in the release namespace
+  create: false
+  # -- Token value (passed via --set, never baked into values files)
+  value: ""
+
+# -- Logging configuration
+logging:
+  # -- Log level (DEBUG, INFO, WARNING, ERROR)
+  level: INFO
+  # -- Enable structured JSON logging (required for Loki)
+  json: true
+
+# =============================================================================
+# Sub-chart dependency control flags
+# All sub-charts are disabled by default. Enable what you need in your overlay.
+# =============================================================================
+
+# -- KEDA autoscaler (required for scale-to-zero worker autoscaling)
+keda:
+  # -- Install KEDA as a sub-chart
+  install: false
+  # -- Resources for KEDA operator
+  resources:
+    operator:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"
+    metricServer:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"
+  # -- Enable Prometheus metrics endpoints for KEDA components
+  prometheus:
+    metricServer:
+      enabled: true
+    operator:
+      enabled: true
+
+# -- kube-prometheus-stack (Prometheus + Grafana + Alertmanager + node-exporter)
+# Required for KEDA autoscaling. GKE Managed Prometheus does NOT expose the
+# standard Prometheus query API that KEDA needs.
+kube-prometheus-stack:
+  # -- Install kube-prometheus-stack as a sub-chart
+  install: false
+  prometheus:
+    prometheusSpec:
+      # -- Discover all ServiceMonitors regardless of helm label selectors
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      # -- Data retention period
+      retention: "15d"
+      retentionSize: "50GB"
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "8Gi"
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: "100Gi"
+  grafana:
+    sidecar:
+      alerts:
+        enabled: true
+        label: app.kubernetes.io/component
+        labelValue: alert
+        searchNamespace: ALL
+      dashboards:
+        enabled: true
+        label: app.kubernetes.io/component
+        labelValue: dashboard
+        searchNamespace: ALL
+        folderAnnotation: dashboard.grafana.com/folder
+        provider:
+          foldersFromFilesStructure: true
+      datasources:
+        enabled: true
+        label: app.kubernetes.io/component
+        labelValue: datasource
+        searchNamespace: ALL
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        url: http://loki:3100
+        access: proxy
+        isDefault: false
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    persistence:
+      enabled: true
+      size: "10Gi"
+  alertmanager:
+    enabled: true
+    alertmanagerSpec:
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"
+  nodeExporter:
+    enabled: true
+  kubeStateMetrics:
+    enabled: true
+  # -- Disable control-plane monitoring (managed by cloud provider)
+  kubeApiServer:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+
+# -- NVIDIA DCGM Exporter for GPU metrics
+dcgm-exporter:
+  # -- Install DCGM Exporter as a sub-chart
+  install: false
+  serviceMonitor:
+    enabled: true
+    interval: "15s"
+    additionalLabels:
+      app.kubernetes.io/part-of: sie
+  # -- Run on GPU nodes only. Override per cloud:
+  # GCP: cloud.google.com/gke-accelerator-count: "1"
+  # AWS: add dcgm-exporter.nodeSelector: {} in values-aws.yaml
+  nodeSelector:
+    cloud.google.com/gke-accelerator-count: "1"
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+  arguments:
+    - "-f"
+    - "/etc/dcgm-exporter/dcp-metrics-included.csv"
+
+# -- Loki log aggregation (Tier 2 - optional)
+loki:
+  # -- Install Loki as a sub-chart
+  install: false
+  # -- Force a predictable service name so Alloy/Grafana/event-exporter can use
+  # the static URL http://loki:3100 regardless of the Helm release name.
+  fullnameOverride: loki
+  deploymentMode: SingleBinary
+  loki:
+    auth_enabled: false
+    storage:
+      type: filesystem
+    limits_config:
+      retention_period: "168h"
+    compactor:
+      # -- Required for retention_period to take effect
+      retention_enabled: true
+      delete_request_store: filesystem
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: loki_index_
+            period: "24h"
+    commonConfig:
+      replication_factor: 1
+  singleBinary:
+    replicas: 1
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+    persistence:
+      enabled: true
+      size: "50Gi"
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  backend:
+    replicas: 0
+  test:
+    enabled: false
+  gateway:
+    enabled: false
+
+# -- Grafana Alloy log collector (Tier 2 - optional, replaces Promtail)
+alloy:
+  # -- Install Alloy as a sub-chart
+  install: false
+  alloy:
+    configMap:
+      # -- The River config is rendered from files/alloy/config.alloy via templates/alloy-configmap.yaml.
+      # Setting create=false tells the sub-chart to mount the ConfigMap created by the parent chart.
+      # name and key must match what templates/alloy-configmap.yaml emits.
+      create: false
+      # NOTE: Static name — values.yaml is not templated so .Release.Name cannot
+      # be used here. If deploying multiple releases in the same namespace, override
+      # this to a unique name to avoid ConfigMap conflicts.
+      name: "sie-alloy-config"
+      key: "config.alloy"
+  controller:
+    type: daemonset
+  mounts:
+    varlog: true
+    dockercontainers: true
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+  tolerations:
+    - operator: Exists
+
+# -- Kubernetes Event Exporter (Tier 2 - optional, sends K8s events to Loki)
+# Broadcom moved Bitnami community images behind a paywall on Docker Hub
+# (https://news.broadcom.com/app-dev/broadcom-introduces-bitnami-secure-images-for-production-ready-containerized-applications).
+# Free images are still available on public.ecr.aws. The Bitnami chart's image
+# verification rejects non-Docker-Hub registries, so allowInsecureImages is required.
+kubernetes-event-exporter:
+  # -- Install Kubernetes Event Exporter as a sub-chart
+  install: false
+  image:
+    registry: public.ecr.aws
+    repository: bitnami/kubernetes-event-exporter
+    tag: 1.7.0-debian-12-r46
+  global:
+    security:
+      allowInsecureImages: true
+  config:
+    logLevel: info
+    logFormat: json
+    route:
+      routes:
+        - match:
+            - receiver: "loki"
+    receivers:
+      - name: "loki"
+        webhook:
+          endpoint: "http://loki:3100/loki/api/v1/push"
+          headers:
+            Content-Type: application/json
+          # NOTE: {{ ... }} below are event-exporter Go templates, not Helm templates.
+          # Helm passes these as literal strings; the event-exporter evaluates them at runtime.
+          layout:
+            streams:
+              - stream:
+                  app: "kubernetes-events"
+                  namespace: "{{ .InvolvedObject.Namespace }}"
+                  kind: "{{ .InvolvedObject.Kind }}"
+                  name: "{{ .InvolvedObject.Name }}"
+                  reason: "{{ .Reason }}"
+                  type: "{{ .Type }}"
+                values:
+                  - - "{{ .LastTimestamp.UnixNano }}"
+                    - "{{ .Message }}"
+  resources:
+    requests:
+      cpu: "10m"
+      memory: "32Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"

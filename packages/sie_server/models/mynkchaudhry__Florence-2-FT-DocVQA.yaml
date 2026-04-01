@@ -1,0 +1,23 @@
+sie_id: mynkchaudhry/Florence-2-FT-DocVQA
+hf_id: mynkchaudhry/Florence-2-FT-DocVQA
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.florence2:Florence2Adapter
+    adapter_options:
+      loadtime:
+        trust_remote_code: true
+      runtime:
+        task: <DocVQA>
+        max_new_tokens: 512
+        num_beams: 1

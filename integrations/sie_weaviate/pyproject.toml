@@ -1,0 +1,31 @@
+[project]
+name = "sie-weaviate"
+version = "0.1.0"
+description = "SIE integration for Weaviate"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "sie-sdk>=0.1.0",
+    "weaviate-client>=4.16",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sie_weaviate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests as integration tests (require running SIE server and Weaviate instance)",
+]
+addopts = "-v --tb=short -m 'not integration'"

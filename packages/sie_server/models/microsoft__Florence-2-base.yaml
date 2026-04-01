@@ -1,0 +1,23 @@
+sie_id: microsoft/Florence-2-base
+hf_id: microsoft/Florence-2-base
+inputs:
+  text: false
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.florence2:Florence2Adapter
+    adapter_options:
+      loadtime:
+        trust_remote_code: true
+      runtime:
+        task: <OCR_WITH_REGION>
+        max_new_tokens: 1024
+        num_beams: 1

@@ -1,0 +1,8 @@
+name: sglang
+priority: 20
+adapters:
+- sie_server.adapters.sglang
+deps:
+  # SGLang 0.5.6+ includes all deps at base level (fixed from 0.4.x extras bug)
+  # See: https://github.com/sgl-project/sglang/issues/4869
+  sglang: '>=0.5.6'

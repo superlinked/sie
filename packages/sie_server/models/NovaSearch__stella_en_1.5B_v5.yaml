@@ -1,0 +1,36 @@
+sie_id: NovaSearch/stella_en_1.5B_v5
+hf_id: NovaSearch/stella_en_1.5B_v5
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 1024
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.qwen2_flash:Qwen2FlashAdapter
+    adapter_options:
+      loadtime:
+        trust_remote_code: true
+        uses_legacy_transformers_cache: true
+        dense_projection_path: 2_Dense_1024
+        config_kwargs:
+          use_memory_efficient_attention: false
+          unpad_inputs: false
+          use_cache: false
+      runtime:
+        pooling: mean
+        normalize: true
+        query_template: |-
+          Instruct: Given a web search query, retrieve relevant passages that answer the query.
+          Query: {text}

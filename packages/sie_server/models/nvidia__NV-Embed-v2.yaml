@@ -1,0 +1,28 @@
+sie_id: nvidia/NV-Embed-v2
+hf_id: Hyukkyu/nv-embed-v2  # works with newer transformers version
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 4096
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 32768
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.pytorch_embedding:PyTorchEmbeddingAdapter
+    adapter_options:
+      loadtime:
+        trust_remote_code: true
+        uses_legacy_transformers_cache: true
+        attn_implementation: eager
+      runtime:
+        normalize: true

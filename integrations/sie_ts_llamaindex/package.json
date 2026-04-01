@@ -1,0 +1,63 @@
+{
+  "name": "@superlinked/sie-llamaindex",
+  "version": "0.1.7",
+  "description": "SIE embeddings integration for LlamaIndex.TS",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src tests",
+    "lint-fix": "biome check --write src tests",
+    "prepack": "pnpm run build"
+  },
+  "dependencies": {
+    "@superlinked/sie-sdk": "workspace:*"
+  },
+  "peerDependencies": {
+    "llamaindex": ">=0.6.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "llamaindex": "^0.8.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "sie",
+    "embeddings",
+    "llamaindex",
+    "vector",
+    "search",
+    "rag"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/superlinked/sie-internal.git",
+    "directory": "integrations/sie_ts_llamaindex"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
