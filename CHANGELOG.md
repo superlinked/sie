@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.8
+
+- chore(main): release 0.1.8
+- fix(helm): correct image.tag comment to reflect actual format
+- fix(helm): remove duplicate platform suffix from worker image tag
+- fix: add sie-qdrant and sie-weaviate to release-please config
+- fix: update README example to use new pool naming convention
+- fix: correct worker image tag format to {version}-{platform}-{bundle}
+
 ## v0.1.7
 
 - chore(main): release 0.1.7

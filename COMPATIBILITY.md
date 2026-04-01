@@ -230,7 +230,4 @@ SIE will declare 1.0 when all of the following are true:
 
 - [SemVer 2.0.0](https://semver.org/)
 - [Conventional Commits](https://www.conventionalcommits.org/)
-- [product/design.md](product/design.md) — Architecture source of truth
-- [product/roadmap.md](product/roadmap.md) — Delivery plan with milestone checkboxes
 - [CHANGELOG.md](CHANGELOG.md) — Release history
-- [CONTRIBUTING.md](CONTRIBUTING.md) — Development workflow

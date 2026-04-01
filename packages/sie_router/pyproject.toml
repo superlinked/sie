@@ -1,6 +1,6 @@
 [project]
 name = "sie-router"
-version = "0.1.7"
+version = "0.1.8"
 description = "Search Inference Engine - Stateless request router for elastic cloud deployments"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }

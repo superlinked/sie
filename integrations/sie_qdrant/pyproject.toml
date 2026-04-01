@@ -1,6 +1,6 @@
 [project]
 name = "sie-qdrant"
-version = "0.1.0"
+version = "0.1.8"
 description = "SIE integration for Qdrant"
 readme = "README.md"
 requires-python = ">=3.10"

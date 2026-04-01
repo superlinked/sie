@@ -1,6 +1,6 @@
 [project]
 name = "sie-langchain"
-version = "0.1.7"
+version = "0.1.8"
 description = "SIE integration for LangChain"
 requires-python = ">=3.10"
 dependencies = [

@@ -154,10 +154,14 @@ workers:
   common:
     image:
       repository: ghcr.io/superlinked/sie-server
-      # -- Image tag. Format: "<version>-<bundle>" (e.g. "v0.1.0-default").
+      # -- Base image tag without bundle suffix (e.g. "v0.1.0-cuda12").
+      # -- The template appends "-<bundle>" automatically.
       # -- Leave empty to use .Chart.AppVersion.
       tag: ""
       pullPolicy: IfNotPresent
+
+    # -- Platform variant for worker images (e.g. "cuda12", "cpu")
+    platform: cuda12
 
     # -- Image pre-pull DaemonSet (caches worker image on GPU nodes before worker pods schedule)
     imagePrepull:
@@ -194,11 +198,14 @@ workers:
       tokenSecretKey: token
 
   # -- Worker pools (one StatefulSet per pool)
-  # NOTE: All pools are disabled by default. Enable explicitly in your values override.
-  # Each pool creates a WorkerGroup: (poolName, gpuType, bundle)
+  # Each pool creates a WorkerGroup: one StatefulSet + one pre-pull DaemonSet.
+  # Pool naming convention: <gpuType>-<bundle> (e.g. l4-default, l4-sglang).
+  # All pools scale to zero by default — enable the ones you need.
   pools:
-    # L4 GPU pool (example configuration)
-    l4:
+
+    # ── L4 GPU ───────────────────────────────────────────────
+
+    l4-default:
       enabled: false
       # -- Minimum replicas (0 for scale-to-zero)
       minReplicas: 0
@@ -210,7 +217,7 @@ workers:
       # -- GPU type label for routing (short form used by router)
       gpuType: l4
       # -- Bundle to use (overrides common.bundle if set)
-      # bundle: default
+      bundle: default
       # -- Optional runtime class override for this pool
       # runtimeClassName: "nvidia"
       # -- Node selector for GPU nodes
@@ -235,13 +242,39 @@ workers:
           operator: Exists
           effect: NoSchedule
 
-    # A100 40GB pool (scale-to-zero)
-    a100-40gb:
+    l4-sglang:
+      enabled: false
+      minReplicas: 0
+      maxReplicas: 10
+      machineProfile: l4
+      gpuType: l4
+      bundle: sglang
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      gpu:
+        count: 1
+        product: NVIDIA-L4
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+    # ── A100 40GB ────────────────────────────────────────────
+
+    a100-40gb-default:
       enabled: false
       minReplicas: 0
       maxReplicas: 5
       machineProfile: a100-40gb
       gpuType: a100-40gb
+      bundle: default
       nodeSelector:
         cloud.google.com/gke-accelerator: nvidia-tesla-a100
       gpu:
@@ -259,13 +292,39 @@ workers:
           operator: Exists
           effect: NoSchedule
 
-    # A100 80GB pool (scale-to-zero)
-    a100-80gb:
+    a100-40gb-sglang:
+      enabled: false
+      minReplicas: 0
+      maxReplicas: 5
+      machineProfile: a100-40gb
+      gpuType: a100-40gb
+      bundle: sglang
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-tesla-a100
+      gpu:
+        count: 1
+        product: NVIDIA-A100-SXM4-40GB
+      resources:
+        requests:
+          cpu: "8"
+          memory: "64Gi"
+        limits:
+          cpu: "16"
+          memory: "128Gi"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+    # ── A100 80GB ────────────────────────────────────────────
+
+    a100-80gb-default:
       enabled: false
       minReplicas: 0
       maxReplicas: 3
       machineProfile: a100-80gb
       gpuType: a100-80gb
+      bundle: default
       nodeSelector:
         cloud.google.com/gke-accelerator: nvidia-a100-80gb
       gpu:
@@ -283,14 +342,64 @@ workers:
           operator: Exists
           effect: NoSchedule
 
-    # CPU pool (for local testing with kind, no GPU required)
-    cpu:
+    a100-80gb-sglang:
+      enabled: false
+      minReplicas: 0
+      maxReplicas: 3
+      machineProfile: a100-80gb
+      gpuType: a100-80gb
+      bundle: sglang
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-a100-80gb
+      gpu:
+        count: 1
+        product: NVIDIA-A100-SXM4-80GB
+      resources:
+        requests:
+          cpu: "8"
+          memory: "128Gi"
+        limits:
+          cpu: "16"
+          memory: "256Gi"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+    # ── CPU (local testing with kind, no GPU) ────────────────
+
+    cpu-default:
       enabled: false
       minReplicas: 1
       maxReplicas: 3
       machineProfile: cpu
       gpuType: cpu
+      bundle: default
+      # -- Platform override for CPU pool
+      platform: cpu
       # No node selector - runs on any node
+      nodeSelector: {}
+      gpu:
+        count: 0
+        product: ""
+      resources:
+        requests:
+          cpu: "2"
+          memory: "6Gi"
+        limits:
+          cpu: "4"
+          memory: "12Gi"
+      tolerations: []
+
+    cpu-sglang:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 3
+      machineProfile: cpu
+      gpuType: cpu
+      bundle: sglang
+      # -- Platform override for CPU pool
+      platform: cpu
       nodeSelector: {}
       gpu:
         count: 0

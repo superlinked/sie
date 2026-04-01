@@ -92,16 +92,15 @@ the pools you need in your values override.
 
 ```yaml
 # Worker pool configuration (must explicitly enable pools)
+# Pool naming: <gpuType>-<bundle> (e.g. l4-default, l4-sglang)
 workers:
   pools:
-    l4:
+    l4-default:
       enabled: true     # Enable this pool (disabled by default)
       minReplicas: 0    # Scale to zero
       maxReplicas: 10
-      gpuType: nvidia-l4
-      gpu:
-        count: 1
-        product: nvidia-l4
+    l4-sglang:
+      enabled: true     # Enable sglang bundle on L4
 
 # Router configuration
 router:
