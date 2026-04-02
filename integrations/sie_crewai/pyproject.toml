@@ -1,6 +1,6 @@
 [project]
 name = "sie-crewai"
-version = "0.1.8"
+version = "0.1.9"
 description = "SIE integration for CrewAI"
 readme = "README.md"
 requires-python = ">=3.10"

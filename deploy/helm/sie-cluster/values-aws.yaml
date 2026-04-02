@@ -35,8 +35,8 @@ serviceMonitor:
 
 # AWS machine profiles (extends base machineProfiles)
 machineProfiles:
-  # AWS g6.xlarge (NVIDIA L4)
-  g6:
+  # AWS g6.xlarge (NVIDIA L4) — mapped to "l4" so gpu="l4" works on both clouds
+  l4:
     gpuType: nvidia-l4
     machineType: g6.xlarge
     spot: false
@@ -64,11 +64,11 @@ router:
 workers:
   pools:
     # AWS g6.xlarge pool (NVIDIA L4)
-    g6-default:
+    l4:
       enabled: true
       minReplicas: 0
       maxReplicas: 10
-      machineProfile: g6
+      machineProfile: l4
       gpuType: nvidia-l4
       bundle: default
       # No GCP-specific node selector

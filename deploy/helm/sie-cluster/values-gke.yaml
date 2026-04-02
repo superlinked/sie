@@ -83,7 +83,7 @@ router:
 workers:
   pools:
     # GKE L4 pool (spot) — enable default bundle
-    l4-default:
+    l4:
       enabled: true
       minReplicas: 0
       maxReplicas: 10

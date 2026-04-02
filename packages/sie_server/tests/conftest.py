@@ -172,7 +172,7 @@ def _get_docker_client() -> Any:
     try:
         import docker
 
-        return docker.from_env(timeout=300)
+        return docker.from_env(timeout=600)
     except ImportError:
         pytest.skip("docker package not installed")
     except Exception as e:  # noqa: BLE001 — Docker API errors are varied
@@ -332,7 +332,7 @@ def sie_docker_server() -> Generator[str]:
             pytest.fail(f"Container did not start within 30s. Logs:\n{logs}")
 
         # Wait for health check (longer timeout for model download)
-        if not _wait_for_health(url, timeout_s=300.0, poll_interval_s=2.0):
+        if not _wait_for_health(url, timeout_s=600.0, poll_interval_s=2.0):
             logs = container.logs().decode("utf-8", errors="replace")
             pytest.fail(f"Container health check failed. Logs:\n{logs}")
 

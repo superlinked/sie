@@ -5,7 +5,7 @@
 {{- $bundle := default $root.Values.workers.common.bundle $pool.bundle }}
 {{- $platform := default $root.Values.workers.common.platform $pool.platform }}
 {{- $imageTag := default $root.Chart.AppVersion $root.Values.workers.common.image.tag }}
-{{- $workerImage := printf "%s:%s-%s" $root.Values.workers.common.image.repository $imageTag $bundle }}
+{{- $workerImage := printf "%s:%s-%s-%s" $root.Values.workers.common.image.repository $imageTag $platform $bundle }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet

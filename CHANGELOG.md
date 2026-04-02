@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.9
+
+- chore(main): release 0.1.9
+- fix(helm): revert pool names to machine profile names
+- fix: increase docker smoke test timeouts and add retry
+- fix(helm): include $platform in worker image tag format
+
 ## v0.1.8
 
 - chore(main): release 0.1.8

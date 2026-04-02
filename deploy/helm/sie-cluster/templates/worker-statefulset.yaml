@@ -54,7 +54,7 @@ spec:
       containers:
         - name: worker
           {{- $imageTag := default $root.Chart.AppVersion $root.Values.workers.common.image.tag }}
-          image: {{ printf "%s:%s-%s" $root.Values.workers.common.image.repository $imageTag $bundle }}
+          image: {{ printf "%s:%s-%s-%s" $root.Values.workers.common.image.repository $imageTag $platform $bundle }}
           imagePullPolicy: {{ $root.Values.workers.common.image.pullPolicy }}
           args:
             - serve
