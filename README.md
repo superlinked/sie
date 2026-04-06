@@ -39,16 +39,9 @@ SIE is an open-source inference engine that serves embeddings, reranking, and en
 
 ## Quickstart
 
-Or try it in your browser, no install needed: [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/superlinked/sie/blob/main/notebooks/quickstart.ipynb)
+Or try it in your browser: [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/superlinked/sie/blob/main/notebooks/quickstart.ipynb)
 
 **1. Start the server**
-
-```bash
-pip install sie-server
-sie-server serve            # auto-detects CUDA / Apple Silicon / CPU
-```
-
-Or with Docker:
 
 ```bash
 docker run -p 8080:8080 ghcr.io/superlinked/sie-server:latest-cpu-default                # CPU
