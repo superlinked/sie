@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from sie_server.types.responses import Classification, Entity
+    from sie_server.types.responses import Classification, DetectedObject, Entity, Relation
 
 
 @dataclass
@@ -129,17 +129,23 @@ class ScoreOutput:
 
 @dataclass
 class ExtractOutput:
-    """Batched output from adapter.extract() - entities/structured data/classifications.
+    """Batched output from adapter.extract() - entities/relations/classifications/objects.
 
     Attributes:
         entities: Extracted entities per item. Each is list[Entity].
         classifications: Classification results per item. Each is list[Classification].
             None when the adapter does not produce classifications.
+        relations: Extracted relations per item. Each is list[Relation].
+            None when the adapter does not produce relations.
+        objects: Detected objects per item. Each is list[DetectedObject].
+            None when the adapter does not produce object detections.
         batch_size: Number of items processed.
     """
 
     entities: list[list[Entity]]  # len=batch
     classifications: list[list[Classification]] | None = None  # len=batch or None
+    relations: list[list[Relation]] | None = None  # len=batch or None
+    objects: list[list[DetectedObject]] | None = None  # len=batch or None
 
     # Metadata
     batch_size: int = 0
@@ -154,4 +160,12 @@ class ExtractOutput:
 
         if self.classifications is not None and len(self.classifications) != self.batch_size:
             msg = f"classifications list length {len(self.classifications)} != batch_size {self.batch_size}"
+            raise ValueError(msg)
+
+        if self.relations is not None and len(self.relations) != self.batch_size:
+            msg = f"relations list length {len(self.relations)} != batch_size {self.batch_size}"
+            raise ValueError(msg)
+
+        if self.objects is not None and len(self.objects) != self.batch_size:
+            msg = f"objects list length {len(self.objects)} != batch_size {self.batch_size}"
             raise ValueError(msg)

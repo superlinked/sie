@@ -57,14 +57,14 @@ router:
   # Disabled by default: the router Docker image embeds model and bundle configs
   # at build time (/app/bundles and /app/models). Enable this only if you need to
   # override image configs via ConfigMaps (e.g., for testing with modified configs).
-  # For production with hot-reload, use gitSync instead.
+  # For production with hot-reload, use NATS-based config distribution (see nats section below).
   embeddedConfigs:
     # -- Enable embedded config delivery (auto-generates ConfigMaps from files/bundles and files/models)
     enabled: false
 
   # -- ConfigMap for static config injection (manual ConfigMap creation)
   # Use this if you want to create ConfigMaps externally and reference them.
-  # For most cases, use embeddedConfigs (simpler) or gitSync (production).
+  # For most cases, use embeddedConfigs (simpler) or NATS-based config distribution (production).
   configMap:
     # -- Enable ConfigMap-based config injection (manual)
     enabled: false
@@ -83,40 +83,6 @@ router:
     models: []
     # Example:
     #   - key: all-MiniLM-L6-v2
-
-  # -- Git-sync sidecar for config hot reload (bundles and models)
-  gitSync:
-    # -- Enable git-sync sidecar for config hot reload
-    enabled: false
-    # -- Git repository URL (HTTPS or SSH)
-    # Examples:
-    #   - https://github.com/org/repo (public)
-    #   - git@github.com:org/repo (private, requires sshSecret)
-    repo: ""
-    # -- Branch to sync
-    branch: main
-    # -- Sync interval (e.g., 60s, 5m)
-    period: 60s
-    # -- Path within repo to bundles directory
-    bundlesPath: packages/sie_server/bundles
-    # -- Path within repo to models directory
-    modelsPath: packages/sie_server/models
-    # -- SSH secret for private repositories
-    # Create with: kubectl create secret generic git-ssh --from-file=ssh=~/.ssh/id_rsa
-    sshSecret: ""
-    # -- Git-sync image
-    image:
-      repository: registry.k8s.io/git-sync/git-sync
-      tag: v4.2.1
-      pullPolicy: IfNotPresent
-    # -- Resources for git-sync sidecar
-    resources:
-      requests:
-        cpu: "50m"
-        memory: "64Mi"
-      limits:
-        cpu: "200m"
-        memory: "256Mi"
 
 # -- Machine profiles configuration
 # Machine profiles abstract cloud-specific hardware configs (GPU type + machine type + spot)
@@ -472,6 +438,106 @@ logging:
   level: INFO
   # -- Enable structured JSON logging (required for Loki)
   json: true
+
+# -- NATS configuration for config distribution
+# When nats.install=true, a NATS server is deployed as a sub-chart.
+# When nats.install=false but nats.enabled=true, connect to an external NATS server.
+# The config store uses pod-local filesystem by default. For multi-router production
+# deployments, override SIE_CONFIG_STORE_DIR with an S3 or GCS URL.
+nats:
+  # -- Deploy NATS server as a sub-chart.
+  # IMPORTANT: If install=true, enabled must also be true (otherwise NATS deploys but nothing connects).
+  install: false
+  # -- Enable NATS-based config distribution (requires nats.install=true or external NATS)
+  enabled: false
+  # -- NATS server URL. Auto-set when install=true. Override for external NATS.
+  url: ""
+  # -- Override the NATS service name used to build the default SIE_NATS_URL.
+  # Defaults to "<release>-nats" if not set.
+  serviceName: ""
+  # -- Config store directory. Accepts local path, s3://, or gs:// URL.
+  # WARNING: The default /tmp path is ephemeral — data is lost on pod restart.
+  # For persistent storage, use an S3 or GCS URL (e.g., s3://bucket/sie-config).
+  configStoreDir: "/tmp/sie-config-store"
+  # -- Restore API-added models from config store on router startup.
+  # Only effective with a persistent configStoreDir (S3/GCS). Default is false
+  # because the default /tmp path does not survive pod restarts.
+  configRestore: false
+  # -- JetStream configuration for queue-based routing (SIE_CLUSTER_ROUTING=queue).
+  # JetStream is required for the work queue. It is NOT required for config distribution
+  # (which uses plain NATS pub/sub).
+  # NOTE: These keys are passed to the NATS sub-chart (nats/nats) which expects
+  # config.jetstream.memoryStore.maxSize (not memStorage/size).
+  config:
+    jetstream:
+      # -- Enable JetStream for the NATS work queue.
+      # Only needed when clusterRouting=queue.
+      enabled: false
+      # -- In-memory storage for work items (ephemeral, low latency).
+      # NOTE: maxSize uses NATS notation (MB/GB), NOT Kubernetes (Mi/Gi).
+      memoryStore:
+        enabled: true
+        maxSize: 512MB
+      # -- File storage (disabled for memory-only work queues).
+      # Enable with a PVC if you need persistent DLQ or large stream retention.
+      fileStore:
+        enabled: false
+  # -- Prometheus NATS exporter sidecar.
+  # Exposes NATS server internals (connections, JetStream streams/consumers) to Prometheus.
+  promExporter:
+    enabled: false
+    image:
+      repository: natsio/prometheus-nats-exporter
+      tag: "0.19.2"
+      pullPolicy: IfNotPresent
+    podMonitor:
+      enabled: true
+    env:
+      # JetStream detailed metrics (streams + consumers)
+      NATS_EXPORTER_OPTS: "-connz -routez -subz -jsz=all"
+
+# -- Cluster routing mode: "direct" (HTTP forwarding) or "queue" (NATS JetStream work queue).
+# "direct" is the default and uses the existing HTTP proxy path.
+# "queue" publishes work items to NATS JetStream and workers pull them.
+# Requires nats.enabled=true and nats.config.jetstream.enabled=true.
+clusterRouting: "direct"
+
+# -- Queue routing tuning knobs (only used when clusterRouting=queue).
+queueRouting:
+  # -- NAK delay (seconds) for items targeting unloaded models.
+  # JetStream redelivers after this delay, giving time for model loading.
+  # Effective retry budget = nakDelay * maxDeliver (default: 5 * 20 = 100s).
+  nakDelaySec: 5
+  # -- Maximum delivery attempts before a message is sent to the DLQ.
+  # Must be high enough to cover cold model downloads (10-60s+).
+  maxDeliver: 20
+  # -- Maximum age (seconds) for messages in the pool-level stream.
+  # Messages older than this are discarded. Set higher for slow model loads.
+  streamMaxAgeSec: 120
+  # -- NATS fetch budget: max messages pulled per fetch() call.
+  # This is the primary driver of GPU batch size in queue mode — the worker
+  # groups fetched messages by model and dispatches them as a single forward pass.
+  # Higher values improve GPU utilization under load but increase per-request latency.
+  natsFetchBudget: 64
+
+# -- Payload store for large work item payloads (images, long documents).
+# When a work item exceeds 1MB, the payload is offloaded to this store.
+# Only used when clusterRouting=queue.
+# IMPORTANT: payloadStore.url must point to shared storage accessible by both
+# router and worker pods. Use s3://bucket/prefix or gs://bucket/prefix.
+# Local filesystem paths (e.g., /tmp/payloads) will NOT work in queue mode
+# because router and worker pods have different filesystems.
+payloadStore:
+  # -- Enable payload store for large item offload.
+  enabled: false
+  # -- Payload store URL. Must be an S3 or GCS URL (s3://bucket/prefix or gs://bucket/prefix).
+  # Local paths are rejected when clusterRouting=queue (see router-deployment.yaml validation).
+  url: ""
+  # -- TTL for stored payloads in seconds.
+  # For S3: configure via S3 lifecycle rules on the bucket.
+  # For GCS: configure via GCS lifecycle rules on the bucket.
+  # This value is passed as SIE_PAYLOAD_STORE_TTL env var to the router.
+  ttlSeconds: 300
 
 # =============================================================================
 # Sub-chart dependency control flags

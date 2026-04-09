@@ -103,6 +103,33 @@ spec:
             - name: SIE_CLUSTER_CACHE
               value: {{ $root.Values.workers.common.clusterCache.url | quote }}
             {{- end }}
+            {{- if $root.Values.nats.enabled }}
+            - name: SIE_NATS_URL
+              value: {{ $root.Values.nats.url | default (printf "nats://%s:4222" ($root.Values.nats.serviceName | default (printf "%s-nats" $root.Release.Name))) | quote }}
+            {{- end }}
+            {{- if and $root.Values.clusterRouting (eq $root.Values.clusterRouting "queue") }}
+            - name: SIE_CLUSTER_ROUTING
+              value: {{ $root.Values.clusterRouting | quote }}
+            - name: SIE_POOL
+              value: {{ $poolName | quote }}
+            {{- with $root.Values.queueRouting }}
+            - name: SIE_NAK_DELAY_S
+              value: {{ .nakDelaySec | default 5 | quote }}
+            - name: SIE_MAX_DELIVER
+              value: {{ .maxDeliver | default 20 | quote }}
+            - name: SIE_STREAM_MAX_AGE_S
+              value: {{ .streamMaxAgeSec | default 120 | quote }}
+            - name: SIE_NATS_FETCH_BUDGET
+              value: {{ .natsFetchBudget | default 64 | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $root.Values.payloadStore.enabled }}
+            - name: SIE_PAYLOAD_STORE_URL
+              value: {{ $root.Values.payloadStore.url | quote }}
+            {{- end }}
+            {{- with $root.Values.workers.common.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           lifecycle:
             preStop:
               exec:

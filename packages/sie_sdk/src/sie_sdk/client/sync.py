@@ -101,8 +101,11 @@ logger = logging.getLogger(__name__)
 
 _LEASE_RENEWAL_MAX_RETRIES = 5
 
-# Patch msgpack for numpy support
-m.patch()
+# NOTE: msgpack_numpy.patch() is called lazily in SIEClient.__init__
+# to avoid monkey-patching the global msgpack module at import time.
+# This prevents overhead in processes that import sie_sdk but don't use
+# the client (e.g., the router only needs sie_sdk.types/queue_types).
+_NUMPY_PATCHED = False
 
 
 def _close_transport(transport: httpx.Client) -> None:
@@ -164,6 +167,14 @@ class SIEClient:
         options: dict[str, Any] | None = None,
         pool: PoolSpec | None = None,
     ) -> None:
+        # Ensure msgpack-numpy hooks are installed (once per process).
+        # Done lazily here instead of at module level to avoid monkey-patching
+        # msgpack in processes that import sie_sdk but never use the client.
+        global _NUMPY_PATCHED
+        if not _NUMPY_PATCHED:
+            m.patch()
+            _NUMPY_PATCHED = True
+
         # Normalize base_url (remove trailing slash)
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_s
@@ -1060,6 +1071,46 @@ class SIEClient:
 
         data = response.json()
         return data["models"]
+
+    def get_model(self, model: str) -> ModelInfo:
+        """Get details for a specific model.
+
+        Returns model metadata including dimensions, supported inputs/outputs,
+        loaded status, and profiles. This is a lightweight call that reads
+        from model config — it does not load the model or trigger inference.
+
+        Args:
+            model: Model name (e.g., "BAAI/bge-m3").
+
+        Returns:
+            ModelInfo dict with name, dims, inputs, outputs, loaded, etc.
+
+        Raises:
+            RequestError: If the model is not found (404).
+            SIEConnectionError: If unable to connect to the server.
+            ServerError: If the server encounters an error.
+
+        Example:
+            >>> info = client.get_model("BAAI/bge-m3")
+            >>> info["dims"]["dense"]
+            1024
+        """
+        try:
+            response = self._client.get(
+                f"/v1/models/{model}",
+                headers={"Accept": JSON_CONTENT_TYPE},
+            )
+        except httpx.ConnectError as e:
+            msg = f"Failed to connect to {self._base_url}: {e}"
+            raise SIEConnectionError(msg) from e
+        except httpx.TimeoutException as e:
+            msg = f"Request timed out: {e}"
+            raise SIEConnectionError(msg) from e
+
+        if response.status_code >= HTTP_CLIENT_ERROR:
+            handle_error(response)
+
+        return response.json()
 
     def _detect_endpoint_type(self) -> Literal["cluster", "worker"]:
         """Detect whether base_url is a router (cluster) or worker endpoint."""

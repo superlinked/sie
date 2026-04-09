@@ -1,5 +1,7 @@
 """Tests for the FastAPI app factory."""
 
+from unittest.mock import MagicMock
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -39,3 +41,28 @@ class TestAppFactory:
 
         assert "/healthz" in paths
         assert "/readyz" in paths
+
+
+class TestNatsPullLoopGuard:
+    """Tests for _nats_pull_loop RuntimeError when NATS is None."""
+
+    @pytest.mark.asyncio
+    async def test_nats_pull_loop_raises_when_nats_is_none(self, monkeypatch) -> None:
+        """SIE_CLUSTER_ROUTING=queue with no NATS subscriber raises RuntimeError."""
+        monkeypatch.setenv("SIE_CLUSTER_ROUTING", "queue")
+
+        registry = MagicMock()
+
+        with pytest.raises(RuntimeError, match="no NATS subscriber available"):
+            async with AppFactory._nats_pull_loop(registry, None):
+                pass  # pragma: no cover
+
+    @pytest.mark.asyncio
+    async def test_nats_pull_loop_yields_none_when_not_queue(self, monkeypatch) -> None:
+        """When SIE_CLUSTER_ROUTING != queue, _nats_pull_loop yields None."""
+        monkeypatch.delenv("SIE_CLUSTER_ROUTING", raising=False)
+
+        registry = MagicMock()
+
+        async with AppFactory._nats_pull_loop(registry, None) as pull_loop:
+            assert pull_loop is None

@@ -11,14 +11,15 @@ import {
 } from "../src/index.js";
 
 // Mock the SIEClient
-vi.mock("@superlinked/sie-sdk", () => {
+vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@superlinked/sie-sdk")>();
   const mockClient = {
     encode: vi.fn(),
   };
 
   return {
+    ...actual,
     SIEClient: vi.fn().mockImplementation(() => mockClient),
-    toNumberArray: (arr: Float32Array | Int32Array | number[]) => Array.from(arr),
   };
 });
 

@@ -22,9 +22,19 @@ DEFAULT_MULTIVECTOR_TOKEN_DIM = 128
 
 
 def _get_text(item: Any) -> str:
-    """Extract text from an item (dict or object with text attribute)."""
+    """Extract text from an item (dict or object with text attribute).
+
+    For image-only items (no text but has images), returns a deterministic
+    placeholder so the mock can still produce consistent embeddings.
+    """
     if isinstance(item, dict):
-        return item.get("text", str(item))
+        text = item.get("text")
+        if text:
+            return text
+        images = item.get("images")
+        if images:
+            return f"<image:{len(images)}>"
+        return str(item)
     if hasattr(item, "text"):
         return item.text
     return str(item)
@@ -100,7 +110,7 @@ def _create_mock_score_result(query: str, items: list[dict], top_k: int | None =
 
 
 def _create_mock_extract_result(text: str, labels: list[str]) -> dict[str, Any]:
-    """Create mock extract results (NER entities)."""
+    """Create mock extract results with all extraction types."""
     # Generate deterministic mock entities
     rng = np.random.default_rng(hash(text) % (2**32))
     entities = []
@@ -119,7 +129,12 @@ def _create_mock_extract_result(text: str, labels: list[str]) -> dict[str, Any]:
                 }
             )
 
-    return {"entities": entities}
+    return {
+        "entities": entities,
+        "relations": [],
+        "classifications": [],
+        "objects": [],
+    }
 
 
 @pytest.fixture
@@ -303,3 +318,21 @@ def test_ner_text() -> str:
 def test_ner_labels() -> list[str]:
     """Sample NER labels for extraction testing."""
     return ["PERSON", "ORGANIZATION", "LOCATION"]
+
+
+@pytest.fixture
+def test_image_paths() -> list[str]:
+    """Sample image paths for testing multimodal embeddings.
+
+    These are placeholder paths — the mock client doesn't read files.
+    """
+    return ["photo_of_cat.jpg", "diagram.png"]
+
+
+@pytest.fixture
+def test_image_bytes() -> list[bytes]:
+    """Sample image bytes for testing multimodal embeddings.
+
+    Minimal JPEG-like headers — the mock client doesn't decode images.
+    """
+    return [b"\xff\xd8\xff\xe0" + b"\x00" * 100, b"\xff\xd8\xff\xe0" + b"\x00" * 200]

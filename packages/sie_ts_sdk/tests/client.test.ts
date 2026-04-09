@@ -693,28 +693,6 @@ describe("SIEClient.score() - reranking", () => {
     );
   });
 
-  it("should support topK option", async () => {
-    mockFetch.mockResolvedValueOnce(
-      createMsgpackResponse({
-        model: "bge-reranker-v2",
-        scores: [
-          { item_id: "doc-1", score: 0.9, rank: 0 },
-          { item_id: "doc-2", score: 0.8, rank: 1 },
-        ],
-      }),
-    );
-
-    await client.score("bge-reranker-v2", { text: "query" }, [{ text: "doc1" }, { text: "doc2" }], {
-      topK: 2,
-    });
-
-    const fetchCall = mockFetch.mock.calls[0];
-    const body = fetchCall?.[1]?.body as Uint8Array;
-    const parsed = unpackMessage<{ top_k?: number }>(body);
-
-    expect(parsed.top_k).toBe(2);
-  });
-
   it("should echo query ID if provided", async () => {
     mockFetch.mockResolvedValueOnce(
       createMsgpackResponse({

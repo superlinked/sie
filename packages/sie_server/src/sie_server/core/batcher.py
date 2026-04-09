@@ -127,10 +127,11 @@ class BatchConfig:
         self,
         max_batch_cost: int = 16384,
         max_batch_requests: int = 64,
-        max_batch_wait_ms: int = 10,
+        max_batch_wait_ms: float = 10.0,
         *,
         max_batch_tokens: int | None = None,  # Backward compatibility alias
         coalesce_ms: float = 2.0,
+        coalesce_ratio: float = 0.2,
     ) -> None:
         """Initialize batch configuration.
 
@@ -139,10 +140,15 @@ class BatchConfig:
             max_batch_requests: Maximum requests per batch.
             max_batch_wait_ms: Maximum wait time before yielding batch.
             max_batch_tokens: Alias for max_batch_cost (backward compatibility).
-            coalesce_ms: Idle coalescing window. If no new items arrive within
-                this period, yield the batch even if max_batch_wait_ms hasn't
-                expired. Detects end-of-burst to avoid waiting the full timeout
-                when all concurrent requests have already been submitted.
+            coalesce_ms: Idle coalescing window ceiling. If no new items arrive
+                within this period, yield the batch even if max_batch_wait_ms
+                hasn't expired. The actual coalescing window may be smaller;
+                see effective_coalesce_ms.
+            coalesce_ratio: Coalesce window as a fraction of max_batch_wait_ms.
+                The effective coalesce window is
+                ``min(coalesce_ms, max_batch_wait_ms * coalesce_ratio)``.
+                This keeps coalesce proportional when the adaptive controller
+                changes max_batch_wait_ms. Default 0.2 (20%).
         """
         # Allow max_batch_tokens as an alias for max_batch_cost
         if max_batch_tokens is not None:
@@ -152,6 +158,17 @@ class BatchConfig:
         self.max_batch_requests = max_batch_requests
         self.max_batch_wait_ms = max_batch_wait_ms
         self.coalesce_ms = coalesce_ms
+        self.coalesce_ratio = coalesce_ratio
+
+    @property
+    def effective_coalesce_ms(self) -> float:
+        """Coalesce window, scaled proportionally to max_batch_wait_ms.
+
+        Returns ``min(coalesce_ms, max_batch_wait_ms * coalesce_ratio)``
+        so the window stays proportional when the adaptive controller
+        changes max_batch_wait_ms. The base ``coalesce_ms`` acts as a ceiling.
+        """
+        return min(self.coalesce_ms, self.max_batch_wait_ms * self.coalesce_ratio)
 
     @property
     def max_batch_tokens(self) -> int:
@@ -225,14 +242,17 @@ class BatchFormer[I: HasCost, T]:
         """Check if the coalescing window has expired (no new items recently).
 
         Returns True when items are pending and no new items have arrived
-        within the coalescing period. This detects the end of a burst —
-        all concurrent requests have been submitted, so waiting longer
-        won't add more items to the batch.
+        within the effective coalescing period. This detects the end of a
+        burst — all concurrent requests have been submitted, so waiting
+        longer won't add more items to the batch.
+
+        Uses effective_coalesce_ms which scales proportionally with
+        max_batch_wait_ms to stay relevant across the adaptive range.
         """
         if self._last_submit_time is None or not self._pending:
             return False
         elapsed_ms = (time.monotonic() - self._last_submit_time) * 1000
-        return elapsed_ms >= self._config.coalesce_ms
+        return elapsed_ms >= self._config.effective_coalesce_ms
 
     def _should_yield_batch(self) -> bool:
         """Check if batch should be yielded (full, timeout, or coalesced)."""
@@ -320,17 +340,28 @@ class BatchFormer[I: HasCost, T]:
 
         Returns the shorter of:
         - Time remaining in the batch formation window (max_batch_wait_ms)
-        - The coalescing period (coalesce_ms) — ensures we re-check frequently
-          enough to detect when a burst has settled
+        - Time remaining until the coalesce window expires (based on when the
+          last item was submitted, not a fixed polling interval)
+
+        This ensures precise coalesce detection: the sleep duration is exactly
+        the time until coalesce fires, rather than polling every coalesce_ms.
         """
         if self._first_request_time is None:
             return None  # Wait indefinitely for first request
 
-        elapsed_ms = (time.monotonic() - self._first_request_time) * 1000
+        now = time.monotonic()
+        elapsed_ms = (now - self._first_request_time) * 1000
         batch_remaining_ms = max(0, self._config.max_batch_wait_ms - elapsed_ms)
 
-        # Cap at coalesce period so we detect burst completion quickly
-        effective_ms = min(batch_remaining_ms, self._config.coalesce_ms)
+        # Compute actual time remaining until coalesce fires
+        coalesce_ms = self._config.effective_coalesce_ms
+        if self._last_submit_time is not None:
+            since_last_submit_ms = (now - self._last_submit_time) * 1000
+            coalesce_remaining_ms = max(0, coalesce_ms - since_last_submit_ms)
+        else:
+            coalesce_remaining_ms = coalesce_ms
+
+        effective_ms = min(batch_remaining_ms, coalesce_remaining_ms)
         return effective_ms / 1000  # Convert to seconds
 
     def _extract_batch(self) -> FormattedBatch[I, T]:

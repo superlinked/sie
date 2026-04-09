@@ -5,6 +5,8 @@ Provides embedder components following Haystack's conventions:
 - SIEDocumentEmbedder: For embedding documents - dense embeddings
 - SIESparseTextEmbedder: For sparse embeddings of queries (hybrid search)
 - SIESparseDocumentEmbedder: For sparse embeddings of documents (hybrid search)
+- SIEMultivectorTextEmbedder: For multivector (ColBERT) embeddings of queries
+- SIEMultivectorDocumentEmbedder: For multivector (ColBERT) embeddings of documents
 """
 
 from __future__ import annotations
@@ -12,6 +14,9 @@ from __future__ import annotations
 from typing import Any
 
 from haystack import Document, component
+from sie_sdk import SIEClient
+from sie_sdk.encoding import dense_embedding, multivector_embedding, sparse_embedding
+from sie_sdk.types import Item
 
 
 @component
@@ -55,8 +60,6 @@ class SIETextEmbedder:
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -79,24 +82,13 @@ class SIETextEmbedder:
         Returns:
             Dictionary with "embedding" key containing the embedding vector.
         """
-        from sie_sdk.types import Item
-
         result = self.client.encode(
             self._model,
             Item(text=text),
             output_types=["dense"],
             options={"is_query": True},
         )
-        embedding = self._extract_dense(result)
-        return {"embedding": embedding}
-
-    def _extract_dense(self, result: Any) -> list[float]:
-        """Extract dense embedding from SDK result."""
-        # SDK returns {"dense": np.ndarray, ...}
-        dense = result.get("dense") if isinstance(result, dict) else getattr(result, "dense", None)
-        if dense is None:
-            return []
-        return dense.tolist() if hasattr(dense, "tolist") else list(dense)
+        return {"embedding": dense_embedding(result)}
 
 
 @component
@@ -146,8 +138,6 @@ class SIEDocumentEmbedder:
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -173,8 +163,6 @@ class SIEDocumentEmbedder:
         if not documents:
             return {"documents": []}
 
-        from sie_sdk.types import Item
-
         # Build text to embed for each document
         texts = [self._build_text(doc) for doc in documents]
         items = [Item(text=text) for text in texts]
@@ -188,7 +176,7 @@ class SIEDocumentEmbedder:
 
         # Store embeddings on documents
         for doc, result in zip(documents, results, strict=True):
-            doc.embedding = self._extract_dense(result)
+            doc.embedding = dense_embedding(result)
 
         return {"documents": documents}
 
@@ -200,14 +188,6 @@ class SIEDocumentEmbedder:
         parts = [str(doc.meta[field]) for field in self._meta_fields_to_embed if field in doc.meta]
         parts.append(doc.content or "")
         return " ".join(parts)
-
-    def _extract_dense(self, result: Any) -> list[float]:
-        """Extract dense embedding from SDK result."""
-        # SDK returns {"dense": np.ndarray, ...}
-        dense = result.get("dense") if isinstance(result, dict) else getattr(result, "dense", None)
-        if dense is None:
-            return []
-        return dense.tolist() if hasattr(dense, "tolist") else list(dense)
 
 
 @component
@@ -252,8 +232,6 @@ class SIESparseTextEmbedder:
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -276,29 +254,13 @@ class SIESparseTextEmbedder:
         Returns:
             Dictionary with "sparse_embedding" key containing dict with "indices" and "values" lists.
         """
-        from sie_sdk.types import Item
-
         result = self.client.encode(
             self._model,
             Item(text=text),
             output_types=["sparse"],
             options={"is_query": True},
         )
-        sparse_embedding = self._extract_sparse(result)
-        return {"sparse_embedding": sparse_embedding}
-
-    def _extract_sparse(self, result: Any) -> dict[str, list]:
-        """Extract sparse embedding from SDK result."""
-        # SDK returns {"sparse": {"indices": np.ndarray, "values": np.ndarray}, ...}
-        sparse = result.get("sparse") if isinstance(result, dict) else getattr(result, "sparse", None)
-        if sparse is None:
-            return {"indices": [], "values": []}
-        indices = sparse.get("indices") if isinstance(sparse, dict) else getattr(sparse, "indices", None)
-        values = sparse.get("values") if isinstance(sparse, dict) else getattr(sparse, "values", None)
-        return {
-            "indices": indices.tolist() if hasattr(indices, "tolist") else list(indices or []),
-            "values": values.tolist() if hasattr(values, "tolist") else list(values or []),
-        }
+        return {"sparse_embedding": sparse_embedding(result)}
 
 
 @component
@@ -349,8 +311,6 @@ class SIESparseDocumentEmbedder:
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -376,8 +336,6 @@ class SIESparseDocumentEmbedder:
         if not documents:
             return {"documents": []}
 
-        from sie_sdk.types import Item
-
         # Build text to embed for each document
         texts = [self._build_text(doc) for doc in documents]
         items = [Item(text=text) for text in texts]
@@ -391,7 +349,7 @@ class SIESparseDocumentEmbedder:
 
         # Store sparse embeddings on documents in meta
         for doc, result in zip(documents, results, strict=True):
-            doc.meta["_sparse_embedding"] = self._extract_sparse(result)
+            doc.meta["_sparse_embedding"] = sparse_embedding(result)
 
         return {"documents": documents}
 
@@ -404,15 +362,257 @@ class SIESparseDocumentEmbedder:
         parts.append(doc.content or "")
         return " ".join(parts)
 
-    def _extract_sparse(self, result: Any) -> dict[str, list]:
-        """Extract sparse embedding from SDK result."""
-        # SDK returns {"sparse": {"indices": np.ndarray, "values": np.ndarray}, ...}
-        sparse = result.get("sparse") if isinstance(result, dict) else getattr(result, "sparse", None)
-        if sparse is None:
-            return {"indices": [], "values": []}
-        indices = sparse.get("indices") if isinstance(sparse, dict) else getattr(sparse, "indices", None)
-        values = sparse.get("values") if isinstance(sparse, dict) else getattr(sparse, "values", None)
-        return {
-            "indices": indices.tolist() if hasattr(indices, "tolist") else list(indices or []),
-            "values": values.tolist() if hasattr(values, "tolist") else list(values or []),
-        }
+
+@component
+class SIEImageEmbedder:
+    """Embeds images using SIE multimodal models (CLIP, SigLIP, ColPali).
+
+    Use this component in Haystack pipelines for image embedding with models
+    that support image input.
+
+    Example:
+        >>> embedder = SIEImageEmbedder(
+        ...     base_url="http://localhost:8080",
+        ...     model="openai/clip-vit-large-patch14",
+        ... )
+        >>> result = embedder.run(images=["/path/to/photo.jpg"])
+        >>> embeddings = result["embeddings"]  # list[list[float]]
+
+    Args:
+        base_url: URL of the SIE server.
+        model: Model name to use for encoding. Must support image input.
+        gpu: GPU type to use (e.g., "l4", "a100"). Passed to SDK as default.
+        options: Model-specific options. Passed to SDK as default.
+        timeout_s: Request timeout in seconds.
+    """
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8080",
+        model: str = "openai/clip-vit-large-patch14",
+        *,
+        gpu: str | None = None,
+        options: dict[str, Any] | None = None,
+        timeout_s: float = 180.0,
+    ) -> None:
+        self._base_url = base_url
+        self._model = model
+        self._gpu = gpu
+        self._options = options
+        self._timeout_s = timeout_s
+        self._client: Any = None
+
+    @property
+    def client(self) -> Any:
+        """Lazily initialize the SIE client."""
+        if self._client is None:
+            self._client = SIEClient(
+                self._base_url,
+                timeout_s=self._timeout_s,
+                gpu=self._gpu,
+                options=self._options,
+            )
+        return self._client
+
+    def warm_up(self) -> None:
+        """Warm up the component by initializing the client."""
+        _ = self.client
+
+    @component.output_types(embeddings=list[list[float]])
+    def run(self, images: list[str | bytes]) -> dict[str, list[list[float]]]:
+        """Embed images and return their embeddings.
+
+        Args:
+            images: List of image file paths (str) or raw image bytes.
+
+        Returns:
+            Dictionary with "embeddings" key containing list of embedding vectors.
+        """
+        if not images:
+            return {"embeddings": []}
+
+        items = [Item(images=[img]) for img in images]
+
+        results = self.client.encode(
+            self._model,
+            items,
+            output_types=["dense"],
+        )
+
+        return {"embeddings": [dense_embedding(result) for result in results]}
+
+
+@component
+class SIEMultivectorTextEmbedder:
+    """Embeds a single text string using SIE multivector (ColBERT) embeddings.
+
+    Produces per-token embeddings for late-interaction retrieval and scoring.
+    Use this component for embedding queries in ColBERT pipelines.
+
+    Example:
+        >>> embedder = SIEMultivectorTextEmbedder(
+        ...     base_url="http://localhost:8080",
+        ...     model="jinaai/jina-colbert-v2",
+        ... )
+        >>> result = embedder.run(text="What is vector search?")
+        >>> multivector = result["multivector_embedding"]  # list[list[float]]
+    """
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8080",
+        model: str = "jinaai/jina-colbert-v2",
+        *,
+        gpu: str | None = None,
+        options: dict[str, Any] | None = None,
+        timeout_s: float = 180.0,
+    ) -> None:
+        """Initialize the multivector text embedder.
+
+        Args:
+            base_url: URL of the SIE server.
+            model: Model name to use for encoding. Must support multivector output
+                (e.g., jinaai/jina-colbert-v2).
+            gpu: GPU type to use (e.g., "l4", "a100"). Passed to SDK as default.
+            options: Model-specific options. Passed to SDK as default.
+            timeout_s: Request timeout in seconds.
+        """
+        self._base_url = base_url
+        self._model = model
+        self._gpu = gpu
+        self._options = options
+        self._timeout_s = timeout_s
+        self._client: Any = None
+
+    @property
+    def client(self) -> Any:
+        """Lazily initialize the SIE client."""
+        if self._client is None:
+            self._client = SIEClient(
+                self._base_url,
+                timeout_s=self._timeout_s,
+                gpu=self._gpu,
+                options=self._options,
+            )
+        return self._client
+
+    def warm_up(self) -> None:
+        """Warm up the component by initializing the client."""
+        _ = self.client
+
+    @component.output_types(multivector_embedding=list)
+    def run(self, text: str) -> dict[str, list[list[float]]]:
+        """Embed a single text string with multivector (ColBERT) embeddings.
+
+        Args:
+            text: The text to embed.
+
+        Returns:
+            Dictionary with "multivector_embedding" key containing per-token embeddings.
+        """
+        result = self.client.encode(
+            self._model,
+            Item(text=text),
+            output_types=["multivector"],
+            options={"is_query": True},
+        )
+        return {"multivector_embedding": multivector_embedding(result["multivector"])}
+
+
+@component
+class SIEMultivectorDocumentEmbedder:
+    """Embeds documents using SIE multivector (ColBERT) embeddings.
+
+    Produces per-token embeddings for late-interaction retrieval. Stores
+    multivector embeddings on each document's metadata.
+
+    Example:
+        >>> from haystack import Document
+        >>> embedder = SIEMultivectorDocumentEmbedder(
+        ...     base_url="http://localhost:8080",
+        ...     model="jinaai/jina-colbert-v2",
+        ... )
+        >>> docs = [Document(content="Python is a programming language.")]
+        >>> result = embedder.run(documents=docs)
+        >>> embedded_docs = result["documents"]
+        >>> print(embedded_docs[0].meta["_multivector_embedding"])  # list[list[float]]
+    """
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8080",
+        model: str = "jinaai/jina-colbert-v2",
+        *,
+        gpu: str | None = None,
+        options: dict[str, Any] | None = None,
+        timeout_s: float = 180.0,
+        meta_fields_to_embed: list[str] | None = None,
+    ) -> None:
+        """Initialize the multivector document embedder.
+
+        Args:
+            base_url: URL of the SIE server.
+            model: Model name to use for encoding. Must support multivector output
+                (e.g., jinaai/jina-colbert-v2).
+            gpu: GPU type to use (e.g., "l4", "a100"). Passed to SDK as default.
+            options: Model-specific options. Passed to SDK as default.
+            timeout_s: Request timeout in seconds.
+            meta_fields_to_embed: List of metadata fields to include in embedding.
+        """
+        self._base_url = base_url
+        self._model = model
+        self._gpu = gpu
+        self._options = options
+        self._timeout_s = timeout_s
+        self._meta_fields_to_embed = meta_fields_to_embed or []
+        self._client: Any = None
+
+    @property
+    def client(self) -> Any:
+        """Lazily initialize the SIE client."""
+        if self._client is None:
+            self._client = SIEClient(
+                self._base_url,
+                timeout_s=self._timeout_s,
+                gpu=self._gpu,
+                options=self._options,
+            )
+        return self._client
+
+    def warm_up(self) -> None:
+        """Warm up the component by initializing the client."""
+        _ = self.client
+
+    @component.output_types(documents=list[Document])
+    def run(self, documents: list[Document]) -> dict[str, list[Document]]:
+        """Embed documents with multivector (ColBERT) embeddings.
+
+        Args:
+            documents: List of documents to embed.
+
+        Returns:
+            Dictionary with "documents" key containing documents with multivector embeddings
+            stored in meta["_multivector_embedding"].
+        """
+        if not documents:
+            return {"documents": []}
+
+        texts = [self._build_text(doc) for doc in documents]
+        items = [Item(text=text) for text in texts]
+
+        results = self.client.encode(
+            self._model,
+            items,
+            output_types=["multivector"],
+        )
+
+        for doc, result in zip(documents, results, strict=True):
+            doc.meta["_multivector_embedding"] = multivector_embedding(result["multivector"])
+
+        return {"documents": documents}
+
+    def _build_text(self, doc: Document) -> str:
+        """Build the text to embed for a document, optionally including metadata fields."""
+        parts = [str(doc.meta[field]) for field in self._meta_fields_to_embed if field in doc.meta]
+        parts.append(doc.content or "")
+        return " ".join(parts)

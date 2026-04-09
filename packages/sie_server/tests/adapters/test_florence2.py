@@ -133,16 +133,17 @@ class TestFlorence2Adapter:
         }
         image_size = (100, 100)
 
-        entities = adapter._convert_output(parsed, "<OCR_WITH_REGION>", image_size)
+        entities, objects = adapter._convert_output(parsed, "<OCR_WITH_REGION>", image_size)
 
         assert len(entities) == 1
         assert entities[0]["text"] == "Hello"
         assert entities[0]["label"] == "text"
         assert entities[0]["score"] == 1.0
         assert entities[0]["bbox"] is not None
+        assert len(objects) == 0
 
     def test_convert_output_object_detection(self, adapter: Florence2Adapter) -> None:
-        """Convert output handles OD format."""
+        """Convert output handles OD format as DetectedObject."""
         parsed = {
             "<OD>": {
                 "bboxes": [[10.0, 20.0, 80.0, 90.0]],
@@ -151,10 +152,10 @@ class TestFlorence2Adapter:
         }
         image_size = (100, 100)
 
-        entities = adapter._convert_output(parsed, "<OD>", image_size)
+        entities, objects = adapter._convert_output(parsed, "<OD>", image_size)
 
-        assert len(entities) == 1
-        assert entities[0]["text"] == "car"  # Detected class is in text field
-        assert entities[0]["label"] == "object"  # Entity type is "object"
-        assert entities[0]["score"] == 1.0
-        assert entities[0]["bbox"] is not None
+        assert len(entities) == 0
+        assert len(objects) == 1
+        assert objects[0]["label"] == "car"
+        assert objects[0]["score"] == 1.0
+        assert objects[0]["bbox"] is not None

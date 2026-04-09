@@ -111,9 +111,8 @@ class ConfigWatcher:
             use_polling = os.environ.get("SIE_ROUTER_POLLING_WATCHER", "").lower() == "true"
             # Also enable polling if running in Kubernetes (configMap mode)
             if not use_polling and os.environ.get("SIE_ROUTER_KUBERNETES", "").lower() == "true":
-                # Check if we're using configMap (not git-sync which handles its own updates)
                 bundles_path = str(self._bundles_dir)
-                if "/configs/" in bundles_path and "/git/" not in bundles_path:
+                if "/configs/" in bundles_path:
                     use_polling = True
                     logger.info("Auto-enabling polling watcher for Kubernetes ConfigMap mode")
             self._config = WatcherConfig(use_polling=use_polling)

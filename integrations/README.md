@@ -12,6 +12,7 @@ standard framework interfaces.
 | `sie-crewai` | CrewAI | `pip install sie-crewai` | Ready |
 | `sie-dspy` | DSPy | `pip install sie-dspy` | Ready |
 | `sie-haystack` | Haystack | `pip install sie-haystack` | Ready |
+| `sie-lancedb` | LanceDB | `pip install sie-lancedb` | Ready |
 | `sie-langchain` | LangChain | `pip install sie-langchain` | Ready |
 | `sie-llamaindex` | LlamaIndex | `pip install sie-llamaindex` | Ready |
 | `sie-qdrant` | Qdrant | `pip install sie-qdrant` | Ready |
@@ -151,11 +152,11 @@ def test_embeddings(mock_sie_client):
 
 Each SIE primitive maps to framework-specific interfaces:
 
-| SIE Primitive | LangChain | LlamaIndex | Haystack | CrewAI | DSPy | Chroma |
-|---------------|-----------|------------|----------|--------|------|--------|
-| `encode()` | `Embeddings` | `BaseEmbedding` | `SIETextEmbedder`, `SIEDocumentEmbedder` | OpenAI-compatible API | `SIEEmbedder` | `EmbeddingFunction` |
-| `score()` | `BaseDocumentCompressor` | `BaseNodePostprocessor` | `SIERanker` | `SIERerankerTool` | `SIEReranker` | N/A |
-| `extract()` | `BaseTool` | `FunctionTool` | `SIEExtractor` | `SIEExtractorTool` | `SIEExtractor` | N/A |
+| SIE Primitive | LangChain | LlamaIndex | Haystack | CrewAI | DSPy | Chroma | LanceDB |
+|---------------|-----------|------------|----------|--------|------|--------|---------|
+| `encode()` | `Embeddings` | `BaseEmbedding` | `SIETextEmbedder`, `SIEDocumentEmbedder` | OpenAI-compatible API | `SIEEmbedder` | `EmbeddingFunction` | `EmbeddingFunction` (dense + multivector) |
+| `score()` | `BaseDocumentCompressor` | `BaseNodePostprocessor` | `SIERanker` | `SIERerankerTool` | `SIEReranker` | N/A | `Reranker` (hybrid search) |
+| `extract()` | `BaseTool` | `FunctionTool` | `SIEExtractor` | `SIEExtractorTool` | `SIEExtractor` | N/A | `SIEExtractor` (table enrichment) |
 
 ## When to Use Integrations vs SDK Directly
 
@@ -167,8 +168,8 @@ Framework integrations implement **callback protocols** - the framework calls SI
 | **Sparse/hybrid search** | Framework integrations | Most frameworks support sparse via `SIESparseEncoder`/`SIESparseEmbedder` |
 | **Reranking** | Framework integrations | All frameworks have reranker interfaces (works with ColBERT models too!) |
 | **Entity extraction** | Framework integrations | All frameworks have tool/component interfaces |
-| **Multivector/ColBERT retrieval** | SDK directly | No framework has native multi-vector interfaces. Use SDK + vector DB (Qdrant, Weaviate, Vespa) |
-| **Multimodal (CLIP, ColPali)** | SDK directly | No framework has standardized image embedding interfaces |
+| **Multivector/ColBERT encoding** | Haystack, Qdrant, Weaviate integrations, or SDK directly | Haystack has `SIEMultivectorTextEmbedder`/`SIEMultivectorDocumentEmbedder`. Qdrant and Weaviate vectorizers support `output_types=["multivector"]`. Others: use SDK |
+| **Multimodal (CLIP, ColPali)** | LlamaIndex / Haystack integrations, or SDK directly | LlamaIndex has `SIEMultiModalEmbedding`, Haystack has `SIEImageEmbedder`. Others: use SDK |
 
 ### Sparse Embeddings
 
@@ -194,6 +195,32 @@ sparse_embedder = SIESparseEmbedder(model="BAAI/bge-m3")
 # Chroma (Cloud only)
 from sie_chroma import SIESparseEmbeddingFunction
 sparse_fn = SIESparseEmbeddingFunction(model="BAAI/bge-m3")
+```
+
+### Multimodal Embeddings
+
+Frameworks with native multimodal support have dedicated classes:
+
+```python
+# LlamaIndex — plugs into MultiModalVectorStoreIndex and other LlamaIndex multimodal pipelines
+from sie_llamaindex import SIEMultiModalEmbedding
+embed_model = SIEMultiModalEmbedding(model_name="openai/clip-vit-large-patch14")
+image_embedding = embed_model.get_image_embedding("photo.jpg")
+
+# Haystack — plugs into Haystack pipeline graphs
+from sie_haystack import SIEImageEmbedder
+embedder = SIEImageEmbedder(model="openai/clip-vit-large-patch14")
+result = embedder.run(images=["photo.jpg"])
+```
+
+For frameworks without multimodal interfaces (LangChain, Chroma, etc.), use the SDK directly:
+
+```python
+from sie_sdk import SIEClient
+from sie_sdk.types import Item
+
+client = SIEClient("http://localhost:8080")
+result = client.encode("openai/clip-vit-large-patch14", Item(images=["photo.jpg"]))
 ```
 
 ### Multivector/ColBERT (SDK Directly)

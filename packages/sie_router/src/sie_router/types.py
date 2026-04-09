@@ -1,5 +1,3 @@
-"""Types for SIE Router."""
-
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -30,6 +28,18 @@ class WorkerHealth(Enum):
 
 
 @dataclass
+class ModelAdaptiveState:
+    """Adaptive batching state for one model on one worker."""
+
+    calibrated: bool = False
+    target_p50_ms: float | None = None
+    wait_ms: float = 10.0
+    p50_ms: float | None = None
+    headroom_ms: float | None = None
+    fill_ratio: float | None = None
+
+
+@dataclass
 class WorkerState:
     """State of a single worker, updated via WebSocket."""
 
@@ -44,17 +54,26 @@ class WorkerState:
     # - Standalone: Detected GPU type (e.g., "l4")
     machine_profile: str = ""
 
+    # NATS pool name (from SIE_POOL env var on worker, e.g., "l4-spot-default").
+    # Used in queue mode to publish to the correct JetStream subject.
+    pool_name: str = ""
+
     # Bundle info (for multi-bundle routing)
     bundle: str = "default"
+    bundle_config_hash: str = ""  # Config hash for awareness gating
 
     # Loaded models
     models: list[str] = field(default_factory=list)
 
     # Load info
     queue_depth: int = 0
+    max_batch_requests: int = 64  # Worker's batch capacity (from BatchConfig)
     # Memory in bytes (consistent with GPUMetrics from worker)
     memory_used_bytes: int = 0
     memory_total_bytes: int = 0
+
+    # Adaptive batching state per model
+    adaptive: dict[str, ModelAdaptiveState] = field(default_factory=dict)
 
     # Health
     health: WorkerHealth = WorkerHealth.UNKNOWN

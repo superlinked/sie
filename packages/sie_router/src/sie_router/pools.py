@@ -10,7 +10,6 @@ Multiple routers coordinate via K8s watch API.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import random
 import time
@@ -19,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import UTC
 from enum import Enum
 from typing import TYPE_CHECKING, Any
+
+import orjson
 
 if TYPE_CHECKING:
     from sie_router.types import MachineProfile
@@ -252,6 +253,11 @@ class PoolManager:
         self._watch_task: asyncio.Task | None = None
 
     @property
+    def use_kubernetes(self) -> bool:
+        """Whether Kubernetes mode is active (read-only)."""
+        return self._use_kubernetes
+
+    @property
     def machine_profiles(self) -> dict[str, MachineProfile]:
         """Get configured machine profiles."""
         return self._machine_profiles
@@ -356,7 +362,7 @@ class PoolManager:
 
             # Parse spec
             spec_json = data.get("spec", "{}")
-            spec_data = json.loads(spec_json)
+            spec_data = orjson.loads(spec_json)
             spec = PoolSpec(
                 name=name,
                 gpus=spec_data.get("gpus", {}),
@@ -366,7 +372,7 @@ class PoolManager:
 
             # Parse status
             status_json = data.get("status", "{}")
-            status_data = json.loads(status_json)
+            status_data = orjson.loads(status_json)
             status = PoolStatus(
                 state=PoolState(status_data.get("state", "pending")),
                 assigned_workers=[
@@ -402,8 +408,8 @@ class PoolManager:
             "last_renewed": pool.status.last_renewed,
         }
         return {
-            "spec": json.dumps(spec_data),
-            "status": json.dumps(status_data),
+            "spec": orjson.dumps(spec_data).decode(),
+            "status": orjson.dumps(status_data).decode(),
         }
 
     async def _watch_pools(self) -> None:

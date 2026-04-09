@@ -10,6 +10,9 @@ from __future__ import annotations
 from typing import Any
 
 from chromadb import Documents, EmbeddingFunction, Embeddings
+from sie_sdk import SIEClient
+from sie_sdk.encoding import dense_embedding, sparse_embedding_dict
+from sie_sdk.types import Item
 
 # Type alias for sparse embeddings: list of {token_id: weight} dicts
 SparseEmbeddings = list[dict[int, float]]
@@ -61,8 +64,6 @@ class SIEEmbeddingFunction(EmbeddingFunction[Documents]):
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -84,7 +85,6 @@ class SIEEmbeddingFunction(EmbeddingFunction[Documents]):
             return []
 
         import numpy as np
-        from sie_sdk.types import Item
 
         items = [Item(text=text) for text in documents]
 
@@ -96,19 +96,11 @@ class SIEEmbeddingFunction(EmbeddingFunction[Documents]):
 
         embeddings: Embeddings = []
         for result in results:
-            dense = self._extract_dense(result)
+            dense = dense_embedding(result)
             # ChromaDB expects numpy arrays (Embeddings = List[numpy.ndarray])
             embeddings.append(np.array(dense, dtype=np.float32))
 
         return embeddings
-
-    def _extract_dense(self, result: Any) -> list[float]:
-        """Extract dense embedding values from SDK result."""
-        # SDK returns {"dense": np.ndarray, ...}
-        dense = result.get("dense") if isinstance(result, dict) else getattr(result, "dense", None)
-        if dense is None:
-            return []
-        return dense.tolist() if hasattr(dense, "tolist") else list(dense)
 
 
 class SIESparseEmbeddingFunction:
@@ -169,8 +161,6 @@ class SIESparseEmbeddingFunction:
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -192,8 +182,6 @@ class SIESparseEmbeddingFunction:
         if not documents:
             return []
 
-        from sie_sdk.types import Item
-
         items = [Item(text=text) for text in documents]
 
         results = self.client.encode(
@@ -202,28 +190,4 @@ class SIESparseEmbeddingFunction:
             output_types=["sparse"],
         )
 
-        return [self._extract_sparse(result) for result in results]
-
-    def _extract_sparse(self, result: Any) -> dict[int, float]:
-        """Extract sparse embedding as token_id → weight dict.
-
-        Chroma Cloud expects sparse embeddings as dict[int, float]
-        where keys are token indices and values are weights.
-        """
-        # SDK returns {"sparse": {"indices": np.ndarray, "values": np.ndarray}, ...}
-        sparse = result.get("sparse") if isinstance(result, dict) else getattr(result, "sparse", None)
-        if sparse is None:
-            return {}
-
-        indices = sparse.get("indices") if isinstance(sparse, dict) else getattr(sparse, "indices", None)
-        values = sparse.get("values") if isinstance(sparse, dict) else getattr(sparse, "values", None)
-
-        if indices is None or values is None:
-            return {}
-
-        # Convert to lists if numpy arrays
-        indices_list = indices.tolist() if hasattr(indices, "tolist") else list(indices)
-        values_list = values.tolist() if hasattr(values, "tolist") else list(values)
-
-        # Create dict mapping token_id → weight
-        return dict(zip(indices_list, values_list))
+        return [sparse_embedding_dict(result) for result in results]

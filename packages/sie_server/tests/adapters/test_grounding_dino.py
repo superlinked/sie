@@ -150,14 +150,16 @@ class TestGroundingDINOAdapter:
         # Verify result structure
         assert isinstance(result, ExtractOutput)
         assert len(result.entities) == 1
-        assert len(result.entities[0]) == 1
+        assert len(result.entities[0]) == 0  # Entities empty for detection adapters
+        assert result.objects is not None
+        assert len(result.objects) == 1
+        assert len(result.objects[0]) == 1
 
-        entity = result.entities[0][0]
-        assert isinstance(entity, dict)  # Entity is a TypedDict
-        assert entity["text"] == "cat"  # text contains the class name
-        assert entity["label"] == "object"  # label is the category type
-        assert entity["score"] == pytest.approx(0.85, rel=1e-5)
-        assert entity["bbox"] == [10, 20, 100, 200]  # x, y, width, height
+        obj = result.objects[0][0]
+        assert isinstance(obj, dict)  # DetectedObject is a TypedDict
+        assert obj["label"] == "cat"
+        assert obj["score"] == pytest.approx(0.85, rel=1e-5)
+        assert obj["bbox"] == [10, 20, 100, 200]  # x, y, width, height
 
 
 @pytest.mark.integration
@@ -188,12 +190,14 @@ class TestGroundingDINOIntegration:
 
         assert isinstance(result, ExtractOutput)
         assert len(result.entities) == 1
+        assert len(result.entities[0]) == 0  # Detection adapters produce objects, not entities
+        assert result.objects is not None
+        assert len(result.objects) == 1
         # May or may not detect anything in a solid color image
         # Just verify structure is correct
-        for entity in result.entities[0]:
-            # Entities may be dicts or TypedDicts
-            assert "label" in entity
-            assert "score" in entity
-            assert "bbox" in entity
-            if entity["bbox"]:
-                assert len(entity["bbox"]) == 4
+        for obj in result.objects[0]:
+            assert "label" in obj
+            assert "score" in obj
+            assert "bbox" in obj
+            if obj["bbox"]:
+                assert len(obj["bbox"]) == 4

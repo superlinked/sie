@@ -98,6 +98,7 @@ members = [
   "integrations/sie_llamaindex",
   "integrations/sie_qdrant",
   "integrations/sie_weaviate",
+  "integrations/sie_lancedb",
 ]
 
 [tool.pytest.ini_options]

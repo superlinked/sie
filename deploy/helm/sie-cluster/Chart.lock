@@ -17,5 +17,8 @@ dependencies:
 - name: kubernetes-event-exporter
   repository: oci://registry-1.docker.io/bitnamicharts
   version: 3.6.3
-digest: sha256:a1bd008e46d20abacb2a91b48186ec34c5ebe346f5df9f3ecd40a3dac3cffbb3
-generated: "2026-03-23T19:20:04.028801547+01:00"
+- name: nats
+  repository: https://nats-io.github.io/k8s/helm/charts/
+  version: 2.12.6
+digest: sha256:016565ae575dd3a760ad55bdfe55995f1d5876db8096f7576c103eff8cb51643
+generated: "2026-03-30T17:25:20.651043+02:00"

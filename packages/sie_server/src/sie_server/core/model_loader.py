@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sie_server.adapters.base import ModelAdapter
-from sie_server.config.model import ModelConfig
+from sie_server.config.model import ModelConfig, ProfileAdaptiveBatching
 from sie_server.core.inference import AttentionBackend, ComputePrecision
 from sie_server.core.loader import load_adapter
 from sie_server.core.worker import ModelWorker, WorkerConfig
+from sie_server.core.worker.types import AdaptiveBatchingParams
 from sie_server.observability.metrics import set_model_loaded, set_model_memory
 
 if TYPE_CHECKING:
@@ -91,11 +92,12 @@ class ModelLoader:
         default_compute_precision: ComputePrecision = "float16",
         attention_backend: AttentionBackend = "auto",
         max_batch_requests: int | None = None,
-        max_batch_wait_ms: int | None = None,
+        max_batch_wait_ms: float | None = None,
         max_queue_size: int | None = None,
         instrumentation: bool = False,
         max_loras_per_model: int = DEFAULT_MAX_LORAS,
         disk_cache_manager: ModelDiskCacheManager | None = None,
+        adaptive_batching: AdaptiveBatchingParams | None = None,
     ) -> None:
         """Initialize the model loader.
 
@@ -116,6 +118,7 @@ class ModelLoader:
         self._instrumentation = instrumentation
         self._max_loras_per_model = max_loras_per_model
         self._disk_cache = disk_cache_manager
+        self._adaptive_batching = adaptive_batching or AdaptiveBatchingParams()
         self._load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-load")
 
     def update_configs(self, configs: dict[str, ModelConfig]) -> None:
@@ -392,12 +395,17 @@ class ModelLoader:
 
         # Create worker for the adapter with postprocessor support
         resolved = config.resolve_profile("default")
+
+        # Merge per-model adaptive batching overrides onto engine defaults
+        adaptive_params = _merge_adaptive_params(self._adaptive_batching, resolved.adaptive_batching)
+
         worker_config = WorkerConfig(
             max_batch_tokens=resolved.max_batch_tokens,
             max_batch_requests=self._max_batch_requests or WorkerConfig().max_batch_requests,
             max_batch_wait_ms=self._max_batch_wait_ms or WorkerConfig().max_batch_wait_ms,
             max_queue_size=self._max_queue_size or WorkerConfig().max_queue_size,
             instrumentation=self._instrumentation,
+            adaptive_batching=adaptive_params,
         )
         worker = ModelWorker(
             adapter,
@@ -504,3 +512,35 @@ class ModelLoader:
     def shutdown(self) -> None:
         """Shutdown the loader's thread pool."""
         self._load_executor.shutdown(wait=False)
+
+
+def _merge_adaptive_params(
+    engine: AdaptiveBatchingParams,
+    profile: ProfileAdaptiveBatching | None,
+) -> AdaptiveBatchingParams:
+    """Merge per-model profile overrides onto engine-level adaptive params.
+
+    None fields in the profile fall through to engine defaults.
+    If profile is None, returns the engine params unchanged.
+    """
+    if profile is None:
+        return engine
+    return AdaptiveBatchingParams(
+        enabled=engine.enabled,
+        target_p50_ms=profile.target_p50_ms if profile.target_p50_ms is not None else engine.target_p50_ms,
+        calibration_multiplier=profile.calibration_multiplier
+        if profile.calibration_multiplier is not None
+        else engine.calibration_multiplier,
+        min_target_p50_ms=profile.min_target_p50_ms
+        if profile.min_target_p50_ms is not None
+        else engine.min_target_p50_ms,
+        max_target_p50_ms=profile.max_target_p50_ms
+        if profile.max_target_p50_ms is not None
+        else engine.max_target_p50_ms,
+        min_wait_ms=profile.min_wait_ms if profile.min_wait_ms is not None else engine.min_wait_ms,
+        max_wait_ms=profile.max_wait_ms if profile.max_wait_ms is not None else engine.max_wait_ms,
+        gain=profile.gain if profile.gain is not None else engine.gain,
+        integral_gain=profile.integral_gain if profile.integral_gain is not None else engine.integral_gain,
+        window_size=engine.window_size,
+        update_interval=engine.update_interval,
+    )

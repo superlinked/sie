@@ -1,13 +1,8 @@
-"""Worker registry for tracking worker state.
-
-The registry maintains state for all workers in the cluster,
-updated via WebSocket connections to each worker's /ws/stats endpoint.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -15,9 +10,54 @@ from typing import Any
 
 from sie_sdk.types import ModelSummary, WorkerInfo, WorkerStatusMessage
 
-from sie_router.types import ClusterStatus, WorkerHealth, WorkerState
+from sie_router.types import ClusterStatus, ModelAdaptiveState, WorkerHealth, WorkerState
 
 logger = logging.getLogger(__name__)
+
+# Feature flag: prefer workers with partially-filled batches over empty ones.
+# This concentrates requests onto fewer workers, enabling larger GPU batches.
+# Set SIE_ROUTER_FILL_FIRST=false to revert to lowest-queue-depth scoring.
+FILL_FIRST_ENABLED = os.environ.get("SIE_ROUTER_FILL_FIRST", "true").lower() in ("true", "1", "yes")
+
+# Threshold above which a worker is considered near-full and should be avoided.
+# At 80% of max_batch_requests, we start penalizing the worker to prevent overload.
+# Intentional discontinuity at 80% — abrupt transition to penalty zone prevents
+# overloading workers near capacity. Smooth transitions were considered but add
+# complexity without meaningful benefit in practice.
+_FILL_FIRST_HIGH_THRESHOLD = 0.8
+
+
+def _fill_first_score(worker: WorkerState) -> float:
+    """Score a worker for fill-first selection (lower score = preferred).
+
+    Workers with partially-filled batches score lower than empty workers,
+    concentrating requests onto fewer workers to enable larger GPU batches.
+    Workers approaching capacity are penalized to prevent overload.
+
+    The scoring uses two zones:
+    - Below threshold (< 80% capacity): prefer more items (negative score).
+      A worker with 30 pending items is preferred over one with 5, because
+      it's closer to forming a full batch.
+    - At/above threshold (>= 80% capacity): penalize to avoid overload.
+      Score increases with queue depth to push traffic to less-loaded workers.
+
+    Args:
+        worker: Worker state with queue_depth and max_batch_requests.
+
+    Returns:
+        Float score where lower = more preferred.
+    """
+    capacity = worker.max_batch_requests if worker.max_batch_requests and worker.max_batch_requests > 0 else 64
+    queue_depth = max(0, worker.queue_depth)  # Clamp to non-negative
+    fill_ratio = queue_depth / capacity
+
+    if fill_ratio < _FILL_FIRST_HIGH_THRESHOLD:
+        # Prefer workers that already have items — closer to forming a full batch.
+        # Negate queue_depth so higher queue = lower (better) score.
+        return -queue_depth
+    # Near-full workers get penalized. Add capacity as offset so these
+    # always score higher (worse) than any worker below the threshold.
+    return capacity + queue_depth
 
 
 class WorkerRegistry:
@@ -59,13 +99,13 @@ class WorkerRegistry:
 
     @property
     def workers(self) -> dict[str, WorkerState]:
-        """Get all workers."""
-        return self._workers
+        """Get all workers (snapshot)."""
+        return dict(self._workers)
 
     @property
     def healthy_workers(self) -> list[WorkerState]:
-        """Get list of healthy workers."""
-        return [w for w in self._workers.values() if w.healthy]
+        """Get list of healthy workers (snapshot)."""
+        return [w for w in dict(self._workers).values() if w.healthy]
 
     def get_worker(self, url: str) -> WorkerState | None:
         """Get worker by URL."""
@@ -100,15 +140,32 @@ class WorkerRegistry:
             worker.name = state.get("name", url)
             worker.gpu_count = state.get("gpu_count", 1)
             worker.bundle = state.get("bundle", "default")
+            worker.bundle_config_hash = state.get("bundle_config_hash", "")
             # machine_profile from worker:
             # - In K8s: SIE_MACHINE_PROFILE env var (e.g., "l4-spot")
             # - Standalone: detected GPU type (e.g., "l4")
             worker.machine_profile = state.get("machine_profile", "")
+            worker.pool_name = state.get("pool_name", "")
             worker.models = state.get("loaded_models", [])
 
-            # Compute aggregate queue depth from models
+            # Compute aggregate queue depth from models and extract adaptive state
             models = state.get("models", [])
             worker.queue_depth = sum(m.get("queue_depth", 0) for m in models)
+            worker.adaptive = {}
+            for m in models:
+                ab = m.get("adaptive_batching")
+                if ab is not None:
+                    worker.adaptive[m.get("name", "")] = ModelAdaptiveState(
+                        calibrated=ab.get("calibrated", False),
+                        target_p50_ms=ab.get("target_p50_ms"),
+                        wait_ms=ab.get("wait_ms", 10.0),
+                        p50_ms=ab.get("p50_ms"),
+                        headroom_ms=ab.get("headroom_ms"),
+                        fill_ratio=ab.get("fill_ratio"),
+                    )
+
+            # Batch capacity for fill-first scoring
+            worker.max_batch_requests = state.get("max_batch_requests", 64)
 
             # Extract GPU memory from gpus array (worker sends memory_*_bytes)
             # Aggregate across all GPUs, keep in bytes (no conversion)
@@ -214,7 +271,8 @@ class WorkerRegistry:
             Best matching worker, or None if no suitable worker found.
         """
         # Start with healthy workers
-        candidates = [w for w in self._workers.values() if w.healthy]
+        workers_snapshot = dict(self._workers)
+        candidates = [w for w in workers_snapshot.values() if w.healthy]
 
         if not candidates:
             return None
@@ -243,9 +301,17 @@ class WorkerRegistry:
         if model:
             with_model = [w for w in candidates if model in w.models]
             if with_model:
-                candidates = with_model
+                # Prefer workers already serving the model; apply fill-first only to them
+                if FILL_FIRST_ENABLED:
+                    return min(with_model, key=_fill_first_score)
+                return min(with_model, key=lambda w: w.queue_depth)
+            # No workers have the model — fall back to lowest queue depth (no fill-first bias)
+            return min(candidates, key=lambda w: w.queue_depth)
 
-        # Pick worker with lowest queue depth
+        # Select based on scoring strategy
+        if FILL_FIRST_ENABLED:
+            return min(candidates, key=_fill_first_score)
+        # Legacy: pick worker with lowest queue depth
         return min(candidates, key=lambda w: w.queue_depth)
 
     def has_capacity(self, gpu: str, bundle: str | None = None) -> bool:
@@ -260,7 +326,7 @@ class WorkerRegistry:
         """
         gpu_lower = gpu.lower()
         bundle_lower = bundle.lower() if bundle else None
-        for w in self._workers.values():
+        for w in dict(self._workers).values():
             if not w.healthy:
                 continue
             if not w.machine_profile or w.machine_profile.lower() != gpu_lower:
@@ -270,13 +336,30 @@ class WorkerRegistry:
             return True
         return False
 
+    def resolve_queue_pool(self, bundle: str, gpu: str = "") -> str | None:
+        """Find the NATS pool name for the given bundle (and optional GPU).
+
+        Looks at healthy workers that broadcast a ``pool_name`` and returns
+        the first match.  Returns ``None`` when no worker matches.
+        """
+        bundle_lower = bundle.lower()
+        for w in dict(self._workers).values():
+            if not w.healthy or not w.pool_name:
+                continue
+            if w.bundle.lower() != bundle_lower:
+                continue
+            if gpu and w.machine_profile and w.machine_profile.lower() != gpu.lower():
+                continue
+            return w.pool_name
+        return None
+
     def get_gpu_types(self) -> list[str]:
         """Get list of available machine_profile types across all healthy workers."""
-        return list({w.machine_profile for w in self._workers.values() if w.healthy and w.machine_profile})
+        return list({w.machine_profile for w in dict(self._workers).values() if w.healthy and w.machine_profile})
 
     def get_bundles(self) -> list[str]:
         """Get list of available bundles across all healthy workers."""
-        return list({w.bundle for w in self._workers.values() if w.healthy and w.bundle})
+        return list({w.bundle for w in dict(self._workers).values() if w.healthy and w.bundle})
 
     def get_models(self) -> dict[str, list[str]]:
         """Get models loaded on each worker.
@@ -285,7 +368,7 @@ class WorkerRegistry:
             Dict mapping model name to list of worker URLs that have it loaded.
         """
         models: dict[str, list[str]] = defaultdict(list)
-        for worker in self._workers.values():
+        for worker in dict(self._workers).values():
             if worker.healthy:
                 for model in worker.models:
                     models[model].append(worker.url)
@@ -309,9 +392,10 @@ class WorkerRegistry:
         # Calculate QPS (requests per second) over last interval
         elapsed = now - self._last_qps_calculation
         if elapsed >= 1.0:
-            total_requests = sum(self._request_counts.values())
+            counts = self._request_counts
+            self._request_counts = defaultdict(int)
+            total_requests = sum(counts.values())
             self._current_qps = total_requests / elapsed if elapsed > 0 else 0
-            self._request_counts.clear()
             self._last_qps_calculation = now
 
         # Aggregate worker info
@@ -319,7 +403,9 @@ class WorkerRegistry:
         total_gpus = 0
         model_workers: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-        for worker in self._workers.values():
+        workers_snapshot = dict(self._workers)
+
+        for worker in workers_snapshot.values():
             # Use memory_*_bytes for consistency with GPUMetrics/WorkerInfo types
             # gpu field populated from machine_profile for display
             worker_info: WorkerInfo = {
@@ -332,6 +418,8 @@ class WorkerRegistry:
                 "memory_used_bytes": worker.memory_used_bytes,
                 "memory_total_bytes": worker.memory_total_bytes,
                 "healthy": worker.healthy,
+                "bundle": worker.bundle,
+                "bundle_config_hash": worker.bundle_config_hash,
             }
             workers_info.append(worker_info)
 
@@ -362,7 +450,7 @@ class WorkerRegistry:
 
         return ClusterStatus(
             timestamp=now,
-            worker_count=len([w for w in self._workers.values() if w.healthy]),
+            worker_count=len([w for w in workers_snapshot.values() if w.healthy]),
             gpu_count=total_gpus,
             models_loaded=len(model_workers),
             total_qps=self._current_qps,

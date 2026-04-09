@@ -1,9 +1,11 @@
 import logging
+import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 import torch
+import yaml
 from fastapi import FastAPI
 
 from sie_server.api.encode import router as encode_router
@@ -19,10 +21,13 @@ from sie_server.api.ws import init_server_start_time
 from sie_server.api.ws import router as ws_router
 from sie_server.app.app_state_config import AppStateConfig
 from sie_server.config.engine import EngineConfig
+from sie_server.config.model import ModelConfig, ProfileConfig, Tasks
 from sie_server.core.memory import MemoryConfig
 from sie_server.core.readiness import mark_not_ready, mark_ready
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.shutdown import ShutdownMiddleware, ShutdownState, setup_signal_handlers
+from sie_server.nats_pull_loop import NatsPullLoop
+from sie_server.nats_subscriber import NatsSubscriber
 from sie_server.observability.gpu import _init_nvml, shutdown_nvml
 from sie_server.observability.tracing import setup_tracing
 
@@ -78,10 +83,14 @@ class AppFactory:
             async with (
                 cls._nvml(),
                 cls._model_registry(config) as registry,
+                cls._nats_subscriber(registry) as nats_sub,
+                cls._nats_pull_loop(registry, nats_sub) as pull_loop,
                 cls._graceful_shutdown(shutdown_state),
                 cls._readiness_handling(),
             ):
                 app.state.registry = registry
+                app.state.nats_subscriber = nats_sub
+                app.state.nats_pull_loop = pull_loop
                 yield
 
         return lifespan
@@ -120,6 +129,121 @@ class AppFactory:
 
             logger.info("Shutting down, unloading models")
             await registry.unload_all_async()
+
+    @classmethod
+    @asynccontextmanager
+    async def _nats_subscriber(cls, registry: ModelRegistry) -> AsyncGenerator[NatsSubscriber | None, None]:
+        """For optional NATS subscriber lifecycle.
+
+        Only starts if SIE_NATS_URL is set. Connection failures are non-fatal —
+        the server starts normally without NATS.
+        """
+        nats_url = os.environ.get("SIE_NATS_URL")
+        if not nats_url:
+            yield None
+            return
+
+        async def on_model_config(model_id: str, config_yaml: str) -> None:
+            try:
+                raw = yaml.safe_load(config_yaml)
+                if not isinstance(raw, dict):
+                    logger.warning("NATS config for '%s' is not a dict, ignoring", model_id)
+                    return
+
+                # Try full ModelConfig parsing (works for complete configs with tasks, hf_id, etc.)
+                try:
+                    model_config = ModelConfig(**raw)
+                    registry.add_config(model_config)
+                    logger.info("Added full model config from NATS: %s", model_config.sie_id)
+                    return
+                except Exception:  # noqa: BLE001 — fallback to lightweight path
+                    logger.debug("Full ModelConfig parse failed for '%s', trying minimal path", model_id)
+
+                # Fallback: minimal config from Config API (sie_id + profiles only).
+                # Create a stub ModelConfig with required fields filled in from the profile.
+                sie_id = raw.get("sie_id", model_id)
+                profiles_raw = raw.get("profiles", {})
+                if not profiles_raw:
+                    logger.warning("NATS config for '%s' has no profiles, ignoring", model_id)
+                    return
+
+                # Fallback to sie_id as hf_id (satisfies ModelConfig validator)
+
+                # Build a minimal valid ModelConfig
+                profiles = {}
+                for pname, pdata in profiles_raw.items():
+                    profiles[pname] = ProfileConfig(
+                        adapter_path=pdata.get("adapter_path"),
+                        max_batch_tokens=pdata.get("max_batch_tokens"),
+                        extends=pdata.get("extends"),
+                    )
+
+                # Build a stub ModelConfig for profile/hash tracking.
+                # This config may not be loadable — it's used to register the model
+                # in the registry so the config hash updates and routing can reference it.
+                # Actual model loading will use the full config pushed by the adapter.
+                model_config = ModelConfig(
+                    sie_id=sie_id,
+                    hf_id=raw.get("hf_id", sie_id),
+                    tasks=Tasks(),
+                    profiles=profiles,
+                )
+                registry.add_config(model_config)
+                logger.info("Added minimal model config from NATS: %s", sie_id)
+
+            except Exception:
+                logger.exception("Failed to apply NATS config for model '%s'", model_id)
+
+        subscriber = NatsSubscriber(nats_url=nats_url, on_model_config=on_model_config)
+        await subscriber.start()
+        try:
+            yield subscriber
+        finally:
+            await subscriber.stop()
+
+    @classmethod
+    @asynccontextmanager
+    async def _nats_pull_loop(
+        cls, registry: ModelRegistry, nats_subscriber: NatsSubscriber | None
+    ) -> AsyncGenerator[NatsPullLoop | None, None]:
+        """For optional NATS pull loop lifecycle.
+
+        Only starts when SIE_CLUSTER_ROUTING=queue and a NATS connection exists.
+        """
+        if os.environ.get("SIE_CLUSTER_ROUTING") != "queue":
+            yield None
+            return
+
+        if nats_subscriber is None:
+            raise RuntimeError("SIE_CLUSTER_ROUTING=queue but no NATS subscriber available — cannot start pull loop")
+
+        nc = nats_subscriber.nc
+        if nc is None:
+            raise RuntimeError("SIE_CLUSTER_ROUTING=queue but NATS connection is None — cannot start pull loop")
+        js = nc.jetstream()
+        bundle_id = os.environ.get("SIE_BUNDLE", "default")
+        pool_name = os.environ.get("SIE_POOL", "_default")
+        payload_store_url = os.environ.get("SIE_PAYLOAD_STORE_URL")
+
+        pull_loop = NatsPullLoop(
+            nc=nc,
+            js=js,
+            registry=registry,
+            bundle_id=bundle_id,
+            pool_name=pool_name,
+            payload_store_url=payload_store_url,
+        )
+        await pull_loop.start()
+
+        # Register pull loop reconnect handler via NatsSubscriber's public API.
+        # This is invoked by the NATS client's reconnected_cb chain, ensuring
+        # pull subscriptions are re-created after NATS reconnect.
+        nats_subscriber.add_reconnect_handler(pull_loop.handle_reconnect)
+
+        try:
+            yield pull_loop
+        finally:
+            await pull_loop.stop()
 
     @classmethod
     @asynccontextmanager

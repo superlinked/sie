@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.1.10
+
+- chore(main): release 0.1.10
+- feat: add async, chunking, and streaming to Weaviate document enricher
+- perf(lancedb): decouple scanner and SIE batch sizes in enrich_table
+- fix(helm): use generic updater for both Chart.yaml version fields
+- fix: handle BytesIO images in LlamaIndex and validate Weaviate classify config
+- perf(lancedb): stream enrich_table batch-by-batch instead of full materialization
+- perf(lancedb): use Lance scanner for column projection in enrich_table
+- fix(observability): queue routing dashboard PromQL for NATS wait
+- feat(observability): queue routing dashboard, NATS prom exporter, router image tag
+- fix: update adapter tests and address code review feedback
+- fix(integrations): address CodeRabbit review findings for LanceDB PR
+- fix(helm): use generic release-please updater for appVersion
+- test(router): add queue-mode score response key regression tests
+- fix(router): use "scores" key in queue-mode score responses
+- fix(helm): restore Chart.yaml deps from main, keep appVersion v-prefix
+- feat(terraform): add evaluation cluster setup for AWS with multi-GPU support and updated configurations
+- make sure extraction uses not just the entity response type but the other response types also, including integrations
+- remove the code that made it seem as if we were passing topk param to server from typescript - this optimization doesn't make that much sense as the request is anyway much larger than response
+- PY<>TS parity in terms of integration depth  for langchain and llamaindex
+- multivector support update in integrations
+- deduplicate integration logic into ts/py sdk package that the integrations already depend on
+- feat(sdk): add get_model() and configure LanceDB release workflows
+- feat(integrations): add LanceDB integration (Python + TypeScript)
+- haystack and llamaindex get multi-modal integration
+- weaviate integration improvements
+- test(queue): add NATS server fixture and improve integration test reliability
+- feat(dlq,pull-loop): improve DLQ routing and score response handling
+- fix(config,queue,nats): correct cluster routing condition, stream max_age units, and reconnect state ordering
+- fix(queue-routing): score response format and DLQ fallback routing key
+- fix(queue-routing): configurable NATS fetch budget, Helm-wired queue params
+- perf(router): bypass FastAPI for hot proxy paths via raw ASGI middleware
+- perf(sdk+router): lazy msgpack_numpy.patch and pure ASGI middleware
+- perf(router): remove msgpack_numpy global patch and BaseHTTPMiddleware
+- perf(router): replace stdlib json with orjson for 3-10x faster serialization
+- perf(router): reduce thread pool pressure by inlining small deserialization
+- refactor(router): remove lock-free synchronization and batch work item serialization
+- fix(helm): add recreate strategy for router deployment when nats config restore is enabled
+- test(cluster): fix kind cluster tests for config API and port-forward restart support
+- fix(queue-routing): resolve 5 bugs blocking NATS pull-based worker routing
+- feat(worker): improve batch cost bounds and fix template logic
+- fix: address review findings — error handling, validation, public APIs, tests
+- fix(server): update tests to use max_seq_length instead of max_length
+- test(adaptive-batching): replace time.sleep with mocked monotonic for deterministic integral accumulation test
+- feat(adaptive-batching): add auto-calibration and PI controller with per-model profile overrides
+- refactor(batcher): implement proportional coalesce scaling and adaptive batch wait precision
+- feat: add pull-based worker queue routing and adaptive batching
+- feat(config-api): implement idempotency and auth separation with profile conflict detection
+- docs(config): clarify write auth token precedence and filter updates
+- fix(server): align cross-encoder max_seq_length parameter with loader
+- chore: review items
+- chore: review items
+- chore: review items
+- chore: fix review items
+- chore: remove git sync
+- feat: implement Config Management API with NATS-based distribution and review fixes Add runtime model config additions via REST API (POST /v1/configs/models), with NATS pub/sub distribution to workers and S3/GCS/local persistence using epoch-based CAS. Workers track config convergence via SHA-256 bundle_config_hash reported through WebSocket status. Key components: - config_api.py: REST endpoints (list/get/add models, resolve, bundles) - config_store.py: Epoch CAS persistence (local/S3/GCS backends) - nats_manager.py: Router-side NATS publish + cross-router sync - nats_subscriber.py: Worker-side NATS subscribe + config apply - Helm/Terraform: NATS sub-chart, config store env vars, restore flow Also addresses 25 code review findings: M2/M12 medium fixes, L1-L16 low-severity fixes, T3-T10 test coverage gaps, D1-D7 doc/feature discrepancies, and H13 S3 conditional writes documentation.
+
 ## v0.1.9
 
 - chore(main): release 0.1.9

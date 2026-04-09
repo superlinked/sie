@@ -22,6 +22,33 @@ class Entity:
     end: int
 
 
+@dataclass
+class Relation:
+    """Extracted relation triple."""
+
+    head: str
+    tail: str
+    relation: str
+    score: float
+
+
+@dataclass
+class Classification:
+    """Text classification result."""
+
+    label: str
+    score: float
+
+
+@dataclass
+class DetectedObject:
+    """Detected object with bounding box."""
+
+    label: str
+    score: float
+    bbox: list[int]
+
+
 class SIEReranker(dspy.Module):
     """Rerank passages by relevance to a query using SIE.
 
@@ -190,15 +217,15 @@ class SIEExtractor(dspy.Module):
         text: str,
         labels: list[str] | None = None,
     ) -> dspy.Prediction:
-        """Extract entities from text.
+        """Extract structured information from text.
 
         Args:
-            text: The text to extract entities from.
-            labels: Entity types to extract (overrides default labels).
+            text: The text to extract from.
+            labels: Labels to extract (overrides default labels).
 
         Returns:
-            Prediction with 'entities' (list of Entity objects) and
-            'entities_dict' (list of dicts for serialization).
+            Prediction with entities, relations, classifications, objects
+            (as dataclass objects) and _dict variants for serialization.
         """
         from sie_sdk.types import Item
 
@@ -211,20 +238,24 @@ class SIEExtractor(dspy.Module):
         )
 
         entities = self._parse_entities(result)
+        relations = self._parse_relations(result)
+        classifications = self._parse_classifications(result)
+        objects = self._parse_objects(result)
 
-        # Also provide dict format for JSON serialization
-        entities_dict = [
-            {
-                "text": e.text,
-                "label": e.label,
-                "score": e.score,
-                "start": e.start,
-                "end": e.end,
-            }
-            for e in entities
-        ]
-
-        return dspy.Prediction(entities=entities, entities_dict=entities_dict)
+        return dspy.Prediction(
+            entities=entities,
+            relations=relations,
+            classifications=classifications,
+            objects=objects,
+            entities_dict=[
+                {"text": e.text, "label": e.label, "score": e.score, "start": e.start, "end": e.end} for e in entities
+            ],
+            relations_dict=[
+                {"head": r.head, "tail": r.tail, "relation": r.relation, "score": r.score} for r in relations
+            ],
+            classifications_dict=[{"label": c.label, "score": c.score} for c in classifications],
+            objects_dict=[{"label": o.label, "score": o.score, "bbox": o.bbox} for o in objects],
+        )
 
     def _parse_entities(self, result: Any) -> list[Entity]:
         """Parse entities from SDK result."""
@@ -261,3 +292,53 @@ class SIEExtractor(dspy.Module):
                 )
 
         return entities
+
+    def _parse_relations(self, result: Any) -> list[Relation]:
+        """Parse relations from SDK result."""
+        items = result.get("relations", []) if isinstance(result, dict) else getattr(result, "relations", [])
+        relations = []
+        for item in items:
+            if isinstance(item, dict):
+                relations.append(
+                    Relation(
+                        head=item.get("head", ""),
+                        tail=item.get("tail", ""),
+                        relation=item.get("relation", ""),
+                        score=float(item.get("score", 0.0)),
+                    )
+                )
+            else:
+                relations.append(
+                    Relation(
+                        head=getattr(item, "head", ""),
+                        tail=getattr(item, "tail", ""),
+                        relation=getattr(item, "relation", ""),
+                        score=float(getattr(item, "score", 0.0)),
+                    )
+                )
+        return relations
+
+    def _parse_classifications(self, result: Any) -> list[Classification]:
+        """Parse classifications from SDK result."""
+        items = (
+            result.get("classifications", []) if isinstance(result, dict) else getattr(result, "classifications", [])
+        )
+        return [
+            Classification(
+                label=c.get("label", "") if isinstance(c, dict) else getattr(c, "label", ""),
+                score=float(c.get("score", 0.0) if isinstance(c, dict) else getattr(c, "score", 0.0)),
+            )
+            for c in items
+        ]
+
+    def _parse_objects(self, result: Any) -> list[DetectedObject]:
+        """Parse detected objects from SDK result."""
+        items = result.get("objects", []) if isinstance(result, dict) else getattr(result, "objects", [])
+        return [
+            DetectedObject(
+                label=o.get("label", "") if isinstance(o, dict) else getattr(o, "label", ""),
+                score=float(o.get("score", 0.0) if isinstance(o, dict) else getattr(o, "score", 0.0)),
+                bbox=o.get("bbox", []) if isinstance(o, dict) else getattr(o, "bbox", []),
+            )
+            for o in items
+        ]

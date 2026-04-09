@@ -3,11 +3,11 @@
 This package provides vectorizer helpers for Qdrant:
 
 - SIEVectorizer: Compute dense embeddings via SIE for Qdrant collections
-- SIENamedVectorizer: Compute multiple vector types (dense + sparse) for Qdrant named vectors
+- SIENamedVectorizer: Compute multiple vector types (dense, sparse, multivector) for Qdrant named vectors
 
-Qdrant supports both dense and sparse vectors natively. Dense vectors are
-stored as ``list[float]``, and sparse vectors use ``SparseVector(indices, values)``
-— no expansion to full vocabulary length is needed (unlike Weaviate).
+Qdrant supports dense, sparse, and multivector embeddings natively. Dense vectors
+are stored as ``list[float]``, sparse vectors use ``SparseVector(indices, values)``,
+and multivectors (ColBERT) are stored as ``list[list[float]]``.
 
 Example usage (dense):
 

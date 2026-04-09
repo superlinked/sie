@@ -1,10 +1,10 @@
 """Health and status endpoints for the router."""
 
-import json
 import logging
 import os
 from typing import Any
 
+import orjson
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
@@ -103,7 +103,7 @@ async def cluster_status_websocket(websocket: WebSocket) -> None:
 
             # Send as JSON
             await websocket.send_text(
-                json.dumps(
+                orjson.dumps(
                     {
                         "timestamp": status.timestamp,
                         "cluster": {
@@ -115,7 +115,7 @@ async def cluster_status_websocket(websocket: WebSocket) -> None:
                         "workers": status.workers,
                         "models": status.models,
                     }
-                )
+                ).decode()
             )
 
             # Send updates every second

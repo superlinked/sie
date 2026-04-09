@@ -35,6 +35,9 @@ export type {
   ScoreEntry,
   ScoreResult,
   Entity,
+  Relation,
+  Classification,
+  DetectedObject,
   ExtractResult,
   // Model and cluster info
   ModelDims,
@@ -67,6 +70,16 @@ export type {
 
 // Utility functions
 export { toNumberArray, toFloat32Array } from "./types.js";
+
+// Encoding result helpers (for integrations)
+export {
+  denseEmbedding,
+  sparseEmbedding,
+  sparseEmbeddingMap,
+  normalizeSparseVector,
+  multivectorEmbedding,
+  type SparseVector,
+} from "./encoding.js";
 
 // Errors
 export {

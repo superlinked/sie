@@ -28,7 +28,7 @@ from transformers import PreTrainedModel
 
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
-from sie_server.types.responses import Entity
+from sie_server.types.responses import DetectedObject, Entity
 
 if TYPE_CHECKING:
     from sie_server.types.inputs import Item
@@ -292,8 +292,9 @@ class Florence2Adapter(ModelAdapter):
 
         # Fallback to inline preprocessing
         all_entities = []
+        all_objects = []
         for item in items:
-            entities = self._extract_single(
+            entities, objects = self._extract_single(
                 item,
                 prompt=prompt,
                 task=task,
@@ -301,8 +302,13 @@ class Florence2Adapter(ModelAdapter):
                 num_beams=num_beams,
             )
             all_entities.append(entities)
+            all_objects.append(objects)
 
-        return ExtractOutput(entities=all_entities)
+        has_objects = any(objs for objs in all_objects)
+        return ExtractOutput(
+            entities=all_entities,
+            objects=all_objects if has_objects else None,
+        )
 
     def _extract_preprocessed(
         self,
@@ -331,6 +337,7 @@ class Florence2Adapter(ModelAdapter):
         from sie_server.core.prepared import Florence2Payload, PreparedItem
 
         all_entities = []
+        all_objects = []
 
         for i, prepared in enumerate(prepared_items):
             # Extract payload
@@ -341,7 +348,7 @@ class Florence2Adapter(ModelAdapter):
 
             if not isinstance(payload, Florence2Payload):
                 # Fallback to inline preprocessing if payload is wrong type
-                entities = self._extract_single(
+                entities, objects = self._extract_single(
                     items[i],
                     prompt=task,
                     task=task,
@@ -349,6 +356,7 @@ class Florence2Adapter(ModelAdapter):
                     num_beams=num_beams,
                 )
                 all_entities.append(entities)
+                all_objects.append(objects)
                 continue
 
             # Move tensors to device with correct dtype
@@ -384,10 +392,15 @@ class Florence2Adapter(ModelAdapter):
             )
 
             # Convert to SIE format
-            entities = self._convert_output(parsed, task, payload.original_size)
+            entities, objects = self._convert_output(parsed, task, payload.original_size)
             all_entities.append(entities)
+            all_objects.append(objects)
 
-        return ExtractOutput(entities=all_entities)
+        has_objects = any(objs for objs in all_objects)
+        return ExtractOutput(
+            entities=all_entities,
+            objects=all_objects if has_objects else None,
+        )
 
     def _build_prompt(
         self,
@@ -424,7 +437,7 @@ class Florence2Adapter(ModelAdapter):
         task: str,
         max_new_tokens: int,
         num_beams: int,
-    ) -> list[Entity]:
+    ) -> tuple[list[Entity], list[DetectedObject]]:
         """Extract from a single item.
 
         Args:
@@ -435,7 +448,7 @@ class Florence2Adapter(ModelAdapter):
             num_beams: Beam search width.
 
         Returns:
-            List of entities extracted from the item.
+            Tuple of (entities, detected_objects) extracted from the item.
         """
         from PIL import Image as PILImage
 
@@ -497,7 +510,7 @@ class Florence2Adapter(ModelAdapter):
         parsed: dict[str, Any],
         task: str,
         image_size: tuple[int, int],
-    ) -> list[Entity]:
+    ) -> tuple[list[Entity], list[DetectedObject]]:
         """Convert Florence-2 output to SIE extraction format.
 
         Args:
@@ -506,9 +519,10 @@ class Florence2Adapter(ModelAdapter):
             image_size: Original image size (width, height).
 
         Returns:
-            List of entities extracted from the output.
+            Tuple of (entities, detected_objects) extracted from the output.
         """
         entities: list[Entity] = []
+        objects: list[DetectedObject] = []
 
         task_output = parsed.get(task, {})
 
@@ -537,10 +551,9 @@ class Florence2Adapter(ModelAdapter):
             for bbox, label in zip(bboxes, labels, strict=False):
                 # Normalize bbox
                 norm_bbox = self._normalize_bbox(bbox, image_size)
-                entities.append(
-                    Entity(
-                        text=label or "object",
-                        label="object",
+                objects.append(
+                    DetectedObject(
+                        label=label or "object",
                         score=1.0,
                         bbox=[int(b) for b in norm_bbox],  # Convert to int list
                     )
@@ -579,7 +592,7 @@ class Florence2Adapter(ModelAdapter):
                 )
             )
 
-        return entities
+        return entities, objects
 
     def _quad_to_bbox(
         self,

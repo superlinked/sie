@@ -299,6 +299,40 @@ export class SIEClient {
   }
 
   /**
+   * Get details for a specific model.
+   *
+   * Returns model metadata including dimensions, supported inputs/outputs,
+   * loaded status, and max sequence length. This is a lightweight call that
+   * reads from model config — it does not load the model or trigger inference.
+   *
+   * @param name - Model name (e.g., "BAAI/bge-m3")
+   * @returns Model information
+   */
+  async getModel(name: string): Promise<ModelInfo> {
+    const response = await this.requestJson(`/v1/models/${encodeURIComponent(name)}`, "GET");
+
+    interface WireModelInfo {
+      name: string;
+      loaded: boolean;
+      inputs: string[];
+      outputs: string[];
+      dims?: { dense?: number; sparse?: number; multivector?: number };
+      max_sequence_length?: number;
+    }
+
+    const data = (await response.json()) as WireModelInfo;
+
+    return {
+      name: data.name,
+      loaded: data.loaded,
+      inputs: data.inputs,
+      outputs: data.outputs,
+      dims: data.dims,
+      maxSequenceLength: data.max_sequence_length,
+    };
+  }
+
+  /**
    * Stream real-time status updates from a worker or router.
    *
    * @param mode - "cluster" uses router /ws/cluster-status, "worker" uses /ws/status.
@@ -419,10 +453,6 @@ export class SIEClient {
       query,
       items,
     };
-
-    if (options.topK !== undefined) {
-      body.top_k = options.topK;
-    }
 
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
     const { pool, gpu } = this.parseGpuParam(options.gpu);

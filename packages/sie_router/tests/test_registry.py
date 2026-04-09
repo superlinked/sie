@@ -1,9 +1,11 @@
 """Tests for WorkerRegistry routing logic."""
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
-from sie_router.registry import WorkerRegistry
+from sie_router.registry import WorkerRegistry, _fill_first_score
+from sie_router.types import WorkerState
 
 
 class TestWorkerRegistry:
@@ -112,17 +114,17 @@ class TestWorkerRegistry:
         assert worker is not None
         assert worker.name == "worker-0"
 
-        # For different model, should pick lower queue depth
+        # For unknown model, no workers have it loaded — falls back to lowest queue depth
         worker = registry.select_worker(model="gte-qwen2")
         assert worker is not None
-        assert worker.name == "worker-1"  # Lower queue depth
+        assert worker.name == "worker-1"  # Lowest queue depth (no fill-first for unknown models)
 
     @pytest.mark.asyncio
-    async def test_load_balancing(self) -> None:
-        """select_worker picks lowest queue depth among candidates."""
+    async def test_load_balancing_fill_first(self) -> None:
+        """select_worker with fill-first picks highest below-threshold queue."""
         registry = WorkerRegistry()
 
-        # Worker with high queue (queue_depth from models array)
+        # Worker with high queue (above 80% threshold: 100/64 = 156%)
         await registry.update_worker(
             "http://worker-0:8080",
             {
@@ -134,7 +136,7 @@ class TestWorkerRegistry:
             },
         )
 
-        # Worker with low queue
+        # Worker with low queue (below threshold: 5/64 = 7.8%)
         await registry.update_worker(
             "http://worker-1:8080",
             {
@@ -146,7 +148,7 @@ class TestWorkerRegistry:
             },
         )
 
-        # Worker with medium queue
+        # Worker with medium queue (below threshold: 50/64 = 78%)
         await registry.update_worker(
             "http://worker-2:8080",
             {
@@ -158,10 +160,42 @@ class TestWorkerRegistry:
             },
         )
 
-        # Should pick worker-1 (lowest queue)
+        # Fill-first: prefers highest queue below threshold → worker-2 (50, below 80%)
+        # worker-0 (100) is above threshold and penalized
         worker = registry.select_worker()
         assert worker is not None
-        assert worker.name == "worker-1"
+        assert worker.name == "worker-2"
+
+    @pytest.mark.asyncio
+    async def test_load_balancing_legacy(self) -> None:
+        """select_worker with fill-first disabled picks lowest queue depth."""
+        registry = WorkerRegistry()
+
+        await registry.update_worker(
+            "http://worker-0:8080",
+            {
+                "name": "worker-0",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["model-a"],
+                "models": [{"name": "model-a", "queue_depth": 100}],
+            },
+        )
+        await registry.update_worker(
+            "http://worker-1:8080",
+            {
+                "name": "worker-1",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["model-a"],
+                "models": [{"name": "model-a", "queue_depth": 5}],
+            },
+        )
+
+        with patch("sie_router.registry.FILL_FIRST_ENABLED", False):
+            worker = registry.select_worker()
+            assert worker is not None
+            assert worker.name == "worker-1"  # Lowest queue depth
 
     @pytest.mark.asyncio
     async def test_unhealthy_workers_excluded(self) -> None:
@@ -627,3 +661,190 @@ class TestWorkerHealthyCallback:
             {"name": "worker-0", "ready": True, "machine_profile": "l4"},
         )
         assert call_count == 2  # Called again on recovery
+
+
+class TestFillFirstScoring:
+    """Tests for fill-first batch scoring strategy."""
+
+    def test_score_prefers_higher_queue_depth_below_threshold(self) -> None:
+        """Workers with more pending items score lower (better) below threshold."""
+        empty = WorkerState(url="http://w0:8080", queue_depth=0, max_batch_requests=64)
+        partial = WorkerState(url="http://w1:8080", queue_depth=30, max_batch_requests=64)
+        half = WorkerState(url="http://w2:8080", queue_depth=50, max_batch_requests=64)
+
+        # Higher queue depth = lower (better) score below 80% threshold
+        assert _fill_first_score(partial) < _fill_first_score(empty)
+        assert _fill_first_score(half) < _fill_first_score(partial)
+
+    def test_score_penalizes_above_threshold(self) -> None:
+        """Workers above 80% capacity score worse than any below-threshold worker."""
+        below = WorkerState(url="http://w0:8080", queue_depth=1, max_batch_requests=64)
+        at_threshold = WorkerState(url="http://w1:8080", queue_depth=52, max_batch_requests=64)  # 52/64 = 81%
+        full = WorkerState(url="http://w2:8080", queue_depth=64, max_batch_requests=64)
+
+        # Any below-threshold worker is better than any above-threshold worker
+        assert _fill_first_score(below) < _fill_first_score(at_threshold)
+        assert _fill_first_score(below) < _fill_first_score(full)
+
+    def test_score_above_threshold_prefers_lower_queue(self) -> None:
+        """Among above-threshold workers, lower queue depth is preferred."""
+        w1 = WorkerState(url="http://w1:8080", queue_depth=52, max_batch_requests=64)
+        w2 = WorkerState(url="http://w2:8080", queue_depth=60, max_batch_requests=64)
+
+        assert _fill_first_score(w1) < _fill_first_score(w2)
+
+    def test_score_handles_zero_capacity(self) -> None:
+        """Workers with zero capacity don't cause division by zero."""
+        w = WorkerState(url="http://w:8080", queue_depth=5, max_batch_requests=0)
+        score = _fill_first_score(w)
+        # max_batch_requests=0 triggers fallback: capacity = 0 or 64 = 64
+        # fill_ratio = 5/64 ≈ 0.078 < 0.8 threshold → returns -queue_depth
+        assert score == -5
+
+    def test_score_uses_default_capacity(self) -> None:
+        """Default max_batch_requests (64) is used when not set."""
+        w = WorkerState(url="http://w:8080", queue_depth=10)
+        assert w.max_batch_requests == 64
+        score = _fill_first_score(w)
+        assert score == -10
+
+    @pytest.mark.asyncio
+    async def test_fill_first_selects_partially_filled_worker(self) -> None:
+        """select_worker with fill-first picks partially-filled over empty."""
+        registry = WorkerRegistry()
+
+        # Worker with some pending items (partially filled batch)
+        await registry.update_worker(
+            "http://worker-busy:8080",
+            {
+                "name": "worker-busy",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["model-a"],
+                "models": [{"name": "model-a", "queue_depth": 30}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # Worker with empty queue
+        await registry.update_worker(
+            "http://worker-empty:8080",
+            {
+                "name": "worker-empty",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["model-a"],
+                "models": [{"name": "model-a", "queue_depth": 0}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # With fill-first enabled, should prefer worker-busy (closer to full batch)
+        with patch("sie_router.registry.FILL_FIRST_ENABLED", True):
+            worker = registry.select_worker()
+            assert worker is not None
+            assert worker.name == "worker-busy"
+
+    @pytest.mark.asyncio
+    async def test_fill_first_avoids_near_full_worker(self) -> None:
+        """select_worker with fill-first avoids near-capacity workers."""
+        registry = WorkerRegistry()
+
+        # Worker nearly full (> 80% of 64 = 51.2)
+        await registry.update_worker(
+            "http://worker-full:8080",
+            {
+                "name": "worker-full",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["model-a"],
+                "models": [{"name": "model-a", "queue_depth": 55}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # Worker with moderate fill
+        await registry.update_worker(
+            "http://worker-moderate:8080",
+            {
+                "name": "worker-moderate",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["model-a"],
+                "models": [{"name": "model-a", "queue_depth": 20}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        with patch("sie_router.registry.FILL_FIRST_ENABLED", True):
+            worker = registry.select_worker()
+            assert worker is not None
+            assert worker.name == "worker-moderate"
+
+    @pytest.mark.asyncio
+    async def test_legacy_scoring_when_fill_first_disabled(self) -> None:
+        """select_worker uses lowest-queue-depth when fill-first is disabled."""
+        registry = WorkerRegistry()
+
+        # Worker with high queue
+        await registry.update_worker(
+            "http://worker-busy:8080",
+            {
+                "name": "worker-busy",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["model-a"],
+                "models": [{"name": "model-a", "queue_depth": 30}],
+            },
+        )
+
+        # Worker with low queue
+        await registry.update_worker(
+            "http://worker-idle:8080",
+            {
+                "name": "worker-idle",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["model-a"],
+                "models": [{"name": "model-a", "queue_depth": 2}],
+            },
+        )
+
+        # With fill-first disabled, should prefer lowest queue depth
+        with patch("sie_router.registry.FILL_FIRST_ENABLED", False):
+            worker = registry.select_worker()
+            assert worker is not None
+            assert worker.name == "worker-idle"
+
+    @pytest.mark.asyncio
+    async def test_max_batch_requests_extracted_from_status(self) -> None:
+        """update_worker extracts max_batch_requests from status message."""
+        registry = WorkerRegistry()
+
+        await registry.update_worker(
+            "http://worker-0:8080",
+            {
+                "name": "worker-0",
+                "ready": True,
+                "machine_profile": "l4",
+                "max_batch_requests": 128,
+            },
+        )
+
+        worker = registry.get_worker("http://worker-0:8080")
+        assert worker is not None
+        assert worker.max_batch_requests == 128
+
+    @pytest.mark.asyncio
+    async def test_max_batch_requests_defaults_to_64(self) -> None:
+        """max_batch_requests defaults to 64 when not in status message."""
+        registry = WorkerRegistry()
+
+        await registry.update_worker(
+            "http://worker-0:8080",
+            {"name": "worker-0", "ready": True, "machine_profile": "l4"},
+        )
+
+        worker = registry.get_worker("http://worker-0:8080")
+        assert worker is not None
+        assert worker.max_batch_requests == 64

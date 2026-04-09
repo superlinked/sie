@@ -173,6 +173,19 @@ Health gate hook: Router readiness SA name
 {{- end }}
 
 {{/*
+Validation: NATS install/enabled consistency.
+Fails if nats.install=true but nats.enabled=false (NATS deploys but nothing connects).
+*/}}
+{{- define "sie-cluster.validateNats" -}}
+{{- if and .Values.nats.install (not .Values.nats.enabled) }}
+{{- fail "Invalid configuration: nats.install=true but nats.enabled=false. NATS will be deployed but nothing will connect to it. Set nats.enabled=true or nats.install=false." }}
+{{- end }}
+{{- if and (not .Values.nats.install) .Values.nats.enabled (not .Values.nats.url) }}
+{{- fail "Invalid configuration: nats.enabled=true but nats.install=false and nats.url is empty. Either set nats.install=true for in-cluster NATS, or provide nats.url for an external NATS server." }}
+{{- end }}
+{{- end }}
+
+{{/*
 KEDA apply hook: ServiceAccount name
 */}}
 {{- define "sie-cluster.keda.apply.serviceAccountName" -}}

@@ -32,7 +32,8 @@ import {
   type EncodeResult,
   SIEClient,
   type SIEClientOptions,
-  toNumberArray,
+  denseEmbedding,
+  sparseEmbedding,
 } from "@superlinked/sie-sdk";
 import type { IEmbeddingFunction } from "chromadb";
 
@@ -157,18 +158,7 @@ export class SIEEmbeddingFunction implements IEmbeddingFunction {
     };
 
     const results = await this.client.encode(this.model, items, options);
-    return (results as EncodeResult[]).map((result) => this.extractDense(result));
-  }
-
-  /**
-   * Extract dense embedding from encode result.
-   */
-  private extractDense(result: EncodeResult): number[] {
-    const dense = result.dense;
-    if (!dense) {
-      throw new Error("Encode result missing dense embedding");
-    }
-    return toNumberArray(dense);
+    return (results as EncodeResult[]).map((result) => denseEmbedding(result));
   }
 
   /**
@@ -286,7 +276,7 @@ export class SIESparseEmbeddingFunction {
     };
 
     const results = await this.client.encode(this.model, items, options);
-    return (results as EncodeResult[]).map((result) => this.extractSparse(result));
+    return (results as EncodeResult[]).map((result) => sparseEmbedding(result));
   }
 
   /**
@@ -310,21 +300,6 @@ export class SIESparseEmbeddingFunction {
       }
       return dict;
     });
-  }
-
-  /**
-   * Extract sparse embedding from encode result.
-   */
-  private extractSparse(result: EncodeResult): SparseEmbedding {
-    const sparse = result.sparse;
-    if (!sparse) {
-      return { indices: [], values: [] };
-    }
-
-    return {
-      indices: toNumberArray(sparse.indices),
-      values: toNumberArray(sparse.values),
-    };
   }
 
   /**

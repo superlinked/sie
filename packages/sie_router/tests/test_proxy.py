@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import msgpack
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -25,6 +26,7 @@ from sie_router.proxy import (
     _make_unconfigured_gpu_response,
     _mask_token,
     _resolve_machine_profile,
+    _response_content_key,
     audit_logger,
     router,
 )
@@ -1061,3 +1063,166 @@ class TestVersionHeader:
                 json={"text": "hello"},
             )
             assert warned_set == {"0.1"}
+
+
+# =============================================================================
+# Queue-mode response assembly tests
+# =============================================================================
+
+
+def _make_queue_result(
+    item_index: int,
+    result_data: dict | list,
+    *,
+    success: bool = True,
+) -> dict:
+    """Build a minimal WorkResult-like dict for queue-mode tests."""
+    result: dict = {
+        "work_item_id": f"req.{item_index}",
+        "request_id": "req",
+        "item_index": item_index,
+        "success": success,
+    }
+    if success:
+        result["result_msgpack"] = msgpack.packb(result_data, use_bin_type=True)
+    return result
+
+
+class TestQueueModeResponseKey:
+    """Regression tests for queue-mode response key selection.
+
+    The score endpoint must return ``"scores"`` (not ``"items"``) to match the
+    SDK ``ScoreResult`` type.  The encode/extract endpoints must keep ``"items"``.
+    Covers both JSON and msgpack response paths.
+    """
+
+    @pytest.fixture
+    def queue_client(self, app: FastAPI, registry: MagicMock) -> TestClient:
+        """TestClient wired for queue routing mode."""
+        app.state.registry = registry
+        app.state.work_publisher = MagicMock()
+        registry.resolve_queue_pool.return_value = "_default"
+        return TestClient(app)
+
+    def _patch_queue_mode(self):
+        return patch("sie_router.proxy.CLUSTER_ROUTING_MODE", "queue")
+
+    # -- JSON response path --
+
+    def test_score_json_uses_scores_key(self, queue_client: TestClient) -> None:
+        """Queue-mode /v1/score JSON response has top-level ``"scores"`` key."""
+        scores_list = [
+            {"item_id": "doc-0", "score": 0.95, "rank": 0},
+            {"item_id": "doc-1", "score": 0.42, "rank": 1},
+        ]
+        queue_client.app.state.work_publisher.submit_score = AsyncMock(
+            return_value=[_make_queue_result(0, scores_list)]
+        )
+
+        with self._patch_queue_mode():
+            response = queue_client.post(
+                "/v1/score/test-reranker",
+                json={
+                    "query": {"text": "What is ML?"},
+                    "items": [{"text": "ML is AI."}, {"text": "Cooking recipe."}],
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "scores" in data, f"Expected 'scores' key, got keys: {list(data.keys())}"
+        assert "items" not in data
+        assert data["scores"] == scores_list
+
+    def test_encode_json_uses_items_key(self, queue_client: TestClient) -> None:
+        """Queue-mode /v1/encode JSON response has top-level ``"items"`` key."""
+        queue_client.app.state.work_publisher.submit_encode = AsyncMock(
+            return_value=[
+                _make_queue_result(0, {"dense": [0.1, 0.2]}),
+                _make_queue_result(1, {"dense": [0.3, 0.4]}),
+            ]
+        )
+
+        with self._patch_queue_mode():
+            response = queue_client.post(
+                "/v1/encode/test-model",
+                json={"items": [{"text": "hello"}, {"text": "world"}]},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "items" in data, f"Expected 'items' key, got keys: {list(data.keys())}"
+        assert "scores" not in data
+
+    # -- Msgpack response path --
+
+    def test_score_msgpack_uses_scores_key(self, queue_client: TestClient) -> None:
+        """Queue-mode /v1/score msgpack response has top-level ``"scores"`` key."""
+        scores_list = [
+            {"item_id": "doc-0", "score": 0.95, "rank": 0},
+            {"item_id": "doc-1", "score": 0.42, "rank": 1},
+        ]
+        queue_client.app.state.work_publisher.submit_score = AsyncMock(
+            return_value=[_make_queue_result(0, scores_list)]
+        )
+
+        with self._patch_queue_mode():
+            response = queue_client.post(
+                "/v1/score/test-reranker",
+                headers={
+                    "Accept": "application/x-msgpack",
+                    "Content-Type": "application/x-msgpack",
+                },
+                content=msgpack.packb(
+                    {
+                        "query": {"text": "What is ML?"},
+                        "items": [{"text": "ML is AI."}, {"text": "Cooking recipe."}],
+                    },
+                    use_bin_type=True,
+                ),
+            )
+
+        assert response.status_code == 200
+        data = msgpack.unpackb(response.content, raw=False)
+        assert "scores" in data, f"Expected 'scores' key, got keys: {list(data.keys())}"
+        assert "items" not in data
+        assert data["scores"] == scores_list
+
+    def test_encode_msgpack_uses_items_key(self, queue_client: TestClient) -> None:
+        """Queue-mode /v1/encode msgpack response has top-level ``"items"`` key."""
+        queue_client.app.state.work_publisher.submit_encode = AsyncMock(
+            return_value=[
+                _make_queue_result(0, {"dense": [0.1, 0.2]}),
+            ]
+        )
+
+        with self._patch_queue_mode():
+            response = queue_client.post(
+                "/v1/encode/test-model",
+                headers={
+                    "Accept": "application/x-msgpack",
+                    "Content-Type": "application/x-msgpack",
+                },
+                content=msgpack.packb(
+                    {"items": [{"text": "hello"}]},
+                    use_bin_type=True,
+                ),
+            )
+
+        assert response.status_code == 200
+        data = msgpack.unpackb(response.content, raw=False)
+        assert "items" in data, f"Expected 'items' key, got keys: {list(data.keys())}"
+        assert "scores" not in data
+
+
+class TestResponseContentKey:
+    """Tests for the _response_content_key helper."""
+
+    def test_score_returns_scores(self) -> None:
+        assert _response_content_key("score") == "scores"
+
+    def test_encode_returns_items(self) -> None:
+        assert _response_content_key("encode") == "items"
+
+    def test_extract_returns_items(self) -> None:
+        assert _response_content_key("extract") == "items"

@@ -84,6 +84,41 @@ class StorageBackend(ABC):
         """
 
     @abstractmethod
+    def write_text(self, path: str, content: str) -> None:
+        """Write text content to a file.
+
+        Args:
+            path: Path to write.
+            content: Text content to write.
+        """
+
+    def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
+        """Conditional write: write only if current content matches expected.
+
+        Used for compare-and-swap on epoch files. Subclasses MUST override
+        this method with an atomic implementation appropriate for the backend.
+
+        Args:
+            path: Path to write.
+            content: New content to write.
+            expected_content: Expected current content. Empty string means
+                the file must not exist (create-only semantics). Cloud
+                backends (S3, GCS) use precondition headers that reject
+                writes if the object already exists, even if it is empty.
+                Local backends treat a missing file as matching empty
+                expected content.
+
+        Returns:
+            True if write succeeded, False if content didn't match.
+
+        Raises:
+            NotImplementedError: Always. Subclasses must provide atomic CAS.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must override write_text_if_match with an atomic implementation"
+        )
+
+    @abstractmethod
     def upload_file(self, src: Path, dst: str) -> None:
         """Upload a local file to the storage backend.
 
@@ -138,6 +173,95 @@ class LocalBackend(StorageBackend):
     def read_text(self, path: str) -> str:
         """Read text from local file."""
         return Path(path).read_text()
+
+    def write_text(self, path: str, content: str) -> None:
+        """Write text to local file."""
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+
+    def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
+        """Atomic CAS on local filesystem using file locking."""
+        import sys
+
+        p = Path(path)
+
+        if sys.platform == "win32":
+            # Windows: use msvcrt for file locking (lock entire file, not just 1 byte)
+            import msvcrt
+
+            if not p.exists():
+                if expected_content != "":
+                    return False  # Expected content but file doesn't exist
+                # Create-new case: exclusive create with read-write mode
+                # so we can lock before writing.
+                p.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with p.open("xb+") as f:
+                        # Lock immediately after exclusive create
+                        content_bytes = content.encode()
+                        file_len = max(len(content_bytes), 1)
+                        msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, file_len)
+                        try:
+                            f.write(content_bytes)
+                            f.flush()
+                        finally:
+                            f.seek(0)
+                            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, file_len)
+                        return True
+                except FileExistsError:
+                    return False
+            else:
+                with p.open("r+") as f:
+                    # Lock the entire file by determining its size first
+                    f.seek(0, 2)  # Seek to end
+                    file_len = f.tell() or 1
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, file_len)
+                    try:
+                        current = f.read()
+                        if current != expected_content:
+                            return False
+                        f.seek(0)
+                        f.write(content)
+                        f.truncate()
+                        return True
+                    finally:
+                        f.seek(0)
+                        new_len = max(file_len, f.seek(0, 2)) or 1
+                        f.seek(0)
+                        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, new_len)
+        else:
+            import fcntl
+
+            if not p.exists():
+                if expected_content != "":
+                    return False  # Expected content but file doesn't exist
+                # Create-new case: exclusive create to prevent TOCTOU race
+                p.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with p.open("x") as f:
+                        fcntl.flock(f, fcntl.LOCK_EX)
+                        try:
+                            f.write(content)
+                            return True
+                        finally:
+                            fcntl.flock(f, fcntl.LOCK_UN)
+                except FileExistsError:
+                    return False  # Another writer created the file first
+            else:
+                with p.open("r+") as f:
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    try:
+                        current = f.read()
+                        if current != expected_content:
+                            return False
+                        f.seek(0)
+                        f.write(content)
+                        f.truncate()
+                        return True
+                    finally:
+                        fcntl.flock(f, fcntl.LOCK_UN)
 
     def upload_file(self, src: Path, dst: str) -> None:
         """Copy a local file to destination."""
@@ -269,6 +393,72 @@ class S3Backend(StorageBackend):
         bucket, key = self._parse_s3_url(path)
         response = client.get_object(Bucket=bucket, Key=key)
         return response["Body"].read().decode("utf-8")
+
+    def write_text(self, path: str, content: str) -> None:
+        """Write text content to S3."""
+        client = self._get_client()
+        bucket, key = self._parse_s3_url(path)
+        client.put_object(Bucket=bucket, Key=key, Body=content.encode("utf-8"))
+
+    def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
+        """Conditional write to S3 using ETags for compare-and-swap.
+
+        Uses S3 conditional writes:
+        - If expected_content is empty: use IfNoneMatch='*' (create-only, epoch=0)
+        - Otherwise: read current ETag, compare content, use IfMatch for write
+
+        .. warning:: Compatibility
+
+            S3 conditional writes (``IfNoneMatch``, ``IfMatch``) are only
+            supported on **general purpose buckets** (available since August
+            2024).  On S3-compatible stores (MinIO, Ceph, R2) these headers
+            may be silently ignored, degrading CAS to an unconditional
+            overwrite.  If you use a non-AWS S3-compatible backend, verify
+            that conditional writes are enforced, or fall back to an
+            external locking mechanism (e.g. DynamoDB).
+        """
+        client = self._get_client()
+        bucket, key = self._parse_s3_url(path)
+
+        if not expected_content.strip():
+            # First epoch (0) — object should not exist yet
+            try:
+                client.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=content.encode("utf-8"),
+                    IfNoneMatch="*",
+                )
+                return True
+            except client.exceptions.ClientError as e:
+                if e.response["Error"]["Code"] in ("PreconditionFailed", "ConditionalRequestConflict"):
+                    return False
+                raise
+        else:
+            # Read current content and ETag
+            try:
+                response = client.get_object(Bucket=bucket, Key=key)
+                current = response["Body"].read().decode("utf-8")
+                etag = response["ETag"]
+            except client.exceptions.NoSuchKey:
+                return False  # Expected content but object doesn't exist
+
+            if current.strip() != expected_content.strip():
+                return False
+
+            # Write with ETag condition
+            try:
+                client.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=content.encode("utf-8"),
+                    IfMatch=etag,
+                )
+                return True
+            except client.exceptions.ClientError as e:
+                if e.response["Error"]["Code"] in ("PreconditionFailed", "ConditionalRequestConflict"):
+                    return False
+                raise
 
     def upload_file(self, src: Path, dst: str) -> None:
         """Upload file to S3 with multipart for large files."""
@@ -419,6 +609,66 @@ class GCSBackend(StorageBackend):
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
         return blob.download_as_text()
+
+    def write_text(self, path: str, content: str) -> None:
+        """Write text content to GCS."""
+        client = self._get_client()
+        bucket_name, blob_path = self._parse_gcs_url(path)
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(content, content_type="text/plain")
+
+    def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
+        """Conditional write to GCS using generation-based preconditions.
+
+        Uses GCS generation numbers:
+        - If expected_content is empty: use if_generation_match=0 (create-only, epoch=0)
+        - Otherwise: read current generation, compare content, use if_generation_match for write
+        """
+        from google.api_core.exceptions import NotFound, PreconditionFailed
+
+        client = self._get_client()
+        bucket_name, blob_path = self._parse_gcs_url(path)
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+
+        if not expected_content.strip():
+            # First epoch (0) — object should not exist yet
+            try:
+                blob.upload_from_string(
+                    content,
+                    content_type="text/plain",
+                    if_generation_match=0,
+                )
+                return True
+            except PreconditionFailed:
+                return False
+        else:
+            # Read current content and generation atomically.
+            # blob.reload() fetches metadata (including generation), then
+            # download_as_text() reads the object body.  If the object is
+            # mutated between these two calls the generation captured here
+            # will be stale and the conditional upload below will correctly
+            # fail with PreconditionFailed, preserving CAS semantics.
+            try:
+                blob.reload()
+                generation = blob.generation
+                current = blob.download_as_text()
+            except NotFound:
+                return False
+
+            if current.strip() != expected_content.strip():
+                return False
+
+            try:
+                blob.upload_from_string(
+                    content,
+                    content_type="text/plain",
+                    if_generation_match=generation,
+                )
+                return True
+            except PreconditionFailed:
+                return False
 
     def upload_file(self, src: Path, dst: str) -> None:
         """Upload file to GCS."""

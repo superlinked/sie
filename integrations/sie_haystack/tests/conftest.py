@@ -21,9 +21,19 @@ DEFAULT_MULTIVECTOR_TOKEN_DIM = 128
 
 
 def _get_text(item: Any) -> str:
-    """Extract text from an item (dict or object with text attribute)."""
+    """Extract text from an item (dict or object with text attribute).
+
+    For image-only items (no text but has images), returns a deterministic
+    placeholder so the mock can still produce consistent embeddings.
+    """
     if isinstance(item, dict):
-        return item.get("text", str(item))
+        text = item.get("text")
+        if text:
+            return text
+        images = item.get("images")
+        if images:
+            return f"<image:{len(images)}>"
+        return str(item)
     if hasattr(item, "text"):
         return item.text
     return str(item)
@@ -203,6 +213,18 @@ def test_ner_labels() -> list[str]:
 def haystack_documents(test_documents: list[str]) -> list[Document]:
     """Convert test documents to Haystack Document objects."""
     return [Document(content=text) for text in test_documents]
+
+
+@pytest.fixture
+def test_image_paths() -> list[str]:
+    """Sample image paths for testing multimodal embeddings."""
+    return ["photo_of_cat.jpg", "diagram.png"]
+
+
+@pytest.fixture
+def test_image_bytes() -> list[bytes]:
+    """Sample image bytes for testing multimodal embeddings."""
+    return [b"\xff\xd8\xff\xe0" + b"\x00" * 100, b"\xff\xd8\xff\xe0" + b"\x00" * 200]
 
 
 @pytest.fixture

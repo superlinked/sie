@@ -52,7 +52,7 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
         model_name_or_path: str | Path,
         *,
         trust_remote_code: bool = True,
-        max_length: int = 8192,
+        max_seq_length: int = 8192,
         compute_precision: ComputePrecision = "bfloat16",
         **kwargs: Any,
     ) -> None:
@@ -61,14 +61,14 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
         Args:
             model_name_or_path: HuggingFace model ID or local path.
             trust_remote_code: Whether to trust remote code (required for Jina).
-            max_length: Maximum sequence length for query+document.
+            max_seq_length: Maximum sequence length for query+document.
             compute_precision: Compute precision (bfloat16 recommended for Jina).
             **kwargs: Additional arguments (ignored).
         """
         _ = kwargs
         self._model_name_or_path = str(model_name_or_path)
         self._trust_remote_code = trust_remote_code
-        self._max_length = max_length
+        self._max_seq_length = max_seq_length
         self._compute_precision = compute_precision
 
         # Loaded state
@@ -211,7 +211,7 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
         encodings = self._tokenizer(
             [p[0] for p in pairs],
             [p[1] for p in pairs],
-            max_length=self._max_length,
+            max_length=self._max_seq_length,
             truncation=True,
             padding=True,
             return_tensors="pt",
@@ -260,7 +260,7 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
             raise RuntimeError(_ERR_NOT_LOADED)
 
         opts = options or {}
-        max_length = opts.get("max_length", self._max_length)
+        max_length = opts.get("max_seq_length", self._max_seq_length)
 
         # Build (query, doc) pairs
         pairs = []

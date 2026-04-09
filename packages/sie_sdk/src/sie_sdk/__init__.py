@@ -23,6 +23,14 @@ from sie_sdk.client import (
     SIEConnectionError,
     SIEError,
 )
+from sie_sdk.encoding import (
+    SparseVector,
+    dense_embedding,
+    multivector_embedding,
+    normalize_sparse_vector,
+    sparse_embedding,
+    sparse_embedding_dict,
+)
 from sie_sdk.types import (
     # Response types
     AssignedWorkerInfo,
@@ -53,7 +61,6 @@ from sie_sdk.types import (
 __version__ = "0.1.0"
 
 __all__ = [
-    # Response types
     "AssignedWorkerInfo",
     "CapacityInfo",
     "ClusterStatusMessage",
@@ -62,9 +69,7 @@ __all__ = [
     "Entity",
     "ExtractResult",
     "HealthResponse",
-    # Input types
     "Item",
-    # Exceptions
     "LoraLoadingError",
     "ModelInfo",
     "ModelLoadingError",
@@ -78,7 +83,6 @@ __all__ = [
     "PoolStatusInfo",
     "ProvisioningError",
     "RequestError",
-    # Clients
     "SIEAsyncClient",
     "SIEClient",
     "SIEConnectionError",
@@ -86,8 +90,14 @@ __all__ = [
     "ScoreResult",
     "ServerError",
     "SparseResult",
+    "SparseVector",
     "StatusMessage",
     "TimingInfo",
     "WorkerInfo",
     "WorkerStatusMessage",
+    "dense_embedding",
+    "multivector_embedding",
+    "normalize_sparse_vector",
+    "sparse_embedding",
+    "sparse_embedding_dict",
 ]

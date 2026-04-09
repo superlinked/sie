@@ -28,13 +28,14 @@ Hybrid search example:
     ... )
 """
 
-from sie_llamaindex.embeddings import SIEEmbedding, SIESparseEmbeddingFunction
+from sie_llamaindex.embeddings import SIEEmbedding, SIEMultiModalEmbedding, SIESparseEmbeddingFunction
 from sie_llamaindex.extractors import SIEExtractorTool, create_sie_extractor_tool
 from sie_llamaindex.rerankers import SIENodePostprocessor
 
 __all__ = [
     "SIEEmbedding",
     "SIEExtractorTool",
+    "SIEMultiModalEmbedding",
     "SIENodePostprocessor",
     "SIESparseEmbeddingFunction",
     "create_sie_extractor_tool",

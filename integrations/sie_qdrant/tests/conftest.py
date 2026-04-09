@@ -16,6 +16,7 @@ import pytest
 
 EMBEDDING_DIM = 384
 SPARSE_DIM = 30522  # BERT vocab size
+MULTIVECTOR_TOKEN_DIM = 128
 
 
 def _create_mock_encode_result(
@@ -23,6 +24,7 @@ def _create_mock_encode_result(
     *,
     include_dense: bool = True,
     include_sparse: bool = False,
+    include_multivector: bool = False,
 ) -> list[dict]:
     """Create mock encode results with deterministic embeddings."""
     results = []
@@ -43,6 +45,10 @@ def _create_mock_encode_result(
                 "indices": np.sort(rng.choice(SPARSE_DIM, num_nonzero, replace=False)).astype(np.int32),
                 "values": rng.uniform(0, 1, num_nonzero).astype(np.float32),
             }
+
+        if include_multivector:
+            num_tokens = len(text.split()) + 2
+            result["multivector"] = rng.standard_normal((num_tokens, MULTIVECTOR_TOKEN_DIM)).astype(np.float32)
 
         results.append(result)
 
@@ -74,15 +80,26 @@ def mock_sie_client() -> MagicMock:
         output_types = output_types or ["dense"]
         include_dense = "dense" in output_types
         include_sparse = "sparse" in output_types
+        include_multivector = "multivector" in output_types
 
         if not isinstance(items, list):
             items = [items]
             item_dicts = [{"text": _get_text(items[0])}]
-            results = _create_mock_encode_result(item_dicts, include_dense=include_dense, include_sparse=include_sparse)
+            results = _create_mock_encode_result(
+                item_dicts,
+                include_dense=include_dense,
+                include_sparse=include_sparse,
+                include_multivector=include_multivector,
+            )
             return results[0]
 
         item_dicts = [{"text": _get_text(i)} for i in items]
-        return _create_mock_encode_result(item_dicts, include_dense=include_dense, include_sparse=include_sparse)
+        return _create_mock_encode_result(
+            item_dicts,
+            include_dense=include_dense,
+            include_sparse=include_sparse,
+            include_multivector=include_multivector,
+        )
 
     client.encode = MagicMock(side_effect=mock_encode)
     client.base_url = "http://localhost:8080"

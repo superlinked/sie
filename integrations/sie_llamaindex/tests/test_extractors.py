@@ -15,7 +15,7 @@ class TestSIEExtractorTool:
             labels=["person", "organization"],
         )
 
-        assert tool.metadata.name == "sie_extract_entities"
+        assert tool.metadata.name == "sie_extract"
         assert "person" in tool.metadata.description
         assert "organization" in tool.metadata.description
 
@@ -35,11 +35,14 @@ class TestSIEExtractorTool:
 
         result = extractor.extract("John Smith works at Acme Corp in New York")
 
-        assert isinstance(result, list)
+        assert isinstance(result, dict)
+        assert "entities" in result
+        assert "relations" in result
+        assert "classifications" in result
+        assert "objects" in result
         # Mock uses probabilistic entity extraction, so result may be empty
-        if len(result) > 0:
-            # Check entity structure if entities were extracted
-            entity = result[0]
+        if len(result["entities"]) > 0:
+            entity = result["entities"][0]
             assert "text" in entity
             assert "label" in entity
             assert "score" in entity

@@ -157,6 +157,42 @@ export interface Entity {
 }
 
 /**
+ * A relation triple between two entities.
+ */
+export interface Relation {
+  /** Head entity text */
+  head: string;
+  /** Tail entity text */
+  tail: string;
+  /** Relation type label (e.g., "works_at", "founded_by") */
+  relation: string;
+  /** Confidence score */
+  score: number;
+}
+
+/**
+ * A text classification result.
+ */
+export interface Classification {
+  /** Classification label (e.g., "positive", "negative") */
+  label: string;
+  /** Confidence score */
+  score: number;
+}
+
+/**
+ * A detected object with bounding box.
+ */
+export interface DetectedObject {
+  /** Object class label (e.g., "person", "car") */
+  label: string;
+  /** Confidence score */
+  score: number;
+  /** Bounding box [x, y, width, height] */
+  bbox: number[];
+}
+
+/**
  * Result of extraction for a single item.
  */
 export interface ExtractResult {
@@ -164,6 +200,12 @@ export interface ExtractResult {
   id?: string;
   /** List of extracted entities */
   entities: Entity[];
+  /** List of extracted relation triples */
+  relations: Relation[];
+  /** List of classification results */
+  classifications: Classification[];
+  /** List of detected objects */
+  objects: DetectedObject[];
 }
 
 /**
@@ -374,8 +416,6 @@ export interface EncodeOptions {
  * Options for score operation.
  */
 export interface ScoreOptions {
-  /** Return only top K results */
-  topK?: number;
   /** GPU type for this request */
   gpu?: string;
   /** Whether to wait for capacity */

@@ -1,3 +1,5 @@
+import asyncio
+import hmac
 import logging
 import os
 import time
@@ -5,6 +7,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+import msgpack
+import msgpack_numpy
+import orjson
 from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sie_sdk.types import PoolListItem, PoolResponse
@@ -22,8 +27,83 @@ from sie_router.registry import WorkerRegistry
 from sie_router.responses import pool_to_list_item, pool_to_response
 from sie_router.types import AuditEntry, ProvisioningResponse
 from sie_router.version import ROUTER_VERSION, SDK_VERSION_HEADER
+from sie_router.work_publisher import NoConsumersError, WorkPublisher
+
+# NOTE: We do NOT call msgpack_numpy.patch() globally.  That monkey-patches
+# msgpack.packb/unpackb with numpy-aware wrappers that add overhead on every
+# call (~0.6% of total CPU).  The router never serializes numpy arrays; it
+# passes worker result blobs through as raw bytes on the msgpack response path.
+# Only the JSON response path needs numpy deserialization, and that uses
+# msgpack_numpy.unpackb explicitly (see ``_unpack_with_numpy``).
+
+# Cluster routing mode: "direct" (HTTP forwarding, default) or "queue" (NATS JetStream).
+# Read once at import time; override via monkeypatch in tests.
+CLUSTER_ROUTING_MODE = os.environ.get("SIE_CLUSTER_ROUTING", "direct").strip().lower()
+
+# Maximum recursion depth for _convert_numpy_for_json to prevent stack overflow
+_MAX_CONVERSION_DEPTH = 128
+
+# Maximum msgpack buffer size for untrusted data (256 MB)
+_MAX_MSGPACK_BUFFER_SIZE = 256 * 1024 * 1024
+
+# Payloads below this threshold are parsed directly on the event loop
+# (json.loads / msgpack.unpackb on small data takes <30μs — less than the
+# ~50μs overhead of asyncio.to_thread).  Larger payloads are offloaded.
+_INLINE_PARSE_THRESHOLD = 65536  # 64 KB
+
+
+def _response_content_key(operation: str) -> str:
+    """Return the top-level response key for the given operation.
+
+    Score responses use ``"scores"`` (matching ``ScoreResult``);
+    all other operations use ``"items"``.
+    """
+    return "scores" if operation == "score" else "items"
+
+
+def _safe_msgpack_unpack(data: bytes) -> Any:
+    """Unpack msgpack data with size limits to prevent memory exhaustion.
+
+    Uses ``msgpack.unpackb`` directly instead of the streaming
+    ``Unpacker`` class — more efficient for single-shot deserialization.
+    """
+    if len(data) > _MAX_MSGPACK_BUFFER_SIZE:
+        raise ValueError(f"msgpack payload too large: {len(data)} bytes (max {_MAX_MSGPACK_BUFFER_SIZE})")
+    return msgpack.unpackb(data, raw=False)
+
 
 logger = logging.getLogger(__name__)
+
+
+def _unpack_with_numpy(data: bytes) -> Any:
+    """Unpack msgpack data that may contain numpy ext types (worker results).
+
+    Uses ``msgpack_numpy.unpackb`` directly instead of the global monkey-patch
+    so the hot-path ``msgpack.unpackb`` stays fast for non-numpy data.
+    Only called on the JSON response path (inside ``asyncio.to_thread``).
+    """
+    if len(data) > _MAX_MSGPACK_BUFFER_SIZE:
+        raise ValueError(f"msgpack payload too large: {len(data)} bytes (max {_MAX_MSGPACK_BUFFER_SIZE})")
+    return msgpack_numpy.unpackb(data, raw=False)
+
+
+def _convert_numpy_for_json(obj: Any, _depth: int = 0) -> Any:
+    """Recursively convert numpy arrays to lists for JSON serialization."""
+    import numpy as np
+
+    if _depth > _MAX_CONVERSION_DEPTH:
+        return obj  # Bail out to avoid stack overflow
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _convert_numpy_for_json(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_convert_numpy_for_json(v, _depth + 1) for v in obj]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    return obj
 
 
 class _AsyncIterStream(httpx.AsyncByteStream):
@@ -90,6 +170,9 @@ def _check_sdk_version(request: Request) -> None:
                 ROUTER_VERSION,
             )
             _sdk_version_warned.add(key)
+            # Cap to prevent unbounded growth from malicious version strings
+            if len(_sdk_version_warned) > 100:
+                _sdk_version_warned.clear()
     except (ValueError, IndexError):
         pass
 
@@ -127,7 +210,7 @@ def _require_auth(request: Request) -> None:
     if header.lower().startswith("bearer "):
         token = header[7:].strip()
 
-    if token not in AUTH_TOKENS:
+    if not any(hmac.compare_digest(token, valid) for valid in AUTH_TOKENS):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"message": "Invalid token"},
@@ -412,6 +495,22 @@ async def _proxy_request(
             )
             return _make_unconfigured_gpu_response(gpu, CONFIGURED_GPU_TYPES)
 
+    # Queue mode: publish to NATS JetStream instead of forwarding to worker.
+    # Workers subscribe to pool-level streams keyed by their SIE_POOL env var
+    # (e.g., "l4-spot-default").  Resolve the NATS pool name from the worker
+    # registry so the published subject matches the worker's subscription.
+    if CLUSTER_ROUTING_MODE == "queue":
+        queue_pool = pool_name or registry.resolve_queue_pool(bundle, gpu) or gpu or effective_pool or "_default"
+        return await _queue_request(
+            request=request,
+            model_name=model_name,
+            profile_id="default",  # Profile resolved by workers from model config
+            bundle=bundle,
+            pool_name=queue_pool,
+            machine_profile=gpu or "",
+            path=path,
+        )
+
     # Pool-aware routing (explicit pool or default pool)
     worker = None
     if pool_manager:
@@ -565,6 +664,333 @@ async def _proxy_request(
             status=status_code,
             latency_ms=round(elapsed * 1000, 1),
             body_bytes=body_bytes,
+        )
+
+
+def _compute_timing_headers(
+    results: list[Any],
+    publish_ms: float,
+    wait_ms: float,
+) -> dict[str, str]:
+    """Compute aggregate timing headers from queue-mode results."""
+    headers: dict[str, str] = {}
+
+    # Router-side timing
+    headers["X-Queue-Publish-Time"] = f"{publish_ms:.1f}"
+    headers["X-Queue-Wait-Time"] = f"{wait_ms:.1f}"
+
+    # Worker-side timing (aggregate across all items)
+    successful = [r for r in results if r.get("success")]
+    if successful:
+        # Use max values (worst-case latency across items)
+        queue_ms = max(r.get("queue_ms", 0) for r in successful)
+        inference_ms = max(r.get("inference_ms", 0) for r in successful)
+        tokenization_ms = max(r.get("tokenization_ms", 0) for r in successful)
+        postprocessing_ms = max(r.get("postprocessing_ms", 0) for r in successful)
+        payload_fetch_ms = max(r.get("payload_fetch_ms", 0) for r in successful)
+
+        headers["X-Queue-Time"] = f"{queue_ms:.1f}"
+        headers["X-Inference-Time"] = f"{inference_ms:.1f}"
+        if tokenization_ms > 0:
+            headers["X-Tokenization-Time"] = f"{tokenization_ms:.1f}"
+        if postprocessing_ms > 0:
+            headers["X-Postprocessing-Time"] = f"{postprocessing_ms:.1f}"
+        if payload_fetch_ms > 0:
+            headers["X-Payload-Fetch-Time"] = f"{payload_fetch_ms:.1f}"
+
+    return headers
+
+
+async def _queue_request(
+    request: Request,
+    model_name: str,
+    profile_id: str,
+    bundle: str,
+    pool_name: str,
+    machine_profile: str,
+    path: str,
+) -> Response:
+    """Handle request via NATS JetStream work queue (cluster queue mode).
+
+    Parses the request body, decomposes it into work items, publishes to
+    JetStream, and waits for results. This replaces ``_forward_request``
+    when ``SIE_CLUSTER_ROUTING=queue``.
+
+    """
+    work_publisher: WorkPublisher | None = getattr(request.app.state, "work_publisher", None)
+    if work_publisher is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "nats_unavailable", "message": "NATS JetStream not configured"},
+        )
+
+    # Parse request body
+    body = await request.body()
+    content_type = request.headers.get("content-type", "")
+
+    try:
+        if len(body) <= _INLINE_PARSE_THRESHOLD:
+            # Small payload: parse on the event loop (faster than thread hop)
+            if "msgpack" in content_type:
+                parsed = _safe_msgpack_unpack(body)
+            else:
+                parsed = orjson.loads(body)
+        elif "msgpack" in content_type:
+            parsed = await asyncio.to_thread(_safe_msgpack_unpack, body)
+        else:
+            if len(body) > _MAX_MSGPACK_BUFFER_SIZE:
+                raise ValueError(f"JSON payload too large: {len(body)} bytes (max {_MAX_MSGPACK_BUFFER_SIZE})")
+            parsed = await asyncio.to_thread(orjson.loads, body)
+    except (msgpack.UnpackValueError, orjson.JSONDecodeError, ValueError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "parse_error", "message": f"Invalid request body: {e}"},
+        ) from e
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "parse_error", "message": "Request body must be a JSON object"},
+        )
+    if "items" in parsed and not isinstance(parsed["items"], list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "parse_error", "message": "'items' must be an array"},
+        )
+    if "query" in parsed and not isinstance(parsed["query"], dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "parse_error", "message": "'query' must be an object"},
+        )
+
+    # Compute expected bundle_config_hash for stale-worker gating
+    model_registry: ModelRegistry | None = getattr(request.app.state, "model_registry", None)
+    bundle_config_hash = ""
+    if model_registry is not None:
+        try:
+            bundle_config_hash = model_registry.compute_bundle_config_hash(bundle)
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not compute bundle_config_hash for %s", bundle)
+
+    # Determine operation from path
+    parts = path.strip("/").split("/")
+    operation = parts[1] if len(parts) > 1 else "encode"
+
+    endpoint = operation
+    start_time = time.monotonic()
+    status_code = "500"
+
+    publish_elapsed_ms = 0.0
+    wait_elapsed_ms = 0.0
+
+    try:
+        if operation == "encode":
+            items = parsed.get("items", [])
+            params = parsed.get("params") or {}
+            publish_start = time.monotonic()
+            submit_task = asyncio.ensure_future(
+                work_publisher.submit_encode(
+                    model_id=model_name,
+                    profile_id=profile_id,
+                    pool_name=pool_name,
+                    machine_profile=machine_profile,
+                    items=items,
+                    output_types=params.get("output_types"),
+                    instruction=params.get("instruction"),
+                    is_query=params.get("is_query", False),
+                    options=params.get("options"),
+                    bundle_config_hash=bundle_config_hash,
+                )
+            )
+            results = await submit_task
+            total_elapsed_ms = (time.monotonic() - publish_start) * 1000
+            publish_elapsed_ms = total_elapsed_ms * 0.1  # Approximate: publish is ~10% of total
+            wait_elapsed_ms = total_elapsed_ms
+        elif operation == "score":
+            query = parsed.get("query", {})
+            items = parsed.get("items", [])
+            publish_start = time.monotonic()
+            submit_task = asyncio.ensure_future(
+                work_publisher.submit_score(
+                    model_id=model_name,
+                    profile_id=profile_id,
+                    pool_name=pool_name,
+                    machine_profile=machine_profile,
+                    query=query,
+                    items=items,
+                    instruction=parsed.get("instruction"),
+                    options=parsed.get("options"),
+                    bundle_config_hash=bundle_config_hash,
+                )
+            )
+            results = await submit_task
+            total_elapsed_ms = (time.monotonic() - publish_start) * 1000
+            publish_elapsed_ms = total_elapsed_ms * 0.1
+            wait_elapsed_ms = total_elapsed_ms
+        elif operation == "extract":
+            items = parsed.get("items", [])
+            params = parsed.get("params") or {}
+            publish_start = time.monotonic()
+            submit_task = asyncio.ensure_future(
+                work_publisher.submit_extract(
+                    model_id=model_name,
+                    profile_id=profile_id,
+                    pool_name=pool_name,
+                    machine_profile=machine_profile,
+                    items=items,
+                    labels=params.get("labels"),
+                    output_schema=params.get("output_schema"),
+                    instruction=params.get("instruction"),
+                    options=params.get("options"),
+                    bundle_config_hash=bundle_config_hash,
+                )
+            )
+            results = await submit_task
+            total_elapsed_ms = (time.monotonic() - publish_start) * 1000
+            publish_elapsed_ms = total_elapsed_ms * 0.1
+            wait_elapsed_ms = total_elapsed_ms
+        else:
+            raise HTTPException(status_code=400, detail={"error": f"Unknown operation: {operation}"})
+
+        # Reassemble response from work results.
+        # Each result_msgpack is an opaque msgpack blob from the worker,
+        # serialized with msgpack-numpy (contains numpy ext types).
+        result_blobs: list[bytes] = []
+        errors = []
+        for r in results:
+            if r.get("success"):
+                raw_blob: bytes | None = r.get("result_msgpack")
+                if raw_blob is None:
+                    # Worker reported success but omitted result payload — treat as error
+                    logger.warning(
+                        "Work item %s reported success but missing result_msgpack",
+                        r.get("work_item_id", "unknown"),
+                    )
+                    errors.append(
+                        {
+                            "item_index": r.get("item_index"),
+                            "error": "Worker reported success but returned no result payload",
+                        }
+                    )
+                else:
+                    result_blobs.append(raw_blob)
+            else:
+                errors.append({"item_index": r.get("item_index"), "error": r.get("error")})
+
+        if errors and not result_blobs:
+            # All items failed
+            status_code = "500"
+            return JSONResponse(
+                status_code=500,
+                content={"error": "all_items_failed", "details": errors},
+            )
+
+        status_code = "200"
+
+        # Compute aggregate timing headers from worker results
+        timing_headers = _compute_timing_headers(results, publish_elapsed_ms, wait_elapsed_ms)
+        response_headers = {"X-SIE-Version": ROUTER_VERSION, **timing_headers}
+
+        # Return as msgpack if client accepts it, otherwise JSON
+        if "msgpack" in request.headers.get("accept", ""):
+            # Build the response at the byte level to avoid deserializing
+            # the worker blobs (which contain numpy ext types).
+            # Manually assemble: {"model": ..., "scores"|"items": [...], "errors"?: ...}
+            packer = msgpack.Packer(use_bin_type=True, autoreset=False)
+            n_keys = 3 if errors else 2
+            packer.pack_map_header(n_keys)
+            packer.pack("model")
+            packer.pack(model_name)
+            packer.pack(_response_content_key(operation))
+            if len(result_blobs) == 1 and operation == "score":
+                # Score returns a single blob containing the complete list;
+                # write it directly to avoid wrapping in an extra array.
+                parts = [packer.bytes()]
+                packer.reset()
+                parts.append(result_blobs[0])
+            else:
+                packer.pack_array_header(len(result_blobs))
+                parts = [packer.bytes()]
+                packer.reset()
+                # Embed each result blob directly — they are already valid msgpack values
+                parts.extend(result_blobs)
+            if errors:
+                packer.pack("errors")
+                packer.pack(errors)
+                parts.append(packer.bytes())
+                packer.reset()
+            response_bytes = b"".join(parts)
+            return Response(
+                content=response_bytes,
+                media_type="application/x-msgpack",
+                headers=response_headers,
+            )
+
+        # JSON path: must deserialize blobs (JSON can't embed binary).
+        # Offload to thread pool — this involves msgpack deserialization,
+        # numpy→list conversion, and is CPU-bound for large batches.
+        def _build_json_items(blobs: list[bytes], is_score: bool) -> list:
+            items = []
+            for blob in blobs:
+                item_data = _unpack_with_numpy(blob)
+                items.append(_convert_numpy_for_json(item_data))
+            # Score returns a single blob containing the complete list;
+            # unwrap to avoid nesting it in an extra array.
+            if is_score and len(items) == 1 and isinstance(items[0], list):
+                return items[0]
+            return items
+
+        result_items = await asyncio.to_thread(_build_json_items, result_blobs, operation == "score")
+        response_data: dict[str, Any] = {
+            "model": model_name,
+            _response_content_key(operation): result_items,
+        }
+        if errors:
+            response_data["errors"] = errors
+        return JSONResponse(
+            content=response_data,
+            headers=response_headers,
+        )
+
+    except TimeoutError:
+        status_code = "504"
+        return JSONResponse(
+            status_code=504,
+            content={"error": "timeout", "message": "Work items not completed within timeout"},
+            headers={"X-SIE-Version": ROUTER_VERSION},
+        )
+    except NoConsumersError as e:
+        status_code = "503"
+        logger.info("No consumers for model %s — returning 503", e.model_id)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "no_consumers",
+                "message": str(e),
+            },
+            headers={"Retry-After": str(DEFAULT_RETRY_AFTER), "X-SIE-Version": ROUTER_VERSION},
+        )
+    except RuntimeError as e:
+        if "backpressure" in str(e).lower():
+            status_code = "503"
+            return JSONResponse(
+                status_code=503,
+                content={"error": "service_unavailable", "message": str(e)},
+                headers={"Retry-After": "5", "X-SIE-Version": ROUTER_VERSION},
+            )
+        raise
+    finally:
+        elapsed = time.monotonic() - start_time
+        REQUEST_COUNT.labels(endpoint=endpoint, status=status_code, machine_profile=machine_profile or "queue").inc()
+        REQUEST_LATENCY.labels(endpoint=endpoint, machine_profile=machine_profile or "queue").observe(elapsed)
+        _emit_audit_log(
+            request,
+            endpoint=endpoint,
+            model=model_name,
+            pool=pool_name,
+            gpu=machine_profile,
+            status=status_code,
+            latency_ms=round(elapsed * 1000, 1),
         )
 
 

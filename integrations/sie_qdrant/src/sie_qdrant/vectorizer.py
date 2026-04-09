@@ -12,6 +12,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from sie_sdk import SIEClient
+from sie_sdk.encoding import dense_embedding, multivector_embedding, normalize_sparse_vector
+
 
 class SIEVectorizer:
     """Compute dense embeddings via SIE for Qdrant collections.
@@ -64,8 +67,6 @@ class SIEVectorizer:
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -98,7 +99,7 @@ class SIEVectorizer:
             output_dtype=self._output_dtype,
         )
 
-        return [self._extract_dense(result) for result in results]
+        return [dense_embedding(result) for result in results]
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query text.
@@ -124,15 +125,7 @@ class SIEVectorizer:
             options={"is_query": True},
         )
 
-        return self._extract_dense(result)
-
-    def _extract_dense(self, result: Any) -> list[float]:
-        """Extract dense embedding values from SDK result."""
-        dense = result.get("dense") if isinstance(result, dict) else getattr(result, "dense", None)
-        if dense is None:
-            msg = "Encode result missing dense embedding"
-            raise ValueError(msg)
-        return dense.tolist() if hasattr(dense, "tolist") else list(dense)
+        return dense_embedding(result)
 
 
 class SIENamedVectorizer:
@@ -195,8 +188,6 @@ class SIENamedVectorizer:
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -263,6 +254,7 @@ class SIENamedVectorizer:
         Dense vectors are converted to ``list[float]``.
         Sparse vectors are returned as ``{"indices": list[int], "values": list[float]}``
         matching Qdrant's native ``SparseVector`` format.
+        Multivectors are returned as ``list[list[float]]`` for ColBERT/late-interaction models.
         """
         named: dict[str, Any] = {}
         for output_type in self._output_types:
@@ -270,30 +262,9 @@ class SIENamedVectorizer:
             if raw is None:
                 continue
             if output_type == "sparse":
-                named[output_type] = self._format_sparse(raw)
+                named[output_type] = normalize_sparse_vector(raw)
+            elif output_type == "multivector":
+                named[output_type] = multivector_embedding(raw)
             else:
                 named[output_type] = raw.tolist() if hasattr(raw, "tolist") else list(raw)
         return named
-
-    @staticmethod
-    def _format_sparse(sparse: Any) -> dict[str, list]:
-        """Format SIE sparse output for Qdrant's SparseVector.
-
-        SIE returns sparse vectors as ``{"indices": [...], "values": [...]}``.
-        Qdrant's ``SparseVector`` accepts the same format natively, so we
-        just convert numpy arrays to Python lists.
-
-        Unlike Weaviate (which requires expanding sparse to full vocabulary
-        length), Qdrant stores sparse vectors efficiently in their native
-        indices+values form.
-        """
-        indices = sparse.get("indices") if isinstance(sparse, dict) else getattr(sparse, "indices", None)
-        values = sparse.get("values") if isinstance(sparse, dict) else getattr(sparse, "values", None)
-
-        if indices is None or values is None:
-            return {"indices": [], "values": []}
-
-        indices_list = indices.tolist() if hasattr(indices, "tolist") else list(indices)
-        values_list = values.tolist() if hasattr(values, "tolist") else list(values)
-
-        return {"indices": indices_list, "values": values_list}

@@ -41,7 +41,7 @@ from PIL import Image as PILImage
 
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
-from sie_server.types.responses import Entity
+from sie_server.types.responses import DetectedObject
 
 if TYPE_CHECKING:
     from PIL.Image import Image
@@ -222,7 +222,7 @@ class Owlv2Adapter(ModelAdapter):
             valid_items = [p for p in prepared_items if hasattr(p, "payload") and p.payload is not None]
 
             if not valid_items:
-                return ExtractOutput(entities=[[] for _ in range(n_items)])
+                return ExtractOutput(entities=[[] for _ in range(n_items)], objects=[[] for _ in range(n_items)])
 
             # Stack pixel values and collect metadata
             pixel_values = torch.stack([p.payload.pixel_values for p in valid_items])
@@ -249,7 +249,7 @@ class Owlv2Adapter(ModelAdapter):
                     image_indices.append(idx)
 
             if not images:
-                return ExtractOutput(entities=[[] for _ in range(n_items)])
+                return ExtractOutput(entities=[[] for _ in range(n_items)], objects=[[] for _ in range(n_items)])
 
             # Batched inference with PIL images
             batch_results = self._detect_batch(
@@ -260,11 +260,11 @@ class Owlv2Adapter(ModelAdapter):
             )
 
         # Map results back to original item positions
-        all_entities: list[list[Entity]] = [[] for _ in range(n_items)]
+        all_objects: list[list[DetectedObject]] = [[] for _ in range(n_items)]
         for result_idx, item_idx in enumerate(image_indices):
-            all_entities[item_idx] = batch_results[result_idx]
+            all_objects[item_idx] = batch_results[result_idx]
 
-        return ExtractOutput(entities=all_entities)
+        return ExtractOutput(entities=[[] for _ in range(n_items)], objects=all_objects)
 
     def _detect_batch(
         self,
@@ -275,7 +275,7 @@ class Owlv2Adapter(ModelAdapter):
         pixel_values: torch.Tensor | None = None,
         original_sizes: list[tuple[int, int]] | None = None,
         images: list[Image] | None = None,
-    ) -> list[list[Entity]]:
+    ) -> list[list[DetectedObject]]:
         """Run batched detection on multiple images.
 
         Supports two modes:
@@ -291,7 +291,7 @@ class Owlv2Adapter(ModelAdapter):
             images: List of PIL Images (fallback if pixel_values not provided).
 
         Returns:
-            List of entity lists, one per input image.
+            List of detected object lists, one per input image.
         """
         processor = self._processor
         model = self._model
@@ -370,11 +370,11 @@ class Owlv2Adapter(ModelAdapter):
             threshold=score_threshold,
         )
 
-        # Convert results to Entity format
-        return [self._results_to_entities(result, labels) for result in results]
+        # Convert results to DetectedObject format
+        return [self._results_to_objects(result, labels) for result in results]
 
-    def _results_to_entities(self, result: dict[str, Any], labels: list[str]) -> list[Entity]:
-        """Convert post-processed detection result to Entity list."""
+    def _results_to_objects(self, result: dict[str, Any], labels: list[str]) -> list[DetectedObject]:
+        """Convert post-processed detection result to DetectedObject list."""
         boxes = result["boxes"]
         scores = result["scores"]
         label_indices = result["labels"]
@@ -384,23 +384,22 @@ class Owlv2Adapter(ModelAdapter):
             return []
 
         n_labels = len(labels)
-        entities = []
+        objects = []
         for i in range(n_detections):
             box = boxes[i]
             x1, y1, x2, y2 = box.tolist()
             label_idx = label_indices[i].item()
             label_text = labels[label_idx] if label_idx < n_labels else f"class_{label_idx}"
 
-            entities.append(
-                Entity(
-                    text=label_text,
-                    label="object",  # Category type, consistent with Florence2
+            objects.append(
+                DetectedObject(
+                    label=label_text,
                     score=float(scores[i]),
                     bbox=[int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
                 )
             )
 
-        return entities
+        return objects
 
     def _extract_image(self, item: Item) -> Image | None:
         """Extract PIL Image from item.

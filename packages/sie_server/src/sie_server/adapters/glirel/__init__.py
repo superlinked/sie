@@ -20,7 +20,7 @@ from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
-from sie_server.types.responses import Entity
+from sie_server.types.responses import Entity, Relation
 
 # Compute precision type (for interface compatibility)
 ComputePrecision = Literal["float16", "bfloat16", "float32"]
@@ -186,13 +186,15 @@ class GLiRELAdapter(ModelAdapter):
             raise ValueError(_ERR_REQUIRES_LABELS)
 
         all_entities = []
+        all_relations = []
         for item in items:
             text = self._extract_text(item)
             entities = self._extract_entities(item)
 
             if not entities:
-                # No entities provided - return empty list
+                # No entities provided - return empty lists
                 all_entities.append([])
+                all_relations.append([])
                 continue
 
             # Convert entities to GLiREL format: [[start_char, end_char, type, text], ...]
@@ -210,7 +212,7 @@ class GLiRELAdapter(ModelAdapter):
 
             # GLiREL prediction - v1.0+ API takes text directly
             with torch.inference_mode():
-                relations = self._model.predict_relations(
+                raw_relations = self._model.predict_relations(
                     text=text,
                     labels=labels,
                     threshold=effective_threshold,
@@ -218,10 +220,9 @@ class GLiRELAdapter(ModelAdapter):
                     top_k=effective_top_k,
                 )
 
-            # Convert to our format
-            # For GLiREL, we convert relations to entities with relation info in the text/label
-            item_entities = []
-            for rel in relations:
+            # Convert to proper Relation objects
+            item_relations = []
+            for rel in raw_relations:
                 # Extract head/tail text (GLiREL v1.0+ returns strings, strip extra whitespace)
                 head_text = rel.get("head_text", "")
                 tail_text = rel.get("tail_text", "")
@@ -229,20 +230,18 @@ class GLiRELAdapter(ModelAdapter):
                     head_text = " ".join(head_text)
                 if isinstance(tail_text, list):
                     tail_text = " ".join(tail_text)
-                head_text = head_text.strip()
-                tail_text = tail_text.strip()
 
-                # Create an entity representing the relation triple
-                relation_label = rel.get("label", "")
-                item_entities.append(
-                    Entity(
-                        text=f"{head_text} -> {tail_text}",
-                        label=f"relation:{relation_label}",
+                item_relations.append(
+                    Relation(
+                        head=head_text.strip(),
+                        tail=tail_text.strip(),
+                        relation=rel.get("label", ""),
                         score=float(rel.get("score", 0.0)),
                     )
                 )
 
-            # Also add input entities
+            # Echo input entities
+            item_entities = []
             for ent in entities:
                 item_entities.append(
                     Entity(
@@ -255,8 +254,9 @@ class GLiRELAdapter(ModelAdapter):
                 )
 
             all_entities.append(item_entities)
+            all_relations.append(item_relations)
 
-        return ExtractOutput(entities=all_entities)
+        return ExtractOutput(entities=all_entities, relations=all_relations)
 
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""

@@ -1,7 +1,4 @@
 {{- if or (index .Values "kube-prometheus-stack" "install") .Values.dashboards.enabled }}
-# Grafana dashboards as ConfigMaps for sidecar discovery.
-# The Grafana sidecar watches for ConfigMaps labelled
-# app.kubernetes.io/component=dashboard and auto-provisions them.
 
 ---
 apiVersion: v1
@@ -12,8 +9,9 @@ metadata:
   labels:
     {{- include "sie-cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: dashboard
+    grafana_dashboard: "1"
   annotations:
-    dashboard.grafana.com/folder: SIE
+    grafana_folder: SIE
 data:
   sie-cluster-overview.json: |-
 {{ .Files.Get "files/dashboards/cluster-overview.json" | indent 4 }}
@@ -27,8 +25,9 @@ metadata:
   labels:
     {{- include "sie-cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: dashboard
+    grafana_dashboard: "1"
   annotations:
-    dashboard.grafana.com/folder: SIE
+    grafana_folder: SIE
 data:
   sie-model-performance.json: |-
 {{ .Files.Get "files/dashboards/model-performance.json" | indent 4 }}
@@ -42,9 +41,26 @@ metadata:
   labels:
     {{- include "sie-cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: dashboard
+    grafana_dashboard: "1"
   annotations:
-    dashboard.grafana.com/folder: SIE
+    grafana_folder: SIE
 data:
   sie-worker-health.json: |-
 {{ .Files.Get "files/dashboards/worker-health.json" | indent 4 }}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-dashboard-queue
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: SIE
+data:
+  sie-queue-routing.json: |-
+{{ .Files.Get "files/dashboards/queue-routing.json" | indent 4 }}
 {{- end }}

@@ -1,13 +1,13 @@
 """CLI for SIE Router."""
 
 import dataclasses
-import json
 import logging
 import os
 import sys
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
+import orjson
 import typer
 
 from sie_router import __version__
@@ -57,7 +57,7 @@ class JSONFormatter(logging.Formatter):
 
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_data, default=str)
+        return orjson.dumps(log_data, default=str).decode()
 
 
 def setup_logging(level: str, *, json_format: bool = False) -> None:

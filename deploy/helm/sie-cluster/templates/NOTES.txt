@@ -1,3 +1,4 @@
+{{- include "sie-cluster.validateNats" . -}}
 SIE Cluster {{ .Chart.Version }} deployed to namespace {{ include "sie-cluster.namespace" . }}.
 
 Router: http://{{ include "sie-cluster.router.serviceName" . }}.{{ include "sie-cluster.namespace" . }}.svc:{{ .Values.router.service.port }}

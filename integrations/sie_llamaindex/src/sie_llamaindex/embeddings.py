@@ -2,18 +2,22 @@
 
 Provides embedding generation using SIE's encode endpoint:
 - SIEEmbedding: Dense embeddings implementing BaseEmbedding
+- SIEMultiModalEmbedding: Dense embeddings for text and images implementing MultiModalEmbedding
 - SIESparseEmbeddingFunction: Sparse embeddings for hybrid search
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from io import BytesIO
+from typing import Any
 
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.core.bridge.pydantic import Field, PrivateAttr
-
-if TYPE_CHECKING:
-    from sie_sdk import SIEAsyncClient, SIEClient
+from llama_index.core.embeddings.multi_modal_base import MultiModalEmbedding
+from llama_index.core.schema import ImageType
+from sie_sdk import SIEAsyncClient, SIEClient
+from sie_sdk.encoding import dense_embedding, sparse_embedding
+from sie_sdk.types import Item
 
 
 class SIEEmbedding(BaseEmbedding):
@@ -93,8 +97,6 @@ class SIEEmbedding(BaseEmbedding):
     def client(self) -> SIEClient:
         """Get or create the sync SIEClient."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self.base_url,
                 timeout_s=self.timeout_s,
@@ -107,8 +109,6 @@ class SIEEmbedding(BaseEmbedding):
     def async_client(self) -> SIEAsyncClient:
         """Get or create the async SIEClient."""
         if self._async_client is None:
-            from sie_sdk import SIEAsyncClient
-
             self._async_client = SIEAsyncClient(
                 self.base_url,
                 timeout_s=self.timeout_s,
@@ -126,8 +126,6 @@ class SIEEmbedding(BaseEmbedding):
         Returns:
             Embedding vector as list of floats.
         """
-        from sie_sdk.types import Item
-
         result = self.client.encode(
             self.model_name,
             Item(text=query),
@@ -137,7 +135,7 @@ class SIEEmbedding(BaseEmbedding):
             options={"is_query": True},
         )
 
-        return self._extract_dense(result)
+        return dense_embedding(result)
 
     def _get_text_embedding(self, text: str) -> list[float]:
         """Get embedding for a text string.
@@ -148,8 +146,6 @@ class SIEEmbedding(BaseEmbedding):
         Returns:
             Embedding vector as list of floats.
         """
-        from sie_sdk.types import Item
-
         result = self.client.encode(
             self.model_name,
             Item(text=text),
@@ -158,7 +154,7 @@ class SIEEmbedding(BaseEmbedding):
             output_dtype=self.output_dtype,
         )
 
-        return self._extract_dense(result)
+        return dense_embedding(result)
 
     def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Get embeddings for multiple texts.
@@ -172,8 +168,6 @@ class SIEEmbedding(BaseEmbedding):
         if not texts:
             return []
 
-        from sie_sdk.types import Item
-
         items = [Item(text=text) for text in texts]
         results = self.client.encode(
             self.model_name,
@@ -183,7 +177,7 @@ class SIEEmbedding(BaseEmbedding):
             output_dtype=self.output_dtype,
         )
 
-        return [self._extract_dense(result) for result in results]
+        return [dense_embedding(result) for result in results]
 
     async def _aget_query_embedding(self, query: str) -> list[float]:
         """Async get embedding for a query string.
@@ -194,8 +188,6 @@ class SIEEmbedding(BaseEmbedding):
         Returns:
             Embedding vector as list of floats.
         """
-        from sie_sdk.types import Item
-
         result = await self.async_client.encode(
             self.model_name,
             Item(text=query),
@@ -205,7 +197,7 @@ class SIEEmbedding(BaseEmbedding):
             options={"is_query": True},
         )
 
-        return self._extract_dense(result)
+        return dense_embedding(result)
 
     async def _aget_text_embedding(self, text: str) -> list[float]:
         """Async get embedding for a text string.
@@ -216,8 +208,6 @@ class SIEEmbedding(BaseEmbedding):
         Returns:
             Embedding vector as list of floats.
         """
-        from sie_sdk.types import Item
-
         result = await self.async_client.encode(
             self.model_name,
             Item(text=text),
@@ -226,24 +216,222 @@ class SIEEmbedding(BaseEmbedding):
             output_dtype=self.output_dtype,
         )
 
-        return self._extract_dense(result)
+        return dense_embedding(result)
 
-    def _extract_dense(self, result: object) -> list[float]:
-        """Extract dense embedding from encode result.
+
+class SIEMultiModalEmbedding(MultiModalEmbedding):
+    """LlamaIndex MultiModalEmbedding implementation using SIE.
+
+    Supports both text and image embedding, plugging into LlamaIndex's
+    multimodal RAG pipelines (e.g. MultiModalVectorStoreIndex).
+
+    Example:
+        >>> from llama_index.core import Settings
+        >>> from sie_llamaindex import SIEMultiModalEmbedding
+        >>>
+        >>> Settings.embed_model = SIEMultiModalEmbedding(
+        ...     model_name="openai/clip-vit-large-patch14",
+        ... )
+
+    Args:
+        base_url: URL of the SIE server.
+        model_name: Model name/ID to use for encoding. Must support image input.
+        instruction: Optional instruction prefix for embedding (model-dependent).
+        output_dtype: Output dtype: "float32" (default), "float16", "int8", "binary".
+        options: Runtime options dict passed to the model adapter.
+        gpu: Target GPU type for routing (e.g., "l4", "a100-80gb").
+        timeout_s: Request timeout in seconds.
+        embed_batch_size: Batch size for embedding multiple items.
+    """
+
+    base_url: str = Field(default="http://localhost:8080", description="SIE server URL")
+    model_name: str = Field(default="openai/clip-vit-large-patch14", description="Model name/ID")
+    instruction: str | None = Field(default=None, description="Instruction prefix")
+    output_dtype: str | None = Field(default=None, description="Output dtype")
+    options: dict[str, Any] | None = Field(default=None, description="Runtime options")
+    gpu: str | None = Field(default=None, description="GPU type for routing")
+    timeout_s: float = Field(default=180.0, description="Request timeout")
+
+    _client: Any = PrivateAttr(default=None)
+    _async_client: Any = PrivateAttr(default=None)
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8080",
+        model_name: str = "openai/clip-vit-large-patch14",
+        instruction: str | None = None,
+        output_dtype: str | None = None,
+        options: dict[str, Any] | None = None,
+        gpu: str | None = None,
+        timeout_s: float = 180.0,
+        embed_batch_size: int = 10,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize SIE multimodal embedding model."""
+        super().__init__(
+            base_url=base_url,
+            model_name=model_name,
+            instruction=instruction,
+            output_dtype=output_dtype,
+            options=options,
+            gpu=gpu,
+            timeout_s=timeout_s,
+            embed_batch_size=embed_batch_size,
+            **kwargs,
+        )
+        self._client = None
+        self._async_client = None
+
+    @classmethod
+    def class_name(cls) -> str:
+        """Return class name for serialization."""
+        return "SIEMultiModalEmbedding"
+
+    @property
+    def client(self) -> SIEClient:
+        """Get or create the sync SIEClient."""
+        if self._client is None:
+            self._client = SIEClient(
+                self.base_url,
+                timeout_s=self.timeout_s,
+                gpu=self.gpu,
+                options=self.options,
+            )
+        return self._client
+
+    @property
+    def async_client(self) -> SIEAsyncClient:
+        """Get or create the async SIEClient."""
+        if self._async_client is None:
+            self._async_client = SIEAsyncClient(
+                self.base_url,
+                timeout_s=self.timeout_s,
+                gpu=self.gpu,
+                options=self.options,
+            )
+        return self._async_client
+
+    # -- Text embedding methods (same as SIEEmbedding) --
+
+    def _get_query_embedding(self, query: str) -> list[float]:
+        """Get embedding for a query string."""
+        result = self.client.encode(
+            self.model_name,
+            Item(text=query),
+            output_types=["dense"],
+            instruction=self.instruction,
+            output_dtype=self.output_dtype,
+            options={"is_query": True},
+        )
+        return dense_embedding(result)
+
+    def _get_text_embedding(self, text: str) -> list[float]:
+        """Get embedding for a text string."""
+        result = self.client.encode(
+            self.model_name,
+            Item(text=text),
+            output_types=["dense"],
+            instruction=self.instruction,
+            output_dtype=self.output_dtype,
+        )
+        return dense_embedding(result)
+
+    def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Get embeddings for multiple texts."""
+        if not texts:
+            return []
+
+        items = [Item(text=text) for text in texts]
+        results = self.client.encode(
+            self.model_name,
+            items,
+            output_types=["dense"],
+            instruction=self.instruction,
+            output_dtype=self.output_dtype,
+        )
+        return [dense_embedding(result) for result in results]
+
+    async def _aget_query_embedding(self, query: str) -> list[float]:
+        """Async get embedding for a query string."""
+        result = await self.async_client.encode(
+            self.model_name,
+            Item(text=query),
+            output_types=["dense"],
+            instruction=self.instruction,
+            output_dtype=self.output_dtype,
+            options={"is_query": True},
+        )
+        return dense_embedding(result)
+
+    async def _aget_text_embedding(self, text: str) -> list[float]:
+        """Async get embedding for a text string."""
+        result = await self.async_client.encode(
+            self.model_name,
+            Item(text=text),
+            output_types=["dense"],
+            instruction=self.instruction,
+            output_dtype=self.output_dtype,
+        )
+        return dense_embedding(result)
+
+    # -- Image embedding methods (MultiModalEmbedding interface) --
+
+    def _get_image_embedding(self, img_file_path: ImageType) -> list[float]:
+        """Get embedding for a single image.
 
         Args:
-            result: EncodeResult from SIE client (dict with "dense" key containing numpy array).
+            img_file_path: File path (str) or BytesIO of the image.
 
         Returns:
-            Dense embedding as list of floats.
+            Embedding vector as list of floats.
         """
-        # SDK returns {"dense": np.ndarray, ...}
-        dense = result.get("dense") if isinstance(result, dict) else getattr(result, "dense", None)
-        if dense is None:
-            msg = "Encode result missing dense embedding"
-            raise ValueError(msg)
-        # Convert numpy array to list
-        return dense.tolist() if hasattr(dense, "tolist") else list(dense)
+        img = img_file_path.getvalue() if isinstance(img_file_path, BytesIO) else img_file_path
+        result = self.client.encode(
+            self.model_name,
+            Item(images=[img]),
+            output_types=["dense"],
+            output_dtype=self.output_dtype,
+        )
+        return dense_embedding(result)
+
+    async def _aget_image_embedding(self, img_file_path: ImageType) -> list[float]:
+        """Async get embedding for a single image.
+
+        Args:
+            img_file_path: File path (str) or BytesIO of the image.
+
+        Returns:
+            Embedding vector as list of floats.
+        """
+        img = img_file_path.getvalue() if isinstance(img_file_path, BytesIO) else img_file_path
+        result = await self.async_client.encode(
+            self.model_name,
+            Item(images=[img]),
+            output_types=["dense"],
+            output_dtype=self.output_dtype,
+        )
+        return dense_embedding(result)
+
+    def _get_image_embeddings(self, img_file_paths: list[ImageType]) -> list[list[float]]:
+        """Get embeddings for multiple images in a single batch.
+
+        Args:
+            img_file_paths: List of file paths or BytesIO objects.
+
+        Returns:
+            List of embedding vectors.
+        """
+        if not img_file_paths:
+            return []
+
+        items = [Item(images=[img.getvalue() if isinstance(img, BytesIO) else img]) for img in img_file_paths]
+        results = self.client.encode(
+            self.model_name,
+            items,
+            output_types=["dense"],
+            output_dtype=self.output_dtype,
+        )
+        return [dense_embedding(result) for result in results]
 
 
 class SIESparseEmbeddingFunction:
@@ -290,8 +478,6 @@ class SIESparseEmbeddingFunction:
     def client(self) -> SIEClient:
         """Get or create the sync SIEClient."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -311,8 +497,6 @@ class SIESparseEmbeddingFunction:
         if not texts:
             return [], []
 
-        from sie_sdk.types import Item
-
         items = [Item(text=text) for text in texts]
         results = self.client.encode(
             self._model_name,
@@ -324,7 +508,7 @@ class SIESparseEmbeddingFunction:
         indices_list = []
         values_list = []
         for result in results:
-            sparse = self._extract_sparse(result)
+            sparse = sparse_embedding(result)
             indices_list.append(sparse["indices"])
             values_list.append(sparse["values"])
 
@@ -342,8 +526,6 @@ class SIESparseEmbeddingFunction:
         if not texts:
             return [], []
 
-        from sie_sdk.types import Item
-
         items = [Item(text=text) for text in texts]
         results = self.client.encode(
             self._model_name,
@@ -354,30 +536,8 @@ class SIESparseEmbeddingFunction:
         indices_list = []
         values_list = []
         for result in results:
-            sparse = self._extract_sparse(result)
+            sparse = sparse_embedding(result)
             indices_list.append(sparse["indices"])
             values_list.append(sparse["values"])
 
         return indices_list, values_list
-
-    def _extract_sparse(self, result: object) -> dict[str, list]:
-        """Extract sparse embedding from encode result.
-
-        Args:
-            result: EncodeResult from SIE client with "sparse" key.
-
-        Returns:
-            Dict with "indices" and "values" lists.
-        """
-        # SDK returns {"sparse": {"indices": np.ndarray, "values": np.ndarray}, ...}
-        sparse = result.get("sparse") if isinstance(result, dict) else getattr(result, "sparse", None)
-        if sparse is None:
-            return {"indices": [], "values": []}
-
-        indices = sparse.get("indices") if isinstance(sparse, dict) else getattr(sparse, "indices", None)
-        values = sparse.get("values") if isinstance(sparse, dict) else getattr(sparse, "values", None)
-
-        return {
-            "indices": indices.tolist() if hasattr(indices, "tolist") else list(indices or []),
-            "values": values.tolist() if hasattr(values, "tolist") else list(values or []),
-        }

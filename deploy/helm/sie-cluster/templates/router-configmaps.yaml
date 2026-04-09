@@ -1,7 +1,7 @@
 {{- if .Values.router.embeddedConfigs.enabled }}
 # Auto-generated ConfigMaps from files/bundles and files/models
 # These provide the ModelRegistry with bundle and model configs
-# Alternative to gitSync for testing, CI, and ephemeral clusters
+# Useful for testing, CI, and ephemeral clusters
 
 ---
 apiVersion: v1

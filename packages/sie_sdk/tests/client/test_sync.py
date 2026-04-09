@@ -393,6 +393,50 @@ class TestListModels:
             assert "dense" in models[0]["outputs"]
             client.close()
 
+    def test_get_model_returns_info(self) -> None:
+        """get_model returns ModelInfo for a specific model."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "name": "BAAI/bge-m3",
+            "loaded": True,
+            "inputs": ["text"],
+            "outputs": ["dense", "sparse", "multivector"],
+            "dims": {"dense": 1024, "sparse": 250002, "multivector": 1024},
+            "max_sequence_length": 8192,
+        }
+
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.get.return_value = mock_response
+            client = SIEClient("http://localhost:8080")
+            info = client.get_model("BAAI/bge-m3")
+
+            assert info["name"] == "BAAI/bge-m3"
+            assert info["dims"]["dense"] == 1024
+            assert info["dims"]["multivector"] == 1024
+            assert info["loaded"] is True
+            mock_client.return_value.get.assert_called_once_with(
+                "/v1/models/BAAI/bge-m3",
+                headers={"Accept": "application/json"},
+            )
+            client.close()
+
+    def test_get_model_not_found_raises(self) -> None:
+        """get_model raises RequestError for unknown model."""
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_response.json.return_value = {
+            "detail": {"code": "MODEL_NOT_FOUND", "message": "Model 'foo' not found"},
+        }
+        mock_response.text = '{"detail": {"code": "MODEL_NOT_FOUND"}}'
+
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.get.return_value = mock_response
+            client = SIEClient("http://localhost:8080")
+            with pytest.raises(RequestError):
+                client.get_model("foo")
+            client.close()
+
 
 class TestContextManager:
     """Tests for context manager protocol."""

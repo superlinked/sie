@@ -7,12 +7,9 @@ Provides drop-in replacement for OpenAI embeddings using SIE's inference server:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from langchain_core.embeddings import Embeddings
-
-if TYPE_CHECKING:
-    from sie_sdk import SIEAsyncClient, SIEClient
+from sie_sdk import SIEAsyncClient, SIEClient
+from sie_sdk.encoding import dense_embedding, sparse_embedding
 
 
 class SIEEmbeddings(Embeddings):
@@ -71,8 +68,6 @@ class SIEEmbeddings(Embeddings):
     def client(self) -> SIEClient:
         """Get or create the sync SIEClient."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -85,8 +80,6 @@ class SIEEmbeddings(Embeddings):
     def async_client(self) -> SIEAsyncClient:
         """Get or create the async SIEClient."""
         if self._async_client is None:
-            from sie_sdk import SIEAsyncClient
-
             self._async_client = SIEAsyncClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -118,7 +111,7 @@ class SIEEmbeddings(Embeddings):
             output_dtype=self._output_dtype,
         )
 
-        return [self._extract_dense(result) for result in results]
+        return [dense_embedding(result) for result in results]
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query text.
@@ -140,7 +133,7 @@ class SIEEmbeddings(Embeddings):
             options={"is_query": True},
         )
 
-        return self._extract_dense(result)
+        return dense_embedding(result)
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         """Async embed a list of documents.
@@ -165,7 +158,7 @@ class SIEEmbeddings(Embeddings):
             output_dtype=self._output_dtype,
         )
 
-        return [self._extract_dense(result) for result in results]
+        return [dense_embedding(result) for result in results]
 
     async def aembed_query(self, text: str) -> list[float]:
         """Async embed a single query text.
@@ -187,24 +180,7 @@ class SIEEmbeddings(Embeddings):
             options={"is_query": True},
         )
 
-        return self._extract_dense(result)
-
-    def _extract_dense(self, result: object) -> list[float]:
-        """Extract dense embedding from encode result.
-
-        Args:
-            result: EncodeResult from SIE client (dict with "dense" key containing numpy array).
-
-        Returns:
-            Dense embedding as list of floats.
-        """
-        # SDK returns {"dense": np.ndarray, ...}
-        dense = result.get("dense") if isinstance(result, dict) else getattr(result, "dense", None)
-        if dense is None:
-            msg = "Encode result missing dense embedding"
-            raise ValueError(msg)
-        # Convert numpy array to list
-        return dense.tolist() if hasattr(dense, "tolist") else list(dense)
+        return dense_embedding(result)
 
 
 class SIESparseEncoder:
@@ -249,8 +225,6 @@ class SIESparseEncoder:
     def client(self) -> SIEClient:
         """Get or create the sync SIEClient."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -280,7 +254,7 @@ class SIESparseEncoder:
             options={"is_query": True},
         )
 
-        return [self._extract_sparse(result) for result in results]
+        return [sparse_embedding(result) for result in results]
 
     def encode_documents(self, texts: list[str]) -> list[dict[str, list]]:
         """Encode document texts to sparse vectors.
@@ -303,26 +277,4 @@ class SIESparseEncoder:
             output_types=["sparse"],
         )
 
-        return [self._extract_sparse(result) for result in results]
-
-    def _extract_sparse(self, result: object) -> dict[str, list]:
-        """Extract sparse embedding from encode result.
-
-        Args:
-            result: EncodeResult from SIE client with "sparse" key.
-
-        Returns:
-            Dict with "indices" and "values" lists.
-        """
-        # SDK returns {"sparse": {"indices": np.ndarray, "values": np.ndarray}, ...}
-        sparse = result.get("sparse") if isinstance(result, dict) else getattr(result, "sparse", None)
-        if sparse is None:
-            return {"indices": [], "values": []}
-
-        indices = sparse.get("indices") if isinstance(sparse, dict) else getattr(sparse, "indices", None)
-        values = sparse.get("values") if isinstance(sparse, dict) else getattr(sparse, "values", None)
-
-        return {
-            "indices": indices.tolist() if hasattr(indices, "tolist") else list(indices or []),
-            "values": values.tolist() if hasattr(values, "tolist") else list(values or []),
-        }
+        return [sparse_embedding(result) for result in results]

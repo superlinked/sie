@@ -62,6 +62,26 @@ class AdapterOptions(BaseModel):
     runtime: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProfileAdaptiveBatching(BaseModel):
+    """Per-model adaptive batching overrides.
+
+    All fields are optional. None means inherit from engine config or parent
+    profile. This enables fieldwise merge: a child profile can override one
+    field while inheriting the rest from the parent or engine defaults.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_p50_ms: float | None = None
+    calibration_multiplier: float | None = None
+    min_target_p50_ms: float | None = None
+    max_target_p50_ms: float | None = None
+    min_wait_ms: float | None = None
+    max_wait_ms: float | None = None
+    gain: float | None = None
+    integral_gain: float | None = None
+
+
 class ProfileConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -70,6 +90,7 @@ class ProfileConfig(BaseModel):
     compute_precision: ComputePrecision | None = None
     adapter_path: str | None = None
     adapter_options: AdapterOptions = AdapterOptions()
+    adaptive_batching: ProfileAdaptiveBatching | None = None
 
 
 class ResolvedProfile(BaseModel):
@@ -80,6 +101,37 @@ class ResolvedProfile(BaseModel):
     adapter_path: str
     loadtime: MappingProxyType[str, Any]
     runtime: MappingProxyType[str, Any]
+    adaptive_batching: ProfileAdaptiveBatching | None = None
+
+
+def _merge_profile_adaptive_batching(
+    parent: ProfileAdaptiveBatching | None,
+    child: ProfileAdaptiveBatching | None,
+) -> ProfileAdaptiveBatching | None:
+    """Merge child adaptive batching overrides onto parent, fieldwise.
+
+    None fields in child inherit from parent. If both are None, returns None.
+    """
+    if parent is None and child is None:
+        return None
+    if parent is None:
+        return child
+    if child is None:
+        return parent
+
+    # Fieldwise merge: child overrides parent per-field
+    return ProfileAdaptiveBatching(
+        target_p50_ms=child.target_p50_ms if child.target_p50_ms is not None else parent.target_p50_ms,
+        calibration_multiplier=child.calibration_multiplier
+        if child.calibration_multiplier is not None
+        else parent.calibration_multiplier,
+        min_target_p50_ms=child.min_target_p50_ms if child.min_target_p50_ms is not None else parent.min_target_p50_ms,
+        max_target_p50_ms=child.max_target_p50_ms if child.max_target_p50_ms is not None else parent.max_target_p50_ms,
+        min_wait_ms=child.min_wait_ms if child.min_wait_ms is not None else parent.min_wait_ms,
+        max_wait_ms=child.max_wait_ms if child.max_wait_ms is not None else parent.max_wait_ms,
+        gain=child.gain if child.gain is not None else parent.gain,
+        integral_gain=child.integral_gain if child.integral_gain is not None else parent.integral_gain,
+    )
 
 
 class ModelConfig(BaseModel):
@@ -161,6 +213,7 @@ class ModelConfig(BaseModel):
                 adapter_path=profile.adapter_path,
                 loadtime=MappingProxyType(dict(profile.adapter_options.loadtime)),
                 runtime=MappingProxyType(dict(profile.adapter_options.runtime)),
+                adaptive_batching=profile.adaptive_batching,
             )
 
         # Resolve via parent — validators guarantee parent exists and has no chaining
@@ -188,6 +241,9 @@ class ModelConfig(BaseModel):
         if profile.adapter_options.runtime:
             runtime = dict(profile.adapter_options.runtime)
 
+        # Adaptive batching: fieldwise merge (child overrides parent per-field)
+        adaptive_batching = _merge_profile_adaptive_batching(parent.adaptive_batching, profile.adaptive_batching)
+
         if max_batch_tokens is None:
             msg = f"Resolved profile '{name}': max_batch_tokens must be set"
             raise ValueError(msg)
@@ -201,6 +257,7 @@ class ModelConfig(BaseModel):
             adapter_path=adapter_path,
             loadtime=MappingProxyType(loadtime),
             runtime=MappingProxyType(runtime),
+            adaptive_batching=adaptive_batching,
         )
 
     @property

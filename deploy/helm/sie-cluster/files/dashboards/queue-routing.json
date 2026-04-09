@@ -1,0 +1,547 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Latency Breakdown by Phase",
+      "type": "row"
+    },
+    {
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p50",
+          "refId": "A"
+        }
+      ],
+      "title": "Router E2E p50 (ms)",
+      "type": "stat",
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 100}, {"color": "red", "value": 500}] } }
+      }
+    },
+    {
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p99",
+          "refId": "A"
+        }
+      ],
+      "title": "Router E2E p99 (ms)",
+      "type": "stat",
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 200}, {"color": "red", "value": 1000}] } }
+      }
+    },
+    {
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_router_requests_total{namespace=\"$namespace\"}[5m]))",
+          "legendFormat": "Requests/s",
+          "refId": "A"
+        }
+      ],
+      "title": "Throughput (req/s)",
+      "type": "stat",
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}] } }
+      }
+    },
+    {
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_router_requests_total{namespace=\"$namespace\", status!=\"200\"}[5m])) / sum(rate(sie_router_requests_total{namespace=\"$namespace\"}[5m])) * 100",
+          "legendFormat": "Error %",
+          "refId": "A"
+        }
+      ],
+      "title": "Error Rate",
+      "type": "stat",
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}] } }
+      }
+    },
+    {
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 5 },
+      "id": 5,
+      "title": "Latency Breakdown Over Time (p99, stacked)",
+      "description": "Stacked p99 latency by phase. Shows where request time is spent across the full path: router overhead, NATS publish, queue transit (time in NATS before worker pull), tokenization, and GPU inference.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "stacking": { "mode": "normal", "group": "A" }, "fillOpacity": 30, "lineWidth": 1 },
+          "unit": "ms"
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Router overhead" }, "properties": [{ "id": "color", "value": { "fixedColor": "#B877D9", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "NATS publish" }, "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Queue transit" }, "properties": [{ "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Tokenization" }, "properties": [{ "id": "color", "value": { "fixedColor": "#F2CC0C", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "GPU inference" }, "properties": [{ "id": "color", "value": { "fixedColor": "#F2495C", "mode": "fixed" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "clamp_min((\n  histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))\n  - histogram_quantile(0.99, sum(rate(sie_router_queue_result_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))\n  - histogram_quantile(0.99, sum(rate(sie_router_queue_publish_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))\n) * 1000, 0)",
+          "legendFormat": "Router overhead",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_publish_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "NATS publish",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "Queue transit",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"tokenize\"}[5m])) by (le)) * 1000",
+          "legendFormat": "Tokenization",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"inference\"}[5m])) by (le)) * 1000",
+          "legendFormat": "GPU inference",
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "id": 6,
+      "title": "E2E Latency Percentiles Over Time (Router)",
+      "description": "Router-measured end-to-end latency: sie_router_request_latency_seconds.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "lineWidth": 2 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "id": 7,
+      "title": "Worker-Side Total Latency Percentiles",
+      "description": "Worker-measured total request duration: sie_request_duration_seconds{phase=\"total\"}.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "lineWidth": 2 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "id": 101,
+      "title": "NATS Queue Health (requires nats.promExporter.enabled=true)",
+      "type": "row"
+    },
+    {
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "id": 8,
+      "title": "Consumer Pending Messages",
+      "description": "Messages waiting in the queue for workers to pull. Sustained growth means workers can't keep up.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "nats_consumer_num_pending{namespace=\"$namespace\", stream_name=~\"WORK_POOL.*\"}",
+          "legendFormat": "{{stream_name}} / {{consumer_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "id": 9,
+      "title": "Consumer Ack Pending (In-Flight)",
+      "description": "Messages pulled by workers but not yet acknowledged. Shows in-flight work.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "nats_consumer_num_ack_pending{namespace=\"$namespace\", stream_name=~\"WORK_POOL.*\"}",
+          "legendFormat": "{{stream_name}} / {{consumer_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "id": 10,
+      "title": "JetStream Memory Usage",
+      "description": "NATS JetStream memory store usage. Alert if approaching the 512MB limit (configurable via nats.config.jetstream.memoryStore.maxSize).",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "fillOpacity": 15 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "nats_account_memory_used{namespace=\"$namespace\"}",
+          "legendFormat": "memory used",
+          "refId": "A"
+        },
+        {
+          "expr": "nats_server_max_memory{namespace=\"$namespace\"}",
+          "legendFormat": "max memory",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "id": 11,
+      "title": "Stream Messages",
+      "description": "Total messages in each work queue stream.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "nats_stream_total_messages{namespace=\"$namespace\", stream_name=~\"WORK_POOL.*\"}",
+          "legendFormat": "{{stream_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "id": 12,
+      "title": "DLQ Events",
+      "description": "Messages that exhausted max delivery attempts. Source: sie_router_dlq_events_total{stream, consumer}.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "rate(sie_router_dlq_events_total{namespace=\"$namespace\"}[5m])",
+          "legendFormat": "{{stream}} / {{consumer}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "id": 102,
+      "title": "Router Queue Publisher",
+      "type": "row"
+    },
+    {
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 41 },
+      "id": 13,
+      "title": "NATS Publish Time (p99)",
+      "description": "Time for the router to publish all work items to NATS JetStream. Source: sie_router_queue_publish_seconds{operation}.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_publish_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le, operation)) * 1000",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 41 },
+      "id": 14,
+      "title": "Queue Result Wait Time (p99)",
+      "description": "Total time the router waits for worker replies after publishing. Source: sie_router_queue_result_wait_seconds{operation}.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_result_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le, operation)) * 1000",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 41 },
+      "id": 15,
+      "title": "Items Published / sec",
+      "description": "Rate of work items published to NATS by operation type. Source: sie_router_queue_items_published (histogram, using _count for requests/sec).",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_router_queue_items_published_count{namespace=\"$namespace\"}[5m])) by (operation)",
+          "legendFormat": "{{operation}} reqs/s",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(sie_router_queue_items_published_sum{namespace=\"$namespace\"}[5m])) by (operation)",
+          "legendFormat": "{{operation}} items/s",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 49 },
+      "id": 103,
+      "title": "Worker Pull Loop",
+      "type": "row"
+    },
+    {
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 50 },
+      "id": 16,
+      "title": "Worker Queue Wait (p99)",
+      "description": "Time messages sit in NATS before a worker pulls them. High values = workers overloaded. Source: sie_pull_loop_queue_wait_seconds{model}.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "queue wait p99",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "legendFormat": "queue wait p50",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 50 },
+      "id": 17,
+      "title": "Worker Batch Process Time (p99)",
+      "description": "Time for the worker to process a batch after pulling from NATS. Source: sie_pull_loop_batch_process_seconds{model, operation}.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_batch_process_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le, operation)) * 1000",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 50 },
+      "id": 18,
+      "title": "Worker Pull Rate",
+      "description": "Rate of items pulled from NATS by workers. Source: sie_pull_loop_items_fetched (histogram — _count = pull cycles/sec, _sum = items/sec).",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_pull_loop_items_fetched_sum{namespace=\"$namespace\"}[5m]))",
+          "legendFormat": "items/sec",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(sie_pull_loop_items_fetched_count{namespace=\"$namespace\"}[5m]))",
+          "legendFormat": "pull cycles/sec",
+          "refId": "B"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": ["sie", "queue-routing", "nats"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "sie", "value": "sie" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Namespace",
+        "multi": false,
+        "name": "namespace",
+        "options": [],
+        "query": "label_values(sie_router_requests_total, namespace)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "SIE Queue Routing",
+  "uid": "sie-queue-routing",
+  "version": 1,
+  "weekStart": ""
+}

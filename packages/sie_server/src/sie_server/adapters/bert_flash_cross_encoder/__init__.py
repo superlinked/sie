@@ -56,7 +56,7 @@ class BertFlashCrossEncoderAdapter(ModelAdapter):
         model_name_or_path: str | Path,
         *,
         trust_remote_code: bool = False,
-        max_length: int = 512,
+        max_seq_length: int = 512,
         compute_precision: ComputePrecision = "float16",
         **kwargs: Any,
     ) -> None:
@@ -65,14 +65,14 @@ class BertFlashCrossEncoderAdapter(ModelAdapter):
         Args:
             model_name_or_path: HuggingFace model ID or local path.
             trust_remote_code: Whether to trust remote code.
-            max_length: Maximum sequence length for query+document.
+            max_seq_length: Maximum sequence length for query+document.
             compute_precision: Compute precision (float16, bfloat16, float32).
             **kwargs: Additional arguments (ignored).
         """
         _ = kwargs
         self._model_name_or_path = str(model_name_or_path)
         self._trust_remote_code = trust_remote_code
-        self._max_length = max_length
+        self._max_seq_length = max_seq_length
         self._compute_precision = compute_precision
 
         # Loaded state
@@ -270,7 +270,7 @@ class BertFlashCrossEncoderAdapter(ModelAdapter):
             self._tokenizer(
                 q,
                 d,
-                max_length=self._max_length,
+                max_length=self._max_seq_length,
                 truncation=True,
                 return_tensors="pt",
             )
@@ -341,7 +341,7 @@ class BertFlashCrossEncoderAdapter(ModelAdapter):
             raise RuntimeError(_ERR_NOT_LOADED)
 
         opts = options or {}
-        max_length = opts.get("max_length", self._max_length)
+        max_length = opts.get("max_seq_length", self._max_seq_length)
 
         # Build (query, doc) pairs
         pairs = []

@@ -26,6 +26,12 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
+from sie_server.core.adaptive_batching import (
+    AdaptiveBatchController,
+    AdaptiveBatchState,
+    BatchEfficiencyTracker,
+    LatencyTracker,
+)
 from sie_server.core.batcher import BatchConfig, BatchFormer, FormattedBatch, HasCost
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers import EncodeHandler, ExtractHandler, OperationHandler, ScoreHandler
@@ -36,6 +42,56 @@ from sie_server.core.worker.types import (
     WorkerResult,
     WorkerStats,
 )
+
+try:
+    from prometheus_client import Gauge, Histogram
+
+    GPU_BATCH_ITEMS = Histogram(
+        "sie_gpu_batch_items",
+        "Number of items per GPU batch",
+        ["model"],
+        buckets=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512],
+    )
+    GPU_BATCH_TOKENS = Histogram(
+        "sie_gpu_batch_tokens",
+        "Number of tokens per GPU batch",
+        ["model"],
+        buckets=[64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768],
+    )
+    ADAPTIVE_BATCH_WAIT = Gauge(
+        "sie_adaptive_batch_wait_ms",
+        "Current dynamic max_batch_wait_ms from adaptive controller",
+        ["model"],
+    )
+    ADAPTIVE_P50 = Gauge(
+        "sie_adaptive_p50_ms",
+        "Observed rolling p50 latency from adaptive controller",
+        ["model"],
+    )
+    ADAPTIVE_HEADROOM = Gauge(
+        "sie_adaptive_headroom_ms",
+        "Latency headroom (target_p50 - observed_p50)",
+        ["model"],
+    )
+    ADAPTIVE_BATCH_COST = Gauge(
+        "sie_adaptive_batch_cost",
+        "Current dynamic max_batch_cost (tokens) from adaptive controller",
+        ["model"],
+    )
+    ADAPTIVE_FILL_RATIO = Gauge(
+        "sie_adaptive_fill_ratio",
+        "Mean batch fill ratio (actual_cost / max_cost)",
+        ["model"],
+    )
+    ADAPTIVE_BATCH_EFFICIENCY = Histogram(
+        "sie_adaptive_batch_efficiency",
+        "Batch request efficiency: actual_batch_size / max_batch_requests",
+        ["model"],
+        buckets=[0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0],
+    )
+    _HAS_BATCH_METRICS = True
+except ImportError:
+    _HAS_BATCH_METRICS = False
 
 if TYPE_CHECKING:
     from sie_server.adapters.base import ModelAdapter
@@ -123,6 +179,36 @@ class ModelWorker:
             thread_name_prefix="inference",
         )
 
+        # Adaptive batching controller (optional, off by default)
+        ab = self._config.adaptive_batching
+        if ab.enabled:
+            self._latency_tracker: LatencyTracker | None = LatencyTracker(
+                window_size=ab.window_size,
+            )
+            self._efficiency_tracker: BatchEfficiencyTracker | None = BatchEfficiencyTracker()
+            self._adaptive_controller: AdaptiveBatchController | None = AdaptiveBatchController(
+                target_p50_ms=ab.target_p50_ms,
+                calibration_multiplier=ab.calibration_multiplier,
+                min_target_p50_ms=ab.min_target_p50_ms,
+                max_target_p50_ms=ab.max_target_p50_ms,
+                min_wait_ms=ab.min_wait_ms,
+                max_wait_ms=ab.max_wait_ms,
+                min_batch_cost=min(256, self._config.max_batch_tokens),
+                max_batch_cost=max(
+                    min(256, self._config.max_batch_tokens), self._config.max_batch_tokens * 4
+                ),  # allow up to 4x growth
+                gain=ab.gain,
+                integral_gain=ab.integral_gain,
+                cost_gain=ab.gain * 0.5,  # cost knob is more conservative
+                update_interval=ab.update_interval,
+                _current_wait_ms=self._config.max_batch_wait_ms,
+                _current_batch_cost=self._config.max_batch_tokens,
+            )
+        else:
+            self._latency_tracker = None
+            self._efficiency_tracker = None
+            self._adaptive_controller = None
+
         # Background task and control
         self._running = False
         self._stopping = False  # True when graceful stop has begun
@@ -158,6 +244,14 @@ class ModelWorker:
         """Return number of pending requests across all batchers."""
         return sum(b.pending_count for b in self._batchers.values())
 
+    def get_adaptive_state(self) -> AdaptiveBatchState | None:
+        """Return immutable snapshot of adaptive controller state, or None if disabled."""
+        if self._adaptive_controller is None:
+            return None
+        observed = self._latency_tracker.p50() if self._latency_tracker else None
+        fill = self._efficiency_tracker.mean_fill_ratio() if self._efficiency_tracker else None
+        return self._adaptive_controller.snapshot(observed_p50_ms=observed, fill_ratio=fill)
+
     @property
     def pending_tokens(self) -> int:
         """Return total tokens in pending requests across all batchers."""
@@ -187,7 +281,25 @@ class ModelWorker:
             self._process_loop(),
             name="model-worker-process",
         )
-        logger.info("ModelWorker started")
+        if self._adaptive_controller is not None:
+            target_str = (
+                f"{self._adaptive_controller.target_p50_ms:.0f}ms"
+                if self._adaptive_controller.target_p50_ms is not None
+                else "auto-calibrate"
+            )
+            logger.info(
+                "ModelWorker started (adaptive batching: target_p50=%s, gain=%.2f, "
+                "integral_gain=%.3f, wait=[%.1f, %.1f]ms, cost=[%d, %d])",
+                target_str,
+                self._adaptive_controller.gain,
+                self._adaptive_controller.integral_gain,
+                self._adaptive_controller.min_wait_ms,
+                self._adaptive_controller.max_wait_ms,
+                self._adaptive_controller.min_batch_cost,
+                self._adaptive_controller.max_batch_cost,
+            )
+        else:
+            logger.info("ModelWorker started")
 
     async def stop(self) -> None:
         """Stop the background processing task.
@@ -454,7 +566,9 @@ class ModelWorker:
     # Batch Processing
     # =========================================================================
 
-    async def _get_next_batch_fcfs(self) -> tuple[str | None, FormattedBatch[HasCost, RequestMetadata]]:
+    async def _get_next_batch_fcfs(
+        self, was_idle: bool = True
+    ) -> tuple[str | None, FormattedBatch[HasCost, RequestMetadata], bool]:
         """Get next batch using FCFS (First-Come-First-Serve) selection.
 
         Selects the batcher whose first pending request has waited the longest.
@@ -465,10 +579,17 @@ class ModelWorker:
         unnecessary latency at low concurrency while preserving batching
         efficiency when requests arrive during inference.
 
+        Args:
+            was_idle: Whether the worker was idle before this call. When True,
+                dispatches immediately without waiting for batch formation.
+                When False, uses the normal timeout/coalesce mechanism to
+                accumulate a proper batch.
+
         Returns:
-            Tuple of (lora_name, batch) where lora_name is None for base model.
+            Tuple of (lora_name, batch, was_idle) where lora_name is None for
+            base model and was_idle indicates whether the worker had to poll
+            (was truly idle).
         """
-        was_idle = True
         while True:
             oldest_lora: str | None = None
             oldest_time: float = float("inf")
@@ -485,7 +606,7 @@ class ModelWorker:
                 # Found a batcher with pending items - get batch from it
                 selected_lora = oldest_lora if oldest_lora is not None else None
                 batch = await self._batchers[selected_lora].get_batch(immediate=was_idle)
-                return selected_lora, batch
+                return selected_lora, batch, was_idle
 
             # No batchers have pending items - worker is idle
             was_idle = True
@@ -494,11 +615,17 @@ class ModelWorker:
             # Check if we should stop
             if not self._running:
                 # Return empty batch to exit gracefully
-                return None, FormattedBatch(items=[], metadata=[], total_cost=0)
+                return None, FormattedBatch(items=[], metadata=[], total_cost=0), was_idle
 
     async def _process_loop(self) -> None:
         """Background loop that processes batches using FCFS across LoRAs."""
         logger.debug("Process loop started")
+
+        # Track idle state across iterations. When idle, the next batch is
+        # dispatched immediately (low-concurrency optimization). When busy
+        # (just finished inference + drain), we let BatchFormer's
+        # timeout/coalesce mechanism accumulate a proper batch.
+        was_idle = True
 
         while self._running:
             try:
@@ -506,7 +633,7 @@ class ModelWorker:
                 batch_wait_start = time.monotonic()
 
                 # Wait for next batch using FCFS selection across LoRA batchers
-                active_lora, batch = await self._get_next_batch_fcfs()
+                active_lora, batch, was_idle = await self._get_next_batch_fcfs(was_idle)
 
                 # Skip empty batches (can happen during shutdown)
                 if batch.size == 0:
@@ -526,12 +653,24 @@ class ModelWorker:
                 # during GPU inference, bypassing the coalesce/timeout wait.
                 # This keeps the GPU saturated without re-entering the batch
                 # formation loop.
+                drained = False
                 batcher = self._batchers.get(active_lora)
                 while batcher is not None:
                     drain_batch = await batcher.try_drain()
                     if drain_batch is None or drain_batch.size == 0:
                         break
+                    drained = True
                     await self._process_batch(drain_batch)
+                    if _HAS_BATCH_METRICS:
+                        _label_name = self._model_name or "unknown"
+                        GPU_BATCH_ITEMS.labels(model=_label_name).observe(drain_batch.size)
+                        GPU_BATCH_TOKENS.labels(model=_label_name).observe(drain_batch.total_tokens)
+
+                # Determine idle state for next iteration.
+                # Worker was busy if we drained items or processed a multi-item
+                # batch — meaning requests are actively arriving and the next
+                # batch should use timeout/coalesce to accumulate properly.
+                was_idle = not drained and batch.size <= 1
 
                 inference_ms = (time.monotonic() - inference_start) * 1000
 
@@ -551,6 +690,44 @@ class ModelWorker:
                     # Count unique requests in this batch
                     unique_requests = len({id(m) for m in batch.metadata})
                     self._stats.requests_per_batch.append(unique_requests)
+
+                if _HAS_BATCH_METRICS:
+                    _label_name = self._model_name or "unknown"
+                    GPU_BATCH_ITEMS.labels(model=_label_name).observe(batch.size)
+                    GPU_BATCH_TOKENS.labels(model=_label_name).observe(batch.total_tokens)
+                    if self._batch_config.max_batch_requests > 0:
+                        ADAPTIVE_BATCH_EFFICIENCY.labels(model=_label_name).observe(
+                            batch.size / self._batch_config.max_batch_requests
+                        )
+
+                # Track batch efficiency for adaptive controller
+                if self._efficiency_tracker is not None:
+                    self._efficiency_tracker.record(batch.total_cost, self._batch_config.max_batch_cost)
+
+                # Step adaptive controller after processing.
+                # Note: mutating _batch_config in-place is safe here because
+                # both assignments happen synchronously (no await between them)
+                # on the single event-loop thread.  BatchFormer reads these
+                # fields only under its own async lock, which cannot interleave
+                # with this synchronous block.
+                if self._adaptive_controller is not None and self._latency_tracker is not None:
+                    observed_p50 = self._latency_tracker.p50()
+                    fill_ratio = self._efficiency_tracker.mean_fill_ratio() if self._efficiency_tracker else None
+                    new_wait, new_cost = self._adaptive_controller.step(observed_p50, fill_ratio)
+                    self._batch_config.max_batch_wait_ms = new_wait
+                    self._batch_config.max_batch_cost = new_cost
+
+                    if _HAS_BATCH_METRICS:
+                        _label = self._model_name or "unknown"
+                        ADAPTIVE_BATCH_WAIT.labels(model=_label).set(new_wait)
+                        ADAPTIVE_BATCH_COST.labels(model=_label).set(new_cost)
+                        if observed_p50 is not None:
+                            ADAPTIVE_P50.labels(model=_label).set(observed_p50)
+                            target = self._adaptive_controller.target_p50_ms
+                            if target is not None:
+                                ADAPTIVE_HEADROOM.labels(model=_label).set(target - observed_p50)
+                        if fill_ratio is not None:
+                            ADAPTIVE_FILL_RATIO.labels(model=_label).set(fill_ratio)
 
                 # Log every 10 batches at INFO level for visibility
                 if self._stats.batches_processed % 10 == 0:
@@ -786,3 +963,14 @@ class ModelWorker:
                 if not metadata.future.done():
                     worker_result = WorkerResult(output=output, timing=metadata.timing)
                     metadata.future.set_result(worker_result)
+
+                    # Feed latency sample to adaptive controller
+                    if self._latency_tracker is not None:
+                        self._latency_tracker.record(metadata.timing.total_ms)
+
+                    # Feed inference-only sample for auto-calibration.
+                    # Uses inference_ms (GPU forward pass) not total_ms to
+                    # avoid a feedback loop where queue/batch wait inflates
+                    # the calibration target.
+                    if self._adaptive_controller is not None and not self._adaptive_controller.calibrated:
+                        self._adaptive_controller.record_inference_sample(metadata.timing.inference_ms)

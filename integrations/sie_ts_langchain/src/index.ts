@@ -4,6 +4,8 @@
  * Provides drop-in replacement for OpenAI embeddings using SIE's inference server:
  * - SIEEmbeddings: Dense embeddings for vector stores
  * - SIESparseEncoder: Sparse encoder for hybrid search
+ * - SIEReranker: Cross-encoder reranking for retrieval pipelines
+ * - SIEExtractor: Entity extraction tool for agents
  *
  * @example
  * ```typescript
@@ -26,7 +28,8 @@ import {
   type EncodeResult,
   SIEClient,
   type SIEClientOptions,
-  toNumberArray,
+  denseEmbedding,
+  sparseEmbedding,
 } from "@superlinked/sie-sdk";
 
 /**
@@ -175,7 +178,7 @@ export class SIEEmbeddings extends Embeddings {
     };
 
     const results = await this.client.encode(this.model, items, options);
-    return (results as EncodeResult[]).map((result) => this.extractDense(result));
+    return (results as EncodeResult[]).map((result) => denseEmbedding(result));
   }
 
   /**
@@ -195,18 +198,7 @@ export class SIEEmbeddings extends Embeddings {
     };
 
     const result = await this.client.encode(this.model, { text }, options);
-    return this.extractDense(result as EncodeResult);
-  }
-
-  /**
-   * Extract dense embedding from encode result.
-   */
-  private extractDense(result: EncodeResult): number[] {
-    const dense = result.dense;
-    if (!dense) {
-      throw new Error("Encode result missing dense embedding");
-    }
-    return toNumberArray(dense);
+    return denseEmbedding(result as EncodeResult);
   }
 
   /**
@@ -314,7 +306,7 @@ export class SIESparseEncoder {
     };
 
     const results = await this.client.encode(this.model, items, options);
-    return (results as EncodeResult[]).map((result) => this.extractSparse(result));
+    return (results as EncodeResult[]).map((result) => sparseEmbedding(result));
   }
 
   /**
@@ -335,22 +327,7 @@ export class SIESparseEncoder {
     };
 
     const results = await this.client.encode(this.model, items, options);
-    return (results as EncodeResult[]).map((result) => this.extractSparse(result));
-  }
-
-  /**
-   * Extract sparse embedding from encode result.
-   */
-  private extractSparse(result: EncodeResult): { indices: number[]; values: number[] } {
-    const sparse = result.sparse;
-    if (!sparse) {
-      return { indices: [], values: [] };
-    }
-
-    return {
-      indices: toNumberArray(sparse.indices),
-      values: toNumberArray(sparse.values),
-    };
+    return (results as EncodeResult[]).map((result) => sparseEmbedding(result));
   }
 
   /**
@@ -362,3 +339,6 @@ export class SIESparseEncoder {
     }
   }
 }
+
+export { SIEReranker, type SIERerankerParams } from "./rerankers.js";
+export { SIEExtractor, type SIEExtractorParams } from "./extractors.js";

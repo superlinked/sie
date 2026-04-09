@@ -245,6 +245,9 @@ Thumbs.db
 # VIM
 *.swp
 
+# kilocode
+.kilo/
+
 # Worktree metadata
 .base-branch
 

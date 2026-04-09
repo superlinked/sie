@@ -10,6 +10,10 @@ Sparse Embedders (for hybrid search):
 - SIESparseTextEmbedder: Sparse embeddings for queries
 - SIESparseDocumentEmbedder: Sparse embeddings for documents
 
+Multivector Embedders (ColBERT):
+- SIEMultivectorTextEmbedder: Per-token embeddings for queries
+- SIEMultivectorDocumentEmbedder: Per-token embeddings for documents
+
 Rankers and Extractors:
 - SIERanker: Reranks documents by relevance to a query
 - SIEExtractor: Extracts entities from text
@@ -45,16 +49,26 @@ Hybrid search example:
 
 from sie_haystack.embedders import (
     SIEDocumentEmbedder,
+    SIEImageEmbedder,
+    SIEMultivectorDocumentEmbedder,
+    SIEMultivectorTextEmbedder,
     SIESparseDocumentEmbedder,
     SIESparseTextEmbedder,
     SIETextEmbedder,
 )
-from sie_haystack.extractors import SIEExtractor
+from sie_haystack.extractors import Classification, DetectedObject, Entity, Relation, SIEExtractor
 from sie_haystack.rankers import SIERanker
 
 __all__ = [
+    "Classification",
+    "DetectedObject",
+    "Entity",
+    "Relation",
     "SIEDocumentEmbedder",
     "SIEExtractor",
+    "SIEImageEmbedder",
+    "SIEMultivectorDocumentEmbedder",
+    "SIEMultivectorTextEmbedder",
     "SIERanker",
     "SIESparseDocumentEmbedder",
     "SIESparseTextEmbedder",

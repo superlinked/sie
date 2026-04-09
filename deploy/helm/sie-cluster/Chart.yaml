@@ -4,8 +4,8 @@ description: >-
   SIE (Search Inference Engine) Kubernetes deployment with router, GPU workers,
   and observability
 type: application
-version: 0.1.9
-appVersion: 0.1.9
+version: 0.1.10  # x-release-please-version
+appVersion: v0.1.10  # x-release-please-version
 keywords:
   - inference
   - embedding
@@ -46,3 +46,9 @@ dependencies:
     version: 3.6.3
     repository: oci://registry-1.docker.io/bitnamicharts
     condition: kubernetes-event-exporter.install
+
+  # Config distribution
+  - name: nats
+    version: "2.x"
+    repository: "https://nats-io.github.io/k8s/helm/charts/"
+    condition: nats.install

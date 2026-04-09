@@ -26,6 +26,7 @@ from sie_server.types.openapi import ExtractResponseModel
 from sie_server.types.requests import ExtractRequest
 from sie_server.types.responses import (
     Classification,
+    DetectedObject,
     Entity,
     ErrorCode,
     ExtractResponse,
@@ -204,12 +205,24 @@ def _build_response(
                 )
             )
 
+        # Convert object dicts to DetectedObject objects
+        objects = []
+        for obj in result.get("objects", []):
+            objects.append(
+                DetectedObject(
+                    label=obj["label"],
+                    score=obj.get("score", 1.0),
+                    bbox=obj["bbox"],
+                )
+            )
+
         results.append(
             ExtractResult(
                 id=item_id,
                 entities=entities,
                 relations=relations,
                 classifications=classifications,
+                objects=objects,
                 data=result.get("data", {}),
             )
         )

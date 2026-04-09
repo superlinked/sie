@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from sie_server.core.batcher import HasCost
     from sie_server.core.worker.types import RequestMetadata
     from sie_server.types.inputs import Item
-    from sie_server.types.responses import Classification
+    from sie_server.types.responses import Classification, DetectedObject, Relation
 
 
 class ExtractHandler(OperationHandler[ExtractOutput]):
@@ -89,9 +89,13 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
             Single-item ExtractOutput.
         """
         classifications = [output.classifications[index]] if output.classifications is not None else None
+        relations = [output.relations[index]] if output.relations is not None else None
+        objects = [output.objects[index]] if output.objects is not None else None
         return ExtractOutput(
             entities=[output.entities[index]],
             classifications=classifications,
+            relations=relations,
+            objects=objects,
             batch_size=1,
         )
 
@@ -123,7 +127,31 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
                 p_cls = partials[i].classifications
                 classifications.append(p_cls[0] if p_cls is not None else [])
 
-        return ExtractOutput(entities=entities, classifications=classifications, batch_size=batch_size)
+        # Reassemble relations if any partial has them
+        has_relations = any(p.relations is not None for p in partials.values())
+        relations: list[list[Relation]] | None = None
+        if has_relations:
+            relations = []
+            for i in range(batch_size):
+                p_rel = partials[i].relations
+                relations.append(p_rel[0] if p_rel is not None else [])
+
+        # Reassemble objects if any partial has them
+        has_objects = any(p.objects is not None for p in partials.values())
+        objects: list[list[DetectedObject]] | None = None
+        if has_objects:
+            objects = []
+            for i in range(batch_size):
+                p_obj = partials[i].objects
+                objects.append(p_obj[0] if p_obj is not None else [])
+
+        return ExtractOutput(
+            entities=entities,
+            classifications=classifications,
+            relations=relations,
+            objects=objects,
+            batch_size=batch_size,
+        )
 
     @classmethod
     def format_output(cls, output: ExtractOutput) -> list[dict[str, Any]]:
@@ -135,5 +163,13 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
                 item["classifications"] = list(output.classifications[i])
             else:
                 item["classifications"] = []
+            if output.relations is not None:
+                item["relations"] = list(output.relations[i])
+            else:
+                item["relations"] = []
+            if output.objects is not None:
+                item["objects"] = list(output.objects[i])
+            else:
+                item["objects"] = []
             results.append(item)
         return results

@@ -1,6 +1,6 @@
 [project]
 name = "sie-server"
-version = "0.1.9"
+version = "0.1.10"
 description = "Search Inference Engine - GPU inference server for search workloads"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
@@ -39,6 +39,8 @@ dependencies = [
     "packaging>=24,<25",
     # Hot-reload
     "watchdog>=6,<7",
+    # NATS pub/sub for config notifications
+    "nats-py>=2.9,<3",
     # Observability
     "opentelemetry-api>=1.28,<2",
     "opentelemetry-sdk>=1.28,<2",

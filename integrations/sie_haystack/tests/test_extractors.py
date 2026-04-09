@@ -9,8 +9,8 @@ from sie_haystack.extractors import Entity
 class TestSIEExtractor:
     """Tests for SIEExtractor component."""
 
-    def test_run_extracts_entities(self, mock_sie_client: object, test_ner_text: str) -> None:
-        """Test that run extracts entities."""
+    def test_run_returns_all_types(self, mock_sie_client: object, test_ner_text: str) -> None:
+        """Test that run returns all extraction types."""
         extractor = SIEExtractor(
             model="test-extractor",
             labels=["person", "organization", "location"],
@@ -20,7 +20,13 @@ class TestSIEExtractor:
         result = extractor.run(text=test_ner_text)
 
         assert "entities" in result
+        assert "relations" in result
+        assert "classifications" in result
+        assert "objects" in result
         assert isinstance(result["entities"], list)
+        assert isinstance(result["relations"], list)
+        assert isinstance(result["classifications"], list)
+        assert isinstance(result["objects"], list)
         # Mock should return at least some entities
         for entity in result["entities"]:
             assert isinstance(entity, Entity)

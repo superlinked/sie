@@ -79,7 +79,7 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
         model_name_or_path: str | Path,
         *,
         trust_remote_code: bool = False,
-        max_length: int = 8192,
+        max_seq_length: int = 8192,
         compute_precision: ComputePrecision = "bfloat16",
         **kwargs: Any,
     ) -> None:
@@ -88,14 +88,14 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
         Args:
             model_name_or_path: HuggingFace model ID or local path.
             trust_remote_code: Whether to trust remote code.
-            max_length: Maximum sequence length for query+document.
+            max_seq_length: Maximum sequence length for query+document.
             compute_precision: Compute precision (bfloat16 recommended).
             **kwargs: Additional arguments (ignored).
         """
         _ = kwargs
         self._model_name_or_path = str(model_name_or_path)
         self._trust_remote_code = trust_remote_code
-        self._max_length = max_length
+        self._max_seq_length = max_seq_length
         self._compute_precision = compute_precision
 
         # Loaded state
@@ -336,7 +336,7 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
             raise RuntimeError(_ERR_NOT_LOADED)
 
         opts = options or {}
-        max_length = opts.get("max_length", self._max_length)
+        max_length = opts.get("max_seq_length", self._max_seq_length)
 
         # Build input sequences with chat template
         all_input_ids = []
@@ -399,9 +399,9 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
         Args:
             query: Query text.
             document: Document text.
-            max_length: Maximum sequence length override (defaults to self._max_length).
+            max_length: Maximum sequence length override (defaults to self._max_seq_length).
         """
-        effective_max_length = max_length if max_length is not None else self._max_length
+        effective_max_length = max_length if max_length is not None else self._max_seq_length
 
         # Tokenize query and document
         query_prompt = f"query: {query}"

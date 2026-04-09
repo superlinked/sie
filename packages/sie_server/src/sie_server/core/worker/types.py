@@ -85,14 +85,36 @@ class QueueFullError(Exception):
 
 
 @dataclass
+class AdaptiveBatchingParams:
+    """Parameters for adaptive batch wait control (passed from EngineConfig).
+
+    ``target_p50_ms=None`` means auto-calibrate from observed inference latency.
+    An explicit float value means use that as a fixed SLO target.
+    """
+
+    enabled: bool = False
+    target_p50_ms: float | None = None
+    calibration_multiplier: float = 1.5
+    min_target_p50_ms: float = 5.0
+    max_target_p50_ms: float = 500.0
+    min_wait_ms: float = 1.0
+    max_wait_ms: float = 50.0
+    gain: float = 0.3
+    integral_gain: float = 0.05
+    window_size: int = 200
+    update_interval: int = 10
+
+
+@dataclass
 class WorkerConfig:
     """Configuration for ModelWorker."""
 
     max_batch_tokens: int = 16384
     max_batch_requests: int = 256
-    max_batch_wait_ms: int = 10
+    max_batch_wait_ms: float = 10.0
     max_queue_size: int = 1000  # Maximum pending items in queue (0 = unlimited)
     instrumentation: bool = False
+    adaptive_batching: AdaptiveBatchingParams = field(default_factory=AdaptiveBatchingParams)
 
 
 @dataclass

@@ -431,7 +431,10 @@ class TestImmediateDispatch:
     @pytest.mark.asyncio
     async def test_immediate_false_waits_for_timeout(self) -> None:
         """get_batch(immediate=False) waits for timeout as usual."""
-        config = BatchConfig(max_batch_wait_ms=50, max_batch_requests=10, coalesce_ms=100)
+        # Use coalesce_ratio=1.0 to disable proportional scaling so the raw
+        # coalesce_ms (100) is used. This ensures the batch timeout (50ms)
+        # is the binding constraint, not the effective coalesce.
+        config = BatchConfig(max_batch_wait_ms=50, max_batch_requests=10, coalesce_ms=100, coalesce_ratio=1.0)
         batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
 
         item = make_text_item([1, 2, 3])
@@ -445,6 +448,8 @@ class TestImmediateDispatch:
         # Should wait at least close to the timeout (coalesce_ms > max_batch_wait_ms
         # so the batch timeout is the binding constraint, not coalescing)
         assert elapsed_ms >= 40
+        # Should not wait excessively beyond the batch timeout
+        assert elapsed_ms <= 150  # 50ms timeout + generous margin for CI jitter
 
     @pytest.mark.asyncio
     async def test_immediate_empty_waits_for_first_request(self) -> None:
@@ -757,3 +762,184 @@ class TestCollateBatch:
         assert result["input_ids"][0] == [1, 0, 0]
         assert result["input_ids"][1] == [2, 3, 0]
         assert result["input_ids"][2] == [4, 5, 6]
+
+
+class TestCoalescePrecision:
+    """Tests for coalesce timing precision (Finding 2 fix)."""
+
+    @pytest.mark.asyncio
+    async def test_coalesce_fires_near_deadline(self) -> None:
+        """Batch yields within a tight window after the last submit + coalesce_ms.
+
+        With the precise timeout fix, the batcher should wake up close to
+        the exact coalesce deadline rather than polling every coalesce_ms.
+        """
+        coalesce = 20.0
+        config = BatchConfig(
+            max_batch_wait_ms=200,
+            max_batch_requests=100,
+            coalesce_ms=coalesce,
+        )
+        batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
+
+        item = make_text_item([1, 2, 3])
+        await batcher.submit(item, "req-1")
+
+        start = time.monotonic()
+        batch = await batcher.get_batch()
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert batch.size == 1
+        # Should fire close to coalesce_ms (within 10ms tolerance for CI)
+        assert elapsed_ms >= coalesce * 0.8, f"Fired too early: {elapsed_ms:.1f}ms"
+        assert elapsed_ms < coalesce * 2.5, f"Fired too late: {elapsed_ms:.1f}ms"
+
+    @pytest.mark.asyncio
+    async def test_coalesce_resets_on_new_submit(self) -> None:
+        """Coalesce window resets when a new item arrives.
+
+        If items arrive at t=0, t=15ms with coalesce_ms=20ms, the batch
+        should yield at ~t=35ms (15ms + 20ms), not at t=20ms.
+        """
+        coalesce = 30.0
+        config = BatchConfig(
+            max_batch_wait_ms=200,
+            max_batch_requests=100,
+            coalesce_ms=coalesce,
+        )
+        batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
+
+        async def staggered_submits() -> None:
+            await batcher.submit(make_text_item([1], 0), "first")
+            await asyncio.sleep(0.015)  # 15ms gap
+            await batcher.submit(make_text_item([2], 1), "second")
+
+        submit_task = asyncio.create_task(staggered_submits())
+
+        start = time.monotonic()
+        batch = await asyncio.wait_for(batcher.get_batch(), timeout=1.0)
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        await submit_task
+
+        assert batch.size == 2
+        # Should fire ~15ms (second submit) + ~30ms (coalesce) = ~45ms
+        assert elapsed_ms >= 35, f"Fired too early: {elapsed_ms:.1f}ms"
+        assert elapsed_ms < 80, f"Fired too late: {elapsed_ms:.1f}ms"
+
+
+class TestCoalesceVsTimeout:
+    """Tests for coalesce and timeout interaction."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_fires_when_shorter_than_coalesce(self) -> None:
+        """When max_batch_wait_ms < coalesce_ms, timeout is the binding constraint."""
+        config = BatchConfig(
+            max_batch_wait_ms=20,
+            max_batch_requests=100,
+            coalesce_ms=100,  # coalesce ceiling much larger than timeout
+        )
+        batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
+
+        await batcher.submit(make_text_item([1]), "req-1")
+
+        start = time.monotonic()
+        batch = await batcher.get_batch()
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert batch.size == 1
+        # Should fire at batch timeout (~20ms), not coalesce (~100ms)
+        assert elapsed_ms < 50, f"Waited too long: {elapsed_ms:.1f}ms"
+
+    @pytest.mark.asyncio
+    async def test_coalesce_fires_when_shorter_than_timeout(self) -> None:
+        """When coalesce_ms < max_batch_wait_ms, coalesce detects end-of-burst."""
+        config = BatchConfig(
+            max_batch_wait_ms=200,
+            max_batch_requests=100,
+            coalesce_ms=15,
+        )
+        batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
+
+        await batcher.submit(make_text_item([1]), "req-1")
+
+        start = time.monotonic()
+        batch = await batcher.get_batch()
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert batch.size == 1
+        # Should fire at coalesce (~15ms), well before timeout (200ms)
+        assert elapsed_ms < 50, f"Waited too long: {elapsed_ms:.1f}ms"
+        assert elapsed_ms >= 10, f"Fired too early: {elapsed_ms:.1f}ms"
+
+
+class TestEffectiveCoalesce:
+    """Tests for proportional coalesce scaling (effective_coalesce_ms)."""
+
+    def test_default_scaling(self) -> None:
+        """With default ratio (0.2), effective coalesce is 20% of batch wait."""
+        config = BatchConfig(max_batch_wait_ms=50, coalesce_ms=20.0)
+        # 50 * 0.2 = 10, min(20, 10) = 10
+        assert config.effective_coalesce_ms == 10.0
+
+    def test_ceiling_respected(self) -> None:
+        """When ratio * wait > coalesce_ms, coalesce_ms is the ceiling."""
+        config = BatchConfig(max_batch_wait_ms=50, coalesce_ms=5.0)
+        # 50 * 0.2 = 10, min(5, 10) = 5
+        assert config.effective_coalesce_ms == 5.0
+
+    def test_scales_with_adaptive_wait(self) -> None:
+        """Effective coalesce tracks changes to max_batch_wait_ms."""
+        config = BatchConfig(max_batch_wait_ms=10, coalesce_ms=20.0)
+        # Initial: 10 * 0.2 = 2, min(20, 2) = 2
+        assert config.effective_coalesce_ms == 2.0
+
+        # Simulate adaptive controller increasing wait
+        config.max_batch_wait_ms = 50.0
+        # 50 * 0.2 = 10, min(20, 10) = 10
+        assert config.effective_coalesce_ms == 10.0
+
+        # Simulate adaptive controller decreasing wait
+        config.max_batch_wait_ms = 2.0
+        # 2 * 0.2 = 0.4, min(20, 0.4) = 0.4
+        assert config.effective_coalesce_ms == pytest.approx(0.4)
+
+    def test_custom_ratio(self) -> None:
+        """Custom coalesce_ratio is respected."""
+        config = BatchConfig(max_batch_wait_ms=100, coalesce_ms=50.0, coalesce_ratio=0.1)
+        # 100 * 0.1 = 10, min(50, 10) = 10
+        assert config.effective_coalesce_ms == 10.0
+
+    def test_zero_wait_gives_zero_coalesce(self) -> None:
+        """When max_batch_wait_ms is 0 (or near-zero), coalesce is effectively 0."""
+        config = BatchConfig(max_batch_wait_ms=0, coalesce_ms=5.0)
+        assert config.effective_coalesce_ms == 0.0
+
+    @pytest.mark.asyncio
+    async def test_effective_coalesce_used_in_batcher(self) -> None:
+        """BatchFormer uses effective_coalesce_ms, not raw coalesce_ms.
+
+        With max_batch_wait_ms=100 and coalesce_ms=50, ratio=0.2:
+        effective_coalesce = min(50, 100*0.2) = 20ms.
+        Batch should yield at ~20ms, not ~50ms.
+        """
+        config = BatchConfig(
+            max_batch_wait_ms=200,
+            max_batch_requests=100,
+            coalesce_ms=50.0,
+            coalesce_ratio=0.2,
+        )
+        # effective_coalesce = min(50, 200*0.2) = 40ms
+        assert config.effective_coalesce_ms == 40.0
+
+        batcher: BatchFormer[TextPreparedItem, str] = BatchFormer(config)
+        await batcher.submit(make_text_item([1]), "req-1")
+
+        start = time.monotonic()
+        batch = await batcher.get_batch()
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert batch.size == 1
+        # Should fire near effective_coalesce (40ms), well before timeout (200ms)
+        assert elapsed_ms < 80, f"Waited too long: {elapsed_ms:.1f}ms"
+        assert elapsed_ms >= 30, f"Fired too early: {elapsed_ms:.1f}ms"

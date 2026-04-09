@@ -189,14 +189,14 @@ class SIEExtractorTool(BaseTool):
         text: str,
         labels: list[str] | None = None,
     ) -> str:
-        """Extract entities from text.
+        """Extract structured information from text.
 
         Args:
-            text: The text to extract entities from.
-            labels: Entity types to extract (overrides default labels).
+            text: The text to extract from.
+            labels: Labels to extract (overrides default labels).
 
         Returns:
-            Formatted string with extracted entities.
+            Formatted string with extracted entities, relations, classifications, and objects.
         """
         from sie_sdk.types import Item
 
@@ -208,52 +208,55 @@ class SIEExtractorTool(BaseTool):
             labels=effective_labels,
         )
 
-        # Parse entities from result
-        entities = self._parse_entities(result)
+        entities = self._parse_items(result, "entities")
+        relations = self._parse_items(result, "relations")
+        classifications = self._parse_items(result, "classifications")
+        objects = self._parse_items(result, "objects")
 
-        if not entities:
-            return f"No entities found in the text for labels: {effective_labels}"
+        lines: list[str] = []
 
-        # Format output
-        lines = ["Extracted entities:"]
-        lines.extend(
-            f"- {entity['text']} ({entity['label']}) [confidence: {entity['score']:.2f}]" for entity in entities
-        )
+        if entities:
+            lines.append("Extracted entities:")
+            lines.extend(
+                f"- {e.get('text', '')} ({e.get('label', '')}) [confidence: {e.get('score', 0.0):.2f}]"
+                for e in entities
+            )
+
+        if relations:
+            lines.append("Extracted relations:")
+            lines.extend(
+                f"- {r.get('head', '')} --[{r.get('relation', '')}]--> {r.get('tail', '')} "
+                f"[confidence: {r.get('score', 0.0):.2f}]"
+                for r in relations
+            )
+
+        if classifications:
+            lines.append("Classifications:")
+            lines.extend(f"- {c.get('label', '')} [confidence: {c.get('score', 0.0):.2f}]" for c in classifications)
+
+        if objects:
+            lines.append("Detected objects:")
+            lines.extend(
+                f"- {o.get('label', '')} at {o.get('bbox', [])} [confidence: {o.get('score', 0.0):.2f}]"
+                for o in objects
+            )
+
+        if not lines:
+            return f"No extraction results found for labels: {effective_labels}"
 
         return "\n".join(lines)
 
-    def _parse_entities(self, result: Any) -> list[dict[str, Any]]:
-        """Parse entities from SDK result."""
-        entities = []
-
-        # Result could be a dict with 'entities' key or a list directly
+    def _parse_items(self, result: Any, field: str) -> list[dict[str, Any]]:
+        """Parse a field from SDK result into list of dicts."""
         if isinstance(result, dict):
-            items = result.get("entities", [])
-        elif isinstance(result, list):
-            items = result
+            items = result.get(field, [])
         else:
-            items = []
+            items = getattr(result, field, [])
 
+        parsed = []
         for item in items:
             if isinstance(item, dict):
-                entities.append(
-                    {
-                        "text": item.get("text", ""),
-                        "label": item.get("label", ""),
-                        "score": float(item.get("score", 0.0)),
-                        "start": item.get("start"),
-                        "end": item.get("end"),
-                    }
-                )
+                parsed.append(item)
             else:
-                entities.append(
-                    {
-                        "text": getattr(item, "text", ""),
-                        "label": getattr(item, "label", ""),
-                        "score": float(getattr(item, "score", 0.0)),
-                        "start": getattr(item, "start", None),
-                        "end": getattr(item, "end", None),
-                    }
-                )
-
-        return entities
+                parsed.append(vars(item) if hasattr(item, "__dict__") else {"value": str(item)})
+        return parsed

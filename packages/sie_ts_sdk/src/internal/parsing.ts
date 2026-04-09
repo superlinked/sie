@@ -6,9 +6,12 @@ import { ProvisioningError, RequestError, ServerError } from "../errors.js";
 import { unpackMessage } from "../msgpack.js";
 import type {
   CapacityInfo,
+  Classification,
+  DetectedObject,
   EncodeResult,
   Entity,
   ExtractResult,
+  Relation,
   ScoreEntry,
   ScoreResult,
   WorkerInfo,
@@ -169,9 +172,30 @@ interface WireEntity {
   bbox?: number[];
 }
 
+interface WireRelation {
+  head: string;
+  tail: string;
+  relation: string;
+  score: number;
+}
+
+interface WireClassification {
+  label: string;
+  score: number;
+}
+
+interface WireDetectedObject {
+  label: string;
+  score: number;
+  bbox: number[];
+}
+
 interface WireExtractResult {
   id?: string;
   entities: WireEntity[];
+  relations?: WireRelation[];
+  classifications?: WireClassification[];
+  objects?: WireDetectedObject[];
 }
 
 /**
@@ -274,6 +298,27 @@ export function parseExtractResult(data: WireExtractResult): ExtractResult {
   return {
     id: data.id,
     entities: data.entities.map(parseEntity),
+    relations: (data.relations ?? []).map(
+      (r: WireRelation): Relation => ({
+        head: r.head,
+        tail: r.tail,
+        relation: r.relation,
+        score: r.score,
+      }),
+    ),
+    classifications: (data.classifications ?? []).map(
+      (c: WireClassification): Classification => ({
+        label: c.label,
+        score: c.score,
+      }),
+    ),
+    objects: (data.objects ?? []).map(
+      (o: WireDetectedObject): DetectedObject => ({
+        label: o.label,
+        score: o.score,
+        bbox: o.bbox,
+      }),
+    ),
   };
 }
 

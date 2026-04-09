@@ -1,6 +1,6 @@
-"""SIE entity extraction tool for LlamaIndex.
+"""SIE extraction tool for LlamaIndex.
 
-Provides NER extraction using SIE's extract endpoint.
+Provides entity, relation, classification, and object extraction using SIE's extract endpoint.
 """
 
 from __future__ import annotations
@@ -20,13 +20,14 @@ def create_sie_extractor_tool(
     options: dict[str, Any] | None = None,
     gpu: str | None = None,
     timeout_s: float = 180.0,
-    name: str = "sie_extract_entities",
+    name: str = "sie_extract",
     description: str | None = None,
 ) -> FunctionTool:
-    """Create a LlamaIndex FunctionTool for entity extraction.
+    """Create a LlamaIndex FunctionTool for extraction.
 
     Creates a tool that wraps SIE's extract endpoint for use with
-    LlamaIndex agents and workflows.
+    LlamaIndex agents and workflows. Returns entities, relations,
+    classifications, and detected objects.
 
     Example:
         >>> from llama_index.core.agent import ReActAgent
@@ -43,8 +44,8 @@ def create_sie_extractor_tool(
 
     Args:
         base_url: URL of the SIE server.
-        model: Entity extraction model name/ID.
-        labels: Entity labels to extract.
+        model: Extraction model name/ID.
+        labels: Labels to extract.
         options: Runtime options dict for model adapter overrides.
         gpu: Target GPU type for routing (e.g., "l4", "a100-80gb").
         timeout_s: Request timeout in seconds.
@@ -52,16 +53,16 @@ def create_sie_extractor_tool(
         description: Tool description for the agent.
 
     Returns:
-        FunctionTool wrapping SIE entity extraction.
+        FunctionTool wrapping SIE extraction.
     """
     if labels is None:
         labels = ["person", "organization", "location"]
 
     if description is None:
         description = (
-            "Extract named entities from text. "
+            "Extract structured information from text. "
             f"Finds entities of types: {', '.join(labels)}. "
-            "Returns a list of entities with their labels, positions, and confidence scores."
+            "Returns entities, relations, classifications, and detected objects."
         )
 
     # Create extractor instance to hold state
@@ -74,19 +75,19 @@ def create_sie_extractor_tool(
         timeout_s=timeout_s,
     )
 
-    def extract_entities(text: str) -> list[dict[str, Any]]:
-        """Extract named entities from text.
+    def extract(text: str) -> dict[str, list[dict[str, Any]]]:
+        """Extract structured information from text.
 
         Args:
-            text: Text to extract entities from.
+            text: Text to extract from.
 
         Returns:
-            List of extracted entities with text, label, score, start, end.
+            Dict with entities, relations, classifications, and objects.
         """
         return extractor.extract(text)
 
     return FunctionTool.from_defaults(
-        fn=extract_entities,
+        fn=extract,
         name=name,
         description=description,
     )
@@ -126,14 +127,14 @@ class _SIEExtractor:
             )
         return self._client
 
-    def extract(self, text: str) -> list[dict[str, Any]]:
-        """Extract entities from text.
+    def extract(self, text: str) -> dict[str, list[dict[str, Any]]]:
+        """Extract structured information from text.
 
         Args:
-            text: Text to extract entities from.
+            text: Text to extract from.
 
         Returns:
-            List of extracted entities.
+            Dict with entities, relations, classifications, and objects.
         """
         from sie_sdk.types import Item
 
@@ -143,44 +144,68 @@ class _SIEExtractor:
             labels=self._labels,
         )
 
-        return self._format_entities(result)
+        return self._format_result(result)
 
-    def _format_entities(self, result: object) -> list[dict[str, Any]]:
-        """Format extraction result into entity list.
+    def _format_result(self, result: object) -> dict[str, list[dict[str, Any]]]:
+        """Format extraction result into multi-type dict."""
 
-        Args:
-            result: ExtractResult from SIE.
+        def _get(key: str) -> list:
+            if isinstance(result, dict):
+                return result.get(key, [])
+            return getattr(result, key, [])
 
-        Returns:
-            List of entity dictionaries.
-        """
-        # Handle dict or object result
-        entities = result.get("entities", []) if isinstance(result, dict) else getattr(result, "entities", [])
+        def _entity(e: Any) -> dict:
+            if isinstance(e, dict):
+                return {
+                    "text": e.get("text", ""),
+                    "label": e.get("label", ""),
+                    "score": float(e.get("score", 0.0)),
+                    "start": int(e.get("start", 0)),
+                    "end": int(e.get("end", 0)),
+                }
+            return {
+                "text": getattr(e, "text", ""),
+                "label": getattr(e, "label", ""),
+                "score": float(getattr(e, "score", 0.0)),
+                "start": int(getattr(e, "start", 0)),
+                "end": int(getattr(e, "end", 0)),
+            }
 
-        formatted = []
-        for entity in entities:
-            if isinstance(entity, dict):
-                formatted.append(
-                    {
-                        "text": entity.get("text", ""),
-                        "label": entity.get("label", ""),
-                        "score": float(entity.get("score", 0.0)),
-                        "start": int(entity.get("start", 0)),
-                        "end": int(entity.get("end", 0)),
-                    }
-                )
-            else:
-                formatted.append(
-                    {
-                        "text": getattr(entity, "text", ""),
-                        "label": getattr(entity, "label", ""),
-                        "score": float(getattr(entity, "score", 0.0)),
-                        "start": int(getattr(entity, "start", 0)),
-                        "end": int(getattr(entity, "end", 0)),
-                    }
-                )
+        def _relation(r: Any) -> dict:
+            if isinstance(r, dict):
+                return {
+                    "head": r.get("head", ""),
+                    "tail": r.get("tail", ""),
+                    "relation": r.get("relation", ""),
+                    "score": float(r.get("score", 0.0)),
+                }
+            return {
+                "head": getattr(r, "head", ""),
+                "tail": getattr(r, "tail", ""),
+                "relation": getattr(r, "relation", ""),
+                "score": float(getattr(r, "score", 0.0)),
+            }
 
-        return formatted
+        def _classification(c: Any) -> dict:
+            if isinstance(c, dict):
+                return {"label": c.get("label", ""), "score": float(c.get("score", 0.0))}
+            return {"label": getattr(c, "label", ""), "score": float(getattr(c, "score", 0.0))}
+
+        def _object(o: Any) -> dict:
+            if isinstance(o, dict):
+                return {"label": o.get("label", ""), "score": float(o.get("score", 0.0)), "bbox": o.get("bbox", [])}
+            return {
+                "label": getattr(o, "label", ""),
+                "score": float(getattr(o, "score", 0.0)),
+                "bbox": getattr(o, "bbox", []),
+            }
+
+        return {
+            "entities": [_entity(e) for e in _get("entities")],
+            "relations": [_relation(r) for r in _get("relations")],
+            "classifications": [_classification(c) for c in _get("classifications")],
+            "objects": [_object(o) for o in _get("objects")],
+        }
 
 
 # Alias for consistency with other integrations

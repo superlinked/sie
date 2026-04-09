@@ -150,12 +150,12 @@ class TestSIEVectorizer:
         assert call_kwargs.get("instruction") == "Represent this query:"
         assert call_kwargs.get("options") == {"is_query": True}
 
-    def test_extract_dense_raises_on_none(self, mock_sie_client: object) -> None:
-        """_extract_dense raises ValueError when dense is missing."""
-        vectorizer = SIEVectorizer(model="test-model")
+    def test_extract_dense_raises_on_none(self) -> None:
+        """extract_dense raises ValueError when dense is missing."""
+        from sie_sdk.encoding import dense_embedding
 
         with pytest.raises(ValueError, match="missing dense embedding"):
-            vectorizer._extract_dense({})
+            dense_embedding({})
 
 
 class TestSIENamedVectorizer:
@@ -163,7 +163,7 @@ class TestSIENamedVectorizer:
 
     def test_embed_documents_returns_named(self, mock_sie_client: object, sample_documents: list[str]) -> None:
         """Returns dicts with requested vector types."""
-        vectorizer = SIENamedVectorizer(model="test-model", output_types=["dense", "sparse"])
+        vectorizer = SIENamedVectorizer(model="test-model", output_types=["dense", "multivector"])
         vectorizer._client = mock_sie_client
 
         named = vectorizer.embed_documents(sample_documents)
@@ -173,20 +173,22 @@ class TestSIENamedVectorizer:
         for item in named:
             assert isinstance(item, dict)
             assert "dense" in item
-            assert "sparse" in item
+            assert "multivector" in item
             assert isinstance(item["dense"], list)
-            assert isinstance(item["sparse"], list)
+            assert isinstance(item["multivector"], list)
+            # multivector is list of token vectors
+            assert isinstance(item["multivector"][0], list)
 
     def test_embed_query_returns_named(self, mock_sie_client: object) -> None:
         """Query embedding returns dict with all vector types."""
-        vectorizer = SIENamedVectorizer(model="test-model", output_types=["dense", "sparse"])
+        vectorizer = SIENamedVectorizer(model="test-model", output_types=["dense", "multivector"])
         vectorizer._client = mock_sie_client
 
         named = vectorizer.embed_query("search text")
 
         assert isinstance(named, dict)
         assert "dense" in named
-        assert "sparse" in named
+        assert "multivector" in named
 
     def test_empty_documents(self, mock_sie_client: object) -> None:
         """Empty input returns empty list without calling SIE."""
@@ -200,23 +202,23 @@ class TestSIENamedVectorizer:
 
     def test_output_types_forwarded(self, mock_sie_client: object) -> None:
         """Requested output_types are passed to encode()."""
-        vectorizer = SIENamedVectorizer(model="test-model", output_types=["dense", "sparse"])
+        vectorizer = SIENamedVectorizer(model="test-model", output_types=["dense", "multivector"])
         vectorizer._client = mock_sie_client
 
         vectorizer.embed_documents(["test"])
 
         call_kwargs = mock_sie_client.encode.call_args.kwargs
-        assert call_kwargs.get("output_types") == ["dense", "sparse"]
+        assert call_kwargs.get("output_types") == ["dense", "multivector"]
 
     def test_default_output_types(self, mock_sie_client: object) -> None:
-        """Default output types are dense + sparse."""
+        """Default output types are dense only."""
         vectorizer = SIENamedVectorizer(model="test-model")
         vectorizer._client = mock_sie_client
 
         vectorizer.embed_documents(["test"])
 
         call_kwargs = mock_sie_client.encode.call_args.kwargs
-        assert call_kwargs.get("output_types") == ["dense", "sparse"]
+        assert call_kwargs.get("output_types") == ["dense"]
 
     def test_lazy_client_initialization(self) -> None:
         """Client is not created until first use."""
@@ -252,3 +254,46 @@ class TestSIENamedVectorizer:
 
         call_kwargs = mock_sie_client.encode.call_args.kwargs
         assert call_kwargs.get("output_dtype") == "float16"
+
+    def test_multivector_shape(self, mock_sie_client: object) -> None:
+        """Multivector output has correct nested list structure."""
+        vectorizer = SIENamedVectorizer(model="test-model", output_types=["multivector"])
+        vectorizer._client = mock_sie_client
+
+        named = vectorizer.embed_documents(["test"])
+
+        mv = named[0]["multivector"]
+        assert isinstance(mv, list)
+        assert len(mv) == 8  # MULTIVECTOR_TOKENS from conftest
+        for token_vec in mv:
+            assert isinstance(token_vec, list)
+            assert len(token_vec) == 128  # MULTIVECTOR_DIM from conftest
+            assert all(isinstance(v, float) for v in token_vec)
+
+    def test_extract_multivector_from_numpy(self) -> None:
+        """extract_multivector converts 2D numpy array to list of lists."""
+        from sie_sdk.encoding import multivector_embedding
+
+        mv = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        result = multivector_embedding(mv)
+
+        assert result == [[1.0, 2.0], [3.0, 4.0]]
+
+    def test_extract_multivector_from_list_of_arrays(self) -> None:
+        """extract_multivector handles list of 1D numpy arrays."""
+        from sie_sdk.encoding import multivector_embedding
+
+        mv = [np.array([1.0, 2.0], dtype=np.float32), np.array([3.0, 4.0], dtype=np.float32)]
+        result = multivector_embedding(mv)
+
+        assert result == [[1.0, 2.0], [3.0, 4.0]]
+
+    def test_dense_only_named(self, mock_sie_client: object) -> None:
+        """Dense-only output works without multivector."""
+        vectorizer = SIENamedVectorizer(model="test-model", output_types=["dense"])
+        vectorizer._client = mock_sie_client
+
+        named = vectorizer.embed_documents(["test"])
+
+        assert "dense" in named[0]
+        assert "multivector" not in named[0]

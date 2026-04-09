@@ -1,10 +1,23 @@
 {{- /* Validate: at most one config delivery mode may be active (zero = embedded-in-image, also valid) */}}
 {{- $modesEnabled := list }}
-{{- if .Values.router.gitSync.enabled }}{{- $modesEnabled = append $modesEnabled "gitSync" }}{{- end }}
 {{- if .Values.router.embeddedConfigs.enabled }}{{- $modesEnabled = append $modesEnabled "embeddedConfigs" }}{{- end }}
 {{- if .Values.router.configMap.enabled }}{{- $modesEnabled = append $modesEnabled "configMap" }}{{- end }}
 {{- if gt (len $modesEnabled) 1 }}
-  {{- fail (printf "router: multiple config delivery modes enabled (%v). Enable only one of: gitSync, embeddedConfigs, configMap." $modesEnabled) }}
+  {{- fail (printf "router: multiple config delivery modes enabled (%v). Enable only one of: embeddedConfigs, configMap." $modesEnabled) }}
+{{- end }}
+{{- /* Validate: clusterRouting=queue requires NATS and JetStream; payloadStore is recommended for large payloads */}}
+{{- if eq (default "direct" .Values.clusterRouting) "queue" }}
+  {{- if not .Values.nats.enabled }}
+    {{- fail "clusterRouting=queue requires nats.enabled=true" }}
+  {{- end }}
+  {{- if not .Values.nats.config.jetstream.enabled }}
+    {{- fail "clusterRouting=queue requires nats.config.jetstream.enabled=true" }}
+  {{- end }}
+  {{- if .Values.payloadStore.enabled }}
+    {{- if not (or (hasPrefix "s3://" (default "" .Values.payloadStore.url)) (hasPrefix "gs://" (default "" .Values.payloadStore.url))) }}
+      {{- fail "payloadStore.url must be an object-store URL (s3://bucket/prefix or gs://bucket/prefix), not a local path" }}
+    {{- end }}
+  {{- end }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -15,6 +28,10 @@ metadata:
     {{- include "sie-cluster.router.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.router.replicas }}
+  {{- if and .Values.nats.enabled .Values.nats.configRestore }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "sie-cluster.router.selectorLabels" . | nindent 6 }}
@@ -76,16 +93,25 @@ spec:
                   name: {{ .Values.router.auth.tokenSecretName }}
                   key: {{ .Values.router.auth.tokenSecretKey }}
             {{- end }}
-            {{- if .Values.router.gitSync.enabled }}
-            # Config paths for git-sync (hot reload)
-            # git-sync creates /git/current symlink to latest revision
-            - name: SIE_BUNDLES_DIR
-              value: /git/current/{{ .Values.router.gitSync.bundlesPath }}
-            - name: SIE_MODELS_DIR
-              value: /git/current/{{ .Values.router.gitSync.modelsPath }}
-            - name: SIE_ROUTER_HOT_RELOAD
-              value: "true"
-            {{- else if .Values.router.embeddedConfigs.enabled }}
+            {{- if .Values.nats.enabled }}
+            - name: SIE_NATS_URL
+              value: {{ .Values.nats.url | default (printf "nats://%s-nats:4222" .Release.Name) | quote }}
+            - name: SIE_CONFIG_STORE_DIR
+              value: {{ .Values.nats.configStoreDir | quote }}
+            - name: SIE_CONFIG_RESTORE
+              value: {{ .Values.nats.configRestore | quote }}
+            {{- end }}
+            {{- if and .Values.clusterRouting (ne .Values.clusterRouting "direct") }}
+            - name: SIE_CLUSTER_ROUTING
+              value: {{ .Values.clusterRouting | quote }}
+            {{- end }}
+            {{- if .Values.payloadStore.enabled }}
+            - name: SIE_PAYLOAD_STORE_URL
+              value: {{ .Values.payloadStore.url | quote }}
+            - name: SIE_PAYLOAD_STORE_TTL
+              value: {{ .Values.payloadStore.ttlSeconds | quote }}
+            {{- end }}
+            {{- if .Values.router.embeddedConfigs.enabled }}
             # Config paths for embedded configs (auto-generated ConfigMaps from chart files/)
             - name: SIE_BUNDLES_DIR
               value: /configs/bundles
@@ -104,11 +130,17 @@ spec:
             - name: SIE_ROUTER_POLLING_WATCHER
               value: "true"
             {{- end }}
-          livenessProbe:
+          startupProbe:
             httpGet:
               path: /healthz
               port: http
             initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
@@ -116,19 +148,14 @@ spec:
             httpGet:
               path: /readyz
               port: http
-            initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
           resources:
             {{- toYaml .Values.router.resources | nindent 12 }}
-          {{- if or .Values.router.gitSync.enabled .Values.router.embeddedConfigs.enabled .Values.router.configMap.enabled }}
+          {{- if or .Values.router.embeddedConfigs.enabled .Values.router.configMap.enabled (and .Values.nats.enabled .Values.nats.configRestore) }}
           volumeMounts:
-            {{- if .Values.router.gitSync.enabled }}
-            - name: config-repo
-              mountPath: /git
-              readOnly: true
-            {{- else if .Values.router.embeddedConfigs.enabled }}
+            {{- if .Values.router.embeddedConfigs.enabled }}
             - name: bundles-config
               mountPath: /configs/bundles
               readOnly: true
@@ -140,44 +167,15 @@ spec:
               mountPath: /configs
               readOnly: true
             {{- end }}
+            {{- if and .Values.nats.enabled .Values.nats.configRestore }}
+            - name: config-store
+              mountPath: {{ .Values.nats.configStoreDir }}
+            {{- end }}
           {{- end }}
-        {{- if .Values.router.gitSync.enabled }}
-        # Git-sync sidecar for config hot reload
-        - name: git-sync
-          image: {{ .Values.router.gitSync.image.repository }}:{{ .Values.router.gitSync.image.tag }}
-          imagePullPolicy: {{ .Values.router.gitSync.image.pullPolicy }}
-          args:
-            - --repo={{ .Values.router.gitSync.repo }}
-            - --ref={{ .Values.router.gitSync.branch }}
-            - --root=/git
-            - --link=current
-            - --period={{ .Values.router.gitSync.period }}
-            - --max-failures=3
-            {{- if .Values.router.gitSync.sshSecret }}
-            - --ssh
-            - --ssh-key-file=/etc/git-secret/ssh
-            - --ssh-known-hosts=false
-            {{- end }}
-          volumeMounts:
-            - name: config-repo
-              mountPath: /git
-            {{- if .Values.router.gitSync.sshSecret }}
-            - name: git-ssh
-              mountPath: /etc/git-secret
-              readOnly: true
-            {{- end }}
-          resources:
-            {{- toYaml .Values.router.gitSync.resources | nindent 12 }}
-          securityContext:
-            runAsUser: 65534  # nobody
-            runAsGroup: 65534
-        {{- end }}
-      {{- if or .Values.router.gitSync.enabled .Values.router.embeddedConfigs.enabled .Values.router.configMap.enabled }}
+
+      {{- if or .Values.router.embeddedConfigs.enabled .Values.router.configMap.enabled (and .Values.nats.enabled .Values.nats.configRestore) }}
       volumes:
-        {{- if .Values.router.gitSync.enabled }}
-        - name: config-repo
-          emptyDir: {}
-        {{- else if .Values.router.embeddedConfigs.enabled }}
+        {{- if .Values.router.embeddedConfigs.enabled }}
         # Auto-generated ConfigMaps from chart files/bundles and files/models
         - name: bundles-config
           configMap:
@@ -212,12 +210,12 @@ spec:
                       path: models/{{ .key }}.yaml
                     {{- end }}
         {{- end }}
-        {{- if and .Values.router.gitSync.enabled .Values.router.gitSync.sshSecret }}
-        - name: git-ssh
-          secret:
-            secretName: {{ .Values.router.gitSync.sshSecret }}
-            defaultMode: 0400
+        {{- if and .Values.nats.enabled .Values.nats.configRestore }}
+        - name: config-store
+          persistentVolumeClaim:
+            claimName: {{ include "sie-cluster.fullname" . }}-config-store
         {{- end }}
+
       {{- end }}
       {{- with .Values.router.nodeSelector }}
       nodeSelector:

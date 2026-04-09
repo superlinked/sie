@@ -6,7 +6,6 @@ Supports multiple discovery methods:
 """
 
 import asyncio
-import json
 import logging
 import random
 from abc import ABC, abstractmethod
@@ -15,6 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import orjson
 import websockets
 from websockets.exceptions import ConnectionClosedError
 
@@ -381,9 +381,9 @@ class WorkerConnectionManager:
                             break
 
                         try:
-                            state = json.loads(message)
+                            state = orjson.loads(message)
                             await self._registry.update_worker(url, state)
-                        except json.JSONDecodeError:
+                        except orjson.JSONDecodeError:
                             logger.warning("Invalid JSON from worker %s: %s", url, message[:100])
 
             except ConnectionClosedError:

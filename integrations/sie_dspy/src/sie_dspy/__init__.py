@@ -42,9 +42,20 @@ Example usage with hybrid search (dense + sparse):
 """
 
 from sie_dspy.embedder import SIEEmbedder, SIESparseEmbedder
-from sie_dspy.modules import SIEExtractor, SIEReranker
+from sie_dspy.modules import (
+    Classification,
+    DetectedObject,
+    Entity,
+    Relation,
+    SIEExtractor,
+    SIEReranker,
+)
 
 __all__ = [
+    "Classification",
+    "DetectedObject",
+    "Entity",
+    "Relation",
     "SIEEmbedder",
     "SIEExtractor",
     "SIEReranker",

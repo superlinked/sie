@@ -1,0 +1,32 @@
+[project]
+name = "sie-lancedb"
+version = "0.1.0"
+description = "SIE integration for LanceDB"
+requires-python = ">=3.12"
+dependencies = [
+    "sie-sdk>=0.1.0",
+    "lancedb>=0.17",
+    "pylance>=0.20",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sie_lancedb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests as integration tests (require running SIE server and LanceDB)",
+]
+addopts = "-v --tb=short -m 'not integration'"

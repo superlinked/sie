@@ -1,6 +1,6 @@
 [project]
 name = "sie-router"
-version = "0.1.9"
+version = "0.1.10"
 description = "Search Inference Engine - Stateless request router for elastic cloud deployments"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
@@ -16,9 +16,13 @@ dependencies = [
     # WebSocket client for worker connections
     "websockets>=14,<15",
 
+    # NATS pub/sub for config distribution
+    "nats-py>=2.9,<3",
+
     # Serialization (for request/response forwarding)
     "msgpack>=1.1,<2",
     "msgpack-numpy>=0.4,<1",
+    "orjson>=3.10,<4",
 
     # Shared types (SDK is source of truth for interface types)
     "sie-sdk>=0.1",
@@ -41,6 +45,7 @@ dependencies = [
 
 [project.optional-dependencies]
 kubernetes = ["kubernetes>=31,<32"]
+gcs = ["google-cloud-storage>=2.18,<3"]
 
 [project.scripts]
 sie-router = "sie_router.cli:app"

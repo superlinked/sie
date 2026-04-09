@@ -206,7 +206,7 @@ class TestModelWorkerScoreOptionsThreading:
 
         try:
             prepared = ScorePreparedItem(cost=50, original_index=0)
-            runtime_options = {"max_length": 256}
+            runtime_options = {"max_seq_length": 256}
 
             future = await worker.submit_score(
                 [prepared],
@@ -277,13 +277,13 @@ class TestModelWorkerScoreOptionsThreading:
                 [prepared1],
                 Item(text="query 1"),
                 [Item(text="doc 1")],
-                options={"max_length": 256},
+                options={"max_seq_length": 256},
             )
             future2 = await worker.submit_score(
                 [prepared2],
                 Item(text="query 2"),
                 [Item(text="doc 2")],
-                options={"max_length": 512},
+                options={"max_seq_length": 512},
             )
 
             await asyncio.gather(future1, future2)
@@ -293,8 +293,8 @@ class TestModelWorkerScoreOptionsThreading:
 
             # Verify each call got the right options
             call_options = [call.kwargs.get("options") for call in mock_adapter.score_pairs.call_args_list]
-            assert {"max_length": 256} in call_options
-            assert {"max_length": 512} in call_options
+            assert {"max_seq_length": 256} in call_options
+            assert {"max_seq_length": 512} in call_options
 
         finally:
             await worker.stop()

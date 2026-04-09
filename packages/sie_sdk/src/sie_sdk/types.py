@@ -297,6 +297,8 @@ class WorkerInfo(TypedDict, total=False):
         loaded_models: List of model names loaded on this worker.
         memory_used_bytes: Total GPU memory in use.
         memory_total_bytes: Total GPU memory available.
+        bundle: Bundle name this worker serves.
+        bundle_config_hash: Config hash for bundle config awareness gating.
     """
 
     name: str
@@ -308,6 +310,8 @@ class WorkerInfo(TypedDict, total=False):
     loaded_models: list[str]
     memory_used_bytes: int
     memory_total_bytes: int
+    bundle: str
+    bundle_config_hash: str
 
 
 class CapacityInfo(TypedDict, total=False):
@@ -575,6 +579,30 @@ class ModelConfig(TypedDict, total=False):
     adapter_options_runtime: dict[str, Any] | None
 
 
+class AdaptiveBatchingStatus(TypedDict, total=False):
+    """Adaptive batching state for a single model on a worker.
+
+    Absent from ModelStatus when adaptive batching is disabled for this model.
+
+    Attributes:
+        calibrated: Whether auto-calibration has completed.
+        target_p50_ms: Current SLO target (may be auto-calibrated). None before calibration.
+        wait_ms: Current dynamic max_batch_wait_ms.
+        batch_cost: Current dynamic max_batch_cost.
+        p50_ms: Observed rolling p50 latency. None if not enough samples.
+        headroom_ms: target - observed. None if either is None.
+        fill_ratio: Mean batch fill ratio (actual_cost / max_cost). None if no samples.
+    """
+
+    calibrated: bool
+    target_p50_ms: float | None
+    wait_ms: float
+    batch_cost: int
+    p50_ms: float | None
+    headroom_ms: float | None
+    fill_ratio: float | None
+
+
 class ModelStatus(TypedDict, total=False):
     """Status of a single model on a worker.
 
@@ -586,6 +614,7 @@ class ModelStatus(TypedDict, total=False):
         config: Model configuration details.
         queue_depth: Number of requests in queue.
         queue_pending_items: Same as queue_depth (for compatibility).
+        adaptive_batching: Adaptive batching state. Absent when disabled.
     """
 
     name: str
@@ -595,6 +624,7 @@ class ModelStatus(TypedDict, total=False):
     config: ModelConfig
     queue_depth: int
     queue_pending_items: int
+    adaptive_batching: AdaptiveBatchingStatus
 
 
 class WorkerStatusMessage(TypedDict, total=False):
@@ -611,12 +641,20 @@ class WorkerStatusMessage(TypedDict, total=False):
         name: Worker name/identifier.
         machine_profile: Machine profile for routing. In K8s: from SIE_MACHINE_PROFILE env var
             (e.g., "l4-spot"). Standalone: detected GPU type (e.g., "l4").
+        pool_name: NATS work-queue pool name (from SIE_POOL env var, e.g., "l4-spot-default").
+            Used by the router in queue mode to publish to the correct JetStream subject.
+            Empty string when not in queue mode or not set.
         gpu_count: Number of GPUs on this worker.
         bundle: Dependency bundle this worker is running (e.g., "default").
+        bundle_config_hash: SHA-256 hash of the serialized model configs/profiles
+            assigned to this worker's bundle. Used by routers to gate routing on
+            config awareness. Empty string when not yet computed.
         loaded_models: List of model names currently loaded.
         server: Server metadata (version, uptime, etc.).
         gpus: Per-GPU metrics (includes gpu_type for each GPU).
         models: Per-model status.
+        max_batch_requests: Maximum number of requests the worker can batch in a
+            single inference call (minimum across loaded models).
         counters: Prometheus counter values for QPS calculation.
         histograms: Prometheus histogram data for latency percentiles.
     """
@@ -625,12 +663,15 @@ class WorkerStatusMessage(TypedDict, total=False):
     ready: bool
     name: str
     machine_profile: str
+    pool_name: str
     gpu_count: int
     bundle: str
+    bundle_config_hash: str
     loaded_models: list[str]
     server: ServerInfo
     gpus: list[GPUMetrics]
     models: list[ModelStatus]
+    max_batch_requests: int
     counters: dict[str, dict[str, float]]
     histograms: dict[str, dict[str, dict[str, Any]]]
 

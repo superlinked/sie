@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from sie_sdk import SIEClient
+from sie_sdk.encoding import dense_embedding, multivector_embedding
+
 
 class SIEVectorizer:
     """Compute dense embeddings via SIE for Weaviate collections.
@@ -65,8 +68,6 @@ class SIEVectorizer:
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -99,7 +100,7 @@ class SIEVectorizer:
             output_dtype=self._output_dtype,
         )
 
-        return [self._extract_dense(result) for result in results]
+        return [dense_embedding(result) for result in results]
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query text.
@@ -128,33 +129,27 @@ class SIEVectorizer:
             options={"is_query": True},
         )
 
-        return self._extract_dense(result)
-
-    def _extract_dense(self, result: Any) -> list[float]:
-        """Extract dense embedding values from SDK result."""
-        dense = result.get("dense") if isinstance(result, dict) else getattr(result, "dense", None)
-        if dense is None:
-            msg = "Encode result missing dense embedding"
-            raise ValueError(msg)
-        return dense.tolist() if hasattr(dense, "tolist") else list(dense)
+        return dense_embedding(result)
 
 
 class SIENamedVectorizer:
     """Compute multiple vector types via SIE for Weaviate named vectors.
 
     Uses a single SIE encode() call to produce multiple output types
-    (e.g., dense + sparse) for Weaviate's named vector feature. This
-    maps to collections configured with multiple
+    (e.g., dense + multivector) for Weaviate's named vector feature.
+    This maps to collections configured with multiple
     ``Configure.Vectors.self_provided(name=...)`` entries.
+
+    Supported output types: ``"dense"``, ``"multivector"`` (ColBERT).
 
     Example:
         >>> vectorizer = SIENamedVectorizer(
         ...     base_url="http://localhost:8080",
-        ...     model="BAAI/bge-m3",
-        ...     output_types=["dense", "sparse"],
+        ...     model="jinaai/jina-colbert-v2",
+        ...     output_types=["dense", "multivector"],
         ... )
         >>> named_vectors = vectorizer.embed_documents(["hello", "world"])
-        >>> # [{"dense": [0.1, ...], "sparse": [0.0, 0.3, ...]}, ...]
+        >>> # [{"dense": [0.1, ...], "multivector": [[0.2, ...], ...]}, ...]
     """
 
     def __init__(
@@ -174,7 +169,8 @@ class SIENamedVectorizer:
         Args:
             base_url: SIE server URL.
             model: Model name for embedding.
-            output_types: Vector types to produce (default: ["dense", "sparse"]).
+            output_types: Vector types to produce (default: ["dense"]).
+                Supports "dense" and "multivector" (ColBERT).
                 Must match the named vector config on the Weaviate collection.
             instruction: Instruction prefix for instruction-tuned models (e.g., E5).
             output_dtype: Output data type (e.g., "float32", "float16", "int8", "binary").
@@ -184,7 +180,7 @@ class SIENamedVectorizer:
         """
         self._base_url = base_url
         self._model = model
-        self._output_types = output_types or ["dense", "sparse"]
+        self._output_types = output_types or ["dense"]
         self._instruction = instruction
         self._output_dtype = output_dtype
         self._gpu = gpu
@@ -196,8 +192,6 @@ class SIENamedVectorizer:
     def client(self) -> Any:
         """Lazily initialize the SIE client."""
         if self._client is None:
-            from sie_sdk import SIEClient
-
             self._client = SIEClient(
                 self._base_url,
                 timeout_s=self._timeout_s,
@@ -206,7 +200,7 @@ class SIENamedVectorizer:
             )
         return self._client
 
-    def embed_documents(self, texts: list[str]) -> list[dict[str, list[float]]]:
+    def embed_documents(self, texts: list[str]) -> list[dict[str, list]]:
         """Embed documents with multiple vector types.
 
         Args:
@@ -214,7 +208,7 @@ class SIENamedVectorizer:
 
         Returns:
             List of dicts mapping vector name to vector values.
-            Ready for ``DataObject(vector={"dense": ..., "sparse": ...})``.
+            Ready for ``DataObject(vector={"dense": ..., "multivector": ...})``.
         """
         if not texts:
             return []
@@ -232,7 +226,7 @@ class SIENamedVectorizer:
 
         return [self._extract_named(result) for result in results]
 
-    def embed_query(self, text: str) -> dict[str, list[float]]:
+    def embed_query(self, text: str) -> dict[str, list]:
         """Embed a query with multiple vector types.
 
         Passes ``is_query=True`` so instruction-tuned models apply
@@ -260,52 +254,15 @@ class SIENamedVectorizer:
 
         return self._extract_named(result)
 
-    def _extract_named(self, result: Any) -> dict[str, list[float]]:
+    def _extract_named(self, result: Any) -> dict[str, list]:
         """Extract all requested vector types from SDK result."""
-        named: dict[str, list[float]] = {}
+        named: dict[str, list] = {}
         for output_type in self._output_types:
             raw = result.get(output_type) if isinstance(result, dict) else getattr(result, output_type, None)
             if raw is None:
                 continue
-            if output_type == "sparse":
-                named[output_type] = self._expand_sparse(raw)
+            if output_type == "multivector":
+                named[output_type] = multivector_embedding(raw)
             else:
                 named[output_type] = raw.tolist() if hasattr(raw, "tolist") else list(raw)
         return named
-
-    @staticmethod
-    def _expand_sparse(sparse: Any) -> list[float]:
-        """Expand SIE sparse output to a dense float list for Weaviate.
-
-        SIE returns sparse vectors as ``{"indices": [...], "values": [...]}``.
-        Weaviate named vectors expect ``list[float]``, so we expand the sparse
-        representation into a full-length vector with zeros at inactive
-        positions and values at the positions specified by indices.
-
-        This preserves positional information so the vector is usable for
-        similarity search.  The resulting vector length equals the maximum
-        index + 1 (typically the model's vocab size).
-
-        Note: For native BM25 hybrid search in Weaviate, you don't need
-        sparse vectors — Weaviate has built-in BM25. Sparse vectors from
-        SIE (e.g., SPLADE) are useful when you want learned sparse
-        representations rather than term-frequency-based BM25.
-        """
-        indices = sparse.get("indices") if isinstance(sparse, dict) else getattr(sparse, "indices", None)
-        values = sparse.get("values") if isinstance(sparse, dict) else getattr(sparse, "values", None)
-
-        if indices is None or values is None:
-            return []
-
-        indices_list = indices.tolist() if hasattr(indices, "tolist") else list(indices)
-        values_list = values.tolist() if hasattr(values, "tolist") else list(values)
-
-        if not indices_list:
-            return []
-
-        # Expand to full-length vector with zeros at inactive positions
-        size = max(indices_list) + 1
-        expanded = [0.0] * size
-        for idx, val in zip(indices_list, values_list):
-            expanded[idx] = float(val)
-        return expanded

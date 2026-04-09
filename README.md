@@ -105,7 +105,7 @@ TypeScript: `pnpm add @sie/sdk` — [TypeScript docs ->](https://sie.dev/docs/re
 The same code works against a production cluster. SIE ships a load-balancing router, KEDA autoscaling (scale to zero), Grafana dashboards, and Terraform modules for GKE and EKS. Not just the server, the whole stack. All Apache 2.0.
 
 ```bash
-helm upgrade --install sie-cluster deploy/helm/sie-cluster \
+helm upgrade --install sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
   --namespace sie --create-namespace \
   --set hfToken.create=true \
   --set hfToken.value=<TOKEN> \

@@ -92,8 +92,9 @@ logger = logging.getLogger(__name__)
 
 _LEASE_RENEWAL_MAX_RETRIES = 5
 
-# Patch msgpack for numpy support
-m.patch()
+# NOTE: msgpack_numpy.patch() is called lazily in SIEAsyncClient.__init__
+# (see sync.py for details).
+_NUMPY_PATCHED = False
 
 
 class _AioResponse:
@@ -176,6 +177,14 @@ class SIEAsyncClient:
         pool: PoolSpec | None = None,
         max_connections: int | None = None,
     ) -> None:
+        # Ensure msgpack-numpy hooks are installed (once per process).
+        # Done lazily here instead of at module level to avoid monkey-patching
+        # msgpack in processes that import sie_sdk but never use the client.
+        global _NUMPY_PATCHED
+        if not _NUMPY_PATCHED:
+            m.patch()
+            _NUMPY_PATCHED = True
+
         # Normalize base_url (remove trailing slash)
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_s
@@ -1035,6 +1044,25 @@ class SIEAsyncClient:
 
         data = response.json()
         return data["models"]
+
+    async def get_model(self, model: str) -> ModelInfo:
+        """Async version of get_model(). See SIEClient.get_model() for details."""
+        try:
+            response = await self._get(
+                f"/v1/models/{model}",
+                headers={"Accept": JSON_CONTENT_TYPE},
+            )
+        except TimeoutError as e:
+            msg = f"Request timed out: {e}"
+            raise SIEConnectionError(msg) from e
+        except (aiohttp.ClientError, OSError) as e:
+            msg = f"Failed to connect to {self._base_url}: {e}"
+            raise SIEConnectionError(msg) from e
+
+        if response.status_code >= HTTP_CLIENT_ERROR:
+            handle_error(response)
+
+        return response.json()
 
     async def _detect_endpoint_type(self) -> Literal["cluster", "worker"]:
         """Detect whether base_url is a router (cluster) or worker endpoint."""

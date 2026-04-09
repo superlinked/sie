@@ -86,7 +86,7 @@ class TestSIEExtractorTool:
 
         result = extractor._run(text=lead_info_text)
 
-        assert "Extracted entities" in result or "No entities found" in result
+        assert "Extracted entities" in result or "No extraction results found" in result
 
     def test_extract_with_custom_labels(self, mock_sie_client: object, lead_info_text: str) -> None:
         """Test extraction with custom labels for business use case."""
@@ -113,12 +113,12 @@ class TestSIEExtractorTool:
         )
         # Create a fresh mock that returns empty
         empty_mock = MagicMock()
-        empty_mock.extract.return_value = []
+        empty_mock.extract.return_value = {"entities": [], "relations": [], "classifications": [], "objects": []}
         extractor._client = empty_mock
 
         result = extractor._run(text="Simple text with no entities.")
 
-        assert "No entities found" in result
+        assert "No extraction results found" in result
 
     def test_custom_model(self, mock_sie_client: object, lead_info_text: str) -> None:
         """Test using a custom extraction model."""

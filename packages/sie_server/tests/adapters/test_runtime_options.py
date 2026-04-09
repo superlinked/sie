@@ -503,7 +503,7 @@ class TestScoreRuntimeOptions:
     """Tests for score runtime options wiring.
 
     Verifies that all cross-encoder adapters accept options in score_pairs(),
-    and that flash CE adapters consume max_length from options.
+    and that flash CE adapters consume max_seq_length from options.
     """
 
     # ---- Helper ----
@@ -549,7 +549,7 @@ class TestScoreRuntimeOptions:
         params = self._get_param_names(cls, "score_pairs")
         assert "options" in params, f"{class_name}.score_pairs() missing 'options' parameter"
 
-    # ---- Flash CE adapters resolve options and consume max_length ----
+    # ---- Flash CE adapters resolve options and consume max_seq_length ----
 
     _FLASH_CE_ADAPTERS: ClassVar[list[tuple[str, str]]] = [
         ("bert_flash_cross_encoder", "BertFlashCrossEncoderAdapter"),
@@ -582,19 +582,19 @@ class TestScoreRuntimeOptions:
         _FLASH_CE_ADAPTERS,
         ids=[m for m, _ in _FLASH_CE_ADAPTERS],
     )
-    def test_flash_ce_consumes_max_length_from_options(
+    def test_flash_ce_consumes_max_seq_length_from_options(
         self,
         module_name: str,
         class_name: str,
     ) -> None:
-        """Flash CE adapters' score_pairs() must read max_length from options."""
+        """Flash CE adapters' score_pairs() must read max_seq_length from options."""
         import inspect
 
         cls = self._get_adapter_class(module_name, class_name)
         source = inspect.getsource(cls.score_pairs)
-        assert 'opts.get("max_length"' in source or "opts.get('max_length'" in source, (
-            f"{class_name}.score_pairs() does not read max_length from options — "
-            "per-request max_length override will not work."
+        assert 'opts.get("max_seq_length"' in source or "opts.get('max_seq_length'" in source, (
+            f"{class_name}.score_pairs() does not read max_seq_length from options — "
+            "per-request max_seq_length override will not work."
         )
 
     # ---- Base class score()/score_pairs() accept options ----

@@ -1,6 +1,7 @@
 """SIE extractor component for Haystack.
 
-Provides SIEExtractor for extracting entities from text.
+Provides SIEExtractor for extracting entities, relations, classifications,
+and detected objects from text.
 """
 
 from __future__ import annotations
@@ -22,12 +23,39 @@ class Entity:
     end: int
 
 
+@dataclass
+class Relation:
+    """Extracted relation triple between two entities."""
+
+    head: str
+    tail: str
+    relation: str
+    score: float
+
+
+@dataclass
+class Classification:
+    """Text classification result."""
+
+    label: str
+    score: float
+
+
+@dataclass
+class DetectedObject:
+    """Detected object with bounding box."""
+
+    label: str
+    score: float
+    bbox: list[int]
+
+
 @component
 class SIEExtractor:
-    """Extracts entities from text using SIE.
+    """Extracts structured information from text using SIE.
 
-    Use this component to extract named entities or custom entity types
-    from text using GLiNER or similar extraction models.
+    Use this component to extract named entities, relations, classifications,
+    and detected objects using GLiNER, GLiREL, GLiClass, or similar models.
 
     Example:
         >>> extractor = SIEExtractor(
@@ -56,7 +84,7 @@ class SIEExtractor:
         Args:
             base_url: URL of the SIE server.
             model: Model name to use for extraction.
-            labels: Entity labels to extract (e.g., ["person", "organization"]).
+            labels: Labels to extract (entity types, relation types, or classification labels).
             gpu: GPU type to use (e.g., "l4", "a100"). Passed to SDK as default.
             options: Model-specific options. Passed to SDK as default.
             timeout_s: Request timeout in seconds.
@@ -87,20 +115,25 @@ class SIEExtractor:
         """Warm up the component by initializing the client."""
         _ = self.client
 
-    @component.output_types(entities=list[Entity])
+    @component.output_types(
+        entities=list[Entity],
+        relations=list[Relation],
+        classifications=list[Classification],
+        objects=list[DetectedObject],
+    )
     def run(
         self,
         text: str,
         labels: list[str] | None = None,
-    ) -> dict[str, list[Entity]]:
-        """Extract entities from text.
+    ) -> dict[str, list]:
+        """Extract structured information from text.
 
         Args:
-            text: The text to extract entities from.
+            text: The text to extract from.
             labels: Override the configured labels for this call.
 
         Returns:
-            Dictionary with "entities" key containing extracted entities.
+            Dictionary with entities, relations, classifications, and objects.
         """
         from sie_sdk.types import Item
 
@@ -112,33 +145,111 @@ class SIEExtractor:
             labels=effective_labels,
         )
 
-        entities = self._build_entities(result)
-        return {"entities": entities}
+        return {
+            "entities": self._build_entities(result),
+            "relations": self._build_relations(result),
+            "classifications": self._build_classifications(result),
+            "objects": self._build_objects(result),
+        }
 
     def _build_entities(self, result: Any) -> list[Entity]:
         """Build Entity objects from SDK result."""
+        items = self._get_field(result, "entities")
         entities = []
-
-        # Result could be a list of entities
-        items = result if isinstance(result, list) else []
-
         for item in items:
             if isinstance(item, dict):
-                entity = Entity(
-                    text=item.get("text", ""),
-                    label=item.get("label", ""),
-                    score=float(item.get("score", 0.0)),
-                    start=int(item.get("start", 0)),
-                    end=int(item.get("end", 0)),
+                entities.append(
+                    Entity(
+                        text=item.get("text", ""),
+                        label=item.get("label", ""),
+                        score=float(item.get("score") or 0.0),
+                        start=int(item.get("start") or 0),
+                        end=int(item.get("end") or 0),
+                    )
                 )
             else:
-                entity = Entity(
-                    text=getattr(item, "text", ""),
-                    label=getattr(item, "label", ""),
-                    score=float(getattr(item, "score", 0.0)),
-                    start=int(getattr(item, "start", 0)),
-                    end=int(getattr(item, "end", 0)),
+                entities.append(
+                    Entity(
+                        text=getattr(item, "text", ""),
+                        label=getattr(item, "label", ""),
+                        score=float(getattr(item, "score", None) or 0.0),
+                        start=int(getattr(item, "start", None) or 0),
+                        end=int(getattr(item, "end", None) or 0),
+                    )
                 )
-            entities.append(entity)
-
         return entities
+
+    def _build_relations(self, result: Any) -> list[Relation]:
+        """Build Relation objects from SDK result."""
+        items = self._get_field(result, "relations")
+        relations = []
+        for item in items:
+            if isinstance(item, dict):
+                relations.append(
+                    Relation(
+                        head=item.get("head", ""),
+                        tail=item.get("tail", ""),
+                        relation=item.get("relation", ""),
+                        score=float(item.get("score") or 0.0),
+                    )
+                )
+            else:
+                relations.append(
+                    Relation(
+                        head=getattr(item, "head", ""),
+                        tail=getattr(item, "tail", ""),
+                        relation=getattr(item, "relation", ""),
+                        score=float(getattr(item, "score", None) or 0.0),
+                    )
+                )
+        return relations
+
+    def _build_classifications(self, result: Any) -> list[Classification]:
+        """Build Classification objects from SDK result."""
+        items = self._get_field(result, "classifications")
+        classifications = []
+        for item in items:
+            if isinstance(item, dict):
+                classifications.append(
+                    Classification(
+                        label=item.get("label", ""),
+                        score=float(item.get("score") or 0.0),
+                    )
+                )
+            else:
+                classifications.append(
+                    Classification(
+                        label=getattr(item, "label", ""),
+                        score=float(getattr(item, "score", None) or 0.0),
+                    )
+                )
+        return classifications
+
+    def _build_objects(self, result: Any) -> list[DetectedObject]:
+        """Build DetectedObject objects from SDK result."""
+        items = self._get_field(result, "objects")
+        objects = []
+        for item in items:
+            if isinstance(item, dict):
+                objects.append(
+                    DetectedObject(
+                        label=item.get("label", ""),
+                        score=float(item.get("score") or 0.0),
+                        bbox=item.get("bbox", []),
+                    )
+                )
+            else:
+                objects.append(
+                    DetectedObject(
+                        label=getattr(item, "label", ""),
+                        score=float(getattr(item, "score", None) or 0.0),
+                        bbox=getattr(item, "bbox", []),
+                    )
+                )
+        return objects
+
+    def _get_field(self, result: Any, field: str) -> list:
+        """Extract a field from the SDK result."""
+        if isinstance(result, dict):
+            return result.get(field, [])
+        return getattr(result, field, [])

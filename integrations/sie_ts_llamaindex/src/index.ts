@@ -4,6 +4,8 @@
  * Provides embedding generation using SIE's encode endpoint:
  * - SIEEmbedding: Dense embeddings implementing BaseEmbedding
  * - SIESparseEmbeddingFunction: Sparse embeddings for hybrid search
+ * - SIENodePostprocessor: Cross-encoder reranking for query pipelines
+ * - createSIEExtractorTool: Entity extraction tool for agents
  *
  * @example
  * ```typescript
@@ -24,7 +26,8 @@ import {
   type EncodeResult,
   SIEClient,
   type SIEClientOptions,
-  toNumberArray,
+  denseEmbedding,
+  sparseEmbedding,
 } from "@superlinked/sie-sdk";
 import { BaseEmbedding } from "llamaindex";
 
@@ -132,7 +135,7 @@ export class SIEEmbedding extends BaseEmbedding {
     };
 
     const results = await this.client.encode(this.modelName, items, options);
-    return (results as EncodeResult[]).map((result) => this.extractDense(result));
+    return (results as EncodeResult[]).map((result) => denseEmbedding(result));
   };
 
   constructor(options: SIEEmbeddingOptions = {}) {
@@ -187,18 +190,7 @@ export class SIEEmbedding extends BaseEmbedding {
     };
 
     const result = await this.client.encode(this.modelName, { text }, options);
-    return this.extractDense(result as EncodeResult);
-  }
-
-  /**
-   * Extract dense embedding from encode result.
-   */
-  private extractDense(result: EncodeResult): number[] {
-    const dense = result.dense;
-    if (!dense) {
-      throw new Error("Encode result missing dense embedding");
-    }
-    return toNumberArray(dense);
+    return denseEmbedding(result as EncodeResult);
   }
 
   /**
@@ -318,7 +310,7 @@ export class SIESparseEmbeddingFunction {
     const valuesList: number[][] = [];
 
     for (const result of results as EncodeResult[]) {
-      const sparse = this.extractSparse(result);
+      const sparse = sparseEmbedding(result);
       indicesList.push(sparse.indices);
       valuesList.push(sparse.values);
     }
@@ -349,27 +341,12 @@ export class SIESparseEmbeddingFunction {
     const valuesList: number[][] = [];
 
     for (const result of results as EncodeResult[]) {
-      const sparse = this.extractSparse(result);
+      const sparse = sparseEmbedding(result);
       indicesList.push(sparse.indices);
       valuesList.push(sparse.values);
     }
 
     return [indicesList, valuesList];
-  }
-
-  /**
-   * Extract sparse embedding from encode result.
-   */
-  private extractSparse(result: EncodeResult): { indices: number[]; values: number[] } {
-    const sparse = result.sparse;
-    if (!sparse) {
-      return { indices: [], values: [] };
-    }
-
-    return {
-      indices: toNumberArray(sparse.indices),
-      values: toNumberArray(sparse.values),
-    };
   }
 
   /**
@@ -381,3 +358,6 @@ export class SIESparseEmbeddingFunction {
     }
   }
 }
+
+export { SIENodePostprocessor, type SIENodePostprocessorOptions } from "./rerankers.js";
+export { createSIEExtractorTool, type SIEExtractorToolOptions } from "./extractors.js";

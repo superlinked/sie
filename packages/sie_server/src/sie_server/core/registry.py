@@ -31,6 +31,7 @@ from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, ModelLo
 from sie_server.core.postprocessor_registry import PostprocessorRegistry
 from sie_server.core.preprocessor_registry import PreprocessorRegistry
 from sie_server.core.worker import ModelWorker
+from sie_server.core.worker.types import AdaptiveBatchingParams
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,10 @@ class ModelRegistry:
         # Hot reloader (created lazily when started)
         self._hot_reloader: HotReloader | None = None
 
+        # Monotonic config mutation counter used by bundle_config_hash cache
+        # in ws.py to detect when configs change and the hash must be recomputed.
+        self._config_version: int = 0
+
         if self._models_dir is not None:
             self._load_configs_from_dir(self._models_dir)
             logger.info("Initializing model registry from %s", self._models_dir)
@@ -135,6 +140,24 @@ class ModelRegistry:
             logger.info("No models directory specified, starting with empty registry")
 
         # Model loader - handles the actual loading workflow
+        # Convert engine adaptive_batching config to worker params
+        adaptive_params = None
+        if engine_config and engine_config.adaptive_batching.enabled:
+            ab = engine_config.adaptive_batching
+            adaptive_params = AdaptiveBatchingParams(
+                enabled=True,
+                target_p50_ms=ab.target_p50_ms,
+                calibration_multiplier=ab.calibration_multiplier,
+                min_target_p50_ms=ab.min_target_p50_ms,
+                max_target_p50_ms=ab.max_target_p50_ms,
+                min_wait_ms=ab.min_wait_ms,
+                max_wait_ms=ab.max_wait_ms,
+                gain=ab.gain,
+                integral_gain=ab.integral_gain,
+                window_size=ab.window_size,
+                update_interval=ab.update_interval,
+            )
+
         self._loader = ModelLoader(
             preprocessor_registry=self._preprocessor_registry,
             postprocessor_registry=self._postprocessor_registry,
@@ -147,6 +170,7 @@ class ModelRegistry:
             instrumentation=engine_config.instrumentation if engine_config else False,
             max_loras_per_model=engine_config.max_loras_per_model if engine_config else DEFAULT_MAX_LORAS,
             disk_cache_manager=self._disk_cache_manager,
+            adaptive_batching=adaptive_params,
         )
 
     def _load_configs_from_dir(self, models_dir: str) -> None:
@@ -165,6 +189,8 @@ class ModelRegistry:
             )
         else:
             self._configs = all_configs
+
+        self._config_version += 1
 
         # Track model directories for adapter loading (local only)
         # For cloud models, we use the cached config directory
@@ -698,6 +724,24 @@ class ModelRegistry:
             for name in list(self._loaded.keys()):
                 await self._do_unload(name)
 
+    def get_configs_snapshot(self, bundle_id: str | None = None) -> dict[str, ModelConfig]:
+        """Return a shallow copy of the current model configs.
+
+        Thread-safe snapshot for reading configs without holding internal locks.
+
+        Args:
+            bundle_id: If provided, only return configs that belong to this
+                worker's model filter (the set of models matched to the bundle
+                at startup). When *None*, all configs are returned.
+
+        Returns:
+            Copy of the configs dict, optionally filtered.
+        """
+        configs = dict(self._configs)
+        if bundle_id is not None and self._model_filter is not None:
+            configs = {k: v for k, v in configs.items() if k in self._model_filter}
+        return configs
+
     def add_config(self, config: ModelConfig, model_dir: Path | None = None) -> None:
         """Add a model config to the registry.
 
@@ -708,8 +752,11 @@ class ModelRegistry:
             model_dir: Optional directory for custom adapter resolution.
         """
         self._configs[config.sie_id] = config
+        if self._model_filter is not None:
+            self._model_filter.add(config.sie_id)
         if model_dir is not None:
             self._model_dirs[config.sie_id] = model_dir
+        self._config_version += 1
 
     def get_model_info(self, name: str) -> dict[str, Any]:
         """Get information about a model.
