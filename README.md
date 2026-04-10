@@ -8,7 +8,7 @@
        alt="Superlinked logo">
 </picture>
 
-<h1>SIE — Superlinked Inference Engine</h1>
+<h1>SIE: Superlinked Inference Engine</h1>
 
 <p><strong>Open-source inference server and production cluster for embeddings, reranking, and extraction.</strong></p>
 <p>85+ models. Three functions. From laptop to Kubernetes. All Apache 2.0.</p>
