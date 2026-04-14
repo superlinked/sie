@@ -242,6 +242,16 @@ def rerank_wines_with_custom_embeddings(
     candidate_wines = generate_wine_embeddings(embedding_generator, candidate_wines)
     candidate_wines = combine_wine_embeddings(embedding_generator, candidate_wines)
 
+    # The no-review penalty is meant to bias the ranking toward wines that
+    # actually have reviews to match against. If none of the candidates have
+    # reviews (e.g. running against the bundled SQLite catalog), applying the
+    # penalty to every wine just uniformly scales every score without changing
+    # the relative ranking, so we skip it in that case to preserve signal.
+    any_candidate_has_reviews = any(
+        len(candidate_wines.iloc[local_index]["wine_reviews_normalized"]) > 0
+        for local_index in range(len(candidate_wines))
+    )
+
     reference_embeddings = []
     if reference_row_indices:
         reference_wines = wines.iloc[reference_row_indices].copy()
@@ -265,7 +275,10 @@ def rerank_wines_with_custom_embeddings(
 
         score = float(cosine_similarity([final_query_embedding], [combined_wine_vector])[0][0])
         review_count = len(candidate_wines.iloc[local_index]["wine_reviews_normalized"])
-        if np.all(candidate_wines.iloc[local_index]["review_embedding"] == 0):
+        if (
+            any_candidate_has_reviews
+            and np.all(candidate_wines.iloc[local_index]["review_embedding"] == 0)
+        ):
             score *= float(no_review_penalty)
 
         wine_scores.append(
