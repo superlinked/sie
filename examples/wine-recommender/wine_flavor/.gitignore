@@ -1,0 +1,11 @@
+venv/
+.env
+data/chroma/
+chroma.sqlite3
+.run/
+node_modules/
+.next/
+npm-debug.log*
+frontend/react_app/node_modules/
+frontend/react_app/.next/
+frontend/react_app/npm-debug.log*

@@ -1,0 +1,21 @@
+<svg width="180" height="180" viewBox="0 0 180 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    @media (prefers-color-scheme: light) {
+      .background { fill: #f7f1e8; }
+      .glass { fill: #722f37; }
+      .wine { fill: #8e3b46; }
+      .stem { fill: #4c2430; }
+    }
+    @media (prefers-color-scheme: dark) {
+      .background { fill: #1f1618; }
+      .glass { fill: #f2e6d8; }
+      .wine { fill: #b85a67; }
+      .stem { fill: #d8c2ac; }
+    }
+  </style>
+  <rect class="background" width="180" height="180" rx="36" />
+  <path class="glass" d="M50 38H130C130 78 118 103 101 116V126H118V138H62V126H79V116C62 103 50 78 50 38Z"/>
+  <path class="wine" d="M62 50H118C116 72 110 86 101 95H79C70 86 64 72 62 50Z"/>
+  <rect class="stem" x="85" y="126" width="10" height="20" rx="5"/>
+  <rect class="stem" x="67" y="146" width="46" height="8" rx="4"/>
+</svg>
