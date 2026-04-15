@@ -90,10 +90,6 @@ Background on the SIE primitives this demo uses:
 - [`score`](https://sie.dev/docs/score) - cross-encoder reranking (used by the "standard" reranker)
 - [`extract`](https://sie.dev/docs/extract) - OCR-style extraction on wine label images
 
-### Optional: OpenAI API key
-
-The `/analyze-flavor-prompt` endpoint turns a natural-language wine description into structure and flavor weights using `gpt-4.1-mini`. This is optional - the rest of the demo works without it. Set `OPENAI_API_KEY` in your `.env` only if you want to use the natural-language prompt feature. Get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
-
 ### Docker and Docker Compose
 
 You need Docker and Docker Compose v2 installed. The backend builds against `python:3.12-slim`, so no local Python setup is required.

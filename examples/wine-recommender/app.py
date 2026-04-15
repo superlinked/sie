@@ -9,10 +9,9 @@ from uuid import uuid4
 import pandas as pd
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
 from pydantic import BaseModel, Field
 from wine_flavor import datasource, service
 from wine_picture_detection import detect_wine_from_image_bytes
@@ -102,10 +101,6 @@ class RecommendationRequest(BaseModel):
     flavors: dict[str, float] = Field(default_factory=dict)
     reference_row_indices: list[int] = Field(default_factory=list)
     top_k: int = Field(default=COSINE_TOP_K, ge=1, le=50)
-
-
-class FlavorPromptRequest(BaseModel):
-    prompt: str = Field(min_length=1, max_length=500)
 
 
 class DemoCatalog:
@@ -379,41 +374,6 @@ def _build_flavor_tags(wines):
     ]
 
 
-def _prompt_flavor_adjustment(prompt: str, available_flavors: list[str]) -> dict:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("Missing required environment variable: OPENAI_API_KEY")
-
-    client = OpenAI(api_key=api_key)
-    response = client.responses.create(
-        model="gpt-4.1-mini",
-        text={"format": {"type": "json_object"}},
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    "Return only JSON with keys structure and flavors. "
-                    "Structure must contain acidity, fizziness, intensity, sweetness, tannin as integers from 0 to 100. "
-                    "Flavors must be an array of up to 8 strings chosen only from the provided list."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Prompt: {prompt}\nAvailable flavors: {', '.join(available_flavors[:250])}",
-            },
-        ],
-    )
-
-    output_text = (response.output_text or "").strip()
-    if not output_text:
-        raise ValueError("OpenAI returned an empty response")
-
-    try:
-        return json.loads(output_text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"OpenAI returned invalid JSON: {output_text}") from exc
-
-
 def _to_recommendation_record(record):
     score = float(record.get("rerank_score") or 0.0)
     return {
@@ -504,41 +464,6 @@ def recommendations(payload: RecommendationRequest):
             custom_rerank_no_review_penalty=CUSTOM_RERANK_NO_REVIEW_PENALTY,
             rerank_max_terms=RERANK_MAX_TERMS,
         )
-    )
-
-
-@app.post("/analyze-flavor-prompt")
-def analyze_flavor_prompt(payload: FlavorPromptRequest):
-    catalog.load()
-    available_flavors = sorted(set(catalog.unique_flavors or []))
-    available_flavors_set = set(available_flavors)
-
-    try:
-        result = _prompt_flavor_adjustment(payload.prompt, available_flavors)
-    except ValueError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Prompt analysis failed: {exc}"
-        ) from exc
-
-    structure = result.get("structure") or {}
-    flavors = [
-        flavor
-        for flavor in (result.get("flavors") or [])
-        if flavor in available_flavors_set
-    ]
-    return jsonable_encoder(
-        {
-            "structure": {
-                "acidity": max(0, min(100, int(structure.get("acidity", 50)))),
-                "fizziness": max(0, min(100, int(structure.get("fizziness", 0)))),
-                "intensity": max(0, min(100, int(structure.get("intensity", 50)))),
-                "sweetness": max(0, min(100, int(structure.get("sweetness", 10)))),
-                "tannin": max(0, min(100, int(structure.get("tannin", 50)))),
-            },
-            "flavors": flavors[:8],
-        }
     )
 
 
