@@ -1,0 +1,6 @@
+numpy==2.2.6
+opencv-python
+pillow
+deskew
+rapidfuzz
+sie-sdk==0.1.9

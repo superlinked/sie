@@ -1,0 +1,10 @@
+venv/
+.git/
+.run/
+__pycache__/
+*.pyc
+.env
+app/node_modules/
+app/.next/
+frontend/react_app/node_modules/
+frontend/react_app/.next/

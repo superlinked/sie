@@ -1,0 +1,122 @@
+{
+  "current_slice_index": 12,
+  "last_error": null,
+  "last_unique_count": 1758,
+  "next_page": 131,
+  "slice_states": {
+    "all|4|0|25": {
+      "last_error": null,
+      "last_unique_count": 0,
+      "next_page": 1,
+      "stalled_batches": 0,
+      "status": "not_started"
+    },
+    "ar|1|0|25": {
+      "last_error": null,
+      "last_unique_count": 5293,
+      "next_page": 41,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "au|1|0|25": {
+      "last_error": null,
+      "last_unique_count": 5293,
+      "next_page": 41,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "au|2|0|25": {
+      "last_error": null,
+      "last_unique_count": 5297,
+      "next_page": 91,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "es|1|0|25": {
+      "last_error": null,
+      "last_unique_count": 5297,
+      "next_page": 41,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "fr|1|0|20": {
+      "last_error": null,
+      "last_unique_count": 2635,
+      "next_page": 131,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "fr|2|0|20": {
+      "last_error": null,
+      "last_unique_count": 3637,
+      "next_page": 131,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "fr|3|0|30": {
+      "last_error": null,
+      "last_unique_count": 5218,
+      "next_page": 131,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "it|1|0|25": {
+      "last_error": null,
+      "last_unique_count": 5297,
+      "next_page": 41,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "it|2|0|25": {
+      "last_error": null,
+      "last_unique_count": 5297,
+      "next_page": 41,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "pt|1|0|25": {
+      "last_error": null,
+      "last_unique_count": 5297,
+      "next_page": 41,
+      "stalled_batches": 4,
+      "status": "in_progress"
+    },
+    "us|1|0|20": {
+      "last_error": null,
+      "last_unique_count": 5234,
+      "next_page": 131,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "us|2|0|20": {
+      "last_error": null,
+      "last_unique_count": 5244,
+      "next_page": 131,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "us|3|0|30": {
+      "last_error": null,
+      "last_unique_count": 5293,
+      "next_page": 131,
+      "stalled_batches": 0,
+      "status": "completed"
+    },
+    "za|1|0|25": {
+      "last_error": null,
+      "last_unique_count": 0,
+      "next_page": 1,
+      "stalled_batches": 0,
+      "status": "not_started"
+    },
+    "za|2|0|25": {
+      "last_error": null,
+      "last_unique_count": 0,
+      "next_page": 1,
+      "stalled_batches": 0,
+      "status": "not_started"
+    }
+  },
+  "stalled_batches": 7,
+  "status": "in_progress"
+}
