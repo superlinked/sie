@@ -29,6 +29,7 @@ from sie_server.core.shutdown import ShutdownMiddleware, ShutdownState, setup_si
 from sie_server.nats_pull_loop import NatsPullLoop
 from sie_server.nats_subscriber import NatsSubscriber
 from sie_server.observability.gpu import _init_nvml, shutdown_nvml
+from sie_server.observability.telemetry import telemetry_sender
 from sie_server.observability.tracing import setup_tracing
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class AppFactory:
             cls._configure_cuda_defaults()
             async with (
                 cls._nvml(),
+                telemetry_sender(),
                 cls._model_registry(config) as registry,
                 cls._nats_subscriber(registry) as nats_sub,
                 cls._nats_pull_loop(registry, nats_sub) as pull_loop,
@@ -121,6 +123,10 @@ class AppFactory:
             # Start background services (memory monitor and hot reload)
             await registry.start_memory_monitor()
             await registry.start_hot_reload()
+
+            # Preload models (shifts weight download from first-request to startup)
+            await cls._preload_models(registry, config)
+
             yield registry
         finally:
             # Stop background services and unload models
@@ -275,6 +281,36 @@ class AppFactory:
             yield
         finally:
             mark_not_ready()
+
+    @classmethod
+    async def _preload_models(cls, registry: ModelRegistry, config: AppStateConfig) -> None:
+        """Preload models at startup (non-fatal on failure).
+
+        Runs inside _model_registry() which enters before _readiness_handling()
+        in the async-with stack, so the pod stays NotReady during preload.
+        """
+        if not config.preload_models:
+            return
+
+        logger.info("Preloading %d model(s): %s", len(config.preload_models), ", ".join(config.preload_models))
+
+        # Sequential loading is intentional: parallel loads risk OOM on GPU workers
+        # where VRAM is limited. For CPU workers with many models, this is slightly
+        # slower but safe. Parallel preloading can be added later if needed.
+        succeeded = 0
+        for name in config.preload_models:
+            try:
+                await registry.load_async(name, config.device)
+                succeeded += 1
+                logger.info("Preloaded model '%s'", name)
+            except Exception:
+                logger.exception(
+                    "Failed to preload model '%s', skipping (will lazy-load on request). "
+                    "Check that the model name matches a config in the models directory.",
+                    name,
+                )
+
+        logger.info("Preload complete: %d/%d models loaded", succeeded, len(config.preload_models))
 
     @staticmethod
     def _configure_cuda_defaults() -> None:

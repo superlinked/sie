@@ -4,7 +4,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
-from sie_router.registry import WorkerRegistry, _fill_first_score
+from sie_router.registry import WorkerRegistry, _all_overloaded, _fill_first_score
 from sie_router.types import WorkerState
 
 
@@ -848,3 +848,333 @@ class TestFillFirstScoring:
         worker = registry.get_worker("http://worker-0:8080")
         assert worker is not None
         assert worker.max_batch_requests == 64
+
+
+class TestAffinitySpill:
+    """Tests for the overflow spill mechanism that breaks model affinity deadlock."""
+
+    @pytest.mark.asyncio
+    async def test_spill_when_all_with_model_overloaded(self) -> None:
+        """Traffic spills to workers without model when all with-model workers are overloaded."""
+        registry = WorkerRegistry()
+
+        # Worker with model loaded, overloaded (55/64 = 85.9% > 80%)
+        await registry.update_worker(
+            "http://worker-0:8080",
+            {
+                "name": "worker-0",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["bge-m3"],
+                "models": [{"name": "bge-m3", "queue_depth": 55}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # Worker without model, idle
+        await registry.update_worker(
+            "http://worker-1:8080",
+            {
+                "name": "worker-1",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": [],
+                "models": [],
+                "max_batch_requests": 64,
+            },
+        )
+
+        with patch("sie_router.registry.AFFINITY_SPILL_ENABLED", True):
+            worker = registry.select_worker(model="bge-m3")
+            assert worker is not None
+            assert worker.name == "worker-1"
+
+    @pytest.mark.asyncio
+    async def test_no_spill_at_exact_threshold_boundary(self) -> None:
+        """No spill when with-model worker is just below the 80% threshold."""
+        registry = WorkerRegistry()
+
+        # Worker with model, just below threshold (51/64 = 79.7% < 80%)
+        await registry.update_worker(
+            "http://worker-0:8080",
+            {
+                "name": "worker-0",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["bge-m3"],
+                "models": [{"name": "bge-m3", "queue_depth": 51}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # Worker without model, idle
+        await registry.update_worker(
+            "http://worker-1:8080",
+            {
+                "name": "worker-1",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": [],
+                "models": [],
+                "max_batch_requests": 64,
+            },
+        )
+
+        with patch("sie_router.registry.AFFINITY_SPILL_ENABLED", True):
+            worker = registry.select_worker(model="bge-m3")
+            assert worker is not None
+            # 51/64 = 0.797 < 0.8, so no spill — stays with loaded worker
+            assert worker.name == "worker-0"
+
+    @pytest.mark.asyncio
+    async def test_no_spill_when_with_model_has_headroom(self) -> None:
+        """No spill when at least one with-model worker is below threshold."""
+        registry = WorkerRegistry()
+
+        # Worker with model, has headroom (20/64 = 31.2%)
+        await registry.update_worker(
+            "http://worker-0:8080",
+            {
+                "name": "worker-0",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["bge-m3"],
+                "models": [{"name": "bge-m3", "queue_depth": 20}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # Worker without model, idle
+        await registry.update_worker(
+            "http://worker-1:8080",
+            {
+                "name": "worker-1",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": [],
+                "models": [],
+                "max_batch_requests": 64,
+            },
+        )
+
+        with patch("sie_router.registry.AFFINITY_SPILL_ENABLED", True):
+            worker = registry.select_worker(model="bge-m3")
+            assert worker is not None
+            assert worker.name == "worker-0"
+
+    @pytest.mark.asyncio
+    async def test_no_spill_when_disabled(self) -> None:
+        """No spill when AFFINITY_SPILL_ENABLED is False."""
+        registry = WorkerRegistry()
+
+        # Worker with model, overloaded (55/64 = 85.9%)
+        await registry.update_worker(
+            "http://worker-0:8080",
+            {
+                "name": "worker-0",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["bge-m3"],
+                "models": [{"name": "bge-m3", "queue_depth": 55}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # Worker without model, idle
+        await registry.update_worker(
+            "http://worker-1:8080",
+            {
+                "name": "worker-1",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": [],
+                "models": [],
+                "max_batch_requests": 64,
+            },
+        )
+
+        with patch("sie_router.registry.AFFINITY_SPILL_ENABLED", False):
+            worker = registry.select_worker(model="bge-m3")
+            assert worker is not None
+            # Should stay with the overloaded with-model worker
+            assert worker.name == "worker-0"
+
+    @pytest.mark.asyncio
+    async def test_spill_no_without_model_workers_falls_back(self) -> None:
+        """When all candidates have the model (even overloaded), route to best with-model worker."""
+        registry = WorkerRegistry()
+
+        # All workers have the model and are overloaded
+        await registry.update_worker(
+            "http://worker-0:8080",
+            {
+                "name": "worker-0",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["bge-m3"],
+                "models": [{"name": "bge-m3", "queue_depth": 60}],
+                "max_batch_requests": 64,
+            },
+        )
+        await registry.update_worker(
+            "http://worker-1:8080",
+            {
+                "name": "worker-1",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["bge-m3"],
+                "models": [{"name": "bge-m3", "queue_depth": 55}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        with patch("sie_router.registry.AFFINITY_SPILL_ENABLED", True):
+            worker = registry.select_worker(model="bge-m3")
+            assert worker is not None
+            # No without-model workers, falls back to normal affinity routing
+            # worker-1 has lower queue depth
+            assert worker.name == "worker-1"
+
+    @pytest.mark.asyncio
+    async def test_spill_picks_lowest_queue_depth_without_model(self) -> None:
+        """Spill picks the idle worker with lowest queue depth."""
+        registry = WorkerRegistry()
+
+        # Worker with model, overloaded
+        await registry.update_worker(
+            "http://worker-0:8080",
+            {
+                "name": "worker-0",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": ["bge-m3"],
+                "models": [{"name": "bge-m3", "queue_depth": 55}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # Worker without model, some load
+        await registry.update_worker(
+            "http://worker-1:8080",
+            {
+                "name": "worker-1",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": [],
+                "models": [],
+                "max_batch_requests": 64,
+            },
+        )
+        # Manually set queue_depth on worker-1 to simulate load
+        w1 = registry.get_worker("http://worker-1:8080")
+        assert w1 is not None
+        w1.queue_depth = 10
+
+        # Worker without model, idle
+        await registry.update_worker(
+            "http://worker-2:8080",
+            {
+                "name": "worker-2",
+                "ready": True,
+                "machine_profile": "l4",
+                "loaded_models": [],
+                "models": [],
+                "max_batch_requests": 64,
+            },
+        )
+
+        with patch("sie_router.registry.AFFINITY_SPILL_ENABLED", True):
+            worker = registry.select_worker(model="bge-m3")
+            assert worker is not None
+            # Should pick worker-2 (lowest queue depth among without-model)
+            assert worker.name == "worker-2"
+
+    @pytest.mark.asyncio
+    async def test_spill_respects_gpu_and_bundle_filters(self) -> None:
+        """Spill only considers workers that pass GPU/bundle filtering."""
+        registry = WorkerRegistry()
+
+        # L4 worker with model, overloaded
+        await registry.update_worker(
+            "http://worker-l4:8080",
+            {
+                "name": "worker-l4",
+                "ready": True,
+                "machine_profile": "l4",
+                "bundle": "default",
+                "loaded_models": ["bge-m3"],
+                "models": [{"name": "bge-m3", "queue_depth": 55}],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # L4 worker without model (same GPU/bundle) - valid spill target
+        await registry.update_worker(
+            "http://worker-l4-idle:8080",
+            {
+                "name": "worker-l4-idle",
+                "ready": True,
+                "machine_profile": "l4",
+                "bundle": "default",
+                "loaded_models": [],
+                "models": [],
+                "max_batch_requests": 64,
+            },
+        )
+
+        # A100 worker without model (different GPU) - should NOT be a spill target
+        await registry.update_worker(
+            "http://worker-a100:8080",
+            {
+                "name": "worker-a100",
+                "ready": True,
+                "machine_profile": "a100-80gb",
+                "bundle": "default",
+                "loaded_models": [],
+                "models": [],
+                "max_batch_requests": 64,
+            },
+        )
+
+        with patch("sie_router.registry.AFFINITY_SPILL_ENABLED", True):
+            worker = registry.select_worker(gpu="l4", bundle="default", model="bge-m3")
+            assert worker is not None
+            # Should spill to L4 worker, not A100
+            assert worker.name == "worker-l4-idle"
+            assert worker.machine_profile == "l4"
+
+
+class TestAllOverloaded:
+    """Tests for the _all_overloaded helper function."""
+
+    def test_empty_list(self) -> None:
+        """Empty list returns True (vacuous truth)."""
+        assert _all_overloaded([], 0.8) is True
+
+    def test_single_overloaded_worker(self) -> None:
+        """Single worker above threshold returns True."""
+        w = WorkerState(url="http://w:8080", queue_depth=55, max_batch_requests=64)
+        assert _all_overloaded([w], 0.8) is True  # 55/64 = 85.9%
+
+    def test_single_underloaded_worker(self) -> None:
+        """Single worker below threshold returns False."""
+        w = WorkerState(url="http://w:8080", queue_depth=20, max_batch_requests=64)
+        assert _all_overloaded([w], 0.8) is False  # 20/64 = 31.2%
+
+    def test_mixed_workers(self) -> None:
+        """One overloaded and one not returns False."""
+        w1 = WorkerState(url="http://w1:8080", queue_depth=55, max_batch_requests=64)
+        w2 = WorkerState(url="http://w2:8080", queue_depth=20, max_batch_requests=64)
+        assert _all_overloaded([w1, w2], 0.8) is False
+
+    def test_all_overloaded(self) -> None:
+        """All workers above threshold returns True."""
+        w1 = WorkerState(url="http://w1:8080", queue_depth=55, max_batch_requests=64)
+        w2 = WorkerState(url="http://w2:8080", queue_depth=60, max_batch_requests=64)
+        assert _all_overloaded([w1, w2], 0.8) is True
+
+    def test_zero_capacity_fallback(self) -> None:
+        """max_batch_requests=0 falls back to 64."""
+        w = WorkerState(url="http://w:8080", queue_depth=55, max_batch_requests=0)
+        # Falls back to capacity=64, 55/64 = 85.9% > 80%
+        assert _all_overloaded([w], 0.8) is True

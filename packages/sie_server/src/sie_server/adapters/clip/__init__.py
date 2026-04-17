@@ -19,15 +19,16 @@ Example configuration:
 
 from __future__ import annotations
 
-import gc
 import io
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
 
 if TYPE_CHECKING:
@@ -38,20 +39,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Type aliases
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
 # Error messages
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_NO_INPUT = "CLIPAdapter requires either text or images input"
 
 
-class CLIPAdapter(ModelAdapter):
+class CLIPAdapter(BaseAdapter):
     """Adapter for CLIP image-text embedding models.
 
     Supports encoding text, images, or both into dense embeddings in a shared
     vector space. Uses HuggingFace transformers CLIPModel and CLIPProcessor.
     """
+
+    spec: ClassVar[AdapterSpec] = AdapterSpec(
+        inputs=("text", "image"),
+        outputs=("dense",),
+        unload_fields=("_model", "_processor", "_dense_dim"),
+        default_preprocessor="image",
+    )
 
     def __init__(
         self,
@@ -81,21 +85,6 @@ class CLIPAdapter(ModelAdapter):
         self._device: str | None = None
         self._dense_dim: int | None = None
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text", "image"],
-            outputs=["dense"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._dense_dim is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(dense=self._dense_dim)
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -107,7 +96,7 @@ class CLIPAdapter(ModelAdapter):
         self._device = device
 
         # Determine dtype
-        dtype = self._resolve_dtype(device)
+        dtype = self._resolve_dtype()
 
         logger.info(
             "Loading CLIP model %s on device=%s with dtype=%s",
@@ -135,10 +124,10 @@ class CLIPAdapter(ModelAdapter):
         # CLIP uses projection_dim for the aligned embedding space
         self._dense_dim = self._model.config.projection_dim
 
-    def _resolve_dtype(self, device: str) -> torch.dtype:
+    def _resolve_dtype(self) -> torch.dtype:
         """Resolve dtype based on device and config."""
         # CPU should use FP32
-        if not device.startswith("cuda"):
+        if not self._device or not str(self._device).startswith("cuda"):
             return torch.float32
 
         dtype_map = {
@@ -147,28 +136,6 @@ class CLIPAdapter(ModelAdapter):
             "float32": torch.float32,
         }
         return dtype_map.get(self._compute_precision, torch.float16)
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._processor is not None:
-            del self._processor
-            self._processor = None
-
-        self._device = None
-        self._dense_dim = None
-
-        # Release GPU memory
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
 
     def encode(
         self,
@@ -197,8 +164,9 @@ class CLIPAdapter(ModelAdapter):
         Returns:
             EncodeOutput with dense embeddings.
         """
-        if self._model is None or self._processor is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._processor is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
         self._validate_output_types(output_types)
 

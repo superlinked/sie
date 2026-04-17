@@ -147,6 +147,13 @@ data:
             query: sum(sie_router_active_lease_gpus{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
             threshold: "1"
             activationThreshold: "0"
+        - type: prometheus
+          metadata:
+            serverAddress: {{ $promAddr }}
+            metricName: sie_router_rejected_rate_{{ $poolName }}
+            query: sum(rate(sie_router_rejected_requests_total{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}[2m])) or vector(0)
+            threshold: "1"
+            activationThreshold: "0"
 {{- end }}
 {{- end }}
   # Router ScaledObject

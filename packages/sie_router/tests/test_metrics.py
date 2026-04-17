@@ -10,11 +10,13 @@ from sie_router.metrics import (
     ACTIVE_LEASE_GPUS,
     DEMAND_EXPIRY_SECONDS,
     PENDING_DEMAND,
+    REJECTED_REQUESTS,
     _pool_demand_time,
     _pools_with_demand,
     _update_pending_demand,
     clear_pending_demand,
     record_pending_demand,
+    record_rejected_request,
     update_worker_metrics,
 )
 from sie_router.metrics import (
@@ -395,3 +397,62 @@ class TestActiveLeaseGPUsEndpoint:
 
         assert response.status_code == 200
         assert ACTIVE_LEASE_GPUS.labels(machine_profile="l4", bundle="default")._value._value == 5
+
+
+class TestRejectedRequestsMetric:
+    """Test cases for rejected requests counter used by KEDA as a supplementary scaling trigger."""
+
+    def setup_method(self) -> None:
+        """Clear state before each test."""
+        _pool_demand_time.clear()
+        _pools_with_demand.clear()
+        REJECTED_REQUESTS._metrics.clear()
+        PENDING_DEMAND._metrics.clear()
+
+    def test_record_rejected_increments_counter(self) -> None:
+        """record_rejected_request increments the counter by 1."""
+        record_rejected_request("l4", "default", "no_healthy_workers")
+
+        sample = REJECTED_REQUESTS.labels(machine_profile="l4", bundle="default", reason="no_healthy_workers")
+        assert sample._value.get() == 1
+
+    def test_record_rejected_multiple_reasons_tracked_independently(self) -> None:
+        """Different reasons produce independent counter series."""
+        record_rejected_request("l4", "default", "no_healthy_workers")
+        record_rejected_request("l4", "default", "no_healthy_workers")
+        record_rejected_request("l4", "default", "worker_503")
+
+        no_healthy = REJECTED_REQUESTS.labels(machine_profile="l4", bundle="default", reason="no_healthy_workers")
+        worker_503 = REJECTED_REQUESTS.labels(machine_profile="l4", bundle="default", reason="worker_503")
+        assert no_healthy._value.get() == 2
+        assert worker_503._value.get() == 1
+
+    def test_record_rejected_refreshes_pending_demand_timestamp(self) -> None:
+        """record_rejected_request refreshes _pool_demand_time when pending demand exists."""
+        # Set up existing pending demand
+        record_pending_demand("l4", "default", "pool-0")
+        old_time = _pool_demand_time["l4:default:pool-0"]
+
+        # Manually age the timestamp
+        _pool_demand_time["l4:default:pool-0"] = old_time - 60.0
+
+        # Record rejected request — should refresh the timestamp
+        record_rejected_request("l4", "default", "no_capacity", pool_name="pool-0")
+
+        new_time = _pool_demand_time["l4:default:pool-0"]
+        assert new_time > old_time - 60.0
+
+    def test_record_rejected_no_refresh_when_no_pending_demand(self) -> None:
+        """record_rejected_request does not create demand entries if none exist."""
+        record_rejected_request("l4", "default", "no_healthy_workers", pool_name="pool-0")
+
+        # No demand tracking entries should be created
+        assert "l4:default" not in _pools_with_demand
+        assert "l4:default:pool-0" not in _pool_demand_time
+
+    def test_record_rejected_empty_machine_profile_uses_unknown(self) -> None:
+        """Empty machine_profile maps to 'unknown' label."""
+        record_rejected_request("", "default", "no_healthy_workers")
+
+        sample = REJECTED_REQUESTS.labels(machine_profile="unknown", bundle="default", reason="no_healthy_workers")
+        assert sample._value.get() == 1

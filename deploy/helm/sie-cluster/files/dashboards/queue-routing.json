@@ -29,7 +29,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         }
@@ -54,7 +54,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p99",
           "refId": "A"
         }
@@ -79,7 +79,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_router_requests_total{namespace=\"$namespace\"}[5m]))",
+          "expr": "sum(rate(sie_router_requests_total{namespace=\"$namespace\"}[$rate_window]))",
           "legendFormat": "Requests/s",
           "refId": "A"
         }
@@ -104,7 +104,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_router_requests_total{namespace=\"$namespace\", status!=\"200\"}[5m])) / sum(rate(sie_router_requests_total{namespace=\"$namespace\"}[5m])) * 100",
+          "expr": "sum(rate(sie_router_requests_total{namespace=\"$namespace\", status!=\"200\"}[$rate_window])) / sum(rate(sie_router_requests_total{namespace=\"$namespace\"}[$rate_window])) * 100",
           "legendFormat": "Error %",
           "refId": "A"
         }
@@ -112,14 +112,14 @@
       "title": "Error Rate",
       "type": "stat",
       "fieldConfig": {
-        "defaults": { "unit": "percent", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}] } }
+        "defaults": { "unit": "percent", "noValue": "0%", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}] } }
       }
     },
     {
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 5 },
       "id": 5,
-      "title": "Latency Breakdown Over Time (p99, stacked)",
-      "description": "Stacked p99 latency by phase. Shows where request time is spent across the full path: router overhead, NATS publish, queue transit (time in NATS before worker pull), tokenization, and GPU inference.",
+      "title": "Latency Breakdown Over Time (mean, stacked)",
+      "description": "Stacked mean latency by phase. Uses mean (not percentiles) because means are additive. Decomposition: E2E = router_overhead + result_wait. result_wait = publish_and_overhead + queue_transit + tokenization + inference. Stacked bars sum to total mean E2E.",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": {
@@ -128,7 +128,7 @@
         },
         "overrides": [
           { "matcher": { "id": "byName", "options": "Router overhead" }, "properties": [{ "id": "color", "value": { "fixedColor": "#B877D9", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "NATS publish" }, "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "NATS publish + overhead" }, "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] },
           { "matcher": { "id": "byName", "options": "Queue transit" }, "properties": [{ "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } }] },
           { "matcher": { "id": "byName", "options": "Tokenization" }, "properties": [{ "id": "color", "value": { "fixedColor": "#F2CC0C", "mode": "fixed" } }] },
           { "matcher": { "id": "byName", "options": "GPU inference" }, "properties": [{ "id": "color", "value": { "fixedColor": "#F2495C", "mode": "fixed" } }] }
@@ -141,27 +141,27 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "clamp_min((\n  histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))\n  - histogram_quantile(0.99, sum(rate(sie_router_queue_result_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))\n  - histogram_quantile(0.99, sum(rate(sie_router_queue_publish_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le))\n) * 1000, 0)",
+          "expr": "clamp_min((\n  sum(rate(sie_router_request_latency_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_router_request_latency_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_router_queue_result_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_router_queue_result_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n) * 1000, 0)",
           "legendFormat": "Router overhead",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_publish_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
-          "legendFormat": "NATS publish",
+          "expr": "clamp_min((\n  sum(rate(sie_router_queue_result_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_router_queue_result_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_pull_loop_queue_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_pull_loop_queue_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window]))\n  - sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"inference\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"inference\"}[$rate_window]))\n) * 1000, 0)",
+          "legendFormat": "NATS publish + overhead",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "expr": "sum(rate(sie_pull_loop_queue_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_pull_loop_queue_wait_seconds_count{namespace=\"$namespace\"}[$rate_window])) * 1000",
           "legendFormat": "Queue transit",
           "refId": "C"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"tokenize\"}[5m])) by (le)) * 1000",
+          "expr": "sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window])) * 1000",
           "legendFormat": "Tokenization",
           "refId": "D"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"inference\"}[5m])) by (le)) * 1000",
+          "expr": "sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"inference\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"inference\"}[$rate_window])) * 1000",
           "legendFormat": "GPU inference",
           "refId": "E"
         }
@@ -183,17 +183,17 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.95, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -215,17 +215,17 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.95, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -347,7 +347,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "rate(sie_router_dlq_events_total{namespace=\"$namespace\"}[5m])",
+          "expr": "rate(sie_router_dlq_events_total{namespace=\"$namespace\"}[$rate_window])",
           "legendFormat": "{{stream}} / {{consumer}}",
           "refId": "A"
         }
@@ -376,7 +376,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_publish_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le, operation)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_publish_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
           "legendFormat": "{{operation}}",
           "refId": "A"
         }
@@ -398,7 +398,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_result_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le, operation)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_result_wait_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
           "legendFormat": "{{operation}}",
           "refId": "A"
         }
@@ -420,12 +420,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_router_queue_items_published_count{namespace=\"$namespace\"}[5m])) by (operation)",
+          "expr": "sum(rate(sie_router_queue_items_published_count{namespace=\"$namespace\"}[$rate_window])) by (operation)",
           "legendFormat": "{{operation}} reqs/s",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(sie_router_queue_items_published_sum{namespace=\"$namespace\"}[5m])) by (operation)",
+          "expr": "sum(rate(sie_router_queue_items_published_sum{namespace=\"$namespace\"}[$rate_window])) by (operation)",
           "legendFormat": "{{operation}} items/s",
           "refId": "B"
         }
@@ -454,12 +454,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "queue wait p99",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "queue wait p50",
           "refId": "B"
         }
@@ -481,7 +481,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_batch_process_seconds_bucket{namespace=\"$namespace\"}[5m])) by (le, operation)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_batch_process_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
           "legendFormat": "{{operation}}",
           "refId": "A"
         }
@@ -503,12 +503,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_pull_loop_items_fetched_sum{namespace=\"$namespace\"}[5m]))",
+          "expr": "sum(rate(sie_pull_loop_items_fetched_sum{namespace=\"$namespace\"}[$rate_window]))",
           "legendFormat": "items/sec",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(sie_pull_loop_items_fetched_count{namespace=\"$namespace\"}[5m]))",
+          "expr": "sum(rate(sie_pull_loop_items_fetched_count{namespace=\"$namespace\"}[$rate_window]))",
           "legendFormat": "pull cycles/sec",
           "refId": "B"
         }
@@ -528,12 +528,28 @@
         "multi": false,
         "name": "namespace",
         "options": [],
-        "query": "label_values(sie_router_requests_total, namespace)",
+        "query": "label_values(up, namespace)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
         "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "1m", "value": "1m" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Rate Window",
+        "multi": false,
+        "name": "rate_window",
+        "options": [
+          { "selected": true, "text": "1m", "value": "1m" },
+          { "selected": false, "text": "2m", "value": "2m" },
+          { "selected": false, "text": "5m", "value": "5m" }
+        ],
+        "query": "1m,2m,5m",
+        "skipUrlSync": false,
+        "type": "custom"
       }
     ]
   },

@@ -1,31 +1,15 @@
-"""Native NLI-based zero-shot classification adapter.
-
-Direct implementation using transformers AutoModelForSequenceClassification
-without the high-level pipeline abstraction. This enables:
-- Batch tokenization of all (text, hypothesis) pairs
-- Single forward pass for all pairs
-- Better throughput than library adapter
-
-Architecture:
-1. Expand: N texts × M labels → N*M (text, hypothesis) pairs
-2. Tokenize: Batch tokenize all pairs
-3. Inference: Single forward pass
-4. Reshape: N*M scores → N × M matrix
-5. Normalize: softmax (single-label) or sigmoid (multi-label)
-"""
-
 from __future__ import annotations
 
-import gc
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 import torch.nn.functional as F
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 from sie_server.types.responses import Classification
 
@@ -36,19 +20,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_REQUIRES_LABELS = "Zero-shot classification requires labels parameter."
-_ERR_REQUIRES_TEXT = "Item must have text for classification."
 
 
-class NLIClassificationFlashAdapter(ModelAdapter):
+class NLIClassificationFlashAdapter(FlashBaseAdapter):
     """Native NLI-based zero-shot classification adapter.
 
     Uses direct model inference instead of transformers pipeline for better
     throughput. Compatible with MoritzLaurer's deberta-v3-zeroshot models.
     """
+
+    fallback_adapter_path: ClassVar[str | None] = None
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("json",),
+        unload_fields=("_model", "_tokenizer", "_dtype"),
+    )
 
     def __init__(
         self,
@@ -89,22 +77,6 @@ class NLIClassificationFlashAdapter(ModelAdapter):
         # entailment=0 or 2 depending on model, we'll detect at load time
         self._entailment_idx: int = 0
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["json"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return output dimensions (none for classification)."""
-        if self._model is None:
-            msg = "Dimensions not available until model is loaded"
-            raise RuntimeError(msg)
-        return ModelDims()
-
     def load(self, device: str) -> None:
         """Load model weights onto the specified device.
 
@@ -114,7 +86,7 @@ class NLIClassificationFlashAdapter(ModelAdapter):
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
         self._device = device
-        self._dtype = self._resolve_dtype(device)
+        self._dtype = self._resolve_dtype()
 
         logger.info(
             "Loading %s (dtype=%s, device=%s)",
@@ -150,41 +122,16 @@ class NLIClassificationFlashAdapter(ModelAdapter):
             self._entailment_idx,
         )
 
-    def _resolve_dtype(self, device: str) -> torch.dtype:
+    def _resolve_dtype(self) -> torch.dtype:
         """Resolve compute dtype based on device and precision setting."""
-        if device == "cpu":
+        if self._device == "cpu":
             return torch.float32
-
-        dtype_map = {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }
-        return dtype_map.get(self._compute_precision, torch.float16)
-
-    def unload(self) -> None:
-        """Unload model and free GPU memory."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
+        return super()._resolve_dtype()
 
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""
         if not item.text:
-            raise ValueError(_ERR_REQUIRES_TEXT)
+            raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="NLIClassificationFlashAdapter"))
         return item.text
 
     def extract(
@@ -213,8 +160,9 @@ class NLIClassificationFlashAdapter(ModelAdapter):
                 - "entities": Empty list
                 - "data": Empty dict
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
         if not labels:
             raise ValueError(_ERR_REQUIRES_LABELS)
@@ -294,7 +242,3 @@ class NLIClassificationFlashAdapter(ModelAdapter):
             entities=[[] for _ in items],
             classifications=all_classifications,
         )
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

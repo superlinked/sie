@@ -27,16 +27,17 @@ See: https://huggingface.co/docs/transformers/model_doc/grounding-dino
 
 from __future__ import annotations
 
-import gc
 import logging
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from PIL import Image as PILImage
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.types.inputs import ImageInput
 from sie_server.types.responses import DetectedObject
@@ -48,14 +49,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_NO_LABELS = "GroundingDINOAdapter requires labels for object detection"
 _ERR_ENCODE_NOT_SUPPORTED = "GroundingDINOAdapter does not support encode(). Use extract() instead."
 
 
-class GroundingDINOAdapter(ModelAdapter):
+class GroundingDINOAdapter(BaseAdapter):
     """Adapter for GroundingDINO open-vocabulary object detection.
 
     GroundingDINO combines DINO with grounded pre-training for zero-shot
@@ -65,6 +63,13 @@ class GroundingDINOAdapter(ModelAdapter):
     This adapter implements extract() for object detection tasks with
     efficient batched inference.
     """
+
+    spec: ClassVar[AdapterSpec] = AdapterSpec(
+        inputs=("image",),
+        outputs=("json",),
+        unload_fields=("_model", "_processor", "_preprocessor", "_device_type"),
+        default_preprocessor="image",
+    )
 
     __slots__ = (
         "_box_threshold",
@@ -101,17 +106,6 @@ class GroundingDINOAdapter(ModelAdapter):
         self._device_type: str = "cpu"
         self._model_dtype: torch.dtype = torch.float32
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        return ModelCapabilities(
-            inputs=["image"],
-            outputs=["json"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        return ModelDims()
-
     def load(self, device: str) -> None:
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
@@ -119,7 +113,7 @@ class GroundingDINOAdapter(ModelAdapter):
 
         self._device = device
         self._device_type = "cuda" if device.startswith("cuda") else "cpu"
-        dtype = self._resolve_dtype(device)
+        dtype = self._resolve_dtype()
 
         logger.info(
             "Loading GroundingDINO model %s on device=%s with dtype=%s",
@@ -145,26 +139,12 @@ class GroundingDINOAdapter(ModelAdapter):
 
         logger.info("GroundingDINO model loaded successfully")
 
-    def _resolve_dtype(self, device: str) -> torch.dtype:
-        if not device.startswith("cuda"):
+    def _resolve_dtype(self) -> torch.dtype:
+        if not self._device or not str(self._device).startswith("cuda"):
             return torch.float32
         return {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}.get(
             self._compute_precision, torch.float16
         )
-
-    def unload(self) -> None:
-        device = self._device
-        self._model = None
-        self._processor = None
-        self._preprocessor = None
-        self._device = None
-        self._device_type = "cpu"
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
 
     def is_loaded(self) -> bool:
         return self._model is not None
@@ -199,10 +179,11 @@ class GroundingDINOAdapter(ModelAdapter):
         """
         del output_schema, instruction  # Unused
 
+        self._check_loaded()
         model = self._model
         processor = self._processor
         if model is None or processor is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         if not labels:
             raise ValueError(_ERR_NO_LABELS)

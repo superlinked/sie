@@ -17,28 +17,19 @@ Performance optimizations:
 """
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import torch
 from sentence_transformers import CrossEncoder
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, AttnImplementation, ComputePrecision
 from sie_server.core.inference_output import ScoreOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
-# Compute precision type (for interface compatibility)
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
 
-# Attention implementation options
-AttnImplementation = Literal["sdpa", "eager"]
-
-# Error messages
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "CrossEncoder adapter requires text input"
-
-
-class CrossEncoderAdapter(ModelAdapter):
+class CrossEncoderAdapter(BaseAdapter):
     """Adapter for cross-encoder reranker models.
 
     Uses the sentence-transformers CrossEncoder class for models like:
@@ -54,6 +45,12 @@ class CrossEncoderAdapter(ModelAdapter):
       which can dispatch to flash attention when available
     - FP16 inference: Reduces memory and improves throughput on GPU
     """
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("score",),
+        unload_fields=("_model",),
+    )
 
     def __init__(
         self,
@@ -84,25 +81,6 @@ class CrossEncoderAdapter(ModelAdapter):
 
         self._model: CrossEncoder | None = None
         self._device: str | None = None
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities.
-
-        Cross-encoders support scoring but not encoding.
-        """
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["score"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions.
-
-        Cross-encoders don't produce embeddings, so all dims are None.
-        """
-        return ModelDims()
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -136,25 +114,6 @@ class CrossEncoderAdapter(ModelAdapter):
         if self._max_length is not None:
             self._model.max_length = self._max_length
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device  # Save before clearing
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        self._device = None
-
-        # Release GPU memory per the memory management contract in base.py
-        import gc
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
-
     def score(
         self,
         query: Item,
@@ -178,8 +137,9 @@ class CrossEncoderAdapter(ModelAdapter):
             ValueError: If query or items lack text.
         """
         _ = options  # Delegated to self._model.predict() which handles tokenization internally
+        self._check_loaded()
         if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         query_text = self._extract_text(query)
         if instruction is not None:
@@ -220,8 +180,9 @@ class CrossEncoderAdapter(ModelAdapter):
             ValueError: If any item lacks text.
         """
         _ = options  # Delegated to self._model.predict() which handles tokenization internally
+        self._check_loaded()
         if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         # Build (query, doc) pairs
         pairs = []
@@ -244,9 +205,5 @@ class CrossEncoderAdapter(ModelAdapter):
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""
         if item.text is None:
-            raise ValueError(_ERR_REQUIRES_TEXT)
+            raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="CrossEncoder adapter"))
         return item.text
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

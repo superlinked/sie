@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-import gc
 import importlib.util
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import numpy as np
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
+from sie_server.adapters._utils import extract_texts, validate_output_types
+from sie_server.adapters.base import ModelAdapter
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput, SparseVector
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -21,11 +23,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "SPLADEFlashAdapter requires text input"
-
 _Arch = Literal["bert", "roberta", "distilbert"]
 
 
@@ -33,7 +30,7 @@ def _has_flash_attn() -> bool:
     return importlib.util.find_spec("flash_attn") is not None
 
 
-class SPLADEFlashAdapter(PEFTLoRAMixin, ModelAdapter):
+class SPLADEFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """SPLADE adapter with flash-attention support for packed sequences.
 
     On CUDA with flash-attn installed, eliminates padding waste by packing
@@ -47,6 +44,14 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, ModelAdapter):
     - weights = log(1 + ReLU(MLM_logits))
     - max-pool over tokens to get per-term weights
     """
+
+    fallback_adapter_path: ClassVar[str | None] = None
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("sparse",),
+        unload_fields=("_model", "_tokenizer", "_use_flash", "_arch", "_idf", "_vocab_size"),
+    )
 
     def __init__(
         self,
@@ -84,19 +89,6 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         else:
             logger.info("SPLADE: non-CUDA device '%s', using native model forward", device)
         return cls(**kwargs)
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["sparse"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        if self._vocab_size is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(sparse=self._vocab_size)
 
     def load(self, device: str) -> None:
         from transformers import AutoModelForMaskedLM, AutoTokenizer
@@ -164,26 +156,6 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             msg = f"Unsupported compute_precision={self._compute_precision!r}; expected one of {tuple(dtype_map)}"
             raise ValueError(msg) from exc
 
-    def unload(self) -> None:
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-        self._vocab_size = None
-        self._arch = None
-        self._use_flash = False
-        self._idf = None
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     # ------------------------------------------------------------------
     # Encode entry point
     # ------------------------------------------------------------------
@@ -198,21 +170,23 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         prepared_items: Any = None,
         options: dict[str, Any] | None = None,
     ) -> EncodeOutput:
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
-        self._validate_output_types(output_types)
+        validate_output_types(output_types, {"sparse"}, "SPLADEFlashAdapter")
 
         opts = options or {}
         query_template = opts.get("query_template", self._query_template)
         doc_template = opts.get("doc_template", self._doc_template)
 
-        texts = self._extract_texts(
+        texts = extract_texts(
             items,
             instruction,
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,
+            err_msg="SPLADEFlashAdapter requires text input",
         )
 
         if not texts:
@@ -471,43 +445,6 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         return results
 
     # ------------------------------------------------------------------
-    # Validation / text extraction
-    # ------------------------------------------------------------------
-
-    def _validate_output_types(self, output_types: list[str]) -> None:
-        unsupported = set(output_types) - {"sparse"}
-        if unsupported:
-            msg = f"Unsupported output types: {unsupported}. SPLADEFlashAdapter only supports 'sparse'."
-            raise ValueError(msg)
-
-    def _extract_texts(
-        self,
-        items: list[Item],
-        instruction: str | None,
-        *,
-        is_query: bool,
-        query_template: str | None = None,
-        doc_template: str | None = None,
-    ) -> list[str]:
-        query_template = query_template if query_template is not None else self._query_template
-        doc_template = doc_template if doc_template is not None else self._doc_template
-        texts = []
-        for item in items:
-            if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
-
-            text = item.text
-
-            template = query_template if is_query else doc_template
-            if template:
-                text = template.format(text=text, instruction=instruction or "")
-            elif instruction:
-                text = f"{instruction} {text}"
-
-            texts.append(text)
-        return texts
-
-    # ------------------------------------------------------------------
     # IDF / query-weight utilities
     # ------------------------------------------------------------------
 
@@ -587,8 +524,9 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             return None
 
     def _encode_query_idf(self, texts: list[str], is_query: bool) -> EncodeOutput:
+        self._check_loaded()
         if self._tokenizer is None or self._idf is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         batch_encoding = self._tokenizer(
             texts,
@@ -614,6 +552,3 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             )
 
         return EncodeOutput(sparse=sparse_list, batch_size=len(texts), is_query=is_query)
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

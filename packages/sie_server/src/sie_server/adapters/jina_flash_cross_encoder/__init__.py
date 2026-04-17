@@ -1,29 +1,15 @@
-"""Jina Flash Attention Cross-Encoder adapter for reranking.
-
-This adapter uses Jina's built-in flash attention with varlen batching.
-The Jina reranker models have their own optimized flash attention implementation
-that already handles unpadding and cu_seqlens internally.
-
-Supports:
-- jinaai/jina-reranker-v2-base-multilingual
-
-Key optimizations (built into model):
-- Flash Attention 2 with variable-length sequences (no padding waste)
-- Automatic unpadding/padding via model's custom code
-- BF16 inference
-"""
-
 from __future__ import annotations
 
-import gc
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters._utils import extract_text
 from sie_server.core.inference_output import ScoreOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -33,19 +19,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "JinaFlashCrossEncoder requires text input"
 _ERR_CUDA_REQUIRED = "JinaFlashCrossEncoder requires CUDA for Flash Attention."
 
 
-class JinaFlashCrossEncoderAdapter(ModelAdapter):
+class JinaFlashCrossEncoderAdapter(FlashBaseAdapter):
     """Cross-encoder adapter for Jina Rerankers with built-in flash attention.
 
     Uses the model's native flash attention implementation which already
     handles variable-length sequences with unpadding internally.
     """
+
+    fallback_adapter_path: ClassVar[str | None] = "cross_encoder:CrossEncoderAdapter"
+    fallback_kwargs_overrides: ClassVar[dict[str, Any]] = {"attn_implementation": "sdpa"}
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("score",),
+        unload_fields=("_model", "_tokenizer", "_dtype"),
+    )
 
     def __init__(
         self,
@@ -76,41 +67,6 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
         self._tokenizer: PreTrainedTokenizerFast | None = None
         self._device: str | None = None
         self._dtype: torch.dtype | None = None
-
-    @classmethod
-    def create_for_device(cls, device: str, **kwargs: Any) -> ModelAdapter:
-        """Factory method that returns the appropriate adapter for the device.
-
-        For non-CUDA devices or when flash-attn is unavailable, returns CrossEncoderAdapter.
-
-        Args:
-            device: Device string (e.g., "cuda:0", "mps", "cpu").
-            **kwargs: Adapter initialization parameters.
-
-        Returns:
-            JinaFlashCrossEncoderAdapter for CUDA with flash-attn, CrossEncoderAdapter otherwise.
-        """
-        from sie_server.adapters.cross_encoder import CrossEncoderAdapter
-
-        return cls._create_flash_or_fallback(
-            device,
-            fallback_class=CrossEncoderAdapter,
-            fallback_kwargs={**kwargs, "attn_implementation": "sdpa"},
-            **kwargs,
-        )
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["score"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions (none for cross-encoders)."""
-        return ModelDims()
 
     def load(self, device: str) -> None:
         """Load model weights onto the specified device."""
@@ -162,23 +118,6 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
         }
         return dtype_map.get(self._compute_precision, torch.bfloat16)
 
-    def unload(self) -> None:
-        """Unload model and free GPU memory."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def score(
         self,
         query: Item,
@@ -197,15 +136,19 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
         Returns:
             List of relevance scores (higher = more relevant).
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
-        query_text = self._extract_text(query)
+        query_text = extract_text(query, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="JinaFlashCrossEncoder"))
         if instruction:
             query_text = f"{instruction} {query_text}"
 
         # Tokenize all pairs
-        pairs = [(query_text, self._extract_text(item)) for item in items]
+        pairs = [
+            (query_text, extract_text(item, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="JinaFlashCrossEncoder")))
+            for item in items
+        ]
 
         # Batch tokenize with padding (model handles unpadding internally)
         encodings = self._tokenizer(
@@ -256,8 +199,9 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
         Returns:
             ScoreOutput containing scores for each (query, doc) pair.
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
         opts = options or {}
         max_length = opts.get("max_seq_length", self._max_seq_length)
@@ -265,10 +209,10 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
         # Build (query, doc) pairs
         pairs = []
         for query, doc in zip(queries, docs, strict=True):
-            query_text = self._extract_text(query)
+            query_text = extract_text(query, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="JinaFlashCrossEncoder"))
             if instruction:
                 query_text = f"{instruction} {query_text}"
-            doc_text = self._extract_text(doc)
+            doc_text = extract_text(doc, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="JinaFlashCrossEncoder"))
             pairs.append((query_text, doc_text))
 
         # Batch tokenize with padding
@@ -297,13 +241,3 @@ class JinaFlashCrossEncoderAdapter(ModelAdapter):
             scores_array = scores_tensor.cpu().numpy().astype(np.float32)
 
         return ScoreOutput(scores=scores_array)
-
-    def _extract_text(self, item: Item) -> str:
-        """Extract text from an item."""
-        if item.text is None:
-            raise ValueError(_ERR_REQUIRES_TEXT)
-        return item.text
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

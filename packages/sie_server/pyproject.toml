@@ -1,6 +1,6 @@
 [project]
 name = "sie-server"
-version = "0.1.10"
+version = "0.2.0"
 description = "Search Inference Engine - GPU inference server for search workloads"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
@@ -53,6 +53,8 @@ dependencies = [
     "uvloop>=0.22",
     "timm>=0.9.0,<1.0",
     "msgspec>=0.20.0",
+    # Async HTTP client (telemetry sender)
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]
@@ -60,7 +62,7 @@ dependencies = [
 flash-attn = ["flash-attn>=2.7,<3 ; sys_platform == 'linux'"]
 # xformers for memory-efficient attention (required by Stella models)
 xformers = ["xformers>=0.0.30,<0.1 ; sys_platform == 'linux'"]
-gpu-metrics = ["pynvml>=11.5,<13"]
+gpu-metrics = ["nvidia-ml-py>=13.5,<14"]
 # TUI dependencies
 top = ["textual>=3.0,<4"]
 
@@ -80,6 +82,4 @@ packages = ["src/sie_server"]
 flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.0/flash_attn-2.7.4+cu128torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux'" }
 
 [dependency-groups]
-dev = [
-    "httpx>=0.28.1",
-]
+dev = []

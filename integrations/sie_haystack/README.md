@@ -8,11 +8,31 @@ SIE integration for Haystack.
 pip install sie-haystack
 ```
 
+## Imports
+
+Preferred import paths follow Haystack's namespace convention:
+
+```python
+from haystack_integrations.components.embedders.sie import (
+    SIEDocumentEmbedder,
+    SIETextEmbedder,
+)
+from haystack_integrations.components.rankers.sie import SIERanker
+from haystack_integrations.components.extractors.sie import SIEExtractor
+```
+
+The legacy flat imports remain supported for compatibility:
+
+```python
+from sie_haystack import SIEDocumentEmbedder, SIEExtractor, SIERanker, SIETextEmbedder
+```
+
 ## Usage
 
 ```python
 from haystack import Document
-from sie_haystack import SIETextEmbedder, SIEDocumentEmbedder, SIERanker
+from haystack_integrations.components.embedders.sie import SIEDocumentEmbedder, SIETextEmbedder
+from haystack_integrations.components.rankers.sie import SIERanker
 
 # Embed a query
 text_embedder = SIETextEmbedder(base_url="http://localhost:8080", model="BAAI/bge-m3")

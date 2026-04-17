@@ -1,7 +1,10 @@
-"""GPU metrics collection via pynvml.
+"""GPU metrics collection via pynvml (provided by the nvidia-ml-py package).
 
 Provides GPU utilization and memory metrics for the Terminal UI.
 Gracefully handles missing pynvml or no GPU.
+
+Note: the ``pynvml`` module is supplied at runtime by the ``nvidia-ml-py``
+package (the legacy ``pynvml`` PyPI package is deprecated).
 
 See DESIGN.md Section 5.6.
 """

@@ -1,40 +1,17 @@
-"""ColBERT adapter with RoPE and Flash Attention 2 varlen.
-
-This adapter supports ColBERT-style models that use Rotary Position Embeddings
-and Flash Attention 2 with variable-length sequences (no padding waste).
-
-Designed for:
-- jinaai/jina-colbert-v2 (XLM-RoBERTa based, rotary embeddings, Matryoshka)
-
-Key features:
-- Uses flash_attn_varlen_func with cu_seqlens for packed sequences
-- Applies Rotary Position Embeddings (RoPE) to Q and K
-- No padding tokens = no wasted compute
-- Returns per-token embeddings for late interaction (MaxSim)
-- Supports Matryoshka dimension truncation (128, 96, 64)
-
-Architecture (jina-colbert-v2):
-- encoder.layers[i].mixer.Wqkv: fused QKV projection
-- encoder.layers[i].mixer.out_proj: output projection
-- encoder.layers[i].mixer.rotary_emb: rotary embeddings
-- encoder.layers[i].mlp: gated MLP
-
-See: https://huggingface.co/jinaai/jina-colbert-v2
-"""
-
 from __future__ import annotations
 
-import gc
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from torch.nn import functional
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters._utils import apply_rotary_pos_emb, validate_output_types
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -48,45 +25,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "ColBERTRotaryFlashAdapter requires text input"
 _ERR_CPU_NOT_SUPPORTED = "ColBERTRotaryFlashAdapter requires CUDA for Flash Attention."
 
 
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotate half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply Rotary Position Embedding to query and key tensors.
-
-    Args:
-        q: Query tensor [total_tokens, num_heads, head_dim].
-        k: Key tensor [total_tokens, num_heads, head_dim].
-        cos: Cosine part [total_tokens, head_dim].
-        sin: Sine part [total_tokens, head_dim].
-
-    Returns:
-        Rotated query and key tensors.
-    """
-    cos = cos.unsqueeze(1).to(q.dtype)
-    sin = sin.unsqueeze(1).to(q.dtype)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
+class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """ColBERT adapter with RoPE and Flash Attention 2 variable-length sequences.
 
     This adapter eliminates padding waste by packing sequences and using
@@ -95,6 +37,14 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
     Works with jina-colbert-v2 architecture (XLM-RoBERTa with flash + RoPE).
     """
+
+    fallback_adapter_path: ClassVar[str | None] = "colbert:ColBERTAdapter"
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("multivector", "score"),
+        unload_fields=("_model", "_tokenizer", "_expansion_token_id"),
+    )
 
     def __init__(
         self,
@@ -134,6 +84,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         _ = kwargs
         self._model_name_or_path = str(model_name_or_path)
         self._token_dim = token_dim
+        self._multivector_dim = token_dim
         self._normalize = normalize
         self._max_seq_length = max_seq_length
         self._query_max_length = query_max_length
@@ -148,36 +99,6 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self._tokenizer: PreTrainedTokenizerFast | None = None
         self._device: str | None = None
         self._expansion_token_id: int | None = None  # Set during load() if query_expansion
-
-    @classmethod
-    def create_for_device(cls, device: str, **kwargs: Any) -> ModelAdapter:
-        """Factory method that returns the appropriate adapter for the device.
-
-        For non-CUDA devices or when flash-attn is unavailable, returns ColBERTAdapter.
-
-        Args:
-            device: Device string (e.g., "cuda:0", "mps", "cpu").
-            **kwargs: Adapter initialization parameters.
-
-        Returns:
-            ColBERTRotaryFlashAdapter for CUDA with flash-attn, ColBERTAdapter otherwise.
-        """
-        from sie_server.adapters.colbert import ColBERTAdapter
-
-        return cls._create_flash_or_fallback(device, fallback_class=ColBERTAdapter, **kwargs)
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["multivector", "score"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        return ModelDims(multivector=self._token_dim)
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -243,7 +164,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         )
 
     def _resolve_dtype(self) -> torch.dtype:
-        """Resolve compute dtype."""
+        """Resolve compute dtype (default: bfloat16)."""
         dtype_map = {
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
@@ -329,24 +250,6 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
         return batch
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -369,10 +272,11 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         Returns:
             EncodeOutput with multivector embeddings.
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
-        self._validate_output_types(output_types)
+        validate_output_types(output_types, {"multivector"}, "ColBERTRotaryFlashAdapter")
         texts = self._extract_texts(items, instruction, is_query=is_query)
 
         max_length = self._query_max_length if is_query else self._max_seq_length
@@ -479,8 +383,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         Returns:
             List of MaxSim scores, one per item.
         """
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         # Encode query
         query_output = self.encode(
@@ -716,13 +619,6 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
         return results
 
-    def _validate_output_types(self, output_types: list[str]) -> None:
-        """Validate that output types are supported."""
-        unsupported = set(output_types) - {"multivector"}
-        if unsupported:
-            msg = f"Unsupported output types: {unsupported}. Only 'multivector' supported."
-            raise ValueError(msg)
-
     def _extract_texts(self, items: list[Item], instruction: str | None, *, is_query: bool) -> list[str]:
         """Extract texts from items, applying prefixes.
 
@@ -737,7 +633,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
         for item in items:
             if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
+                raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="ColBERTRotaryFlashAdapter"))
 
             text = item.text
 
@@ -751,10 +647,6 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             texts.append(text)
 
         return texts
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)
 
     def get_postprocessors(self) -> dict[str, Any] | None:
         """Return MUVERA postprocessor for converting multivector to dense.

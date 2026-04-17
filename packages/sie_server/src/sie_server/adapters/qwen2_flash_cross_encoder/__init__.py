@@ -1,30 +1,15 @@
-"""Qwen2 Flash Attention Cross-Encoder adapter for reranking.
-
-This adapter supports Qwen2-based causal LM rerankers like mxbai-rerank-v2.
-Uses Flash Attention 2 varlen for variable-length sequences without padding waste.
-
-Supports:
-- mixedbread-ai/mxbai-rerank-base-v2
-- mixedbread-ai/mxbai-rerank-large-v2
-
-Key optimizations:
-- Flash Attention 2 with variable-length sequences (no padding waste)
-- Causal attention for decoder-based rerankers
-- Scores via logit(token="1") - logit(token="0") at last position
-- BF16 inference
-"""
-
 from __future__ import annotations
 
-import gc
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters._utils import apply_rotary_pos_emb, extract_text
 from sie_server.core.inference_output import ScoreOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -34,10 +19,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "Qwen2FlashCrossEncoder requires text input"
 _ERR_CUDA_REQUIRED = "Qwen2FlashCrossEncoder requires CUDA for Flash Attention."
 
 # Chat template for mxbai-rerank models
@@ -46,33 +27,35 @@ _CHAT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 _TASK_PROMPT = "You are a search relevance expert who evaluates how well documents match search queries. For each query-document pair, carefully analyze the semantic relationship between them, then provide your binary relevance judgment (0 for not relevant, 1 for relevant).\nRelevance:"
 
 
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotate half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply Rotary Position Embedding to query and key tensors."""
-    cos = cos.unsqueeze(1).to(q.dtype)
-    sin = sin.unsqueeze(1).to(q.dtype)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
+class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
     """Cross-encoder adapter for Qwen2-based causal LM rerankers.
 
     Uses flash_attn_varlen_func for variable-length sequences without padding.
     Implements the mxbai-rerank scoring mechanism with logit differences.
     """
+
+    fallback_adapter_path: ClassVar[str | None] = "cross_encoder:CrossEncoderAdapter"
+    fallback_kwargs_overrides: ClassVar[dict[str, Any]] = {"attn_implementation": "sdpa"}
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("score",),
+        unload_fields=(
+            "_model",
+            "_tokenizer",
+            "_dtype",
+            "_num_heads",
+            "_num_kv_heads",
+            "_head_dim",
+            "_hidden_size",
+            "_yes_token_id",
+            "_no_token_id",
+            "_chat_prefix_ids",
+            "_chat_suffix_ids",
+            "_task_prompt_ids",
+            "_sep_ids",
+        ),
+    )
 
     def __init__(
         self,
@@ -119,41 +102,6 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
         self._chat_suffix_ids: list[int] = []
         self._task_prompt_ids: list[int] = []
         self._sep_ids: list[int] = []
-
-    @classmethod
-    def create_for_device(cls, device: str, **kwargs: Any) -> ModelAdapter:
-        """Factory method that returns the appropriate adapter for the device.
-
-        For non-CUDA devices or when flash-attn is unavailable, returns CrossEncoderAdapter.
-
-        Args:
-            device: Device string (e.g., "cuda:0", "mps", "cpu").
-            **kwargs: Adapter initialization parameters.
-
-        Returns:
-            Qwen2FlashCrossEncoderAdapter for CUDA with flash-attn, CrossEncoderAdapter otherwise.
-        """
-        from sie_server.adapters.cross_encoder import CrossEncoderAdapter
-
-        return cls._create_flash_or_fallback(
-            device,
-            fallback_class=CrossEncoderAdapter,
-            fallback_kwargs={**kwargs, "attn_implementation": "sdpa"},
-            **kwargs,
-        )
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["score"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions (none for cross-encoders)."""
-        return ModelDims()
 
     def load(self, device: str) -> None:
         """Load model weights onto the specified device."""
@@ -223,23 +171,6 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
         }
         return dtype_map.get(self._compute_precision, torch.bfloat16)
 
-    def unload(self) -> None:
-        """Unload model and free GPU memory."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def score(
         self,
         query: Item,
@@ -258,15 +189,14 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
         Returns:
             List of relevance scores (higher = more relevant).
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
-        query_text = self._extract_text(query)
+        query_text = extract_text(query, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="Qwen2FlashCrossEncoder"))
 
         # Build input sequences with chat template
         all_input_ids = []
         for item in items:
-            doc_text = self._extract_text(item)
+            doc_text = extract_text(item, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="Qwen2FlashCrossEncoder"))
             input_ids = self._build_input_ids(query_text, doc_text)
             all_input_ids.append(input_ids)
 
@@ -332,8 +262,9 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
         Returns:
             ScoreOutput containing scores for each (query, doc) pair.
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
         opts = options or {}
         max_length = opts.get("max_seq_length", self._max_seq_length)
@@ -341,8 +272,8 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
         # Build input sequences with chat template
         all_input_ids = []
         for query, doc in zip(queries, docs, strict=True):
-            query_text = self._extract_text(query)
-            doc_text = self._extract_text(doc)
+            query_text = extract_text(query, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="Qwen2FlashCrossEncoder"))
+            doc_text = extract_text(doc, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="Qwen2FlashCrossEncoder"))
             input_ids = self._build_input_ids(query_text, doc_text, max_length=max_length)
             all_input_ids.append(input_ids)
 
@@ -557,13 +488,3 @@ class Qwen2FlashCrossEncoderAdapter(ModelAdapter):
         logits = self._model.lm_head(last_hidden)  # [batch_size, vocab_size]
 
         return logits
-
-    def _extract_text(self, item: Item) -> str:
-        """Extract text from an item."""
-        if item.text is None:
-            raise ValueError(_ERR_REQUIRES_TEXT)
-        return item.text
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

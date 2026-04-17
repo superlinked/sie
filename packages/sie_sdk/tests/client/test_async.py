@@ -1,4 +1,6 @@
+import asyncio
 import json
+from typing import Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -90,6 +92,120 @@ class TestSIEAsyncClientInit:
             assert call_kwargs["limit"] == 512
             assert call_kwargs["limit_per_host"] == 512
             await client.close()
+
+    @pytest.mark.asyncio
+    async def test_max_concurrency_creates_semaphore(self) -> None:
+        client = SIEAsyncClient("http://localhost:8080", max_concurrency=10)
+        assert client._semaphore is not None
+        # asyncio.Semaphore internal value check
+        assert client._semaphore._value == 10  # type: ignore[attr-defined]
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_max_concurrency_none_no_semaphore(self) -> None:
+        client = SIEAsyncClient("http://localhost:8080")
+        assert client._semaphore is None
+        await client.close()
+
+
+class TestMaxConcurrency:
+    """Tests for max_concurrency semaphore throttling."""
+
+    @pytest.mark.asyncio
+    async def test_max_concurrency_limits_inflight(self) -> None:
+        """Verify that with max_concurrency=2, only 2 requests are in-flight simultaneously."""
+        peak_concurrency = 0
+        current_concurrency = 0
+        lock = asyncio.Lock()
+
+        resp_body = msgpack.packb(
+            {"model": "m", "items": [{"dense": {"dims": 2, "dtype": "float32", "values": np.array([1.0, 2.0])}}]},
+            use_bin_type=True,
+        )
+
+        class _FakeResp:
+            """Fake aiohttp response context manager with a delay to measure concurrency."""
+
+            def __init__(self) -> None:
+                self.status = 200
+                self.headers: dict[str, str] = {}
+
+            async def read(self) -> bytes:
+                return resp_body
+
+            async def __aenter__(self) -> Self:
+                nonlocal peak_concurrency, current_concurrency
+                async with lock:
+                    current_concurrency += 1
+                    peak_concurrency = max(peak_concurrency, current_concurrency)
+                await asyncio.sleep(0.05)
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                nonlocal current_concurrency
+                async with lock:
+                    current_concurrency -= 1
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(side_effect=lambda *a, **kw: _FakeResp())
+        mock_session.close = AsyncMock()
+
+        client = SIEAsyncClient("http://localhost:8080", max_concurrency=2)
+        client._session = mock_session
+
+        tasks = [client.encode("m", {"text": f"item-{i}"}) for i in range(10)]
+        await asyncio.gather(*tasks)
+
+        assert peak_concurrency <= 2
+        assert mock_session.post.call_count == 10
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_max_concurrency_none_no_limit(self) -> None:
+        """Verify that when max_concurrency is not set, all requests run concurrently."""
+        peak_concurrency = 0
+        current_concurrency = 0
+        lock = asyncio.Lock()
+
+        resp_body = msgpack.packb(
+            {"model": "m", "items": [{"dense": {"dims": 2, "dtype": "float32", "values": np.array([1.0, 2.0])}}]},
+            use_bin_type=True,
+        )
+
+        class _FakeResp:
+            def __init__(self) -> None:
+                self.status = 200
+                self.headers: dict[str, str] = {}
+
+            async def read(self) -> bytes:
+                return resp_body
+
+            async def __aenter__(self) -> Self:
+                nonlocal peak_concurrency, current_concurrency
+                async with lock:
+                    current_concurrency += 1
+                    peak_concurrency = max(peak_concurrency, current_concurrency)
+                await asyncio.sleep(0.05)
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                nonlocal current_concurrency
+                async with lock:
+                    current_concurrency -= 1
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(side_effect=lambda *a, **kw: _FakeResp())
+        mock_session.close = AsyncMock()
+
+        client = SIEAsyncClient("http://localhost:8080")
+        client._session = mock_session
+
+        tasks = [client.encode("m", {"text": f"item-{i}"}) for i in range(10)]
+        await asyncio.gather(*tasks)
+
+        # Without concurrency limit, all 10 should run concurrently
+        assert peak_concurrency == 10
+        await client.close()
 
 
 class TestAsyncEncode:

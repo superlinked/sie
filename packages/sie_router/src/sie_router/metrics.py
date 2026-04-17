@@ -44,6 +44,12 @@ PENDING_DEMAND = Gauge(
     ["machine_profile", "bundle"],
 )
 
+REJECTED_REQUESTS = Counter(
+    "sie_router_rejected_requests_total",
+    "Total requests rejected (503) before reaching a worker or returned 503 by a worker",
+    ["machine_profile", "bundle", "reason"],
+)
+
 # Track pools with pending demand per WorkerGroup
 # Key format: "machine_profile:bundle" -> set of pool names with pending demand
 _pools_with_demand: dict[str, set[str]] = {}
@@ -86,6 +92,32 @@ def record_pending_demand(machine_profile: str, bundle: str, pool_name: str = "d
 
     # Update gauge to number of pools with demand
     PENDING_DEMAND.labels(machine_profile=machine_profile, bundle=bundle).set(len(_pools_with_demand[key]))
+
+
+def record_rejected_request(
+    machine_profile: str,
+    bundle: str,
+    reason: str,
+    pool_name: str = "default",
+) -> None:
+    """Record a rejected request for KEDA scaling visibility.
+
+    Increments the REJECTED_REQUESTS counter and refreshes the pending demand
+    timestamp (if demand already exists) to prevent premature gauge decay.
+
+    Args:
+        machine_profile: Machine profile name (e.g., "l4-spot"). Empty string maps to "unknown".
+        bundle: Dependency bundle (e.g., "default").
+        reason: Rejection reason (e.g., "no_healthy_workers", "no_capacity", "worker_503").
+        pool_name: Name of the pool requesting capacity.
+    """
+    effective_profile = machine_profile or "unknown"
+    REJECTED_REQUESTS.labels(machine_profile=effective_profile, bundle=bundle, reason=reason).inc()
+    if machine_profile:
+        key = _demand_key(machine_profile, bundle)
+        pool_key = _pool_key(machine_profile, bundle, pool_name)
+        if key in _pools_with_demand and pool_name in _pools_with_demand[key]:
+            _pool_demand_time[pool_key] = time.monotonic()
 
 
 def clear_pending_demand(machine_profile: str, bundle: str) -> None:

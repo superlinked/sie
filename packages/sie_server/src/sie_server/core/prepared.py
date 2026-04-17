@@ -255,6 +255,33 @@ DonutPreparedItem = PreparedItem[DonutPayload]
 
 
 @dataclass(slots=True)
+class LightOnOCRPayload(Payload):
+    """Preprocessed LightOnOCR input ready for extraction.
+
+    LightOnOCR-2-1B uses a Pixtral vision encoder + Qwen3 text decoder
+    (Mistral3 architecture). The processor applies a chat template and
+    processes images into model inputs.
+
+    Attributes:
+        pixel_values: Preprocessed image tensor [C, H, W].
+        input_ids: Tokenized chat prompt [seq_len].
+        attention_mask: Attention mask for the prompt [seq_len].
+        image_sizes: Image dimensions tensor [2] required by generate().
+        original_size: Original image size (width, height).
+    """
+
+    pixel_values: Any  # torch.Tensor [C, H, W]
+    input_ids: Any  # torch.Tensor [seq_len]
+    attention_mask: Any  # torch.Tensor [seq_len]
+    image_sizes: Any  # torch.Tensor [2]
+    original_size: tuple[int, int]
+
+
+# Type alias for LightOnOCR prepared item
+LightOnOCRPreparedItem = PreparedItem[LightOnOCRPayload]
+
+
+@dataclass(slots=True)
 class DetectionPayload(Payload):
     """Preprocessed detection model input ready for inference.
 

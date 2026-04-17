@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sie_sdk.types import PoolListItem, PoolResponse
 
 from sie_router.health import CONFIGURED_GPU_TYPES
-from sie_router.metrics import REQUEST_COUNT, REQUEST_LATENCY, record_pending_demand
+from sie_router.metrics import REQUEST_COUNT, REQUEST_LATENCY, record_pending_demand, record_rejected_request
 from sie_router.model_registry import (
     BundleConflictError,
     ModelNotFoundError,
@@ -25,7 +25,7 @@ from sie_router.model_registry import (
 from sie_router.pools import DEFAULT_POOL_NAME, DefaultPoolProtectedError, PoolManager, parse_gpu_param
 from sie_router.registry import WorkerRegistry
 from sie_router.responses import pool_to_list_item, pool_to_response
-from sie_router.types import AuditEntry, ProvisioningResponse
+from sie_router.types import AuditEntry, ProvisioningResponse, WorkerHealth
 from sie_router.version import ROUTER_VERSION, SDK_VERSION_HEADER
 from sie_router.work_publisher import NoConsumersError, WorkPublisher
 
@@ -293,6 +293,27 @@ def _resolve_machine_profile(gpu: str, configured_gpu_types: list[str]) -> str:
     return gpu
 
 
+def _infer_machine_profile(registry: WorkerRegistry, bundle: str | None = None) -> str | None:
+    """Infer machine_profile from UNKNOWN-health workers or sole configured GPU.
+
+    Used when no explicit GPU is specified but all workers are UNKNOWN health
+    (e.g., during model loading). Returns the profile if it can be unambiguously
+    determined, otherwise None.
+    """
+    workers_snapshot = registry.workers
+    unknown_profiles: set[str] = set()
+    for w in workers_snapshot.values():
+        if w.health == WorkerHealth.UNKNOWN and w.machine_profile:
+            if bundle and w.bundle.lower() != bundle.lower():
+                continue
+            unknown_profiles.add(w.machine_profile)
+    if len(unknown_profiles) == 1:
+        return unknown_profiles.pop()
+    if len(CONFIGURED_GPU_TYPES) == 1:
+        return CONFIGURED_GPU_TYPES[0]
+    return None
+
+
 def _make_provisioning_response(gpu: str) -> JSONResponse:
     """Create a 202 Accepted response for provisioning.
 
@@ -484,6 +505,12 @@ async def _proxy_request(
         configured_lower = {g.lower() for g in CONFIGURED_GPU_TYPES}
         if gpu.lower() not in configured_lower:
             logger.warning("GPU type '%s' not configured (available: %s)", gpu, CONFIGURED_GPU_TYPES)
+            record_rejected_request(
+                machine_profile=gpu,
+                bundle=bundle,
+                reason="gpu_not_configured",
+                pool_name=effective_pool or "default",
+            )
             endpoint = path.split("/")[2] if len(path.split("/")) > 2 else "unknown"
             _emit_audit_log(
                 request,
@@ -567,6 +594,12 @@ async def _proxy_request(
             # demand_gpu is the machine_profile (e.g., "l4-spot", "a100-40gb")
             # effective_pool is the pool name (enables per-pool demand tracking for scaling)
             record_pending_demand(demand_gpu, bundle, effective_pool or "default")
+            record_rejected_request(
+                machine_profile=demand_gpu,
+                bundle=bundle,
+                reason="no_capacity",
+                pool_name=effective_pool or "default",
+            )
             endpoint = path.split("/")[2] if len(path.split("/")) > 2 else "unknown"
             _emit_audit_log(
                 request,
@@ -580,6 +613,15 @@ async def _proxy_request(
 
         # No GPU specified and no pool with GPU spec - return 503
         logger.warning("No healthy workers available")
+        inferred_gpu = _infer_machine_profile(registry, bundle)
+        if inferred_gpu:
+            record_pending_demand(inferred_gpu, bundle, effective_pool or "default")
+        record_rejected_request(
+            machine_profile=inferred_gpu or "",
+            bundle=bundle,
+            reason="no_healthy_workers",
+            pool_name=effective_pool or "default",
+        )
         endpoint = path.split("/")[2] if len(path.split("/")) > 2 else "unknown"
         _emit_audit_log(request, endpoint=endpoint, model=model_name, pool=effective_pool, status=503)
         raise HTTPException(
@@ -628,6 +670,14 @@ async def _proxy_request(
         # Record request for QPS tracking
         registry.record_request(worker.url)
         status_code = str(response.status_code)
+
+        if response.status_code == 503:
+            record_rejected_request(
+                machine_profile=worker.machine_profile or "",
+                bundle=worker.bundle,
+                reason="worker_503",
+                pool_name=effective_pool or "default",
+            )
 
         # Add worker identification header for per-worker metrics tracking
         response.headers["X-SIE-Worker"] = worker.name or worker.url

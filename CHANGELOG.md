@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.2.0
+
+- chore(main): release 0.2.0
+- docs: add telemetry documentation and clarify deployment guidelines
+- refactor(observability): update tmp_path type hints from str to Path
+- test(observability): fix telemetry test type hints
+- fix(haystack): rename namespace alias to sie
+- feat(observability): add anonymous usage telemetry
+- feat(haystack): add haystack_integrations namespace aliases
+- feat(deps): migrate from pynvml to nvidia-ml-py package
+- feat(benchmarks): add MTEB NFCorpus evaluation results for ModernBERT-based embedders
+- fix: install uv via curl instead of COPY --from ghcr.io
+- feat(sdk): add max_concurrency param to SIEAsyncClient to prevent connection pool exhaustion
+- fix(build): downgrade dockerfile syntax version to 1 for broader compatibility
+- refactor(deployment): add model preloading configuration to Terraform and CLI validation
+- feat(adapters): add ModernBERT flash dense embedding support with fallback mechanism
+- fix(router): harden affinity spill with bounds check, clamp, and debug log
+- feat(workers): implement model preloading at startup to reduce first-request latency
+- fix(router): add overflow spill to break model affinity deadlock
+- fix(router): make rejected requests visible to KEDA scaling metrics
+- fix(adapters): remove redundant tokenizer validation and unused template parameter
+- refactor(adapters): simplify template application logic and add chat token caching
+- fix: address PR review — panel title, namespace variable
+- fix(dashboard): queue routing dashboard accuracy and usability
+- fix(release): add LanceDB integrations to release-please config
+- refactor(adapters): consolidate adapter infrastructure with declarative specs
+- perf(server): use sdpa attention for LightOnOCR (6x faster, no OOM)
+- fix(server): harden LightOnOCR adapter and rename next bundle
+- fix(server): add collate() and fix prepare() signature on LightOnOCRPreprocessor
+- refactor(adapters): consolidate adapter infrastructure with declarative specs
+- refactor(adapters): improve flash attention device handling and resource cleanup
+- refactor(adapters): extract common flash adapter logic into reusable base and utilities
+- fix(server): trim next bundle to only verified transformers 5.x adapters
+- fix: restore accidentally deleted test file
+- fix(server): remove accidental data symlink, default to bfloat16
+- Delete packages/sie_server/tests/adapters/test_lighton_ocr.py
+- feat(server): add next bundle and fix LightOnOCR for transformers 5.x
+- feat(server): add lightonai/LightOnOCR-2-1B OCR adapter
+
 ## v0.1.10
 
 - chore(main): release 0.1.10

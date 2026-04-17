@@ -19,16 +19,17 @@ See: https://huggingface.co/vidore/colpali-v1.3-hf
 
 from __future__ import annotations
 
-import gc
 import io
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
 
 if TYPE_CHECKING:
@@ -39,13 +40,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_NO_INPUT = "ColPaliAdapter requires either text or images input"
 
 
-class ColPaliAdapter(ModelAdapter):
+class ColPaliAdapter(BaseAdapter):
     """Adapter for ColPali visual document retrieval models.
 
     ColPali encodes document page images into multi-vector representations
@@ -54,6 +52,14 @@ class ColPaliAdapter(ModelAdapter):
 
     Uses HuggingFace transformers ColPaliForRetrieval and ColPaliProcessor.
     """
+
+    spec = AdapterSpec(
+        inputs=("text", "image"),
+        outputs=("multivector", "score"),
+        multivector_dim=128,
+        unload_fields=("_model", "_processor"),
+        default_preprocessor="image",
+    )
 
     def __init__(
         self,
@@ -92,19 +98,6 @@ class ColPaliAdapter(ModelAdapter):
         self._device: str | None = None
         self._multivector_dim: int = token_dim or 128  # ColPali uses 128-dim per patch
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text", "image"],
-            outputs=["multivector", "score"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        return ModelDims(multivector=self._multivector_dim)
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -116,7 +109,7 @@ class ColPaliAdapter(ModelAdapter):
         self._device = device
 
         # Determine dtype and attention implementation
-        dtype = self._resolve_dtype(device)
+        dtype = self._resolve_dtype()
         attn_impl = self._resolve_attn_implementation(device)
 
         logger.info(
@@ -174,10 +167,10 @@ class ColPaliAdapter(ModelAdapter):
         self._cached_input_ids = cached["input_ids"]  # [1, seq_len]
         self._cached_attention_mask = cached["attention_mask"]  # [1, seq_len]
 
-    def _resolve_dtype(self, device: str) -> torch.dtype:
+    def _resolve_dtype(self) -> torch.dtype:
         """Resolve dtype based on device and config."""
         # CPU should use FP32
-        if not device.startswith("cuda"):
+        if not self._device or not str(self._device).startswith("cuda"):
             return torch.float32
 
         dtype_map = {
@@ -245,27 +238,6 @@ class ColPaliAdapter(ModelAdapter):
                 if hasattr(config.vlm_config.vision_config, "torch_dtype"):
                     config.vlm_config.vision_config.torch_dtype = dtype
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._processor is not None:
-            del self._processor
-            self._processor = None
-
-        self._device = None
-
-        # Release GPU memory
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -294,8 +266,7 @@ class ColPaliAdapter(ModelAdapter):
         Returns:
             EncodeOutput with multivector embeddings.
         """
-        if self._model is None or self._processor is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         self._validate_output_types(output_types)
 
@@ -554,8 +525,7 @@ class ColPaliAdapter(ModelAdapter):
         Returns:
             List of MaxSim scores, one per document.
         """
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         # Encode query
         query_output = self.encode(

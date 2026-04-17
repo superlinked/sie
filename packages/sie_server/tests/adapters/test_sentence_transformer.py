@@ -45,10 +45,10 @@ class TestSentenceTransformerDenseAdapter:
         assert caps.inputs == ["text"]
         assert caps.outputs == ["dense"]
 
-    def test_dims_before_load_raises(self, adapter: SentenceTransformerDenseAdapter) -> None:
-        """Accessing dims before load raises error."""
-        with pytest.raises(RuntimeError, match="Model not loaded"):
-            _ = adapter.dims
+    def test_dims_before_load_returns_none(self, adapter: SentenceTransformerDenseAdapter) -> None:
+        """Dims returns None values before load (BaseAdapter derives from spec)."""
+        dims = adapter.dims
+        assert dims.dense is None
 
     @patch("sie_server.adapters.sentence_transformer.SentenceTransformer")
     def test_load(
@@ -137,34 +137,8 @@ class TestSentenceTransformerDenseAdapter:
         adapter.load("cpu")
 
         items = [Item()]  # No text
-        with pytest.raises(ValueError, match="require text input"):
+        with pytest.raises(ValueError, match="requires text input"):
             adapter.encode(items, output_types=["dense"])
-
-    def test_encode_before_load_raises(self, adapter: SentenceTransformerDenseAdapter) -> None:
-        """Encode before load raises error."""
-        items = [Item(text="hello")]
-        with pytest.raises(RuntimeError, match="Model not loaded"):
-            adapter.encode(items, output_types=["dense"])
-
-    @patch("gc.collect")
-    @patch("sie_server.adapters.sentence_transformer.SentenceTransformer")
-    @patch("sie_server.adapters.sentence_transformer.torch")
-    def test_unload(
-        self,
-        mock_torch: MagicMock,
-        mock_st_class: MagicMock,
-        mock_gc: MagicMock,
-        adapter: SentenceTransformerDenseAdapter,
-        mock_st_model: MagicMock,
-    ) -> None:
-        """Unload clears the model."""
-        mock_st_class.return_value = mock_st_model
-
-        adapter.load("cpu")
-        adapter.unload()
-
-        with pytest.raises(RuntimeError, match="Model not loaded"):
-            _ = adapter.dims
 
 
 class TestSentenceTransformerSparseAdapter:
@@ -202,10 +176,10 @@ class TestSentenceTransformerSparseAdapter:
         assert caps.inputs == ["text"]
         assert caps.outputs == ["sparse"]
 
-    def test_dims_before_load_raises(self, adapter: SentenceTransformerSparseAdapter) -> None:
-        """Accessing dims before load raises error."""
-        with pytest.raises(RuntimeError, match="Model not loaded"):
-            _ = adapter.dims
+    def test_dims_before_load_returns_none(self, adapter: SentenceTransformerSparseAdapter) -> None:
+        """Dims returns None values before load (BaseAdapter derives from spec)."""
+        dims = adapter.dims
+        assert dims.sparse is None
 
     @patch("sie_server.adapters.sentence_transformer.SparseEncoder")
     def test_load(
@@ -289,7 +263,7 @@ class TestSentenceTransformerSparseAdapter:
         adapter.load("cpu")
 
         items = [Item()]  # No text
-        with pytest.raises(ValueError, match="require text input"):
+        with pytest.raises(ValueError, match="requires text input"):
             adapter.encode(items, output_types=["sparse"])
 
     def test_encode_before_load_raises(self, adapter: SentenceTransformerSparseAdapter) -> None:
@@ -315,5 +289,5 @@ class TestSentenceTransformerSparseAdapter:
         adapter.load("cpu")
         adapter.unload()
 
-        with pytest.raises(RuntimeError, match="Model not loaded"):
-            _ = adapter.dims
+        dims = adapter.dims
+        assert dims.sparse is None

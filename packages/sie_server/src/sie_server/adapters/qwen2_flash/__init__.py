@@ -1,36 +1,19 @@
-"""Qwen2 Flash Attention adapter using flash_attn_varlen_func.
-
-This adapter uses Flash Attention 2's variable-length attention to process
-sequences without padding, eliminating padding waste and improving throughput.
-
-Supports Qwen2-based encoder models like:
-- dunzhang/stella_en_1.5B_v5
-
-Key differences from RoPEFlashAdapter (for NewModel):
-- Qwen2/3 uses pre-norm (RMSNorm before attention/MLP) instead of post-norm
-- RoPE is stored per-layer in self_attn.rotary_emb (Qwen2) or model-level (Qwen3)
-- Uses GQA (grouped query attention) with fewer KV heads than Q heads
-- Separate q/k/v projections instead of combined qkv_proj
-- Qwen3 adds QK-normalization (q_norm/k_norm RMSNorm per-head before RoPE)
-
-See: https://github.com/Dao-AILab/flash-attention
-"""
-
 from __future__ import annotations
 
-import gc
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from torch.nn import functional
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision, PoolingStrategy
+from sie_server.adapters._utils import apply_rotary_pos_emb, extract_texts, validate_output_types
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -38,46 +21,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-PoolingStrategy = Literal["cls", "mean", "last"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "Qwen2FlashAdapter requires text input"
 _ERR_CPU_NOT_SUPPORTED = "Qwen2FlashAdapter requires CUDA. Use sentence_transformer adapter for CPU."
 
 
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotate half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply Rotary Position Embedding to query and key tensors.
-
-    Args:
-        q: Query tensor [total_tokens, num_heads, head_dim].
-        k: Key tensor [total_tokens, num_kv_heads, head_dim].
-        cos: Cosine part [total_tokens, head_dim].
-        sin: Sine part [total_tokens, head_dim].
-
-    Returns:
-        Rotated query and key tensors.
-    """
-    cos = cos.unsqueeze(1).to(q.dtype)
-    sin = sin.unsqueeze(1).to(q.dtype)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-class Qwen2FlashAdapter(PEFTLoRAMixin, ModelAdapter):
+class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """Qwen2-based encoder adapter using Flash Attention 2 with variable-length sequences.
 
     This adapter eliminates padding waste by packing sequences and using
@@ -85,6 +32,14 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
     Works with models like dunzhang/stella_en_1.5B_v5.
     """
+
+    fallback_adapter_path: ClassVar[str | None] = "sentence_transformer:SentenceTransformerDenseAdapter"
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("dense",),
+        unload_fields=("_model", "_tokenizer", "_dense_dim", "_dense_projection"),
+    )
 
     def __init__(
         self,
@@ -139,37 +94,14 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self._dense_dim: int | None = None
         self._dense_projection: torch.nn.Linear | None = None
 
-    @classmethod
-    def create_for_device(cls, device: str, **kwargs: Any) -> ModelAdapter:
-        """Factory method that returns the appropriate adapter for the device.
-
-        For non-CUDA devices or when flash-attn is unavailable, returns SentenceTransformerDenseAdapter.
-
-        Args:
-            device: Device string (e.g., "cuda:0", "mps", "cpu").
-            **kwargs: Adapter initialization parameters.
-
-        Returns:
-            Qwen2FlashAdapter for CUDA with flash-attn, SentenceTransformerDenseAdapter otherwise.
-        """
-        from sie_server.adapters.sentence_transformer import SentenceTransformerDenseAdapter
-
-        return cls._create_flash_or_fallback(device, fallback_class=SentenceTransformerDenseAdapter, **kwargs)
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._dense_dim is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(dense=self._dense_dim)
+    def _resolve_dtype(self) -> torch.dtype:
+        """Resolve compute dtype (defaults to bfloat16 for Qwen2)."""
+        dtype_map = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }
+        return dtype_map.get(self._compute_precision, torch.bfloat16)
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -228,15 +160,6 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
         logger.debug("Qwen2 model dense_dim: %d", self._dense_dim)
 
-    def _resolve_dtype(self) -> torch.dtype:
-        """Resolve compute dtype."""
-        dtype_map = {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }
-        return dtype_map.get(self._compute_precision, torch.bfloat16)
-
     def _load_dense_projection(self, device: str) -> None:
         """Load the sentence-transformers dense projection layer from HuggingFace."""
         import safetensors.torch
@@ -284,29 +207,6 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, ModelAdapter):
             out_features,
         )
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._dense_projection is not None:
-            del self._dense_projection
-            self._dense_projection = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-        self._dense_dim = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -329,10 +229,11 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, ModelAdapter):
         Returns:
             EncodeOutput with dense embeddings.
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
-        self._validate_output_types(output_types)
+        validate_output_types(output_types, {"dense"}, "Qwen2FlashAdapter")
 
         # Resolve runtime options (config defaults -> profile -> request overrides)
         opts = options or {}
@@ -341,12 +242,13 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, ModelAdapter):
         normalize = opts.get("normalize", self._normalize)
         pooling = opts.get("pooling", self._pooling)
 
-        texts = self._extract_texts(
+        texts = extract_texts(
             items,
             instruction,
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,
+            err_msg="Qwen2FlashAdapter requires text input",
         )
 
         # Tokenize each sequence individually (no padding)
@@ -590,43 +492,3 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, ModelAdapter):
             pooled = functional.normalize(pooled, p=2, dim=-1)
 
         return pooled
-
-    def _validate_output_types(self, output_types: list[str]) -> None:
-        """Validate that output types are supported."""
-        unsupported = set(output_types) - {"dense"}
-        if unsupported:
-            msg = f"Unsupported output types: {unsupported}. Qwen2FlashAdapter only supports 'dense'."
-            raise ValueError(msg)
-
-    def _extract_texts(
-        self,
-        items: list[Item],
-        instruction: str | None,
-        *,
-        is_query: bool,
-        query_template: str | None = None,
-        doc_template: str | None = None,
-    ) -> list[str]:
-        """Extract texts from items, applying templates if configured."""
-        query_template = query_template if query_template is not None else self._query_template
-        doc_template = doc_template if doc_template is not None else self._doc_template
-        texts = []
-        for item in items:
-            if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
-
-            text = item.text
-
-            # Apply template based on query/document mode
-            template = query_template if is_query else doc_template
-            if template:
-                text = template.format(text=text, instruction=instruction or "")
-            elif instruction:
-                text = f"{instruction} {text}"
-
-            texts.append(text)
-        return texts
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

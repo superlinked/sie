@@ -17,26 +17,22 @@ See DESIGN.md Section 7.6 for adapter specification.
 """
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar
 
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 from sie_server.types.responses import Entity
 
-# Compute precision type (for interface compatibility)
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
 # Error messages
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "GLiNER adapter requires text input"
 _ERR_REQUIRES_LABELS = "GLiNER requires labels parameter for extraction"
 
 
-class GLiNERAdapter(ModelAdapter):
+class GLiNERAdapter(BaseAdapter):
     """Adapter for GLiNER zero-shot NER models.
 
     GLiNER extracts entities of any specified type from text without
@@ -55,6 +51,12 @@ class GLiNERAdapter(ModelAdapter):
         #   {"text": "Steve Jobs", "label": "person", "score": 0.92, "start": 26, "end": 36},
         # ]}]
     """
+
+    spec: ClassVar[AdapterSpec] = AdapterSpec(
+        inputs=("text",),
+        outputs=("json",),
+        unload_fields=("_model",),
+    )
 
     def __init__(
         self,
@@ -90,25 +92,6 @@ class GLiNERAdapter(ModelAdapter):
         self._model: Any = None  # GLiNER model type
         self._device: str | None = None
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities.
-
-        GLiNER models support extraction but not encoding or scoring.
-        """
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["json"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions.
-
-        GLiNER models don't produce embeddings, so all dims are None.
-        """
-        return ModelDims()
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -138,25 +121,6 @@ class GLiNERAdapter(ModelAdapter):
             self._model = self._model.to(device)
         else:
             self._model = self._model.to(device, dtype=dtype)
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device  # Save before clearing
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        self._device = None
-
-        # Release GPU memory per the memory management contract in base.py
-        import gc
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
 
     def extract(
         self,
@@ -194,8 +158,7 @@ class GLiNERAdapter(ModelAdapter):
             RuntimeError: If model not loaded.
             ValueError: If labels not provided or items lack text.
         """
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         if not labels:
             raise ValueError(_ERR_REQUIRES_LABELS)
@@ -297,9 +260,5 @@ class GLiNERAdapter(ModelAdapter):
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""
         if item.text is None:
-            raise ValueError(_ERR_REQUIRES_TEXT)
+            raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="GLiNER adapter"))
         return item.text
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

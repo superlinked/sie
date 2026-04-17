@@ -62,10 +62,10 @@ class TestCLIPAdapter:
         assert caps.inputs == ["text", "image"]
         assert caps.outputs == ["dense"]
 
-    def test_dims_before_load_raises(self, adapter: CLIPAdapter) -> None:
-        """Accessing dims before load raises error."""
-        with pytest.raises(RuntimeError, match="Model not loaded"):
-            _ = adapter.dims
+    def test_dims_before_load(self, adapter: CLIPAdapter) -> None:
+        """Dims returns None dense before load (BaseAdapter reads from spec)."""
+        dims = adapter.dims
+        assert dims.dense is None
 
     def test_encode_before_load_raises(self, adapter: CLIPAdapter) -> None:
         """Encode before load raises error."""
@@ -124,5 +124,7 @@ class TestCLIPAdapter:
 
         adapter.unload()
 
-        with pytest.raises(RuntimeError, match="Model not loaded"):
-            _ = adapter.dims
+        assert adapter._model is None
+        assert adapter._processor is None
+        assert adapter._dense_dim is None
+        assert adapter.dims.dense is None

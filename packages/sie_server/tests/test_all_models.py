@@ -196,6 +196,10 @@ def _assert_extract(
 # =============================================================================
 
 
+def test_alibaba_nlp_gte_modernbert_base_dense() -> None:
+    _assert_dense("Alibaba-NLP/gte-modernbert-base", 768, [-0.01058197021484375, -0.020538330078125, 0.03900146484375])
+
+
 def test_alibaba_nlp_gte_multilingual_base_dense() -> None:
     _assert_dense("Alibaba-NLP/gte-multilingual-base", 768, [-0.055389404296875, 0.06341552734375, -0.029815673828125])
 
@@ -309,6 +313,11 @@ def test_salesforce_sfr_embedding_2_r_dense() -> None:
 @pytest.mark.xfail(reason="7B model too large for CPU unit tests", strict=False)
 def test_salesforce_sfr_embedding_mistral_dense() -> None:
     _assert_dense("Salesforce/SFR-Embedding-Mistral", 4096, None)
+
+
+@pytest.mark.xfail(reason="Snowflake model custom code requires xformers", strict=False)
+def test_snowflake_snowflake_arctic_embed_m_v2_0_dense() -> None:
+    _assert_dense("Snowflake/snowflake-arctic-embed-m-v2.0", 768, None)
 
 
 def test_sentence_transformers_all_minilm_l6_v2_dense() -> None:
@@ -476,6 +485,20 @@ def test_baai_bge_m3_sparse_profile_multivector() -> None:
 # =============================================================================
 # ibm-granite sparse
 # =============================================================================
+
+
+def test_ibm_granite_granite_embedding_english_r2_dense() -> None:
+    _assert_dense(
+        "ibm-granite/granite-embedding-english-r2", 768, [-0.017974853515625, -0.03485107421875, -0.0006227493286132812]
+    )
+
+
+def test_ibm_granite_granite_embedding_small_english_r2_dense() -> None:
+    _assert_dense(
+        "ibm-granite/granite-embedding-small-english-r2",
+        384,
+        [0.04559326171875, 0.0131683349609375, 0.00701141357421875],
+    )
 
 
 def test_ibm_granite_embedding_30m_sparse() -> None:

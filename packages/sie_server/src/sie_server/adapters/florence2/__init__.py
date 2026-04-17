@@ -17,16 +17,17 @@ See: https://huggingface.co/microsoft/Florence-2-base
 
 from __future__ import annotations
 
-import gc
 import io
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from transformers import PreTrainedModel
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.types.responses import DetectedObject, Entity
 
@@ -35,9 +36,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_NO_IMAGES = "Florence2Adapter requires image input for extraction"
 _ERR_ENCODE_NOT_SUPPORTED = "Florence2Adapter does not support encode(). Use extract() instead."
 
@@ -53,7 +51,7 @@ TASK_CAPTION_TO_PHRASE_GROUNDING = "<CAPTION_TO_PHRASE_GROUNDING>"
 TASK_DOCVQA = "<DocVQA>"
 
 
-class Florence2Adapter(ModelAdapter):
+class Florence2Adapter(BaseAdapter):
     """Adapter for Florence-2 vision-language models.
 
     Florence-2 is a multi-task vision foundation model that can perform:
@@ -69,6 +67,13 @@ class Florence2Adapter(ModelAdapter):
         CPU preprocessing uses ImagePreprocessor pattern via prepared_items.
         Batched inference supported. Flash attention enabled when available.
     """
+
+    spec: ClassVar[AdapterSpec] = AdapterSpec(
+        inputs=("image",),
+        outputs=("json",),
+        unload_fields=("_model", "_processor", "_preprocessor"),
+        default_preprocessor="image",
+    )
 
     def __init__(
         self,
@@ -109,19 +114,6 @@ class Florence2Adapter(ModelAdapter):
         self._preprocessor: Any = None  # SIE Florence2Preprocessor for CPU preprocessing
         self._device: str | None = None
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["image"],
-            outputs=["json"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions (empty for extraction models)."""
-        return ModelDims()
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -133,7 +125,7 @@ class Florence2Adapter(ModelAdapter):
         self._device = device
 
         # Determine dtype
-        dtype = self._resolve_dtype(device)
+        dtype = self._resolve_dtype()
 
         logger.info(
             "Loading Florence-2 model %s on device=%s with dtype=%s, attn=%s",
@@ -166,9 +158,9 @@ class Florence2Adapter(ModelAdapter):
 
         logger.info("Florence-2 model loaded successfully")
 
-    def _resolve_dtype(self, device: str) -> torch.dtype:
+    def _resolve_dtype(self) -> torch.dtype:
         """Resolve dtype based on device and config."""
-        if not device.startswith("cuda"):
+        if not self._device or not str(self._device).startswith("cuda"):
             return torch.float32
 
         dtype_map = {
@@ -193,30 +185,6 @@ class Florence2Adapter(ModelAdapter):
         )
 
         logger.info("Created Florence2Preprocessor for CPU preprocessing")
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._processor is not None:
-            del self._processor
-            self._processor = None
-
-        if self._preprocessor is not None:
-            del self._preprocessor
-            self._preprocessor = None
-
-        self._device = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
 
     def get_preprocessor(self) -> Any | None:
         """Return the Florence2Preprocessor for CPU/GPU overlap.
@@ -269,8 +237,9 @@ class Florence2Adapter(ModelAdapter):
             - objects: List of {label, score, bbox} for OD
             - data: Raw parsed output from model
         """
-        if self._model is None or self._processor is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._processor is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
         options = options or {}
         task = options.get("task", self._default_task)

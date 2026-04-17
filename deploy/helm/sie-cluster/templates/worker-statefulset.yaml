@@ -61,9 +61,6 @@ spec:
             - --host=0.0.0.0
             - --port={{ $root.Values.workers.common.port }}
             - --bundle={{ $bundle }}
-            {{- range $root.Values.workers.common.preloadModels }}
-            - --model={{ . }}
-            {{- end }}
           ports:
             - name: http
               containerPort: {{ $root.Values.workers.common.port }}
@@ -81,6 +78,11 @@ spec:
             # Device configuration (cpu if no GPU, cuda otherwise)
             - name: SIE_DEVICE
               value: {{ if gt (int $pool.gpu.count) 0 }}cuda{{ else }}cpu{{ end }}
+            {{- if $root.Values.workers.common.preloadModels }}
+            # Models to eagerly load at startup (before readiness)
+            - name: SIE_PRELOAD_MODELS
+              value: {{ join "," $root.Values.workers.common.preloadModels | quote }}
+            {{- end }}
             # Logging configuration
             - name: SIE_LOG_LEVEL
               value: {{ $root.Values.logging.level | quote }}
@@ -127,6 +129,19 @@ spec:
             - name: SIE_PAYLOAD_STORE_URL
               value: {{ $root.Values.payloadStore.url | quote }}
             {{- end }}
+            # Telemetry
+            {{- if and $root.Values.telemetry (hasKey $root.Values.telemetry "enabled") (not $root.Values.telemetry.enabled) }}
+            - name: SIE_TELEMETRY_DISABLED
+              value: "1"
+            {{- end }}
+            {{- if and $root.Values.telemetry $root.Values.telemetry.url }}
+            - name: SIE_TELEMETRY_URL
+              value: {{ $root.Values.telemetry.url | quote }}
+            {{- end }}
+            - name: SIE_VARIANT
+              value: {{ printf "%s-%s" $platform $bundle | quote }}
+            - name: SIE_DEPLOYMENT_ENV
+              value: {{ if and $root.Values.telemetry $root.Values.telemetry.deploymentEnv }}{{ $root.Values.telemetry.deploymentEnv | quote }}{{ else }}"production"{{ end }}
             {{- with $root.Values.workers.common.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -137,11 +152,18 @@ spec:
                 # The 10s sleep gives the K8s endpoints controller time to
                 # remove this pod from the service, so no new traffic arrives.
                 command: ["sleep", "10"]
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 60
+            # Total: 600s (10 min) for model downloads + GPU loading
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 10
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
@@ -149,12 +171,10 @@ spec:
             httpGet:
               path: /readyz
               port: http
-            # Extended timeouts for large model loading (jina-colbert-v2, Florence-2, etc.)
-            # Total tolerance: 120s + (12 * 10s) = 240s before pod is considered unhealthy
-            initialDelaySeconds: 120
+            initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 10
-            failureThreshold: 12
+            failureThreshold: 3
           resources:
             requests:
               {{- toYaml $pool.resources.requests | nindent 14 }}

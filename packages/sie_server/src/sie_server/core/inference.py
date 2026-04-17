@@ -63,13 +63,18 @@ def get_torch_dtype(precision: ComputePrecision) -> torch.dtype:
     return dtype_map[precision]
 
 
-def is_flash_attention_available() -> bool:
+def is_flash_attention_available(device: str | None = None) -> bool:
     """Check if Flash Attention 2 is available.
 
     Flash Attention 2 requires:
     - CUDA device with Ampere or newer architecture (compute capability >= 8.0)
     - flash-attn package installed
     - Transformers with FA2 support
+
+    Args:
+        device: Target device string (e.g. ``"cuda:0"``).  When provided the
+            capability check runs against that specific GPU rather than
+            ``torch.cuda.current_device()``, which matters on multi-GPU hosts.
 
     Returns:
         True if Flash Attention 2 can be used.
@@ -79,8 +84,11 @@ def is_flash_attention_available() -> bool:
 
     # Check CUDA compute capability (Ampere is 8.0+)
     try:
-        device = torch.cuda.current_device()
-        capability = torch.cuda.get_device_capability(device)
+        if device is not None and ":" in device:
+            device_idx = int(device.split(":")[1])
+        else:
+            device_idx = torch.cuda.current_device()
+        capability = torch.cuda.get_device_capability(device_idx)
         if capability[0] < _MIN_AMPERE_COMPUTE_CAPABILITY:
             logger.debug(
                 "Flash Attention 2 requires Ampere+ GPU (compute capability 8.0+), current device has %d.%d",
@@ -88,7 +96,7 @@ def is_flash_attention_available() -> bool:
                 capability[1],
             )
             return False
-    except (RuntimeError, AssertionError):
+    except (RuntimeError, AssertionError, ValueError):
         logger.debug("Could not determine CUDA compute capability", exc_info=True)
         return False
 

@@ -29,6 +29,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -176,6 +177,7 @@ class SIEAsyncClient:
         options: dict[str, Any] | None = None,
         pool: PoolSpec | None = None,
         max_connections: int | None = None,
+        max_concurrency: int | None = None,
     ) -> None:
         # Ensure msgpack-numpy hooks are installed (once per process).
         # Done lazily here instead of at module level to avoid monkey-patching
@@ -220,6 +222,9 @@ class SIEAsyncClient:
         self._headers = headers.copy()
 
         self._max_connections = max_connections or 100
+        self._semaphore: asyncio.Semaphore | None = (
+            asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
+        )
         self._session: aiohttp.ClientSession | None = None
         self._closed = False
 
@@ -259,6 +264,15 @@ class SIEAsyncClient:
     # Low-level HTTP helpers (thin wrappers around aiohttp)
     # ------------------------------------------------------------------
 
+    @contextlib.asynccontextmanager
+    async def _throttle(self) -> AsyncIterator[None]:
+        """Acquire the concurrency semaphore if configured, else no-op."""
+        if self._semaphore is not None:
+            async with self._semaphore:
+                yield
+        else:
+            yield
+
     async def _post(
         self,
         url: str,
@@ -277,7 +291,7 @@ class SIEAsyncClient:
             kw["headers"] = headers
         if timeout_s is not None:
             kw["timeout"] = aiohttp.ClientTimeout(total=timeout_s)
-        async with self._ensure_session().post(url, **kw) as resp:
+        async with self._throttle(), self._ensure_session().post(url, **kw) as resp:
             body = await resp.read()
             return _AioResponse(resp.status, body, resp.headers)
 
@@ -290,7 +304,7 @@ class SIEAsyncClient:
         kw: dict[str, Any] = {}
         if headers:
             kw["headers"] = headers
-        async with self._ensure_session().get(url, **kw) as resp:
+        async with self._throttle(), self._ensure_session().get(url, **kw) as resp:
             body = await resp.read()
             return _AioResponse(resp.status, body, resp.headers)
 
@@ -303,7 +317,7 @@ class SIEAsyncClient:
         kw: dict[str, Any] = {}
         if headers:
             kw["headers"] = headers
-        async with self._ensure_session().delete(url, **kw) as resp:
+        async with self._throttle(), self._ensure_session().delete(url, **kw) as resp:
             body = await resp.read()
             return _AioResponse(resp.status, body, resp.headers)
 

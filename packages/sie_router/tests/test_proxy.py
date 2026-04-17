@@ -31,7 +31,7 @@ from sie_router.proxy import (
     router,
 )
 from sie_router.registry import WorkerRegistry
-from sie_router.types import WorkerState
+from sie_router.types import WorkerHealth, WorkerState
 from sie_router.version import ROUTER_VERSION, SDK_VERSION_HEADER, SERVER_VERSION_HEADER
 
 # =============================================================================
@@ -379,6 +379,125 @@ class TestProxyNoWorkers:
         assert body["status"] == "gpu_not_configured"
         assert body["gpu"] == "h100"
         assert "l4" in body["configured_gpu_types"]
+
+
+# =============================================================================
+# Rejected request recording tests
+# =============================================================================
+
+
+class TestRejectedRequestRecording:
+    """Tests for recording rejected requests for KEDA visibility."""
+
+    def test_no_workers_no_gpu_records_rejected_request(self, client: TestClient, registry: MagicMock) -> None:
+        """503 'No healthy workers' records a rejected request."""
+        registry.select_worker.return_value = None
+        registry.workers = {}
+
+        with patch("sie_router.proxy.record_rejected_request") as mock_rejected:
+            response = client.post(
+                "/v1/encode/test-model",
+                json={"text": "hello"},
+            )
+
+        assert response.status_code == 503
+        mock_rejected.assert_called_once_with(
+            machine_profile="",
+            bundle="default",
+            reason="no_healthy_workers",
+            pool_name="default",
+        )
+
+    def test_no_workers_no_gpu_infers_profile_from_unknown_workers(
+        self, client: TestClient, registry: MagicMock
+    ) -> None:
+        """Infers machine_profile from UNKNOWN-health workers on 503."""
+        registry.select_worker.return_value = None
+        # Provide workers dict with UNKNOWN health worker
+        unknown_worker = WorkerState(
+            url="http://w-0:8080",
+            name="w-0",
+            machine_profile="l4-spot",
+            bundle="default",
+            health=WorkerHealth.UNKNOWN,
+        )
+        registry.workers = {"http://w-0:8080": unknown_worker}
+
+        with (
+            patch("sie_router.proxy.record_rejected_request") as mock_rejected,
+            patch("sie_router.proxy.record_pending_demand") as mock_demand,
+        ):
+            response = client.post(
+                "/v1/encode/test-model",
+                json={"text": "hello"},
+            )
+
+        assert response.status_code == 503
+        # Should infer l4-spot and record pending demand
+        mock_demand.assert_called_once_with("l4-spot", "default", "default")
+        mock_rejected.assert_called_once_with(
+            machine_profile="l4-spot",
+            bundle="default",
+            reason="no_healthy_workers",
+            pool_name="default",
+        )
+
+    def test_no_workers_no_gpu_infers_profile_from_single_configured_gpu(
+        self, client: TestClient, registry: MagicMock
+    ) -> None:
+        """Infers machine_profile from sole configured GPU type on 503."""
+        registry.select_worker.return_value = None
+        registry.workers = {}
+
+        with (
+            patch("sie_router.proxy.CONFIGURED_GPU_TYPES", ["l4-spot"]),
+            patch("sie_router.proxy.record_rejected_request") as mock_rejected,
+            patch("sie_router.proxy.record_pending_demand") as mock_demand,
+        ):
+            response = client.post(
+                "/v1/encode/test-model",
+                json={"text": "hello"},
+            )
+
+        assert response.status_code == 503
+        mock_demand.assert_called_once_with("l4-spot", "default", "default")
+        mock_rejected.assert_called_once_with(
+            machine_profile="l4-spot",
+            bundle="default",
+            reason="no_healthy_workers",
+            pool_name="default",
+        )
+
+    def test_worker_503_records_rejected_request(self, client: TestClient, registry: MagicMock) -> None:
+        """Worker returning 503 records a rejected request."""
+        registry.select_worker.return_value = WorkerState(
+            name="worker-0", url="http://worker-0:8080", machine_profile="l4", bundle="default"
+        )
+
+        with (
+            patch("sie_router.proxy._forward_request", new_callable=AsyncMock) as mock_forward,
+            patch("sie_router.proxy.record_rejected_request") as mock_rejected,
+        ):
+            from fastapi import Response as FastAPIResponse
+
+            mock_forward.return_value = FastAPIResponse(
+                content=b'{"error": "MODEL_LOADING"}',
+                status_code=503,
+                media_type="application/json",
+            )
+
+            response = client.post(
+                "/v1/encode/test-model",
+                json={"text": "hello"},
+            )
+
+        assert response.status_code == 503
+        mock_rejected.assert_called_once_with(
+            machine_profile="l4",
+            bundle="default",
+            reason="worker_503",
+            pool_name="default",
+        )
 
 
 # =============================================================================

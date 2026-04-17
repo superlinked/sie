@@ -12,27 +12,23 @@ See DESIGN.md Section 7.6 for adapter specification.
 """
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar
 
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 from sie_server.types.responses import Entity, Relation
 
-# Compute precision type (for interface compatibility)
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
 # Error messages
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "GLiREL adapter requires text input"
 _ERR_REQUIRES_LABELS = "GLiREL requires labels parameter for relation extraction"
 _ERR_REQUIRES_ENTITIES = "GLiREL requires entities in metadata for relation extraction"
 
 
-class GLiRELAdapter(ModelAdapter):
+class GLiRELAdapter(BaseAdapter):
     """Adapter for GLiREL zero-shot relation extraction models.
 
     GLiREL extracts relations between entities. You provide:
@@ -60,6 +56,12 @@ class GLiRELAdapter(ModelAdapter):
         # ]}]
     """
 
+    spec: ClassVar[AdapterSpec] = AdapterSpec(
+        inputs=("text",),
+        outputs=("json",),
+        unload_fields=("_model",),
+    )
+
     def __init__(
         self,
         model_name_or_path: str | Path,
@@ -84,25 +86,6 @@ class GLiRELAdapter(ModelAdapter):
         self._model: Any = None  # GLiREL model type
         self._device: str | None = None
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities.
-
-        GLiREL models support extraction but not encoding or scoring.
-        """
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["json"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions.
-
-        GLiREL models don't produce embeddings, so all dims are None.
-        """
-        return ModelDims()
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -122,25 +105,6 @@ class GLiRELAdapter(ModelAdapter):
 
         # Set eval mode
         self._model.eval()
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device  # Save before clearing
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        self._device = None
-
-        # Release GPU memory per the memory management contract in base.py
-        import gc
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
 
     def extract(
         self,
@@ -179,8 +143,7 @@ class GLiRELAdapter(ModelAdapter):
             RuntimeError: If model not loaded.
             ValueError: If labels not provided or items lack entities.
         """
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         if not labels:
             raise ValueError(_ERR_REQUIRES_LABELS)
@@ -261,7 +224,7 @@ class GLiRELAdapter(ModelAdapter):
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""
         if item.text is None:
-            raise ValueError(_ERR_REQUIRES_TEXT)
+            raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="GLiREL adapter"))
         return item.text
 
     def _extract_entities(self, item: Item) -> list[dict[str, Any]]:
@@ -270,7 +233,3 @@ class GLiRELAdapter(ModelAdapter):
         if metadata is None:
             return []
         return metadata.get("entities", [])
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

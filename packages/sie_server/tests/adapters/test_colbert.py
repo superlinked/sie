@@ -31,10 +31,10 @@ class TestColBERTAdapter:
         assert caps.inputs == ["text"]
         assert caps.outputs == ["multivector", "score"]
 
-    def test_dims_before_load_raises(self, adapter: ColBERTAdapter) -> None:
-        """Accessing dims before load raises error."""
-        with pytest.raises(RuntimeError, match="Model not loaded"):
-            _ = adapter.dims
+    def test_dims_before_load_returns_none(self, adapter: ColBERTAdapter) -> None:
+        """Dims returns None values before load (BaseAdapter derives from spec)."""
+        dims = adapter.dims
+        assert dims.multivector is None
 
     def test_encode_before_load_raises(self, adapter: ColBERTAdapter) -> None:
         """Encode before load raises error."""

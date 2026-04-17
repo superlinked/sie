@@ -22,6 +22,7 @@ from sie_server.core.preprocessor.vision import (
     DetectionPreprocessor,
     DonutPreprocessor,
     Florence2Preprocessor,
+    LightOnOCRPreprocessor,
     NemoColEmbedPreprocessor,
     _dynamic_preprocess,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "DonutPreprocessor",
     "Florence2Preprocessor",
     "ImagePreprocessor",
+    "LightOnOCRPreprocessor",
     "NemoColEmbedPreprocessor",
     # Protocol
     "Preprocessor",

@@ -69,8 +69,9 @@ class ModelAdapter(ABC):
 
     Device-Aware Factory Method:
         Adapters can override create_for_device() to return different adapter
-        implementations based on device compatibility. Flash adapters use this
-        to automatically fall back to standard implementations on non-CUDA devices.
+        implementations based on device compatibility. Flash adapters inherit
+        from FlashBaseAdapter which provides declarative fallback via ClassVar
+        properties (fallback_adapter_path, fallback_kwargs_overrides).
     """
 
     # Set to True for adapters that need main thread (e.g., SGLang signal handlers)
@@ -91,70 +92,11 @@ class ModelAdapter(ABC):
         Returns:
             Adapter instance (may be fallback adapter for incompatible devices).
 
-        Example (Flash adapter with fallback):
-            @classmethod
-            def create_for_device(cls, device: str, **kwargs) -> ModelAdapter:
-                from sie_server.adapters.cross_encoder import CrossEncoderAdapter
-                return cls._create_flash_or_fallback(
-                    device,
-                    fallback_class=CrossEncoderAdapter,
-                    fallback_kwargs={**kwargs, "attn_implementation": "sdpa"},
-                    **kwargs
-                )
+        Example (Flash adapter with declarative fallback):
+            class MyFlashCrossEncoder(FlashBaseAdapter):
+                fallback_adapter_path = "cross_encoder:CrossEncoderAdapter"
+                fallback_kwargs_overrides = {"attn_implementation": "sdpa"}
         """
-        return cls(**kwargs)
-
-    @classmethod
-    def _create_flash_or_fallback(
-        cls,
-        device: str,
-        fallback_class: type["ModelAdapter"],
-        fallback_kwargs: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> "ModelAdapter":
-        """Helper for flash adapters to create with fallback logic.
-
-        Checks if device is CUDA and Flash Attention is available (hardware + package).
-        If not, returns the fallback adapter instead. This extracts common logic
-        shared by all flash adapters to reduce duplication.
-
-        Args:
-            device: Target device (e.g., "cuda:0", "mps", "cpu").
-            fallback_class: Adapter class to use when Flash Attention unavailable.
-            fallback_kwargs: Kwargs for fallback (defaults to same as flash adapter).
-            **kwargs: Adapter initialization parameters.
-
-        Returns:
-            Flash adapter instance on CUDA with Flash Attention, fallback otherwise.
-        """
-        # Import here to avoid circular dependency (core.inference imports core.loader imports base)
-        from sie_server.core.inference import is_flash_attention_available
-
-        if fallback_kwargs is None:
-            fallback_kwargs = kwargs
-
-        # Quick device check before hardware detection
-        if not device.startswith("cuda"):
-            logger.info(
-                "%s requires CUDA. Using %s for device '%s'. "
-                "For optimal performance, use a Linux system with NVIDIA GPU.",
-                cls.__name__,
-                fallback_class.__name__,
-                device,
-            )
-            return fallback_class(**fallback_kwargs)
-
-        # Check Flash Attention availability (hardware capability + package)
-        if not is_flash_attention_available():
-            logger.warning(
-                "Flash Attention unavailable (requires Ampere+ GPU and flash-attn package). "
-                "Using %s for device '%s'. "
-                "To install on Linux: pip install sie-server[flash-attn]",
-                fallback_class.__name__,
-                device,
-            )
-            return fallback_class(**fallback_kwargs)
-
         return cls(**kwargs)
 
     @property

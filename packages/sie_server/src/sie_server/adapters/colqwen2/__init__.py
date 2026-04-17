@@ -21,17 +21,18 @@ See: https://huggingface.co/vidore/colqwen2.5-v0.2
 
 from __future__ import annotations
 
-import gc
 import io
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
 from torch import nn
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
 
 if TYPE_CHECKING:
@@ -41,9 +42,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_NO_INPUT = "ColQwen2Adapter requires either text or images input"
 
 # ColQwen2.5 processor constants (from colpali-engine)
@@ -126,13 +124,21 @@ def _make_colqwen2_5_cls() -> type:
     return ColQwen2_5
 
 
-class ColQwen2Adapter(ModelAdapter):
+class ColQwen2Adapter(BaseAdapter):
     """Adapter for ColQwen2.5 visual document retrieval models.
 
     ColQwen2.5 encodes document page images into multi-vector representations
     (one 128-dim vector per image patch) for late interaction retrieval.
     Based on Qwen2.5-VL architecture.
     """
+
+    spec = AdapterSpec(
+        inputs=("text", "image"),
+        outputs=("multivector", "score"),
+        multivector_dim=128,
+        unload_fields=("_model", "_processor"),
+        default_preprocessor="image",
+    )
 
     def __init__(
         self,
@@ -166,24 +172,13 @@ class ColQwen2Adapter(ModelAdapter):
         self._device: str | None = None
         self._multivector_dim: int = token_dim
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        return ModelCapabilities(
-            inputs=["text", "image"],
-            outputs=["multivector", "score"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        return ModelDims(multivector=self._multivector_dim)
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device."""
         from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
 
         self._device = device
 
-        dtype = self._resolve_dtype(device)
+        dtype = self._resolve_dtype()
         attn_impl = self._resolve_attn_implementation(device)
 
         logger.info(
@@ -223,8 +218,8 @@ class ColQwen2Adapter(ModelAdapter):
 
         self._multivector_dim = getattr(self._model, "dim", 128)
 
-    def _resolve_dtype(self, device: str) -> torch.dtype:
-        if not device.startswith("cuda"):
+    def _resolve_dtype(self) -> torch.dtype:
+        if not self._device or not str(self._device).startswith("cuda"):
             return torch.float32
         dtype_map = {
             "float16": torch.float16,
@@ -245,23 +240,6 @@ class ColQwen2Adapter(ModelAdapter):
             logger.info("flash_attn not available, using sdpa attention")
             return "sdpa"
 
-    def unload(self) -> None:
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-        if self._processor is not None:
-            del self._processor
-            self._processor = None
-        self._device = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
-
     # ------------------------------------------------------------------
     # Encode
     # ------------------------------------------------------------------
@@ -276,8 +254,7 @@ class ColQwen2Adapter(ModelAdapter):
         prepared_items: Any = None,
         options: dict[str, Any] | None = None,
     ) -> EncodeOutput:
-        if self._model is None or self._processor is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
         self._validate_output_types(output_types)
 
         # Separate text-only queries from image items for batched processing
@@ -456,8 +433,7 @@ class ColQwen2Adapter(ModelAdapter):
         options: dict[str, Any] | None = None,
     ) -> list[float]:
         """Score documents against a text query using MaxSim."""
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         query_output = self.encode([query], output_types=["multivector"], is_query=True)
         if query_output.multivector is None:

@@ -1,6 +1,6 @@
 {
   "name": "@superlinked/sie-sdk",
-  "version": "0.1.10",
+  "version": "0.2.0",
   "description": "Official TypeScript SDK for SIE (Search Inference Engine)",
   "type": "module",
   "main": "./dist/index.cjs",

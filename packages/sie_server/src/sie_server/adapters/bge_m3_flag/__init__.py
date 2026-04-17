@@ -14,16 +14,16 @@ See: https://huggingface.co/BAAI/bge-m3
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, SparseVector
-from sie_server.core.preprocessor import CharCountPreprocessor
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,20 +34,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Compute precision type
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
 
-# Error messages
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "BGEM3FlagAdapter requires text input"
-
-
-class BGEM3FlagAdapter(ModelAdapter):
+class BGEM3FlagAdapter(BaseAdapter):
     """Adapter for BAAI/bge-m3 using FlagEmbedding library.
 
     This adapter uses the FlagEmbedding library's BGEM3FlagModel.
     For better performance, use BGEM3Adapter which uses Flash Attention 2.
     """
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("dense", "sparse", "multivector"),
+        dense_dim=1024,
+        sparse_dim=250002,
+        multivector_dim=1024,
+        unload_fields=("_model",),
+    )
 
     # BGE-M3 specific dimensions
     DENSE_DIM = 1024
@@ -80,23 +82,6 @@ class BGEM3FlagAdapter(ModelAdapter):
 
         self._model: BGEM3FlagModel | None = None
         self._device: str | None = None
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense", "sparse", "multivector"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        return ModelDims(
-            dense=self.DENSE_DIM,
-            sparse=self.SPARSE_DIM,
-            multivector=self.MULTIVECTOR_DIM,
-        )
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -157,27 +142,6 @@ class BGEM3FlagAdapter(ModelAdapter):
             return True
         return True
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device  # Save before clearing
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        self._device = None
-
-        # Release GPU memory per the memory management contract in base.py
-        import gc
-
-        import torch
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -204,8 +168,9 @@ class BGEM3FlagAdapter(ModelAdapter):
             RuntimeError: If model not loaded.
             ValueError: If output_types contains unsupported types.
         """
+        self._check_loaded()
         if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         self._validate_output_types(output_types)
         texts = self._extract_texts(items, instruction)
@@ -247,7 +212,7 @@ class BGEM3FlagAdapter(ModelAdapter):
         texts = []
         for item in items:
             if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
+                raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="BGEM3FlagAdapter"))
             text = item.text
             if instruction is not None:
                 text = f"{instruction} {text}"
@@ -299,7 +264,3 @@ class BGEM3FlagAdapter(ModelAdapter):
             dense_dim=self.DENSE_DIM if dense_np is not None else None,
             multivector_token_dim=self.MULTIVECTOR_DIM if multivector_list is not None else None,
         )
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

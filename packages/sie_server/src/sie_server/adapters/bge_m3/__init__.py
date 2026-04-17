@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -23,9 +23,10 @@ from huggingface_hub import snapshot_download
 from torch import nn
 from torch.nn import functional
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, SparseVector
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -33,20 +34,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Compute precision type
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
 
-# Error messages
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "BGEM3Adapter requires text input"
-
-
-class BGEM3Adapter(ModelAdapter):
+class BGEM3Adapter(BaseAdapter):
     """Adapter for BAAI/bge-m3 model.
 
     This adapter uses direct PyTorch inference with Flash Attention 2
     for optimal performance (dense, sparse, and multi-vector outputs).
     """
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("dense", "sparse", "multivector"),
+        dense_dim=1024,
+        sparse_dim=250002,
+        multivector_dim=1024,
+        unload_fields=("_model", "_tokenizer", "_colbert_linear", "_sparse_linear"),
+    )
 
     # BGE-M3 specific dimensions
     DENSE_DIM = 1024
@@ -82,23 +85,6 @@ class BGEM3Adapter(ModelAdapter):
         self._colbert_linear: nn.Linear | None = None
         self._sparse_linear: nn.Linear | None = None
         self._device: str | None = None
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense", "sparse", "multivector"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        return ModelDims(
-            dense=self.DENSE_DIM,
-            sparse=self.SPARSE_DIM,
-            multivector=self.MULTIVECTOR_DIM,
-        )
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -194,37 +180,6 @@ class BGEM3Adapter(ModelAdapter):
         else:
             logger.warning("sparse_linear.pt not found at %s", base_path)
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device  # Save before clearing
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._colbert_linear is not None:
-            del self._colbert_linear
-            self._colbert_linear = None
-
-        if self._sparse_linear is not None:
-            del self._sparse_linear
-            self._sparse_linear = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-
-        # Release GPU memory per the memory management contract in base.py
-        import gc
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -247,8 +202,9 @@ class BGEM3Adapter(ModelAdapter):
         Returns:
             EncodeOutput with requested output types.
         """
+        self._check_loaded()
         if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         self._validate_output_types(output_types)
 
@@ -294,7 +250,7 @@ class BGEM3Adapter(ModelAdapter):
         texts = []
         for item in items:
             if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
+                raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="BGEM3Adapter"))
             text = item.text
             if instruction is not None:
                 text = f"{instruction} {text}"
@@ -348,8 +304,9 @@ class BGEM3Adapter(ModelAdapter):
         Returns list of {token_id: weight} dicts.
         """
         # Get special token IDs to exclude
+        self._check_loaded()
         if self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
         special_tokens = {
             self._tokenizer.cls_token_id,
             self._tokenizer.eos_token_id,
@@ -422,7 +379,3 @@ class BGEM3Adapter(ModelAdapter):
             dense_dim=self.DENSE_DIM if dense_np is not None else None,
             multivector_token_dim=self.MULTIVECTOR_DIM if multivector_list is not None else None,
         )
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

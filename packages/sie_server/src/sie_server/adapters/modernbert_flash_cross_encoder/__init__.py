@@ -1,39 +1,15 @@
-"""ModernBERT Flash Attention Cross-Encoder adapter for reranking.
-
-This adapter implements cross-encoder scoring with Flash Attention 2 varlen,
-eliminating padding waste for variable-length query-document pairs.
-
-Supports:
-- Alibaba-NLP/gte-reranker-modernbert-base
-
-Key optimizations:
-- Flash Attention 2 with variable-length sequences (no padding waste)
-- FP16/BF16 inference
-- Packed batching via cu_seqlens
-- Uses model's native flash attention with sliding window support
-
-Architecture (ModernBERT):
-- model.embeddings: tok_embeddings + norm + drop
-- model.layers[i].attn_norm / mlp_norm: layer norms (pre-norm)
-- model.layers[i].attn.Wqkv: fused QKV projection
-- model.layers[i].attn.rotary_emb: rotary embeddings (flash version)
-- model.layers[i].attn.Wo: output projection
-- model.layers[i].attn.local_attention: window size for sliding window attention
-- head: dense + act + norm
-- classifier: final linear layer
-"""
-
 from __future__ import annotations
 
-import gc
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters._utils import extract_text
 from sie_server.core.inference_output import ScoreOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -43,19 +19,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "ModernBertFlashCrossEncoder requires text input"
 _ERR_CUDA_REQUIRED = "ModernBertFlashCrossEncoder requires CUDA for Flash Attention."
 
 
-class ModernBertFlashCrossEncoderAdapter(ModelAdapter):
+class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
     """Cross-encoder adapter for ModernBERT with Flash Attention 2 varlen.
 
     Uses flash_attn_varlen_qkvpacked_func to avoid wasting compute on padding tokens.
     Supports ModernBERT architecture with RoPE, pre-norm, and sliding window attention.
     """
+
+    fallback_adapter_path: ClassVar[str | None] = "cross_encoder:CrossEncoderAdapter"
+    fallback_kwargs_overrides: ClassVar[dict[str, Any]] = {"attn_implementation": "sdpa"}
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("score",),
+        unload_fields=("_model", "_tokenizer", "_dtype", "_num_heads", "_head_dim", "_hidden_size"),
+    )
 
     def __init__(
         self,
@@ -93,41 +74,6 @@ class ModernBertFlashCrossEncoderAdapter(ModelAdapter):
         self._hidden_size: int = 0
         self._use_sigmoid: bool = True
         self._use_mean_pooling: bool = False
-
-    @classmethod
-    def create_for_device(cls, device: str, **kwargs: Any) -> ModelAdapter:
-        """Factory method that returns the appropriate adapter for the device.
-
-        For non-CUDA devices or when flash-attn is unavailable, returns CrossEncoderAdapter.
-
-        Args:
-            device: Device string (e.g., "cuda:0", "mps", "cpu").
-            **kwargs: Adapter initialization parameters.
-
-        Returns:
-            ModernBertFlashCrossEncoderAdapter for CUDA with flash-attn, CrossEncoderAdapter otherwise.
-        """
-        from sie_server.adapters.cross_encoder import CrossEncoderAdapter
-
-        return cls._create_flash_or_fallback(
-            device,
-            fallback_class=CrossEncoderAdapter,
-            fallback_kwargs={**kwargs, "attn_implementation": "sdpa"},
-            **kwargs,
-        )
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["score"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions (none for cross-encoders)."""
-        return ModelDims()
 
     def load(self, device: str) -> None:
         """Load model weights onto the specified device."""
@@ -192,23 +138,6 @@ class ModernBertFlashCrossEncoderAdapter(ModelAdapter):
         }
         return dtype_map.get(self._compute_precision, torch.bfloat16)
 
-    def unload(self) -> None:
-        """Unload model and free GPU memory."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def score(
         self,
         query: Item,
@@ -227,15 +156,22 @@ class ModernBertFlashCrossEncoderAdapter(ModelAdapter):
         Returns:
             List of relevance scores (higher = more relevant).
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
-        query_text = self._extract_text(query)
+        query_text = extract_text(query, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="ModernBertFlashCrossEncoder"))
         if instruction:
             query_text = f"{instruction} {query_text}"
 
         # Tokenize all pairs individually (no padding)
-        pairs = [(query_text, self._extract_text(item)) for item in items]
+        pairs = [
+            (
+                query_text,
+                extract_text(item, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="ModernBertFlashCrossEncoder")),
+            )
+            for item in items
+        ]
         encodings = [
             self._tokenizer(
                 q,
@@ -300,8 +236,9 @@ class ModernBertFlashCrossEncoderAdapter(ModelAdapter):
         Returns:
             ScoreOutput containing scores for each (query, doc) pair.
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
         opts = options or {}
         max_length = opts.get("max_seq_length", self._max_seq_length)
@@ -309,10 +246,12 @@ class ModernBertFlashCrossEncoderAdapter(ModelAdapter):
         # Build (query, doc) pairs
         pairs = []
         for query, doc in zip(queries, docs, strict=True):
-            query_text = self._extract_text(query)
+            query_text = extract_text(
+                query, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="ModernBertFlashCrossEncoder")
+            )
             if instruction:
                 query_text = f"{instruction} {query_text}"
-            doc_text = self._extract_text(doc)
+            doc_text = extract_text(doc, err_msg=ERR_REQUIRES_TEXT.format(adapter_name="ModernBertFlashCrossEncoder"))
             pairs.append((query_text, doc_text))
 
         # Tokenize all pairs individually (no padding)
@@ -464,13 +403,3 @@ class ModernBertFlashCrossEncoderAdapter(ModelAdapter):
         logits = classifier(pooled)
 
         return logits
-
-    def _extract_text(self, item: Item) -> str:
-        """Extract text from an item."""
-        if item.text is None:
-            raise ValueError(_ERR_REQUIRES_TEXT)
-        return item.text
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

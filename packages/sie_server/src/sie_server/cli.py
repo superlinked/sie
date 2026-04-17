@@ -155,6 +155,7 @@ def serve(
     tracing: bool = typer.Option(default=False, help="Enable OpenTelemetry tracing (exports to localhost:4317)"),
     instrumentation: bool = typer.Option(False, "--instrumentation", "-i", help="Enable batch instrumentation logging"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
+    preload: str | None = typer.Option(None, "--preload", help="Comma-separated model names to preload at startup"),
     json_logs: bool = typer.Option(False, "--json-logs", help="Enable structured JSON logging (for Loki)"),
 ) -> None:
     """Start the SIE inference server."""
@@ -239,10 +240,33 @@ def serve(
     if not hf_fallback:
         typer.echo("HuggingFace Hub fallback: disabled")
 
+    # Handle preload models (CLI flag takes precedence, then env var from Helm configmap)
+    preload_models: list[str] | None = None
+    if preload:
+        preload_models = [m.strip() for m in preload.split(",") if m.strip()]
+        if model_filter:
+            invalid = [m for m in preload_models if m not in model_filter]
+            if invalid:
+                typer.echo(f"Error: Preload model(s) not in model filter: {', '.join(invalid)}", err=True)
+                raise typer.Exit(1)
+        typer.echo(f"Preload: {len(preload_models)} models will be loaded at startup")
+    else:
+        preload_env = os.environ.get("SIE_PRELOAD_MODELS")
+        if preload_env:
+            preload_models = [m.strip() for m in preload_env.split(",") if m.strip()]
+            if preload_models:
+                if model_filter:
+                    invalid = [m for m in preload_models if m not in model_filter]
+                    if invalid:
+                        typer.echo(f"Error: Preload model(s) not in model filter: {', '.join(invalid)}", err=True)
+                        raise typer.Exit(1)
+                typer.echo(f"Preload (from env): {len(preload_models)} models will be loaded at startup")
+
     config = AppStateConfig(
         models_dir=models_dir_resolved,
         device=resolved_device,
         model_filter=model_filter,
+        preload_models=preload_models,
     )
 
     run_server(host=host, port=port, reload=reload, config=config)

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from sie_server.adapters._utils import extract_texts, resolve_embedding_options
 from sie_server.types.inputs import Item
 
 
@@ -165,17 +166,10 @@ class TestRuntimeOptionsConsumption:
     # --- Template override tests (flash adapter _extract_texts) ---
 
     def test_extract_texts_uses_template_from_options(self) -> None:
-        """Flash adapter _extract_texts uses template params over self._* defaults."""
-        from sie_server.adapters.bert_flash import BertFlashAdapter
-
-        adapter = BertFlashAdapter(
-            "test-model",
-            query_template="default_query: {text}",
-            doc_template="default_doc: {text}",
-        )
+        """Flash adapter extract_texts uses template params over defaults."""
         items: list[Item] = [Item(text="hello")]
 
-        texts = adapter._extract_texts(
+        texts = extract_texts(
             items,
             None,
             is_query=True,
@@ -183,18 +177,19 @@ class TestRuntimeOptionsConsumption:
         )
         assert texts == ["custom: hello"]
 
-    def test_extract_texts_falls_back_to_loadtime(self) -> None:
-        """Flash adapter _extract_texts falls back to self._* when no params given."""
-        from sie_server.adapters.bert_flash import BertFlashAdapter
-
-        adapter = BertFlashAdapter(
-            "test-model",
-            query_template="loadtime: {text}",
+    def test_resolve_embedding_options_falls_back_to_defaults(self) -> None:
+        """resolve_embedding_options returns adapter defaults when no overrides given."""
+        normalize, pooling, qt, dt = resolve_embedding_options(
+            None,
+            default_normalize=True,
+            default_pooling="mean",
+            default_query_template="loadtime: {text}",
+            default_doc_template=None,
         )
-        items: list[Item] = [Item(text="hello")]
-
-        texts = adapter._extract_texts(items, None, is_query=True)
-        assert texts == ["loadtime: hello"]
+        assert normalize is True
+        assert pooling == "mean"
+        assert qt == "loadtime: {text}"
+        assert dt is None
 
     # --- Pooling override tests (PyTorchEmbeddingAdapter) ---
 
@@ -348,6 +343,7 @@ class TestRuntimeOptionsWiringRegression:
 
     _DENSE_FLASH_ADAPTERS: ClassVar[list[tuple[str, str]]] = [
         ("bert_flash", "BertFlashAdapter"),
+        ("modernbert_flash", "ModernBERTFlashAdapter"),
         ("nomic_flash", "NomicFlashAdapter"),
         ("qwen2_flash", "Qwen2FlashAdapter"),
         ("rope_flash", "RoPEFlashAdapter"),
@@ -364,11 +360,31 @@ class TestRuntimeOptionsWiringRegression:
         module_name: str,
         class_name: str,
     ) -> None:
-        """Dense flash adapters' _extract_texts must accept query_template and doc_template."""
+        """Dense flash adapters must pass query_template and doc_template to text extraction.
+
+        Adapters may either define their own ``_extract_texts`` method with
+        these parameters, or call the shared ``extract_texts()`` utility from
+        ``_utils`` (which accepts them).  Both patterns are valid.
+        """
+        import inspect
+
         cls = self._get_adapter_class(module_name, class_name)
-        params = self._get_param_names(cls, "_extract_texts")
-        assert "query_template" in params, f"{class_name}._extract_texts missing query_template"
-        assert "doc_template" in params, f"{class_name}._extract_texts missing doc_template"
+
+        # Pattern 1: adapter has its own _extract_texts with the right params
+        if hasattr(cls, "_extract_texts"):
+            params = self._get_param_names(cls, "_extract_texts")
+            has_own = "query_template" in params and "doc_template" in params
+        else:
+            has_own = False
+
+        # Pattern 2: encode() calls the shared extract_texts utility with template kwargs
+        source = inspect.getsource(cls.encode)
+        uses_util = "extract_texts(" in source and "query_template" in source and "doc_template" in source
+
+        assert has_own or uses_util, (
+            f"{class_name} must either define _extract_texts(query_template, doc_template) "
+            "or call extract_texts() with query_template and doc_template kwargs"
+        )
 
     @pytest.mark.parametrize(
         ("module_name", "class_name"),
@@ -403,11 +419,29 @@ class TestRuntimeOptionsWiringRegression:
         module_name: str,
         class_name: str,
     ) -> None:
-        """Sparse flash adapters' _extract_texts must accept query_template and doc_template."""
+        """Sparse flash adapters must accept query_template and doc_template.
+
+        Either via own _extract_texts method or via the shared extract_texts() utility.
+        """
+        import inspect
+
         cls = self._get_adapter_class(module_name, class_name)
-        params = self._get_param_names(cls, "_extract_texts")
-        assert "query_template" in params, f"{class_name}._extract_texts missing query_template"
-        assert "doc_template" in params, f"{class_name}._extract_texts missing doc_template"
+
+        # Pattern 1: adapter has its own _extract_texts with the right params
+        if hasattr(cls, "_extract_texts"):
+            params = self._get_param_names(cls, "_extract_texts")
+            has_own = "query_template" in params and "doc_template" in params
+        else:
+            has_own = False
+
+        # Pattern 2: encode() calls the shared extract_texts utility with template kwargs
+        source = inspect.getsource(cls.encode)
+        uses_util = "extract_texts(" in source and "query_template" in source and "doc_template" in source
+
+        assert has_own or uses_util, (
+            f"{class_name} must either define _extract_texts(query_template, doc_template) "
+            "or call extract_texts() with query_template and doc_template kwargs"
+        )
 
     # ---- Group B: PyTorch and SGLang ----
 
@@ -451,6 +485,7 @@ class TestRuntimeOptionsWiringRegression:
 
     _ALL_ENCODE_ADAPTERS: ClassVar[list[tuple[str, str]]] = [
         ("bert_flash", "BertFlashAdapter"),
+        ("modernbert_flash", "ModernBERTFlashAdapter"),
         ("nomic_flash", "NomicFlashAdapter"),
         ("qwen2_flash", "Qwen2FlashAdapter"),
         ("rope_flash", "RoPEFlashAdapter"),
@@ -493,9 +528,10 @@ class TestRuntimeOptionsWiringRegression:
 
         cls = self._get_adapter_class(module_name, class_name)
         source = inspect.getsource(cls.encode)
-        assert "options or {}" in source or "options or dict()" in source, (
+        assert "options or {}" in source or "options or dict()" in source or "resolve_embedding_options" in source, (
             f"{class_name}.encode() does not resolve options dict — "
-            "expected 'options or {{}}' pattern. Runtime options will be silently ignored."
+            "expected 'options or {{}}' or 'resolve_embedding_options()' pattern. "
+            "Runtime options will be silently ignored."
         )
 
 

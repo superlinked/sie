@@ -1,0 +1,15 @@
+name: transformers5
+priority: 5
+default: false
+# Only adapters verified to work with transformers 5.x belong here.
+# Do NOT copy all default adapters — they may break with the newer version.
+adapters:
+- sie_server.adapters.lighton_ocr
+deps:
+  # Transformers 5.x for models requiring newer architecture support
+  # (e.g., LightOnOCR-2-1B needs LightOnOcrForConditionalGeneration)
+  transformers: '>=5.0'
+  # Pin torch — flash-attn's unpinned torch dep can pull in 2.10+ which breaks torchvision
+  torch: '>=2.9,<2.10'
+  huggingface-hub: '>=0.20'
+  pillow: ''

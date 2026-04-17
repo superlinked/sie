@@ -162,6 +162,19 @@ class TestAdapterFactoryIntegration:
 
         assert type(adapter).__name__ == "BGEM3Adapter"
 
+    def test_modernbert_flash_on_cpu_returns_fallback(self, tmp_path: Path) -> None:
+        """ModernBERT flash dense falls back to SentenceTransformerDenseAdapter on CPU."""
+        config = _make_config(
+            "test-modernbert-dense",
+            "Alibaba-NLP/gte-modernbert-base",
+            "sie_server.adapters.modernbert_flash:ModernBERTFlashAdapter",
+            dense_dim=768,
+        )
+
+        adapter = load_adapter(config, tmp_path, device="cpu")
+
+        assert type(adapter).__name__ == "SentenceTransformerDenseAdapter"
+
     def test_colbert_modernbert_flash_on_mps(self, tmp_path: Path) -> None:
         """ColBERT ModernBERT flash falls back to ColBERTAdapter on MPS."""
         config = _make_config(

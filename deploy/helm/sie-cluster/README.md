@@ -51,6 +51,7 @@ When scaling from zero, expect the following latencies:
 ### Client Handling
 
 When a pool is scaling from zero, the router returns:
+
 - **202 Accepted** with `Retry-After: 120` header
 - Client should retry after the indicated delay
 
@@ -113,13 +114,14 @@ autoscaling:
 ## Gated Models
 
 Some HuggingFace models require authentication to download (gated models). Examples:
+
 - `google/embeddinggemma-300m` - Manual gating (requires approval)
 - `naver/splade-v3` - Auto gating (requires license acceptance)
 
 ### Prerequisites
 
-1. Create a HuggingFace account and generate an access token at https://huggingface.co/settings/tokens
-2. For manually gated models, request access on the model page (e.g., https://huggingface.co/google/embeddinggemma-300m)
+1. Create a HuggingFace account and generate an access token at <https://huggingface.co/settings/tokens>
+2. For manually gated models, request access on the model page (e.g., <https://huggingface.co/google/embeddinggemma-300m>)
 3. For auto-gated models, accept the license agreement on the model page
 
 ### Kubernetes Setup
@@ -168,11 +170,39 @@ docker run -e HF_TOKEN=hf_your_token_here \
   sie-server:cuda12-default
 ```
 
+## Telemetry
+
+SIE collects anonymous usage telemetry (version, OS, architecture, GPU type) to help maintainers understand adoption and hardware distribution. Telemetry is on by default and sends a lightweight heartbeat once per hour.
+
+**No IP addresses, hostnames, cluster names, API keys, or request data are collected.**
+
+Disable telemetry:
+
+```yaml
+telemetry:
+  enabled: false
+```
+
+Enterprise customers can route heartbeats through their own collector:
+
+```yaml
+telemetry:
+  url: "https://telemetry.internal.example.com/api/telemetry"
+```
+
+Tag non-production deployments to filter them out of dashboards:
+
+```yaml
+telemetry:
+  deploymentEnv: staging  # production (default) | staging | development | ci
+```
+
 ## Observability
 
 Observability components (Prometheus, Grafana, Loki, DCGM Exporter, Alloy, Event Exporter) are included as optional sub-chart dependencies. Enable them in your values overlay (e.g. `kube-prometheus-stack.install: true`).
 
 Pre-configured dashboards:
+
 - Cluster overview (QPS, latency, GPU utilization)
 - Per-model performance
 - Worker health

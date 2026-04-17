@@ -46,10 +46,11 @@ import torch
 from torch.nn import functional
 from transformers import AutoModel, AutoTokenizer
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -57,17 +58,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Type aliases
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
 AttnImplementation = Literal["sdpa", "flash_attention_2", "eager"]
 PoolingStrategy = Literal["last_token", "cls", "mean"]
 
-# Error messages
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "PyTorchEmbeddingAdapter requires text input"
 
-
-class PyTorchEmbeddingAdapter(PEFTLoRAMixin, ModelAdapter):
+class PyTorchEmbeddingAdapter(PEFTLoRAMixin, BaseAdapter):
     """Generic PyTorch adapter for embedding models.
 
     This adapter uses direct PyTorch/transformers inference with configurable
@@ -79,6 +74,12 @@ class PyTorchEmbeddingAdapter(PEFTLoRAMixin, ModelAdapter):
         support. LoRAs are loaded via load_lora() and switched via set_active_lora().
         See peft_lora_mixin.py for implementation details.
     """
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("dense",),
+        unload_fields=("_model", "_tokenizer", "_dense_dim"),
+    )
 
     def __init__(
         self,
@@ -144,21 +145,6 @@ class PyTorchEmbeddingAdapter(PEFTLoRAMixin, ModelAdapter):
         self._tokenizer: PreTrainedTokenizerFast | None = None
         self._device: str | None = None
         self._dense_dim: int | None = None
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._dense_dim is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(dense=self._dense_dim)
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -231,30 +217,6 @@ class PyTorchEmbeddingAdapter(PEFTLoRAMixin, ModelAdapter):
         # Use configured attention implementation directly
         return dtype, self._attn_implementation
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device  # Save before clearing
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-        self._dense_dim = None
-
-        # Release GPU memory per the memory management contract in base.py
-        import gc
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -277,8 +239,9 @@ class PyTorchEmbeddingAdapter(PEFTLoRAMixin, ModelAdapter):
         Returns:
             EncodeOutput with dense embeddings.
         """
+        self._check_loaded()
         if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         self._validate_output_types(output_types)
 
@@ -408,7 +371,7 @@ class PyTorchEmbeddingAdapter(PEFTLoRAMixin, ModelAdapter):
         texts = []
         for item in items:
             if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
+                raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="PyTorchEmbeddingAdapter"))
 
             text = item.text
 
@@ -424,7 +387,3 @@ class PyTorchEmbeddingAdapter(PEFTLoRAMixin, ModelAdapter):
 
             texts.append(text)
         return texts
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

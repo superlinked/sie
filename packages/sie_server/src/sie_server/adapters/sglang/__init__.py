@@ -26,26 +26,21 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import requests
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 
 if TYPE_CHECKING:
     from sie_server.types.inputs import Item
 
 logger = logging.getLogger(__name__)
 
-# Compute precision type
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-# Error messages
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "SGLangEmbeddingAdapter requires text input"
 _ERR_SERVER_STARTUP = "SGLang server failed to start within timeout"
 
 # Server startup config
@@ -68,7 +63,7 @@ def _find_free_port(start_port: int = _BASE_PORT) -> int:
     raise RuntimeError(msg)
 
 
-class SGLangEmbeddingAdapter(ModelAdapter):
+class SGLangEmbeddingAdapter(BaseAdapter):
     """Adapter for LLM embedding models using SGLang HTTP server backend.
 
     SGLang pre-allocates GPU memory for the KV cache, providing stable memory
@@ -92,8 +87,14 @@ class SGLangEmbeddingAdapter(ModelAdapter):
         results = adapter.encode([Item(text="hello")], ["dense"])
     """
 
+    spec = AdapterSpec(inputs=("text",), outputs=("dense",), unload_fields=("_process", "_server_url", "_dense_dim"))
+
     # SGLang uses signal handlers that require main thread execution
     requires_main_thread: bool = True
+
+    def _check_loaded(self) -> None:
+        if self._server_url is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
     def __init__(
         self,
@@ -155,23 +156,6 @@ class SGLangEmbeddingAdapter(ModelAdapter):
         self._device: str | None = None
         self._dense_dim: int | None = None
         self._active_lora: str | None = None  # Set by set_active_lora() before encode()
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions.
-
-        Note: For SGLang adapters, the dense dimension is detected on first encode.
-        The model config specifies dims.dense, so callers can use that.
-        """
-        return ModelDims(dense=self._dense_dim)
 
     @property
     def available_loras(self) -> list[str]:
@@ -414,8 +398,7 @@ class SGLangEmbeddingAdapter(ModelAdapter):
         Note:
             LoRA is set via set_active_lora() called by the worker before encode().
         """
-        if self._server_url is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         # Validate active LoRA if specified
         lora = self._active_lora
@@ -542,7 +525,7 @@ class SGLangEmbeddingAdapter(ModelAdapter):
         texts = []
         for item in items:
             if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
+                raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="SGLangEmbeddingAdapter"))
 
             text = item.text
 
@@ -595,10 +578,6 @@ class SGLangEmbeddingAdapter(ModelAdapter):
         """L2-normalize embeddings."""
         norms = np.linalg.norm(embeddings, axis=-1, keepdims=True)
         return embeddings / np.maximum(norms, 1e-12)
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)
 
     # -------------------------------------------------------------------------
     # LoRA Support

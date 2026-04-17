@@ -1,35 +1,20 @@
-"""XLMRoberta Flash Attention adapter using flash_attn_varlen_func.
-
-This adapter uses Flash Attention 2's variable-length attention to process
-sequences without padding, eliminating padding waste and improving throughput.
-
-Supports XLMRoberta-based models like:
-- Alibaba-NLP/gte-multilingual-base
-- intfloat/multilingual-e5-large(-instruct)
-
-Key features:
-- Uses flash_attn_varlen_func with cu_seqlens for packed sequences
-- No padding tokens = no wasted compute
-- Position IDs correctly offset for XLMRoberta (start at padding_idx + 1 = 2)
-
-See: https://github.com/Dao-AILab/flash-attention
-"""
-
 from __future__ import annotations
 
-import gc
+import importlib.util
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
 from torch.nn import functional
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision, PoolingStrategy
+from sie_server.adapters._utils import extract_texts, validate_output_types
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -37,14 +22,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-PoolingStrategy = Literal["cls", "mean"]
 
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "XLMRobertaFlashAdapter requires text input"
-
-
-class XLMRobertaFlashAdapter(PEFTLoRAMixin, ModelAdapter):
+class XLMRobertaFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """XLMRoberta adapter using Flash Attention 2 with variable-length sequences.
 
     This adapter eliminates padding waste by packing sequences and using
@@ -52,6 +31,20 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
     Works with any XLMRoberta-based model for dense embeddings.
     """
+
+    fallback_adapter_path: ClassVar[str | None] = None
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("dense",),
+        unload_fields=("_model", "_tokenizer", "_dense_dim", "_use_flash"),
+    )
+
+    def _resolve_dtype(self) -> torch.dtype:
+        """Resolve dtype; force float32 on CPU for numerical stability."""
+        if self._device == "cpu":
+            return torch.float32
+        return super()._resolve_dtype()
 
     def __init__(
         self,
@@ -91,21 +84,7 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self._device: str | None = None
         self._padding_idx: int = 1  # XLMRoberta default, set properly in load()
         self._dense_dim: int | None = None
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._dense_dim is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(dense=self._dense_dim)
+        self._use_flash: bool = False
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -119,7 +98,7 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self._device = device
         dtype = self._resolve_dtype()
 
-        self._use_flash = device.startswith("cuda")
+        self._use_flash = device.startswith("cuda") and importlib.util.find_spec("flash_attn") is not None
 
         logger.info(
             "Loading %s on device=%s with dtype=%s, attn=flash_varlen, pooling=%s",
@@ -146,34 +125,6 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self._dense_dim = self._model.config.hidden_size
         logger.debug("XLMRoberta padding_idx: %d, hidden_size: %d", self._padding_idx, self._dense_dim)
 
-    def _resolve_dtype(self) -> torch.dtype:
-        """Resolve compute dtype."""
-        dtype_map = {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }
-        return dtype_map.get(self._compute_precision, torch.float16)
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-        self._dense_dim = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -196,10 +147,11 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         Returns:
             EncodeOutput with dense embeddings.
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
-        self._validate_output_types(output_types)
+        validate_output_types(output_types, {"dense"}, "XLMRobertaFlashAdapter")
 
         # Resolve runtime options (config defaults -> profile -> request overrides)
         opts = options or {}
@@ -208,12 +160,13 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         normalize = opts.get("normalize", self._normalize)
         pooling = opts.get("pooling", self._pooling)
 
-        texts = self._extract_texts(
+        texts = extract_texts(
             items,
             instruction,
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,
+            err_msg="XLMRobertaFlashAdapter requires text input",
         )
 
         # Tokenize each sequence individually (no padding)
@@ -374,8 +327,7 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         """
         import torch.nn.functional as F
 
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         model = self._model
         num_heads = model.config.num_attention_heads  # type: ignore[union-attr]
@@ -477,43 +429,3 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             pooled = functional.normalize(pooled, p=2, dim=-1)
 
         return pooled
-
-    def _validate_output_types(self, output_types: list[str]) -> None:
-        """Validate that output types are supported."""
-        unsupported = set(output_types) - {"dense"}
-        if unsupported:
-            msg = f"Unsupported output types: {unsupported}. XLMRobertaFlashAdapter only supports 'dense'."
-            raise ValueError(msg)
-
-    def _extract_texts(
-        self,
-        items: list[Item],
-        instruction: str | None,
-        *,
-        is_query: bool,
-        query_template: str | None = None,
-        doc_template: str | None = None,
-    ) -> list[str]:
-        """Extract texts from items, applying templates if configured."""
-        query_template = query_template if query_template is not None else self._query_template
-        doc_template = doc_template if doc_template is not None else self._doc_template
-        texts = []
-        for item in items:
-            if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
-
-            text = item.text
-
-            # Apply template based on query/document mode
-            template = query_template if is_query else doc_template
-            if template:
-                text = template.format(text=text, instruction=instruction or "")
-            elif instruction:
-                text = f"{instruction} {text}"
-
-            texts.append(text)
-        return texts
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

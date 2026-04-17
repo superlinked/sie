@@ -26,6 +26,16 @@ FILL_FIRST_ENABLED = os.environ.get("SIE_ROUTER_FILL_FIRST", "true").lower() in 
 # complexity without meaningful benefit in practice.
 _FILL_FIRST_HIGH_THRESHOLD = 0.8
 
+# Overflow spill: when ALL workers with the model exceed this queue-depth
+# threshold, spill traffic to workers without the model to trigger lazy loading.
+AFFINITY_SPILL_ENABLED = os.environ.get("SIE_ROUTER_AFFINITY_SPILL", "true").lower() in ("true", "1", "yes")
+_AFFINITY_SPILL_THRESHOLD_RAW = float(os.environ.get("SIE_ROUTER_AFFINITY_SPILL_THRESHOLD", "0.8"))
+if not (0.0 <= _AFFINITY_SPILL_THRESHOLD_RAW <= 1.0):
+    raise ValueError(
+        f"SIE_ROUTER_AFFINITY_SPILL_THRESHOLD must be between 0.0 and 1.0: got {_AFFINITY_SPILL_THRESHOLD_RAW}"
+    )
+_AFFINITY_SPILL_THRESHOLD = _AFFINITY_SPILL_THRESHOLD_RAW
+
 
 def _fill_first_score(worker: WorkerState) -> float:
     """Score a worker for fill-first selection (lower score = preferred).
@@ -58,6 +68,23 @@ def _fill_first_score(worker: WorkerState) -> float:
     # Near-full workers get penalized. Add capacity as offset so these
     # always score higher (worse) than any worker below the threshold.
     return capacity + queue_depth
+
+
+def _all_overloaded(workers: list[WorkerState], threshold: float) -> bool:
+    """Check if all workers exceed the queue-depth threshold.
+
+    Args:
+        workers: List of worker states to check.
+        threshold: Queue-depth ratio (0..1) above which a worker is overloaded.
+
+    Returns:
+        True if every worker's queue_depth / capacity >= threshold.
+    """
+    for w in workers:
+        capacity = w.max_batch_requests if w.max_batch_requests and w.max_batch_requests > 0 else 64
+        if max(0, w.queue_depth) / capacity < threshold:
+            return False
+    return True
 
 
 class WorkerRegistry:
@@ -301,7 +328,19 @@ class WorkerRegistry:
         if model:
             with_model = [w for w in candidates if model in w.models]
             if with_model:
-                # Prefer workers already serving the model; apply fill-first only to them
+                # Overflow spill: when ALL with_model workers are overloaded,
+                # spill to a worker without the model to trigger lazy loading.
+                if AFFINITY_SPILL_ENABLED and _all_overloaded(with_model, _AFFINITY_SPILL_THRESHOLD):
+                    without_model = [w for w in candidates if model not in w.models]
+                    if without_model:
+                        logger.debug(
+                            "Affinity spill: all %d workers with model '%s' overloaded, "
+                            "spilling to worker without model",
+                            len(with_model),
+                            model,
+                        )
+                        return min(without_model, key=lambda w: w.queue_depth)
+                # Normal affinity: route to best with_model worker
                 if FILL_FIRST_ENABLED:
                     return min(with_model, key=_fill_first_score)
                 return min(with_model, key=lambda w: w.queue_depth)

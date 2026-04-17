@@ -25,34 +25,31 @@ See: https://huggingface.co/nvidia/llama-nemoretriever-colembed-3b-v1
 
 from __future__ import annotations
 
-import gc
 import io
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 
 if TYPE_CHECKING:
     from sie_server.types.inputs import Item
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_NO_INPUT = "NemoColEmbedAdapter requires either text or images input"
 _ERR_REQUIRES_FLASH_ATTN = (
     "NemoColEmbedAdapter requires flash_attn. Install with: pip install flash-attn --no-build-isolation"
 )
 
 
-class NemoColEmbedAdapter(ModelAdapter):
+class NemoColEmbedAdapter(BaseAdapter):
     """Adapter for NVIDIA NeMo ColEmbed visual document retrieval model.
 
     NeMo ColEmbed encodes document page images into multi-vector representations
@@ -65,6 +62,14 @@ class NemoColEmbedAdapter(ModelAdapter):
 
     Requires flash_attn and trust_remote_code=True.
     """
+
+    spec = AdapterSpec(
+        inputs=("text", "image"),
+        outputs=("multivector", "score"),
+        multivector_dim=128,
+        unload_fields=("_model", "_processor"),
+        default_preprocessor="charcount",
+    )
 
     def __init__(
         self,
@@ -99,19 +104,6 @@ class NemoColEmbedAdapter(ModelAdapter):
         self._processor: Any = None  # NemoColEmbedPreprocessor, created on load()
         # Note: Named _processor (not _preprocessor) for PreprocessorRegistry auto-detection
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text", "image"],
-            outputs=["multivector", "score"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        return ModelDims(multivector=self._multivector_dim)
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -132,7 +124,7 @@ class NemoColEmbedAdapter(ModelAdapter):
         self._device = device
 
         # Determine dtype
-        dtype = self._resolve_dtype(device)
+        dtype = self._resolve_dtype()
 
         logger.info(
             "Loading NeMo ColEmbed model %s on device=%s with dtype=%s",
@@ -190,10 +182,10 @@ class NemoColEmbedAdapter(ModelAdapter):
         # Create preprocessor for conformance with SIE infrastructure
         self._create_processor()
 
-    def _resolve_dtype(self, device: str) -> torch.dtype:
+    def _resolve_dtype(self) -> torch.dtype:
         """Resolve dtype based on device and config."""
         # CPU should use FP32
-        if not device.startswith("cuda"):
+        if not self._device or not str(self._device).startswith("cuda"):
             return torch.float32
 
         dtype_map = {
@@ -237,27 +229,6 @@ class NemoColEmbedAdapter(ModelAdapter):
             num_image_token,
         )
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._processor is not None:
-            del self._processor
-            self._processor = None
-
-        self._device = None
-
-        # Release GPU memory
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -287,8 +258,7 @@ class NemoColEmbedAdapter(ModelAdapter):
         Returns:
             EncodeOutput with multivector embeddings.
         """
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         self._validate_output_types(output_types)
 
@@ -514,8 +484,7 @@ class NemoColEmbedAdapter(ModelAdapter):
         Returns:
             List of scores, one per document.
         """
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         # Encode query and documents
         query_multivector = self.encode([query], output_types=["multivector"], is_query=True).multivector
@@ -550,7 +519,3 @@ class NemoColEmbedAdapter(ModelAdapter):
         if unsupported:
             msg = f"Unsupported output types: {unsupported}. NemoColEmbedAdapter only supports 'multivector'."
             raise ValueError(msg)
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

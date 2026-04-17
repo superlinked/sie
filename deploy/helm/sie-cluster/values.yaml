@@ -432,6 +432,14 @@ hfToken:
   # -- Token value (passed via --set, never baked into values files)
   value: ""
 
+# -- Anonymous usage telemetry. See https://superlinked.com/policies/telemetry
+telemetry:
+  enabled: true
+  # -- Override receiver endpoint (enterprise self-hosted collectors)
+  url: ""
+  # -- Deployment environment: production | staging | development | ci
+  deploymentEnv: production
+
 # -- Logging configuration
 logging:
   # -- Log level (DEBUG, INFO, WARNING, ERROR)

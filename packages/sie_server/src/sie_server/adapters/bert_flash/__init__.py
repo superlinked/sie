@@ -17,18 +17,23 @@ See: https://github.com/Dao-AILab/flash-attention
 
 from __future__ import annotations
 
-import gc
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
 from torch.nn import functional
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision, PoolingStrategy
+from sie_server.adapters._utils import (
+    extract_texts,
+    resolve_embedding_options,
+    validate_output_types,
+)
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -38,15 +43,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-PoolingStrategy = Literal["cls", "mean"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "BertFlashAdapter requires text input"
 _ERR_CPU_NOT_SUPPORTED = "BertFlashAdapter requires CUDA. Use pytorch_embedding adapter for CPU."
 
 
-class BertFlashAdapter(PEFTLoRAMixin, ModelAdapter):
+class BertFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """BERT adapter using Flash Attention 2 with variable-length sequences.
 
     This adapter eliminates padding waste by packing sequences and using
@@ -54,6 +54,21 @@ class BertFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
     Works with any BERT-based model for dense embeddings.
     """
+
+    fallback_adapter_path: ClassVar[str | None] = "sentence_transformer:SentenceTransformerDenseAdapter"
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("dense",),
+        unload_fields=(
+            "_model",
+            "_tokenizer",
+            "_dense_dim",
+            "_fused_qkv_weights",
+            "_fused_qkv_biases",
+            "_token_type_emb_0",
+        ),
+    )
 
     def __init__(
         self,
@@ -95,39 +110,6 @@ class BertFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self._fused_qkv_weights: list[torch.Tensor] = []
         self._fused_qkv_biases: list[torch.Tensor] = []
         self._token_type_emb_0: torch.Tensor | None = None
-
-    @classmethod
-    def create_for_device(cls, device: str, **kwargs: Any) -> ModelAdapter:
-        """Factory method that returns the appropriate adapter for the device.
-
-        For non-CUDA devices or when flash-attn is unavailable, returns SentenceTransformerDenseAdapter.
-
-        Args:
-            device: Device string (e.g., "cuda:0", "mps", "cpu").
-            **kwargs: Adapter initialization parameters.
-
-        Returns:
-            BertFlashAdapter for CUDA with flash-attn, SentenceTransformerDenseAdapter otherwise.
-        """
-        from sie_server.adapters.sentence_transformer import SentenceTransformerDenseAdapter
-
-        # Use base class helper (fallback gets same kwargs)
-        return cls._create_flash_or_fallback(device, fallback_class=SentenceTransformerDenseAdapter, **kwargs)
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._dense_dim is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(dense=self._dense_dim)
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -188,37 +170,6 @@ class BertFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self.encode(warmup_items, ["dense"])
         logger.info("Warmup complete")
 
-    def _resolve_dtype(self) -> torch.dtype:
-        """Resolve compute dtype."""
-        dtype_map = {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }
-        return dtype_map.get(self._compute_precision, torch.float16)
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-        self._dense_dim = None
-        self._fused_qkv_weights = []
-        self._fused_qkv_biases = []
-        self._token_type_emb_0 = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -241,24 +192,28 @@ class BertFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         Returns:
             EncodeOutput with dense embeddings.
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
-        self._validate_output_types(output_types)
+        validate_output_types(output_types, {"dense"}, "BertFlashAdapter")
 
         # Resolve runtime options (config defaults -> profile -> request overrides)
-        opts = options or {}
-        query_template = opts.get("query_template", self._query_template)
-        doc_template = opts.get("doc_template", self._doc_template)
-        normalize = opts.get("normalize", self._normalize)
-        pooling = opts.get("pooling", self._pooling)
+        normalize, pooling, query_template, doc_template = resolve_embedding_options(
+            options,
+            default_normalize=self._normalize,
+            default_pooling=self._pooling,
+            default_query_template=self._query_template,
+            default_doc_template=self._doc_template,
+        )
 
-        texts = self._extract_texts(
+        texts = extract_texts(
             items,
             instruction,
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,
+            err_msg="BertFlashAdapter requires text input",
         )
 
         # Batch tokenization — single call instead of per-text loop
@@ -435,43 +390,3 @@ class BertFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             pooled = functional.normalize(pooled, p=2, dim=-1)
 
         return pooled
-
-    def _validate_output_types(self, output_types: list[str]) -> None:
-        """Validate that output types are supported."""
-        unsupported = set(output_types) - {"dense"}
-        if unsupported:
-            msg = f"Unsupported output types: {unsupported}. BertFlashAdapter only supports 'dense'."
-            raise ValueError(msg)
-
-    def _extract_texts(
-        self,
-        items: list[Item],
-        instruction: str | None,
-        *,
-        is_query: bool,
-        query_template: str | None = None,
-        doc_template: str | None = None,
-    ) -> list[str]:
-        """Extract texts from items, applying templates if configured."""
-        query_template = query_template if query_template is not None else self._query_template
-        doc_template = doc_template if doc_template is not None else self._doc_template
-        texts = []
-        for item in items:
-            if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
-
-            text = item.text
-
-            # Apply template based on query/document mode
-            template = query_template if is_query else doc_template
-            if template:
-                text = template.format(text=text, instruction=instruction or "")
-            elif instruction:
-                text = f"{instruction} {text}"
-
-            texts.append(text)
-        return texts
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

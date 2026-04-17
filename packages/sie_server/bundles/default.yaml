@@ -15,6 +15,7 @@ adapters:
 - sie_server.adapters.grounding_dino
 - sie_server.adapters.gte_sparse_flash
 - sie_server.adapters.jina_flash_cross_encoder
+- sie_server.adapters.modernbert_flash
 - sie_server.adapters.modernbert_flash_cross_encoder
 - sie_server.adapters.nemo_colembed
 - sie_server.adapters.nomic_flash

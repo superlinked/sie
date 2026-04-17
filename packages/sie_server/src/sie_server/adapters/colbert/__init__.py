@@ -26,16 +26,16 @@ See: https://github.com/stanford-futuredata/ColBERT
 
 from __future__ import annotations
 
-import gc
 import logging
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch.nn import functional
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,13 +49,8 @@ from sie_server.types.inputs import Item
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
 
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "ColBERTAdapter requires text input"
-
-
-class ColBERTAdapter(ModelAdapter):
+class ColBERTAdapter(BaseAdapter):
     """Adapter for ColBERT-style late interaction models.
 
     ColBERT models produce per-token embeddings that enable late interaction
@@ -74,6 +69,12 @@ class ColBERTAdapter(ModelAdapter):
 
     Supports both encode() for getting embeddings and score() for MaxSim reranking.
     """
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("multivector", "score"),
+        unload_fields=("_model", "_tokenizer", "_linear", "_actual_token_dim"),
+    )
 
     def __init__(
         self,
@@ -144,21 +145,6 @@ class ColBERTAdapter(ModelAdapter):
         self._query_prefix_id: int | None = None  # Set during load() for special token prefixes
         self._doc_prefix_id: int | None = None  # Set during load() for special token prefixes
         self._doc_skiplist_ids: set[int] = set()  # Set during load(): punctuation token IDs to skip in docs
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["multivector", "score"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._actual_token_dim is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(multivector=self._actual_token_dim)
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -498,29 +484,6 @@ class ColBERTAdapter(ModelAdapter):
 
         return batch
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        if self._linear is not None:
-            del self._linear
-            self._linear = None
-
-        self._device = None
-        self._actual_token_dim = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -543,8 +506,9 @@ class ColBERTAdapter(ModelAdapter):
         Returns:
             EncodeOutput with multivector embeddings.
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
         self._validate_output_types(output_types)
         texts = self._extract_texts(items, instruction, is_query=is_query)
@@ -848,8 +812,7 @@ class ColBERTAdapter(ModelAdapter):
         Returns:
             List of MaxSim scores, one per item.
         """
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
         # Encode query
         query_output = self.encode(
@@ -1107,7 +1070,7 @@ class ColBERTAdapter(ModelAdapter):
 
         for item in items:
             if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
+                raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="ColBERTAdapter"))
 
             text = item.text
 
@@ -1122,10 +1085,6 @@ class ColBERTAdapter(ModelAdapter):
             texts.append(text)
 
         return texts
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)
 
     def get_postprocessors(self) -> dict[str, Any] | None:
         """Return MUVERA postprocessor for converting multivector to dense.

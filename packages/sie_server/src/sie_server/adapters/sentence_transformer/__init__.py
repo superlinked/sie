@@ -8,31 +8,31 @@ For models that output both dense and sparse (like BGE-M3), use BGEM3Adapter.
 """
 
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer, SparseEncoder
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, SparseVector
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
-# Compute precision type (for interface compatibility)
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
 
-# Error messages
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "SentenceTransformer adapters require text input"
-
-
-class SentenceTransformerDenseAdapter(ModelAdapter):
+class SentenceTransformerDenseAdapter(BaseAdapter):
     """Adapter for dense sentence-transformers models.
 
     Uses the SentenceTransformer class for models like BGE, E5, GTE, all-MiniLM, etc.
     These models output dense (fixed-dimension) vector embeddings.
     """
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("dense",),
+        unload_fields=("_model", "_dense_dim"),
+    )
 
     def __init__(
         self,
@@ -69,21 +69,6 @@ class SentenceTransformerDenseAdapter(ModelAdapter):
         self._device: str | None = None
         self._dense_dim: int | None = None
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(dense=self._dense_dim)
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -103,26 +88,6 @@ class SentenceTransformerDenseAdapter(ModelAdapter):
             self._model.max_seq_length = self._max_seq_length
 
         self._dense_dim = self._model.get_sentence_embedding_dimension()
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device  # Save before clearing
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        self._device = None
-        self._dense_dim = None
-
-        # Release GPU memory per the memory management contract in base.py
-        import gc
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
 
     def encode(
         self,
@@ -151,8 +116,9 @@ class SentenceTransformerDenseAdapter(ModelAdapter):
             RuntimeError: If model not loaded.
             ValueError: If output_types contains unsupported types.
         """
+        self._check_loaded()
         if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         unsupported = set(output_types) - {"dense"}
         if unsupported:
@@ -203,20 +169,22 @@ class SentenceTransformerDenseAdapter(ModelAdapter):
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""
         if item.text is None:
-            raise ValueError(_ERR_REQUIRES_TEXT)
+            raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="SentenceTransformer adapters"))
         return item.text
 
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)
 
-
-class SentenceTransformerSparseAdapter(ModelAdapter):
+class SentenceTransformerSparseAdapter(BaseAdapter):
     """Adapter for sparse sentence-transformers models.
 
     Uses the SparseEncoder class for models like SPLADE that output sparse
     (variable-dimension, mostly-zero) vector embeddings.
     """
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("sparse",),
+        unload_fields=("_model", "_sparse_dim"),
+    )
 
     def __init__(
         self,
@@ -245,21 +213,6 @@ class SentenceTransformerSparseAdapter(ModelAdapter):
         self._device: str | None = None
         self._sparse_dim: int | None = None
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["sparse"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(sparse=self._sparse_dim)
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -278,26 +231,6 @@ class SentenceTransformerSparseAdapter(ModelAdapter):
 
         # Sparse dim is vocabulary size
         self._sparse_dim = self._model.get_sentence_embedding_dimension()
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device  # Save before clearing
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        self._device = None
-        self._sparse_dim = None
-
-        # Release GPU memory per the memory management contract in base.py
-        import gc
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
 
     def encode(
         self,
@@ -325,8 +258,9 @@ class SentenceTransformerSparseAdapter(ModelAdapter):
             RuntimeError: If model not loaded.
             ValueError: If output_types contains unsupported types.
         """
+        self._check_loaded()
         if self._model is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         unsupported = set(output_types) - {"sparse"}
         if unsupported:
@@ -377,9 +311,5 @@ class SentenceTransformerSparseAdapter(ModelAdapter):
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""
         if item.text is None:
-            raise ValueError(_ERR_REQUIRES_TEXT)
+            raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="SentenceTransformer adapters"))
         return item.text
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

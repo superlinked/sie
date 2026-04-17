@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import gc
 import importlib
 import logging
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
+from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters.base import ModelAdapter
-
-if TYPE_CHECKING:
-    import torch
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +46,18 @@ def _import_adapter_class(adapter_path: str) -> type[ModelAdapter]:
     return getattr(module, class_name)
 
 
-class FlashBaseAdapter(ModelAdapter):
+class FlashBaseAdapter(BaseAdapter):
     """Thin base class for all flash-attention adapters.
 
     Provides:
     - Declarative fallback: set ``fallback_adapter_path`` and optionally
       ``fallback_kwargs_overrides`` instead of overriding ``create_for_device``.
-    - Common ``unload()`` with gc + cache clearing.
-    - ``_resolve_dtype()`` for compute precision mapping.
-    - ``get_preprocessor()`` returning ``CharCountPreprocessor``.
+
+    Inherits from ``BaseAdapter``:
+    - ``unload()`` driven by ``spec.unload_fields``
+    - ``_resolve_dtype()``
+    - ``get_preprocessor()`` returning ``CharCountPreprocessor``
+    - ``_check_loaded()``
 
     Subclasses with custom fallback logic (e.g. SPLADEFlashAdapter) can still
     override ``create_for_device()`` directly.
@@ -83,7 +83,7 @@ class FlashBaseAdapter(ModelAdapter):
         # Import lazily to avoid circular deps (core.inference -> core.loader -> base)
         from sie_server.core.inference import is_flash_attention_available
 
-        if device.startswith("cuda") and is_flash_attention_available():
+        if device.startswith("cuda") and is_flash_attention_available(device):
             return cls(**kwargs)
 
         # Resolve fallback class from string path
@@ -102,59 +102,9 @@ class FlashBaseAdapter(ModelAdapter):
             logger.warning(
                 "Flash Attention unavailable (requires Ampere+ GPU and flash-attn package). "
                 "Using %s for device '%s'. "
-                "To install on Linux: pip install sie-server[flash-attn]",
+                "To install on Linux: uv add 'sie-server[flash-attn]'",
                 fallback_class.__name__,
                 device,
             )
 
         return fallback_class(**merged)
-
-    # -- Common unload -------------------------------------------------------
-    def unload(self) -> None:
-        """Unload model weights and free GPU memory."""
-        import torch as _torch
-
-        device = getattr(self, "_device", None)
-
-        # Clear standard fields
-        for attr in ("_model", "_tokenizer"):
-            if getattr(self, attr, None) is not None:
-                setattr(self, attr, None)
-
-        # Clear subclass-specific fields
-        for attr in self._extra_fields_to_clear():
-            if hasattr(self, attr):
-                setattr(self, attr, None)
-
-        self._device = None
-
-        gc.collect()
-        if device and str(device).startswith("cuda"):
-            _torch.cuda.empty_cache()
-
-    def _extra_fields_to_clear(self) -> list[str]:
-        """Override to list additional instance attributes to clear on unload."""
-        return []
-
-    # -- Shared utilities ----------------------------------------------------
-    def _resolve_dtype(self) -> torch.dtype:
-        """Map ``self._compute_precision`` to a ``torch.dtype``."""
-        import torch as _torch
-
-        dtype_map: dict[str, torch.dtype] = {
-            "float16": _torch.float16,
-            "bfloat16": _torch.bfloat16,
-            "float32": _torch.float32,
-        }
-        return dtype_map.get(
-            getattr(self, "_compute_precision", "float16"),
-            _torch.float16,
-        )
-
-    def get_preprocessor(self) -> Any:
-        """Return ``CharCountPreprocessor`` for cost estimation."""
-        from sie_server.core.preprocessor import CharCountPreprocessor
-
-        return CharCountPreprocessor(
-            model_name=getattr(self, "_model_name_or_path", ""),
-        )

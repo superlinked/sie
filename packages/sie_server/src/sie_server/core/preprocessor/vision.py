@@ -17,6 +17,7 @@ from sie_server.core.prepared import (
     DetectionPayload,
     DonutPayload,
     Florence2Payload,
+    LightOnOCRPayload,
     NemoColEmbedPayload,
     PreparedBatch,
     PreparedItem,
@@ -767,6 +768,201 @@ class DonutPreprocessor:
         return {
             "pixel_values": pixel_values.to(device),
             "decoder_input_ids": torch.stack(decoder_ids_batch).to(device),
+        }
+
+
+class LightOnOCRPreprocessor:
+    """Preprocessor for LightOnOCR document OCR model.
+
+    Handles CPU-bound image preprocessing:
+    1. Load image from bytes (PIL)
+    2. Convert to RGB if needed
+    3. Build chat messages with system prompt and image placeholder
+    4. Apply chat template and process through PixtralProcessor
+    5. Extract image_sizes from processor output
+
+    This moves heavy image processing off the GPU thread, allowing
+    overlap with inference on previous batches.
+
+    Thread-safe: PIL and HuggingFace processors handle concurrent calls.
+    """
+
+    def __init__(
+        self,
+        processor: Any,
+        model_name: str,
+        *,
+        system_prompt: str = "You are an OCR engine. Return the markdown representation of the document.",
+    ) -> None:
+        """Initialize with a LightOnOCR processor.
+
+        Args:
+            processor: HuggingFace AutoProcessor (PixtralProcessor).
+            model_name: Model name for logging.
+            system_prompt: System prompt for the chat template.
+        """
+        self._processor = processor
+        self._model_name = model_name
+        self._system_prompt = system_prompt
+
+    @property
+    def modality(self) -> str:
+        """Return 'image'."""
+        return "image"
+
+    def _build_messages(self, instruction: str | None = None) -> list[dict[str, Any]]:
+        """Build chat messages for the model.
+
+        Args:
+            instruction: Optional instruction to append to user content.
+
+        Returns:
+            List of message dicts with system and user roles.
+        """
+        user_content: list[dict[str, str]] = [{"type": "image"}]
+        if instruction:
+            user_content.append({"type": "text", "text": instruction})
+
+        return [
+            {"role": "system", "content": self._system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+    def _process_single_image(
+        self,
+        item: Item,
+        index: int,
+        text: str,
+    ) -> PreparedItem[LightOnOCRPayload] | None:
+        """Process a single image item (thread-safe).
+
+        Args:
+            item: Item with images field.
+            index: Original index for reordering.
+            text: Chat template text for the processor.
+
+        Returns:
+            PreparedItem or None if item has no images.
+        """
+        from PIL import Image as PILImage
+
+        if not item.images:
+            logger.warning("LightOnOCRPreprocessor: item %d has no images", index)
+            return None
+
+        img_input = item.images[0]
+        pil_img = PILImage.open(io.BytesIO(img_input["data"]))
+        original_size = (pil_img.width, pil_img.height)
+
+        if pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+
+        inputs = self._processor(
+            text=text,
+            images=[pil_img],
+            return_tensors="pt",
+        )
+
+        payload = LightOnOCRPayload(
+            pixel_values=inputs["pixel_values"].squeeze(0),
+            input_ids=inputs["input_ids"].squeeze(0),
+            attention_mask=inputs["attention_mask"].squeeze(0),
+            image_sizes=inputs["image_sizes"].squeeze(0),
+            original_size=original_size,
+        )
+
+        return PreparedItem(payload=payload, cost=1, original_index=index)
+
+    def prepare(
+        self,
+        items: list[Item],
+        *,
+        config: ModelConfig,
+        is_query: bool = False,
+        instruction: str | None = None,
+        task: str | None = None,
+    ) -> PreparedBatch[LightOnOCRPayload]:
+        """Preprocess images for LightOnOCR.
+
+        Uses parallel processing for batches of 2+ images to utilize
+        multiple CPU cores (PIL releases GIL during image operations).
+
+        Args:
+            items: Items with images field.
+            config: Model config (unused - uses processor defaults).
+            is_query: Whether items are queries (unused for LightOnOCR).
+            task: Task token (unused for LightOnOCR).
+            instruction: Optional instruction to append to user message.
+
+        Returns:
+            PreparedBatch with LightOnOCRPayload items.
+        """
+        messages = self._build_messages(instruction)
+        text = self._processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+
+        if len(items) == 1:
+            result = self._process_single_image(items[0], 0, text)
+            if result is None:
+                return PreparedBatch(items=[], total_cost=0, modality="image")
+            return PreparedBatch(items=[result], total_cost=1, modality="image")
+
+        executor = get_image_executor()
+        futures = [executor.submit(self._process_single_image, item, i, text) for i, item in enumerate(items)]
+
+        prepared_items: list[PreparedItem[LightOnOCRPayload]] = []
+        for future in futures:
+            result = future.result()
+            if result is not None:
+                prepared_items.append(result)
+
+        return PreparedBatch(
+            items=prepared_items,
+            total_cost=len(prepared_items),
+            modality="image",
+        )
+
+    def collate(
+        self,
+        prepared: list[PreparedItem[LightOnOCRPayload]],
+        *,
+        device: str,
+        dtype: Any = None,
+    ) -> dict[str, Any]:
+        """Collate LightOnOCR items into batched tensors.
+
+        Args:
+            prepared: List of prepared items.
+            device: Target device.
+            dtype: Optional dtype for pixel_values.
+
+        Returns:
+            Dict with input tensors for the model.
+        """
+        import torch
+
+        if not prepared:
+            return {
+                "pixel_values": torch.tensor([]),
+                "input_ids": torch.tensor([]),
+                "attention_mask": torch.tensor([]),
+                "image_sizes": torch.tensor([]),
+            }
+
+        # LightOnOCR processes one image at a time (variable-size inputs)
+        p = prepared[0]
+        pixel_values = p.payload.pixel_values.unsqueeze(0)
+        if dtype is not None:
+            pixel_values = pixel_values.to(dtype=dtype)
+
+        return {
+            "pixel_values": pixel_values.to(device),
+            "input_ids": p.payload.input_ids.unsqueeze(0).to(device),
+            "attention_mask": p.payload.attention_mask.unsqueeze(0).to(device),
+            "image_sizes": p.payload.image_sizes.unsqueeze(0).to(device),
         }
 
 

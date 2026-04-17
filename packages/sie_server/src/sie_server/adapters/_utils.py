@@ -75,7 +75,6 @@ def extract_texts(
     is_query: bool,
     query_template: str | None = None,
     doc_template: str | None = None,
-    always_apply_template: bool = False,
     err_msg: str = "Item must have text",
 ) -> list[str]:
     """Extract text from items, applying query/doc templates.
@@ -86,9 +85,6 @@ def extract_texts(
         is_query: Whether items are queries (selects template).
         query_template: Template for queries, e.g. ``"query: {text}"``.
         doc_template: Template for documents, e.g. ``"passage: {text}"``.
-        always_apply_template: If ``True``, always apply the selected
-            template even when there is no instruction.  This matches
-            the Nomic adapter behavior where task prefixes are mandatory.
         err_msg: Error message when ``item.text`` is ``None``.
 
     Returns:
@@ -103,7 +99,7 @@ def extract_texts(
 
         text = item.text
 
-        if template and (instruction or always_apply_template):
+        if template:
             text = template.format(text=text, instruction=instruction or "")
         elif instruction:
             text = f"{instruction} {text}"

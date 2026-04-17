@@ -1,32 +1,18 @@
-"""GTE Sparse adapter for NewForMaskedLM architecture with Flash Attention.
-
-This adapter supports sparse embedding models based on the NewForMaskedLM architecture
-from Alibaba-NLP, such as opensearch-neural-sparse-encoding-doc-v3-gte.
-
-Key architecture details:
-- POST-norm architecture (LayerNorm AFTER residual connection)
-- Rotary Position Embeddings (RoPE) applied in attention layers
-- Fused QKV projection via attention.qkv_proj
-- Uses flash_attn_varlen_func for efficient batched inference on GPU
-
-Produces SPLADE-style sparse vectors:
-- weights = log(1 + ReLU(MLM_logits))
-- max-pool over tokens to get per-term weights
-"""
-
 from __future__ import annotations
 
-import gc
+import importlib.util
 import logging
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import numpy as np
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters._utils import apply_rotary_pos_emb, extract_texts, validate_output_types
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput, SparseVector
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -36,45 +22,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "GTESparseFlashAdapter requires text input"
 _ERR_WRONG_ARCH = "GTESparseFlashAdapter requires NewForMaskedLM architecture (model.new attribute)"
 
 
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotate half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply Rotary Position Embedding to query and key tensors.
-
-    Args:
-        q: Query tensor [total_tokens, num_heads, head_dim].
-        k: Key tensor [total_tokens, num_heads, head_dim].
-        cos: Cosine part [total_tokens, head_dim].
-        sin: Sine part [total_tokens, head_dim].
-
-    Returns:
-        Rotated query and key tensors.
-    """
-    cos = cos.unsqueeze(1).to(q.dtype)
-    sin = sin.unsqueeze(1).to(q.dtype)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
+class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """GTE sparse flash adapter for NewForMaskedLM architecture.
 
     This adapter uses Flash Attention 2's variable-length attention for efficient
@@ -87,6 +38,31 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
     Supports LoRA adapters via PEFTLoRAMixin.
     """
+
+    fallback_adapter_path: ClassVar[str | None] = None
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("sparse",),
+        unload_fields=(
+            "_model",
+            "_tokenizer",
+            "_vocab_size",
+            "_num_heads",
+            "_head_dim",
+            "_hidden_size",
+            "_idf",
+            "_use_flash",
+            "_activation_mode",
+            "_special_token_ids",
+        ),
+    )
+
+    def _resolve_dtype(self) -> torch.dtype:
+        """Resolve dtype; force float32 on CPU for numerical stability."""
+        if self._device == "cpu":
+            return torch.float32
+        return super()._resolve_dtype()
 
     def __init__(
         self,
@@ -130,21 +106,6 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self._activation_mode: Literal["v1", "v3"] = "v1"
         self._special_token_ids: list[int] = []
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["sparse"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._vocab_size is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(sparse=self._vocab_size)
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -157,7 +118,7 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
         self._device = device
-        self._use_flash = device.startswith("cuda")
+        self._use_flash = device.startswith("cuda") and importlib.util.find_spec("flash_attn") is not None
         dtype = self._resolve_dtype()
 
         attn_mode = "flash_varlen" if self._use_flash else "native"
@@ -187,6 +148,7 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             raise ValueError(_ERR_WRONG_ARCH)
 
         self._vocab_size = self._model.config.vocab_size
+        self._sparse_dim = self._vocab_size
         self._num_heads = cast("int", self._model.config.num_attention_heads)
         self._hidden_size = cast("int", self._model.config.hidden_size)
         self._head_dim = self._hidden_size // self._num_heads
@@ -204,41 +166,6 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             self._activation_mode = "v3"
         else:
             self._activation_mode = "v1"
-
-    def _resolve_dtype(self) -> torch.dtype:
-        """Resolve compute dtype."""
-        dtype_map = {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }
-        return dtype_map.get(self._compute_precision, torch.float16)
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-        self._vocab_size = None
-        self._num_heads = None
-        self._head_dim = None
-        self._hidden_size = None
-        self._use_flash = False
-        self._idf = None
-        self._activation_mode = "v1"
-        self._special_token_ids = []
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
 
     def encode(
         self,
@@ -265,22 +192,24 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         Returns:
             EncodeOutput with sparse embeddings.
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
-        self._validate_output_types(output_types)
+        validate_output_types(output_types, {"sparse"}, "GTESparseFlashAdapter")
 
         # Resolve runtime options (config defaults -> profile -> request overrides)
         opts = options or {}
         query_template = opts.get("query_template", self._query_template)
         doc_template = opts.get("doc_template", self._doc_template)
 
-        texts = self._extract_texts(
+        texts = extract_texts(
             items,
             instruction,
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,
+            err_msg=ERR_REQUIRES_TEXT.format(adapter_name="GTESparseFlashAdapter"),
         )
 
         # Inference-free query encoding via IDF lookup (doc-* checkpoint pattern)
@@ -293,8 +222,9 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
     def _encode_native(self, texts: list[str], is_query: bool) -> EncodeOutput:
         """Encode using native forward pass (for CPU or fallback)."""
+        self._check_loaded()
         if self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
         inputs = self._tokenizer(
             texts,
             max_length=self._max_seq_length,
@@ -333,8 +263,9 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         """Encode using flash attention with packed sequences."""
         from flash_attn import flash_attn_varlen_func  # ty: ignore[unresolved-import]
 
+        self._check_loaded()
         if self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         # Batch tokenize all texts at once (no padding for packing)
         batch_encoding = self._tokenizer(
@@ -467,8 +398,9 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         - hidden = hidden + mlp(hidden)
         - hidden = mlp_ln(hidden)  # POST-norm
         """
+        self._check_loaded()
         if self._head_dim is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
         softmax_scale = 1.0 / (self._head_dim**0.5)
 
         for layer in self._model.new.encoder.layer:
@@ -517,8 +449,9 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         return hidden
 
     def _get_special_token_ids_modelcard(self) -> list[int]:
+        self._check_loaded()
         if self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
         ids: list[int] = []
         for tok in self._tokenizer.special_tokens_map.values():
             if isinstance(tok, list):
@@ -595,8 +528,9 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         return idf_vec
 
     def _encode_query_idf(self, texts: list[str], is_query: bool) -> EncodeOutput:
+        self._check_loaded()
         if self._tokenizer is None or self._idf is None or self._vocab_size is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         batch_encoding = self._tokenizer(
             texts,
@@ -634,40 +568,3 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             )
 
         return EncodeOutput(sparse=sparse_list, batch_size=len(texts), is_query=is_query)
-
-    def _validate_output_types(self, output_types: list[str]) -> None:
-        """Validate that output types are supported."""
-        unsupported = set(output_types) - {"sparse"}
-        if unsupported:
-            msg = f"Unsupported output types: {unsupported}. GTESparseFlashAdapter only supports 'sparse'."
-            raise ValueError(msg)
-
-    def _extract_texts(
-        self,
-        items: list[Item],
-        instruction: str | None,
-        *,
-        is_query: bool,
-        query_template: str | None = None,
-        doc_template: str | None = None,
-    ) -> list[str]:
-        """Extract texts from items, applying templates if configured."""
-        query_template = query_template if query_template is not None else self._query_template
-        doc_template = doc_template if doc_template is not None else self._doc_template
-        texts = []
-        for item in items:
-            if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
-
-            text = item.text
-            template = query_template if is_query else doc_template
-            if template:
-                text = template.format(text=text, instruction=instruction or "")
-            elif instruction:
-                text = f"{instruction} {text}"
-            texts.append(text)
-        return texts
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

@@ -1,0 +1,21 @@
+sie_id: lightonai/LightOnOCR-2-1B
+hf_id: lightonai/LightOnOCR-2-1B
+inputs:
+  text: false
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.lighton_ocr:LightOnOCRAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        max_new_tokens: 4096
+        num_beams: 1

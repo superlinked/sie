@@ -20,17 +20,18 @@ Paper: https://arxiv.org/abs/2111.15664
 
 from __future__ import annotations
 
-import gc
 import io
 import json
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.types.responses import Entity
 
@@ -39,9 +40,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_NO_IMAGES = "DonutAdapter requires image input for extraction"
 _ERR_ENCODE_NOT_SUPPORTED = "DonutAdapter does not support encode(). Use extract() instead."
 
@@ -52,7 +50,7 @@ TASK_RVLCDIP = "<s_rvlcdip>"
 TASK_SYNTHDOG = "<s_synthdog>"
 
 
-class DonutAdapter(ModelAdapter):
+class DonutAdapter(BaseAdapter):
     """Adapter for Donut vision-language models.
 
     Donut is an OCR-free document understanding transformer that:
@@ -67,6 +65,13 @@ class DonutAdapter(ModelAdapter):
         CPU preprocessing uses ImagePreprocessor pattern via prepared_items.
         Batched inference supported. Flash attention enabled when available.
     """
+
+    spec: ClassVar[AdapterSpec] = AdapterSpec(
+        inputs=("image",),
+        outputs=("json",),
+        unload_fields=("_model", "_processor", "_preprocessor"),
+        default_preprocessor="image",
+    )
 
     def __init__(
         self,
@@ -104,19 +109,6 @@ class DonutAdapter(ModelAdapter):
         self._preprocessor: Any = None  # SIE DonutPreprocessor for CPU preprocessing
         self._device: str | None = None
 
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["image"],
-            outputs=["json"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions (empty for extraction models)."""
-        return ModelDims()
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -128,7 +120,7 @@ class DonutAdapter(ModelAdapter):
         self._device = device
 
         # Determine dtype
-        dtype = self._resolve_dtype(device)
+        dtype = self._resolve_dtype()
 
         logger.info(
             "Loading Donut model %s on device=%s with dtype=%s, attn=%s",
@@ -156,9 +148,9 @@ class DonutAdapter(ModelAdapter):
 
         logger.info("Donut model loaded successfully")
 
-    def _resolve_dtype(self, device: str) -> torch.dtype:
+    def _resolve_dtype(self) -> torch.dtype:
         """Resolve dtype based on device and config."""
-        if not device.startswith("cuda"):
+        if not self._device or not str(self._device).startswith("cuda"):
             return torch.float32
 
         dtype_map = {
@@ -183,30 +175,6 @@ class DonutAdapter(ModelAdapter):
         )
 
         logger.info("Created DonutPreprocessor for CPU preprocessing")
-
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._processor is not None:
-            del self._processor
-            self._processor = None
-
-        if self._preprocessor is not None:
-            del self._preprocessor
-            self._preprocessor = None
-
-        self._device = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
 
     def get_preprocessor(self) -> Any | None:
         """Return the DonutPreprocessor for CPU/GPU overlap.
@@ -259,8 +227,9 @@ class DonutAdapter(ModelAdapter):
             - data: Parsed JSON output from model
             - raw_text: Raw generated text before JSON parsing
         """
-        if self._model is None or self._processor is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._processor is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
         options = options or {}
         task = options.get("task", self._default_task)

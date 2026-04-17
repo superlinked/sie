@@ -6,16 +6,15 @@ Compatible with MoritzLaurer's deberta-v3-zeroshot models and similar NLI classi
 
 from __future__ import annotations
 
-import gc
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
-from sie_server.config.model import ComputePrecision
+from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.responses import Classification
 
 if TYPE_CHECKING:
@@ -23,11 +22,10 @@ if TYPE_CHECKING:
 
     from sie_server.types.inputs import Item
 
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_REQUIRES_LABELS = "Zero-shot classification requires labels parameter."
 
 
-class NLIClassificationAdapter(ModelAdapter):
+class NLIClassificationAdapter(BaseAdapter):
     """Adapter for NLI-based zero-shot classification models.
 
     Uses the HuggingFace transformers zero-shot-classification pipeline.
@@ -36,6 +34,16 @@ class NLIClassificationAdapter(ModelAdapter):
     The pipeline converts classification into NLI: for each label, it creates
     a hypothesis like "This text is about {label}" and scores entailment.
     """
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("json",),
+        unload_fields=("_pipeline",),
+    )
+
+    def _check_loaded(self) -> None:
+        if self._pipeline is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
     def __init__(
         self,
@@ -65,22 +73,6 @@ class NLIClassificationAdapter(ModelAdapter):
 
         self._pipeline: Pipeline | None = None
         self._device: str | None = None
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["json"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return output dimensions (none for classification)."""
-        if self._pipeline is None:
-            msg = "Dimensions not available until model is loaded"
-            raise RuntimeError(msg)
-        return ModelDims()  # No embedding dimensions
 
     def load(self, device: str) -> None:
         """Load model onto specified device.
@@ -116,20 +108,6 @@ class NLIClassificationAdapter(ModelAdapter):
             device=device_idx,
             dtype=torch_dtype,
         )
-
-    def unload(self) -> None:
-        """Release model and free GPU memory."""
-        if self._pipeline is not None:
-            del self._pipeline
-            self._pipeline = None
-
-        gc.collect()
-
-        device = self._device
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
 
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item.
@@ -181,8 +159,9 @@ class NLIClassificationAdapter(ModelAdapter):
             RuntimeError: If model not loaded.
             ValueError: If labels not provided or items lack text.
         """
+        self._check_loaded()
         if self._pipeline is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+            raise RuntimeError(ERR_NOT_LOADED)
 
         if not labels:
             raise ValueError(_ERR_REQUIRES_LABELS)
@@ -233,7 +212,3 @@ class NLIClassificationAdapter(ModelAdapter):
             entities=[[] for _ in items],
             classifications=all_classifications,
         )
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

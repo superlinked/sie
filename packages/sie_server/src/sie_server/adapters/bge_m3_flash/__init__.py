@@ -1,21 +1,8 @@
-"""BGE-M3 Flash Attention adapter using flash_attn_varlen_func.
-
-This adapter uses Flash Attention 2's variable-length attention to process
-sequences without padding, eliminating padding waste and improving throughput.
-
-Key difference from BGEM3Adapter (SDPA):
-- Uses flash_attn_varlen_func with cu_seqlens for packed sequences
-- No padding tokens = no wasted compute
-- Position IDs correctly offset for XLMRoberta (start at padding_idx + 1 = 2)
-
-See: https://github.com/Dao-AILab/flash-attention
-"""
-
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
@@ -23,10 +10,12 @@ from huggingface_hub import snapshot_download
 from torch import nn
 from torch.nn import functional
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
+from sie_server.adapters._utils import validate_output_types
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput, SparseVector
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -34,14 +23,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "BGEM3FlashAdapter requires text input"
 _ERR_CPU_NOT_SUPPORTED = "BGEM3FlashAdapter requires CUDA. Use bge_m3 adapter for CPU."
 
 
-class BGEM3FlashAdapter(PEFTLoRAMixin, ModelAdapter):
+class BGEM3FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """BGE-M3 adapter using Flash Attention 2 with variable-length sequences.
 
     This adapter eliminates padding waste by packing sequences and using
@@ -51,6 +36,17 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, ModelAdapter):
     DENSE_DIM = 1024
     SPARSE_DIM = 250002
     MULTIVECTOR_DIM = 1024
+
+    fallback_adapter_path: ClassVar[str | None] = "bge_m3:BGEM3Adapter"
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("dense", "sparse", "multivector"),
+        dense_dim=1024,
+        sparse_dim=250002,
+        multivector_dim=1024,
+        unload_fields=("_model", "_tokenizer", "_colbert_linear", "_sparse_linear"),
+    )
 
     def __init__(
         self,
@@ -82,40 +78,6 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self._sparse_linear: nn.Linear | None = None
         self._device: str | None = None
         self._padding_idx: int = 1  # XLMRoberta default, set properly in load()
-
-    @classmethod
-    def create_for_device(cls, device: str, **kwargs: Any) -> ModelAdapter:
-        """Factory method that returns the appropriate adapter for the device.
-
-        For non-CUDA devices or when flash-attn is unavailable, returns BGEM3Adapter.
-
-        Args:
-            device: Device string (e.g., "cuda:0", "mps", "cpu").
-            **kwargs: Adapter initialization parameters.
-
-        Returns:
-            BGEM3FlashAdapter for CUDA with flash-attn, BGEM3Adapter otherwise.
-        """
-        from sie_server.adapters.bge_m3 import BGEM3Adapter
-
-        return cls._create_flash_or_fallback(device, fallback_class=BGEM3Adapter, **kwargs)
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense", "sparse", "multivector"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        return ModelDims(
-            dense=self.DENSE_DIM,
-            sparse=self.SPARSE_DIM,
-            multivector=self.MULTIVECTOR_DIM,
-        )
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -158,15 +120,6 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
         self._load_linear_layers(self._model_name_or_path, dtype, device)
 
-    def _resolve_dtype(self) -> torch.dtype:
-        """Resolve compute dtype."""
-        dtype_map = {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }
-        return dtype_map.get(self._compute_precision, torch.float16)
-
     def _load_linear_layers(self, model_path: str, dtype: torch.dtype, device: str) -> None:
         """Load the colbert and sparse linear layers from checkpoint."""
         hidden_size = self._model.config.hidden_size  # type: ignore[union-attr]
@@ -196,34 +149,6 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, ModelAdapter):
         else:
             logger.warning("sparse_linear.pt not found at %s", base_path)
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._colbert_linear is not None:
-            del self._colbert_linear
-            self._colbert_linear = None
-
-        if self._sparse_linear is not None:
-            del self._sparse_linear
-            self._sparse_linear = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        self._device = None
-
-        import gc
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -249,10 +174,11 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, ModelAdapter):
         Note:
             LoRA is handled via set_active_lora() called by the worker before encode().
         """
-        if self._model is None or self._tokenizer is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
+        if self._tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
-        self._validate_output_types(output_types)
+        validate_output_types(output_types, {"dense", "sparse", "multivector"}, "BGEM3FlashAdapter")
 
         # Resolve runtime options (config defaults -> profile -> request overrides)
         opts = options or {}
@@ -486,19 +412,12 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
         return results
 
-    def _validate_output_types(self, output_types: list[str]) -> None:
-        """Validate that output types are supported."""
-        unsupported = set(output_types) - {"dense", "sparse", "multivector"}
-        if unsupported:
-            msg = f"Unsupported output types: {unsupported}"
-            raise ValueError(msg)
-
     def _extract_texts(self, items: list[Item], instruction: str | None) -> list[str]:
         """Extract texts from items, optionally prepending instruction."""
         texts = []
         for item in items:
             if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
+                raise ValueError("BGEM3FlashAdapter requires text input")
             text = item.text
             if instruction is not None:
                 text = f"{instruction} {text}"
@@ -543,7 +462,3 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, ModelAdapter):
             dense_dim=self.DENSE_DIM if dense_np is not None else None,
             multivector_token_dim=self.MULTIVECTOR_DIM if multivector_list else None,
         )
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)

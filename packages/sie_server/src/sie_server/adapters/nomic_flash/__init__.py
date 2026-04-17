@@ -1,39 +1,19 @@
-"""Nomic BERT MoE Flash Attention adapter using flash_attn_varlen_func.
-
-This adapter uses Flash Attention 2's variable-length attention to process
-sequences without padding, eliminating padding waste and improving throughput.
-
-Supports nomic-ai/nomic-embed-text-v2-moe model:
-- 12 layers, 768 hidden, 12 heads
-- MoE on every 2nd layer (layers 1,3,5,7,9,11) with 8 experts, top-2 routing
-- Regular MLP on even layers (0,2,4,6,8,10)
-- RoPE positional embeddings
-- Task prefixes: search_query: / search_document:
-
-Key features:
-- Uses flash_attn_varlen_func with cu_seqlens for packed sequences
-- Applies Rotary Position Embeddings (RoPE) to Q and K
-- Implements MoE routing in pure PyTorch (no megablocks dependency)
-- No padding tokens = no wasted compute
-
-See: https://github.com/Dao-AILab/flash-attention
-"""
-
 from __future__ import annotations
 
-import gc
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision, PoolingStrategy
+from sie_server.adapters._utils import apply_rotary_pos_emb, extract_texts, validate_output_types
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput
-from sie_server.core.preprocessor import CharCountPreprocessor
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
@@ -41,51 +21,36 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ComputePrecision = Literal["float16", "bfloat16", "float32"]
-PoolingStrategy = Literal["cls", "mean"]
-
-_ERR_NOT_LOADED = "Model not loaded. Call load() first."
-_ERR_REQUIRES_TEXT = "NomicFlashAdapter requires text input"
 _ERR_CPU_NOT_SUPPORTED = "NomicFlashAdapter requires CUDA. Use pytorch_embedding adapter for CPU."
 
 
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotate half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply Rotary Position Embedding to query and key tensors.
-
-    Args:
-        q: Query tensor [total_tokens, num_heads, head_dim].
-        k: Key tensor [total_tokens, num_heads, head_dim].
-        cos: Cosine part [total_tokens, head_dim].
-        sin: Sine part [total_tokens, head_dim].
-
-    Returns:
-        Rotated query and key tensors.
-    """
-    cos = cos.unsqueeze(1).to(q.dtype)
-    sin = sin.unsqueeze(1).to(q.dtype)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-class NomicFlashAdapter(PEFTLoRAMixin, ModelAdapter):
+class NomicFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """Nomic BERT MoE adapter using Flash Attention 2 with variable-length sequences.
 
     This adapter eliminates padding waste by packing sequences and using
     flash_attn_varlen_func. Implements MoE routing in pure PyTorch.
     """
+
+    fallback_adapter_path: ClassVar[str | None] = "sentence_transformer:SentenceTransformerDenseAdapter"
+
+    spec = AdapterSpec(
+        inputs=("text",),
+        outputs=("dense",),
+        unload_fields=(
+            "_tokenizer",
+            "_dtype",
+            "_dense_dim",
+            "_word_embeddings",
+            "_token_type_embeddings",
+            "_emb_ln_weight",
+            "_emb_ln_bias",
+            "_layers",
+        ),
+    )
+
+    def _check_loaded(self) -> None:
+        if self._tokenizer is None or self._layers is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
     def __init__(
         self,
@@ -142,39 +107,6 @@ class NomicFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         self._moe_top_k: int = 2
         self._rotary_base: float = 10000.0
 
-    @classmethod
-    def create_for_device(cls, device: str, **kwargs: Any) -> ModelAdapter:
-        """Factory method that returns the appropriate adapter for the device.
-
-        For non-CUDA devices or when flash-attn is unavailable, returns SentenceTransformerDenseAdapter.
-
-        Args:
-            device: Device string (e.g., "cuda:0", "mps", "cpu").
-            **kwargs: Adapter initialization parameters.
-
-        Returns:
-            NomicFlashAdapter for CUDA with flash-attn, SentenceTransformerDenseAdapter otherwise.
-        """
-        from sie_server.adapters.sentence_transformer import SentenceTransformerDenseAdapter
-
-        # Use base class helper (fallback gets same kwargs)
-        return cls._create_flash_or_fallback(device, fallback_class=SentenceTransformerDenseAdapter, **kwargs)
-
-    @property
-    def capabilities(self) -> ModelCapabilities:
-        """Return model capabilities."""
-        return ModelCapabilities(
-            inputs=["text"],
-            outputs=["dense"],
-        )
-
-    @property
-    def dims(self) -> ModelDims:
-        """Return model dimensions."""
-        if self._dense_dim is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
-        return ModelDims(dense=self._dense_dim)
-
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
 
@@ -211,15 +143,6 @@ class NomicFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
         self._dense_dim = self._hidden_size
         logger.info("Nomic model loaded: %d layers, %d hidden", 12, self._hidden_size)
-
-    def _resolve_dtype(self) -> torch.dtype:
-        """Resolve compute dtype."""
-        dtype_map = {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }
-        return dtype_map.get(self._compute_precision, torch.float16)
 
     def _load_weights(self, model_path: str) -> None:
         """Load model weights from safetensors file."""
@@ -272,24 +195,6 @@ class NomicFlashAdapter(PEFTLoRAMixin, ModelAdapter):
 
         return layer
 
-    def unload(self) -> None:
-        """Unload the model and free resources."""
-        device = self._device
-
-        # Clear all weight tensors
-        self._word_embeddings = None
-        self._token_type_embeddings = None
-        self._emb_ln_weight = None
-        self._emb_ln_bias = None
-        self._layers = None
-        self._tokenizer = None
-        self._device = None
-        self._dense_dim = None
-
-        gc.collect()
-        if device and device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
     def encode(
         self,
         items: list[Item],
@@ -312,10 +217,9 @@ class NomicFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         Returns:
             EncodeOutput with dense embeddings.
         """
-        if self._tokenizer is None or self._layers is None:
-            raise RuntimeError(_ERR_NOT_LOADED)
+        self._check_loaded()
 
-        self._validate_output_types(output_types)
+        validate_output_types(output_types, {"dense"}, "NomicFlashAdapter")
 
         # Resolve runtime options (config defaults -> profile -> request overrides)
         opts = options or {}
@@ -324,12 +228,13 @@ class NomicFlashAdapter(PEFTLoRAMixin, ModelAdapter):
         normalize = opts.get("normalize", self._normalize)
         pooling = opts.get("pooling", self._pooling)
 
-        texts = self._extract_texts(
+        texts = extract_texts(
             items,
             instruction,
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,
+            err_msg="NomicFlashAdapter requires text input",
         )
 
         # Tokenize each sequence individually (no padding)
@@ -623,40 +528,3 @@ class NomicFlashAdapter(PEFTLoRAMixin, ModelAdapter):
             pooled = F.normalize(pooled, p=2, dim=-1)
 
         return pooled
-
-    def _validate_output_types(self, output_types: list[str]) -> None:
-        """Validate that output types are supported."""
-        unsupported = set(output_types) - {"dense"}
-        if unsupported:
-            msg = f"Unsupported output types: {unsupported}. NomicFlashAdapter only supports 'dense'."
-            raise ValueError(msg)
-
-    def _extract_texts(
-        self,
-        items: list[Item],
-        instruction: str | None,
-        *,
-        is_query: bool,
-        query_template: str | None = None,
-        doc_template: str | None = None,
-    ) -> list[str]:
-        """Extract texts from items, applying task prefixes."""
-        query_template = query_template if query_template is not None else self._query_template
-        doc_template = doc_template if doc_template is not None else self._doc_template
-        texts = []
-        for item in items:
-            if item.text is None:
-                raise ValueError(_ERR_REQUIRES_TEXT)
-
-            text = item.text
-
-            # Apply task prefix template
-            template = query_template if is_query else doc_template
-            text = template.format(text=text, instruction=instruction or "")
-
-            texts.append(text)
-        return texts
-
-    def get_preprocessor(self) -> CharCountPreprocessor:
-        """Return CharCountPreprocessor for cost estimation without tokenization overhead."""
-        return CharCountPreprocessor(model_name=self._model_name_or_path)
