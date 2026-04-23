@@ -1,0 +1,172 @@
+name: Push SIE model configs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'configs/models/**.yaml'
+  workflow_dispatch:
+    inputs:
+      model_path:
+        description: 'Single model YAML to push (relative to repo root)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SIE_CONFIG_URL: ${{ vars.SIE_CONFIG_URL }}
+  SIE_GATEWAY_URL: ${{ vars.SIE_GATEWAY_URL }}
+  READINESS_TIMEOUT_SECONDS: '180'
+  READINESS_POLL_INTERVAL_SECONDS: '5'
+
+jobs:
+  push-configs:
+    name: Push model configs to SIE
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Collect changed model YAMLs
+        id: collect
+        shell: bash
+        env:
+          MODEL_PATH: ${{ inputs.model_path }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MODEL_PATH:-}" ]; then
+            printf '%s\n' "$MODEL_PATH" > changed.txt
+          else
+            git diff --name-only --diff-filter=AM \
+              "${BEFORE_SHA}" "${GITHUB_SHA}" \
+              -- 'configs/models/**.yaml' > changed.txt || true
+          fi
+          wc -l < changed.txt
+          cat changed.txt
+
+      - name: Push each config and verify readiness
+        if: ${{ hashFiles('changed.txt') != '' }}
+        shell: bash
+        env:
+          SIE_ADMIN_TOKEN: ${{ secrets.SIE_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SIE_CONFIG_URL:-}" ]; then
+            echo "::error::SIE_CONFIG_URL variable is not set"
+            exit 1
+          fi
+          if [ -z "${SIE_ADMIN_TOKEN:-}" ]; then
+            echo "::error::SIE_ADMIN_TOKEN secret is not set"
+            exit 1
+          fi
+
+          push_one() {
+            local file="$1"
+            local short_sha="${GITHUB_SHA::12}"
+            local path_hash
+            path_hash="$(printf '%s' "$file" | sha256sum | cut -c1-12)"
+            local idem_key="gh-${GITHUB_REPOSITORY//\//-}-${short_sha}-${path_hash}"
+
+            echo "::group::POST $file  (Idempotency-Key: $idem_key)"
+            local http_code body
+            body="$(mktemp)"
+            http_code="$(curl --silent --show-error \
+              --output "$body" --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer ${SIE_ADMIN_TOKEN}" \
+              --header "Content-Type: application/x-yaml" \
+              --header "Idempotency-Key: ${idem_key}" \
+              --data-binary "@${file}" \
+              "${SIE_CONFIG_URL%/}/v1/configs/models")"
+
+            echo "HTTP ${http_code}"
+            cat "$body"
+            echo
+
+            case "$http_code" in
+              200|201) ;;
+              409)
+                echo "::error file=${file}::content_conflict (409). The API is append-only; to mutate existing metadata, create a new profile_id instead."
+                exit 1
+                ;;
+              422)
+                echo "::error file=${file}::validation_error or idempotency_mismatch (422). Inspect the response body above."
+                exit 1
+                ;;
+              401|403)
+                echo "::error::auth failed (${http_code}). Check SIE_ADMIN_TOKEN and that the config service exposes write auth for this token."
+                exit 1
+                ;;
+              *)
+                echo "::error file=${file}::unexpected status ${http_code}"
+                exit 1
+                ;;
+            esac
+
+            local model_id
+            if ! model_id="$(python3 - "$file" <<'PY'
+          import sys, yaml
+          try:
+              doc = yaml.safe_load(open(sys.argv[1]))
+              print(doc["sie_id"])
+          except KeyError:
+              sys.stderr.write(f"::error file={sys.argv[1]}::missing 'sie_id' in YAML\n")
+              sys.exit(1)
+          except Exception as e:
+              sys.stderr.write(f"::error file={sys.argv[1]}::failed to parse YAML: {e}\n")
+              sys.exit(1)
+          PY
+            )"; then
+              exit 1
+            fi
+            echo "model_id=${model_id}"
+            echo "::endgroup::"
+
+            if [ -z "${SIE_GATEWAY_URL:-}" ]; then
+              echo "::notice::SIE_GATEWAY_URL not set; skipping worker-ack readiness poll for ${model_id}."
+              return 0
+            fi
+
+            echo "::group::Poll gateway readiness for ${model_id}"
+            local deadline=$(( $(date +%s) + READINESS_TIMEOUT_SECONDS ))
+            while : ; do
+              local snap http
+              snap="$(mktemp)"
+              http="$(curl --silent --show-error \
+                --output "$snap" --write-out '%{http_code}' \
+                --header "Authorization: Bearer ${SIE_ADMIN_TOKEN}" \
+                "${SIE_GATEWAY_URL%/}/v1/configs/models/${model_id}/status")"
+              if [ "$http" = "200" ]; then
+                if python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get("all_bundles_acked") else 1)' "$snap"; then
+                  echo "ready (all_bundles_acked=true)"
+                  cat "$snap"
+                  echo
+                  break
+                fi
+              else
+                echo "gateway status returned HTTP ${http}"
+                cat "$snap"; echo
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "::error::readiness timeout after ${READINESS_TIMEOUT_SECONDS}s for ${model_id}"
+                cat "$snap"; echo
+                exit 1
+              fi
+              sleep "$READINESS_POLL_INTERVAL_SECONDS"
+            done
+            echo "::endgroup::"
+          }
+
+          exit_code=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            [ ! -f "$f" ] && { echo "::warning::skipping missing $f"; continue; }
+            push_one "$f" || exit_code=$?
+          done < changed.txt
+          exit "$exit_code"
