@@ -6,7 +6,7 @@ It combines:
 
 - Vivino wine metadata and tasting attributes
 - in-memory vector retrieval over structure + flavor signals
-- SIE-based reranking methods, using both the [encode](https://sie.dev/docs/encode) and [score](https://sie.dev/docs/score) capabilities of the SIE.
+- SIE-based reranking methods, using both the [encode](https://superlinked.com/docs/encode) and [score](https://superlinked.com/docs/score) capabilities of the SIE.
 
 This is a good SIE demo because it shows how a stronger model can be added only where it matters most: after fast candidate retrieval, at the ranking stage.
 
@@ -51,7 +51,7 @@ This is a good SIE use case because the value is not in replacing the whole syst
 
 ## Pre-requisite
 
-In order to run this demo, you will need to start the SIE server. Please refer to the [SIE quickstart page](https://sie.dev/docs/quickstart) for detailed instructions
+In order to run this demo, you will need to start the SIE server. Please refer to the [SIE quickstart page](https://superlinked.com/docs/quickstart) for detailed instructions
 
 ## Setup
 
@@ -65,7 +65,8 @@ Create a `.env` file with the required settings:
 
 ```env
 CLUSTER_URL=https://your-sie-cluster-url
-API_KEY=your-sie-api-key
+# Optional: only needed for managed/auth-enabled SIE clusters.
+API_KEY=
 RERANK_METHOD=standard
 SIE_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 SIE_EMBEDDING_MODEL=BAAI/bge-m3
@@ -84,6 +85,8 @@ DEMO_NUM_PAGES=5
 
 `CUSTOM_RERANK_A` mixes review embeddings with generated tasting-note embeddings for each wine.
 
+`API_KEY` can stay blank when you are using a local unauthenticated SIE server.
+
 ## Run
 
 This folder is mainly the retrieval prototype code used by the app, so the most direct way to use it is by running the full demo. Detailed instructions to do so are in `sie/examples/wine-recommender/README.md`
@@ -100,4 +103,4 @@ python test/compare_rerank_methods.py
 1. Fetch wines from Vivino or load from the local database
 2. Build wine vectors from structure + flavors
 3. Retrieve top candidates with cosine similarity
-4. Rerank candidates with standard SIE reranking (with the [score](https://sie.dev/docs/score) method) or custom embedding-based reranking (with the [encode](https://sie.dev/docs/encode) method)
+4. Rerank candidates with standard SIE reranking (with the [score](https://superlinked.com/docs/score) method) or custom embedding-based reranking (with the [encode](https://superlinked.com/docs/encode) method)

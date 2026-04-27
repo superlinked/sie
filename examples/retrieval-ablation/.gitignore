@@ -1,0 +1,9 @@
+cache/
+*.npz
+*.csv
+*.tsv
+*.partial.json
+__pycache__/
+.venv/
+.env
+*.lock

@@ -1,0 +1,6 @@
+sie-sdk==0.1.10
+fastapi>=0.115.0
+uvicorn>=0.30.0
+numpy>=1.26.0
+pyyaml>=6.0
+datasets>=2.19.0

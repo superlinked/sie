@@ -1,0 +1,59 @@
+# Stablebridge Pruner-Highlighter Model
+#
+# Unified reranking + token-level pruning model built on frozen
+# BAAI/bge-reranker-v2-m3 with a trained PruningHead MLP.
+#
+# Architecture:
+#   Base: BAAI/bge-reranker-v2-m3 (frozen cross-encoder, 1024 hidden)
+#   Head: PruningHead MLP (1024 → 512 → 1, with GELU + Dropout)
+#   Weights: sugiv/stablebridge-pruner-highlighter (HuggingFace Hub)
+#
+# Capabilities:
+#   - score: Standard reranking scores (higher = more relevant)
+#   - extract (json): Token-level pruning spans with char offsets
+#
+# Usage:
+#   POST /v1/score/sugiv/stablebridge-pruner-highlighter
+#   POST /v1/extract/sugiv/stablebridge-pruner-highlighter
+#
+sie_id: sugiv/stablebridge-pruner-highlighter
+hf_id: BAAI/bge-reranker-v2-m3
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: {}
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.stablebridge_pruner:StablebridgePrunerAdapter
+    adapter_options:
+      loadtime:
+        pruning_head_path: sugiv/stablebridge-pruner-highlighter
+        pruning_head_file: best.pt
+        hidden_size: 1024
+        intermediate_size: 512
+        dropout: 0.2
+      runtime:
+        prune_threshold: 0.6
+        highlight_threshold: 0.9
+  # Profile for aggressive pruning (higher compression)
+  aggressive:
+    extends: default
+    adapter_options:
+      runtime:
+        prune_threshold: 0.4
+        highlight_threshold: 0.8
+  # Profile for conservative pruning (keep more text)
+  conservative:
+    extends: default
+    adapter_options:
+      runtime:
+        prune_threshold: 0.7
+        highlight_threshold: 0.95

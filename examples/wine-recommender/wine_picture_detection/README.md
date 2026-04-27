@@ -1,6 +1,6 @@
 # Wine Picture Detection
 
-This folder contains the standalone OCR-based wine label detection prototype used by the demo app. This leverages the [extract](https://sie.dev/docs/extract) capability of the SIE.
+This folder contains the standalone OCR-based wine label detection prototype used by the demo app. This leverages the [extract](https://superlinked.com/docs/extract) capability of the SIE.
 
 ## What It Does
 
@@ -32,7 +32,7 @@ Using the SIE lets this prototype focus on extracting structured text accurately
 
 ## Pre-requisite
 
-In order to run this demo, you will need to start the SIE server. Please refer to the [SIE quickstart page](https://sie.dev/docs/quickstart) for detailed instructions
+In order to run this demo, you will need to start the SIE server. Please refer to the [SIE quickstart page](https://superlinked.com/docs/quickstart) for detailed instructions
 
 ## Setup
 
@@ -48,7 +48,8 @@ The OCR flow expects SIE access through environment variables such as:
 
 ```env
 CLUSTER_URL=https://your-sie-cluster-url
-API_KEY=your-sie-api-key
+# Optional: only needed for managed/auth-enabled SIE clusters.
+API_KEY=
 DATABASE_PATH=wine_flavor.db
 TOP_N=5
 SCORE_THRESHOLD=0
@@ -56,6 +57,8 @@ SIE_OCR_MODEL=microsoft/Florence-2-base
 OCR_GPU=l4-spot
 OCR_PROVISION_TIMEOUT_S=900
 ```
+
+Leave `API_KEY` blank when the target SIE server does not require auth.
 
 ## Run the OCR script directly
 

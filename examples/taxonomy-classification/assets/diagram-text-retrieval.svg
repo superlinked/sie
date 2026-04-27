@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="235" viewBox="0 0 860 235" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#888"/>
+    </marker>
+  </defs>
+
+  <text x="430" y="26" text-anchor="middle" font-size="16" font-weight="700" fill="#333">Text Retrieval</text>
+  <text x="430" y="44" text-anchor="middle" font-size="11" fill="#777">Variant: leaf or full-path</text>
+
+  <text x="30" y="74" font-size="10" font-weight="700" fill="#888">INDEX</text>
+  <rect x="30" y="84" width="170" height="38" rx="8" fill="#F6F6F6" stroke="#CFCFCF"/>
+  <text x="115" y="107" text-anchor="middle" font-size="11" fill="#555">Taxonomy labels</text>
+  <line x1="200" y1="103" x2="240" y2="103" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <rect x="250" y="74" width="220" height="58" rx="10" fill="#FEB97A" stroke="#E5A050" stroke-width="1.2"/>
+  <text x="360" y="99" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">SIE — encode()</text>
+  <text x="360" y="117" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.88)">text mode, is_query=False</text>
+  <line x1="470" y1="103" x2="510" y2="103" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <rect x="520" y="84" width="170" height="38" rx="8" fill="#F6F6F6" stroke="#CFCFCF"/>
+  <text x="605" y="107" text-anchor="middle" font-size="11" fill="#555">Chroma index</text>
+
+  <text x="30" y="164" font-size="10" font-weight="700" fill="#555">QUERY</text>
+  <rect x="30" y="174" width="170" height="38" rx="8" fill="#F6F6F6" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="115" y="197" text-anchor="middle" font-size="11" font-weight="600" fill="#333">Product description</text>
+  <line x1="200" y1="193" x2="240" y2="193" stroke="#888" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <rect x="250" y="164" width="220" height="58" rx="10" fill="#FE8019" stroke="#D96A0B" stroke-width="1.4"/>
+  <text x="360" y="189" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">SIE — encode()</text>
+  <text x="360" y="207" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.88)">query mode, is_query=True</text>
+  <line x1="470" y1="193" x2="510" y2="193" stroke="#888" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <rect x="520" y="164" width="140" height="58" rx="10" fill="#F6F6F6" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="590" y="189" text-anchor="middle" font-size="12" font-weight="600" fill="#333">Chroma search</text>
+  <text x="590" y="207" text-anchor="middle" font-size="10" fill="#777">nearest category</text>
+  <line x1="660" y1="193" x2="700" y2="193" stroke="#888" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <rect x="710" y="174" width="120" height="38" rx="8" fill="#F6F6F6" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="770" y="197" text-anchor="middle" font-size="11" fill="#555">Top category</text>
+</svg>

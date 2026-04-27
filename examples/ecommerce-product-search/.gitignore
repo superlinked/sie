@@ -1,0 +1,5 @@
+.venv/
+data/products.json
+data/embeddings.npy
+data/metadata.json
+__pycache__/

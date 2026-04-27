@@ -1,0 +1,14 @@
+--- a/packages/sie_server/src/sie_server/api/encode.py
++++ b/packages/sie_server/src/sie_server/api/encode.py
+@@ -298,6 +298,11 @@
+                         "message": str(e),
+                     },
+                 ) from e
++
++            # Map lora_id -> lora for worker batch routing
++            # The worker's submit() reads options["lora"] to select the LoRA batcher,
++            # while the profile config uses "lora_id" in runtime options.
++            options["lora"] = lora
+
+         # Get output_types: profile > request param > default
+         output_types: list[str] = options.get("output_types") or (params.output_types if params else None) or ["dense"]

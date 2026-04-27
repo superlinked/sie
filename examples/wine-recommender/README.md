@@ -1,11 +1,11 @@
 # WineRetrieval
 
-WineRetrieval is a runnable demo app that shows how to combine retrieval, reranking, and OCR-style extraction with [SIE](https://sie.dev/docs/). You can use it to explore wine recommendations from taste preferences, then switch to label detection from an uploaded bottle image.
+WineRetrieval is a runnable demo app that shows how to combine retrieval, reranking, and OCR-style extraction with [SIE](https://superlinked.com/docs/). You can use it to explore wine recommendations from taste preferences, then switch to label detection from an uploaded bottle image.
 
 It wires together two separate prototype features:
 
-- `wine_flavor/`: wine retrieval and reranking from flavor + structure preferences. This uses both the [encode](https://sie.dev/docs/encode) and [score](https://sie.dev/docs/score) primitives of the SIE.
-- `wine_picture_detection/`: OCR-based wine label detection, using the [extract](https://sie.dev/docs/extract) primitive.
+- `wine_flavor/`: wine retrieval and reranking from flavor + structure preferences. This uses both the [encode](https://superlinked.com/docs/encode) and [score](https://superlinked.com/docs/score) primitives of the SIE.
+- `wine_picture_detection/`: OCR-based wine label detection, using the [extract](https://superlinked.com/docs/extract) primitive.
 
 Those two pieces are connected through the root `app.py` so you can try them in one UI, but they are also meant to be runnable on their own from inside their own folders. Please refer to the instructions in the README in each sub-folder to do so.
 
@@ -27,13 +27,9 @@ The duplicated database files (`wine_flavor.db`) and local `.env` setup are inte
 
 ## SIE Features Used
 
-- [`encode`](https://sie.dev/docs/encode) for tasting-note and review embeddings in the **embedding-based reranker** (config value `custom`)
-- [`score`](https://sie.dev/docs/score) for cross-encoder reranking of candidate reviews in the **cross-encoder reranker** (config value `standard`)
-- [`extract`](https://sie.dev/docs/extract) for OCR-based wine label detection
-
-Retrieval itself (the first stage that narrows 5k+ wines down to a candidate set) runs locally with a TF-IDF cosine over structured flavor and taste attributes, so the first-stage retrieval does not call SIE. SIE engages at the reranking and extraction stages.
-
-A note on terminology: this demo uses the word "reranker" for both modes, but they are different kinds of reranking. A **cross-encoder reranker** (the `standard` mode) feeds each `(query, document)` pair into one model call and gets a relevance score directly, which is what SIE's `score` primitive does. An **embedding-based reranker** (the `custom` mode) embeds the query and each candidate document independently with SIE `encode`, then ranks by cosine similarity in that dense vector space. Cross-encoders are generally higher precision at the same model budget; embedding-based rerankers are cheaper per candidate and degrade more gracefully when some documents lack the text the cross-encoder would score against.
+- `encode` for retrieval embeddings
+- `score` for reranking candidate wines
+- `extract` for OCR-based wine label detection
 
 ## Why The OCR Flow Matters
 
@@ -70,29 +66,12 @@ flowchart TD;
     D --> E["Wine identification"];
 ```
 
-## Pre-requisites
+## Pre-requisite
 
-### Get your SIE credentials
+In order to run this demo, you will need to start the SIE server. Please refer to the [SIE quickstart page](https://superlinked.com/docs/quickstart) for detailed instructions
 
-This demo does not bundle an SIE server - you bring your own. You need:
-
-- **`CLUSTER_URL`**: the URL of a running SIE cluster you can reach from the machine that runs the backend container
-- **`API_KEY`**: a valid API key for that cluster
-
-You can get these either by:
-
-1. **Self-hosting SIE** - see the [SIE quickstart](https://sie.dev/docs/quickstart) to run an SIE server locally or on your own infrastructure, then use that `CLUSTER_URL` and issue yourself an `API_KEY` from the server config
-2. **Using a managed SIE cluster** - grab the `CLUSTER_URL` and `API_KEY` from your SIE dashboard
-
-Background on the SIE primitives this demo uses:
-
-- [`encode`](https://sie.dev/docs/encode) - dense embeddings for tasting notes and reviews (used by the "custom" reranker)
-- [`score`](https://sie.dev/docs/score) - cross-encoder reranking (used by the "standard" reranker)
-- [`extract`](https://sie.dev/docs/extract) - OCR-style extraction on wine label images
-
-### Docker and Docker Compose
-
-You need Docker and Docker Compose v2 installed. The backend builds against `python:3.12-slim`, so no local Python setup is required.
+The app needs `CLUSTER_URL` so it knows where SIE is running. `API_KEY`
+is optional and should stay blank for a local unauthenticated SIE server.
 
 ## Running the full Demo
 
@@ -105,7 +84,8 @@ From the repo root:
 
 ```bash
 cd examples/wine-recommender
-cp .env.example .env           # edit .env and fill in CLUSTER_URL and API_KEY
+cp .env.example .env
+# If SIE is not running on your host at port 8080, edit CLUSTER_URL in .env.
 docker compose up --build
 ```
 
@@ -124,18 +104,12 @@ docker compose down
 
 ## Environment Files
 
-- The root app and `wine_flavor/` subproject use the root `.env` (copy from `.env.example`)
-- `wine_picture_detection/` can also use its own local `.env` / `.env.example` when you run that subproject standalone
+- The root app and `wine_flavor/` subproject use the root `.env`
+- `wine_picture_detection/` can also use its own local `.env` / `.env.example`
 - The duplicated setup is intentional so both subprojects can be run individually
 
 If you are running the full demo, put the required backend keys in the root `.env`.
-
-## Reranker Modes
-
-The recommendation flow supports two reranking strategies, selected via `RERANK_METHOD` in `.env`. Both re-order the top-20 candidates produced by the local TF-IDF retrieval stage, but they call SIE in different ways:
-
-- **`custom` (embedding-based reranker, default)**: calls SIE [`encode`](https://sie.dev/docs/encode) on generated tasting notes and (when available) per-wine reviews, embeds the user query the same way, then ranks candidates by cosine similarity in the shared embedding space. Works out of the box with the bundled SQLite catalog, which has structured taste and flavor attributes but no per-wine reviews. The code calls this path `custom_rerank` and the config value is `custom`; in the retrieval literature this is more precisely an embedding-based reranker or a dense re-scoring pass.
-- **`standard` (cross-encoder reranker)**: calls SIE [`score`](https://sie.dev/docs/score) to rerank each candidate wine's reviews against a set of structure and flavor prompt terms, with each `(term, review)` pair scored by a cross-encoder model such as `BAAI/bge-reranker-v2-m3`. This mode only produces meaningful scores when wines actually have reviews - the bundled catalog ships without reviews, so every wine will get a zero rerank score in `standard` mode. If you want to try `standard` mode, re-run the database ingestion under `wine_flavor/db_creation.py` to fetch reviews from Vivino first.
+For local/self-hosted SIE without auth, leave `API_KEY=` blank.
 
 ## What To Try
 

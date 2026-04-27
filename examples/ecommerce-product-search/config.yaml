@@ -1,0 +1,47 @@
+# SIE server (defaults to local Docker: docker run -p 8080:8080 ghcr.io/superlinked/sie-server:latest-cpu-default).
+# Override with SIE_CLUSTER_URL / SIE_API_KEY env vars if you have a managed cluster.
+cluster:
+  url: "http://localhost:8080"
+  api_key: ""
+  gpu: ""                       # only set for managed multi-GPU clusters (e.g. "l4-spot"); ignored locally
+  provision_timeout_s: 600
+
+# Models
+models:
+  embedding: "NovaSearch/stella_en_400M_v5"
+  reranker: "BAAI/bge-reranker-v2-m3"
+  extractor: "urchade/gliner_multi-v2.1"
+
+# Extraction labels (zero-shot, no training needed)
+extract_labels:
+  - brand
+  - color
+  - material
+  - size
+  - product_type
+
+# Search
+search:
+  top_k_candidates: 100
+  top_k_results: 10
+
+# Ingest tuning
+ingest:
+  batch_size_extraction: 8
+  batch_size_encoding: 32
+  confidence_threshold: 0.5
+  junk_text_max_len: 15
+
+# Dataset
+dataset:
+  name: "milistu/AMAZON-Products-2023"
+  sample_size: 3000
+  min_description_length: 100
+  categories:
+    - "AMAZON FASHION"
+    - "Amazon Home"
+    - "Tools & Home Improvement"
+    - "Sports & Outdoors"
+    - "Cell Phones & Accessories"
+    - "All Electronics"
+    - "Arts, Crafts & Sewing"

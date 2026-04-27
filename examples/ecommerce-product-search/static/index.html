@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SIE Product Search</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; color: #333; }
+
+    .header { background: #1a1a2e; color: #fff; padding: 24px; text-align: center; }
+    .header h1 { font-size: 22px; font-weight: 600; }
+    .header p { font-size: 13px; color: #888; margin-top: 4px; }
+
+    .search-bar { max-width: 720px; margin: 24px auto 0; padding: 0 16px; display: flex; gap: 8px; }
+    .search-bar input {
+      flex: 1; padding: 12px 16px; font-size: 15px; border: 1px solid #ddd;
+      border-radius: 8px; outline: none;
+    }
+    .search-bar input:focus { border-color: #4a6cf7; }
+    .search-bar button {
+      padding: 12px 24px; background: #4a6cf7; color: #fff; border: none;
+      border-radius: 8px; font-size: 15px; cursor: pointer;
+    }
+    .search-bar button:hover { background: #3a5ce5; }
+
+    .filters { max-width: 720px; margin: 12px auto; padding: 0 16px; }
+    .filters select { padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+
+    .status { max-width: 720px; margin: 16px auto; padding: 0 16px; font-size: 13px; color: #666; }
+
+    .results { max-width: 720px; margin: 16px auto; padding: 0 16px; }
+    .result-card {
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
+      padding: 16px; margin-bottom: 12px;
+    }
+    .result-card:hover { border-color: #4a6cf7; }
+    .result-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+    .result-meta { font-size: 12px; color: #888; margin-bottom: 8px; }
+    .result-meta span { margin-right: 12px; }
+    .result-desc { font-size: 13px; color: #555; line-height: 1.5; margin-bottom: 8px; }
+    .result-attrs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+    .attr-tag {
+      background: #eef2ff; color: #4a6cf7; padding: 2px 8px;
+      border-radius: 4px; font-size: 11px;
+    }
+    .result-scores { font-size: 11px; color: #aaa; }
+    .result-features { margin-bottom: 8px; padding-left: 0; list-style: none; }
+    .result-features li { font-size: 13px; color: #555; line-height: 1.5; padding: 2px 0 2px 14px; position: relative; }
+    .result-features li::before { content: "•"; position: absolute; left: 0; color: #4a6cf7; }
+
+    .empty { text-align: center; padding: 48px; color: #999; font-size: 15px; }
+    .loading { text-align: center; padding: 32px; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Product Search</h1>
+    <p>Powered by SIE: encode, score, extract</p>
+  </div>
+
+  <div class="search-bar">
+    <input type="text" id="query" placeholder="Search products..." autofocus>
+    <button onclick="doSearch()">Search</button>
+  </div>
+
+  <div class="filters">
+    <select id="category">
+      <option value="">All categories</option>
+    </select>
+  </div>
+
+  <div class="status" id="status"></div>
+  <div class="results" id="results">
+    <div class="empty">Search for something to get started</div>
+  </div>
+
+  <script>
+    const queryInput = document.getElementById("query");
+    const categorySelect = document.getElementById("category");
+    const resultsDiv = document.getElementById("results");
+    const statusDiv = document.getElementById("status");
+
+    // Load categories
+    fetch("/api/categories").then(r => r.json()).then(cats => {
+      cats.forEach(([name, count]) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = `${name} (${count})`;
+        categorySelect.appendChild(opt);
+      });
+    });
+
+    // Load stats
+    fetch("/api/stats").then(r => r.json()).then(stats => {
+      statusDiv.textContent = `${stats.total_products} products indexed | ${stats.embedding_dims}d embeddings | models: ${stats.models.embedding}, ${stats.models.reranker}, ${stats.models.extractor}`;
+    });
+
+    queryInput.addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+
+    async function doSearch() {
+      const q = queryInput.value.trim();
+      if (!q) return;
+
+      resultsDiv.innerHTML = '<div class="loading">Searching...</div>';
+      const start = performance.now();
+
+      const params = new URLSearchParams({ q });
+      const cat = categorySelect.value;
+      if (cat) params.set("category", cat);
+
+      try {
+        const resp = await fetch(`/api/search?${params}`);
+        const data = await resp.json();
+        const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+
+        if (!data.results.length) {
+          resultsDiv.innerHTML = '<div class="empty">No results found</div>';
+          return;
+        }
+
+        statusDiv.textContent = `${data.results.length} results in ${elapsed}s`;
+        resultsDiv.innerHTML = data.results.map((r, i) => `
+          <div class="result-card">
+            <div class="result-title">${i + 1}. ${esc(r.title)}</div>
+            <div class="result-meta">
+              <span>${esc(r.category)}</span>
+              ${r.price ? `<span>$${r.price}</span>` : ""}
+              ${r.rating ? `<span>${r.rating} stars</span>` : ""}
+            </div>
+            ${r.features && r.features.length ? '<ul class="result-features">' + r.features.slice(0, 5).map(f => '<li>' + esc(f) + '</li>').join('') + '</ul>' : '<div class="result-desc">' + esc(r.description.slice(0, 200)) + '...</div>'}
+            ${Object.keys(r.attributes).length ? `
+              <div class="result-attrs">
+                ${Object.entries(r.attributes).map(([k, v]) =>
+                  `<span class="attr-tag">${esc(k)}: ${esc(v)}</span>`
+                ).join("")}
+              </div>
+            ` : ""}
+            <div class="result-scores">vector: ${r.scores.vector} | rerank: ${r.scores.rerank}</div>
+          </div>
+        `).join("");
+      } catch (err) {
+        resultsDiv.innerHTML = `<div class="empty">Error: ${err.message}</div>`;
+      }
+    }
+
+    function esc(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>

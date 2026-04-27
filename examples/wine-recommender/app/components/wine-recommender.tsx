@@ -477,7 +477,7 @@ export function WineRecommender() {
                     onClick={() => {
                       setSelectedReferenceWine("")
                       setDetectedWine(null)
-                      setDetectionConfidence(null)
+                      setDetectionMatchScore(null)
                     }}
                     className="text-xs text-muted-foreground hover:text-foreground"
                   >
@@ -557,7 +557,7 @@ export function WineRecommender() {
                     onClick={() => {
                       setSelectedReferenceWine("")
                       setDetectedWine(null)
-                      setDetectionConfidence(null)
+                      setDetectionMatchScore(null)
                     }}
                     className="p-1.5 rounded-full hover:bg-muted transition-colors"
                   >

@@ -11,9 +11,7 @@ def _resolve_sie_connection(base_url=None):
     if not resolved_base_url:
         raise ValueError("Missing SIE base URL. Set CLUSTER_URL in the environment or pass base_url explicitly.")
 
-    api_key = os.getenv("API_KEY")
-    if not api_key:
-        raise ValueError("Missing SIE API key. Set API_KEY in the environment.")
+    api_key = os.getenv("API_KEY") or None
 
     return resolved_base_url, api_key
 
