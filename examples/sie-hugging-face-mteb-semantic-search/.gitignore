@@ -1,0 +1,56 @@
+# SIE SUPERLINKED LLM SYSTEM
+LLM/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Testing / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Backend data — ignore contents but keep the sqlite directory structure
+backend/data/*
+!backend/data/sqlite/
+backend/data/sqlite/*
+!backend/data/sqlite/.gitignore
+
+# Node / Frontend
+node_modules/
+.vite/
+
+# Build output
+frontend/dist/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Personal notes
+otherInfo.txt

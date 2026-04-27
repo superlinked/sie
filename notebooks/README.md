@@ -26,6 +26,6 @@ jupyter lab
 ## Links
 
 - [SIE overview](../README.md)
-- [API reference](https://sie.dev/docs/reference/sdk)
-- [Full quickstart guide](https://sie.dev/docs/quickstart)
-- [All models](https://sie.dev/docs/reference/models)
+- [API reference](https://superlinked.com/docs/reference/sdk)
+- [Full quickstart guide](https://superlinked.com/docs/quickstart)
+- [All models](https://superlinked.com/models)

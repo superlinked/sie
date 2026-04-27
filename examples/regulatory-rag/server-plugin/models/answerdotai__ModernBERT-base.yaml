@@ -1,0 +1,33 @@
+sie_id: answerdotai/ModernBERT-base
+hf_id: answerdotai/ModernBERT-base
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 768
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.pytorch_embedding:PyTorchEmbeddingAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        pooling: cls
+        normalize: true
+  us-regulatory:
+    extends: default
+    adapter_options:
+      runtime:
+        pooling: cls
+        normalize: true
+        lora_id: sugiv/modernbert-us-stablecoin-encoder

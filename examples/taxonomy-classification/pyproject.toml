@@ -1,0 +1,39 @@
+[project]
+name = "taxonomy_classification"
+version = "0.1.0"
+description = "Taxonomy classification example for SIE"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "chromadb>=0.4",
+    "polars>=1.40.0",
+    "python-dotenv>=1.2.2",
+    "sie-sdk==0.2.0",
+    "tqdm>=4.67.3",
+]
+
+[project.scripts]
+clean-shopify-dataset = "taxonomy_classification.data.clean_shopify_dataset:main"
+download-shopify-dataset = "taxonomy_classification.data.download_shopify_dataset:main"
+download-shopify-taxonomy = "taxonomy_classification.data.download_shopify_taxonomy:main"
+trim-shopify-dataset-to-l3 = "taxonomy_classification.data.trim_shopify_dataset_to_l3:main"
+eval-nli = "taxonomy_classification.classifier.nli:eval_main"
+predict-nli = "taxonomy_classification.classifier.nli:predict_main"
+eval-text-retrieval = "taxonomy_classification.classifier.text_retrieval:eval_main"
+predict-text-retrieval = "taxonomy_classification.classifier.text_retrieval:predict_main"
+eval-image-retrieval = "taxonomy_classification.classifier.image_retrieval:eval_main"
+predict-image-retrieval = "taxonomy_classification.classifier.image_retrieval:predict_main"
+eval-reranking = "taxonomy_classification.classifier.reranking:eval_main"
+predict-reranking = "taxonomy_classification.classifier.reranking:predict_main"
+
+[dependency-groups]
+dev = [
+  "ruff>=0.11.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py312"

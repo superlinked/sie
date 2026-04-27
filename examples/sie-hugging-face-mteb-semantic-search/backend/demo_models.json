@@ -1,0 +1,62 @@
+[
+  {
+    "hf_id": "BAAI/bge-m3",
+    "author": "BAAI",
+    "downloads_30d": 1800000,
+    "likes": 2400,
+    "pipeline_tag": "sentence-similarity",
+    "tags": ["embeddings", "multilingual", "retrieval", "long-context"],
+    "short_description": "Strong general-purpose multilingual embedding model for retrieval, clustering, and semantic search.",
+    "long_description": "BAAI/bge-m3 is a strong default when you need one embedding model that works across multilingual retrieval, clustering, and semantic matching. It handles longer inputs than many older embedding models and is a reliable starting point for product search, knowledge search, and benchmark exploration.",
+    "mteb_scores": [
+      {"task_name": "Retrieval", "main_score": 0.681},
+      {"task_name": "Clustering", "main_score": 0.572}
+    ],
+    "demo_readme": "# BAAI/bge-m3\n\nDemo entry bundled with the example.\n\nUse this card when you want a strong multilingual retrieval baseline with long-context support."
+  },
+  {
+    "hf_id": "jinaai/jina-embeddings-v3",
+    "author": "Jina AI",
+    "downloads_30d": 920000,
+    "likes": 1650,
+    "pipeline_tag": "sentence-similarity",
+    "tags": ["embeddings", "multilingual", "classification", "search"],
+    "short_description": "Flexible multilingual embedding model that works well for semantic search and classification tasks.",
+    "long_description": "jina-embeddings-v3 is useful when you want one model family for semantic search, classification-style similarity, and multilingual document understanding. It is a good fit for teams that care about broad language support and stable general-purpose retrieval quality.",
+    "mteb_scores": [
+      {"task_name": "Retrieval", "main_score": 0.664},
+      {"task_name": "Classification", "main_score": 0.701}
+    ],
+    "demo_readme": "# jina-embeddings-v3\n\nDemo entry bundled with the example.\n\nThis card represents a flexible multilingual search model with balanced retrieval and classification quality."
+  },
+  {
+    "hf_id": "mixedbread-ai/mxbai-embed-large-v1",
+    "author": "Mixedbread",
+    "downloads_30d": 610000,
+    "likes": 1200,
+    "pipeline_tag": "sentence-similarity",
+    "tags": ["embeddings", "english", "retrieval", "reranking"],
+    "short_description": "Large English-focused embedding model with strong retrieval quality for product and document search.",
+    "long_description": "mxbai-embed-large-v1 is a good fit for English-heavy product search, enterprise search, and retrieval evaluation. It is often chosen when teams want a high-quality embedding baseline that pairs naturally with Mixedbread rerankers.",
+    "mteb_scores": [
+      {"task_name": "Retrieval", "main_score": 0.693},
+      {"task_name": "STS", "main_score": 0.812}
+    ],
+    "demo_readme": "# mxbai-embed-large-v1\n\nDemo entry bundled with the example.\n\nThis card stands in for a strong English retrieval model that pairs well with reranking pipelines."
+  },
+  {
+    "hf_id": "intfloat/e5-large-v2",
+    "author": "intfloat",
+    "downloads_30d": 540000,
+    "likes": 2100,
+    "pipeline_tag": "sentence-similarity",
+    "tags": ["embeddings", "retrieval", "text-matching", "english"],
+    "short_description": "Popular embedding baseline for semantic search and query-document matching in English.",
+    "long_description": "e5-large-v2 is a well-known embedding baseline that remains useful for semantic search, FAQ retrieval, and query-document matching. It is especially helpful when you want a familiar reference point while comparing newer embedding models.",
+    "mteb_scores": [
+      {"task_name": "Retrieval", "main_score": 0.641},
+      {"task_name": "STS", "main_score": 0.801}
+    ],
+    "demo_readme": "# e5-large-v2\n\nDemo entry bundled with the example.\n\nThis card gives the local demo a familiar semantic-search baseline."
+  }
+]

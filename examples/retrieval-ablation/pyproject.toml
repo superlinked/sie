@@ -1,0 +1,18 @@
+[project]
+name = "retrieval-ablation"
+version = "0.1.0"
+description = "Retrieval ablation benchmark for SIE + Turbopuffer"
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    "sie-sdk",
+    "python-dotenv",
+    "loguru",
+    "numpy",
+    "polars>=1.39.2",
+    "pyarrow>=22.0.0",
+    "turbopuffer>=1.18.0",
+    "maxsim-cpu>=0.1.0",
+    "datasets>=3.6.0",
+    "matplotlib>=3.10.8",
+]

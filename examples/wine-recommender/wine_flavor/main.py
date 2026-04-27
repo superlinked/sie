@@ -25,7 +25,7 @@ def _require_float_env(name, fallback_name=None):
 
 try:
     SIE_BASE_URL = _require_env("CLUSTER_URL")
-    SIE_API_KEY = _require_env("API_KEY")
+    SIE_API_KEY = os.getenv("API_KEY") or None
     RERANK_METHOD = _require_env("RERANK_METHOD")
     SIE_RERANK_MODEL = _require_env("SIE_RERANK_MODEL")
     SIE_EMBEDDING_MODEL = _require_env("SIE_EMBEDDING_MODEL")

@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 320" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#888"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="520" y="28" text-anchor="middle" font-weight="700" font-size="16" fill="#333">Regulatory RAG Pipeline</text>
+  <text x="520" y="46" text-anchor="middle" font-size="11" fill="#999">Custom LoRA encoder, cross-encoder reranker, and token-level pruner, all from one SIE cluster</text>
+
+  <!-- ===== Main horizontal flow ===== -->
+  <!-- boxes sit on the 100..180 band -->
+
+  <!-- Query (input) -->
+  <rect x="20" y="100" width="140" height="80" rx="8" fill="#E8E8E8" stroke="#AAA" stroke-width="1.5"/>
+  <text x="90" y="128" text-anchor="middle" font-weight="600" font-size="12" fill="#333">Query</text>
+  <text x="90" y="148" text-anchor="middle" font-size="10" fill="#666">"Reserve requirements</text>
+  <text x="90" y="161" text-anchor="middle" font-size="10" fill="#666">for stablecoin issuers?"</text>
+
+  <line x1="160" y1="140" x2="198" y2="140" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- SIE encode() with LoRA profile -->
+  <rect x="202" y="100" width="170" height="80" rx="8" fill="#FE8019" stroke="#D96A0B" stroke-width="1.5"/>
+  <text x="287" y="124" text-anchor="middle" font-weight="700" font-size="13" fill="#fff">SIE — encode()</text>
+  <text x="287" y="142" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.9)">ModernBERT-base</text>
+  <text x="287" y="156" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.9)">profile: us-regulatory</text>
+  <text x="287" y="170" text-anchor="middle" font-size="9" fill="rgba(255,255,255,0.8)">(LoRA hot-load)</text>
+
+  <line x1="372" y1="140" x2="410" y2="140" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Dense retrieval -->
+  <rect x="414" y="100" width="140" height="80" rx="8" fill="#F3F3F3" stroke="#BBB" stroke-width="1.5"/>
+  <text x="484" y="126" text-anchor="middle" font-weight="600" font-size="12" fill="#333">Dense retrieval</text>
+  <text x="484" y="146" text-anchor="middle" font-size="10" fill="#666">cosine similarity</text>
+  <text x="484" y="162" text-anchor="middle" font-size="10" fill="#999">top-5 candidates</text>
+
+  <line x1="554" y1="140" x2="592" y2="140" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- SIE score() -->
+  <rect x="596" y="100" width="170" height="80" rx="8" fill="#FE8019" stroke="#D96A0B" stroke-width="1.5"/>
+  <text x="681" y="124" text-anchor="middle" font-weight="700" font-size="13" fill="#fff">SIE — score()</text>
+  <text x="681" y="142" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.9)">stablebridge-pruner</text>
+  <text x="681" y="156" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.9)">cross-encoder rerank</text>
+  <text x="681" y="170" text-anchor="middle" font-size="9" fill="rgba(255,255,255,0.8)">top-3 kept</text>
+
+  <line x1="766" y1="140" x2="804" y2="140" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- SIE extract() -->
+  <rect x="808" y="100" width="212" height="80" rx="8" fill="#FE8019" stroke="#D96A0B" stroke-width="1.5"/>
+  <text x="914" y="124" text-anchor="middle" font-weight="700" font-size="13" fill="#fff">SIE — extract()</text>
+  <text x="914" y="142" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.9)">stablebridge-pruner</text>
+  <text x="914" y="156" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.9)">token-level keep/drop</text>
+  <text x="914" y="170" text-anchor="middle" font-size="9" fill="rgba(255,255,255,0.8)">highlight / kept / pruned spans</text>
+
+  <!-- down arrow from extract to compressed context -->
+  <line x1="914" y1="180" x2="914" y2="216" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Compressed context output (bottom-right) -->
+  <rect x="660" y="220" width="360" height="60" rx="8" fill="#E8E8E8" stroke="#AAA" stroke-width="1.5"/>
+  <text x="840" y="244" text-anchor="middle" font-weight="600" font-size="12" fill="#333">Compressed context for the LLM</text>
+  <text x="840" y="262" text-anchor="middle" font-size="10" fill="#666">avg 74% compression — only highlight + kept spans kept</text>
+  <text x="840" y="276" text-anchor="middle" font-size="9" fill="#999">pruned spans dropped before generation</text>
+
+  <!-- Caption -->
+  <line x1="20" y1="300" x2="1020" y2="300" stroke="#E0E0E0" stroke-width="1"/>
+  <text x="520" y="314" text-anchor="middle" font-size="10" fill="#999">One SIE cluster serves all three primitives. Orange boxes are SIE API calls; grey boxes are data passing between stages.</text>
+</svg>

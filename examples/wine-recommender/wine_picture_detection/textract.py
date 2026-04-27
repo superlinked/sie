@@ -25,7 +25,7 @@ if not DATABASE_PATH.is_absolute():
     DATABASE_PATH = ROOT_DIR / DATABASE_PATH
 
 CLUSTER_URL = os.getenv("CLUSTER_URL")
-API_KEY = os.getenv("API_KEY")
+API_KEY = os.getenv("API_KEY") or None
 TOP_N = int(os.getenv("TOP_N", 5))
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", 0))
 SIE_OCR_MODEL = os.getenv("SIE_OCR_MODEL", "microsoft/Florence-2-base")
@@ -104,6 +104,11 @@ def _require_sie_sdk():
 
 
 def textract(image: Image.Image) -> dict[str, Any]:
+    if not CLUSTER_URL:
+        raise ValueError(
+            "Missing SIE base URL. Set CLUSTER_URL in the environment or in .env."
+        )
+
     SIE_CLIENT, Item = _require_sie_sdk()
     sie_client = SIE_CLIENT(CLUSTER_URL, api_key=API_KEY)
 

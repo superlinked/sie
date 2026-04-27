@@ -1,0 +1,11 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+alembic==1.13.3
+pydantic==2.9.2
+pydantic-settings==2.6.0
+huggingface_hub>=1.7.1
+mteb>=2.3.0
+openai>=2.0.0
+chromadb>=1.0.0
+httpx>=0.27.0

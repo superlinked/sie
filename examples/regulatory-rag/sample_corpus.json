@@ -1,0 +1,86 @@
+[
+  {
+    "id": "genius-act-s4-reserves",
+    "title": "GENIUS Act — Section 4: Reserve Requirements",
+    "text": "Section 4. Reserve Requirements. (a) Each permitted payment stablecoin issuer shall maintain reserves consisting of: (1) United States coins and currency; (2) funds held as demand deposits at insured depository institutions; (3) Treasury bills with a maturity of 93 days or less; (4) repurchase agreements backed by Treasury bills. (b) The aggregate value of reserves shall be not less than the outstanding amount of payment stablecoins issued.",
+    "jurisdiction": "US",
+    "source": "congress.gov"
+  },
+  {
+    "id": "genius-act-s2-definitions",
+    "title": "GENIUS Act — Section 2: Definitions",
+    "text": "Section 2. Definitions. (1) The term 'payment stablecoin' means a digital asset that is designed to be used as a means of payment and is pegged to a fixed monetary value denominated in the United States dollar. (2) The term 'permitted payment stablecoin issuer' means a person that has been granted a charter or license pursuant to this Act.",
+    "jurisdiction": "US",
+    "source": "congress.gov"
+  },
+  {
+    "id": "genius-act-s5-licensing",
+    "title": "GENIUS Act — Section 5: Licensing",
+    "text": "Section 5. Licensing. (a) No person may issue a payment stablecoin in the United States unless such person: (1) is chartered as a national payment stablecoin issuer under section 6; (2) is licensed as a State payment stablecoin issuer under section 7; or (3) is a subsidiary of an insured depository institution that has received approval under section 8.",
+    "jurisdiction": "US",
+    "source": "congress.gov"
+  },
+  {
+    "id": "genius-act-s9-disclosures",
+    "title": "GENIUS Act — Section 9: Disclosures",
+    "text": "Section 9. Disclosures. (a) Each permitted payment stablecoin issuer shall disclose monthly: (1) the current amount of payment stablecoins outstanding; (2) the composition and value of reserves maintained; (3) any material changes in reserve composition. (b) The disclosures required under this section shall be made publicly available on the issuer's website.",
+    "jurisdiction": "US",
+    "source": "congress.gov"
+  },
+  {
+    "id": "mica-art48-reserves",
+    "title": "MiCA — Article 48: Reserve of Assets",
+    "text": "Article 48 MiCA. Reserve of assets. 1. Issuers of asset-referenced tokens shall constitute and at all times maintain a reserve of assets. The reserve of assets shall be composed and managed such that: (a) the risks associated with the assets referenced by the asset-referenced tokens are covered; (b) the liquidity risks associated with the permanent redemption rights of the holders are addressed.",
+    "jurisdiction": "EU",
+    "source": "eur-lex.europa.eu"
+  },
+  {
+    "id": "genius-act-s12-enforcement",
+    "title": "GENIUS Act — Section 12: Enforcement",
+    "text": "Section 12. Enforcement. (a) Civil penalties: Any permitted payment stablecoin issuer that violates any provision of this Act shall be subject to a civil penalty of not more than $1,000,000 for each day during which such violation continues. (b) Criminal penalties: Any person who willfully violates this Act shall be fined not more than $5,000,000 or imprisoned for not more than 20 years, or both.",
+    "jurisdiction": "US",
+    "source": "congress.gov"
+  },
+  {
+    "id": "genius-act-s6-occ",
+    "title": "GENIUS Act — Section 6: Federal Charter",
+    "text": "Section 6. Federal Charter. (a) The Comptroller of the Currency may charter a national payment stablecoin issuer under this section. (b) The OCC shall supervise and examine each national payment stablecoin issuer in the same manner as the OCC supervises national banks. (c) National payment stablecoin issuers shall be subject to safety and soundness standards established by the OCC.",
+    "jurisdiction": "US",
+    "source": "congress.gov"
+  },
+  {
+    "id": "genius-act-s10-segregation",
+    "title": "GENIUS Act — Section 10: Segregation",
+    "text": "Section 10. Segregation. (a) Reserves maintained by a permitted payment stablecoin issuer shall be held in accounts that are: (1) separate from the issuer's operational funds; (2) clearly identified as reserve accounts; (3) held at insured depository institutions or with a Federal Reserve Bank. (b) Reserves shall not be commingled with any other assets of the issuer.",
+    "jurisdiction": "US",
+    "source": "congress.gov"
+  },
+  {
+    "id": "genius-act-s11-reporting",
+    "title": "GENIUS Act — Section 11: Reporting",
+    "text": "Section 11. Reporting. (a) Each permitted payment stablecoin issuer shall file quarterly reports with the appropriate Federal or State regulator. (b) Reports shall include: (1) financial statements prepared in accordance with GAAP; (2) attestation reports on reserves by a registered public accounting firm; (3) a description of any material changes in the issuer's business or risk profile.",
+    "jurisdiction": "US",
+    "source": "congress.gov"
+  },
+  {
+    "id": "genius-act-s13-consumer-protection",
+    "title": "GENIUS Act — Section 13: Consumer Protection",
+    "text": "Section 13. Consumer Protection. (a) Each holder of a payment stablecoin shall have the right to redeem such stablecoin at par value within one business day. (b) Issuers shall establish clear procedures for handling customer complaints. (c) The issuer shall maintain insurance or other protections against loss of customer funds due to theft, fraud, or operational failure.",
+    "jurisdiction": "US",
+    "source": "congress.gov"
+  },
+  {
+    "id": "sec-framework-2025",
+    "title": "SEC Staff Statement on Stablecoin Classification",
+    "text": "Certain stablecoins that are designed primarily as a means of payment and transmission, are backed by reserves consisting of low-risk and liquid assets, and can be redeemed at a one-to-one ratio with the U.S. dollar, do not need to be registered as securities under the federal securities laws. This position applies to stablecoins that do not offer or promise yields, returns, or other financial benefits derived from the pooled reserves.",
+    "jurisdiction": "US",
+    "source": "sec.gov"
+  },
+  {
+    "id": "fed-supervisory-letter-2025",
+    "title": "Federal Reserve SR 25-4: Supervisory Expectations for Stablecoin Activities",
+    "text": "State member banks engaging in stablecoin-related activities are expected to have robust risk management frameworks that address operational risk, compliance risk, and liquidity risk. The institution must ensure that reserve assets are custodied in a manner that protects them from the claims of the institution's creditors in the event of insolvency.",
+    "jurisdiction": "US",
+    "source": "federalreserve.gov"
+  }
+]

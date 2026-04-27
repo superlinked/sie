@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="170" viewBox="0 0 860 170" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#888"/>
+    </marker>
+  </defs>
+
+  <text x="430" y="26" text-anchor="middle" font-size="16" font-weight="700" fill="#333">Retrieval + Reranking</text>
+  <text x="430" y="44" text-anchor="middle" font-size="11" fill="#777">Reuse text retrieval, then rerank top-K with a cross-encoder</text>
+
+  <rect x="30" y="82" width="170" height="42" rx="8" fill="#F6F6F6" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="115" y="107" text-anchor="middle" font-size="11" font-weight="600" fill="#333">Product description</text>
+
+  <line x1="200" y1="103" x2="240" y2="103" stroke="#888" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+  <rect x="250" y="72" width="190" height="62" rx="10" fill="#FE8019" stroke="#D96A0B" stroke-width="1.4"/>
+  <text x="345" y="96" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">Stage 1 — retrieve</text>
+  <text x="345" y="114" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.88)">text retrieval + Chroma</text>
+
+  <line x1="440" y1="103" x2="480" y2="103" stroke="#888" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+  <rect x="490" y="82" width="120" height="42" rx="8" fill="#F6F6F6" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="550" y="100" text-anchor="middle" font-size="11" font-weight="600" fill="#333">Top-K</text>
+  <text x="550" y="115" text-anchor="middle" font-size="10" fill="#777">candidates</text>
+
+  <line x1="610" y1="103" x2="650" y2="103" stroke="#888" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+  <rect x="660" y="72" width="170" height="62" rx="10" fill="#FE8019" stroke="#D96A0B" stroke-width="1.4"/>
+  <text x="745" y="96" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">Stage 2 — score()</text>
+  <text x="745" y="114" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.88)">cross-encoder reranker</text>
+</svg>
