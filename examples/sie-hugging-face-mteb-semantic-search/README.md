@@ -1,4 +1,4 @@
-# SIE Model Picker
+# Find SOTA embedding models by MTEB task
 
 **You're using SIE and you need to pick a model.** SIE ships 85+
 specialized models for encoding, reranking, and extraction (BGE,

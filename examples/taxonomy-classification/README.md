@@ -1,4 +1,4 @@
-# Taxonomy Classification with SIE
+# Build a multi-modal product classifier with embeddings
 
 Classify products into a large hierarchical taxonomy using SIE as the unified inference layer.
 

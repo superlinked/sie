@@ -1,11 +1,25 @@
-# Production RAG Pipeline for Financial Document Search
+# Find the best retrieval strategy for your RAG
 
-**An evals-driven recipe.** Every model choice below is backed by a
-head-to-head benchmark on 1,854 real queries against 2,942 pages from
-six SEC 10-K filings, measured by NDCG@10. No guesswork, no defaults.
-The recipe at the top is the one that won the evals; the
-[Evidence](#evidence) section lists every other combination tried and
-what each scored.
+RAG quality lives or dies by the retrieval step. Most teams pick a
+retrieval pipeline by feel, by averaged leaderboard scores, or by what
+is already in the stack. None of those tell you how each strategy
+actually performs on your data, so the surprises show up in production.
+
+The cure is straightforward to describe and historically painful to
+run: define a representative benchmark, evaluate every reasonable
+retrieval strategy on it, and pick by a single metric. The painful
+part has always been infrastructure, since most teams give up after
+wiring two or three different model serving stacks.
+
+This example shows what that workflow looks like when one inference
+cluster can serve every retrieval, reranking, and multi-vector model
+the experiment needs. The result is the recipe below, the methodology
+that produced it, and the numbers that ruled out every alternative.
+
+**The setup.** Six bank 10-K filings from SEC EDGAR, 1,854 real
+queries, 2,942 pages, eight retrieval strategies, ranked by NDCG@10.
+The recipe at the top won the evals; the [Evidence](#evidence)
+section lists every other combination tried and what each scored.
 
 One SIE cluster, seven models, three API calls. No model serving to
 manage.

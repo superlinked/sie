@@ -11,12 +11,12 @@ service keys.
 
 | Example | Best for | SIE primitives | Setup | Status |
 |---|---|---|---|---|
-| [E-Commerce Product Search](./ecommerce-product-search) | Showing the fastest local product-search path with extraction, embeddings, and reranking | `extract`, `encode`, `score` | Local SIE Docker image, Python or TypeScript app | Runnable |
-| [Retrieval Ablation](./retrieval-ablation) | Demonstrating eval-driven model selection for production RAG retrieval | `encode`, `score` | SIE endpoint, Turbopuffer key, optional SIE API key for auth-enabled clusters | Runnable benchmark |
-| [Hugging Face MTEB Semantic Search](./sie-hugging-face-mteb-semantic-search) | Building a semantic-search app over model metadata and benchmark results | `encode`, `score` | Backend seed script plus Vite frontend; falls back without a live SIE endpoint | Runnable |
-| [Regulatory RAG](./regulatory-rag) | Hosting custom adapters and LoRA profiles in SIE | `encode`, `score`, `extract` | Custom SIE Docker image, GPU recommended | Advanced runnable example |
-| [Wine Recommender](./wine-recommender) | Combining recommendation reranking with OCR-style extraction in a UI | `encode`, `score`, `extract` | Docker Compose app plus local SIE endpoint; API key optional for unauthenticated SIE | Runnable demo |
-| [Taxonomy Classification](./taxonomy-classification) | Evaluating text, image, NLI, and reranking approaches for hierarchical product taxonomy classification | `extract`, `encode`, `score` | SIE endpoint, Shopify dataset prep via `uv run` scripts, standalone `uv` project | Runnable evaluation example |
+| [Self-hosted product search in 5 min](./ecommerce-product-search) | Showing the fastest local product-search path with extraction, embeddings, and reranking | `extract`, `encode`, `score` | Local SIE Docker image, Python or TypeScript app | Runnable |
+| [Find the best retrieval strategy for your RAG](./retrieval-ablation) | Picking a production RAG retrieval pipeline by evals on real financial documents | `encode`, `score` | SIE endpoint, Turbopuffer key, optional SIE API key for auth-enabled clusters | Runnable benchmark |
+| [Find SOTA embedding models by MTEB task](./sie-hugging-face-mteb-semantic-search) | Searching ~14K HF embedding models ranked by task-specific MTEB scores | `encode`, `score` | Backend seed script plus Vite frontend; falls back without a live SIE endpoint | Runnable |
+| [Private fine-tuned compliance RAG](./regulatory-rag) | Hot-loading a domain LoRA encoder and a custom token-pruning adapter on SIE | `encode`, `score`, `extract` | Custom SIE Docker image, GPU recommended | Advanced runnable example |
+| [Build a multimodal wine recommender with OCR](./wine-recommender) | Combining preference-based retrieval with OCR-driven label detection in one UI | `encode`, `score`, `extract` | Docker Compose app plus local SIE endpoint; API key optional for unauthenticated SIE | Runnable demo |
+| [Build a multi-modal product classifier with embeddings](./taxonomy-classification) | Evaluating text, image, NLI, and reranking approaches for hierarchical product taxonomy classification | `extract`, `encode`, `score` | SIE endpoint, Shopify dataset prep via `uv run` scripts, standalone `uv` project | Runnable evaluation example |
 
 For docs publishing, lead with the quickest runnable demos, then use the
 benchmark and evaluation examples for deeper technical users.

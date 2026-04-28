@@ -1,4 +1,4 @@
-# Regulatory RAG: Custom Models on SIE
+# Private fine-tuned compliance RAG
 
 The "advanced hosting" example. Shows how to run a real production
 RAG stack on SIE with **two things you won't find in a stock

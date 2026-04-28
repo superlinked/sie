@@ -1,6 +1,8 @@
-# WineRetrieval
+# Build a multimodal wine recommender with OCR
 
-WineRetrieval is a runnable demo app that shows how to combine retrieval, reranking, and OCR-style extraction with [SIE](https://superlinked.com/docs/). You can use it to explore wine recommendations from taste preferences, then switch to label detection from an uploaded bottle image.
+Real product flows often need search and extraction at the same time. A user might know they want "something fruity and not too tannic" or they might just have a photo of a bottle they liked. Most stacks would solve those with two separate services and two separate codebases.
+
+This demo wires both into one app on [SIE](https://superlinked.com/docs/). Type taste preferences and get ranked wine recommendations, or upload a bottle photo and get the wine identified from its label. The recommendation flow uses `encode` and `score`. The label flow uses `extract` for OCR. Both run through one SIE endpoint, behind a single Next.js UI.
 
 It wires together two separate prototype features:
 
