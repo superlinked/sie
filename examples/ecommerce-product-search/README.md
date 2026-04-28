@@ -1,4 +1,4 @@
-# E-Commerce Product Search
+# Self-hosted product search in 5 min
 
 <p align="center">
   <img src="./assets/hero.png" alt="E-Commerce Product Search: extract, encode, score on a single SIE cluster" width="100%" />
