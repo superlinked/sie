@@ -13,11 +13,11 @@ forward pass. Everything needed to host the advanced stuff lives in
 
 Detail per stage:
 
-- **Encode** — `ModernBERT-base` with the `us-regulatory` profile, which hot-loads the `sugiv/modernbert-us-stablecoin-encoder` LoRA weights at request time. Produces a 768-dim domain-adapted embedding.
-- **Dense retrieval** — in-memory cosine similarity over the corpus, top-5 kept.
-- **Score / Rerank** — `sugiv/stablebridge-pruner-highlighter` cross-encoder, keeps top-3.
-- **Extract / Prune** — same Stablebridge model, second primitive. Returns token-level keep/drop probabilities aggregated into `highlight` / `kept` / `pruned` spans.
-- **LLM context** — the surviving `highlight` and `kept` spans become the compressed context passed downstream. Averages 74% compression vs. the raw reranked passages.
+- **Encode**: `ModernBERT-base` with the `us-regulatory` profile, which hot-loads the `sugiv/modernbert-us-stablecoin-encoder` LoRA weights at request time. Produces a 768-dim domain-adapted embedding.
+- **Dense retrieval**: in-memory cosine similarity over the corpus, top-5 kept.
+- **Score / Rerank**: `sugiv/stablebridge-pruner-highlighter` cross-encoder, keeps top-3.
+- **Extract / Prune**: same Stablebridge model, second primitive. Returns token-level keep/drop probabilities aggregated into `highlight` / `kept` / `pruned` spans.
+- **LLM context**: the surviving `highlight` and `kept` spans become the compressed context passed downstream. Averages 74% compression vs. the raw reranked passages.
 
 ## Why this example exists
 

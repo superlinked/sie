@@ -6,7 +6,7 @@ Classify products into a large hierarchical taxonomy using SIE as the unified in
 
 Taxonomy classification assigns a category path (e.g. `Electronics > Computers > Laptops`) to a product given its description or image. Real-world taxonomies are large (10K+ categories), hierarchical (up to 8 levels deep), and ambiguous (multiple categories can be valid for the same product).
 
-Google's [Custom Taxonomy Classifier](https://github.com/google-marketing-solutions/custom-taxonomy-classifier) demonstrates a minimal version of this: embed flat category names with a single Vertex AI model, retrieve the nearest neighbor. This project goes further — we systematically evaluate multiple approaches across text, vision, with and without reranking on a hierarchical taxonomy.
+Google's [Custom Taxonomy Classifier](https://github.com/google-marketing-solutions/custom-taxonomy-classifier) demonstrates a minimal version of this: embed flat category names with a single Vertex AI model, retrieve the nearest neighbor. This project goes further: we systematically evaluate multiple approaches across text, vision, with and without reranking on a hierarchical taxonomy.
 
 ## Why SIE
 
@@ -49,11 +49,11 @@ uv run trim-shopify-dataset-to-l3
 ```
 
 These scripts generate the following files under `data/`:
-- `train-00000-of-00015.parquet` — the raw Shopify train shard downloaded from Hugging Face
-- `shopify-taxonomy-categories.txt` — the raw taxonomy categories file from Shopify
-- `shopify-products-clean-full-depth.parquet` — cleaned dataset with required fields and valid taxonomy labels
-- `shopify-taxonomy-l3.parquet` — taxonomy trimmed to 3 levels
-- `shopify-products-experiment-l3.parquet` — final L3 dataset used by the evaluation scripts
+- `train-00000-of-00015.parquet`: the raw Shopify train shard downloaded from Hugging Face
+- `shopify-taxonomy-categories.txt`: the raw taxonomy categories file from Shopify
+- `shopify-products-clean-full-depth.parquet`: cleaned dataset with required fields and valid taxonomy labels
+- `shopify-taxonomy-l3.parquet`: taxonomy trimmed to 3 levels
+- `shopify-products-experiment-l3.parquet`: final L3 dataset used by the evaluation scripts
 
 To keep evaluation simple, we trim the taxonomy to 3 levels:
 - `26` L1 labels
@@ -61,8 +61,8 @@ To keep evaluation simple, we trim the taxonomy to 3 levels:
 - `1,790` total nodes
 
 We report hierarchical F1 (`hF1`) in two settings:
-- **strict** — only the single `ground_truth_category` counts as correct
-- **lenient** — any label in `potential_product_categories` counts as correct
+- **strict**: only the single `ground_truth_category` counts as correct
+- **lenient**: any label in `potential_product_categories` counts as correct
 
 ## Approaches
 
@@ -364,8 +364,8 @@ With SIE, the interesting part was the modeling, not the infrastructure. We coul
 
 There is still a lot of room to push these results further. A few directions we did not cover here:
 
-- **LLM-enriched category names** — generate richer descriptions for taxonomy nodes, then embed those instead of bare category names.
-- **Hierarchical cascade** — predict L1 first, then L2 inside the chosen branch, then L3.
-- **Fine-tuned embeddings** — train a contrastive model directly on `(product, category)` pairs from the dataset.
+- **LLM-enriched category names**: generate richer descriptions for taxonomy nodes, then embed those instead of bare category names.
+- **Hierarchical cascade**: predict L1 first, then L2 inside the chosen branch, then L3.
+- **Fine-tuned embeddings**: train a contrastive model directly on `(product, category)` pairs from the dataset.
 
 If you want to take this further, try improving the current baselines or inventing a new approach entirely. That is the real takeaway: SIE makes it easy to explore the space quickly.

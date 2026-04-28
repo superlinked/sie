@@ -49,12 +49,12 @@ the mode you want. The sections below walk through both.
 
 ## Architecture
 
-- **Backend** — Python service in `backend/` (FastAPI + SIE):
+- **Backend**: Python service in `backend/` (FastAPI + SIE):
   - SQLite in `backend/data/sqlite/sie.db` with tables `storage_ids` and `models`.
   - ChromaDB in `backend/data/chroma/` as the local vector store.
   - Superlinked Inference Engine (SIE) produces embeddings for short and long descriptions.
   - OpenRouter generates descriptions from HF metadata + README + MTEB scores.
-- **Frontend** — TypeScript + React app in `frontend/` that calls the backend APIs for search, browse, and model details.
+- **Frontend**: TypeScript + React app in `frontend/` that calls the backend APIs for search, browse, and model details.
 
 ```mermaid
 flowchart LR
@@ -244,7 +244,7 @@ npm run dev
 
 Then open <http://localhost:5173>. For the local demo flow, start with storage id `demo`.
 
-### 3. Check the SIE server — `cli_sie_status.py`
+### 3. Check the SIE server: `cli_sie_status.py`
 
 Inspects liveness, readiness, loaded embedding models, and worker pools.
 
@@ -256,7 +256,7 @@ python cli_sie_status.py --models     # list loaded models
 python cli_sie_status.py --pools      # list worker pools
 ```
 
-### 4. Download model metadata — `cli_download.py`
+### 4. Download model metadata: `cli_download.py`
 
 Selects the top MTEB-benchmarked models (ranked by number of benchmark tasks),
 fetches their Hugging Face metadata in parallel, and stores everything under
@@ -281,7 +281,7 @@ python cli_download.py test01 --dry-run
 Demo READMEs are bundled locally. Live Hugging Face READMEs are fetched on demand
 for downloaded models (see [Operations notes](#operations-notes)).
 
-### 5. Generate descriptions and index — `cli_generate.py`
+### 5. Generate descriptions and index: `cli_generate.py`
 
 Runs the same pipeline as the web UI *Generate Descriptions* buttons:
 
@@ -314,7 +314,7 @@ python cli_generate.py test01 --reindex-only
 python cli_generate.py test01 --dry-run
 ```
 
-### 6. Rebuild the vector index only — `cli_reindex.py`
+### 6. Rebuild the vector index only: `cli_reindex.py`
 
 Drops and rebuilds the `models_{storage_id}` Chroma collection from the
 current SQLite descriptions. Useful if the vector DB is out of sync, or
@@ -332,14 +332,14 @@ python cli_reindex.py test01 --batch-size 16
 
 Single-page React app (`frontend/src/App.tsx`) with four tabs, in this order:
 
-1. **Search with Reranking** — the recommended entry point. Runs a short-description
+1. **Search with Reranking**: the recommended entry point. Runs a short-description
    kNN, then reranks the candidates by long-description similarity. Calls
    `POST /api/search/semantic-rerank`.
-2. **Simple search** — single-stage semantic search on short descriptions. Calls
+2. **Simple search**: single-stage semantic search on short descriptions. Calls
    `POST /api/search/semantic`.
-3. **Download LLM Cards** — triggers `POST /api/models/download` to (re)populate
+3. **Download LLM Cards**: triggers `POST /api/models/download` to (re)populate
    a storage with the top MTEB-benchmarked HF models.
-4. **Browse LLM Cards** — filters stored models by `storage_id` and optional
+4. **Browse LLM Cards**: filters stored models by `storage_id` and optional
    `hf_id` substring; each row opens a full detail view with MTEB scores, the
    live HF README, and a *Generate descriptions* modal.
 
@@ -382,15 +382,15 @@ A full walk-through of the UI fields and modals lives in
 | `long_description`  | varchar(2048)| ≤ 2048 characters                                        |
 
 **Not stored locally:** `readme`, `siblings`, `safetensors`, `spaces`, and the
-raw nested MTEB per-subset/per-split JSON — these would blow SQLite past several
+raw nested MTEB per-subset/per-split JSON: these would blow SQLite past several
 GB across the full catalog.
 
 ### Chroma collection `models_{storage_id}`
 
 Holds **two entries per model**:
 
-- id `"{hf_id}::short"` with `kind="short"` — embedding of `short_description`.
-- id `"{hf_id}::long"`  with `kind="long"`  — embedding of `long_description`.
+- id `"{hf_id}::short"` with `kind="short"`: embedding of `short_description`.
+- id `"{hf_id}::long"` with `kind="long"`: embedding of `long_description`.
 
 Both are produced by the same `SIEEmbeddingFunction`. The `kind` metadata lets
 each search endpoint filter to the right set.
@@ -401,7 +401,7 @@ each search endpoint filter to the right set.
 
 Semantic search lets users describe a task in plain language and find the
 embedding models whose descriptions are closest in meaning. Two endpoints
-are available — a single-stage short-description search and a two-stage
+are available: a single-stage short-description search and a two-stage
 rerank search.
 
 Both share the same request shape:
@@ -414,7 +414,7 @@ Both share the same request shape:
 }
 ```
 
-### `POST /api/search/semantic` — single stage
+### `POST /api/search/semantic`: single stage
 
 Embeds the query, kNN-searches the `kind="short"` entries, returns up to
 `n_results` models sorted by cosine distance.
@@ -431,11 +431,11 @@ Response:
 }
 ```
 
-### `POST /api/search/semantic-rerank` — two stage
+### `POST /api/search/semantic-rerank`: two stage
 
-1. **Stage 1 — short kNN:** `collection.query(query_texts=[query], n_results=N, where={"kind": "short"})`
+1. **Stage 1: short kNN:** `collection.query(query_texts=[query], n_results=N, where={"kind": "short"})`
    returns candidate models with their short-distance scores.
-2. **Stage 2 — long rerank:** `collection.query(query_texts=[query], n_results=len(candidates), where={"$and": [{"kind": "long"}, {"hf_id": {"$in": candidates}}]})`
+2. **Stage 2: long rerank:** `collection.query(query_texts=[query], n_results=len(candidates), where={"$and": [{"kind": "long"}, {"hf_id": {"$in": candidates}}]})`
    makes Chroma recompute cosine distance against only those candidates' long vectors.
 3. Results are merged by `hf_id`, sorted by `rerank_distance` ascending;
    any candidate without a long embedding falls back to `short_distance`
@@ -465,7 +465,7 @@ Response:
 - **Auto:** `POST /api/generate/save` calls `upsert_embedding(storage_id, hf_id, short, long)`
   after every save, keeping both Chroma entries in sync. Clearing a description
   deletes that `kind`'s entry.
-- **Bulk (re)build:** `python cli_reindex.py <storage_id>` — see [How to use](#6-rebuild-the-vector-index-only--cli_reindexpy).
+- **Bulk (re)build:** `python cli_reindex.py <storage_id>`: see [How to use](#6-rebuild-the-vector-index-only--cli_reindexpy).
 
 ---
 
@@ -491,7 +491,7 @@ python cli_download.py <storage_id> --overwrite
 sqlite3 data/sqlite/sie.db "VACUUM;"
 ```
 
-SQLite does not shrink on its own after row deletes — the `VACUUM;` step
+SQLite does not shrink on its own after row deletes: the `VACUUM;` step
 is what actually reclaims disk.
 
 ### Description generation pipeline
