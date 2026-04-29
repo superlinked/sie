@@ -1,3 +1,4 @@
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,6 +17,7 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
+from sie_server.core.load_errors import LoadErrorClass, LoadFailure
 from sie_server.core.registry import ModelRegistry
 
 # Patch msgpack for numpy support
@@ -83,6 +85,8 @@ def mock_registry(mock_adapter: MagicMock) -> MagicMock:
     registry.is_loaded.return_value = True
     registry.is_loading.return_value = False
     registry.is_unloading.return_value = False
+    registry.is_failed.return_value = False
+    registry.get_failure.return_value = None
     registry.get.return_value = mock_adapter
     registry.get_config.return_value = ModelConfig(
         sie_id="test-model",
@@ -241,6 +245,44 @@ class TestEncodeEndpoint:
         assert data["detail"]["code"] == "MODEL_LOADING"
         assert "loading" in data["detail"]["message"].lower()
         mock_registry.start_load_async.assert_called_once()
+
+    def test_encode_returns_model_load_failed_when_terminal(self, client: TestClient, mock_registry: MagicMock) -> None:
+        """A registry-recorded terminal failure returns 502 MODEL_LOAD_FAILED.
+
+        Regression for sie-test#85: previously the API returned 503
+        MODEL_LOADING for any not-loaded model, which the SDK retried for
+        5 minutes even on permanent gated/dependency failures. The new
+        contract returns 502 MODEL_LOAD_FAILED with no Retry-After header
+        so         the SDK can short-circuit immediately.
+        """
+        failure = LoadFailure(
+            error_class=LoadErrorClass.GATED,
+            message="GatedModelError: HF_TOKEN missing or invalid for org/test",
+            attempts=1,
+            last_attempt_ts=time.monotonic(),
+            cooldown_s=None,
+        )
+        mock_registry.is_loaded.return_value = False
+        mock_registry.is_failed.return_value = True
+        mock_registry.get_failure.return_value = failure
+
+        # Should NOT trigger another background load.
+        mock_registry.start_load_async = MagicMock()
+
+        response = client.post(
+            "/v1/encode/test-model",
+            json={"items": [{"text": "Hello"}]},
+        )
+        assert response.status_code == 502
+        data = response.json()
+        assert data["detail"]["code"] == "MODEL_LOAD_FAILED"
+        assert data["detail"]["error_class"] == "GATED"
+        assert data["detail"]["permanent"] is True
+        assert data["detail"]["attempts"] == 1
+        # Critical: no Retry-After header so the SDK does not loop.
+        assert "retry-after" not in {k.lower() for k in response.headers}
+        # And no background load was kicked off.
+        mock_registry.start_load_async.assert_not_called()
 
     def test_encode_lazy_loads_model(
         self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
@@ -580,6 +622,8 @@ class TestEncodeLoraRouting:
         registry.is_loaded.return_value = True
         registry.is_loading.return_value = False
         registry.is_unloading.return_value = False
+        registry.is_failed.return_value = False
+        registry.get_failure.return_value = None
         registry.get.return_value = mock_adapter
         registry.get_config.return_value = ModelConfig(
             sie_id="test-model",

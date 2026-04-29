@@ -294,6 +294,14 @@ def _build_embeddings_response(
         200: {"description": "Embeddings generated successfully"},
         400: {"description": "Invalid request"},
         404: {"description": "Model not found"},
+        502: {
+            "description": (
+                "Terminal model-load failure (MODEL_LOAD_FAILED). "
+                "Carried in the ``detail`` envelope: ``{code, message, "
+                "error_class, permanent, attempts}``. No ``Retry-After`` "
+                "header — clients MUST NOT auto-retry. See sie-test#85."
+            ),
+        },
         503: {"description": "Service unavailable"},
     },
 )

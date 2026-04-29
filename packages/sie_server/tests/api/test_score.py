@@ -115,6 +115,8 @@ def mock_registry(mock_adapter: MagicMock) -> MagicMock:
     registry.is_loaded.return_value = True
     registry.is_loading.return_value = False
     registry.is_unloading.return_value = False
+    registry.is_failed.return_value = False
+    registry.get_failure.return_value = None
     registry.get.return_value = mock_adapter
     registry.get_config.return_value = ModelConfig(
         sie_id="test-reranker",

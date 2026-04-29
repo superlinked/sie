@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from typing import Any
 
@@ -214,7 +215,16 @@ def test_alibaba_nlp_gte_qwen2_7b_instruct_dense() -> None:
     _assert_dense("Alibaba-NLP/gte-Qwen2-7B-instruct", 3584, None)
 
 
+@pytest.mark.skipif(
+    not os.environ.get("HF_TOKEN"),
+    reason="google/embeddinggemma-300m is gated; HF_TOKEN required to download weights",
+)
 def test_google_embeddinggemma_300m_dense() -> None:
+    # Architecture support: ``Gemma3TextModel`` requires transformers>=4.56.
+    # Older versions raise ImportError/ValueError during ``AutoModel.from_pretrained``;
+    # gate the test rather than letting numerical-equivalence drift mask the
+    # underlying problem (sie-test#85).
+    pytest.importorskip("transformers", minversion="4.56.0")
     _assert_dense("google/embeddinggemma-300m", 768, [0.01641845703125, 0.052001953125, -0.0009312629699707031])
 
 
@@ -383,6 +393,22 @@ def test_laion_clip_vit_h_14_laion2b_dense() -> None:
 @pytest.mark.xfail(reason="Large ViT-H model too large for CPU unit tests", strict=False)
 def test_laion_clip_vit_h_14_laion2b_image_dense() -> None:
     _assert_dense_image("laion/CLIP-ViT-H-14-laion2B-s32B-b79K", 1024, None)
+
+
+def test_marqo_ecommerce_embeddings_b_dense() -> None:
+    _assert_dense(
+        "Marqo/marqo-ecommerce-embeddings-B",
+        768,
+        [-0.03741455078125, 0.002193450927734375, -0.00609588623046875],
+    )
+
+
+def test_marqo_ecommerce_embeddings_b_image_dense() -> None:
+    _assert_dense_image(
+        "Marqo/marqo-ecommerce-embeddings-B",
+        768,
+        [0.00914764404296875, -0.021392822265625, 0.00676727294921875],
+    )
 
 
 def test_openai_clip_vit_base_patch32_dense() -> None:

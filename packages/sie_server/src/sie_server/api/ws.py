@@ -77,8 +77,12 @@ def get_model_status(registry: ModelRegistry) -> list[ModelStatus]:
         loaded = registry.is_loaded(name)
         loading = registry.is_loading(name)
         unloading = registry.is_unloading(name)
+        failed = registry.is_failed(name)
 
-        # Determine state: loading/unloading take precedence
+        # Determine state: loading/unloading take precedence over loaded.
+        # ``failed`` ranks below ``loaded`` (a recovered failure that has
+        # since loaded successfully should report ``loaded``) but above
+        # ``available`` so the diagnostic surface is preserved.
         state: ModelState
         if loading:
             state = "loading"
@@ -86,6 +90,8 @@ def get_model_status(registry: ModelRegistry) -> list[ModelStatus]:
             state = "unloading"
         elif loaded:
             state = "loaded"
+        elif failed:
+            state = "failed"
         else:
             state = "available"
 

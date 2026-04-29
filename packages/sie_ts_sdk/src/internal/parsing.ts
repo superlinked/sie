@@ -2,7 +2,7 @@
  * Parsing utilities for SIE responses
  */
 
-import { ProvisioningError, RequestError, ServerError } from "../errors.js";
+import { ModelLoadFailedError, ProvisioningError, RequestError, ServerError } from "../errors.js";
 import { unpackMessage } from "../msgpack.js";
 import type {
   CapacityInfo,
@@ -47,9 +47,15 @@ export function getRetryAfter(response: Response): number | undefined {
 }
 
 /**
- * Extract error code from response body (handles both JSON and msgpack)
+ * Extract the error-detail object from a response body (JSON or msgpack).
+ *
+ * Returns the nested `error` / `detail` object so callers can read
+ * auxiliary fields like `error_class`, `permanent`, `attempts` without
+ * re-parsing. Used by the {@link throwIfModelLoadFailed} short-circuit.
  */
-export async function getErrorCode(response: Response): Promise<string | undefined> {
+export async function getErrorDetail(
+  response: Response,
+): Promise<Record<string, unknown> | undefined> {
   try {
     const contentType = response.headers.get("content-type") ?? "";
     let data: Record<string, unknown>;
@@ -61,30 +67,71 @@ export async function getErrorCode(response: Response): Promise<string | undefin
       data = (await response.json()) as Record<string, unknown>;
     }
 
-    // Check error.code pattern
     if (data.error && typeof data.error === "object") {
-      const error = data.error as Record<string, unknown>;
-      if (typeof error.code === "string") {
-        return error.code;
-      }
+      return data.error as Record<string, unknown>;
     }
-
-    // Check detail.code pattern
     if (data.detail && typeof data.detail === "object") {
-      const detail = data.detail as Record<string, unknown>;
-      if (typeof detail.code === "string") {
-        return detail.code;
-      }
+      return data.detail as Record<string, unknown>;
     }
-
-    // Check top-level code
     if (typeof data.code === "string") {
-      return data.code;
+      return data;
     }
   } catch {
     // Ignore parsing errors
   }
   return undefined;
+}
+
+/**
+ * Extract error code from response body (handles both JSON and msgpack)
+ */
+export async function getErrorCode(response: Response): Promise<string | undefined> {
+  const detail = await getErrorDetail(response);
+  if (!detail) return undefined;
+  const code = detail.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * Throw {@link ModelLoadFailedError} if the response is a 502 carrying
+ * the `MODEL_LOAD_FAILED` error code.
+ *
+ * Used by the retry loop to short-circuit *before* engaging the
+ * `MODEL_LOADING` budget. The server emits 502 + this code for
+ * permanent-class failures (gated repos, missing dependencies); the SDK
+ * must surface the error immediately rather than retrying for the full
+ * provision timeout.
+ *
+ * No-op for any other status / error code.
+ */
+export async function throwIfModelLoadFailed(response: Response, model?: string): Promise<void> {
+  if (response.status !== 502) return;
+  const detail = await getErrorDetail(response.clone());
+  if (!detail) return;
+  if (detail.code !== "MODEL_LOAD_FAILED") return;
+  const errorClass = typeof detail.error_class === "string" ? detail.error_class : undefined;
+  const permanent = typeof detail.permanent === "boolean" ? detail.permanent : true;
+  // Defensive: server should always send an int >= 1, but a malformed
+  // payload must not crash the retry loop. Use ``Number.isFinite`` so
+  // ``NaN`` (from a non-numeric string) and infinities both fall back
+  // to 1, and a legitimate 0 (if the server semantics ever change) is
+  // preserved instead of being clobbered by ``|| 1``.
+  const attemptsRaw = detail.attempts;
+  const parsedAttempts =
+    typeof attemptsRaw === "number"
+      ? attemptsRaw
+      : typeof attemptsRaw === "string"
+        ? Number.parseInt(attemptsRaw, 10)
+        : Number.NaN;
+  const attempts = Number.isFinite(parsedAttempts) ? parsedAttempts : 1;
+  const message =
+    typeof detail.message === "string" ? detail.message : `Model '${model ?? "?"}' failed to load`;
+  throw new ModelLoadFailedError(message, {
+    model,
+    errorClass,
+    permanent,
+    attempts,
+  });
 }
 
 /**

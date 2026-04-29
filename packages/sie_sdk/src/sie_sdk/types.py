@@ -33,8 +33,10 @@ DEFAULT_OUTPUT_DTYPE: OutputDType = "float32"
 # Output type options
 OutputType = Literal["dense", "sparse", "multivector"]
 
-# Model state (for status messages)
-ModelState = Literal["available", "loading", "loaded", "unloading"]
+# Model state (for status messages).
+# ``failed`` is the terminal branch added for non-retryable load failures
+# (gated repos, missing dependencies, etc.). See sie-test#85 for context.
+ModelState = Literal["available", "loading", "loaded", "unloading", "failed"]
 
 
 def np_to_dtype(arr: np.ndarray) -> DType:

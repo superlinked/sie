@@ -26,6 +26,7 @@ from torch.nn import functional
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters.bge_m3_score_mixin import BGEM3ScoreMixin
 from sie_server.core.inference_output import EncodeOutput, SparseVector
 from sie_server.types.inputs import Item
 
@@ -35,16 +36,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class BGEM3Adapter(BaseAdapter):
+class BGEM3Adapter(BGEM3ScoreMixin, BaseAdapter):
     """Adapter for BAAI/bge-m3 model.
 
     This adapter uses direct PyTorch inference with Flash Attention 2
     for optimal performance (dense, sparse, and multi-vector outputs).
+
+    Scoring (`/v1/score`) is supported via :class:`BGEM3ScoreMixin`, which
+    composes scores from the encoder outputs (dense / sparse / multivector).
     """
 
     spec = AdapterSpec(
         inputs=("text",),
-        outputs=("dense", "sparse", "multivector"),
+        outputs=("dense", "sparse", "multivector", "score"),
         dense_dim=1024,
         sparse_dim=250002,
         multivector_dim=1024,

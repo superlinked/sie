@@ -14,6 +14,7 @@ from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters._utils import validate_output_types
+from sie_server.adapters.bge_m3_score_mixin import BGEM3ScoreMixin
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput, SparseVector
 from sie_server.types.inputs import Item
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 _ERR_CPU_NOT_SUPPORTED = "BGEM3FlashAdapter requires CUDA. Use bge_m3 adapter for CPU."
 
 
-class BGEM3FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
+class BGEM3FlashAdapter(BGEM3ScoreMixin, PEFTLoRAMixin, FlashBaseAdapter):
     """BGE-M3 adapter using Flash Attention 2 with variable-length sequences.
 
     This adapter eliminates padding waste by packing sequences and using
@@ -41,7 +42,7 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
 
     spec = AdapterSpec(
         inputs=("text",),
-        outputs=("dense", "sparse", "multivector"),
+        outputs=("dense", "sparse", "multivector", "score"),
         dense_dim=1024,
         sparse_dim=250002,
         multivector_dim=1024,
@@ -231,6 +232,8 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             )
 
         return self._to_inference_output(results, output_types, len(items), is_query)
+
+    # score() and score_pairs() are provided by BGEM3ScoreMixin.
 
     def _build_position_ids(self, cu_seqlens: torch.Tensor, num_seqs: int) -> torch.Tensor:
         """Build XLMRoberta-style position IDs for packed sequences.

@@ -1,3 +1,4 @@
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,6 +12,7 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
+from sie_server.core.load_errors import LoadErrorClass, LoadFailure
 from sie_server.core.registry import ModelRegistry
 
 
@@ -76,6 +78,10 @@ def mock_registry() -> MagicMock:
     registry.get_config = get_config
     registry.has_model = has_model
     registry.is_loaded = is_loaded
+    registry.is_loading = lambda _name: False
+    registry.is_unloading = lambda _name: False
+    registry.is_failed = lambda _name: False
+    registry.get_failure = lambda _name: None
 
     return registry
 
@@ -153,3 +159,84 @@ class TestGetModel:
         assert response.status_code == 404
         data = response.json()
         assert data["detail"]["code"] == "MODEL_NOT_FOUND"
+
+
+class TestModelStateField:
+    """Coverage for the ``state`` and ``last_error`` fields on ``ModelInfo``."""
+
+    def test_loaded_model_reports_loaded_state(self, client: TestClient) -> None:
+        response = client.get("/v1/models/model-a")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == "loaded"
+        assert data["last_error"] is None
+
+    def test_available_model_reports_available_state(self, client: TestClient) -> None:
+        response = client.get("/v1/models/model-b")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == "available"
+        assert data["last_error"] is None
+
+    def test_failed_model_reports_failed_state_with_error(self, mock_registry: MagicMock) -> None:
+        """A registry-recorded failure surfaces via ``state`` + ``last_error``."""
+        failure = LoadFailure(
+            error_class=LoadErrorClass.GATED,
+            message="GatedModelError: model is gated, set HF_TOKEN",
+            attempts=2,
+            last_attempt_ts=time.monotonic(),
+            cooldown_s=None,
+        )
+
+        mock_registry.is_loaded = lambda name: False
+        mock_registry.is_failed = lambda name: name == "model-b"
+        mock_registry.get_failure = lambda name: failure if name == "model-b" else None
+
+        app = FastAPI()
+        app.include_router(models_router)
+        app.state.registry = mock_registry
+        client = TestClient(app)
+
+        response = client.get("/v1/models/model-b")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == "failed"
+        assert data["loaded"] is False
+        assert data["last_error"] is not None
+        assert data["last_error"]["code"] == "GATED"
+        assert data["last_error"]["attempts"] == 2
+        assert data["last_error"]["permanent"] is True
+        assert "HF_TOKEN" in data["last_error"]["message"]
+
+    def test_list_models_includes_failed_entries(self, mock_registry: MagicMock) -> None:
+        """``GET /v1/models`` carries the per-model state for clients."""
+        failure = LoadFailure(
+            error_class=LoadErrorClass.OOM,
+            message="RuntimeError: CUDA out of memory",
+            attempts=1,
+            last_attempt_ts=time.monotonic(),
+            cooldown_s=60.0,
+        )
+
+        mock_registry.is_loaded = lambda name: False
+        mock_registry.is_failed = lambda name: name == "model-a"
+        mock_registry.get_failure = lambda name: failure if name == "model-a" else None
+
+        app = FastAPI()
+        app.include_router(models_router)
+        app.state.registry = mock_registry
+        client = TestClient(app)
+
+        response = client.get("/v1/models")
+        assert response.status_code == 200
+        data = response.json()
+
+        by_name = {m["name"]: m for m in data["models"]}
+        assert by_name["model-a"]["state"] == "failed"
+        assert by_name["model-a"]["last_error"]["code"] == "OOM"
+        assert by_name["model-a"]["last_error"]["permanent"] is False
+        assert by_name["model-b"]["state"] == "available"
+        # Healthy models must not leak a stale error payload alongside
+        # a failed sibling — guard against accidental cross-talk in the
+        # list serializer.
+        assert by_name["model-b"].get("last_error") is None

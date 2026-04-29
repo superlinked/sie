@@ -300,6 +300,49 @@ class ModelStateChecker:
                 headers={"Retry-After": "5"},
             )
 
+    def check_not_failed(self) -> None:
+        """Check whether the model has a recorded terminal load failure.
+
+        When the registry has a sticky :class:`LoadFailure` still in
+        cooldown, return ``502 MODEL_LOAD_FAILED`` with **no**
+        ``Retry-After`` header. The SDK uses the absence of
+        ``Retry-After`` (combined with the dedicated error code) to
+        bypass its 5-minute ``MODEL_LOADING`` retry budget and surface
+        a :class:`ModelLoadFailedError` to the caller immediately.
+
+        This is the symptom-side fix for sie-test#85: previously a
+        gated/dep-missing model would loop the SDK for 5 minutes; now
+        the server tells the SDK "don't bother" the first time it asks.
+
+        Raises:
+            HTTPException: 502 ``MODEL_LOAD_FAILED`` if registry holds a
+                non-expired failure record.
+        """
+        if not self.registry.is_failed(self.model):
+            return
+        failure = self.registry.get_failure(self.model)
+        # Defensive: ``is_failed`` is True implies a record exists, but a
+        # concurrent ``clear_failure`` could have raced us to the dict.
+        if failure is None:  # pragma: no cover — narrow race window
+            return
+        self.span.set_attribute("error", "model_load_failed")
+        self.span.set_attribute("model_load_error_class", failure.error_class.value)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": ErrorCode.MODEL_LOAD_FAILED.value,
+                "message": (
+                    f"Model '{self.model}' failed to load "
+                    f"({failure.error_class.value}, attempts={failure.attempts}): {failure.message}"
+                ),
+                "error_class": failure.error_class.value,
+                "attempts": failure.attempts,
+                "permanent": failure.is_permanent,
+            },
+            # Intentionally no Retry-After header — the SDK uses its
+            # absence to short-circuit the MODEL_LOADING retry budget.
+        )
+
     async def ensure_loaded(self, device: str) -> None:
         """Start loading model if not loaded, raise 503 to retry.
 
@@ -307,25 +350,54 @@ class ModelStateChecker:
             device: Device to load model on (cpu, cuda, mps).
 
         Raises:
-            HTTPException: 503 with Retry-After if model needs loading.
+            HTTPException: 502 ``MODEL_LOAD_FAILED`` (non-retryable) if a
+                terminal failure is already recorded; otherwise 503
+                ``MODEL_LOADING`` with ``Retry-After`` so the SDK retries.
         """
-        if not self.registry.is_loaded(self.model):
-            logger.info("Starting background load for model %s on device %s", self.model, device)
-            await self.registry.start_load_async(self.model, device=device)
-            self.span.set_attribute("error", "model_loading")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": ErrorCode.MODEL_LOADING.value,
-                    "message": f"Model '{self.model}' is loading, please retry",
-                },
-                headers={"Retry-After": "5"},
-            )
+        if self.registry.is_loaded(self.model):
+            return
+
+        # Short-circuit recorded terminal failures BEFORE kicking off
+        # another doomed background load. Without this guard, every
+        # request would retrigger ``start_load_async`` and the SDK
+        # would burn its 5-minute MODEL_LOADING budget on a known-bad
+        # configuration (sie-test#85).
+        self.check_not_failed()
+
+        logger.info("Starting background load for model %s on device %s", self.model, device)
+        await self.registry.start_load_async(self.model, device=device)
+
+        # ``start_load_async`` is a no-op when a failure was recorded
+        # mid-flight (race between ``check_not_failed`` and this call).
+        # Re-check and surface the terminal error rather than telling
+        # the SDK to retry.
+        self.check_not_failed()
+
+        # Race window: a *concurrent* request could have driven the load
+        # to completion between the initial ``is_loaded`` check above
+        # and this point. In that case we should return success to the
+        # caller (no need to make them retry on a 503) — the model is
+        # already serving.
+        if self.registry.is_loaded(self.model):
+            return
+
+        self.span.set_attribute("error", "model_loading")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": ErrorCode.MODEL_LOADING.value,
+                "message": f"Model '{self.model}' is loading, please retry",
+            },
+            headers={"Retry-After": "5"},
+        )
 
     async def validate_ready(self, device: str) -> None:
         """Run all state checks to ensure model is ready for inference.
 
-        Checks in order: exists, not unloading, not loading, ensure loaded.
+        Checks in order: exists, not unloading, not failed, not loading,
+        ensure loaded. ``check_not_failed`` runs before ``check_not_loading``
+        so a recorded terminal failure short-circuits the SDK's retry
+        loop even if a stale ``_loading`` flag races with it.
 
         Args:
             device: Device to load model on if needed.
@@ -335,6 +407,7 @@ class ModelStateChecker:
         """
         self.check_exists()
         self.check_not_unloading()
+        self.check_not_failed()
         self.check_not_loading()
         await self.ensure_loaded(device)
 

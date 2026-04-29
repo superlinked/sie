@@ -13,7 +13,7 @@ tasks:
       dim: 250002
     multivector:
       dim: 1024
-  score: null
+  score: {}
   extract: null
 max_sequence_length: 8192
 profiles:

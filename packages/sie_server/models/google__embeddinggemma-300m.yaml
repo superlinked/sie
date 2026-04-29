@@ -1,5 +1,20 @@
+# NOTE: ``google/embeddinggemma-300m`` is a *gated* HuggingFace repo. The
+# server requires ``HF_TOKEN`` (with the model license accepted on the
+# HF account) to load this model. Without it, the registry records a
+# terminal ``GATED`` failure and the API returns ``MODEL_LOAD_FAILED``
+# (502, no Retry-After) so the SDK does not loop.
+#
+# Architecture support: needs ``transformers>=4.56`` for
+# ``Gemma3TextModel``. Older versions raise an unsupported-model error
+# which the registry classifies as ``DEPENDENCY``.
 sie_id: google/embeddinggemma-300m
 hf_id: google/embeddinggemma-300m
+# Track the default branch. Note: ``main`` is mutable on the Hub, so
+# this does NOT guarantee bit-for-bit reproducibility — it merely names
+# the branch we expect HuggingFace to resolve. For a true pin, replace
+# this with an immutable commit SHA after verifying the new revision
+# against ``test_google_embeddinggemma_300m_dense``.
+hf_revision: main
 inputs:
   text: true
   image: false
@@ -17,6 +32,11 @@ max_sequence_length: 2048
 profiles:
   default:
     max_batch_tokens: 16384
+    # bfloat16 on CUDA matches the captured reference embedding in
+    # ``test_all_models.py``. On CPU the adapter falls back to fp32
+    # automatically (see pytorch_embedding adapter); the loaded model
+    # still works, but numerical-equivalence tests should be gated on
+    # CUDA availability if drift becomes an issue.
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.pytorch_embedding:PyTorchEmbeddingAdapter
     adapter_options:

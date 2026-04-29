@@ -25,6 +25,11 @@ from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig
 from sie_server.core.disk_cache import DiskCacheConfig, ModelDiskCacheManager
 from sie_server.core.hot_reload import HotReloader
+from sie_server.core.load_errors import (
+    LoadErrorClass,
+    LoadFailure,
+    classify_load_error,
+)
 from sie_server.core.loader import load_model_configs
 from sie_server.core.memory import MemoryConfig, MemoryManager
 from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, ModelLoader
@@ -119,6 +124,12 @@ class ModelRegistry:
         self._load_lock: asyncio.Lock | None = None  # Created lazily on first use
         self._loading: set[str] = set()  # Models currently being loaded
         self._unloading: set[str] = set()  # Models currently being unloaded
+        # Terminal-failed state. Populated by ``_load_model_background`` when a
+        # load raises; surfaces non-retryable ``MODEL_LOAD_FAILED`` errors via
+        # the API and short-circuits hot retry loops (see ``start_load_async``).
+        # Cleared on successful load, explicit ``clear_failure``, or hot-reload
+        # of the model config.
+        self._failed: dict[str, LoadFailure] = {}
 
         # Background memory monitor
         self._monitor_task: asyncio.Task[None] | None = None
@@ -316,6 +327,43 @@ class ModelRegistry:
         """Check if a model is currently being unloaded."""
         return name in self._unloading
 
+    def is_failed(self, name: str) -> bool:
+        """Check whether a model has a recorded load failure still in cooldown.
+
+        A model is considered "failed" only while its recorded
+        :class:`LoadFailure` is within the cooldown window for its error
+        class. Once the cooldown elapses (transient classes only) the
+        failure is treated as expired and ``is_failed`` returns False so
+        the next request can trigger a fresh attempt.
+
+        Permanent failure classes (``GATED``, ``NOT_FOUND``,
+        ``DEPENDENCY``, ``UNKNOWN``) have ``cooldown_s=None`` and stay
+        sticky until :meth:`clear_failure` is invoked (e.g. by hot
+        reload).
+        """
+        failure = self._failed.get(name)
+        if failure is None:
+            return False
+        return failure.in_cooldown(time.monotonic())
+
+    def get_failure(self, name: str) -> LoadFailure | None:
+        """Return the recorded :class:`LoadFailure` for ``name`` if any.
+
+        Returns ``None`` when no failure has been recorded; the failure
+        record is returned regardless of cooldown so that ``GET /v1/models``
+        can include diagnostic detail even after the cooldown has elapsed.
+        """
+        return self._failed.get(name)
+
+    def clear_failure(self, name: str) -> bool:
+        """Drop any recorded failure for ``name``.
+
+        Returns True if a record existed and was removed. Used by hot
+        reload (a config change is operator intent that may have fixed
+        the underlying issue) and by successful loads.
+        """
+        return self._failed.pop(name, None) is not None
+
     def _get_load_lock(self) -> asyncio.Lock:
         """Get or create the load lock (must be called from async context)."""
         if self._load_lock is None:
@@ -450,6 +498,9 @@ class ModelRegistry:
 
         # Register with memory manager for LRU tracking
         self._memory_manager.register_model(name, estimated_bytes=loaded.memory_bytes)
+
+        # Clear any stale failure record from a prior attempt.
+        self._failed.pop(name, None)
 
         return loaded.adapter
 
@@ -590,6 +641,13 @@ class ModelRegistry:
         if name in self._loading:
             return False
 
+        # Recorded failure still in cooldown — don't start another doomed
+        # background load. The API surface (``ensure_loaded``) checks
+        # ``is_failed`` and returns ``MODEL_LOAD_FAILED`` instead of
+        # ``MODEL_LOADING``, so the SDK won't keep retrying.
+        if self.is_failed(name):
+            return False
+
         # Check model exists and dependencies are compatible BEFORE starting background task.
         # This surfaces errors synchronously so the API can return 404/409 immediately.
         self._check_model_loadable(name)
@@ -613,6 +671,12 @@ class ModelRegistry:
         is managed here with a finally block to ensure cleanup even if load_async
         returns early (e.g., model already loaded by another task).
 
+        On success any previously-recorded :class:`LoadFailure` for ``name``
+        is cleared. On failure the exception is classified via
+        :func:`classify_load_error` and recorded into ``self._failed`` so
+        the API surface can return a non-retryable
+        ``MODEL_LOAD_FAILED`` and the SDK stops hammering the loader.
+
         Args:
             name: Model name.
             device: Device string (e.g., "cuda:0", "cpu").
@@ -620,14 +684,67 @@ class ModelRegistry:
         try:
             await self.load_async(name, device)
             logger.info("Background model load completed: %s", name)
-        except Exception:
-            logger.exception("Background model load failed: %s", name)
+            # Successful load clears any prior failure record (e.g. a
+            # transient OOM that has since been resolved by eviction).
+            self._failed.pop(name, None)
+        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+            # Operator-initiated shutdown / task cancellation must NOT
+            # be recorded as a load failure — that would leave the
+            # model permanently in ``failed`` state across server
+            # restarts. Let these propagate so asyncio's task lifecycle
+            # handles them normally.
+            raise
+        except Exception as exc:  # noqa: BLE001 — classify_load_error buckets every exception type
+            self._record_load_failure(name, exc)
         finally:
             # Always remove from _loading when background task completes.
             # This handles the case where load_async returned early (model already
             # loaded by another task) without entering its own finally block.
             # For normal loads, load_async already discarded, so this is a no-op.
             self._loading.discard(name)
+
+    def _record_load_failure(self, name: str, exc: BaseException) -> None:
+        """Classify ``exc`` and record a :class:`LoadFailure` for ``name``.
+
+        Increments ``attempts`` if a failure is already on file. Emits a
+        WARNING-level log with structured fields so operators see the
+        actionable hint immediately rather than waiting for the SDK's
+        retry budget to elapse.
+        """
+        classification = classify_load_error(exc)
+        previous = self._failed.get(name)
+        attempts = (previous.attempts + 1) if previous is not None else 1
+        message = f"{type(exc).__name__}: {exc}"
+        failure = LoadFailure(
+            error_class=classification.error_class,
+            message=message,
+            attempts=attempts,
+            last_attempt_ts=time.monotonic(),
+            cooldown_s=classification.cooldown_s,
+        )
+        self._failed[name] = failure
+
+        if classification.error_class is LoadErrorClass.GATED:
+            # Gated models almost always indicate a missing/invalid HF_TOKEN.
+            # Emit the actionable hint up-front instead of relying on the
+            # 300s soft-warning that only fires on slow loads.
+            logger.warning(
+                "Model '%s' load failed: gated repository (attempts=%d). "
+                "Ensure HF_TOKEN is set and the account has accepted the model "
+                "license on HuggingFace. Underlying error: %s",
+                name,
+                attempts,
+                message,
+                extra={"gated_model": True, "model": name},
+            )
+        else:
+            logger.exception(
+                "Background model load failed: %s (class=%s, attempts=%d, cooldown=%s)",
+                name,
+                classification.error_class.value,
+                attempts,
+                "permanent" if classification.cooldown_s is None else f"{classification.cooldown_s:.0f}s",
+            )
 
     def unload(self, name: str) -> None:
         """Unload a model and free resources.
@@ -661,6 +778,24 @@ class ModelRegistry:
         self._memory_manager.unregister_model(name)
 
         logger.info("Model '%s' unloaded", name)
+
+    def _clear_transient_failures(self, classes: tuple[LoadErrorClass, ...] = (LoadErrorClass.OOM,)) -> int:
+        """Drop transient-class failure records for all models.
+
+        Used after a successful unload (memory has been freed, so a prior
+        ``OOM`` is no longer relevant) and after device-level recovery
+        events. Returns the number of records cleared.
+
+        Permanent classes (``GATED``, ``DEPENDENCY``, ``NOT_FOUND``,
+        ``UNKNOWN``) are never cleared by this helper — those require
+        operator intent (config update or explicit ``clear_failure``).
+        """
+        cleared = 0
+        for name, failure in list(self._failed.items()):
+            if failure.error_class in classes:
+                self._failed.pop(name, None)
+                cleared += 1
+        return cleared
 
     async def _do_unload(self, name: str) -> None:
         """Unload a model safely (drains worker first).
@@ -708,6 +843,17 @@ class ModelRegistry:
 
             # Unregister from memory manager
             self._memory_manager.unregister_model(name)
+
+            # Freeing memory makes any prior OOM-class load failure on a
+            # *sibling* model retryable; clear those records so the next
+            # request can re-attempt without waiting out the cooldown.
+            cleared = self._clear_transient_failures()
+            if cleared:
+                logger.debug(
+                    "Cleared %d transient failure record(s) after unloading '%s'",
+                    cleared,
+                    name,
+                )
 
             logger.info("Model '%s' unloaded", name)
         finally:
@@ -781,6 +927,11 @@ class ModelRegistry:
             self._model_filter.add(config.sie_id)
         if model_dir is not None:
             self._model_dirs[config.sie_id] = model_dir
+        # A config update is operator intent that may have fixed the
+        # underlying issue (e.g. pinned a working revision, dropped a
+        # broken adapter option). Clear any sticky failure so the next
+        # request retries with the new config.
+        self._failed.pop(config.sie_id, None)
         self._config_version += 1
 
     def get_model_info(self, name: str) -> dict[str, Any]:

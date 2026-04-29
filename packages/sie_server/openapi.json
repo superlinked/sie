@@ -3,7 +3,7 @@
   "info": {
     "title": "SIE Server",
     "description": "Search Inference Engine - GPU inference server for search workloads",
-    "version": "0.3.0"
+    "version": "0.3.1"
   },
   "paths": {
     "/": {
@@ -134,6 +134,9 @@
           "404": {
             "description": "Model not found"
           },
+          "502": {
+            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry. See sie-test#85."
+          },
           "503": {
             "description": "Model not loaded or service unavailable"
           },
@@ -234,6 +237,9 @@
           "404": {
             "description": "Model not found"
           },
+          "502": {
+            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry. See sie-test#85."
+          },
           "503": {
             "description": "Model not loaded or service unavailable"
           },
@@ -333,6 +339,9 @@
           },
           "404": {
             "description": "Model not found"
+          },
+          "502": {
+            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry. See sie-test#85."
           },
           "503": {
             "description": "Model not loaded or service unavailable"
@@ -503,6 +512,9 @@
           },
           "404": {
             "description": "Model not found"
+          },
+          "502": {
+            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry. See sie-test#85."
           },
           "503": {
             "description": "Service unavailable"
@@ -847,6 +859,28 @@
             "type": "boolean",
             "title": "Loaded"
           },
+          "state": {
+            "type": "string",
+            "enum": [
+              "available",
+              "loading",
+              "loaded",
+              "unloading",
+              "failed"
+            ],
+            "title": "State",
+            "default": "available"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelLoadError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "max_sequence_length": {
             "anyOf": [
               {
@@ -877,6 +911,35 @@
         ],
         "title": "ModelInfo",
         "description": "Information about a model."
+      },
+      "ModelLoadError": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts"
+          },
+          "permanent": {
+            "type": "boolean",
+            "title": "Permanent"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "attempts",
+          "permanent"
+        ],
+        "title": "ModelLoadError",
+        "description": "Diagnostic detail for a recorded load failure.\n\nSurfaced in :class:`ModelInfo` when the registry has a sticky\nfailure for the model. Attributes mirror the server-side\n:class:`sie_server.core.load_errors.LoadFailure`."
       },
       "ModelsListResponse": {
         "properties": {

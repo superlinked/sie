@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 from sie_server.core.prepared import ImagePayload, PreparedItem, TextPayload
 from sie_server.core.preprocessor import ImagePreprocessor, Preprocessor, TextPreprocessor
+from sie_server.core.preprocessor.image import OpenCLIPImagePreprocessor
 from sie_server.types.inputs import ImageInput, Item
 
 
@@ -344,6 +345,131 @@ class TestImagePreprocessor:
         """Collate empty list returns empty tensor."""
         preprocessor = ImagePreprocessor(mock_processor, "test-model")
 
+        result = preprocessor.collate([], device="cpu")
+
+        assert result["pixel_values"].numel() == 0
+
+
+class TestOpenCLIPImagePreprocessor:
+    """Tests for OpenCLIPImagePreprocessor.
+
+    Uses a lambda ``val_preproc`` so the tests are pure unit tests with no
+    model download.
+    """
+
+    @pytest.fixture
+    def fake_val_preproc(self):
+        """A torchvision-compose-shaped callable: PIL.Image -> Tensor[3, 224, 224]."""
+
+        def _fn(img: Image.Image) -> torch.Tensor:
+            # Deterministic encoding of (width, height) into the first two
+            # channels of the corner pixel so tests can verify which image
+            # produced the tensor.
+            tensor = torch.zeros(3, 224, 224)
+            tensor[0, 0, 0] = float(img.width)
+            tensor[1, 0, 0] = float(img.height)
+            return tensor
+
+        return _fn
+
+    @pytest.fixture
+    def mock_config(self):
+        """Create mock model config."""
+        return MagicMock()
+
+    @pytest.fixture
+    def sample_image_bytes(self):
+        """Create a 640x480 JPEG."""
+        img = Image.new("RGB", (640, 480), color="red")
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG")
+        return buffer.getvalue()
+
+    def test_is_preprocessor(self, fake_val_preproc):
+        """OpenCLIPImagePreprocessor satisfies the Preprocessor protocol."""
+        preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
+        assert isinstance(preprocessor, Preprocessor)
+
+    def test_modality(self, fake_val_preproc):
+        """Modality is 'image'."""
+        preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
+        assert preprocessor.modality == "image"
+
+    def test_prepare_runs_val_preproc_and_records_payload(self, fake_val_preproc, mock_config, sample_image_bytes):
+        """prepare() invokes val_preproc and stores the resulting tensor on the payload."""
+        preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
+        items = [Item(images=[ImageInput(data=sample_image_bytes, format="jpeg")])]
+
+        batch = preprocessor.prepare(items, config=mock_config)
+
+        assert batch.size == 1
+        assert batch.modality == "image"
+        assert batch.total_cost == 1
+
+        item = batch.items[0]
+        assert item.cost == 1
+        assert item.original_index == 0
+        assert isinstance(item.payload, ImagePayload)
+        assert item.payload.original_size == (640, 480)
+        # Tensor shape is [C, H, W] (no batch dim) — same contract as ImagePreprocessor
+        assert item.payload.pixel_values.shape == (3, 224, 224)
+        # Verify our fake val_preproc actually ran (encoded width/height)
+        assert item.payload.pixel_values[0, 0, 0].item() == 640.0
+        assert item.payload.pixel_values[1, 0, 0].item() == 480.0
+
+    def test_prepare_skips_text_only_items(self, fake_val_preproc, mock_config, sample_image_bytes):
+        """Items without images are skipped; original_index of image items is preserved."""
+        preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
+        items: list[Item] = [
+            Item(text="text only"),
+            Item(images=[ImageInput(data=sample_image_bytes, format="jpeg")]),
+            Item(text="also text only"),
+        ]
+
+        batch = preprocessor.prepare(items, config=mock_config)
+
+        assert batch.size == 1
+        assert batch.total_cost == 1
+        assert batch.items[0].original_index == 1
+
+    def test_prepare_rgba_conversion(self, fake_val_preproc, mock_config):
+        """RGBA images are converted to RGB before val_preproc."""
+        img = Image.new("RGBA", (100, 100), color=(255, 0, 0, 128))
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        rgba_bytes = buffer.getvalue()
+
+        preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
+        items = [Item(images=[ImageInput(data=rgba_bytes, format="png")])]
+
+        # Should not raise — RGBA → RGB happens before the lambda is invoked.
+        batch = preprocessor.prepare(items, config=mock_config)
+        assert batch.size == 1
+        assert batch.items[0].payload.pixel_values.shape == (3, 224, 224)
+
+    def test_collate_stacks_into_batch(self, fake_val_preproc):
+        """collate() stacks [C, H, W] payloads into [B, C, H, W] on the requested device."""
+        preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
+        prepared = [
+            PreparedItem(
+                payload=ImagePayload(
+                    pixel_values=torch.randn(3, 224, 224),
+                    original_size=(640, 480),
+                ),
+                cost=1,
+                original_index=i,
+            )
+            for i in range(4)
+        ]
+
+        result = preprocessor.collate(prepared, device="cpu")
+
+        assert "pixel_values" in result
+        assert result["pixel_values"].shape == (4, 3, 224, 224)
+
+    def test_collate_empty_returns_empty_tensor(self, fake_val_preproc):
+        """collate() on an empty list returns a 0-element tensor (matches ImagePreprocessor)."""
+        preprocessor = OpenCLIPImagePreprocessor(fake_val_preproc, "test-model")
         result = preprocessor.collate([], device="cpu")
 
         assert result["pixel_values"].numel() == 0

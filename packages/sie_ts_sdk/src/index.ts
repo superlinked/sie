@@ -91,6 +91,7 @@ export {
   PoolError,
   LoraLoadingError,
   ModelLoadingError,
+  ModelLoadFailedError,
 } from "./errors.js";
 
 // Client-side scoring (MaxSim for ColBERT-style models)

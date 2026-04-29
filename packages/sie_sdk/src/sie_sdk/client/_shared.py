@@ -39,7 +39,7 @@ from sie_sdk.types import (
     SparseResult,
 )
 
-from .errors import RequestError, ServerError
+from .errors import ModelLoadFailedError, RequestError, ServerError
 
 # Content types
 MSGPACK_CONTENT_TYPE = "application/msgpack"
@@ -67,6 +67,11 @@ LORA_LOADING_ERROR_CODE = "LORA_LOADING"  # Error code from server
 MODEL_LOADING_MAX_RETRIES = 60  # Max retries (60 * 5s = 5 min, matches provision timeout)
 MODEL_LOADING_DEFAULT_DELAY_S = 5.0  # Default retry delay (model loads take longer than LoRA)
 MODEL_LOADING_ERROR_CODE = "MODEL_LOADING"  # Error code from server
+
+# Terminal load failure (non-retryable). Server returns this with HTTP 502
+# and *no* Retry-After header so the SDK can short-circuit immediately
+# instead of burning the MODEL_LOADING retry budget.
+MODEL_LOAD_FAILED_ERROR_CODE = "MODEL_LOAD_FAILED"
 
 # Resource-exhausted retry settings (server-side OOM recovery exhausted).
 # Default backoff sequence: 5 -> 10 -> 20 s (capped at 30s). Three attempts
@@ -281,6 +286,23 @@ def get_error_code(response: _HttpResponse) -> str | None:
     Returns:
         Error code string, or None if not found.
     """
+    detail = get_error_detail(response)
+    if detail is None:
+        return None
+    code = detail.get("code")
+    return code if isinstance(code, str) else None
+
+
+def get_error_detail(response: _HttpResponse) -> dict[str, Any] | None:
+    """Extract the full error-detail dict from a response body.
+
+    Returns the nested ``error``/``detail`` object so callers can read
+    auxiliary fields like ``error_class``, ``permanent``, ``attempts``
+    (carried by ``MODEL_LOAD_FAILED`` responses) without re-parsing.
+
+    Returns ``None`` if the body has no recognised error detail or it is
+    not a dict.
+    """
     try:
         if MSGPACK_CONTENT_TYPE in response.headers.get("content-type", ""):
             data = msgpack.unpackb(response.content, raw=False)
@@ -290,15 +312,65 @@ def get_error_code(response: _HttpResponse) -> str | None:
         if "error" in data:
             error = data["error"]
             if isinstance(error, dict):
-                return error.get("code")
-            return None  # error is a string, no code
+                return error
+            return None
         if "detail" in data:
             detail = data["detail"]
             if isinstance(detail, dict):
-                return detail.get("code")
+                return detail
     except (ValueError, KeyError, TypeError):
         pass
     return None
+
+
+def raise_if_model_load_failed(response: _HttpResponse, model: str | None = None) -> None:
+    """Raise :class:`ModelLoadFailedError` if the response is 502 ``MODEL_LOAD_FAILED``.
+
+    Used by the SDK retry loops to short-circuit *before* checking the
+    ``MODEL_LOADING`` retry budget. The server returns this on the very
+    first request when it has a recorded terminal failure for the
+    model, so the caller should fail fast instead of retrying for 5
+    minutes.
+
+    Args:
+        response: HTTP response to inspect.
+        model: Model name for inclusion in the raised error.
+
+    Raises:
+        ModelLoadFailedError: If the response is a 502 carrying the
+            ``MODEL_LOAD_FAILED`` error code.
+    """
+    if response.status_code != 502:
+        return
+    detail = get_error_detail(response)
+    if detail is None:
+        return
+    if detail.get("code") != MODEL_LOAD_FAILED_ERROR_CODE:
+        return
+    error_class = detail.get("error_class")
+    permanent = bool(detail.get("permanent", True))
+    attempts_raw = detail.get("attempts", 1)
+    # Defensive: a malformed/buggy server payload (e.g. ``"attempts": "n/a"``,
+    # ``"inf"``, ``-5``) must not crash the retry loop or expose nonsense
+    # values upstream. Coerce best-effort, then clamp to a sane minimum of 1.
+    # OverflowError (from float('inf')) and any other exception fall back
+    # to 1 so malformed payloads always degrade safely.
+    try:
+        if isinstance(attempts_raw, int | float | str):
+            attempts = int(attempts_raw)
+        else:
+            attempts = 1
+    except (TypeError, ValueError, OverflowError):
+        attempts = 1
+    attempts = max(attempts, 1)
+    message = str(detail.get("message") or f"Model '{model}' failed to load")
+    raise ModelLoadFailedError(
+        message,
+        model=model,
+        error_class=str(error_class) if error_class is not None else None,
+        permanent=permanent,
+        attempts=attempts,
+    )
 
 
 def handle_error(response: _HttpResponse) -> None:

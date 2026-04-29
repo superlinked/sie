@@ -1328,6 +1328,18 @@ http = [
 ]
 
 [[package]]
+name = "ftfy"
+version = "6.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "wcwidth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a5/d3/8650919bc3c7c6e90ee3fa7fd618bf373cbbe55dff043bd67353dbb20cd8/ftfy-6.3.1.tar.gz", hash = "sha256:9b3c3d90f84fb267fe64d375a07b7f8912d817cf86009ae134aa03e1819506ec", size = 308927 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/6e/81d47999aebc1b155f81eca4477a616a70f238a2549848c38983f3c22a82/ftfy-6.3.1-py3-none-any.whl", hash = "sha256:7c70eb532015cd2f9adb53f101fb6c7945988d023a085d127d1573dc49dd0083", size = 44821 },
+]
+
+[[package]]
 name = "gitdb"
 version = "4.0.12"
 source = { registry = "https://pypi.org/simple" }
@@ -3373,6 +3385,28 @@ wheels = [
 ]
 
 [[package]]
+name = "open-clip-torch"
+version = "2.32.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ftfy" },
+    { name = "huggingface-hub" },
+    { name = "regex" },
+    { name = "safetensors" },
+    { name = "timm" },
+    { name = "torch", version = "2.9.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
+    { name = "torch", version = "2.9.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux'" },
+    { name = "torchvision", version = "0.24.1", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "torchvision", version = "0.24.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
+    { name = "torchvision", version = "0.24.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/7b/fd38dfd522968135dce71d0b543c2ae776f9c8e27df6ad46b63bab09eef7/open_clip_torch-2.32.0.tar.gz", hash = "sha256:0220bc111162527eb738c1fe20dbfd6ea45dfe44726b54a4de18d3945d8f2f00", size = 1491248 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/f9/0458745c1d299411161ee3b6c32228a3de0be1d8497d779fd7f17a8e96aa/open_clip_torch-2.32.0-py3-none-any.whl", hash = "sha256:80b35b43e37afc2b6173aa5ab0ad68744ab3a3211e624f72dfe743a162707637", size = 1528783 },
+]
+
+[[package]]
 name = "openai"
 version = "2.30.0"
 source = { registry = "https://pypi.org/simple" }
@@ -5145,7 +5179,7 @@ dev = [
 
 [[package]]
 name = "sie-admin"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "packages/sie_admin" }
 dependencies = [
     { name = "httpx" },
@@ -5178,7 +5212,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-bench"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "packages/sie_bench" }
 dependencies = [
     { name = "aiohttp" },
@@ -5255,7 +5289,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-chroma"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "integrations/sie_chroma" }
 dependencies = [
     { name = "chromadb" },
@@ -5327,7 +5361,7 @@ dev = [
 
 [[package]]
 name = "sie-crewai"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "integrations/sie_crewai" }
 dependencies = [
     { name = "crewai" },
@@ -5352,7 +5386,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-dspy"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "integrations/sie_dspy" }
 dependencies = [
     { name = "dspy" },
@@ -5377,7 +5411,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-haystack"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "integrations/sie_haystack" }
 dependencies = [
     { name = "haystack-ai" },
@@ -5404,7 +5438,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-lancedb"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "integrations/sie_lancedb" }
 dependencies = [
     { name = "lancedb" },
@@ -5431,7 +5465,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-langchain"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "integrations/sie_langchain" }
 dependencies = [
     { name = "langchain-core" },
@@ -5458,7 +5492,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-llamaindex"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "integrations/sie_llamaindex" }
 dependencies = [
     { name = "llama-index-core" },
@@ -5485,7 +5519,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-qdrant"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "integrations/sie_qdrant" }
 dependencies = [
     { name = "qdrant-client" },
@@ -5508,7 +5542,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-sdk"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "packages/sie_sdk" }
 dependencies = [
     { name = "aiohttp" },
@@ -5557,7 +5591,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-server"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "packages/sie_server" }
 dependencies = [
     { name = "docling" },
@@ -5574,6 +5608,7 @@ dependencies = [
     { name = "msgspec" },
     { name = "nats-py" },
     { name = "numpy" },
+    { name = "open-clip-torch" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-instrumentation-fastapi" },
@@ -5634,6 +5669,7 @@ requires-dist = [
     { name = "nats-py", specifier = ">=2.9,<3" },
     { name = "numpy", specifier = ">=2,<3" },
     { name = "nvidia-ml-py", marker = "extra == 'gpu-metrics'", specifier = ">=13.5,<14" },
+    { name = "open-clip-torch", specifier = ">=2.24" },
     { name = "opentelemetry-api", specifier = ">=1.28,<2" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.28,<2" },
     { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.49b0,<1" },
@@ -5668,7 +5704,7 @@ dev = []
 
 [[package]]
 name = "sie-weaviate"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "integrations/sie_weaviate" }
 dependencies = [
     { name = "sie-sdk" },

@@ -61,6 +61,7 @@ import {
   parseEncodeResults,
   parseExtractResults,
   parseScoreResult,
+  throwIfModelLoadFailed,
 } from "./internal/parsing.js";
 import { packMessage, unpackMessage } from "./msgpack.js";
 import type {
@@ -1054,6 +1055,13 @@ export class SIEClient {
         await sleep(actualDelay);
         continue;
       }
+
+      // Short-circuit terminal load failures (sie-test#85). The server
+      // emits 502 MODEL_LOAD_FAILED for permanent classes (gated repos,
+      // missing dependencies, unrecognised architectures); we must
+      // surface the error immediately rather than burn the
+      // MODEL_LOADING retry budget on a known-bad config.
+      await throwIfModelLoadFailed(response, model);
 
       // Handle 503 with LORA_LOADING or MODEL_LOADING - auto-retry
       if (response.status === 503) {

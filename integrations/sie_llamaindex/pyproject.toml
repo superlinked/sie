@@ -1,6 +1,6 @@
 [project]
 name = "sie-llamaindex"
-version = "0.3.0"
+version = "0.3.1"
 description = "SIE integration for LlamaIndex"
 requires-python = ">=3.10"
 dependencies = [

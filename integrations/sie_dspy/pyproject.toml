@@ -1,6 +1,6 @@
 [project]
 name = "sie-dspy"
-version = "0.3.0"
+version = "0.3.1"
 description = "SIE integration for DSPy"
 readme = "README.md"
 requires-python = ">=3.10"

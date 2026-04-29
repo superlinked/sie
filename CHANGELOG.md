@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.3.1
+
+- chore(main): release 0.3.1
+- fix(bge-m3): tighten score_mode validation, drop module docstring
+- docs(sdk,server): clarify MODEL_LOAD_FAILED covers transient cooldowns
+- fix(bge-m3): extend score support to bge_m3 and bge_m3_flag adapters
+- fix(sdk,server): address CodeRabbit review on terminal load failures
+- fix(siglip): cast pixel_values to model dtype on open_clip path
+- chore(server): regenerate openapi.json with state and last_error fields
+- feat(siglip): add Marqo/marqo-ecommerce-embeddings-B via open_clip backend
+- fix(server): add terminal failed state to model registry (sie-test#85)
+- feat(bge-m3): support /v1/score with dense/sparse/colbert/hybrid modes
+
 ## v0.3.0
 
 - chore(main): release 0.3.0

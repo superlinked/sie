@@ -176,6 +176,7 @@ class ErrorCode(StrEnum):
     MODEL_NOT_LOADED = "MODEL_NOT_LOADED"
     LORA_LOADING = "LORA_LOADING"  # LoRA adapter loading in progress - SDK should retry
     MODEL_LOADING = "MODEL_LOADING"  # Model loading in progress - SDK should retry
+    MODEL_LOAD_FAILED = "MODEL_LOAD_FAILED"  # Terminal load failure (gated, missing dep, etc) - SDK MUST NOT retry
     INFERENCE_ERROR = "INFERENCE_ERROR"
     QUEUE_FULL = "QUEUE_FULL"
     INTERNAL_ERROR = "INTERNAL_ERROR"

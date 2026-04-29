@@ -45,7 +45,7 @@ class TestBGEM3FlagAdapter:
         """Adapter reports correct capabilities."""
         caps = adapter.capabilities
         assert caps.inputs == ["text"]
-        assert caps.outputs == ["dense", "sparse", "multivector"]
+        assert caps.outputs == ["dense", "sparse", "multivector", "score"]
 
     def test_dims(self, adapter: BGEM3FlagAdapter) -> None:
         """Adapter reports correct dimensions."""
@@ -206,7 +206,7 @@ class TestBGEM3Adapter:
         """Adapter reports correct capabilities."""
         caps = adapter.capabilities
         assert caps.inputs == ["text"]
-        assert caps.outputs == ["dense", "sparse", "multivector"]
+        assert caps.outputs == ["dense", "sparse", "multivector", "score"]
 
     def test_dims(self, adapter: BGEM3Adapter) -> None:
         """Adapter reports correct dimensions."""

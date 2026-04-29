@@ -86,6 +86,7 @@ from ._shared import (
     parse_extract_results,
     parse_gpu_param,
     parse_score_result,
+    raise_if_model_load_failed,
 )
 from .errors import (
     LoraLoadingError,
@@ -1049,6 +1050,9 @@ class SIEAsyncClient:
                 await asyncio.sleep(actual_delay)
                 continue
 
+            # Short-circuit terminal load failures (sie-test#85).
+            raise_if_model_load_failed(response, model=model)
+
             # Handle 503 with LORA_LOADING or MODEL_LOADING - auto-retry
             if response.status_code == 503:
                 from ._shared import get_error_code
@@ -1516,6 +1520,9 @@ class SIEAsyncClient:
                 await asyncio.sleep(actual_delay)
                 continue
 
+            # Short-circuit terminal load failures (sie-test#85).
+            raise_if_model_load_failed(response, model=model)
+
             # Handle 503 with MODEL_LOADING - auto-retry
             if response.status_code == 503:
                 from ._shared import get_error_code
@@ -1777,6 +1784,9 @@ class SIEAsyncClient:
                 )
                 await asyncio.sleep(actual_delay)
                 continue
+
+            # Short-circuit terminal load failures (sie-test#85).
+            raise_if_model_load_failed(response, model=model)
 
             # Handle 503 with MODEL_LOADING - auto-retry
             if response.status_code == 503:

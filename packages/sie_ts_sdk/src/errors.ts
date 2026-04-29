@@ -197,3 +197,48 @@ export class ModelLoadingError extends SIEError {
     this.model = model;
   }
 }
+
+/**
+ * Error when the server reports a *terminal* model-load failure.
+ *
+ * Distinct from {@link ModelLoadingError} — this is thrown on the first
+ * response (no retry budget consumed) when the server returns HTTP
+ * `502 MODEL_LOAD_FAILED`. The server uses this code for permanent-class
+ * failures (gated repos, missing dependencies, unrecognised model
+ * architectures) where retrying would waste time. See sie-test#85.
+ *
+ * Permanent failures will not auto-clear; an operator must fix the
+ * underlying cause (e.g. set `HF_TOKEN`, accept the model license on
+ * HuggingFace, upgrade `transformers`).
+ */
+export class ModelLoadFailedError extends ServerError {
+  /** The model that was requested */
+  readonly model: string | undefined;
+  /**
+   * Server-side classification: one of `GATED`, `OOM`, `DEPENDENCY`,
+   * `NOT_FOUND`, `NETWORK`, `UNKNOWN`. Use this to route to specific
+   * remediation paths (e.g. surface a "set HF_TOKEN" hint for `GATED`).
+   */
+  readonly errorClass: string | undefined;
+  /** Whether the failure is non-retryable per server policy. */
+  readonly permanent: boolean;
+  /** How many load attempts the server has logged. */
+  readonly attempts: number;
+
+  constructor(
+    message: string,
+    options?: {
+      model?: string;
+      errorClass?: string;
+      permanent?: boolean;
+      attempts?: number;
+    },
+  ) {
+    super(message, "MODEL_LOAD_FAILED", 502);
+    this.name = "ModelLoadFailedError";
+    this.model = options?.model;
+    this.errorClass = options?.errorClass;
+    this.permanent = options?.permanent ?? true;
+    this.attempts = options?.attempts ?? 1;
+  }
+}
