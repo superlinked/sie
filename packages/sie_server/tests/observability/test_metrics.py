@@ -108,16 +108,16 @@ class TestRecordRequest:
         assert len(caplog.records) >= 1
         rec = caplog.records[-1]
         assert rec.message == "Request completed"
-        assert rec.model == "bge-m3"  # type: ignore[attr-defined]
-        assert rec.endpoint == "encode"  # type: ignore[attr-defined]
-        assert rec.status == "success"  # type: ignore[attr-defined]
-        assert rec.request_id == "req-abc"  # type: ignore[attr-defined]
-        assert rec.api_key == "sk-***"  # type: ignore[attr-defined]
-        assert rec.queue_depth == 3  # type: ignore[attr-defined]
-        assert rec.latency_ms == 50.0  # type: ignore[attr-defined]
-        assert rec.tokenization_ms == 10.0  # type: ignore[attr-defined]
-        assert rec.queue_ms == 5.0  # type: ignore[attr-defined]
-        assert rec.inference_ms == 35.0  # type: ignore[attr-defined]
+        assert rec.model == "bge-m3"  # type: ignore
+        assert rec.endpoint == "encode"  # type: ignore
+        assert rec.status == "success"  # type: ignore
+        assert rec.request_id == "req-abc"  # type: ignore
+        assert rec.api_key == "sk-***"  # type: ignore
+        assert rec.queue_depth == 3  # type: ignore
+        assert rec.latency_ms == 50.0  # type: ignore
+        assert rec.tokenization_ms == 10.0  # type: ignore
+        assert rec.queue_ms == 5.0  # type: ignore
+        assert rec.inference_ms == 35.0  # type: ignore
 
     def test_record_request_without_timing(self, caplog: pytest.LogCaptureFixture) -> None:
         """record_request emits log even without timing data."""
@@ -133,8 +133,8 @@ class TestRecordRequest:
         assert len(caplog.records) >= 1
         rec = caplog.records[-1]
         assert rec.message == "Request completed"
-        assert rec.model == "bge-m3"  # type: ignore[attr-defined]
-        assert rec.status == "error"  # type: ignore[attr-defined]
+        assert rec.model == "bge-m3"  # type: ignore
+        assert rec.status == "error"  # type: ignore
 
 
 class TestRecordBatch:

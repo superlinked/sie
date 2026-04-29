@@ -97,23 +97,23 @@ spec:
 
 ---
 # =============================================================================
-# KEDA ScaledObject for SIE Router (if needed)
+# KEDA ScaledObject for SIE Gateway (if needed)
 # =============================================================================
 #
-# The router is typically lightweight and doesn't need GPU-specific settings.
+# The gateway is typically lightweight and doesn't need GPU-specific settings.
 # Use simpler scaling based on CPU/memory.
 #
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: sie-router-scaler
+  name: sie-gateway-scaler
   namespace: sie
   labels:
     app.kubernetes.io/name: sie
-    app.kubernetes.io/component: router
+    app.kubernetes.io/component: gateway
 spec:
   scaleTargetRef:
-    name: sie-router
+    name: sie-gateway
 
   minReplicaCount: 2     # Always keep 2 for HA
   maxReplicaCount: 10
@@ -125,9 +125,9 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: http://prometheus-operated.monitoring.svc:9090
-        metricName: sie_router_request_rate
-        query: sum(rate(sie_router_requests_total{namespace="sie"}[1m]))
-        threshold: '100'  # Target: 100 req/s per router pod
+        metricName: sie_gateway_request_rate
+        query: sum(rate(sie_gateway_requests_total{namespace="sie"}[1m]))
+        threshold: '100'  # Target: 100 req/s per gateway pod
 
 ---
 # =============================================================================

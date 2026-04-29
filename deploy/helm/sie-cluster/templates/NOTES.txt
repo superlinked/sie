@@ -1,7 +1,7 @@
 {{- include "sie-cluster.validateNats" . -}}
 SIE Cluster {{ .Chart.Version }} deployed to namespace {{ include "sie-cluster.namespace" . }}.
 
-Router: http://{{ include "sie-cluster.router.serviceName" . }}.{{ include "sie-cluster.namespace" . }}.svc:{{ .Values.router.service.port }}
+Gateway: http://{{ include "sie-cluster.gateway.serviceName" . }}.{{ include "sie-cluster.namespace" . }}.svc:{{ .Values.gateway.service.port }}
 
 {{- if index .Values "kube-prometheus-stack" "install" }}
 Prometheus: enabled — kubectl port-forward -n {{ include "sie-cluster.namespace" . }} svc/prometheus-operated 9090

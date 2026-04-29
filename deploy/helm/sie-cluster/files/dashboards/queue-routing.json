@@ -29,12 +29,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         }
       ],
-      "title": "Router E2E p50 (ms)",
+      "title": "Gateway E2E p50 (ms)",
       "type": "stat",
       "fieldConfig": {
         "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 100}, {"color": "red", "value": 500}] } }
@@ -54,12 +54,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p99",
           "refId": "A"
         }
       ],
-      "title": "Router E2E p99 (ms)",
+      "title": "Gateway E2E p99 (ms)",
       "type": "stat",
       "fieldConfig": {
         "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 200}, {"color": "red", "value": 1000}] } }
@@ -79,7 +79,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_router_requests_total{namespace=\"$namespace\"}[$rate_window]))",
+          "expr": "sum(rate(sie_gateway_requests_total{namespace=\"$namespace\"}[$rate_window]))",
           "legendFormat": "Requests/s",
           "refId": "A"
         }
@@ -104,7 +104,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_router_requests_total{namespace=\"$namespace\", status!=\"200\"}[$rate_window])) / sum(rate(sie_router_requests_total{namespace=\"$namespace\"}[$rate_window])) * 100",
+          "expr": "sum(rate(sie_gateway_requests_total{namespace=\"$namespace\", status!=\"200\"}[$rate_window])) / sum(rate(sie_gateway_requests_total{namespace=\"$namespace\"}[$rate_window])) * 100",
           "legendFormat": "Error %",
           "refId": "A"
         }
@@ -119,7 +119,7 @@
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 5 },
       "id": 5,
       "title": "Latency Breakdown Over Time (mean, stacked)",
-      "description": "Stacked mean latency by phase. Uses mean (not percentiles) because means are additive. Decomposition: E2E = router_overhead + result_wait. result_wait = publish_and_overhead + queue_transit + tokenization + inference. Stacked bars sum to total mean E2E.",
+      "description": "Stacked mean latency by phase. Uses mean (not percentiles) because means are additive. Decomposition: E2E = gateway_overhead + result_wait. result_wait = publish_and_overhead + queue_transit + tokenization + inference. Stacked bars sum to total mean E2E.",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": {
@@ -127,7 +127,7 @@
           "unit": "ms"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Router overhead" }, "properties": [{ "id": "color", "value": { "fixedColor": "#B877D9", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Gateway overhead" }, "properties": [{ "id": "color", "value": { "fixedColor": "#B877D9", "mode": "fixed" } }] },
           { "matcher": { "id": "byName", "options": "NATS publish + overhead" }, "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] },
           { "matcher": { "id": "byName", "options": "Queue transit" }, "properties": [{ "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } }] },
           { "matcher": { "id": "byName", "options": "Tokenization" }, "properties": [{ "id": "color", "value": { "fixedColor": "#F2CC0C", "mode": "fixed" } }] },
@@ -141,12 +141,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "clamp_min((\n  sum(rate(sie_router_request_latency_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_router_request_latency_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_router_queue_result_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_router_queue_result_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n) * 1000, 0)",
-          "legendFormat": "Router overhead",
+          "expr": "clamp_min((\n  sum(rate(sie_gateway_request_latency_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_gateway_request_latency_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_gateway_queue_result_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_gateway_queue_result_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n) * 1000, 0)",
+          "legendFormat": "Gateway overhead",
           "refId": "A"
         },
         {
-          "expr": "clamp_min((\n  sum(rate(sie_router_queue_result_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_router_queue_result_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_pull_loop_queue_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_pull_loop_queue_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window]))\n  - sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"inference\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"inference\"}[$rate_window]))\n) * 1000, 0)",
+          "expr": "clamp_min((\n  sum(rate(sie_gateway_queue_result_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_gateway_queue_result_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_pull_loop_queue_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_pull_loop_queue_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window]))\n  - sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"inference\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"inference\"}[$rate_window]))\n) * 1000, 0)",
           "legendFormat": "NATS publish + overhead",
           "refId": "B"
         },
@@ -170,8 +170,8 @@
     {
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
       "id": 6,
-      "title": "E2E Latency Percentiles Over Time (Router)",
-      "description": "Router-measured end-to-end latency: sie_router_request_latency_seconds.",
+      "title": "E2E Latency Percentiles Over Time (Gateway)",
+      "description": "Gateway-measured end-to-end latency: sie_gateway_request_latency_seconds.",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": { "unit": "ms", "custom": { "lineWidth": 2 } }
@@ -183,17 +183,17 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.95, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_router_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -335,7 +335,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
       "id": 12,
       "title": "DLQ Events",
-      "description": "Messages that exhausted max delivery attempts. Source: sie_router_dlq_events_total{stream, consumer}.",
+      "description": "Messages that exhausted max delivery attempts. Source: sie_gateway_dlq_events_total{stream, consumer}.",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": { "custom": { "fillOpacity": 15 } }
@@ -347,7 +347,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "rate(sie_router_dlq_events_total{namespace=\"$namespace\"}[$rate_window])",
+          "expr": "rate(sie_gateway_dlq_events_total{namespace=\"$namespace\"}[$rate_window])",
           "legendFormat": "{{stream}} / {{consumer}}",
           "refId": "A"
         }
@@ -357,14 +357,14 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
       "id": 102,
-      "title": "Router Queue Publisher",
+      "title": "Gateway Queue Publisher",
       "type": "row"
     },
     {
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 41 },
       "id": 13,
       "title": "NATS Publish Time (p99)",
-      "description": "Time for the router to publish all work items to NATS JetStream. Source: sie_router_queue_publish_seconds{operation}.",
+      "description": "Time for the gateway to publish all work items to NATS JetStream. Source: sie_gateway_queue_publish_seconds{operation}.",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
@@ -376,7 +376,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_publish_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_queue_publish_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
           "legendFormat": "{{operation}}",
           "refId": "A"
         }
@@ -386,7 +386,7 @@
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 41 },
       "id": 14,
       "title": "Queue Result Wait Time (p99)",
-      "description": "Total time the router waits for worker replies after publishing. Source: sie_router_queue_result_wait_seconds{operation}.",
+      "description": "Total time the gateway waits for worker replies after publishing. Source: sie_gateway_queue_result_wait_seconds{operation}.",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
@@ -398,7 +398,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_router_queue_result_wait_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_queue_result_wait_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
           "legendFormat": "{{operation}}",
           "refId": "A"
         }
@@ -408,7 +408,7 @@
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 41 },
       "id": 15,
       "title": "Items Published / sec",
-      "description": "Rate of work items published to NATS by operation type. Source: sie_router_queue_items_published (histogram, using _count for requests/sec).",
+      "description": "Rate of work items published to NATS by operation type. Source: sie_gateway_queue_items_published (histogram, using _count for requests/sec).",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }
@@ -420,12 +420,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_router_queue_items_published_count{namespace=\"$namespace\"}[$rate_window])) by (operation)",
+          "expr": "sum(rate(sie_gateway_queue_items_published_count{namespace=\"$namespace\"}[$rate_window])) by (operation)",
           "legendFormat": "{{operation}} reqs/s",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(sie_router_queue_items_published_sum{namespace=\"$namespace\"}[$rate_window])) by (operation)",
+          "expr": "sum(rate(sie_gateway_queue_items_published_sum{namespace=\"$namespace\"}[$rate_window])) by (operation)",
           "legendFormat": "{{operation}} items/s",
           "refId": "B"
         }

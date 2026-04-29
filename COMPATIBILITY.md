@@ -24,12 +24,12 @@ All packages share a **single version number**, managed by [release-please](http
 | `sie-langchain`, `sie-llamaindex`, `sie-haystack`, `sie-dspy`, `sie-crewai`, `sie-chroma` | PyPI | 0.1.6 |
 | `@superlinked/sie-sdk`, `@superlinked/sie-langchain`, `@superlinked/sie-llamaindex`, `@superlinked/sie-chroma` | npm | 0.1.6 |
 | `sie-cluster` Helm chart | OCI (`ghcr.io/superlinked/charts`) | 0.1.6 |
-| `sie-server`, `sie-router` Docker images | ghcr.io | 0.1.6 |
+| `sie-server`, `sie-gateway` Docker images | ghcr.io | 0.1.6 |
 | `superlinked/sie/google`, `superlinked/sie/aws` Terraform modules | Terraform Registry | 0.1.6 |
 
-`sie-server`, `sie-router`, `sie-admin`, and `sie-bench` are internal packages distributed via Docker images or used in development only — they are not published to PyPI.
+`sie-server`, `sie-gateway`, `sie-admin`, and `sie-bench` are internal packages distributed via Docker images or used in development only — they are not published to PyPI.
 
-**Why mono-version:** Simplifies compatibility reasoning. Users deploy matching versions of SDK, server, router, and Helm chart. The version skew detection (see below) depends on this guarantee.
+**Why mono-version:** Simplifies compatibility reasoning. Users deploy matching versions of SDK, server, gateway, and Helm chart. The version skew detection (see below) depends on this guarantee.
 
 **Post-1.0 plan:** Re-evaluate independent versioning after 1.0 if package release cadences diverge significantly. Until then, mono-version remains the approach.
 
@@ -94,7 +94,7 @@ Same criteria as the Python SDK, applied to `SIEClient` and its types in `@super
 
 ### Helm Chart (breaking)
 
-- Removing or renaming a values.yaml key (e.g., renaming `router.replicas` to `router.replicaCount`)
+- Removing or renaming a values.yaml key (e.g., renaming `gateway.replicas` to `gateway.replicaCount`)
 - Changing the default value of an existing key in a way that alters behavior
 - Removing a template
 - Changing label selectors on StatefulSets or Deployments (causes rolling update failures)
@@ -117,7 +117,7 @@ Same criteria as the Python SDK, applied to `SIEClient` and its types in `@super
 
 ### CLI (breaking)
 
-- Removing or renaming a CLI command or flag (e.g., `sie-server serve`, `sie-router`, `sie-admin cache`)
+- Removing or renaming a CLI command or flag (e.g., `sie-server serve`, `sie-gateway`, `sie-admin cache`)
 
 ### Terraform Modules (breaking)
 
@@ -174,9 +174,9 @@ A migration guide includes:
 
 ## Version Skew Policy
 
-SIE uses version negotiation headers (`X-SIE-SDK-Version`, `X-SIE-Server-Version`) to detect version mismatches between SDK clients and servers/routers.
+SIE uses version negotiation headers (`X-SIE-SDK-Version`, `X-SIE-Server-Version`) to detect version mismatches between SDK clients and servers/gateways.
 
-**Supported skew:** SDK and server/router must share the same **major** version and be within **1 minor version** of each other.
+**Supported skew:** SDK and server/gateway must share the same **major** version and be within **1 minor version** of each other.
 
 | SDK Version | Server Version | Status |
 |-------------|----------------|--------|

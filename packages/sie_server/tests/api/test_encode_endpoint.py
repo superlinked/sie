@@ -1,5 +1,5 @@
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import msgpack
 import msgpack_numpy as m
@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sie_server.api.encode import router as encode_router
 from sie_server.config.model import (
+    AdapterOptions,
     EmbeddingDim,
     EncodeTask,
     ModelConfig,
@@ -545,3 +546,196 @@ class TestMsgspecDecodeEndToEnd:
             headers=JSON_HEADERS,
         )
         assert response.status_code == 200
+
+
+class TestEncodeLoraRouting:
+    """Regression tests for issue #94: map options['lora_id'] -> options['lora'].
+
+    The encode handler resolves the LoRA from ``options["lora_id"]`` (which is
+    populated by the profile config's ``adapter_options.runtime``), but the
+    worker's batcher routes LoRA-specific requests on ``options["lora"]``.
+    Without the mapping, named-profile LoRA requests load the adapter into the
+    registry but every inference still runs against the base model weights —
+    a silent quality regression.
+    """
+
+    @staticmethod
+    def _make_lora_registry(
+        mock_adapter: MagicMock,
+        *,
+        lora_state: tuple[bool, bool] = (True, False),
+    ) -> MagicMock:
+        """Build a mock registry whose 'us-regulatory' profile carries a lora_id.
+
+        Mirrors the ``mock_registry`` fixture but adds a second profile and an
+        async ``ensure_lora_loaded_async``. ``lora_state`` is the
+        ``(is_ready, is_loading)`` tuple returned by that mock.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        from sie_server.core.postprocessor_registry import PostprocessorRegistry
+
+        registry = MagicMock(spec=ModelRegistry)
+        registry.has_model.return_value = True
+        registry.is_loaded.return_value = True
+        registry.is_loading.return_value = False
+        registry.is_unloading.return_value = False
+        registry.get.return_value = mock_adapter
+        registry.get_config.return_value = ModelConfig(
+            sie_id="test-model",
+            hf_id="org/test",
+            tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=3))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:TestAdapter",
+                    max_batch_tokens=8192,
+                ),
+                "us-regulatory": ProfileConfig(
+                    adapter_path="test:TestAdapter",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(
+                        runtime={"lora_id": "org/test-lora"},
+                    ),
+                ),
+            },
+        )
+        registry.model_names = ["test-model"]
+        registry.device = "cpu"
+        registry.ensure_lora_loaded_async = AsyncMock(return_value=lora_state)
+
+        preprocessor_registry = MagicMock()
+        preprocessor_registry.has_tokenizer.return_value = False
+        preprocessor_registry.has_preprocessor.return_value = False
+        registry.preprocessor_registry = preprocessor_registry
+        cpu_pool = ThreadPoolExecutor(max_workers=1)
+        registry.postprocessor_registry = PostprocessorRegistry(cpu_pool)
+        return registry
+
+    @pytest.fixture
+    def lora_client(self, mock_adapter: MagicMock) -> tuple[TestClient, MagicMock, MagicMock]:
+        registry = self._make_lora_registry(mock_adapter)
+        app = FastAPI()
+        app.include_router(encode_router)
+        app.state.registry = registry
+        return TestClient(app), registry, mock_adapter
+
+    def test_profile_lora_id_is_mapped_to_lora_for_worker_routing(
+        self, lora_client: tuple[TestClient, MagicMock, MagicMock]
+    ) -> None:
+        """Profile-resolved lora_id must surface as options['lora'] downstream."""
+        client, registry, adapter = lora_client
+
+        response = client.post(
+            "/v1/encode/test-model",
+            json={
+                "items": [{"text": "Hello"}],
+                "params": {"options": {"profile": "us-regulatory"}},
+            },
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+
+        # The LoRA ensure-loaded path must have been invoked with the resolved id.
+        registry.ensure_lora_loaded_async.assert_called_once_with("test-model", "org/test-lora")
+
+        # The adapter must receive options carrying both lora_id (legacy / profile
+        # surface) and lora (worker-batcher routing key) with matching values.
+        assert adapter.encode.call_count == 1
+        forwarded_options = adapter.encode.call_args.kwargs["options"]
+        assert forwarded_options.get("lora_id") == "org/test-lora"
+        assert forwarded_options.get("lora") == "org/test-lora", (
+            "options['lora'] must be set so the worker batcher routes to the "
+            "LoRA-specific batch instead of base model weights (issue #94)."
+        )
+
+    def test_request_level_lora_id_is_mapped_to_lora(
+        self, lora_client: tuple[TestClient, MagicMock, MagicMock]
+    ) -> None:
+        """A request-level options.lora_id override is also mapped to lora."""
+        client, registry, adapter = lora_client
+
+        response = client.post(
+            "/v1/encode/test-model",
+            json={
+                "items": [{"text": "Hello"}],
+                "params": {"options": {"lora_id": "org/override-lora"}},
+            },
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+
+        registry.ensure_lora_loaded_async.assert_called_once_with("test-model", "org/override-lora")
+        forwarded_options = adapter.encode.call_args.kwargs["options"]
+        assert forwarded_options.get("lora") == "org/override-lora"
+
+    def test_no_lora_id_does_not_set_lora_key(self, lora_client: tuple[TestClient, MagicMock, MagicMock]) -> None:
+        """Without a LoRA, options['lora'] must remain unset (no spurious routing)."""
+        client, registry, adapter = lora_client
+
+        response = client.post(
+            "/v1/encode/test-model",
+            json={"items": [{"text": "Hello"}]},
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+
+        registry.ensure_lora_loaded_async.assert_not_called()
+        forwarded_options = adapter.encode.call_args.kwargs["options"]
+        assert "lora" not in forwarded_options
+        assert "lora_id" not in forwarded_options
+
+    def test_lora_loading_returns_503_and_does_not_invoke_adapter(self, mock_adapter: MagicMock) -> None:
+        """When the LoRA is still loading, the request must short-circuit with 503.
+
+        Locks in the invariant that the lora_id -> lora mapping is reachable
+        only on the success path: a future refactor that moves the assignment
+        above the early-return must not silently start dispatching requests
+        whose LoRA is not ready.
+        """
+        registry = self._make_lora_registry(mock_adapter, lora_state=(False, True))
+        app = FastAPI()
+        app.include_router(encode_router)
+        app.state.registry = registry
+        client = TestClient(app)
+
+        response = client.post(
+            "/v1/encode/test-model",
+            json={
+                "items": [{"text": "Hello"}],
+                "params": {"options": {"profile": "us-regulatory"}},
+            },
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "LORA_LOADING"
+        assert response.headers.get("Retry-After") == "1"
+        registry.ensure_lora_loaded_async.assert_called_once_with("test-model", "org/test-lora")
+        mock_adapter.encode.assert_not_called()
+
+    def test_lora_load_failure_returns_500_and_does_not_invoke_adapter(self, mock_adapter: MagicMock) -> None:
+        """When the LoRA load has failed (not ready, not loading), respond 500 INFERENCE_ERROR.
+
+        Complements ``test_lora_loading_returns_503_and_does_not_invoke_adapter``
+        by exercising the second early-return branch in the endpoint: the
+        adapter must not be invoked on a failed load, and no Retry-After hint
+        is offered (this is a terminal failure, not a transient one).
+        """
+        registry = self._make_lora_registry(mock_adapter, lora_state=(False, False))
+        app = FastAPI()
+        app.include_router(encode_router)
+        app.state.registry = registry
+        client = TestClient(app)
+
+        response = client.post(
+            "/v1/encode/test-model",
+            json={
+                "items": [{"text": "Hello"}],
+                "params": {"options": {"profile": "us-regulatory"}},
+            },
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 500
+        assert response.json()["detail"]["code"] == "INFERENCE_ERROR"
+        assert response.headers.get("Retry-After") != "1"
+        registry.ensure_lora_loaded_async.assert_called_once_with("test-model", "org/test-lora")
+        mock_adapter.encode.assert_not_called()

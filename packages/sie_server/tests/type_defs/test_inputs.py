@@ -7,6 +7,7 @@ for TypedDict types (not supported in Python 3.12+).
 from sie_server.types.inputs import (
     Item,
     is_audio_input,
+    is_document_input,
     is_image_input,
     is_item,
     is_video_input,
@@ -98,6 +99,37 @@ class TestIsVideoInput:
         assert not is_video_input(None)
 
 
+class TestIsDocumentInput:
+    """Tests for is_document_input type guard."""
+
+    def test_valid_with_data_only(self) -> None:
+        """Minimal valid DocumentInput with just data."""
+        assert is_document_input({"data": b"%PDF-1.4"})
+
+    def test_valid_full(self) -> None:
+        """Full DocumentInput with format hint."""
+        assert is_document_input({"data": b"%PDF-1.4", "format": "pdf"})
+
+    def test_valid_with_empty_bytes(self) -> None:
+        """Empty bytes is still valid (validation happens elsewhere)."""
+        assert is_document_input({"data": b""})
+
+    def test_invalid_missing_data(self) -> None:
+        """Missing data key should fail."""
+        assert not is_document_input({})
+        assert not is_document_input({"format": "pdf"})
+
+    def test_invalid_data_wrong_type(self) -> None:
+        """Data must be bytes."""
+        assert not is_document_input({"data": "string"})
+        assert not is_document_input({"data": None})
+
+    def test_invalid_not_dict(self) -> None:
+        """Must be a dict."""
+        assert not is_document_input(None)
+        assert not is_document_input(b"raw bytes")
+
+
 class TestIsItem:
     """Tests for is_item type guard."""
 
@@ -113,6 +145,10 @@ class TestIsItem:
         """Item with images list."""
         assert is_item({"images": [{"data": b"img"}]})
 
+    def test_valid_with_document(self) -> None:
+        """Item with a document payload."""
+        assert is_item({"document": {"data": b"%PDF-1.4", "format": "pdf"}})
+
     def test_valid_full(self) -> None:
         """Full Item with all fields."""
         assert is_item(
@@ -120,6 +156,7 @@ class TestIsItem:
                 "id": "item1",
                 "text": "hello",
                 "images": [{"data": b"img"}],
+                "document": {"data": b"%PDF-1.4", "format": "pdf"},
                 "metadata": {"key": "value"},
             }
         )
@@ -128,6 +165,7 @@ class TestIsItem:
         """Item Struct instances are valid."""
         assert is_item(Item(text="hello"))
         assert is_item(Item())
+        assert is_item(Item(document={"data": b"%PDF-1.4", "format": "pdf"}))
 
     def test_invalid_not_dict_or_struct(self) -> None:
         """Must be a dict or Item Struct."""

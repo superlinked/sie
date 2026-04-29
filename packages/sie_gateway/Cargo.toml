@@ -1,0 +1,78 @@
+[package]
+name = "sie-gateway"
+version = "0.3.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "sie-gateway"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+prometheus = { version = "0.13", features = ["process"] }
+thiserror = "2"
+dashmap = "6"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+bytes = "1"
+
+# Phase 4: Model registry + hot reload
+arc-swap = "1"
+sha2 = "0.10"
+notify = "6"
+
+# Phase 5: Auth
+subtle = "2"
+
+# Phase 6: Kubernetes discovery
+kube = { version = "0.98", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.24", features = ["latest"] }
+rand = "0.8"
+
+# Phase 7: Pool management (chrono for DateTime)
+chrono = { version = "0.4", features = ["serde"] }
+
+# Phase 11: Request coalescing (MD5 for params hash)
+md-5 = "0.10"
+
+# Phase 8: NATS integration
+async-nats = "0.38"
+uuid = { version = "1", features = ["v4", "v7"] }
+
+# Phase 10: Queue mode (msgpack serialization)
+rmp-serde = "1"
+rmp = "0.8"
+rmpv = { version = "1", features = ["with-serde"] }
+
+# Async traits and filesystem locking
+async-trait = "0.1"
+fs2 = "0.4"
+serde_bytes = "0.11"
+percent-encoding = "2"
+
+# Cloud config store backends (opt-in)
+object_store = { version = "0.11", optional = true, features = ["aws", "gcp"] }
+url = { version = "2", optional = true }
+
+[features]
+default = []
+cloud-storage = ["dep:object_store", "dep:url"]
+
+[dev-dependencies]
+tempfile = "3"
+http = "1"
+tower = { version = "0.5", features = ["util"] }
+wiremock = "0.6"

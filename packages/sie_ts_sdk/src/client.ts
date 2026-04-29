@@ -53,7 +53,6 @@ import {
   SDK_VERSION_HEADER,
   SERVER_VERSION_HEADER,
 } from "./internal/constants.js";
-import { SDK_VERSION } from "./version.js";
 import {
   getErrorCode,
   getRetryAfter,
@@ -78,6 +77,7 @@ import type {
   ScoreResult,
   StatusMessage,
 } from "./types.js";
+import { SDK_VERSION } from "./version.js";
 
 /** Helper to sleep for a given number of milliseconds */
 function sleep(ms: number): Promise<void> {
@@ -110,7 +110,7 @@ const _LEASE_RENEWAL_MAX_RETRIES = 5;
  *
  * @example Resource pool usage
  * ```typescript
- * const client = new SIEClient("http://router:8080");
+ * const client = new SIEClient("http://gateway:8080");
  *
  * // Create a dedicated pool
  * await client.createPool("eval-bench", { l4: 2 });
@@ -333,9 +333,9 @@ export class SIEClient {
   }
 
   /**
-   * Stream real-time status updates from a worker or router.
+   * Stream real-time status updates from a worker or gateway.
    *
-   * @param mode - "cluster" uses router /ws/cluster-status, "worker" uses /ws/status.
+   * @param mode - "cluster" uses gateway /ws/cluster-status, "worker" uses /ws/status.
    *               "auto" detects the endpoint via /health.
    */
   async *watch(mode: "auto" | "cluster" | "worker" = "auto"): AsyncGenerator<StatusMessage> {
@@ -568,7 +568,7 @@ export class SIEClient {
    * Close the client and cleanup resources.
    *
    * Stops pool lease renewal timers. Note that pools are not deleted
-   * automatically - they are garbage collected by the router after inactivity.
+   * automatically - they are garbage collected by the gateway after inactivity.
    * This allows pool reuse if the client reconnects.
    */
   async close(): Promise<void> {
@@ -885,7 +885,7 @@ export class SIEClient {
   /**
    * Get current cluster capacity information.
    *
-   * Queries the router's /health endpoint for cluster state. Useful for
+   * Queries the gateway's /health endpoint for cluster state. Useful for
    * checking if specific GPU types are available before sending requests.
    *
    * @param gpu - Optional filter to check specific GPU type availability
@@ -908,11 +908,11 @@ export class SIEClient {
     const response = await this.requestJson("/health");
     const data = (await response.json()) as { type?: string };
 
-    // Check if this is a router (has 'type': 'router') or worker
-    if (data.type !== "router") {
+    // Check if this is a gateway (has 'type': 'gateway') or worker
+    if (data.type !== "gateway") {
       throw new RequestError(
-        "getCapacity() requires a router endpoint. This appears to be a worker.",
-        "not_router",
+        "getCapacity() requires a gateway endpoint. This appears to be a worker.",
+        "not_gateway",
         400,
       );
     }
@@ -923,7 +923,7 @@ export class SIEClient {
   /**
    * Wait for GPU capacity to become available.
    *
-   * Polls the router until workers with the specified GPU type are online.
+   * Polls the gateway until workers with the specified GPU type are online.
    * This is useful for pre-warming the cluster before running benchmarks.
    *
    * @param gpu - GPU type to wait for (e.g., "l4", "a100-80gb")
@@ -983,7 +983,15 @@ export class SIEClient {
   }
 
   /**
-   * Make a msgpack HTTP request with retry logic for 202 and LoRA loading.
+   * Make a msgpack HTTP request with retry logic.
+   *
+   * Retried (only when `waitForCapacity: true`, capped by `provisionTimeout`):
+   *  - 202 Accepted (provisioning)
+   *  - 503 `MODEL_LOADING` / `LORA_LOADING` / no error code (scale-from-zero)
+   *  - `SIEConnectionError` with `kind === "connect"` (issue #95)
+   *
+   * `kind === "timeout"` is NOT retried — would extend the user-visible
+   * timeout from `timeout` to `provisionTimeout`.
    */
   private async requestWithRetry(
     path: string,
@@ -1000,7 +1008,22 @@ export class SIEClient {
     let loraRetries = 0;
 
     while (true) {
-      const response = await this.request(path, body, pool, gpu);
+      let response: Response;
+      try {
+        response = await this.request(path, body, pool, gpu);
+      } catch (err) {
+        // Only retry connect-time failures; see docstring for rationale.
+        if (waitForCapacity && err instanceof SIEConnectionError && err.kind === "connect") {
+          const elapsed = Date.now() - startTime;
+          if (elapsed < this.provisionTimeout) {
+            const remaining = this.provisionTimeout - elapsed;
+            const delay = Math.min(DEFAULT_RETRY_DELAY, remaining);
+            await sleep(delay);
+            continue;
+          }
+        }
+        throw err;
+      }
 
       // Handle 202 (provisioning) - capacity not available
       if (response.status === HTTP_ACCEPTED) {
@@ -1073,6 +1096,20 @@ export class SIEClient {
           await sleep(actualDelay);
           continue;
         }
+
+        // Generic 503 fall-through (router/gateway scale-from-zero).
+        // New code-specific 503 branches MUST go ABOVE this block.
+        if (waitForCapacity) {
+          const elapsed = Date.now() - startTime;
+          if (elapsed < this.provisionTimeout) {
+            const retryAfter = getRetryAfter(response);
+            const delay = retryAfter ?? DEFAULT_RETRY_DELAY;
+            const remaining = this.provisionTimeout - elapsed;
+            const actualDelay = Math.min(delay, remaining);
+            await sleep(actualDelay);
+            continue;
+          }
+        }
       }
 
       // Handle other errors
@@ -1133,10 +1170,10 @@ export class SIEClient {
       return response;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
-        throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`);
+        throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`, "timeout");
       }
       if (error instanceof TypeError) {
-        throw new SIEConnectionError(`Connection failed: ${error.message}`);
+        throw new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
       }
       throw error;
     } finally {
@@ -1177,10 +1214,10 @@ export class SIEClient {
       return response;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
-        throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`);
+        throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`, "timeout");
       }
       if (error instanceof TypeError) {
-        throw new SIEConnectionError(`Connection failed: ${error.message}`);
+        throw new SIEConnectionError(`Connection failed: ${error.message}`, "connect");
       }
       throw error;
     } finally {
@@ -1242,7 +1279,7 @@ export class SIEClient {
       }
 
       const data = (await response.json()) as { type?: string };
-      return data.type === "router" ? "cluster" : "worker";
+      return data.type === "gateway" ? "cluster" : "worker";
     } catch {
       return "worker";
     } finally {

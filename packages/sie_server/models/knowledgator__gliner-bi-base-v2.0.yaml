@@ -1,0 +1,22 @@
+sie_id: knowledgator/gliner-bi-base-v2.0
+hf_id: knowledgator/gliner-bi-base-v2.0
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 1024
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliner_bi:GLiNERBiAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        threshold: 0.3
+        precompute_labels: true

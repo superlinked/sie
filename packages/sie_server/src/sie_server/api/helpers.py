@@ -10,6 +10,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from sie_server.api.serialization import MsgPackResponse, _convert_for_json
+from sie_server.core.oom import is_oom_error
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError
 from sie_server.observability.metrics import record_request
@@ -20,6 +21,39 @@ if TYPE_CHECKING:
     from opentelemetry.trace import Span
 
     from sie_server.core.registry import ModelRegistry
+
+# Default Retry-After (seconds) returned alongside RESOURCE_EXHAUSTED when no
+# engine-config override is supplied. Kept small enough that an SDK using the
+# default backoff (5 → 10 → 20 s) will typically land within the LRU-eviction
+# + recovery window. Operators can override per-cluster via
+# ``engine_config.oom_recovery.retry_after_s`` (env: SIE_OOM_RECOVERY__RETRY_AFTER_S).
+_OOM_DEFAULT_RETRY_AFTER_S = 5
+
+
+def oom_retry_after_from_registry(registry: "ModelRegistry | None") -> int:
+    """Resolve the OOM ``Retry-After`` value from a registry's engine config.
+
+    Falls back to ``_OOM_DEFAULT_RETRY_AFTER_S`` when:
+
+    - The registry is ``None`` (early app startup, edge tests).
+    - The registry has no engine config attached (legacy embed-only test
+      harnesses).
+    - The chained attribute access does not yield an ``int`` — protects
+      tests that use ``MagicMock(spec=ModelRegistry)`` without explicitly
+      stubbing ``engine_config``. Without this fallback the ``Retry-After``
+      header would receive ``str(<Mock>)``, breaking the SDK's parsing.
+
+    Centralised so the three API route handlers stay one-liners.
+    """
+    if registry is None or registry.engine_config is None:
+        return _OOM_DEFAULT_RETRY_AFTER_S
+    value = registry.engine_config.oom_recovery.retry_after_s
+    if not isinstance(value, int):
+        # Defensive: a misconfigured test fixture / future schema change
+        # would otherwise silently emit a garbage Retry-After header.
+        return _OOM_DEFAULT_RETRY_AFTER_S
+    return value
+
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +348,7 @@ class InferenceErrorHandler:
         endpoint: str,
         span: "Span",
         ctx: RequestContext | None = None,
+        oom_retry_after_s: int = _OOM_DEFAULT_RETRY_AFTER_S,
     ) -> None:
         """Initialize handler.
 
@@ -322,11 +357,17 @@ class InferenceErrorHandler:
             endpoint: Endpoint name for metrics (encode, score, extract).
             span: OpenTelemetry span for error attributes.
             ctx: Optional request context for structured logging.
+            oom_retry_after_s: Value for the ``Retry-After`` header on
+                ``RESOURCE_EXHAUSTED`` (503) responses. Defaults to the
+                module constant; route handlers pass
+                ``registry.engine_config.oom_recovery.retry_after_s`` so
+                operators can tune it per cluster.
         """
         self.model = model
         self.endpoint = endpoint
         self.span = span
         self.ctx = ctx
+        self.oom_retry_after_s = oom_retry_after_s
 
     def _log_kwargs(self) -> dict[str, Any]:
         """Build kwargs for record_request from context."""
@@ -379,13 +420,39 @@ class InferenceErrorHandler:
     def handle_inference_error(self, error: Exception, operation: str = "Inference") -> HTTPException:
         """Handle generic inference errors.
 
+        OOM errors are mapped to 503 ``RESOURCE_EXHAUSTED`` with a
+        ``Retry-After`` header so the SDK can auto-retry. Everything else
+        keeps the legacy 500 ``INFERENCE_ERROR`` mapping.
+
         Args:
             error: Exception from inference.
             operation: Operation name for error message (Inference, Extraction, Scoring).
 
         Returns:
-            HTTPException with 500 status.
+            HTTPException with 503 (OOM) or 500 (other).
         """
+        # Recognise both the worker's ``ResourceExhaustedError`` (recovery
+        # exhausted) and any OOM that escaped without recovery (recovery
+        # disabled or a code path the executor doesn't wrap). Both deserve
+        # the same 503 treatment.
+        if is_oom_error(error):
+            logger.warning(
+                "%s OOM for model %s, returning 503 RESOURCE_EXHAUSTED: %s",
+                operation,
+                self.model,
+                error,
+            )
+            self.span.set_attribute("error", "resource_exhausted")
+            record_request(model=self.model, endpoint=self.endpoint, status="error", **self._log_kwargs())
+            return HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": ErrorCode.RESOURCE_EXHAUSTED.value,
+                    "message": f"{operation} temporarily unavailable due to resource pressure: {error}",
+                },
+                headers={"Retry-After": str(self.oom_retry_after_s)},
+            )
+
         logger.exception("%s error for model %s", operation, self.model)
         self.span.set_attribute("error", "inference_error")
         record_request(model=self.model, endpoint=self.endpoint, status="error", **self._log_kwargs())

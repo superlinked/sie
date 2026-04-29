@@ -160,6 +160,14 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
 
         logger.debug("Qwen2 model dense_dim: %d", self._dense_dim)
 
+        # Clamp configured max_seq_length to whatever the tokenizer/model
+        # actually support to avoid OOB position embeddings on long inputs.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_seq_length,
+        )
+
     def _load_dense_projection(self, device: str) -> None:
         """Load the sentence-transformers dense projection layer from HuggingFace."""
         import safetensors.torch

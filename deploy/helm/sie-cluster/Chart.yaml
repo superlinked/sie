@@ -1,11 +1,11 @@
 apiVersion: v2
 name: sie-cluster
 description: >-
-  SIE (Search Inference Engine) Kubernetes deployment with router, GPU workers,
+  SIE (Search Inference Engine) Kubernetes deployment with gateway, GPU workers,
   and observability
 type: application
-version: 0.2.0  # x-release-please-version
-appVersion: v0.2.0  # x-release-please-version
+version: 0.3.0  # x-release-please-version
+appVersion: v0.3.0  # x-release-please-version
 keywords:
   - inference
   - embedding

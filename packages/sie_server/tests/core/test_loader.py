@@ -258,6 +258,23 @@ class TestBuildAdapterKwargs:
         # Model's bfloat16 should override default float16
         assert kwargs["compute_precision"] == "bfloat16"
 
+    def test_package_backed_passes_none_for_model_path(self) -> None:
+        """package_backed adapters get model_name_or_path=None — they ship their own weights."""
+        profile = ProfileConfig(
+            adapter_path="sie_server.adapters.docling:DoclingAdapter",
+            max_batch_tokens=1,
+        )
+        config = ModelConfig(
+            sie_id="docling",
+            package_backed=True,
+            tasks=Tasks(extract=ExtractTask()),
+            profiles={"default": profile},
+        )
+
+        kwargs = _build_adapter_kwargs(config, "float16")
+
+        assert kwargs["model_name_or_path"] is None
+
 
 class TestLoadAdapter:
     """Tests for load_adapter."""
@@ -316,7 +333,7 @@ class MyCustomAdapter(ModelAdapter):
 
         adapter = load_adapter(config, tmp_path, device="cpu")
 
-        assert adapter.model_path == "org/custom"  # type: ignore[attr-defined]
+        assert adapter.model_path == "org/custom"  # type: ignore
 
     def test_invalid_adapter_path(self, tmp_path: Path) -> None:
         """Raises error for invalid adapter path."""

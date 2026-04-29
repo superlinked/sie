@@ -10,6 +10,7 @@ from sie_server.api.helpers import (
     RequestParser,
     ResponseBuilder,
     extract_request_context,
+    oom_retry_after_from_registry,
 )
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.serialization import MsgPackResponse
@@ -240,7 +241,13 @@ async def score(
         items = request.items
 
         # Score using worker with batching
-        error_handler = InferenceErrorHandler(model, "score", span, ctx=ctx)
+        error_handler = InferenceErrorHandler(
+            model,
+            "score",
+            span,
+            ctx=ctx,
+            oom_retry_after_s=oom_retry_after_from_registry(registry),
+        )
         try:
             worker_result = await _score_via_worker(
                 registry,
@@ -251,7 +258,7 @@ async def score(
                 options=options,
             )
             # Format typed output to extract scores
-            score_output: ScoreOutput = worker_result.output  # type: ignore[assignment]
+            score_output: ScoreOutput = worker_result.output  # type: ignore
             scores = [float(score_output.scores[i]) for i in range(score_output.batch_size)]
             timing = worker_result.timing
         except QueueFullError as e:

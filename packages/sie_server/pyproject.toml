@@ -1,6 +1,6 @@
 [project]
 name = "sie-server"
-version = "0.2.0"
+version = "0.3.0"
 description = "Search Inference Engine - GPU inference server for search workloads"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
@@ -26,6 +26,8 @@ dependencies = [
     "gliner>=0.2,<1",
     "glirel>=1.0,<2",
     "gliclass>=0.1,<1",
+    # Docling — composite-document parser (PDF/DOCX/HTML) for extract()
+    "docling>=2,<3",
     "loguru>=0.7,<1",
     # Image processing
     "pillow>=11,<12",

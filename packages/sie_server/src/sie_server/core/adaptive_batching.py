@@ -98,7 +98,7 @@ class BatchEfficiencyTracker:
 class AdaptiveBatchState:
     """Immutable snapshot of adaptive controller state.
 
-    Used by WebSocket status and router health to expose controller
+    Used by WebSocket status and gateway health to expose controller
     internals without coupling to private fields.
     """
 

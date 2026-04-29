@@ -20,12 +20,22 @@ class ImageInputModel(BaseModel):
     format: str | None = Field(default=None, description="Image format hint: 'jpeg', 'png', etc.")
 
 
+class DocumentInputModel(BaseModel):
+    """Document input for composite-document extractors (PDF, DOCX, HTML, ...)."""
+
+    data: bytes = Field(..., description="Document bytes (raw file content)")
+    format: str | None = Field(default=None, description="Document format hint: 'pdf', 'docx', 'html', etc.")
+
+
 class ItemModel(BaseModel):
     """A single item to encode."""
 
     id: str | None = Field(default=None, description="Optional identifier for this item. Returned in response.")
     text: str | None = Field(default=None, description="Text content to encode", examples=["Hello, world!"])
     images: list[ImageInputModel] | None = Field(default=None, description="Images for multimodal models")
+    document: DocumentInputModel | None = Field(
+        default=None, description="Document for composite-document extractors (PDF, DOCX, HTML, ...)"
+    )
     metadata: dict[str, Any] | None = Field(default=None, description="Arbitrary metadata. Returned in response.")
 
     model_config = {"extra": "allow"}

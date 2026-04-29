@@ -75,6 +75,9 @@ docs/_build/
 .pybuilder/
 target/
 
+# Rust
+*.rs.bk
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
@@ -247,6 +250,7 @@ Thumbs.db
 
 # kilocode
 .kilo/
+.kilocode/
 
 # Worktree metadata
 .base-branch

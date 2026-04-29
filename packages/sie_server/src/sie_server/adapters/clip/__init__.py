@@ -207,7 +207,7 @@ class CLIPAdapter(BaseAdapter):
             pil_images = self._load_images(item)
             return self._encode_images(pil_images)
         # Text-only encoding (text is guaranteed non-None if no images)
-        return self._encode_text(item.text)  # type: ignore[arg-type]
+        return self._encode_text(item.text)  # type: ignore
 
     def _load_images(self, item: Item) -> list[Image.Image]:
         """Load images from item into PIL Images.

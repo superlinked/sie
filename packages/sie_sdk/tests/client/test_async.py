@@ -98,7 +98,7 @@ class TestSIEAsyncClientInit:
         client = SIEAsyncClient("http://localhost:8080", max_concurrency=10)
         assert client._semaphore is not None
         # asyncio.Semaphore internal value check
-        assert client._semaphore._value == 10  # type: ignore[attr-defined]
+        assert client._semaphore._value == 10  # type: ignore
         await client.close()
 
     @pytest.mark.asyncio
@@ -230,7 +230,7 @@ class TestAsyncEncode:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
         result = await client.encode("bge-m3", {"id": "doc-1", "text": "hello"})
 
         assert isinstance(result, dict)
@@ -252,7 +252,7 @@ class TestAsyncEncode:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
         results = await client.encode("bge-m3", [{"text": "hello"}, {"text": "world"}])
 
         assert isinstance(results, list)
@@ -282,7 +282,7 @@ class TestAsyncListModels:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._get = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._get = AsyncMock(return_value=resp)  # type: ignore
         models = await client.list_models()
 
         assert len(models) == 1
@@ -307,7 +307,7 @@ class TestAsyncScore:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
         result = await client.score(
             "bge-reranker-v2",
             query={"text": "What is ML?"},
@@ -339,7 +339,7 @@ class TestAsyncExtract:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
         result = await client.extract(
             "gliner",
             {"text": "Apple founded by Steve Jobs."},
@@ -365,7 +365,7 @@ class TestAsyncExtract:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
         results = await client.extract(
             "gliner",
             [{"text": "Apple info"}, {"text": "Tesla info"}],
@@ -374,6 +374,31 @@ class TestAsyncExtract:
 
         assert isinstance(results, list)
         assert len(results) == 2
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_extract_converts_document_to_wire_format(self) -> None:
+        """Async extract converts document inputs and returns parsed `data`."""
+        resp = _make_msgpack_response(
+            {
+                "model": "docling",
+                "items": [{"entities": [], "data": {"document": {"pages": []}}}],
+            }
+        )
+
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(return_value=resp)  # type: ignore
+        result = await client.extract(
+            "docling",
+            {"document": b"%PDF-1.4 fake content"},
+        )
+
+        body = client._post.call_args.kwargs["data"]
+        request_body = msgpack.unpackb(body, raw=False)
+        wire_doc = request_body["items"][0]["document"]
+        assert wire_doc["data"] == b"%PDF-1.4 fake content"
+        assert wire_doc["format"] is None
+        assert result["data"] == {"document": {"pages": []}}
         await client.close()
 
 
@@ -433,8 +458,10 @@ class TestAsyncErrorHandling:
 
     @pytest.mark.asyncio
     async def test_connection_error(self) -> None:
+        # `wait_for_capacity=False` opts out of the issue-#95 retry path;
+        # see test_transport_error_retry.py for retry coverage.
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(  # type: ignore[method-assign]
+        client._post = AsyncMock(  # type: ignore
             side_effect=aiohttp.ClientConnectorError(
                 connection_key=MagicMock(),
                 os_error=OSError("Connection refused"),
@@ -442,13 +469,13 @@ class TestAsyncErrorHandling:
         )
 
         with pytest.raises(SIEConnectionError, match="Failed to connect"):
-            await client.encode("bge-m3", {"text": "hello"})
+            await client.encode("bge-m3", {"text": "hello"}, wait_for_capacity=False)
         await client.close()
 
     @pytest.mark.asyncio
     async def test_timeout_error(self) -> None:
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(side_effect=TimeoutError("Timeout"))  # type: ignore[method-assign]
+        client._post = AsyncMock(side_effect=TimeoutError("Timeout"))  # type: ignore
 
         with pytest.raises(SIEConnectionError, match="timed out"):
             await client.encode("bge-m3", {"text": "hello"}, wait_for_capacity=False)
@@ -456,20 +483,27 @@ class TestAsyncErrorHandling:
 
     @pytest.mark.asyncio
     async def test_broad_client_error(self) -> None:
-        """Non-connector aiohttp.ClientError (e.g. ServerDisconnectedError) is caught."""
+        """Mid-flight `aiohttp.ServerDisconnectedError` is now in the retryable
+        transport-error set (see `_RETRYABLE_TRANSPORT_ERRORS` in `async_.py`).
+        With `wait_for_capacity=False` it surfaces immediately as
+        `SIEConnectionError` with the new "Connection lost mid-request"
+        message; with the default `wait_for_capacity=True` it would retry
+        until the provision timeout, which is covered by
+        `test_transport_error_retry.py`.
+        """
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(  # type: ignore[method-assign]
+        client._post = AsyncMock(  # type: ignore
             side_effect=aiohttp.ServerDisconnectedError(),
         )
 
-        with pytest.raises(SIEConnectionError, match="Failed to connect"):
-            await client.encode("bge-m3", {"text": "hello"})
+        with pytest.raises(SIEConnectionError, match="Connection lost mid-request"):
+            await client.encode("bge-m3", {"text": "hello"}, wait_for_capacity=False)
         await client.close()
 
     @pytest.mark.asyncio
     async def test_connection_error_on_create_pool(self) -> None:
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(  # type: ignore[method-assign]
+        client._post = AsyncMock(  # type: ignore
             side_effect=aiohttp.ClientConnectorError(
                 connection_key=MagicMock(),
                 os_error=OSError("Connection refused"),
@@ -490,7 +524,7 @@ class TestAsyncErrorHandling:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
 
         with pytest.raises(RequestError) as exc_info:
             await client.encode("bge-m3", {"text": "hello"})
@@ -507,7 +541,7 @@ class TestAsyncErrorHandling:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
 
         with pytest.raises(ServerError) as exc_info:
             await client.encode("bge-m3", {"text": "hello"})
@@ -527,7 +561,7 @@ class TestAsyncPoolOperations:
             status_code=200,
         )
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
 
         await client.create_pool("my-pool", gpus={"l4": 1})
 
@@ -544,7 +578,7 @@ class TestAsyncPoolOperations:
             status_code=200,
         )
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
 
         await client.create_pool("my-pool", gpus={"l4": 1})
         await client.create_pool("my-pool", gpus={"l4": 1})
@@ -555,7 +589,7 @@ class TestAsyncPoolOperations:
     @pytest.mark.asyncio
     async def test_create_pool_connection_error_cleans_sentinel(self) -> None:
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(  # type: ignore[method-assign]
+        client._post = AsyncMock(  # type: ignore
             side_effect=aiohttp.ClientConnectorError(
                 connection_key=MagicMock(),
                 os_error=OSError("Connection refused"),
@@ -575,7 +609,7 @@ class TestAsyncPoolOperations:
             status_code=400,
         )
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp)  # type: ignore
 
         with pytest.raises(PoolError, match="Invalid machine profile"):
             await client.create_pool("my-pool", gpus={"l4": 1})
@@ -600,7 +634,7 @@ class TestAsyncPoolOperations:
             status_code=200,
         )
         client = SIEAsyncClient("http://localhost:8080")
-        client._get = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._get = AsyncMock(return_value=resp)  # type: ignore
 
         result = await client.get_pool("my-pool")
 
@@ -612,7 +646,7 @@ class TestAsyncPoolOperations:
     async def test_get_pool_not_found_returns_none(self) -> None:
         resp = _make_json_response({}, status_code=404)
         client = SIEAsyncClient("http://localhost:8080")
-        client._get = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._get = AsyncMock(return_value=resp)  # type: ignore
 
         result = await client.get_pool("missing-pool")
 
@@ -622,7 +656,7 @@ class TestAsyncPoolOperations:
     @pytest.mark.asyncio
     async def test_get_pool_connection_error(self) -> None:
         client = SIEAsyncClient("http://localhost:8080")
-        client._get = AsyncMock(  # type: ignore[method-assign]
+        client._get = AsyncMock(  # type: ignore
             side_effect=aiohttp.ClientConnectorError(
                 connection_key=MagicMock(),
                 os_error=OSError("Connection refused"),
@@ -637,7 +671,7 @@ class TestAsyncPoolOperations:
     async def test_delete_pool_success(self) -> None:
         resp = _make_json_response({}, status_code=200)
         client = SIEAsyncClient("http://localhost:8080")
-        client._delete = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._delete = AsyncMock(return_value=resp)  # type: ignore
 
         result = await client.delete_pool("my-pool")
 
@@ -648,7 +682,7 @@ class TestAsyncPoolOperations:
     async def test_delete_pool_not_found(self) -> None:
         resp = _make_json_response({}, status_code=404)
         client = SIEAsyncClient("http://localhost:8080")
-        client._delete = AsyncMock(return_value=resp)  # type: ignore[method-assign]
+        client._delete = AsyncMock(return_value=resp)  # type: ignore
 
         result = await client.delete_pool("missing-pool")
 
@@ -658,7 +692,7 @@ class TestAsyncPoolOperations:
     @pytest.mark.asyncio
     async def test_delete_pool_connection_error(self) -> None:
         client = SIEAsyncClient("http://localhost:8080")
-        client._delete = AsyncMock(  # type: ignore[method-assign]
+        client._delete = AsyncMock(  # type: ignore
             side_effect=aiohttp.ClientConnectorError(
                 connection_key=MagicMock(),
                 os_error=OSError("Connection refused"),

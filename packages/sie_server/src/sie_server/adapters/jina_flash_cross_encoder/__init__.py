@@ -67,6 +67,13 @@ class JinaFlashCrossEncoderAdapter(FlashBaseAdapter):
         self._tokenizer: PreTrainedTokenizerFast | None = None
         self._device: str | None = None
         self._dtype: torch.dtype | None = None
+        # Resolved at load() to min(configured, tokenizer.model_max_length,
+        # model.config.max_position_embeddings). Used as a hard ceiling at
+        # tokenization time so runtime overrides cannot escape the clamp.
+        # Initialised to 0 so a pre-load read would zero-out tokenization
+        # rather than silently use the unclamped configured value; in
+        # practice every entry point goes through ``_check_loaded()`` first.
+        self._tokenizer_max_length: int = 0
 
     def load(self, device: str) -> None:
         """Load model weights onto the specified device."""
@@ -109,6 +116,17 @@ class JinaFlashCrossEncoderAdapter(FlashBaseAdapter):
             getattr(config, "use_flash_attn", "N/A"),
         )
 
+        # Clamp max_seq_length to whatever the tokenizer/model actually support.
+        # jina-reranker-v2-base-multilingual has model_max_length=1024 and
+        # max_position_embeddings=1024; a stale 8192 here would silently let
+        # over-long inputs through and crash the CUDA worker.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_seq_length,
+        )
+        self._tokenizer_max_length = self._max_seq_length
+
     def _resolve_dtype(self) -> torch.dtype:
         """Resolve compute dtype."""
         dtype_map = {
@@ -150,11 +168,12 @@ class JinaFlashCrossEncoderAdapter(FlashBaseAdapter):
             for item in items
         ]
 
-        # Batch tokenize with padding (model handles unpadding internally)
+        # Batch tokenize with padding (model handles unpadding internally).
+        # No runtime override on this path — use the ceiling resolved at load().
         encodings = self._tokenizer(
             [p[0] for p in pairs],
             [p[1] for p in pairs],
-            max_length=self._max_seq_length,
+            max_length=self._tokenizer_max_length,
             truncation=True,
             padding=True,
             return_tensors="pt",
@@ -204,7 +223,10 @@ class JinaFlashCrossEncoderAdapter(FlashBaseAdapter):
             raise RuntimeError(ERR_NOT_LOADED)
 
         opts = options or {}
-        max_length = opts.get("max_seq_length", self._max_seq_length)
+        # Hard-clamp to the tokenizer/model ceiling resolved at load time.
+        # Runtime overrides must not push past the model's positional capacity.
+        # Malformed overrides (None, strings, negatives) fall back to the ceiling.
+        max_length = self._coerce_runtime_max_length(opts.get("max_seq_length"), self._tokenizer_max_length)
 
         # Build (query, doc) pairs
         pairs = []

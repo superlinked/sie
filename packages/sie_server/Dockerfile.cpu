@@ -2,44 +2,31 @@
 # SIE Server - CPU-only Image (amd64 + arm64)
 # Build from repo root:
 #   docker build -f packages/sie_server/Dockerfile.cpu -t sie-server:cpu-default .
-#   docker build -f packages/sie_server/Dockerfile.cpu --build-arg BUNDLE=sglang -t sie-server:cpu-sglang .
+#   docker build -f packages/sie_server/Dockerfile.cpu --build-arg BUNDLE=transformers5 -t sie-server:cpu-transformers5 .
 #   docker buildx build --platform linux/amd64,linux/arm64 -f packages/sie_server/Dockerfile.cpu -t sie-server:cpu .
-#
-# For faster builds with cache mounts (requires BuildKit):
-#   DOCKER_BUILDKIT=1 docker build -f packages/sie_server/Dockerfile.cpu -t sie-server:cpu-default .
-#
-# Layer caching strategy:
-#   - Stage 1 (deps): Install all pip dependencies from pyproject.toml (cached unless deps change)
-#   - Stage 2 (builder): Copy source code and do editable install (quick, uses cached deps)
-#   This ensures code-only changes rebuild only Stage 2, not the slow pip install step.
 
 ARG BUNDLE=default
 
 # =============================================================================
-# Stage 1: Dependencies (changes rarely - cached for code-only changes)
+# Stage 1: Dependencies (pyproject.toml only, cached across code changes)
 # =============================================================================
-FROM ubuntu:22.04 AS deps
+FROM python:3.12-slim-bookworm AS deps
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_NO_CACHE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install Python 3.12 and build tools
+# build-essential + git are builder-only; they do NOT leak into the runtime stage.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    gnupg \
-    ca-certificates \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    python3.12-dev \
-    curl \
-    git \
     build-essential \
-    zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    curl \
+    git
 
-# Install uv - pin to specific version for reproducibility
 ARG UV_VERSION=0.9.28
 RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh \
     && mv /root/.local/bin/uv /bin/uv \
@@ -47,24 +34,17 @@ RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh \
 
 WORKDIR /app
 
-# UV environment variables for optimal builds
-ENV UV_NO_CACHE=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
-
-# Copy ONLY dependency specifications first (for layer caching)
+# Dependency specs first — this layer caches as long as pyproject.toml is unchanged.
 COPY packages/sie_sdk/pyproject.toml /tmp/sie_sdk/pyproject.toml
 COPY packages/sie_server/pyproject.toml ./pyproject.toml
 
-# Create minimal src directories so pip install -e works for dep resolution
+# Stub source trees so pip accepts the editable installs during dep resolution.
 RUN mkdir -p /tmp/sie_sdk/src/sie_sdk src/sie_server \
     && touch /tmp/sie_sdk/src/sie_sdk/__init__.py \
     && touch src/sie_server/__init__.py
 
-# Create venv and install dependencies only (without actual source code)
-# This layer is cached as long as pyproject.toml files don't change
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3.12 -m venv .venv \
+    python -m venv .venv \
     && .venv/bin/pip install --upgrade pip \
     && .venv/bin/pip install \
         --index-url https://download.pytorch.org/whl/cpu \
@@ -73,32 +53,55 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         -e ".[gpu-metrics]"
 
 # =============================================================================
-# Stage 2: Source code (changes often - quick rebuild)
+# Stage 2: Base - source install + shared-venv finalization (no BUNDLE)
 # =============================================================================
+# Bundle-agnostic: all base-stage layers are shared across bundles of this
+# platform in local BuildKit cache and in content-addressed registry layers.
 FROM deps AS base
 
-# Now copy the actual source code (this layer rebuilds on code changes)
 COPY packages/sie_sdk/src /tmp/sie_sdk/src
 COPY packages/sie_server/src src/
+COPY packages/sie_server/bundles bundles/
+COPY packages/sie_server/models models/
 
-# Re-install editable packages with actual source (quick, deps already installed)
+# Editable reinstall over the stub stage — keeps ./bundles lookups via CWD
+# working for `sie_server.cli resolve-deps`.
 RUN --mount=type=cache,target=/root/.cache/pip \
     .venv/bin/pip install --no-deps \
         -e /tmp/sie_sdk \
         -e .
 
+# Sanity-check shared venv imports — catches breakage introduced by the
+# shared-deps resolver.
+RUN .venv/bin/python -c "import torch; print(torch.__version__)"
+
+# Register bundle-libs on sys.path. Content is identical across bundles.
+RUN echo "import sys; sys.path.insert(0, '/app/bundle-libs')" \
+    > /app/.venv/lib/python3.12/site-packages/_sie_bundle.pth
+
+# .venv cleanup + stdlib trim — runs here so /app/.venv reaches its final
+# form BEFORE bundle divergence. Largest wins: torch/include, *.a static
+# libs, stripping shared objects. Keep bytecode (cold-start matters more
+# than size).
+RUN set -eux; \
+    cd /app/.venv/lib/python3.12/site-packages; \
+    find . -type d -name '__pycache__' -prune -exec rm -rf {} +; \
+    find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete; \
+    find . -type d -name 'tests' -prune -exec rm -rf {} +; \
+    rm -rf torch/test torch/utils/tensorboard torch/utils/bottleneck 2>/dev/null || true; \
+    find torch -type f -name '*.a' -delete 2>/dev/null || true; \
+    find . -type f -name 'RECORD' -path '*dist-info*' -delete; \
+    rm -rf /app/.venv/share/jupyter 2>/dev/null || true; \
+    rm -rf /usr/local/lib/python3.12/test /usr/local/lib/python3.12/idlelib 2>/dev/null || true; \
+    find /app/.venv -exec touch -h -d @0 {} + 2>/dev/null || true
+
 # =============================================================================
-# Stage 2: Builder - bundle-specific deps
+# Stage 3: Builder - bundle-specific deps
 # =============================================================================
 FROM base AS builder
 
 ARG BUNDLE
 
-# Resolve bundle-specific dependencies
-COPY packages/sie_server/bundles bundles/
-COPY packages/sie_server/models models/
-
-# Use --cpu flag to exclude CUDA-only dependencies (flash-attn, xformers)
 RUN .venv/bin/python -m sie_server.cli resolve-deps \
     --bundle "${BUNDLE}" \
     --models-dir models \
@@ -107,78 +110,83 @@ RUN .venv/bin/python -m sie_server.cli resolve-deps \
     && echo "Bundle ${BUNDLE} requirements:" \
     && cat /tmp/bundle-requirements.txt
 
-# Install bundle-specific deps
+# Bundle-specific deps land in a separate site-packages tree so the shared
+# venv layer stays byte-identical across bundles of the same platform.
+# Even if /tmp/bundle-requirements.txt is empty, create /app/bundle-libs so
+# the runtime `COPY --from` never fails.
 RUN --mount=type=cache,target=/root/.cache/pip \
+    mkdir -p /app/bundle-libs; \
     if [ -s /tmp/bundle-requirements.txt ]; then \
         .venv/bin/pip install \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
+            --target=/app/bundle-libs \
+            --no-compile \
             -r /tmp/bundle-requirements.txt; \
     fi
 
-# Clean up to reduce image size
-RUN find .venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true \
-    && find .venv -type f -name "*.pyc" -delete 2>/dev/null || true \
-    && find .venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true \
-    && find .venv -type d -name "test" -exec rm -rf {} + 2>/dev/null || true \
-    && rm -rf .venv/share/jupyter 2>/dev/null || true
+# bundle-libs cleanup (symmetric to the .venv cleanup in base).
+RUN set -eux; \
+    if [ -d /app/bundle-libs ]; then \
+        cd /app/bundle-libs; \
+        find . -type d -name '__pycache__' -prune -exec rm -rf {} +; \
+        find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete; \
+        find . -type d -name 'tests' -prune -exec rm -rf {} +; \
+        rm -rf torch/test torch/utils/tensorboard torch/utils/bottleneck 2>/dev/null || true; \
+        find torch -type f -name '*.a' -delete 2>/dev/null || true; \
+        find . -type f -name 'RECORD' -path '*dist-info*' -delete; \
+    fi; \
+    find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true
 
 # =============================================================================
-# Stage 2: Runtime
+# Stage 4: Runtime
 # =============================================================================
-FROM ubuntu:22.04 AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 
-ARG BUNDLE
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install Python 3.12 runtime
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    gnupg \
-    ca-certificates \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    libjpeg8 \
-    libpng16-16 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create non-root user
-RUN groupadd -g 1000 sie && useradd -u 1000 -g sie -m sie
-
-WORKDIR /app
-
-# Copy virtual environment from builder (with correct ownership to avoid chown layer)
-COPY --from=builder --chown=sie:sie /app/.venv /app/.venv
-
-# Copy source code (uv sync creates editable install with .pth pointing to /app/src)
-COPY --from=builder --chown=sie:sie /app/src /app/src
-
-# Copy sie-sdk source (installed as editable in /tmp)
-COPY --from=builder --chown=sie:sie /tmp/sie_sdk/src /tmp/sie_sdk/src
-
-# Copy model configs and bundles (needed for runtime model discovery)
-COPY --from=builder --chown=sie:sie /app/models /app/models
-COPY --from=builder --chown=sie:sie /app/bundles /app/bundles
-
-# Create directories for runtime
-RUN mkdir -p /app/evals /app/.cache/huggingface && chown -R sie:sie /app/evals /app/.cache
-
-# Labels
-LABEL org.opencontainers.image.title="SIE Server" \
-      org.opencontainers.image.description="Search Inference Engine - ${BUNDLE} bundle (CPU)" \
-      sie.bundle="${BUNDLE}"
-
-ENV PATH="/app/.venv/bin:$PATH" \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/app/.cache/huggingface \
     OMP_NUM_THREADS=4 \
-    MKL_NUM_THREADS=4 \
-    SIE_BUNDLE="${BUNDLE}"
+    MKL_NUM_THREADS=4
+
+# Only the shared libs torch + pillow actually dlopen at runtime.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    libjpeg62-turbo \
+    libpng16-16
+
+RUN groupadd -g 1000 sie && useradd -u 1000 -g sie -m sie
+
+WORKDIR /app
+
+# --link shared COPYs — produce independent layer tars without parent-dir
+# headers carrying a build-time mtime, so resulting layer digests match
+# across bundles of the same platform. Numeric --chown because --link has
+# no /etc/passwd visible (the sie user exists in the runtime FS but --link
+# layers are created in isolation).
+COPY --link --from=base --chown=1000:1000 /app/.venv /app/.venv
+COPY --link --from=base --chown=1000:1000 /app/src /app/src
+COPY --link --from=base --chown=1000:1000 /tmp/sie_sdk/src /tmp/sie_sdk/src
+COPY --link --from=base --chown=1000:1000 /app/models /app/models
+COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
+# Bundle-specific extras — last layer so shared layers above stay cached.
+COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
+
+RUN mkdir -p /app/evals /app/.cache/huggingface && chown -R sie:sie /app/evals /app/.cache
+
+# Declare BUNDLE arg only here, where it is first used (LABEL + ENV),
+# so every RUN/COPY layer above is bundle-agnostic in its cache key.
+ARG BUNDLE
+
+ENV SIE_BUNDLE="${BUNDLE}"
+
+LABEL org.opencontainers.image.title="SIE Server" \
+      org.opencontainers.image.description="Search Inference Engine - ${BUNDLE} bundle (CPU)" \
+      sie.bundle="${BUNDLE}"
 
 USER sie
 EXPOSE 8080

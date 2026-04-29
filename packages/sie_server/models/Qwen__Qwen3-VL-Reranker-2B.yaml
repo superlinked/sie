@@ -1,0 +1,21 @@
+sie_id: Qwen/Qwen3-VL-Reranker-2B
+hf_id: Qwen/Qwen3-VL-Reranker-2B
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: {}
+  extract: null
+max_sequence_length: 32768
+profiles:
+  default:
+    max_batch_tokens: 4096
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.qwen3_vl_reranker:Qwen3VLRerankerAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        default_instruction: Retrieve relevant documents for the query.

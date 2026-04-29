@@ -7,7 +7,7 @@ dependencies = [
     "sie-server",
     "sie-sdk",
     "sie-bench",
-    "sie-router",
+    "sie-config",
     "einops>=0.8.1",
     # Using fork for filter_languages fix (filters metadata.eval_langs for retrieval tasks)
     "mteb[image] @ git+https://github.com/superlinked/mteb.git@main",
@@ -32,6 +32,9 @@ dev = [
     "pytest-asyncio",
     "pytest-cov",
     "pytest-subprocess", # For testing mise task subprocess calls
+    # Docling smoke-test fixture generation (PDF + DOCX)
+    "reportlab>=4.0",
+    "python-docx>=1.1",
     # Mise task dependencies
     "pydantic>=2.0", # Config validation in mise tasks
     "httpx>=0.27", # HTTP client for health checks in mise tasks
@@ -79,7 +82,7 @@ sie-server = { workspace = true }
 sie-sdk = { workspace = true }
 sie-bench = { workspace = true }
 sie-admin = { workspace = true }
-sie-router = { workspace = true }
+sie-config = { workspace = true }
 
 [tool.uv.workspace]
 # Note: packages/sie_ts_sdk is TypeScript, not Python
@@ -87,7 +90,7 @@ sie-router = { workspace = true }
 members = [
   "packages/sie_admin",
   "packages/sie_bench",
-  "packages/sie_router",
+  "packages/sie_config",
   "packages/sie_sdk",
   "packages/sie_server",
   "integrations/sie_chroma",
@@ -104,8 +107,8 @@ members = [
 [tool.pytest.ini_options]
 # Note: integrations are NOT in testpaths because each has its own conftest.py
 # which causes pytest plugin conflicts. Run with: mise run test integrations/
-testpaths = ["packages/sie_server/tests", "packages/sie_sdk/tests", "packages/sie_bench/tests", "packages/sie_admin/tests", "packages/sie_router/tests", "tools/mise_tasks/tests"]
-pythonpath = ["packages/sie_server/src", "packages/sie_sdk/src", "packages/sie_bench/src", "packages/sie_admin/src", "packages/sie_router/src", "tools/mise_tasks"]
+testpaths = ["packages/sie_server/tests", "packages/sie_sdk/tests", "packages/sie_bench/tests", "packages/sie_admin/tests", "packages/sie_config/tests", "tools/mise_tasks/tests"]
+pythonpath = ["packages/sie_server/src", "packages/sie_sdk/src", "packages/sie_bench/src", "packages/sie_admin/src", "packages/sie_config/src", "tools/mise_tasks"]
 addopts = "-m 'not integration and not docker and not model' --import-mode=importlib"
 asyncio_mode = "auto"
 markers = [
@@ -127,6 +130,7 @@ exclude = [
     "product/gtm/",       # Website content with HTML-styled code examples
     "product/research/",  # Research scripts with relaxed linting
     "tools/modal_sandbox.py", # modal sandbox script
+    "docs/warm-pool-tuning/data/",  # Committed data-analysis snippets, not shipped code
 ]
 
 [tool.ruff.format]
@@ -252,6 +256,11 @@ ignore = [
     "PLR0913", # Adapter constructors need many parameters for flexibility
     "PLR2004", # Magic numbers in adapter-specific logic
 ]
+# Provider adapters (cluster lifecycle) — ABC conformance forces unused args in concrete impls
+"tools/mise_tasks/providers/**/*" = [
+    "ARG002",  # Unused method arguments (provider adapter interface conformance)
+    "PLC0415", # Lazy imports from cluster module to avoid circular dependency
+]
 # Benchmark eval uses print for progress output
 "**/eval/**/*" = [
     "ARG002",  # Unused method arguments (interface conformance)
@@ -293,8 +302,8 @@ ignore = [
 "packages/sie_server/src/sie_server/observability/**/*" = [
     "PLC0415", # Lazy imports for optional tracing/GPU libs
 ]
-# Router package uses lazy imports
-"packages/sie_router/src/sie_router/**/*" = [
+# Config service uses lazy imports
+"packages/sie_config/src/sie_config/**/*" = [
     "PLC0415", # Lazy imports for optional features
     "PLR2004", # HTTP status codes are well-known magic numbers
     "T201",    # CLI output
@@ -392,9 +401,7 @@ python-version = "3.12"
 exclude = [
     # Test files - use mocks/fixtures that don't type-check well with ty
     "packages/*/tests/**",
-    # kubernetes is optional (only in cluster deployments)
-    "packages/sie_router/src/sie_router/discovery.py",
-    "packages/sie_router/src/sie_router/pools.py",
+
     # xformers/flash_attn optional (requires CUDA build)
     "packages/sie_server/src/sie_server/adapters/bert_flash/**",
     "packages/sie_server/src/sie_server/adapters/nomic_flash/**",
@@ -412,6 +419,8 @@ exclude = [
     "packages/sie_bench/src/sie_bench/tracking/mlflow.py",
     "packages/sie_bench/src/sie_bench/tracking/wandb.py",
     "packages/sie_bench/src/sie_bench/runners/fastembed.py",
+    # textual/textual-plotext (installed but ty can't resolve them)
+    "packages/sie_admin/src/sie_admin/top/**",
     # marimo notebooks
     "tools/benchview.py",
     # modal sandbox script

@@ -179,6 +179,7 @@ class ErrorCode(StrEnum):
     INFERENCE_ERROR = "INFERENCE_ERROR"
     QUEUE_FULL = "QUEUE_FULL"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    RESOURCE_EXHAUSTED = "RESOURCE_EXHAUSTED"  # GPU OOM
 
 
 class ErrorDetail(TypedDict, total=False):

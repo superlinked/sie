@@ -307,7 +307,7 @@ class TestAsyncModelLoadingRetry:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(side_effect=[resp_503, resp_200])  # type: ignore[method-assign]
+        client._post = AsyncMock(side_effect=[resp_503, resp_200])  # type: ignore
 
         result = await client.encode("bge-m3", {"text": "hello"})
 
@@ -329,7 +329,7 @@ class TestAsyncModelLoadingRetry:
         )
 
         client = SIEAsyncClient("http://localhost:8080")
-        client._post = AsyncMock(return_value=resp_503)  # type: ignore[method-assign]
+        client._post = AsyncMock(return_value=resp_503)  # type: ignore
 
         with pytest.raises((ModelLoadingError, ProvisioningError)) as exc_info:
             await client.encode("bge-m3", {"text": "hello"}, provision_timeout_s=0.05)

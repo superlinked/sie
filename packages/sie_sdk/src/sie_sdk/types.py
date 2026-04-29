@@ -75,6 +75,17 @@ class VideoInput(TypedDict, total=False):
     format: str  # "mp4", "webm" - inferred from path
 
 
+class DocumentInput(TypedDict, total=False):
+    """Document input for composite-document extractors (PDF, DOCX, HTML, ...).
+
+    Wraps a raw document payload. The SDK accepts bytes or a path; format is
+    inferred from the path suffix when not explicitly provided.
+    """
+
+    data: bytes | str | Path
+    format: str  # "pdf", "docx", "html", "md", "txt", ... - inferred from path
+
+
 class Item(TypedDict, total=False):
     """A single item to encode, score, or extract from.
 
@@ -107,6 +118,7 @@ class Item(TypedDict, total=False):
     images: Sequence[ImageInput | Image.Image | NDArray[Any] | bytes | str | Path]
     audio: AudioInput | bytes | str | Path
     video: VideoInput | bytes | str | Path
+    document: DocumentInput | bytes | str | Path
     metadata: dict[str, Any]
     multivector: NDArray[np.float32]  # Pre-encoded multivector (for use with scoring.maxsim)
 
@@ -349,7 +361,7 @@ class PoolSpec(TypedDict, total=False):
         gpus: GPU requirements, e.g., {"l4": 2, "a100-40gb": 1}.
         bundle: Optional bundle filter for worker assignment.
         minimum_worker_count: Desired minimum warm workers in the pool. Stored in pool
-            spec and forwarded to the router; enforcement depends on cluster autoscaler
+            spec and forwarded to the gateway; enforcement depends on cluster autoscaler
             configuration. Defaults to 0 (scale to zero).
     """
 
@@ -359,7 +371,7 @@ class PoolSpec(TypedDict, total=False):
     minimum_worker_count: int
 
 
-# --- Pool Response Types (nested structure matching router API) ---
+# --- Pool Response Types (nested structure matching gateway API) ---
 
 
 class AssignedWorkerInfo(TypedDict):
@@ -377,7 +389,7 @@ class AssignedWorkerInfo(TypedDict):
 
 
 class PoolStatusInfo(TypedDict, total=False):
-    """Pool status information from router API.
+    """Pool status information from gateway API.
 
     Attributes:
         state: Pool state ("pending", "active", "expired").
@@ -407,7 +419,7 @@ class PoolSpecResponse(TypedDict, total=False):
 
 
 class PoolResponse(TypedDict, total=False):
-    """Full pool response from router API.
+    """Full pool response from gateway API.
 
     This is the canonical response structure for pool endpoints.
     Uses nested spec/status structure for clear separation.
@@ -493,11 +505,11 @@ class ModelSummary(TypedDict, total=False):
 
 
 class HealthResponse(TypedDict, total=False):
-    """Health endpoint response from router.
+    """Health endpoint response from gateway.
 
     Attributes:
         status: Overall status ("healthy", "degraded", "no_workers").
-        type: Component type ("router" or "worker").
+        type: Component type ("gateway" or "worker").
         cluster: Cluster summary statistics.
         configured_gpu_types: GPU types configured in the cluster.
         live_gpu_types: GPU types currently running.
@@ -529,7 +541,7 @@ ClusterModelInfo = ModelSummary
 # =============================================================================
 # These types define the wire format for real-time status updates:
 # - Worker sends WorkerStatusMessage via /ws/status
-# - Router sends ClusterStatusMessage via /ws/cluster-status
+# - Gateway sends ClusterStatusMessage via /ws/cluster-status
 
 
 class ServerInfo(TypedDict):
@@ -631,23 +643,23 @@ class WorkerStatusMessage(TypedDict, total=False):
     """Complete status message sent by worker on /ws/status.
 
     This is the canonical format consumed by:
-    - Router (extracts machine_profile, bundle, loaded_models for routing)
+    - Gateway (extracts machine_profile, bundle, loaded_models for routing)
     - sie-top in worker mode (displays full details)
 
     Attributes:
         timestamp: Unix timestamp of this status snapshot.
-        ready: True when worker is ready to accept traffic. Router only routes to
+        ready: True when worker is ready to accept traffic. Gateway only routes to
             ready workers. False during startup until lifespan completes.
         name: Worker name/identifier.
         machine_profile: Machine profile for routing. In K8s: from SIE_MACHINE_PROFILE env var
             (e.g., "l4-spot"). Standalone: detected GPU type (e.g., "l4").
         pool_name: NATS work-queue pool name (from SIE_POOL env var, e.g., "l4-spot-default").
-            Used by the router in queue mode to publish to the correct JetStream subject.
+            Used by the gateway in queue mode to publish to the correct JetStream subject.
             Empty string when not in queue mode or not set.
         gpu_count: Number of GPUs on this worker.
         bundle: Dependency bundle this worker is running (e.g., "default").
         bundle_config_hash: SHA-256 hash of the serialized model configs/profiles
-            assigned to this worker's bundle. Used by routers to gate routing on
+            assigned to this worker's bundle. Used by gateways to gate routing on
             config awareness. Empty string when not yet computed.
         loaded_models: List of model names currently loaded.
         server: Server metadata (version, uptime, etc.).
@@ -677,7 +689,7 @@ class WorkerStatusMessage(TypedDict, total=False):
 
 
 class ClusterStatusMessage(TypedDict, total=False):
-    """Complete status message sent by router on /ws/cluster-status.
+    """Complete status message sent by gateway on /ws/cluster-status.
 
     Consumed by sie-top in cluster mode.
 

@@ -244,6 +244,33 @@ class TestMemoryManager:
         candidates = manager.get_eviction_candidates(2)
         assert candidates == ["model-a", "model-b"]
 
+    def test_get_idle_models_returns_sorted_by_age(self, manager: MemoryManager) -> None:
+        """Stale models are returned oldest-first regardless of insertion order."""
+        manager.register_model("recent")
+        manager.register_model("stale-old")
+        manager.register_model("stale-newer")
+
+        # Force last_used_at deltas: ``stale-old`` last used 1000s ago,
+        # ``stale-newer`` last used 100s ago, ``recent`` "now".
+        now = time.monotonic()
+        manager.get_model_info("stale-old").last_used_at = now - 1000.0  # type: ignore[union-attr]
+        manager.get_model_info("stale-newer").last_used_at = now - 100.0  # type: ignore[union-attr]
+        manager.get_model_info("recent").last_used_at = now
+
+        idle = manager.get_idle_models(idle_threshold_s=50.0, now=now)
+        assert idle == ["stale-old", "stale-newer"]
+
+    def test_get_idle_models_empty_below_threshold(self, manager: MemoryManager) -> None:
+        """Models touched within the threshold are not returned."""
+        manager.register_model("fresh")
+        # No artificial age — the model was just registered.
+        idle = manager.get_idle_models(idle_threshold_s=3600.0)
+        assert idle == []
+
+    def test_get_idle_models_negative_threshold_rejected(self, manager: MemoryManager) -> None:
+        with pytest.raises(ValueError, match="idle_threshold_s"):
+            manager.get_idle_models(idle_threshold_s=-1.0)
+
     def test_get_stats(self, manager: MemoryManager) -> None:
         """Test getting memory stats."""
         stats = manager.get_stats()

@@ -353,6 +353,18 @@ def test_google_siglip_so400m_patch14_384_image_dense() -> None:
     )
 
 
+def test_google_siglip2_base_patch16_224_dense() -> None:
+    _assert_dense(
+        "google/siglip2-base-patch16-224", 768, [0.022308349609375, -0.0198822021484375, 0.0005893707275390625]
+    )
+
+
+def test_google_siglip2_base_patch16_224_image_dense() -> None:
+    _assert_dense_image(
+        "google/siglip2-base-patch16-224", 768, [0.0188140869140625, -0.033660888671875, -0.002132415771484375]
+    )
+
+
 def test_laion_clip_vit_b_32_laion2b_dense() -> None:
     _assert_dense(
         "laion/CLIP-ViT-B-32-laion2B-s34B-b79K", 512, [-0.020416259765625, -0.0300140380859375, -0.0004265308380126953]
@@ -767,6 +779,45 @@ def test_mixedbread_ai_mxbai_rerank_large_v2_score() -> None:
     _assert_score("mixedbread-ai/mxbai-rerank-large-v2", None)
 
 
+@pytest.mark.xfail(
+    reason="Non-deterministic: CPU fallback uses CrossEncoderAdapter which randomly initializes classification head",
+    strict=False,
+)
+def test_qwen_qwen3_reranker_0_6b_score() -> None:
+    _assert_score("Qwen/Qwen3-Reranker-0.6B", [0.80029296875])
+
+
+def test_qwen_qwen3_reranker_0_6b_score_in_range() -> None:
+    """Qwen3-Reranker uses log_softmax scoring — output must be in [0, 1]."""
+    adapter = _get_adapter("Qwen/Qwen3-Reranker-0.6B")
+    output = adapter.score_pairs(
+        queries=[Item(text="what is artificial intelligence")],
+        docs=[Item(text="Artificial intelligence is the simulation of human intelligence by machines")],
+    )
+    score = float(output.scores[0])
+    assert 0.0 <= score <= 1.0, f"log_softmax score must be in [0, 1], got {score}"
+
+
+def test_qwen_qwen3_reranker_0_6b_score_with_instruction() -> None:
+    """Verify instruction passthrough works for Qwen3-Reranker."""
+    adapter = _get_adapter("Qwen/Qwen3-Reranker-0.6B")
+    output = adapter.score_pairs(
+        queries=[Item(text="what is artificial intelligence")],
+        docs=[Item(text="Artificial intelligence is the simulation of human intelligence by machines")],
+        instruction="Retrieve passages about technology",
+    )
+    score = float(output.scores[0])
+    assert 0.0 <= score <= 1.0, f"log_softmax score must be in [0, 1], got {score}"
+
+
+@pytest.mark.xfail(
+    reason="Non-deterministic: CPU fallback uses CrossEncoderAdapter which randomly initializes classification head",
+    strict=False,
+)
+def test_qwen_qwen3_reranker_4b_score() -> None:
+    _assert_score("Qwen/Qwen3-Reranker-4B", [0.288818359375])
+
+
 # =============================================================================
 # Extract models (text input - GLiNER / NLI classification)
 # =============================================================================
@@ -776,6 +827,10 @@ _NER_LABELS = ["person", "organization", "location"]
 
 def test_emergentmethods_gliner_large_news_v2_1_extract() -> None:
     _assert_extract("EmergentMethods/gliner_large_news-v2.1", _NER_LABELS, ["location", "organization", "person"])
+
+
+def test_fastino_gliner2_base_v1_extract() -> None:
+    _assert_extract("fastino/gliner2-base-v1", _NER_LABELS, ["location", "organization", "person"])
 
 
 def test_ihor_gliner_biomed_large_v1_0_extract() -> None:
@@ -792,6 +847,14 @@ def test_knowledgator_gliclass_base_v1_0_extract() -> None:
 
 def test_knowledgator_gliclass_small_v1_0_extract() -> None:
     _assert_extract("knowledgator/gliclass-small-v1.0", ["technology", "sports", "politics"], [])
+
+
+def test_knowledgator_gliner_bi_base_v2_0_extract() -> None:
+    _assert_extract("knowledgator/gliner-bi-base-v2.0", _NER_LABELS, ["location", "organization", "person"])
+
+
+def test_knowledgator_modern_gliner_bi_base_v1_0_extract() -> None:
+    _assert_extract("knowledgator/modern-gliner-bi-base-v1.0", _NER_LABELS, ["location", "organization", "person"])
 
 
 def test_moritzlaurer_deberta_v3_base_zeroshot_extract() -> None:

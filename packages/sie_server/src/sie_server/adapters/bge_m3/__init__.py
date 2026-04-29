@@ -151,7 +151,7 @@ class BGEM3Adapter(BaseAdapter):
 
         BGE-M3 has additional linear layers for multi-vector and sparse outputs.
         """
-        hidden_size = self._model.config.hidden_size  # type: ignore[union-attr]
+        hidden_size = self._model.config.hidden_size  # type: ignore
 
         # Resolve the actual directory: could be a local path or HF model ID
         base_path = Path(model_path)

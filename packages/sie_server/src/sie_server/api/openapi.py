@@ -40,7 +40,7 @@ def setup_custom_openapi_schema(app: FastAPI) -> None:
         app.openapi_schema = openapi_schema
         return app.openapi_schema
 
-    app.openapi = custom_openapi  # type: ignore[method-assign]
+    app.openapi = custom_openapi  # type: ignore
 
 
 def _add_request_body_schemas(openapi_schema: dict[str, Any]) -> None:

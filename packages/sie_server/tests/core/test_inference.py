@@ -138,4 +138,4 @@ class TestResolveInferenceSettings:
     def test_settings_are_frozen(self) -> None:
         settings = resolve_inference_settings("cpu")
         with pytest.raises(AttributeError):
-            settings.compute_precision = "float32"  # type: ignore[misc]
+            settings.compute_precision = "float32"  # type: ignore

@@ -23,18 +23,25 @@ adapters:
 - sie_server.adapters.pytorch_embedding
 - sie_server.adapters.qwen2_flash
 - sie_server.adapters.qwen2_flash_cross_encoder
+- sie_server.adapters.qwen3_vl_embedding
+- sie_server.adapters.qwen3_vl_reranker
 - sie_server.adapters.rope_flash
 - sie_server.adapters.sentence_transformer
 - sie_server.adapters.siglip
 - sie_server.adapters.splade_flash
+- sie_server.adapters.stablebridge_pruner
 - sie_server.adapters.xlm_roberta_flash
 - sie_server.adapters.nli_classification
 - sie_server.adapters.nli_classification_flash
 - sie_server.adapters.gliner
+- sie_server.adapters.gliner2
+- sie_server.adapters.gliner_bi
 - sie_server.adapters.glirel
 - sie_server.adapters.gliclass
 - sie_server.adapters.donut
 - sie_server.adapters.florence2
+- sie_server.adapters.docling
+- sie_server.adapters.paddleocr_vl
 deps:
   # Most flash adapters; sentence_transformer needs >=4.57
   transformers: '>=4.57'
@@ -52,8 +59,10 @@ deps:
   pillow: ''
   # grounding_dino
   requests: ''
-  # gliner
+  # gliner, gliner_bi
   gliner: '>=0.2,<1'
+  # gliner2
+  gliner2: '>=0.1'
   # glirel
   glirel: '>=1.0,<2'
   # gliclass
@@ -62,6 +71,8 @@ deps:
   loguru: '>=0.7,<1'
   # donut, florence2
   timm: '>=0.9.0,<1.0'
+  # docling — composite-document parser (PDF/DOCX/HTML)
+  docling: '>=2,<3'
   # Flash Attention 2 — CUDA only, prebuilt wheel
   flash-attn:
     url: https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.0/flash_attn-2.7.4+cu128torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl

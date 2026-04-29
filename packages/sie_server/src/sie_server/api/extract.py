@@ -10,12 +10,13 @@ from sie_server.api.helpers import (
     RequestParser,
     ResponseBuilder,
     extract_request_context,
+    oom_retry_after_from_registry,
 )
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
+from sie_server.core.extract_cost import build_extract_prepared_items
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.core.prepared import ExtractPreparedItem
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError, WorkerResult
 from sie_server.core.worker.handlers.extract import ExtractHandler
@@ -118,17 +119,9 @@ async def _extract_via_worker(
             timing.tokenization_ms or 0,
         )
     else:
-        # Text model: create simple PreparedItems (cost = character count)
-        # GLiNER/GLiClass do their own tokenization
-        prepared_items = []
-        for i, item in enumerate(items):
-            text = item.text
-            char_count = len(text) if text else 0
-            prepared = ExtractPreparedItem(
-                cost=char_count,
-                original_index=i,
-            )
-            prepared_items.append(prepared)
+        # Text/document model: cost is text characters or document byte size.
+        # GLiNER/GLiClass tokenize internally; document adapters (Docling) parse internally.
+        prepared_items = build_extract_prepared_items(items)
 
     timing.end_tokenization()
 
@@ -345,7 +338,13 @@ async def extract(
         items = request.items
 
         # Extract using worker with batching
-        error_handler = InferenceErrorHandler(model, "extract", span, ctx=ctx)
+        error_handler = InferenceErrorHandler(
+            model,
+            "extract",
+            span,
+            ctx=ctx,
+            oom_retry_after_s=oom_retry_after_from_registry(registry),
+        )
         try:
             worker_result = await _extract_via_worker(
                 registry,

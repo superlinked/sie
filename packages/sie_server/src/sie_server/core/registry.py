@@ -28,10 +28,12 @@ from sie_server.core.hot_reload import HotReloader
 from sie_server.core.loader import load_model_configs
 from sie_server.core.memory import MemoryConfig, MemoryManager
 from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, ModelLoader
+from sie_server.core.oom import is_oom_error
 from sie_server.core.postprocessor_registry import PostprocessorRegistry
 from sie_server.core.preprocessor_registry import PreprocessorRegistry
 from sie_server.core.worker import ModelWorker
 from sie_server.core.worker.types import AdaptiveBatchingParams
+from sie_server.observability.metrics import record_idle_eviction
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,12 @@ class ModelRegistry:
         self._monitor_task: asyncio.Task[None] | None = None
         self._monitor_running = False
 
+        # Background idle-evictor (proactive cold-model unload). None unless
+        # ``engine_config.idle_evict_s`` is set.
+        self._idle_evict_task: asyncio.Task[None] | None = None
+        self._idle_evict_running = False
+        self._engine_config = engine_config
+
         # Background fire-and-forget tasks (prevents GC collection)
         self._background_tasks: set[asyncio.Task[None]] = set()
 
@@ -158,6 +166,11 @@ class ModelRegistry:
                 update_interval=ab.update_interval,
             )
 
+        # Build OOM recovery config from the engine config (if present).
+        # The registry passes itself as the RegistryCallbacks impl: the
+        # ``evict_lru_excluding`` method satisfies the protocol structurally.
+        oom_recovery_config = engine_config.oom_recovery.to_runtime() if engine_config is not None else None
+
         self._loader = ModelLoader(
             preprocessor_registry=self._preprocessor_registry,
             postprocessor_registry=self._postprocessor_registry,
@@ -171,6 +184,8 @@ class ModelRegistry:
             max_loras_per_model=engine_config.max_loras_per_model if engine_config else DEFAULT_MAX_LORAS,
             disk_cache_manager=self._disk_cache_manager,
             adaptive_batching=adaptive_params,
+            oom_recovery=oom_recovery_config,
+            registry_callbacks=self,
         )
 
     def _load_configs_from_dir(self, models_dir: str) -> None:
@@ -269,6 +284,16 @@ class ModelRegistry:
     def memory_manager(self) -> MemoryManager:
         """Return the memory manager for device memory tracking."""
         return self._memory_manager
+
+    @property
+    def engine_config(self) -> EngineConfig | None:
+        """Return the engine config (or None if running without one).
+
+        Read-only accessor used by API route handlers that need to thread
+        config-derived values into per-request helpers (e.g. the
+        ``Retry-After`` value on ``RESOURCE_EXHAUSTED`` 503s).
+        """
+        return self._engine_config
 
     @property
     def device(self) -> str:
@@ -871,24 +896,80 @@ class ModelRegistry:
     def _is_oom_error(self, error: RuntimeError) -> bool:
         """Check if a RuntimeError is an out-of-memory error.
 
-        Detects OOM errors from PyTorch (CUDA/MPS) and generic memory errors.
+        Thin wrapper over :func:`sie_server.core.oom.is_oom_error` kept for
+        backwards-compatibility with existing call sites in this module.
+        New code should import from ``core.oom`` directly.
+        """
+        return is_oom_error(error)
+
+    async def evict_lru_excluding(self, exclude_name: str, *, timeout_s: float = 5.0) -> bool:
+        """Evict the LRU model that is not ``exclude_name``.
+
+        Used by the per-worker OOM recovery executor to free GPU memory by
+        unloading a cold sibling model when an inference attempt OOMs. The
+        load-lock is acquired with a soft timeout so a deadlocked / busy
+        registry doesn't stall the worker indefinitely.
+
+        **Concurrency caveat — drain-under-lock:** this method holds the
+        registry's load-lock for the duration of ``_do_unload``, which
+        includes ``worker.stop()`` waiting up to ``_DRAIN_TIMEOUT_S`` (30 s)
+        for in-flight requests to complete. During a memory-pressure
+        incident multiple workers may invoke ``evict_lru_excluding``
+        concurrently; the soft ``timeout_s`` here prevents permanent
+        deadlock, but a single eviction can still block other registry
+        operations (additional loads / unloads) for up to the drain
+        timeout. Operators should expect a transient stall window during
+        large multi-worker OOM episodes and not interpret it as a hang.
+        Splitting the drain off the lock is tracked as a follow-up.
 
         Args:
-            error: The RuntimeError to check.
+            exclude_name: The calling worker's own model. Never evicted, even
+                if it happens to be the LRU entry — the caller still needs
+                its weights resident.
+            timeout_s: How long to wait for the registry's load-lock before
+                giving up.
 
         Returns:
-            True if this appears to be an OOM error.
+            True if a sibling model was actually unloaded; False if there
+            was no eligible candidate, the lock could not be acquired in
+            time, or the eviction itself failed.
         """
-        error_str = str(error).lower()
-        oom_indicators = [
-            "out of memory",
-            "cuda out of memory",
-            "mps backend out of memory",
-            "cannot allocate memory",
-            "failed to allocate",
-            "oom",
-        ]
-        return any(indicator in error_str for indicator in oom_indicators)
+        lock = self._get_load_lock()
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout_s)
+        except TimeoutError:
+            logger.warning(
+                "evict_lru_excluding: lock acquisition timed out after %.1fs (caller=%s)",
+                timeout_s,
+                exclude_name,
+            )
+            return False
+
+        try:
+            # Walk LRU order and pick the first that is not ``exclude_name``
+            # and is still loaded (the OrderedDict in the memory manager
+            # may include entries already torn down by another path).
+            for candidate in self._memory_manager.loaded_models:
+                if candidate == exclude_name:
+                    continue
+                if candidate not in self._loaded:
+                    continue
+                if candidate in self._unloading:
+                    continue
+                logger.info(
+                    "OOM recovery: evicting LRU sibling '%s' (caller='%s')",
+                    candidate,
+                    exclude_name,
+                )
+                try:
+                    await self._do_unload(candidate)
+                except Exception:
+                    logger.exception("OOM recovery: failed to evict '%s'", candidate)
+                    return False
+                return True
+            return False
+        finally:
+            lock.release()
 
     async def start_memory_monitor(self) -> None:
         """Start the background memory monitor task.
@@ -920,6 +1001,119 @@ class ModelRegistry:
             pass
         self._monitor_task = None
         logger.info("Memory monitor stopped")
+
+    async def start_idle_evictor(self) -> None:
+        """Start the proactive idle-eviction loop, if configured.
+
+        No-op when ``engine_config.idle_evict_s`` is None. Idempotent: a
+        second call while the loop is running returns immediately. Paired
+        with :meth:`stop_idle_evictor`; both are typically wired into the
+        FastAPI lifespan alongside ``start_memory_monitor``.
+        """
+        if self._idle_evict_task is not None:
+            return  # already running
+        if self._engine_config is None or self._engine_config.idle_evict_s is None:
+            logger.debug("Idle evictor disabled (idle_evict_s is None)")
+            return
+
+        self._idle_evict_running = True
+        self._idle_evict_task = asyncio.create_task(self._idle_evict_loop())
+        logger.info(
+            "Idle evictor started (idle_threshold=%ds, check_interval=%.1fs)",
+            self._engine_config.idle_evict_s,
+            self._memory_config.memory_check_interval_s,
+        )
+
+    async def stop_idle_evictor(self) -> None:
+        """Stop the idle-eviction loop. No-op if not running."""
+        if self._idle_evict_task is None:
+            return
+
+        self._idle_evict_running = False
+        self._idle_evict_task.cancel()
+        try:
+            await self._idle_evict_task
+        except asyncio.CancelledError:
+            pass
+        self._idle_evict_task = None
+        logger.info("Idle evictor stopped")
+
+    async def _idle_evict_loop(self) -> None:
+        """Background loop: unload models idle longer than ``idle_evict_s``.
+
+        Runs at the same cadence as the pressure monitor. On each tick:
+        1. Snapshot stale models (no lock — read-only over the LRU dict).
+        2. Take the load lock once, walk the snapshot, evict the first
+           still-stale model, then release. Subsequent stale models wait
+           for the next tick. This caps lock contention against in-flight
+           ``load_async`` callers and matches the "one eviction per tick"
+           cadence of the existing pressure monitor.
+
+        The recheck inside the lock guards against the snapshot/unload race:
+        a request that arrived after the snapshot may have bumped
+        ``last_used_at``, in which case we skip and look at the next
+        candidate.
+
+        Idle eviction *can* unload the only loaded model. The pressure
+        monitor explicitly skips that case (because the eviction would
+        immediately be undone by a new request); for idle eviction the
+        operator's TTL is the explicit signal that they want even sole
+        models to be released after idle.
+
+        Configuration is bound at task-start: ``idle_evict_s`` and
+        ``memory_check_interval_s`` are read once. Hot-reloading these
+        values requires restarting the loop via ``stop_idle_evictor`` /
+        ``start_idle_evictor``; documented as a future improvement.
+        """
+        assert self._engine_config is not None  # checked at start_idle_evictor
+        interval = self._memory_config.memory_check_interval_s
+        threshold = self._engine_config.idle_evict_s
+        assert threshold is not None  # checked at start_idle_evictor
+
+        while self._idle_evict_running:
+            try:
+                await asyncio.sleep(interval)
+                stale = self._memory_manager.get_idle_models(idle_threshold_s=threshold)
+                if not stale:
+                    continue
+
+                lock = self._get_load_lock()
+                async with lock:
+                    for name in stale:
+                        # Re-check under the lock: model may have been
+                        # unloaded already, or bumped by a request that
+                        # arrived after the snapshot.
+                        if name not in self._loaded:
+                            continue
+                        info = self._memory_manager.get_model_info(name)
+                        if info is None:
+                            continue
+                        age = time.monotonic() - info.last_used_at
+                        if age < threshold:
+                            continue
+                        logger.info(
+                            "Idle eviction: model '%s' idle for %.0fs (threshold=%ds), unloading",
+                            name,
+                            age,
+                            threshold,
+                        )
+                        try:
+                            await self._do_unload(name)
+                        except Exception:
+                            logger.exception("Idle eviction failed for '%s'", name)
+                        else:
+                            # Bump only on successful unload — failed evictions
+                            # leave the model loaded and will retry next tick.
+                            record_idle_eviction(name)
+                        # One eviction per tick: yield the lock so other
+                        # registry operations can make progress. The next
+                        # tick handles any remaining stale models.
+                        break
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Error in idle eviction loop")
 
     async def start_hot_reload(self) -> None:
         """Start the hot reloader for model config changes.

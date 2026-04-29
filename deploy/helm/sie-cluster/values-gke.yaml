@@ -68,7 +68,7 @@ ingress:
   enabled: true
   className: nginx
 
-router:
+gateway:
   replicas: 2
   image:
     pullPolicy: IfNotPresent
@@ -79,6 +79,21 @@ router:
     limits:
       cpu: "2"
       memory: "2Gi"
+
+# sie-config control plane (singleton by design — see chart values.yaml for
+# the HA caveat). Mirroring the gateway's pullPolicy/resources so GKE installs
+# are representative of a full sie-cluster deployment.
+config:
+  enabled: true
+  image:
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
 
 workers:
   pools:

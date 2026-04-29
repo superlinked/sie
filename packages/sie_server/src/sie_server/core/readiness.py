@@ -2,9 +2,9 @@
 
 This module provides a single source of truth for worker readiness, used by:
 - /readyz endpoint (K8s readiness probe)
-- /ws/status WebSocket (router health check via `ready` field)
+- /ws/status WebSocket (gateway health check via `ready` field)
 
-The router only routes requests to workers that report ready=True.
+The gateway only routes requests to workers that report ready=True.
 This prevents routing to workers that are still starting up.
 
 Usage:

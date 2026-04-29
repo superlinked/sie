@@ -56,6 +56,22 @@ class VideoInput(TypedDict, total=False):
     format: str | None
 
 
+class DocumentInput(TypedDict, total=False):
+    """Document input for composite-document extractors (wire format).
+
+    On the wire, documents are sent as bytes with a format hint
+    (e.g., 'pdf', 'docx', 'html'). The hint is advisory — adapters may
+    still sniff the bytes when format is missing or unrecognized.
+
+    Attributes:
+        data: Document bytes (raw file content).
+        format: Document format hint: 'pdf', 'docx', 'html', etc.
+    """
+
+    data: bytes
+    format: str | None
+
+
 class Item(msgspec.Struct):
     """A single item to encode, score, or extract from.
 
@@ -68,6 +84,7 @@ class Item(msgspec.Struct):
     images: list[dict[str, Any]] | None = None
     audio: dict[str, Any] | None = None
     video: dict[str, Any] | None = None
+    document: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -102,6 +119,18 @@ def is_audio_input(obj: Any) -> TypeGuard[AudioInput]:
 
 def is_video_input(obj: Any) -> TypeGuard[VideoInput]:
     """Check if obj is a valid VideoInput dict.
+
+    Args:
+        obj: Object to validate.
+
+    Returns:
+        True if obj is a dict with 'data' key containing bytes.
+    """
+    return isinstance(obj, dict) and "data" in obj and isinstance(obj.get("data"), bytes)
+
+
+def is_document_input(obj: Any) -> TypeGuard[DocumentInput]:
+    """Check if obj is a valid DocumentInput dict.
 
     Args:
         obj: Object to validate.

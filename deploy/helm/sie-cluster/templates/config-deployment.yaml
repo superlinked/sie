@@ -1,0 +1,139 @@
+{{- if .Values.config.enabled }}
+{{- include "sie-cluster.validateNats" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sie-cluster.config.serviceName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.config.labels" . | nindent 4 }}
+spec:
+  {{- /*
+    sie-config is intentionally hardcoded to a single replica.
+
+    State it owns (see packages/sie_gateway/docs/architecture-guide.md §3, §11):
+      - epoch counter on disk (RMW increment)
+      - per-process asyncio.Lock serializing writes
+      - per-process Idempotency-Key LRU cache
+      - in-memory ModelRegistry
+      - single NATS publisher identity (wire key: router_id, kept for Rust gateway serde-alias compat) for config deltas
+
+    None of these are cluster-coordinated. Running replicas > 1 without first
+    adding leader election (K8s Lease), shared idempotency, and a single-writer
+    discipline on the epoch file would produce lost epoch bumps, duplicated
+    NATS deltas, and divergent per-pod registries. Do NOT expose this as a
+    values.yaml knob until that refactor lands.
+
+    The ReadWriteOnce PVC (when enabled) enforces this at the storage layer,
+    but hardcoding replicas=1 here is belt-and-braces.
+  */}}
+  replicas: 1
+  {{- /*
+    Recreate strategy when the PVC is enabled: the config store PVC is
+    ReadWriteOnce, so rolling updates would deadlock on the volume lock.
+  */}}
+  {{- if .Values.config.configStore.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "sie-cluster.config.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sie-cluster.config.selectorLabels" . | nindent 8 }}
+      {{- with .Values.config.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "sie-cluster.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "sie-cluster.serviceAccountName" . }}
+      containers:
+        - name: config
+          image: {{ include "sie-cluster.config.image" . }}
+          imagePullPolicy: {{ .Values.config.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SIE_BUNDLES_DIR
+              value: {{ .Values.sharedPaths.bundlesDir | quote }}
+            - name: SIE_MODELS_DIR
+              value: {{ .Values.sharedPaths.modelsDir | quote }}
+            - name: SIE_LOG_LEVEL
+              value: {{ .Values.logging.level | quote }}
+            {{- if .Values.logging.json }}
+            - name: SIE_LOG_JSON
+              value: "true"
+            {{- end }}
+            {{- if .Values.config.auth.adminTokenSecretName }}
+            - name: SIE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.auth.adminTokenSecretName }}
+                  key: {{ .Values.config.auth.adminTokenSecretKey }}
+            {{- end }}
+            {{- if .Values.nats.enabled }}
+            - name: SIE_NATS_URL
+              value: {{ .Values.nats.url | default (printf "nats://%s-nats:4222" .Release.Name) | quote }}
+            {{- end }}
+            {{- if .Values.config.configStore.enabled }}
+            - name: SIE_CONFIG_STORE_DIR
+              value: {{ .Values.config.configStore.mountPath | quote }}
+            - name: SIE_CONFIG_RESTORE
+              value: "true"
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.config.resources | nindent 12 }}
+          {{- if .Values.config.configStore.enabled }}
+          volumeMounts:
+            - name: config-store
+              mountPath: {{ .Values.config.configStore.mountPath }}
+          {{- end }}
+      {{- if .Values.config.configStore.enabled }}
+      volumes:
+        - name: config-store
+          persistentVolumeClaim:
+            claimName: {{ include "sie-cluster.config.serviceName" . }}-store
+      {{- end }}
+      {{- with .Values.config.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.config.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.config.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

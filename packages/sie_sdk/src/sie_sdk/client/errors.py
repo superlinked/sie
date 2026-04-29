@@ -123,3 +123,32 @@ class ModelLoadingError(SIEError):
     ) -> None:
         super().__init__(message)
         self.model = model
+
+
+class ResourceExhaustedError(ServerError):
+    """Error when the server has exhausted its OOM-recovery strategies.
+
+    Raised when:
+    - Server returns 503 with RESOURCE_EXHAUSTED code
+    - SDK retry limit is exceeded
+
+    Subclass of :class:`ServerError` so callers that already catch
+    ``ServerError`` continue to behave correctly; new code can catch
+    ``ResourceExhaustedError`` specifically to react to sustained GPU
+    pressure (e.g., back off, route elsewhere, scale up).
+
+    Attributes:
+        model: The model that was requested.
+        retries: Number of retry attempts made before giving up.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        model: str | None = None,
+        retries: int = 0,
+    ) -> None:
+        super().__init__(message, code="RESOURCE_EXHAUSTED", status_code=503)
+        self.model = model
+        self.retries = retries

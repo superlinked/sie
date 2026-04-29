@@ -1,5 +1,126 @@
 # Changelog
 
+## v0.3.0
+
+- chore(main): release 0.3.0
+- review: label-aware merging in stablebridge pruner spans
+- fix(adapters): validate runtime max_seq_length overrides before clamp
+- review: fail fast on missing PruningHead keys
+- review: tighten profile validation, encoding, fixture paths
+- fix(gateway): align /v1/models error and list shapes
+- fix(adapters): clamp runtime max_seq_length overrides in score_pairs
+- feat: upstream Stablebridge pruner adapter + sie_bench evals
+- fix(gateway): add GET /v1/models/{model} detail route
+- fix(adapters): clamp flash adapter max_seq_length to model positional capacity
+- fix(gliclass): return all label scores and bound input length
+- fix(client): retry only transient connection errors under wait_for_capacity
+- feat(oom): improve error semantics and budget exhaustion detection
+- fix(sdk): retry on connection errors and generic 503s
+- refactor(oom): extract SDK retry logic and refine server NAK semantics
+- feat(oom): implement defensive exception fan-out and improve recovery metrics
+- test(api): add coverage for lora load failure in encode endpoint
+- test(docling): drop module-level docstring (CodeRabbit)
+- fix(docling): per-task converter, hf_revision guard, callable typing (CodeRabbit)
+- test(api): add regression tests for lora routing in encode handler
+- feat(server): add reactive OOM recovery and proactive idle eviction
+- feat(extract): add Docling adapter for PDF/DOCX/HTML parsing
+- fix(sdk): has_children filters folder-marker objects (Refs #732, #654)
+- fix(sdk): cluster cache prefix probe uses list, not head (Refs #732, #654)
+- test: hoist non-optional imports to module top (CodeRabbit)
+- feat(extract): plumb document items and structured `data` results
+- fix(sdk): preserve caller-supplied document format over inferred (CodeRabbit)
+- chore(openapi): regenerate spec after adding document modality
+- feat(types): add `document` input modality across SDKs, server, and metadata
+- test(adapters): mock get_embedding_dimension in sentence_transformer fixtures
+- fix(types): adapt to ty 0.0.32 stricter ignore handling
+- build(deps): add litellm>=1.83.7 to sie_dspy dependencies
+- Re-seed ACTIVE_LEASE_GPUS sentinel after pool reset
+- fix(gateway): pre-instantiate request/demand metric families on startup
+- chore(gateway): address PR #721 review — pin deny config + drop no-op cov flag
+- chore(gateway): bump Rust to 1.95.0, add cargo-deny audit + llvm-cov coverage
+- chore(sdk): trim retry-comment verbosity, drop debug-context refs
+- fix(sdk): retry mid-flight transport disconnects, not just timeouts
+- fix(gateway): keep record_request async to match main's call shape
+- fix(gateway): drop double-counted REQUEST_COUNT / REQUEST_LATENCY emit
+- fix(gateway): address PR #716 review feedback
+- docs(gateway): strip dangling PRD / improvements-doc section refs
+- docs(gateway): scrub ghost references left over from the perf audit
+- perf(gateway): cache SDK version parse, integer audit latency, UUIDv7
+- perf(gateway): tighten cold-pool backpressure + cheaper QPS counter
+- perf(gateway): move score-endpoint unwrap instead of cloning
+- perf(gateway): fuse msgpack_numpy decode into the response path
+- perf(gateway): publish work items concurrently + borrow shared fields
+- perf(gateway): pass msgpack items through as rmpv::Value
+- perf(gateway): trim per-request work on the inference hot path
+- fix(observability): address PR review blockers on metrics PR
+- feat(observability): add Prometheus metrics to sie-config and expand sie-gateway coverage
+- docs(sdk): drop LORA_LOADING references from score/extract docstrings
+- docs(sdk): correct wait_for_capacity docstrings to reflect actual retry matrix
+- fix(gateway): emit X-SIE-Error-Code header on model-loading 503
+- chore(gateway): drop dead AppError::UpstreamTimeout variant
+- fix(gateway,sdk): map upstream timeouts to 503+MODEL_LOADING for SDK retry
+- test(bundle-coverage): fail loudly on empty dirs and duplicate bundle names
+- test(bundle-coverage): drop over-strict duplicate-adapter assertion and module docstring
+- fix(config): surface mixed-profile unrouteable models and keep snapshot consistent on writes
+- fix(config,cluster): surface unrouteable models loudly and helm-repo-add on pristine hosts
+- fix(bundles): declare Qwen3-VL adapters in default bundle
+- fix(gateway): prioritize epoch-rewind branch; harden no-thrash test; correct arch-guide on ephemeral restart
+- docs: align config-management-api, design.md §10.10, and arch-guide with sie-config cutover
+- test(gateway): lock in backwards-epoch recovery in config_poller
+- chore(gateway,docs): address PR #702 review feedback
+- chore(gateway,helm): drop deprecated SIE_CLUSTER_ROUTING surface on the gateway
+- fix(helm): fail fast when gateway has no bundle source
+- fix(gateway): make sie-config single source of truth for bundles with live resync
+- perf(docker): add --link + move ARG BUNDLE to eliminate cross-bundle layer noise
+- fix(kind-smoke): add --no-pool-isolation for static clusters + contract-drift fixes
+- perf(docker): reorder stages for maximum BuildKit cache reuse
+- perf(docker): normalize mtimes so shared venv layer is dedupable
+- fix(kind-smoke): address bot review feedback
+- fix(kind-smoke): wire sie-config image and helm overrides into kind cluster fixture
+- perf(docker): split worker venv into shared + bundle-specific layers
+- fix(docs): Update packages/sie_server/Dockerfile.cuda11
+- fix(adapters): add input validation guards for empty/failed visual inputs
+- slim worker Dockerfiles: smaller final image, faster first-request
+- chore: integrate sie-config across release plumbing, helm, terraform, tests
+- fix: address follow-up PR review nits
+- fix(sie_config): address PR review feedback
+- fix(tests): restore docker gateway smoke test after router rename
+- fix(helm): enable NATS + JetStream by default to match queue clusterRouting
+- chore(gateway): sync crate version with cluster release (0.2.0)
+- fix(helm): default clusterRouting to "queue" on import-sie-router-rust
+- chore(gateway): make gateway-fmt auto-fix by default
+- fix(gateway,config): address PR review -- 404 for unknown models, 202 on default routing, full YAML propagation
+- ci: publish sie-gateway image to GHCR on release
+- fix(gateway,config): harden auth, trusted NATS producers, and recovery path; drop gateway HA default
+- fix(gateway): normalize model ids in NATS work subjects + docs/tooling/ha cleanup
+- chore: consolidate architecture doc and prune stale infra + docs
+- fix(gateway,config,sdk): resiliency, concurrency, and cross-service hash parity
+- chore(gateway,config): finish split audit — offload fs I/O, drop dead NATS accessors, align docs
+- test(gateway,config): expand coverage; drop dead idempotency cache; rewrite split docs
+- refactor(gateway): split sie-config into its own service; gateway is now consumer-only
+- docs(gateway): reflect current sie-config state and lock infra decisions
+- fix(config): emit identical NATS payload to bundle and _all subjects
+- refactor: rename sie-router service to sie-gateway
+- chore(sie-config): bump version to 0.1.10
+- refactor: replace sie-router package with sie-config service
+- Add PaddleOCR-VL-1.5 adapter (#659)
+- fix(adapters): clarify video placeholder, validate token IDs, fix torch_dtype key
+- fix(adapters): address review findings for Qwen3-VL adapters
+- feat(adapters): add Qwen3-VL-Embedding-2B and Qwen3-VL-Reranker-2B multimodal adapters
+- fix: guard score() and score_pairs() against empty input lists
+- fix: address review findings — negative truncation guard, score() options, constant dedup
+- feat: add Qwen3-Reranker-0.6B and 4B causal LM reranker support
+- feat: add GLiNER2 and GLiNER-bi adapters (#632)
+- fix(docker): propagate failure when all add-apt-repository retries exhausted
+- fix(docker): add retry logic for deadsnakes PPA to handle Launchpad outages
+- feat: add SigLIP 2 base-patch16-224 vision-language encoder
+- feat(openapi): add static spec export and validation
+- feat(adapters): add GLM-OCR adapter
+- revert: test_async.py — belongs to a separate PR, not this epic
+- fix: address CodeRabbit review comments on PR #615
+- fix(docker): cache apt lists alongside apt cache to prevent stale index
+- fix(cluster): emit base image tag in helm guidance; correct misleading docs (#609)
+
 ## v0.2.0
 
 - chore(main): release 0.2.0

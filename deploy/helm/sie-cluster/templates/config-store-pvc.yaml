@@ -1,0 +1,18 @@
+{{- if and .Values.config.enabled .Values.config.configStore.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "sie-cluster.config.serviceName" . }}-store
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.config.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.config.configStore.size }}
+  {{- with .Values.config.configStore.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

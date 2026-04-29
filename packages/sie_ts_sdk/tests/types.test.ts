@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 import type {
+  DocumentInput,
   EncodeResult,
   Entity,
   ExtractResult,
@@ -81,6 +82,25 @@ describe("Item creation - common user patterns", () => {
 
     expect(item.multivector).toHaveLength(2);
     expect(item.text).toBeUndefined(); // No text, using cached embedding
+  });
+
+  it("creates items with a document payload for composite-document extractors", () => {
+    // User scenario: "I'm using Docling to parse this PDF and want structured data back"
+    const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]); // %PDF-1.4
+    const document: DocumentInput = { data: pdfBytes, format: "pdf" };
+
+    const item: Item = { id: "doc-1", document };
+
+    expect(item.document?.format).toBe("pdf");
+    expect(item.document?.data).toBeInstanceOf(Uint8Array);
+    expect(item.document?.data.length).toBe(8);
+  });
+
+  it("allows document items to omit the format hint (server may sniff)", () => {
+    // User scenario: "I have raw bytes from a file, let the server figure out what it is"
+    const item: Item = { document: { data: new Uint8Array([0x00, 0x01]) } };
+
+    expect(item.document?.format).toBeUndefined();
   });
 });
 

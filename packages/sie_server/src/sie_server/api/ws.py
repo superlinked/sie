@@ -161,7 +161,7 @@ def _compute_bundle_config_hash(registry: ModelRegistry, bundle_id: str) -> str:
     if not configs:
         return ""
 
-    # Deterministic serialization matching router's compute_bundle_config_hash:
+    # Deterministic serialization matching gateway's compute_bundle_config_hash:
     # both sides hash [{"sie_id": name, "profiles": [{name, config}]}]
     # where config contains routable fields (adapter_path, max_batch_tokens, etc.).
     _hash_fields = ("adapter_path", "max_batch_tokens", "compute_precision", "adapter_options")
@@ -173,12 +173,12 @@ def _compute_bundle_config_hash(registry: ModelRegistry, bundle_id: str) -> str:
             # Normalize adapter_options to a plain dict or None.
             # Pydantic models serialize default AdapterOptions() as
             # {"loadtime": {}, "runtime": {}} which would mismatch
-            # the router's raw dict (None when not set). Treat a
+            # the gateway's raw dict (None when not set). Treat a
             # default/empty AdapterOptions the same as None.
             adapter_opts_raw = None
             if profile.adapter_options:
                 dumped = profile.adapter_options.model_dump(mode="json")
-                # Treat all-empty-sub-dicts as None (matches router's raw None)
+                # Treat all-empty-sub-dicts as None (matches gateway's raw None)
                 if any(v for v in dumped.values()):
                     adapter_opts_raw = dumped
             profile_dict = {
@@ -274,7 +274,7 @@ async def build_status_message(registry: ModelRegistry) -> WorkerStatusMessage:
     loaded_models = [m["name"] for m in model_status if m["state"] == "loaded"]
 
     # Compute aggregate max_batch_requests across loaded models.
-    # The router uses this for fill-first scoring to know worker batch capacity.
+    # The gateway uses this for fill-first scoring to know worker batch capacity.
     # Use the minimum across loaded models (conservative: GPU batch is model-specific).
     # Snapshot _loaded to avoid RuntimeError from concurrent mutation during iteration.
     loaded_snapshot = list(registry._loaded.values())
@@ -288,7 +288,7 @@ async def build_status_message(registry: ModelRegistry) -> WorkerStatusMessage:
         timestamp=time.time(),
         ready=is_ready(),
         name=worker_name,
-        # Router-friendly fields
+        # Gateway-friendly fields
         machine_profile=machine_profile,
         pool_name=pool_name,
         gpu_count=gpu_count,
@@ -296,7 +296,7 @@ async def build_status_message(registry: ModelRegistry) -> WorkerStatusMessage:
         bundle_config_hash=bundle_config_hash,
         loaded_models=loaded_models,
         max_batch_requests=max_batch_requests,
-        # Detailed fields (for TUI, router model selection, debugging)
+        # Detailed fields (for TUI, gateway model selection, debugging)
         # Note: queue_depth is per-model in models array, not aggregated
         server=server_info,
         gpus=gpu_metrics,  # Individual GPU info still available here

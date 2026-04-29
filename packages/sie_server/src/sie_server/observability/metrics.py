@@ -114,6 +114,75 @@ MODEL_MEMORY_BYTES = Gauge(
 
 
 # -----------------------------------------------------------------------------
+# OOM Recovery Metrics
+# -----------------------------------------------------------------------------
+#
+# These mirror ``sie_server.core.oom.OomRecoveryStats`` and are bumped from
+# inside ``BatchExecutor`` whenever the corresponding strategy fires. Operators
+# use them to:
+#   * Detect a sustained recovery rate (= a real memory leak or undersized
+#     pool, not just transient pressure).
+#   * Tune ``SIE_OOM_RECOVERY__MAX_SPLIT_DEPTH`` based on how often
+#     ``batch_splits`` fires relative to ``terminal_failures``.
+#   * Dashboard "recovery saved this many requests" via
+#     ``recoveries_succeeded`` (analytics value separate from
+#     ``terminal_failures``, which is the alert signal).
+
+OOM_RECOVERIES_ATTEMPTED = Counter(
+    "sie_oom_recoveries_attempted_total",
+    "Number of OOM events caught at the worker dispatch boundary",
+    ["model"],
+)
+
+OOM_RECOVERIES_SUCCEEDED = Counter(
+    "sie_oom_recoveries_succeeded_total",
+    "OOM recovery attempts that fully succeeded (every metadata got a result)",
+    ["model"],
+)
+
+OOM_TERMINAL_FAILURES = Counter(
+    "sie_oom_terminal_failures_total",
+    "OOM events where every recovery strategy was exhausted (clients see RESOURCE_EXHAUSTED)",
+    ["model"],
+)
+
+OOM_CACHE_CLEARS = Counter(
+    "sie_oom_cache_clears_total",
+    "Cache-clear recovery actions executed",
+    ["model"],
+)
+
+OOM_EVICTIONS_TRIGGERED = Counter(
+    "sie_oom_evictions_triggered_total",
+    "Sibling-model evictions performed during OOM recovery",
+    ["model"],
+)
+
+OOM_BATCH_SPLITS = Counter(
+    "sie_oom_batch_splits_total",
+    "Top-level batch-split recovery invocations (recursive halves not counted separately)",
+    ["model"],
+)
+
+
+# -----------------------------------------------------------------------------
+# Idle Eviction Metrics
+# -----------------------------------------------------------------------------
+#
+# Bumped from ``ModelRegistry._idle_evict_loop`` each time a cold model is
+# unloaded by the proactive idle-TTL evictor. Different from
+# ``sie_oom_evictions_triggered_total`` (which is the reactive sibling-eviction
+# step inside ``BatchExecutor``) — this metric tracks the proactive cleanup
+# loop and is what operators key on when validating ``SIE_IDLE_EVICT_S``.
+
+IDLE_EVICTIONS_TOTAL = Counter(
+    "sie_idle_evictions_total",
+    "Models unloaded by the proactive idle-TTL evictor",
+    ["model"],
+)
+
+
+# -----------------------------------------------------------------------------
 # Helper Functions
 # -----------------------------------------------------------------------------
 
@@ -223,3 +292,58 @@ def set_model_memory(model: str, device: str, memory_bytes: int) -> None:
         memory_bytes: Estimated GPU memory usage in bytes.
     """
     MODEL_MEMORY_BYTES.labels(model=model, device=device).set(memory_bytes)
+
+
+def record_oom_recovery_event(
+    model: str,
+    *,
+    action: str | None = None,
+    attempted: bool = False,
+    succeeded: bool = False,
+    terminal: bool = False,
+) -> None:
+    """Bump the appropriate OOM recovery counters for ``model``.
+
+    Centralises the prom-metric writes so ``BatchExecutor`` doesn't have
+    to know about the prometheus client. Multiple flags can be set in a
+    single call (e.g., ``attempted=True`` plus ``succeeded=True``) to
+    record both events for the same recovery cycle.
+
+    Args:
+        model: Model name (becomes the ``model`` label).
+        action: Strategy action name when bumping a per-strategy counter.
+            One of ``"cache_clear"``, ``"evict_lru"``, or ``"split_batch"``;
+            ``None`` skips the per-strategy bump.
+        attempted: Bump ``sie_oom_recoveries_attempted_total``.
+        succeeded: Bump ``sie_oom_recoveries_succeeded_total``.
+        terminal: Bump ``sie_oom_terminal_failures_total``.
+    """
+    if attempted:
+        OOM_RECOVERIES_ATTEMPTED.labels(model=model).inc()
+    if succeeded:
+        OOM_RECOVERIES_SUCCEEDED.labels(model=model).inc()
+    if terminal:
+        OOM_TERMINAL_FAILURES.labels(model=model).inc()
+    if action is None:
+        return
+    if action == "cache_clear":
+        OOM_CACHE_CLEARS.labels(model=model).inc()
+    elif action == "evict_lru":
+        OOM_EVICTIONS_TRIGGERED.labels(model=model).inc()
+    elif action == "split_batch":
+        OOM_BATCH_SPLITS.labels(model=model).inc()
+    else:
+        # Fail fast: silently dropping unknown actions causes per-strategy
+        # metrics to drift out of sync with the executor's real behaviour
+        # (e.g., a typo at the call site in ``BatchExecutor`` would never
+        # surface as a missing-counter alert).
+        msg = f"record_oom_recovery_event: unknown action {action!r} for model {model!r}"
+        raise ValueError(msg)
+
+
+def record_idle_eviction(model: str) -> None:
+    """Bump ``sie_idle_evictions_total`` for ``model``.
+
+    Called from the registry's idle-evict loop after a successful unload.
+    """
+    IDLE_EVICTIONS_TOTAL.labels(model=model).inc()

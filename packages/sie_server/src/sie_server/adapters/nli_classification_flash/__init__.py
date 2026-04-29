@@ -122,6 +122,14 @@ class NLIClassificationFlashAdapter(FlashBaseAdapter):
             self._entailment_idx,
         )
 
+        # Clamp configured max_length to whatever the tokenizer/model
+        # actually support to avoid OOB position embeddings on long inputs.
+        self._max_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_length,
+        )
+
     def _resolve_dtype(self) -> torch.dtype:
         """Resolve compute dtype based on device and precision setting."""
         if self._device == "cpu":

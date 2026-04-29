@@ -375,6 +375,42 @@ class MemoryManager:
         """
         return list(self._models.keys())[:count]
 
+    def get_idle_models(
+        self,
+        *,
+        idle_threshold_s: float,
+        now: float | None = None,
+    ) -> list[str]:
+        """Return loaded models whose ``last_used_at`` is older than the threshold.
+
+        Pure-function over the existing ``_models`` ``OrderedDict``: no
+        additional state is kept. Used by the proactive idle-eviction
+        background loop in ``ModelRegistry`` to unload cold models even
+        when memory pressure is below the reactive threshold.
+
+        Args:
+            idle_threshold_s: Age in seconds beyond which a model is
+                considered idle. Must be non-negative; ``0`` returns every
+                tracked model (intended for tests, not production).
+            now: Override the reference time (for tests). Defaults to
+                ``time.monotonic()``.
+
+        Returns:
+            Model names sorted oldest-first (longest-idle leads).
+        """
+        if idle_threshold_s < 0:
+            msg = f"idle_threshold_s must be >= 0, got {idle_threshold_s}"
+            raise ValueError(msg)
+        ref = time.monotonic() if now is None else now
+        idle: list[tuple[float, str]] = []
+        for name, info in self._models.items():
+            age = ref - info.last_used_at
+            if age >= idle_threshold_s:
+                idle.append((info.last_used_at, name))
+        # Sort by last_used_at ascending → longest-idle first.
+        idle.sort(key=lambda pair: pair[0])
+        return [name for _, name in idle]
+
     def should_evict_for_load(self, required_bytes: int | None = None) -> bool:
         """Check if we need to evict models before loading a new one.
 

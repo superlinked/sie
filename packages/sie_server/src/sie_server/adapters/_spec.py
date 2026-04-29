@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-InputModality = Literal["text", "image", "audio", "video"]
+InputModality = Literal["text", "image", "audio", "video", "document"]
 OutputType = Literal["dense", "sparse", "multivector", "score", "json"]
 
 

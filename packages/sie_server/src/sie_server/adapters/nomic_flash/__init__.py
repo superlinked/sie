@@ -144,6 +144,15 @@ class NomicFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._dense_dim = self._hidden_size
         logger.info("Nomic model loaded: %d layers, %d hidden", 12, self._hidden_size)
 
+        # Clamp configured max_seq_length to whatever the tokenizer supports.
+        # Weights are loaded raw from safetensors, so there is no HF config to
+        # consult — the helper falls back to tokenizer.model_max_length.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            None,
+            self._max_seq_length,
+        )
+
     def _load_weights(self, model_path: str) -> None:
         """Load model weights from safetensors file."""
         from safetensors import safe_open

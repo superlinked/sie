@@ -108,7 +108,7 @@ def resolve_deps(
     if bundle:
         resolved_bundle = bundle
     else:
-        model_list = [m.strip() for m in models.split(",") if m.strip()]  # type: ignore[union-attr]
+        model_list = [m.strip() for m in models.split(",") if m.strip()]  # type: ignore
         matched = find_bundle_for_models(model_list, bundles_dir, models_path)
         if not matched:
             typer.echo(f"Error: No bundle found covering models: {', '.join(model_list)}", err=True)
@@ -136,6 +136,57 @@ def resolve_deps(
         # Print requirements to stdout for shell scripts to consume
         for req in result.requirements:
             typer.echo(req)
+
+
+@app.command("openapi")
+def openapi_export(
+    output: Path | None = typer.Option(None, "--output", "-o", help="Output file path (default: stdout)"),  # noqa: B008
+    indent: int = typer.Option(2, "--indent", help="JSON indentation level"),
+) -> None:
+    """Export the OpenAPI spec as a static JSON file."""
+    import json
+    from importlib.metadata import version as pkg_version
+
+    from fastapi import FastAPI
+
+    from sie_server.api.encode import router as encode_router
+    from sie_server.api.extract import router as extract_router
+    from sie_server.api.health import router as health_router
+    from sie_server.api.metrics import router as metrics_router
+    from sie_server.api.models import router as models_router
+    from sie_server.api.openai_compat import router as openai_router
+    from sie_server.api.openapi import setup_custom_openapi_schema
+    from sie_server.api.root import router as root_router
+    from sie_server.api.score import router as score_router
+    from sie_server.api.ws import router as ws_router
+
+    # Build a lightweight FastAPI app with all routers but no lifespan
+    # (no GPU init, no model registry, no telemetry, no NATS)
+    app_ = FastAPI(
+        title="SIE Server",
+        description="Search Inference Engine - GPU inference server for search workloads",
+        version="0.1.0",
+    )
+    app_.include_router(root_router)
+    app_.include_router(health_router)
+    app_.include_router(encode_router)
+    app_.include_router(extract_router)
+    app_.include_router(score_router)
+    app_.include_router(models_router)
+    app_.include_router(metrics_router)
+    app_.include_router(ws_router)
+    app_.include_router(openai_router)
+    setup_custom_openapi_schema(app_)
+
+    spec = app_.openapi()
+    spec["info"]["version"] = pkg_version("sie-server")
+
+    json_str = json.dumps(spec, indent=indent) + "\n"
+    if output:
+        output.write_text(json_str)
+        typer.echo(f"OpenAPI spec written to {output}")
+    else:
+        typer.echo(json_str, nl=False)
 
 
 @app.command()

@@ -48,6 +48,14 @@ class TestInputTypes:
         assert item.images is None
         assert item.audio is None
         assert item.video is None
+        assert item.document is None
+
+    def test_item_with_document(self) -> None:
+        """Item carries a document payload for composite-document extractors."""
+        item = Item(document={"data": b"%PDF-1.4", "format": "pdf"})
+        assert item.document is not None
+        assert item.document["data"] == b"%PDF-1.4"
+        assert item.document["format"] == "pdf"
 
 
 class TestOutputTypes:

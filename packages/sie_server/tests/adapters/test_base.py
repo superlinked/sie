@@ -42,7 +42,7 @@ class TestModelAdapterABC:
     def test_cannot_instantiate_directly(self) -> None:
         """Cannot instantiate ModelAdapter directly."""
         with pytest.raises(TypeError, match="abstract"):
-            ModelAdapter()  # type: ignore[abstract]
+            ModelAdapter()  # type: ignore
 
     def test_default_methods_raise(self) -> None:
         """Default encode/score/extract raise NotImplementedError."""

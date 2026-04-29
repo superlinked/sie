@@ -17,6 +17,20 @@ export type DType = "float32" | "float16" | "bfloat16" | "int8" | "uint8" | "bin
 export type OutputType = "dense" | "sparse" | "multivector";
 
 /**
+ * Document input for composite-document extractors (PDF, DOCX, HTML, ...).
+ *
+ * The wire format is the document bytes plus an optional format hint. The
+ * hint is advisory — adapters may sniff the bytes when it is missing or
+ * unrecognized.
+ */
+export interface DocumentInput {
+  /** Document bytes (raw file content) */
+  data: Uint8Array;
+  /** Document format hint: "pdf", "docx", "html", etc. */
+  format?: string;
+}
+
+/**
  * A single item to encode, score, or extract from.
  *
  * For simple text encoding, just use `{ text: "your text here" }`.
@@ -31,6 +45,9 @@ export type OutputType = "dense" | "sparse" | "multivector";
  * // With images for multimodal models (ColPali, CLIP)
  * { text: "Description", images: [imageBytes] }
  *
+ * // With a document for composite-document extractors (Docling, ...)
+ * { document: { data: pdfBytes, format: "pdf" } }
+ *
  * // Pre-encoded multivector (for use with maxsim utility)
  * { multivector: [tokenEmbedding1, tokenEmbedding2, ...] }
  */
@@ -41,6 +58,8 @@ export interface Item {
   text?: string;
   /** Images as byte arrays (JPEG/PNG) for multimodal models */
   images?: Uint8Array[];
+  /** Document for composite-document extractors (PDF, DOCX, HTML, ...) */
+  document?: DocumentInput;
   /** Pre-encoded multivector (for use with maxsim utility) */
   multivector?: Float32Array[];
   /** Arbitrary metadata (passed through to results) */
@@ -104,7 +123,7 @@ export interface ModelInfo {
   name: string;
   /** Whether the model is currently loaded in memory */
   loaded: boolean;
-  /** Supported input types: ["text"], ["text", "image"], etc. */
+  /** Supported input types: ["text"], ["text", "image"], ["text", "document"], etc. */
   inputs: string[];
   /** Supported output types: ["dense"], ["dense", "sparse"], etc. */
   outputs: string[];

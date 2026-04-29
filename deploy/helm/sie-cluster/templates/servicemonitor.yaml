@@ -1,6 +1,8 @@
 {{- if .Values.serviceMonitor.enabled }}
 # ServiceMonitor for Prometheus Operator
-# Scrapes metrics from router and all worker pools
+# Scrapes metrics from the gateway, sie-config, and all worker pools (any
+# service that exposes the `http` port under the chart's common selector
+# labels).
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

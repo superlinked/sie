@@ -87,7 +87,7 @@ class SentenceTransformerDenseAdapter(BaseAdapter):
         if self._max_seq_length is not None:
             self._model.max_seq_length = self._max_seq_length
 
-        self._dense_dim = self._model.get_sentence_embedding_dimension()
+        self._dense_dim = self._model.get_embedding_dimension()
 
     def encode(
         self,
@@ -230,7 +230,7 @@ class SentenceTransformerSparseAdapter(BaseAdapter):
             self._model.max_seq_length = self._max_seq_length
 
         # Sparse dim is vocabulary size
-        self._sparse_dim = self._model.get_sentence_embedding_dimension()
+        self._sparse_dim = self._model.get_embedding_dimension()
 
     def encode(
         self,

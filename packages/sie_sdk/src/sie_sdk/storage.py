@@ -17,6 +17,7 @@ import fnmatch
 import logging
 import os
 import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from pathlib import Path
@@ -70,6 +71,23 @@ class StorageBackend(ABC):
 
         Returns:
             True if path exists.
+        """
+
+    @abstractmethod
+    def has_children(self, path: str) -> bool:
+        """Check if a prefix has any children.
+
+        Required for cache lookups that probe a directory-like prefix
+        (e.g. an HF cache ``snapshots/`` folder). Object stores have no
+        real directories: a single ``head_object`` on a prefix returns
+        404 even when ``list_objects_v2`` shows children clearly present,
+        so ``exists`` cannot be used for this check.
+
+        Args:
+            path: Prefix to check (cloud URL or local directory path).
+
+        Returns:
+            True if the prefix contains at least one child object/file.
         """
 
     @abstractmethod
@@ -170,15 +188,52 @@ class LocalBackend(StorageBackend):
         """Check if local path exists."""
         return Path(path).exists()
 
+    def has_children(self, path: str) -> bool:
+        """Check if a local directory contains at least one entry."""
+        p = Path(path)
+        if not p.is_dir():
+            return False
+        return next(p.iterdir(), None) is not None
+
     def read_text(self, path: str) -> str:
         """Read text from local file."""
         return Path(path).read_text()
 
     def write_text(self, path: str, content: str) -> None:
-        """Write text to local file."""
+        """Write text to local file atomically.
+
+        Uses a write-to-temp-then-rename pattern so a crash mid-write can
+        never leave the destination truncated or empty. `Path.replace` is
+        atomic on POSIX and Windows (NTFS) when source and destination
+        are on the same filesystem — which they are here because we put
+        the temp file next to the destination. Without this, the naive
+        `Path.write_text` truncates-then-writes, and a crash in between
+        leaves zero bytes on disk. That is particularly bad for the
+        epoch file: `ConfigStore.read_epoch` swallows a malformed int
+        as 0, which silently collapses the whole replay-detection
+        mechanism downstream (poller would see remote==local==0 and
+        declare "in sync" forever).
+        """
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{p.name}.",
+            suffix=".tmp",
+            dir=str(p.parent),
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp_path.replace(p)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
 
     def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
         """Atomic CAS on local filesystem using file locking."""
@@ -386,6 +441,26 @@ class S3Backend(StorageBackend):
         except client.exceptions.ClientError:
             return False
         return True
+
+    def has_children(self, path: str) -> bool:
+        """Check if an S3 prefix has at least one object beneath it.
+
+        Uses ``list_objects_v2`` with ``MaxKeys=2`` because S3 has no real
+        directories — ``head_object`` on a prefix returns 404 even when
+        children are clearly present (see :py:meth:`StorageBackend.has_children`).
+
+        Folder-marker objects whose key equals the normalized prefix exactly
+        (a zero-byte placeholder at e.g. ``snapshots/``) are filtered out:
+        they exist as objects but represent no real children. ``MaxKeys=2``
+        guarantees that if a real child exists alongside such a marker, the
+        single non-marker entry is still visible in the response.
+        """
+        client = self._get_client()
+        bucket, prefix = self._parse_s3_url(path)
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        response = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=2)
+        return any(obj.get("Key") != prefix for obj in response.get("Contents", []))
 
     def read_text(self, path: str) -> str:
         """Read text content from S3."""
@@ -601,6 +676,26 @@ class GCSBackend(StorageBackend):
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
         return blob.exists()
+
+    def has_children(self, path: str) -> bool:
+        """Check if a GCS prefix has at least one blob beneath it.
+
+        Lists with ``max_results=2`` to avoid materialising the full page
+        when only existence is needed.
+
+        Folder-marker blobs whose name equals the normalized prefix exactly
+        (a zero-byte placeholder at e.g. ``snapshots/``) are filtered out:
+        they exist as blobs but represent no real children. ``max_results=2``
+        guarantees that if a real child exists alongside such a marker, the
+        single non-marker entry is still visible in the response.
+        """
+        client = self._get_client()
+        bucket_name, prefix = self._parse_gcs_url(path)
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        bucket = client.bucket(bucket_name)
+        blobs = bucket.list_blobs(prefix=prefix, max_results=2)
+        return any(blob.name != prefix for blob in blobs)
 
     def read_text(self, path: str) -> str:
         """Read text content from GCS."""

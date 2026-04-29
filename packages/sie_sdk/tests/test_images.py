@@ -104,7 +104,7 @@ class TestToJpegBytes:
     def test_unsupported_type(self) -> None:
         """Raise ValueError for unsupported types."""
         with pytest.raises(ValueError, match="Unsupported image type"):
-            to_jpeg_bytes(123)  # type: ignore[arg-type]
+            to_jpeg_bytes(123)  # type: ignore
 
     def test_invalid_array_shape(self) -> None:
         """Raise ValueError for invalid array dimensions."""

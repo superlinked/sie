@@ -545,6 +545,185 @@ describe("SIEClient.close()", () => {
   });
 });
 
+describe("SIEClient retry on connection errors and generic 503s", () => {
+  beforeEach(() => {
+    mockFetch.mockClear();
+    // Fake timers also fake Date.now(), which requestWithRetry uses.
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("should retry on connection error when waitForCapacity is true", async () => {
+    const client = new SIEClient("http://localhost:8080", {
+      timeout: 30_000,
+      provisionTimeout: 60_000,
+    });
+
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed")).mockResolvedValueOnce(
+      createMsgpackResponse({
+        items: [{ dense: { values: new Float32Array([0.1, 0.2]) } }],
+      }),
+    );
+
+    const promise = client.encode("bge-m3", { text: "test" }, { waitForCapacity: true });
+
+    // DEFAULT_RETRY_DELAY = 5_000ms.
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const result = await promise;
+
+    expect(result.dense).toBeInstanceOf(Float32Array);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    await client.close();
+  });
+
+  it("should not retry on connection error when waitForCapacity is false", async () => {
+    const client = new SIEClient("http://localhost:8080", { timeout: 1000 });
+
+    mockFetch.mockRejectedValueOnce(new TypeError("fetch failed"));
+
+    await expect(
+      client.encode("bge-m3", { text: "test" }, { waitForCapacity: false }),
+    ).rejects.toThrow(SIEConnectionError);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    await client.close();
+  });
+
+  it("should NOT retry on per-request timeout even when waitForCapacity is true", async () => {
+    // Pin the kind === "timeout" no-retry contract; see requestWithRetry docstring.
+    const client = new SIEClient("http://localhost:8080", {
+      timeout: 30_000,
+      provisionTimeout: 60_000,
+    });
+
+    // request() wraps AbortError as SIEConnectionError with kind="timeout".
+    mockFetch.mockRejectedValueOnce(
+      Object.assign(new Error("The user aborted a request."), { name: "AbortError" }),
+    );
+
+    await expect(
+      client.encode("bge-m3", { text: "test" }, { waitForCapacity: true }),
+    ).rejects.toThrow(SIEConnectionError);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    await client.close();
+  });
+
+  it("should give up retrying connection errors after provisionTimeout", async () => {
+    const client = new SIEClient("http://localhost:8080", {
+      timeout: 30_000,
+      provisionTimeout: 10_000,
+    });
+
+    mockFetch.mockRejectedValue(new TypeError("fetch failed"));
+
+    const promise = client.encode("bge-m3", { text: "test" }, { waitForCapacity: true });
+    // Attach assertion before advancing timers to avoid unhandled-rejection warnings.
+    const expectation = expect(promise).rejects.toThrow(SIEConnectionError);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expectation;
+
+    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // provisionTimeout=10s / DEFAULT_RETRY_DELAY=5s → 3 expected calls.
+    expect(mockFetch.mock.calls.length).toBeLessThanOrEqual(4);
+
+    await client.close();
+  });
+
+  it("should retry on generic 503 (no error code) when waitForCapacity is true", async () => {
+    const client = new SIEClient("http://localhost:8080", {
+      timeout: 30_000,
+      provisionTimeout: 60_000,
+    });
+
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "no healthy workers" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMsgpackResponse({
+          items: [{ dense: { values: new Float32Array([0.1, 0.2]) } }],
+        }),
+      );
+
+    const promise = client.encode("bge-m3", { text: "test" }, { waitForCapacity: true });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const result = await promise;
+
+    expect(result.dense).toBeInstanceOf(Float32Array);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    await client.close();
+  });
+
+  it("should not retry on generic 503 when waitForCapacity is false", async () => {
+    const client = new SIEClient("http://localhost:8080", { timeout: 1000 });
+
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "no healthy workers" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(
+      client.encode("bge-m3", { text: "test" }, { waitForCapacity: false }),
+    ).rejects.toThrow(ServerError);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    await client.close();
+  });
+
+  it("should honor Retry-After header on generic 503", async () => {
+    const client = new SIEClient("http://localhost:8080", {
+      timeout: 30_000,
+      provisionTimeout: 60_000,
+    });
+
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "no healthy workers" }), {
+          status: 503,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "2", // < DEFAULT_RETRY_DELAY (5s)
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMsgpackResponse({
+          items: [{ dense: { values: new Float32Array([0.1]) } }],
+        }),
+      );
+
+    const promise = client.encode("bge-m3", { text: "test" }, { waitForCapacity: true });
+
+    // Second fetch must not fire before 2s — proves sleep is ≥ 2s.
+    await vi.advanceTimersByTimeAsync(1_900);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    // Second fetch fires after the full 2s — proves Retry-After is honored.
+    await vi.advanceTimersByTimeAsync(200);
+    const result = await promise;
+
+    expect(result.dense).toBeInstanceOf(Float32Array);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    await client.close();
+  });
+});
+
 describe("Real-world usage patterns", () => {
   beforeEach(() => {
     mockFetch.mockClear();

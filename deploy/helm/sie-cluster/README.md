@@ -15,10 +15,10 @@ helm install sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
 ## Architecture
 
 ```
-┌─────────────┐     ┌─────────────────────────────────────┐
-│   Client    │────▶│           Router (2+ replicas)      │
-└─────────────┘     └───────────────┬─────────────────────┘
-                                    │
+┌─────────────┐     ┌─────────────────────────────────────┐     ┌──────────────┐
+│   Client    │────▶│      Gateway (1 replica; 2+ for HA)  │◀───▶│  sie-config  │
+└─────────────┘     └───────────────┬─────────────────────┘     │ (singleton)  │
+                                    │                           └──────────────┘
                     ┌───────────────┼───────────────┐
                     ▼               ▼               ▼
               ┌─────────┐     ┌─────────┐     ┌─────────┐
@@ -27,8 +27,9 @@ helm install sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
               └─────────┘     └─────────┘     └─────────┘
 ```
 
-- **Router**: Stateless proxy that routes requests to workers based on GPU type and model affinity
-- **Worker Pools**: StatefulSets per GPU type, each with KEDA autoscaling
+- **Gateway**: Stateless request proxy that routes to workers based on GPU type and model affinity. Consumes config via GET/NATS from `sie-config`.
+- **sie-config**: Authoritative control plane for model/bundle configuration. Serves `/v1/configs/*` writes and publishes NATS deltas to the gateway and workers. Deployed as a singleton (`replicas: 1`, `strategy: Recreate`).
+- **Worker Pools**: StatefulSets per GPU type, each with KEDA autoscaling.
 
 ## Cold Start Expectations
 
@@ -50,8 +51,7 @@ When scaling from zero, expect the following latencies:
 
 ### Client Handling
 
-When a pool is scaling from zero, the router returns:
-
+When a pool is scaling from zero, the gateway returns:
 - **202 Accepted** with `Retry-After: 120` header
 - Client should retry after the indicated delay
 
@@ -72,7 +72,7 @@ autoscaling:
 
 ### Scale-from-Zero Trigger
 
-The router exposes `sie_router_pending_demand{gpu="..."}` metric when requests
+The gateway exposes `sie_gateway_pending_demand{gpu="..."}` metric when requests
 arrive for GPU types with no available workers. KEDA uses this to trigger scale-up
 even when there are 0 workers (and thus no worker metrics).
 
@@ -80,7 +80,7 @@ even when there are 0 workers (and thus no worker metrics).
 
 | Metric | Source | Purpose |
 |--------|--------|---------|
-| `sie_router_pending_demand` | Router | Trigger scale from 0 |
+| `sie_gateway_pending_demand` | Gateway | Trigger scale from 0 |
 | `sie_request_queue_depth` | Workers | Scale up on load |
 | `sie_active_requests` | Workers | Scale up on concurrent requests |
 
@@ -101,8 +101,8 @@ workers:
       minReplicas: 0    # Scale to zero
       maxReplicas: 10
 
-# Router configuration
-router:
+# Gateway configuration
+gateway:
   replicaCount: 2  # HA by default
 
 # Autoscaling

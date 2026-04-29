@@ -21,7 +21,7 @@ class TestSentenceTransformerDenseAdapter:
     def mock_st_model(self) -> MagicMock:
         """Create a mock SentenceTransformer model."""
         mock = MagicMock()
-        mock.get_sentence_embedding_dimension.return_value = 384
+        mock.get_embedding_dimension.return_value = 384
 
         # Return correct batch size based on input
         def mock_encode(texts, **kwargs):
@@ -150,7 +150,7 @@ class TestSentenceTransformerSparseAdapter:
         import torch
 
         mock = MagicMock()
-        mock.get_sentence_embedding_dimension.return_value = 30522
+        mock.get_embedding_dimension.return_value = 30522
 
         # Create sparse COO tensor output
         # 2 rows, vocab_size columns, few non-zero values

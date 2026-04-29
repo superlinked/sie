@@ -1,0 +1,58 @@
+# cargo-deny config for sie-gateway.
+#
+# Run with: `mise run gateway-deny`
+# Docs:     https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true        # audit cloud-storage feature deps too
+no-default-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+# Each ignored entry must carry a reason and an upstream-fix path. When
+# the corresponding transitive bump lands (kube-rs, async-nats,
+# prometheus), drop the entry — `cargo-deny` warns on unmatched ignores.
+ignore = [
+    # ── Vulnerabilities (transitive, blocked on upstream dep bumps) ──
+    { id = "RUSTSEC-2024-0437", reason = "protobuf v2 stack overflow on malformed input; transitive via prometheus 0.13 (which pins protobuf=2.28). Fixed by bumping prometheus." },
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki <0.103.13 CRL distribution-point matching; transitive via async-nats 0.38 (pulls webpki 0.102). Fixed by bumping async-nats >=0.39." },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki URI name-constraint bypass; transitive via async-nats 0.38. Fixed by bumping async-nats >=0.39." },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard name-constraint accept; transitive via async-nats 0.38. Fixed by bumping async-nats >=0.39." },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL parsing panic; transitive via async-nats 0.38. Fixed by bumping async-nats >=0.39." },
+
+    # ── Unmaintained / unsound (low impact, all transitive) ──
+    { id = "RUSTSEC-2025-0012", reason = "`backoff` crate unmaintained; transitive via kube-runtime 0.98. Fixed by bumping kube-rs (newer versions migrated to `backon`)." },
+    { id = "RUSTSEC-2024-0384", reason = "`instant` unmaintained; transitive via backoff -> kube-runtime. Resolves with the kube-rs bump above." },
+    { id = "RUSTSEC-2025-0134", reason = "`rustls-pemfile` archived; transitive via kube-client 0.98. Resolves with the kube-rs bump above." },
+    { id = "RUSTSEC-2026-0097", reason = "`rand` soundness issue only triggers under a custom `log` impl that calls `rand::rng()`; sie-gateway uses tracing-subscriber and never reaches that path." },
+]
+
+[licenses]
+version = 2
+# sie-gateway itself is `publish = false`; skip license validation for
+# the workspace crate, only audit external dependency licenses.
+private = { ignore = true }
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

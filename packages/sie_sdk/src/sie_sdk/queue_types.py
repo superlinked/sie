@@ -18,7 +18,7 @@ class _WorkItemRequired(TypedDict):
 class WorkItem(_WorkItemRequired, total=False):
     """A single inference work item published to NATS JetStream.
 
-    Published by the router to ``sie.work.{model_id_normalized}.{pool_name}``.
+    Published by the gateway to ``sie.work.{model_id_normalized}.{pool_name}``.
     Consumed by workers via JetStream pull consumers.
 
     Attributes:
@@ -31,7 +31,7 @@ class WorkItem(_WorkItemRequired, total=False):
         profile_id: Profile name (e.g., ``"default"``).
         pool_name: Target pool (e.g., ``"_default"``).
         machine_profile: Required GPU type (e.g., ``"l4"``). Workers validate this.
-        bundle_config_hash: Expected bundle config hash from the router's ModelRegistry.
+        bundle_config_hash: Expected bundle config hash from the gateway's ModelRegistry.
             Workers compare this against their own computed hash and NAK items with
             mismatched hashes so they are redelivered to updated workers.
 
@@ -50,7 +50,7 @@ class WorkItem(_WorkItemRequired, total=False):
         labels: Extract: entity labels.
         output_schema: Extract: structured output schema.
 
-        router_id: Originating router identifier (for observability).
+        router_id: Originating gateway identifier (for observability).
         reply_subject: NATS subject where the worker should publish results.
         timestamp: Unix timestamp when the work item was created.
     """
@@ -89,11 +89,11 @@ class WorkResult(_WorkResultRequired, total=False):
     """Result for a single work item, published to the reply subject.
 
     Published by the worker to the ``reply_subject`` from the corresponding
-    ``WorkItem``. The router collects results and reassembles the HTTP response.
+    ``WorkItem``. The gateway collects results and reassembles the HTTP response.
 
     Result payloads are serialized as msgpack bytes (opaque blobs) by the worker.
-    The router embeds them directly into the response without deserializing,
-    keeping numpy/msgpack-numpy out of the router's dependency graph.
+    The gateway embeds them directly into the response without deserializing,
+    keeping numpy/msgpack-numpy out of the gateway's dependency graph.
 
     Attributes:
         work_item_id: Matches the originating ``WorkItem.work_item_id``.
@@ -101,7 +101,7 @@ class WorkResult(_WorkResultRequired, total=False):
         item_index: Position in the original request (for result ordering).
 
         success: Whether inference succeeded.
-        result_msgpack: Msgpack-serialized result bytes (opaque to the router).
+        result_msgpack: Msgpack-serialized result bytes (opaque to the gateway).
             For encode: a single ``EncodeResult`` dict.
             For score: list of ``ScoreResult`` dicts.
             For extract: a single ``ExtractResult`` dict.

@@ -1,0 +1,27 @@
+sie_id: Qwen/Qwen3-VL-Embedding-2B
+hf_id: Qwen/Qwen3-VL-Embedding-2B
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 2048
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 32768
+profiles:
+  default:
+    max_batch_tokens: 4096
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.qwen3_vl_embedding:Qwen3VLEmbeddingAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        normalize: true
+        pooling: last
+        default_instruction: Represent the user's input.

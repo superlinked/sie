@@ -12,6 +12,7 @@ from sie_server.api.helpers import (
     RequestParser,
     ResponseBuilder,
     extract_request_context,
+    oom_retry_after_from_registry,
 )
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.serialization import MsgPackResponse
@@ -47,7 +48,7 @@ def _format_dense(
     dense_dim = encode_task.dense.dim if encode_task and encode_task.dense else None
     is_binary = embedding.dtype == np.uint8 and dense_dim and embedding.shape[0] < dense_dim
     if is_binary:
-        original_dims: int = dense_dim  # type: ignore[assignment]
+        original_dims: int = dense_dim  # type: ignore
         dtype: DType = "binary"
     else:
         original_dims = dense_dim if dense_dim is not None else embedding.shape[0]
@@ -108,7 +109,7 @@ def _format_multivector(
     mv_dim = encode_task.multivector.dim if encode_task and encode_task.multivector else None
     is_binary = embeddings.dtype == np.uint8 and mv_dim and embeddings.shape[1] < mv_dim
     if is_binary:
-        original_token_dims: int = mv_dim  # type: ignore[assignment]
+        original_token_dims: int = mv_dim  # type: ignore
         dtype: DType = "binary"
     else:
         original_token_dims = mv_dim if mv_dim is not None else embeddings.shape[1]
@@ -299,6 +300,9 @@ async def encode(
                     },
                 ) from e
 
+            # Worker batcher routes on options["lora"]; profile uses "lora_id".
+            options["lora"] = lora
+
         # Get output_types: profile > request param > default
         output_types: list[str] = options.get("output_types") or (params.output_types if params else None) or ["dense"]
 
@@ -348,7 +352,13 @@ async def encode(
         items = request.items
 
         # Run encoding (preprocess → execute)
-        error_handler = InferenceErrorHandler(model, "encode", span, ctx=ctx)
+        error_handler = InferenceErrorHandler(
+            model,
+            "encode",
+            span,
+            ctx=ctx,
+            oom_retry_after_s=oom_retry_after_from_registry(registry),
+        )
         try:
             results, timing = await EncodePipeline.run_encode(
                 registry=registry,

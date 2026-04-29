@@ -282,6 +282,49 @@ LightOnOCRPreparedItem = PreparedItem[LightOnOCRPayload]
 
 
 @dataclass(slots=True)
+class PaddleOCRVLPayload(Payload):
+    """Preprocessed PaddleOCR-VL input ready for extraction.
+
+    PaddleOCR-VL-1.5 combines a NaViT-style SigLIP vision encoder with an
+    ERNIE-4.5-0.3B decoder. The processor tokenizes a chat-template prompt
+    and emits a Qwen-VL-style ``image_grid_thw`` alongside ``pixel_values``.
+    """
+
+    pixel_values: Any  # torch.Tensor
+    input_ids: Any  # torch.Tensor [seq_len]
+    attention_mask: Any  # torch.Tensor [seq_len]
+    image_grid_thw: Any  # torch.Tensor [1, 3] — (temporal, height, width) grid
+    original_size: tuple[int, int]
+
+
+PaddleOCRVLPreparedItem = PreparedItem[PaddleOCRVLPayload]
+
+
+@dataclass(slots=True)
+class GlmOcrPayload(Payload):
+    """Preprocessed GLM-OCR input ready for extraction.
+
+    GLM-OCR uses a CogViT visual encoder + GLM autoregressive decoder.
+    The processor's apply_chat_template returns a multi-key dict
+    (input_ids, attention_mask, mm_token_type_ids, pixel_values,
+    image_grid_thw) where pixel_values is a flattened patch tensor with
+    no batch dim; we store the full dict to avoid losing keys or
+    double-batching.
+
+    Attributes:
+        inputs: Raw processor output dict of tensors.
+        original_size: Original image size (width, height) for debugging.
+    """
+
+    inputs: dict[str, Any]
+    original_size: tuple[int, int]
+
+
+# Type alias for GLM-OCR prepared item
+GlmOcrPreparedItem = PreparedItem[GlmOcrPayload]
+
+
+@dataclass(slots=True)
 class DetectionPayload(Payload):
     """Preprocessed detection model input ready for inference.
 

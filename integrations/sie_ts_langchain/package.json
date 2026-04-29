@@ -1,6 +1,6 @@
 {
   "name": "@superlinked/sie-langchain",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "SIE embeddings integration for LangChain.js",
   "type": "module",
   "main": "./dist/index.cjs",

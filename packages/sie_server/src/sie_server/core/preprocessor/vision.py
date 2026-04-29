@@ -17,8 +17,10 @@ from sie_server.core.prepared import (
     DetectionPayload,
     DonutPayload,
     Florence2Payload,
+    GlmOcrPayload,
     LightOnOCRPayload,
     NemoColEmbedPayload,
+    PaddleOCRVLPayload,
     PreparedBatch,
     PreparedItem,
 )
@@ -966,6 +968,184 @@ class LightOnOCRPreprocessor:
         }
 
 
+class GlmOcrPreprocessor:
+    """Preprocessor for GLM-OCR document OCR model.
+
+    Handles CPU-bound image preprocessing:
+    1. Load image from bytes (PIL)
+    2. Convert to RGB if needed
+    3. Build chat messages with user text and embedded PIL image
+    4. Apply chat template (tokenize=True, return_dict=True) to produce
+       pixel_values, input_ids, and attention_mask in a single call.
+
+    GLM-OCR uses a single-turn user message (no system prompt) and supports
+    embedding a PIL image directly in the chat template via
+    `{"type": "image", "image": pil_img}` (transformers 5.x).
+
+    This moves heavy image processing off the GPU thread, allowing
+    overlap with inference on previous batches.
+
+    Thread-safe: PIL and HuggingFace processors handle concurrent calls.
+    """
+
+    def __init__(
+        self,
+        processor: Any,
+        model_name: str,
+        *,
+        user_text: str = "Text Recognition:",
+    ) -> None:
+        """Initialize with a GLM-OCR processor.
+
+        Args:
+            processor: HuggingFace AutoProcessor for GLM-OCR.
+            model_name: Model name for logging.
+            user_text: Default user text prompt appended to the image.
+        """
+        self._processor = processor
+        self._model_name = model_name
+        self._user_text = user_text
+
+    @property
+    def modality(self) -> str:
+        """Return 'image'."""
+        return "image"
+
+    def _process_single_image(
+        self,
+        item: Item,
+        index: int,
+        instruction: str | None = None,
+    ) -> PreparedItem[GlmOcrPayload] | None:
+        """Process a single image item (thread-safe).
+
+        Args:
+            item: Item with images field.
+            index: Original index for reordering.
+            instruction: Optional instruction replacing the default user text.
+
+        Returns:
+            PreparedItem or None if item has no images.
+        """
+        from PIL import Image as PILImage
+
+        if not item.images:
+            logger.warning("GlmOcrPreprocessor: item %d has no images", index)
+            return None
+
+        img_input = item.images[0]
+        pil_img = PILImage.open(io.BytesIO(img_input["data"]))
+        original_size = (pil_img.width, pil_img.height)
+
+        if pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+
+        text = instruction or self._user_text
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": pil_img},
+                    {"type": "text", "text": text},
+                ],
+            }
+        ]
+
+        inputs = self._processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+
+        payload = GlmOcrPayload(
+            inputs=dict(inputs),
+            original_size=original_size,
+        )
+
+        return PreparedItem(payload=payload, cost=1, original_index=index)
+
+    def prepare(
+        self,
+        items: list[Item],
+        *,
+        config: ModelConfig,
+        is_query: bool = False,
+        instruction: str | None = None,
+        task: str | None = None,
+    ) -> PreparedBatch[GlmOcrPayload]:
+        """Preprocess images for GLM-OCR.
+
+        Uses parallel processing for batches of 2+ images to utilize
+        multiple CPU cores (PIL releases GIL during image operations).
+
+        Args:
+            items: Items with images field.
+            config: Model config (unused - uses processor defaults).
+            is_query: Whether items are queries (unused for GLM-OCR).
+            instruction: Optional instruction replacing the default user text.
+            task: Task token (unused for GLM-OCR).
+
+        Returns:
+            PreparedBatch with GlmOcrPayload items.
+        """
+        if len(items) == 1:
+            result = self._process_single_image(items[0], 0, instruction=instruction)
+            if result is None:
+                return PreparedBatch(items=[], total_cost=0, modality="image")
+            return PreparedBatch(items=[result], total_cost=1, modality="image")
+
+        executor = get_image_executor()
+        futures = [executor.submit(self._process_single_image, item, i, instruction) for i, item in enumerate(items)]
+
+        prepared_items: list[PreparedItem[GlmOcrPayload]] = []
+        for future in futures:
+            result = future.result()
+            if result is not None:
+                prepared_items.append(result)
+
+        return PreparedBatch(
+            items=prepared_items,
+            total_cost=len(prepared_items),
+            modality="image",
+        )
+
+    def collate(
+        self,
+        prepared: list[PreparedItem[GlmOcrPayload]],
+        *,
+        device: str,
+        dtype: Any = None,
+    ) -> dict[str, Any]:
+        """Collate GLM-OCR items into model-ready tensors.
+
+        GLM-OCR processes one image at a time: its pixel_values tensor is
+        a flattened patch sequence with no batch dim, and other keys
+        already carry a batch dim of 1 from apply_chat_template.
+
+        Args:
+            prepared: List of prepared items (single-item batches).
+            device: Target device.
+            dtype: Optional dtype for floating-point tensors.
+
+        Returns:
+            Dict with input tensors for the model.
+        """
+        if not prepared:
+            return {}
+
+        out: dict[str, Any] = {}
+        for k, v in prepared[0].payload.inputs.items():
+            if hasattr(v, "is_floating_point") and v.is_floating_point() and dtype is not None:
+                out[k] = v.to(device=device, dtype=dtype)
+            elif hasattr(v, "to"):
+                out[k] = v.to(device)
+            else:
+                out[k] = v
+        return out
+
+
 class DetectionPreprocessor:
     """Preprocessor for object detection models (GroundingDINO, OWL-v2).
 
@@ -1139,4 +1319,175 @@ class DetectionPreprocessor:
         return {
             "pixel_values": pixel_values.to(device),
             "original_sizes": original_sizes,
+        }
+
+
+# Canonical task -> prompt mapping from the PaddleOCR-VL-1.5 model card
+# (PROMPTS dict in the README; trailing colons included). Keep in sync with
+# PaddleOCRVLAdapter._VALID_TASKS.
+_PADDLEOCR_VL_TASK_PROMPTS: dict[str, str] = {
+    "ocr": "OCR:",
+    "table": "Table Recognition:",
+    "formula": "Formula Recognition:",
+    "chart": "Chart Recognition:",
+    "spotting": "Spotting:",
+    "seal": "Seal Recognition:",
+}
+
+
+class PaddleOCRVLPreprocessor:
+    """Preprocessor for PaddleOCR-VL document OCR model.
+
+    Builds a chat-template prompt keyed by task (ocr/table/formula/chart/
+    spotting/seal) and runs the HuggingFace processor to produce pixel_values,
+    input_ids, attention_mask, and image_grid_thw.
+
+    Thread-safe: PIL and HuggingFace processors handle concurrent calls.
+    """
+
+    def __init__(
+        self,
+        processor: Any,
+        model_name: str,
+        *,
+        default_task: str = "ocr",
+    ) -> None:
+        if default_task not in _PADDLEOCR_VL_TASK_PROMPTS:
+            msg = f"default_task {default_task!r} must be one of {tuple(_PADDLEOCR_VL_TASK_PROMPTS)}"
+            raise ValueError(msg)
+        self._processor = processor
+        self._model_name = model_name
+        self._default_task = default_task
+
+    @property
+    def modality(self) -> str:
+        return "image"
+
+    def _task_prompt(self, task: str | None, instruction: str | None) -> str:
+        """Resolve the text prompt for the user message.
+
+        Instruction overrides the task-based prompt when provided.
+        """
+        if instruction:
+            return instruction
+        resolved_task = task or self._default_task
+        return _PADDLEOCR_VL_TASK_PROMPTS.get(resolved_task, _PADDLEOCR_VL_TASK_PROMPTS[self._default_task])
+
+    def _build_messages(self, prompt_text: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt_text},
+                ],
+            }
+        ]
+
+    def _process_single_image(
+        self,
+        item: Item,
+        index: int,
+        text: str,
+    ) -> PreparedItem[PaddleOCRVLPayload] | None:
+        from PIL import Image as PILImage
+
+        if not item.images:
+            logger.warning("PaddleOCRVLPreprocessor: item %d has no images", index)
+            return None
+
+        img_input = item.images[0]
+        pil_img = PILImage.open(io.BytesIO(img_input["data"]))
+        original_size = (pil_img.width, pil_img.height)
+
+        if pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+
+        inputs = self._processor(
+            text=text,
+            images=[pil_img],
+            return_tensors="pt",
+        )
+
+        payload = PaddleOCRVLPayload(
+            pixel_values=inputs["pixel_values"],
+            input_ids=inputs["input_ids"].squeeze(0),
+            attention_mask=inputs["attention_mask"].squeeze(0),
+            image_grid_thw=inputs["image_grid_thw"],
+            original_size=original_size,
+        )
+        return PreparedItem(payload=payload, cost=1, original_index=index)
+
+    def prepare(
+        self,
+        items: list[Item],
+        *,
+        config: ModelConfig,
+        is_query: bool = False,
+        instruction: str | None = None,
+        task: str | None = None,
+    ) -> PreparedBatch[PaddleOCRVLPayload]:
+        prompt_text = self._task_prompt(task, instruction)
+        messages = self._build_messages(prompt_text)
+        text = self._processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+
+        if len(items) == 1:
+            result = self._process_single_image(items[0], 0, text)
+            if result is None:
+                return PreparedBatch(items=[], total_cost=0, modality="image")
+            return PreparedBatch(items=[result], total_cost=1, modality="image")
+
+        executor = get_image_executor()
+        futures = [executor.submit(self._process_single_image, item, i, text) for i, item in enumerate(items)]
+
+        prepared_items: list[PreparedItem[PaddleOCRVLPayload]] = []
+        for future in futures:
+            result = future.result()
+            if result is not None:
+                prepared_items.append(result)
+
+        return PreparedBatch(
+            items=prepared_items,
+            total_cost=len(prepared_items),
+            modality="image",
+        )
+
+    def collate(
+        self,
+        prepared: list[PreparedItem[PaddleOCRVLPayload]],
+        *,
+        device: str,
+        dtype: Any = None,
+    ) -> dict[str, Any]:
+        """Collate items into batched tensors.
+
+        PaddleOCR-VL processes one image at a time (variable-size inputs via NaViT
+        patch packing); batching multiple images requires careful grid handling
+        that the model's own path does not expose. This collate emits the first
+        item's tensors, matching LightOnOCR's approach.
+        """
+        import torch
+
+        if not prepared:
+            return {
+                "pixel_values": torch.tensor([]),
+                "input_ids": torch.tensor([]),
+                "attention_mask": torch.tensor([]),
+                "image_grid_thw": torch.tensor([]),
+            }
+
+        p = prepared[0]
+        pixel_values = p.payload.pixel_values
+        if dtype is not None:
+            pixel_values = pixel_values.to(dtype=dtype)
+
+        return {
+            "pixel_values": pixel_values.to(device),
+            "input_ids": p.payload.input_ids.unsqueeze(0).to(device),
+            "attention_mask": p.payload.attention_mask.unsqueeze(0).to(device),
+            "image_grid_thw": p.payload.image_grid_thw.to(device),
         }

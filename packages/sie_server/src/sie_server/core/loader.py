@@ -393,14 +393,18 @@ def _build_adapter_kwargs(
     Returns:
         Dictionary of kwargs for the adapter constructor.
     """
-    # Determine model path: weights_path takes precedence over hf_id
-    model_name_or_path: str | Path
-    if config.weights_path is not None:
+    # Determine model path: weights_path takes precedence over hf_id.
+    # package_backed adapters (e.g., Docling) carry their own weights via the
+    # installed package and intentionally have neither hf_id nor weights_path.
+    model_name_or_path: str | Path | None
+    if config.package_backed:
+        model_name_or_path = None
+    elif config.weights_path is not None:
         model_name_or_path = config.weights_path
     elif config.hf_id is not None:
         model_name_or_path = config.hf_id
     else:
-        msg = f"Model '{config.name}' has no weights_path or hf_id"
+        msg = f"Model '{config.name}' has no weights_path, hf_id, or package_backed flag"
         raise ValueError(msg)
 
     # Resolve default profile for adapter options and compute precision

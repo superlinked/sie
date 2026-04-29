@@ -53,7 +53,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "sie-cluster.router.serviceName" . }}
+                name: {{ include "sie-cluster.gateway.serviceName" . }}
                 port:
-                  number: {{ .Values.router.service.port }}
+                  number: {{ .Values.gateway.service.port }}
 {{- end }}

@@ -134,6 +134,14 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         )
         self._idf = self._try_load_idf_vector(self._tokenizer)
 
+        # Clamp configured max_seq_length to whatever the tokenizer/model
+        # actually support to avoid OOB position embeddings on long inputs.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_seq_length,
+        )
+
     def _detect_arch(self) -> _Arch:
         if hasattr(self._model, "bert"):
             return "bert"

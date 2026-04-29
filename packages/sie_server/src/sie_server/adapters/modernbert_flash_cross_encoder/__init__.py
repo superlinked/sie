@@ -129,6 +129,14 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
             "mean" if self._use_mean_pooling else "cls",
         )
 
+        # Clamp configured max_seq_length to whatever the tokenizer/model
+        # actually support to avoid OOB position embeddings on long inputs.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_seq_length,
+        )
+
     def _resolve_dtype(self) -> torch.dtype:
         """Resolve compute dtype."""
         dtype_map = {
@@ -241,7 +249,10 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
             raise RuntimeError(ERR_NOT_LOADED)
 
         opts = options or {}
-        max_length = opts.get("max_seq_length", self._max_seq_length)
+        # Hard-clamp to the load-time ceiling so runtime overrides cannot
+        # push past the model's positional capacity. Malformed overrides
+        # (None, strings, negatives) fall back to the ceiling.
+        max_length = self._coerce_runtime_max_length(opts.get("max_seq_length"), self._max_seq_length)
 
         # Build (query, doc) pairs
         pairs = []

@@ -46,7 +46,7 @@ class AppFactory:
             lifespan=cls._create_lifespan(config, shutdown_state),
         )
         # Add graceful shutdown middleware (for spot instance preemption)
-        app.add_middleware(ShutdownMiddleware, shutdown_state=shutdown_state)  # type: ignore[invalid-argument-type]
+        app.add_middleware(ShutdownMiddleware, shutdown_state=shutdown_state)
 
         # Setup OpenTelemetry tracing (no-op if SIE_TRACING_ENABLED is not set)
         setup_tracing(app)
@@ -120,8 +120,10 @@ class AppFactory:
             engine_config=engine_config,
         )
         try:
-            # Start background services (memory monitor and hot reload)
+            # Start background services (memory monitor, idle evictor, hot reload).
+            # The idle evictor is a no-op when ``idle_evict_s`` is None.
             await registry.start_memory_monitor()
+            await registry.start_idle_evictor()
             await registry.start_hot_reload()
 
             # Preload models (shifts weight download from first-request to startup)
@@ -131,6 +133,7 @@ class AppFactory:
         finally:
             # Stop background services and unload models
             await registry.stop_memory_monitor()
+            await registry.stop_idle_evictor()
             await registry.stop_hot_reload()
 
             logger.info("Shutting down, unloading models")

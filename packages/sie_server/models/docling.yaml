@@ -1,0 +1,20 @@
+sie_id: docling
+package_backed: true
+inputs:
+  text: false
+  image: false
+  audio: false
+  video: false
+  document: true
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 1
+    compute_precision: null
+    adapter_path: sie_server.adapters.docling:DoclingAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

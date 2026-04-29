@@ -10,7 +10,7 @@ from sie_server.config.engine import ComputePrecision
 OutputType = Literal["dense", "sparse", "multivector", "score", "json"]
 PoolingStrategy = Literal["cls", "mean", "last_token", "splade", "none"]
 
-_MODALITY_NAMES = ("text", "image", "audio", "video")
+_MODALITY_NAMES = ("text", "image", "audio", "video", "document")
 
 
 class InputModalities(BaseModel):
@@ -20,6 +20,7 @@ class InputModalities(BaseModel):
     image: bool = False
     audio: bool = False
     video: bool = False
+    document: bool = False
 
     def to_list(self) -> list[str]:
         return [k for k in _MODALITY_NAMES if getattr(self, k)]
@@ -145,6 +146,7 @@ class ModelConfig(BaseModel):
     hf_id: str | None = None
     hf_revision: str | None = None
     weights_path: Path | None = None
+    package_backed: bool = False
     inputs: InputModalities = InputModalities()
     tasks: Tasks
     max_sequence_length: int | None = None
@@ -152,8 +154,13 @@ class ModelConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_weight_source(self) -> "ModelConfig":
+        if self.package_backed:
+            if self.hf_id is not None or self.weights_path is not None or self.hf_revision is not None:
+                msg = "'package_backed' models must not set 'hf_id', 'weights_path', or 'hf_revision'"
+                raise ValueError(msg)
+            return self
         if self.hf_id is None and self.weights_path is None:
-            msg = "At least one of 'hf_id' or 'weights_path' must be set"
+            msg = "At least one of 'hf_id', 'weights_path', or 'package_backed' must be set"
             raise ValueError(msg)
         return self
 

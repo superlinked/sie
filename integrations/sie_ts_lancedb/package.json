@@ -1,6 +1,6 @@
 {
   "name": "@superlinked/sie-lancedb",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "SIE embedding function and reranker for LanceDB",
   "type": "module",
   "main": "./dist/index.cjs",

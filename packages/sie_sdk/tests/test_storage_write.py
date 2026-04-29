@@ -122,6 +122,9 @@ class TestStorageBackendWriteTextIfMatch:
             def exists(self, path):
                 return False
 
+            def has_children(self, path):
+                return False
+
             def read_text(self, path):
                 return ""
 

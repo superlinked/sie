@@ -16,18 +16,18 @@ Example:
 
 GPU Selection and Auto-Retry:
     >>> # Request specific GPU, auto-retry while scaling up
-    >>> client = SIEClient("http://router:8080")
+    >>> client = SIEClient("http://gateway:8080")
     >>> result = client.encode(
     ...     "bge-m3",
     ...     {"text": "Hello"},
     ...     gpu="l4",
-    ...     wait_for_capacity=True,  # Auto-retry on 202
+    ...     wait_for_capacity=True,  # Auto-retry on 202/503/504 and transient transport errors
     ...     provision_timeout_s=900,  # Wait up to 15 min
     ... )
 
 Resource Pools (per DESIGN.md Section 10.3):
     >>> # Create pool for isolated capacity
-    >>> client = SIEClient("http://router:8080")
+    >>> client = SIEClient("http://gateway:8080")
     >>> client.create_pool("eval-bench", {"l4": 2})  # 2 L4 GPUs
     >>> result = client.encode("bge-m3", {"text": "Hello"}, gpu="eval-bench/l4")
     >>> client.delete_pool("eval-bench")  # Cleanup when done
@@ -49,6 +49,7 @@ import httpx
 import msgpack
 import msgpack_numpy as m
 
+from sie_sdk.documents import convert_item_document
 from sie_sdk.images import convert_item_images
 from sie_sdk.types import (
     CapacityInfo,
@@ -70,6 +71,7 @@ from ._shared import (
     DEFAULT_RETRY_DELAY_S,
     HTTP_ACCEPTED,
     HTTP_CLIENT_ERROR,
+    HTTP_GATEWAY_TIMEOUT,
     JSON_CONTENT_TYPE,
     LORA_LOADING_DEFAULT_DELAY_S,
     LORA_LOADING_ERROR_CODE,
@@ -77,12 +79,17 @@ from ._shared import (
     MODEL_LOADING_DEFAULT_DELAY_S,
     MODEL_LOADING_ERROR_CODE,
     MSGPACK_CONTENT_TYPE,
+    RESOURCE_EXHAUSTED_ERROR_CODE,
+    RESOURCE_EXHAUSTED_MAX_RETRIES,
     SDK_VERSION_HEADER,
     SERVER_VERSION_HEADER,
     check_version_skew,
+    compute_oom_backoff,
+    compute_retry_delay,
     get_retry_after,
     get_sdk_version,
     handle_error,
+    is_transient_connect_error,
     parse_encode_results,
     parse_extract_results,
     parse_gpu_param,
@@ -94,17 +101,31 @@ from .errors import (
     PoolError,
     ProvisioningError,
     RequestError,
+    ResourceExhaustedError,
     SIEConnectionError,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Mid-flight transport errors retried under `wait_for_capacity=True`:
+# the request was in flight and the peer severed the connection before a
+# complete response arrived (proxy idle timeout, rolling restart,
+# TCP reset). `httpx.ConnectError` is retried separately at each call
+# site to preserve its distinct "Failed to connect" message.
+_RETRYABLE_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
+    httpx.TimeoutException,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.WriteError,
+)
 
 _LEASE_RENEWAL_MAX_RETRIES = 5
 
 # NOTE: msgpack_numpy.patch() is called lazily in SIEClient.__init__
 # to avoid monkey-patching the global msgpack module at import time.
 # This prevents overhead in processes that import sie_sdk but don't use
-# the client (e.g., the router only needs sie_sdk.types/queue_types).
+# the client (e.g., the gateway only needs sie_sdk.types/queue_types).
 _NUMPY_PATCHED = False
 
 
@@ -116,6 +137,74 @@ def _close_transport(transport: httpx.Client) -> None:
     """
     with contextlib.suppress(Exception):
         transport.close()
+
+
+def _handle_oom_retry(
+    response: httpx.Response,
+    *,
+    start_time: float,
+    oom_retries: int,
+    max_oom_retries: int,
+    timeout: float,
+    model: str,
+) -> int:
+    """Sleep through one ``RESOURCE_EXHAUSTED`` retry and return the next
+    ``oom_retries`` counter, or raise ``ResourceExhaustedError`` when the
+    retry / ``provision_timeout_s`` budget is exhausted.
+
+    Centralises the bounded-exponential-backoff path shared by ``encode``,
+    ``score`` and ``extract``: ``oom_retries`` counts *completed* retries
+    so the (oom_retries+1)-th attempt is the one we're about to make.
+    ``compute_oom_backoff(attempt=oom_retries)`` returns the delay BEFORE
+    that attempt; the typical sequence (no ``Retry-After``) is
+    5 → 10 → 20 → 30s capped, so three retries take ~35s total. Distinct
+    from MODEL_LOADING: the model is already resident, the request just
+    lost the race for compute resources.
+    """
+    elapsed = time.monotonic() - start_time
+    if oom_retries >= max_oom_retries or elapsed >= timeout:
+        msg = f"Server resource exhausted after {oom_retries} retry attempt(s) for model '{model}'"
+        raise ResourceExhaustedError(msg, model=model, retries=oom_retries)
+    retry_after = get_retry_after(response)
+    raw_delay = compute_oom_backoff(retry_after, oom_retries)
+    remaining = timeout - elapsed
+    # Sustained OOM: the next backoff would consume the rest of the
+    # provision-timeout budget without leaving room for the retried
+    # request to actually run. Surface the *root cause*
+    # (``ResourceExhaustedError``) now rather than sleeping the budget
+    # away and letting the outer loop's ``remaining <= 0`` branch raise
+    # ``ProvisioningError`` — that masquerade was the original
+    # complaint: a server stuck at OOM would surface to callers as
+    # "provisioning timeout" with no hint that the real failure was
+    # capacity exhaustion.
+    if raw_delay >= remaining:
+        logger.warning(
+            "Server resource exhausted; remaining budget %.1fs < next backoff %.1fs (attempt %d/%d, elapsed: %.1fs, timeout: %.1fs)",
+            remaining,
+            raw_delay,
+            oom_retries + 1,
+            max_oom_retries,
+            elapsed,
+            timeout,
+        )
+        msg = f"Server resource exhausted after {oom_retries} retry attempt(s) for model '{model}'"
+        raise ResourceExhaustedError(msg, model=model, retries=oom_retries)
+    delay = raw_delay
+    # First retry surfaces at WARNING so a user with default log level
+    # can see "the SDK is retrying you" — without this they may spend
+    # hours debugging "slow inference" not realising auto-retry is in
+    # flight. Subsequent retries stay at INFO to avoid log spam at scale.
+    log_fn = logger.warning if oom_retries == 0 else logger.info
+    log_fn(
+        "Server resource exhausted, retrying in %.1fs (attempt %d/%d, elapsed: %.1fs, timeout: %.1fs)",
+        delay,
+        oom_retries + 1,
+        max_oom_retries,
+        elapsed,
+        timeout,
+    )
+    time.sleep(delay)
+    return oom_retries + 1
 
 
 class SIEClient:
@@ -141,7 +230,7 @@ class SIEClient:
 
         >>> # With defaults for all requests
         >>> client = SIEClient(
-        ...     "http://router:8080",
+        ...     "http://gateway:8080",
         ...     gpu="l4",
         ...     options={"normalize": True},
         ... )
@@ -149,7 +238,7 @@ class SIEClient:
         >>> result = client.encode("bge-m3", {"text": "Hello"}, gpu="a100")  # overrides
 
         >>> # With resource pool for isolated capacity (new API)
-        >>> client = SIEClient("http://router:8080")
+        >>> client = SIEClient("http://gateway:8080")
         >>> client.create_pool("eval-bench", {"l4": 2})
         >>> result = client.encode("bge-m3", {"text": "Hello"}, gpu="eval-bench/l4")
         >>> client.delete_pool("eval-bench")
@@ -411,7 +500,7 @@ class SIEClient:
             self._lease_renewal_thread.join(timeout=5.0)
             self._lease_renewal_thread = None
 
-        # Note: Pool deletion is not done here - pools are GC'd by router
+        # Note: Pool deletion is not done here - pools are GC'd by gateway
         # after inactivity. This allows pool reuse if client reconnects.
 
     def _cleanup_all_pools(self) -> None:
@@ -447,7 +536,7 @@ class SIEClient:
             bundle: Optional bundle filter. When set, only workers running this
                 bundle will be assigned to the pool.
             minimum_worker_count: Desired minimum number of warm workers in the pool.
-                Stored in pool spec and forwarded to the router; enforcement depends
+                Stored in pool spec and forwarded to the gateway; enforcement depends
                 on cluster autoscaler configuration. Defaults to 0 (scale to zero).
 
         Raises:
@@ -725,6 +814,7 @@ class SIEClient:
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> EncodeResult: ...
 
     @overload
@@ -741,6 +831,7 @@ class SIEClient:
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> list[EncodeResult]: ...
 
     def encode(
@@ -756,6 +847,7 @@ class SIEClient:
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> EncodeResult | list[EncodeResult]:
         """Encode items into vector representations.
 
@@ -773,11 +865,40 @@ class SIEClient:
             options: Runtime options dict. Can include "profile" to select a named profile,
                     or individual options like "muvera", "normalize", etc.
             gpu: Target GPU type (e.g., "l4", "a100-80gb"). Routes request to workers
-                with matching GPU. Required when using the router with multiple GPU pools.
-            wait_for_capacity: If True, automatically retry on 202 (provisioning) until
-                capacity is available or timeout. If False, raise ProvisioningError on 202.
+                with matching GPU. Required when using the gateway with multiple GPU pools.
+            wait_for_capacity: When True (default), auto-retry transient "not
+                enough capacity yet" responses under ``provision_timeout_s`` —
+                ``202`` (scale-from-zero provisioning); generic ``503`` (no
+                healthy workers for the (bundle, machine_profile) tuple);
+                ``504`` (defense-in-depth for older gateways that haven't yet
+                mapped upstream timeouts to ``503 MODEL_LOADING``); local
+                ``httpx`` read/connect/pool timeouts; and transient
+                mid-flight transport errors (``RemoteProtocolError``,
+                ``ReadError``, ``WriteError`` — peer severed the connection
+                before a complete response arrived). Retries honour the
+                server's ``Retry-After`` header when present. When False,
+                these surface immediately as ``ProvisioningError`` /
+                ``ServerError`` / ``SIEConnectionError``.
+                Note: ``503 MODEL_LOADING``, ``503 LORA_LOADING`` and
+                ``503 RESOURCE_EXHAUSTED`` are retried regardless of this
+                flag — the worker has already accepted the request and is
+                loading the target model/adapter or recovering from
+                transient capacity exhaustion. Their budgets are documented
+                under ``ModelLoadingError`` / ``LoraLoadingError`` /
+                ``ResourceExhaustedError`` below; the ``RESOURCE_EXHAUSTED``
+                branch can be disabled by passing ``max_oom_retries=0``.
             provision_timeout_s: Maximum time to wait for capacity when wait_for_capacity=True.
                 Default: 900 seconds (15 minutes).
+            max_oom_retries: Public retry knob capping the number of
+                ``503 RESOURCE_EXHAUSTED`` (server-side OOM) retries. Each
+                retry uses bounded exponential backoff
+                (``compute_oom_backoff``); the SDK also stops retrying
+                early if the next backoff would exhaust
+                ``provision_timeout_s``. ``RESOURCE_EXHAUSTED`` retries
+                run regardless of ``wait_for_capacity``; set
+                ``max_oom_retries=0`` to disable them entirely (the first
+                OOM surfaces immediately as ``ResourceExhaustedError``).
+                Default: ``RESOURCE_EXHAUSTED_MAX_RETRIES`` (3).
 
         Returns:
             EncodeResult if single item was passed, list[EncodeResult] if list was passed.
@@ -787,8 +908,21 @@ class SIEClient:
             RequestError: If the request is invalid (4xx response).
             ServerError: If the server encounters an error (5xx response).
             SIEConnectionError: If unable to connect to the server.
-            ProvisioningError: If wait_for_capacity=False and server returns 202,
-                or if provisioning times out.
+            ProvisioningError: If ``wait_for_capacity=False`` and the gateway
+                returns ``202`` (scale-from-zero provisioning), or if ``202``
+                retries exceed ``provision_timeout_s``.
+            ModelLoadingError: If ``503`` ``MODEL_LOADING`` retries exceed
+                ``provision_timeout_s`` during worker-side cold-loading of the
+                target model. Note: this branch retries regardless of
+                ``wait_for_capacity``.
+            LoraLoadingError: If ``503`` ``LORA_LOADING`` retries exhaust the
+                (short, fixed) retry budget. Note: this branch retries
+                regardless of ``wait_for_capacity``.
+            ResourceExhaustedError: If ``503`` ``RESOURCE_EXHAUSTED``
+                retries exhaust ``max_oom_retries`` or the next backoff
+                would exhaust ``provision_timeout_s``. Note: this branch
+                retries regardless of ``wait_for_capacity`` unless
+                ``max_oom_retries=0``.
 
         Example:
             >>> # Single item
@@ -799,7 +933,7 @@ class SIEClient:
             >>> results = client.encode("bge-m3", [{"text": "Hello"}, {"text": "World"}])
             >>> len(results)  # 2
 
-            >>> # With GPU selection (for router)
+            >>> # With GPU selection (for gateway)
             >>> result = client.encode("bge-m3", {"text": "Hello"}, gpu="l4")
 
             >>> # Auto-wait for capacity during scale-up
@@ -879,6 +1013,11 @@ class SIEClient:
 
         # Local retry counter for LoRA loading (model loading uses time-based timeout only)
         lora_retries = 0
+        # Retry counter for server-side OOM (RESOURCE_EXHAUSTED). Bounded by
+        # ``RESOURCE_EXHAUSTED_MAX_RETRIES`` so a stuck-at-OOM server cannot
+        # cause unbounded blocking; each retry uses bounded exponential
+        # backoff via ``compute_oom_backoff``.
+        oom_retries = 0
 
         # Retry loop for 202 (provisioning) responses
         while True:
@@ -896,27 +1035,36 @@ class SIEClient:
                     f"/v1/encode/{model}", content=body, headers=headers, timeout=request_timeout
                 )
             except httpx.ConnectError as e:
+                if wait_for_capacity and is_transient_connect_error(e):
+                    delay_s = compute_retry_delay(
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Connect error",
+                        error=e,
+                    )
+                    if delay_s is not None:
+                        time.sleep(delay_s)
+                        continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
-            except httpx.TimeoutException as e:
-                # Retry on timeout if wait_for_capacity is enabled and we haven't exceeded provision timeout.
-                # This handles the case where model loading takes longer than the HTTP socket timeout.
+            except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
-                    elapsed = time.monotonic() - start_time
-                    if elapsed < timeout:
-                        delay = MODEL_LOADING_DEFAULT_DELAY_S
-                        remaining = timeout - elapsed
-                        actual_delay = min(delay, remaining)
-                        logger.info(
-                            "Request timed out, retrying in %.1fs (elapsed: %.1fs, timeout: %.1fs): %s",
-                            actual_delay,
-                            elapsed,
-                            timeout,
-                            e,
-                        )
-                        time.sleep(actual_delay)
+                    delay_s = compute_retry_delay(
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Transient transport error",
+                        error=e,
+                    )
+                    if delay_s is not None:
+                        time.sleep(delay_s)
                         continue
-                msg = f"Request timed out: {e}"
+                if isinstance(e, httpx.TimeoutException):
+                    msg = f"Request timed out: {e}"
+                else:
+                    msg = (
+                        f"Connection lost mid-request ({type(e).__name__}); "
+                        f"the peer closed the connection before sending a complete response: {e}"
+                    )
                 raise SIEConnectionError(msg) from e
 
             # Handle 202 (provisioning) - capacity not available
@@ -993,6 +1141,17 @@ class SIEClient:
                     time.sleep(actual_delay)
                     continue
 
+                if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
+                    oom_retries = _handle_oom_retry(
+                        response,
+                        start_time=start_time,
+                        oom_retries=oom_retries,
+                        max_oom_retries=max_oom_retries,
+                        timeout=timeout,
+                        model=model,
+                    )
+                    continue
+
                 # Generic 503 (no healthy workers) - retry if wait_for_capacity
                 # This handles scale-from-zero when pools are PENDING and have no workers yet
                 if wait_for_capacity:
@@ -1013,6 +1172,29 @@ class SIEClient:
                         )
                         time.sleep(actual_delay)
                         continue
+
+            # Handle 504 (gateway timeout) — defense-in-depth for older
+            # gateways that don't yet map an upstream timeout to
+            # 503 + MODEL_LOADING. A cold-start request that triggers a
+            # worker-side on-demand model load will typically exceed the
+            # gateway's per-request timeout on the first call; treat that
+            # the same as MODEL_LOADING and retry under the existing
+            # provision_timeout_s budget.
+            if response.status_code == HTTP_GATEWAY_TIMEOUT and wait_for_capacity:
+                elapsed = time.monotonic() - start_time
+                if elapsed < timeout:
+                    retry_after = get_retry_after(response)
+                    delay = retry_after or MODEL_LOADING_DEFAULT_DELAY_S
+                    remaining = timeout - elapsed
+                    actual_delay = min(delay, remaining)
+                    logger.info(
+                        "Gateway timeout (504), retrying in %.1fs (elapsed: %.1fs, timeout: %.1fs)",
+                        actual_delay,
+                        elapsed,
+                        timeout,
+                    )
+                    time.sleep(actual_delay)
+                    continue
 
             # Handle errors
             if response.status_code >= HTTP_CLIENT_ERROR:
@@ -1113,7 +1295,7 @@ class SIEClient:
         return response.json()
 
     def _detect_endpoint_type(self) -> Literal["cluster", "worker"]:
-        """Detect whether base_url is a router (cluster) or worker endpoint."""
+        """Detect whether base_url is a gateway (cluster) or worker endpoint."""
         try:
             response = self._client.get(
                 "/health",
@@ -1127,7 +1309,7 @@ class SIEClient:
                 payload = response.json()
             except ValueError:
                 return "worker"
-            if isinstance(payload, dict) and payload.get("type") == "router":
+            if isinstance(payload, dict) and payload.get("type") == "gateway":
                 return "cluster"
         return "worker"
 
@@ -1149,11 +1331,11 @@ class SIEClient:
         *,
         mode: Literal["auto", "cluster", "worker"] = "auto",
     ) -> Iterator[StatusMessage]:
-        """Stream real-time status updates from the server or router.
+        """Stream real-time status updates from the server or gateway.
 
         Args:
             mode: "cluster" connects to /ws/cluster-status, "worker" to /ws/status.
-                "auto" detects router vs worker via /health.
+                "auto" detects gateway vs worker via /health.
 
         Yields:
             StatusMessage updates (ClusterStatusMessage or WorkerStatusMessage).
@@ -1207,7 +1389,7 @@ class SIEClient:
     def get_capacity(self, *, gpu: str | None = None) -> CapacityInfo:
         """Get current cluster capacity information.
 
-        Queries the router's /health endpoint for cluster state. Useful for
+        Queries the gateway's /health endpoint for cluster state. Useful for
         checking if specific GPU types are available before sending requests.
 
         Args:
@@ -1220,7 +1402,7 @@ class SIEClient:
         Raises:
             SIEConnectionError: If unable to connect to the server.
             ServerError: If the server encounters an error.
-            RequestError: If the endpoint is not available (e.g., worker, not router).
+            RequestError: If the endpoint is not available (e.g., worker, not gateway).
 
         Example:
             >>> # Check cluster state
@@ -1250,10 +1432,10 @@ class SIEClient:
 
         data = response.json()
 
-        # Check if this is a router (has 'type': 'router') or worker
-        if data.get("type") != "router":
-            msg = "get_capacity() requires a router endpoint. This appears to be a worker."
-            raise RequestError(msg, code="not_router", status_code=400)
+        # Check if this is a gateway (has 'type': 'gateway') or worker
+        if data.get("type") != "gateway":
+            msg = "get_capacity() requires a gateway endpoint. This appears to be a worker."
+            raise RequestError(msg, code="not_gateway", status_code=400)
 
         # Build CapacityInfo
         cluster = data.get("cluster", {})
@@ -1295,7 +1477,7 @@ class SIEClient:
     ) -> CapacityInfo:
         """Wait for GPU capacity to become available.
 
-        Polls the router until workers with the specified GPU type are online.
+        Polls the gateway until workers with the specified GPU type are online.
         This is useful for pre-warming the cluster before running benchmarks.
 
         Note: This triggers capacity requests by sending a warmup encode request
@@ -1370,6 +1552,7 @@ class SIEClient:
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> ScoreResult:
         """Score items against a query using a reranker model.
 
@@ -1387,10 +1570,38 @@ class SIEClient:
             options: Runtime options dict. Can include "profile" to select a named profile.
             gpu: Target GPU type (e.g., "l4", "a100-80gb"). Routes request to workers
                 with matching GPU.
-            wait_for_capacity: If True, automatically retry on 202 (provisioning) until
-                capacity is available or timeout.
+            wait_for_capacity: When True (default), auto-retry transient "not
+                enough capacity yet" responses under ``provision_timeout_s`` —
+                ``202`` (scale-from-zero provisioning); generic ``503`` (no
+                healthy workers for the (bundle, machine_profile) tuple);
+                ``504`` (defense-in-depth for older gateways that haven't yet
+                mapped upstream timeouts to ``503 MODEL_LOADING``); local
+                ``httpx`` read/connect/pool timeouts; and transient
+                mid-flight transport errors (``RemoteProtocolError``,
+                ``ReadError``, ``WriteError`` — peer severed the connection
+                before a complete response arrived). Retries honour the
+                server's ``Retry-After`` header when present. When False,
+                these surface immediately as ``ProvisioningError`` /
+                ``ServerError`` / ``SIEConnectionError``.
+                Note: ``503 MODEL_LOADING`` and ``503 RESOURCE_EXHAUSTED``
+                are retried regardless of this flag — the worker has
+                already accepted the request and is loading the target
+                model or recovering from transient capacity exhaustion.
+                Their budgets are documented under ``ModelLoadingError`` /
+                ``ResourceExhaustedError`` below; the
+                ``RESOURCE_EXHAUSTED`` branch can be disabled by passing
+                ``max_oom_retries=0``.
             provision_timeout_s: Maximum time to wait for capacity when wait_for_capacity=True.
                 Default: 900 seconds (15 minutes).
+            max_oom_retries: Public retry knob capping the number of
+                ``503 RESOURCE_EXHAUSTED`` (server-side OOM) retries. Each
+                retry uses bounded exponential backoff
+                (``compute_oom_backoff``); the SDK also stops retrying
+                early if the next backoff would exhaust
+                ``provision_timeout_s``. ``RESOURCE_EXHAUSTED`` retries
+                run regardless of ``wait_for_capacity``; set
+                ``max_oom_retries=0`` to disable them entirely.
+                Default: ``RESOURCE_EXHAUSTED_MAX_RETRIES`` (3).
 
         Returns:
             ScoreResult containing the model name, query_id, and sorted scores.
@@ -1400,8 +1611,18 @@ class SIEClient:
             RequestError: If the request is invalid (4xx response).
             ServerError: If the server encounters an error (5xx response).
             SIEConnectionError: If unable to connect to the server.
-            ProvisioningError: If wait_for_capacity=False and server returns 202,
-                or if provisioning times out.
+            ProvisioningError: If ``wait_for_capacity=False`` and the gateway
+                returns ``202`` (scale-from-zero provisioning), or if ``202``
+                retries exceed ``provision_timeout_s``.
+            ModelLoadingError: If ``503`` ``MODEL_LOADING`` retries exceed
+                ``provision_timeout_s`` during worker-side cold-loading of the
+                target model. Note: this branch retries regardless of
+                ``wait_for_capacity``.
+            ResourceExhaustedError: If ``503`` ``RESOURCE_EXHAUSTED``
+                retries exhaust ``max_oom_retries`` or the next backoff
+                would exhaust ``provision_timeout_s``. Note: this branch
+                retries regardless of ``wait_for_capacity`` unless
+                ``max_oom_retries=0``.
 
         Example:
             >>> result = client.score(
@@ -1439,6 +1660,8 @@ class SIEClient:
         start_time = time.monotonic()
 
         # Model loading uses time-based timeout only (no retry counter)
+        # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
+        oom_retries = 0
 
         # Retry loop for 202 (provisioning) responses
         while True:
@@ -1456,27 +1679,36 @@ class SIEClient:
                     f"/v1/score/{model}", content=body, headers=headers, timeout=request_timeout
                 )
             except httpx.ConnectError as e:
+                if wait_for_capacity and is_transient_connect_error(e):
+                    delay_s = compute_retry_delay(
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Connect error",
+                        error=e,
+                    )
+                    if delay_s is not None:
+                        time.sleep(delay_s)
+                        continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
-            except httpx.TimeoutException as e:
-                # Retry on timeout if wait_for_capacity is enabled and we haven't exceeded provision timeout.
-                # This handles the case where model loading takes longer than the HTTP socket timeout.
+            except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
-                    elapsed = time.monotonic() - start_time
-                    if elapsed < timeout:
-                        delay = MODEL_LOADING_DEFAULT_DELAY_S
-                        remaining = timeout - elapsed
-                        actual_delay = min(delay, remaining)
-                        logger.info(
-                            "Request timed out, retrying in %.1fs (elapsed: %.1fs, timeout: %.1fs): %s",
-                            actual_delay,
-                            elapsed,
-                            timeout,
-                            e,
-                        )
-                        time.sleep(actual_delay)
+                    delay_s = compute_retry_delay(
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Transient transport error",
+                        error=e,
+                    )
+                    if delay_s is not None:
+                        time.sleep(delay_s)
                         continue
-                msg = f"Request timed out: {e}"
+                if isinstance(e, httpx.TimeoutException):
+                    msg = f"Request timed out: {e}"
+                else:
+                    msg = (
+                        f"Connection lost mid-request ({type(e).__name__}); "
+                        f"the peer closed the connection before sending a complete response: {e}"
+                    )
                 raise SIEConnectionError(msg) from e
 
             # Handle 202 (provisioning) - capacity not available
@@ -1532,6 +1764,17 @@ class SIEClient:
                     time.sleep(actual_delay)
                     continue
 
+                if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
+                    oom_retries = _handle_oom_retry(
+                        response,
+                        start_time=start_time,
+                        oom_retries=oom_retries,
+                        max_oom_retries=max_oom_retries,
+                        timeout=timeout,
+                        model=model,
+                    )
+                    continue
+
                 # Generic 503 (no healthy workers) - retry if wait_for_capacity
                 # This handles scale-from-zero when pools are PENDING and have no workers yet
                 if wait_for_capacity:
@@ -1552,6 +1795,29 @@ class SIEClient:
                         )
                         time.sleep(actual_delay)
                         continue
+
+            # Handle 504 (gateway timeout) — defense-in-depth for older
+            # gateways that don't yet map an upstream timeout to
+            # 503 + MODEL_LOADING. A cold-start request that triggers a
+            # worker-side on-demand model load will typically exceed the
+            # gateway's per-request timeout on the first call; treat that
+            # the same as MODEL_LOADING and retry under the existing
+            # provision_timeout_s budget.
+            if response.status_code == HTTP_GATEWAY_TIMEOUT and wait_for_capacity:
+                elapsed = time.monotonic() - start_time
+                if elapsed < timeout:
+                    retry_after = get_retry_after(response)
+                    delay = retry_after or MODEL_LOADING_DEFAULT_DELAY_S
+                    remaining = timeout - elapsed
+                    actual_delay = min(delay, remaining)
+                    logger.info(
+                        "Gateway timeout (504), retrying in %.1fs (elapsed: %.1fs, timeout: %.1fs)",
+                        actual_delay,
+                        elapsed,
+                        timeout,
+                    )
+                    time.sleep(actual_delay)
+                    continue
 
             # Handle errors
             if response.status_code >= HTTP_CLIENT_ERROR:
@@ -1582,6 +1848,7 @@ class SIEClient:
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> ExtractResult: ...
 
     @overload
@@ -1597,6 +1864,7 @@ class SIEClient:
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> list[ExtractResult]: ...
 
     def extract(
@@ -1611,6 +1879,7 @@ class SIEClient:
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
     ) -> ExtractResult | list[ExtractResult]:
         """Extract entities or structured data from items.
 
@@ -1623,10 +1892,38 @@ class SIEClient:
             options: Runtime options dict. Can include "profile" to select a named profile.
             gpu: Target GPU type (e.g., "l4", "a100-80gb"). Routes request to workers
                 with matching GPU.
-            wait_for_capacity: If True, automatically retry on 202 (provisioning) until
-                capacity is available or timeout.
+            wait_for_capacity: When True (default), auto-retry transient "not
+                enough capacity yet" responses under ``provision_timeout_s`` —
+                ``202`` (scale-from-zero provisioning); generic ``503`` (no
+                healthy workers for the (bundle, machine_profile) tuple);
+                ``504`` (defense-in-depth for older gateways that haven't yet
+                mapped upstream timeouts to ``503 MODEL_LOADING``); local
+                ``httpx`` read/connect/pool timeouts; and transient
+                mid-flight transport errors (``RemoteProtocolError``,
+                ``ReadError``, ``WriteError`` — peer severed the connection
+                before a complete response arrived). Retries honour the
+                server's ``Retry-After`` header when present. When False,
+                these surface immediately as ``ProvisioningError`` /
+                ``ServerError`` / ``SIEConnectionError``.
+                Note: ``503 MODEL_LOADING`` and ``503 RESOURCE_EXHAUSTED``
+                are retried regardless of this flag — the worker has
+                already accepted the request and is loading the target
+                model or recovering from transient capacity exhaustion.
+                Their budgets are documented under ``ModelLoadingError`` /
+                ``ResourceExhaustedError`` below; the
+                ``RESOURCE_EXHAUSTED`` branch can be disabled by passing
+                ``max_oom_retries=0``.
             provision_timeout_s: Maximum time to wait for capacity when wait_for_capacity=True.
                 Default: 900 seconds (15 minutes).
+            max_oom_retries: Public retry knob capping the number of
+                ``503 RESOURCE_EXHAUSTED`` (server-side OOM) retries. Each
+                retry uses bounded exponential backoff
+                (``compute_oom_backoff``); the SDK also stops retrying
+                early if the next backoff would exhaust
+                ``provision_timeout_s``. ``RESOURCE_EXHAUSTED`` retries
+                run regardless of ``wait_for_capacity``; set
+                ``max_oom_retries=0`` to disable them entirely.
+                Default: ``RESOURCE_EXHAUSTED_MAX_RETRIES`` (3).
 
         Returns:
             ExtractResult if single item was passed, list[ExtractResult] if list was passed.
@@ -1636,8 +1933,18 @@ class SIEClient:
             RequestError: If the request is invalid (4xx response).
             ServerError: If the server encounters an error (5xx response).
             SIEConnectionError: If unable to connect to the server.
-            ProvisioningError: If wait_for_capacity=False and server returns 202,
-                or if provisioning times out.
+            ProvisioningError: If ``wait_for_capacity=False`` and the gateway
+                returns ``202`` (scale-from-zero provisioning), or if ``202``
+                retries exceed ``provision_timeout_s``.
+            ModelLoadingError: If ``503`` ``MODEL_LOADING`` retries exceed
+                ``provision_timeout_s`` during worker-side cold-loading of the
+                target model. Note: this branch retries regardless of
+                ``wait_for_capacity``.
+            ResourceExhaustedError: If ``503`` ``RESOURCE_EXHAUSTED``
+                retries exhaust ``max_oom_retries`` or the next backoff
+                would exhaust ``provision_timeout_s``. Note: this branch
+                retries regardless of ``wait_for_capacity`` unless
+                ``max_oom_retries=0``.
 
         Example:
             >>> # Single item
@@ -1662,8 +1969,15 @@ class SIEClient:
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
 
-        # Convert images to wire format (same as encode)
-        items_for_wire = [convert_item_images({**item}) if "images" in item else item for item in items_list]  # ty: ignore[invalid-argument-type]
+        # Convert images and documents to wire format (bytes + format hint)
+        items_for_wire = []
+        for item in items_list:
+            wire_item: dict[str, Any] = {**item}  # ty: ignore[invalid-argument-type]
+            if "images" in wire_item:
+                wire_item = convert_item_images(wire_item)
+            if "document" in wire_item:
+                wire_item = convert_item_document(wire_item)
+            items_for_wire.append(wire_item)
 
         # Build request body
         request_body: dict[str, Any] = {"items": items_for_wire}
@@ -1700,6 +2014,8 @@ class SIEClient:
         start_time = time.monotonic()
 
         # Model loading uses time-based timeout only (no retry counter)
+        # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
+        oom_retries = 0
 
         # Retry loop for 202 (provisioning) responses
         while True:
@@ -1717,27 +2033,36 @@ class SIEClient:
                     f"/v1/extract/{model}", content=body, headers=headers, timeout=request_timeout
                 )
             except httpx.ConnectError as e:
+                if wait_for_capacity and is_transient_connect_error(e):
+                    delay_s = compute_retry_delay(
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Connect error",
+                        error=e,
+                    )
+                    if delay_s is not None:
+                        time.sleep(delay_s)
+                        continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
                 raise SIEConnectionError(msg) from e
-            except httpx.TimeoutException as e:
-                # Retry on timeout if wait_for_capacity is enabled and we haven't exceeded provision timeout.
-                # This handles the case where model loading takes longer than the HTTP socket timeout.
+            except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
-                    elapsed = time.monotonic() - start_time
-                    if elapsed < timeout:
-                        delay = MODEL_LOADING_DEFAULT_DELAY_S
-                        remaining = timeout - elapsed
-                        actual_delay = min(delay, remaining)
-                        logger.info(
-                            "Request timed out, retrying in %.1fs (elapsed: %.1fs, timeout: %.1fs): %s",
-                            actual_delay,
-                            elapsed,
-                            timeout,
-                            e,
-                        )
-                        time.sleep(actual_delay)
+                    delay_s = compute_retry_delay(
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Transient transport error",
+                        error=e,
+                    )
+                    if delay_s is not None:
+                        time.sleep(delay_s)
                         continue
-                msg = f"Request timed out: {e}"
+                if isinstance(e, httpx.TimeoutException):
+                    msg = f"Request timed out: {e}"
+                else:
+                    msg = (
+                        f"Connection lost mid-request ({type(e).__name__}); "
+                        f"the peer closed the connection before sending a complete response: {e}"
+                    )
                 raise SIEConnectionError(msg) from e
 
             # Handle 202 (provisioning) - capacity not available
@@ -1793,6 +2118,17 @@ class SIEClient:
                     time.sleep(actual_delay)
                     continue
 
+                if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
+                    oom_retries = _handle_oom_retry(
+                        response,
+                        start_time=start_time,
+                        oom_retries=oom_retries,
+                        max_oom_retries=max_oom_retries,
+                        timeout=timeout,
+                        model=model,
+                    )
+                    continue
+
                 # Generic 503 (no healthy workers) - retry if wait_for_capacity
                 # This handles scale-from-zero when pools are PENDING and have no workers yet
                 if wait_for_capacity:
@@ -1813,6 +2149,29 @@ class SIEClient:
                         )
                         time.sleep(actual_delay)
                         continue
+
+            # Handle 504 (gateway timeout) — defense-in-depth for older
+            # gateways that don't yet map an upstream timeout to
+            # 503 + MODEL_LOADING. A cold-start request that triggers a
+            # worker-side on-demand model load will typically exceed the
+            # gateway's per-request timeout on the first call; treat that
+            # the same as MODEL_LOADING and retry under the existing
+            # provision_timeout_s budget.
+            if response.status_code == HTTP_GATEWAY_TIMEOUT and wait_for_capacity:
+                elapsed = time.monotonic() - start_time
+                if elapsed < timeout:
+                    retry_after = get_retry_after(response)
+                    delay = retry_after or MODEL_LOADING_DEFAULT_DELAY_S
+                    remaining = timeout - elapsed
+                    actual_delay = min(delay, remaining)
+                    logger.info(
+                        "Gateway timeout (504), retrying in %.1fs (elapsed: %.1fs, timeout: %.1fs)",
+                        actual_delay,
+                        elapsed,
+                        timeout,
+                    )
+                    time.sleep(actual_delay)
+                    continue
 
             # Handle errors
             if response.status_code >= HTTP_CLIENT_ERROR:

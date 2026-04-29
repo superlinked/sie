@@ -125,6 +125,14 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._dense_dim = self._model.config.hidden_size
         logger.debug("XLMRoberta padding_idx: %d, hidden_size: %d", self._padding_idx, self._dense_dim)
 
+        # Clamp configured max_seq_length to whatever the tokenizer/model
+        # actually support to avoid OOB position embeddings on long inputs.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_seq_length,
+        )
+
     def encode(
         self,
         items: list[Item],
@@ -245,7 +253,7 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
 
     def _run_embeddings(self, input_ids: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
         """Compute embeddings for packed input."""
-        embeddings = self._model.embeddings  # type: ignore[union-attr]
+        embeddings = self._model.embeddings  # type: ignore
 
         word_emb = embeddings.word_embeddings(input_ids)
         pos_emb = embeddings.position_embeddings(position_ids)
@@ -267,12 +275,12 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         """Run transformer layers using flash_attn_varlen_func."""
         from flash_attn import flash_attn_varlen_func
 
-        num_heads = self._model.config.num_attention_heads  # type: ignore[union-attr]
-        hidden_size = self._model.config.hidden_size  # type: ignore[union-attr]
+        num_heads = self._model.config.num_attention_heads  # type: ignore
+        hidden_size = self._model.config.hidden_size  # type: ignore
         head_dim = hidden_size // num_heads
         softmax_scale = 1.0 / (head_dim**0.5)
 
-        for layer in self._model.encoder.layer:  # type: ignore[union-attr]
+        for layer in self._model.encoder.layer:  # type: ignore
             attention = layer.attention.self
 
             # QKV projections
@@ -330,8 +338,8 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._check_loaded()
 
         model = self._model
-        num_heads = model.config.num_attention_heads  # type: ignore[union-attr]
-        hidden_size = model.config.hidden_size  # type: ignore[union-attr]
+        num_heads = model.config.num_attention_heads  # type: ignore
+        hidden_size = model.config.hidden_size  # type: ignore
         head_dim = hidden_size // num_heads
 
         if hidden_size % num_heads != 0:
@@ -344,7 +352,7 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         else:
             cu_seqlens_cpu = cu_seqlens
 
-        for layer in model.encoder.layer:  # type: ignore[union-attr]
+        for layer in model.encoder.layer:  # type: ignore
             attn_self = layer.attention.self
 
             # QKV projections on packed hidden

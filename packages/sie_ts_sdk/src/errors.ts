@@ -35,6 +35,12 @@ export class SIEError extends Error {
 }
 
 /**
+ * `SIEConnectionError` failure category. Only `"connect"` is auto-retried
+ * under `waitForCapacity: true`; `"timeout"` and `"other"` fail fast.
+ */
+export type SIEConnectionErrorKind = "connect" | "timeout" | "other";
+
+/**
  * Error connecting to the SIE server.
  *
  * Raised when:
@@ -44,9 +50,12 @@ export class SIEError extends Error {
  * - Server refuses connection
  */
 export class SIEConnectionError extends SIEError {
-  constructor(message: string) {
+  readonly kind: SIEConnectionErrorKind;
+
+  constructor(message: string, kind: SIEConnectionErrorKind = "other") {
     super(message);
     this.name = "SIEConnectionError";
+    this.kind = kind;
   }
 }
 

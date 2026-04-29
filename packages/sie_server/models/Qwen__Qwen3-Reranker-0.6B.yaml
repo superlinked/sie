@@ -1,0 +1,25 @@
+sie_id: Qwen/Qwen3-Reranker-0.6B
+hf_id: Qwen/Qwen3-Reranker-0.6B
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: {}
+  extract: null
+max_sequence_length: 32768
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.qwen2_flash_cross_encoder:Qwen2FlashCrossEncoderAdapter
+    adapter_options:
+      loadtime:
+        yes_token: "yes"
+        no_token: "no"
+        input_format: qwen3
+        score_mode: log_softmax
+        default_instruction: "Given a web search query, retrieve relevant passages that answer the query"
+      runtime: {}

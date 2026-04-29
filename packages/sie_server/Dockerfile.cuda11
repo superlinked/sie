@@ -3,57 +3,50 @@
 # Build from repo root:
 #   docker build -f packages/sie_server/Dockerfile.cuda11 -t sie-server:cuda11-default .
 #   docker build -f packages/sie_server/Dockerfile.cuda11 --build-arg BUNDLE=sglang -t sie-server:cuda11-sglang .
-#
-# For faster builds with cache mounts (requires BuildKit):
-#   DOCKER_BUILDKIT=1 docker build -f packages/sie_server/Dockerfile.cuda11 -t sie-server:cuda11-default .
 
 ARG BUNDLE=default
-
-# =============================================================================
-# Stage 1: Base deps (shared across bundles)
-# =============================================================================
-FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04 AS base
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install Python 3.12 and build tools
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    gnupg \
-    ca-certificates \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    python3.12-dev \
-    curl \
-    git \
-    zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install uv - pin to specific version for reproducibility
 ARG UV_VERSION=0.9.28
+
+# =============================================================================
+# Stage 1: uv + standalone Python 3.12 (no deadsnakes PPA)
+# =============================================================================
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04 AS deps
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_NO_CACHE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git
+
+ARG UV_VERSION
 RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh \
     && mv /root/.local/bin/uv /bin/uv \
     && mv /root/.local/bin/uvx /bin/uvx
 
+RUN uv python install 3.12 \
+    && ln -s "$(uv python find 3.12)" /usr/local/bin/python3.12 \
+    && ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3 \
+    && ln -sf /usr/local/bin/python3.12 /usr/local/bin/python
+
 WORKDIR /app
 
-# UV environment variables for optimal builds
-ENV UV_NO_CACHE=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+COPY packages/sie_sdk/pyproject.toml /tmp/sie_sdk/pyproject.toml
+COPY packages/sie_server/pyproject.toml ./pyproject.toml
 
-# Copy sie-sdk (dependency of sie-server)
-COPY packages/sie_sdk /tmp/sie_sdk
+RUN mkdir -p /tmp/sie_sdk/src/sie_sdk src/sie_server \
+    && touch /tmp/sie_sdk/src/sie_sdk/__init__.py \
+    && touch src/sie_server/__init__.py
 
-# Copy sie-server files (delay bundles/models to keep deps cached)
-COPY packages/sie_server/pyproject.toml ./
-COPY packages/sie_server/src src/
-
-# Create venv and install everything with pip (simpler, no workspace issues)
-# Note: flash-attn prebuilt wheels not available for cu118, uses SDPA fallback
+# Note: flash-attn prebuilt wheels are not published for cu118, so SDPA
+# fallback is used at runtime (see SIE_ATTENTION_BACKEND below).
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3.12 -m venv .venv \
     && .venv/bin/pip install --upgrade pip \
@@ -64,15 +57,53 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         -e ".[gpu-metrics]"
 
 # =============================================================================
-# Stage 2: Builder - bundle-specific deps
+# Stage 2: Base - source install + shared-venv finalization (no BUNDLE)
+# =============================================================================
+# Everything here is bundle-agnostic, so all base-stage layers are shared
+# across bundles of this platform in local BuildKit cache and in registry.
+FROM deps AS base
+
+COPY packages/sie_sdk/src /tmp/sie_sdk/src
+COPY packages/sie_server/src src/
+COPY packages/sie_server/bundles bundles/
+COPY packages/sie_server/models models/
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    .venv/bin/pip install --no-deps \
+        -e /tmp/sie_sdk \
+        -e .
+
+# Sanity-check shared venv imports — catches breakage introduced by the
+# shared-deps resolver.
+RUN .venv/bin/python -c "import torch; print(torch.__version__)"
+
+# Register bundle-libs on sys.path. `sys.path.insert(0, ...)` puts
+# bundle-libs at position 0 so bundle-specific versions shadow shared
+# venv versions. Content is identical across bundles.
+RUN echo "import sys; sys.path.insert(0, '/app/bundle-libs')" \
+    > /app/.venv/lib/python3.12/site-packages/_sie_bundle.pth
+
+# .venv cleanup — runs here so /app/.venv reaches its final form BEFORE
+# bundle divergence. All nvidia-*-cu11 packages kept — torch._C DT_NEEDED
+# links libcufile, libnccl, etc.; removing any breaks `import torch`.
+RUN set -eux; \
+    cd /app/.venv/lib/python3.12/site-packages; \
+    find . -type d -name '__pycache__' -prune -exec rm -rf {} +; \
+    find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete; \
+    find . -type d -name 'tests' -prune -exec rm -rf {} +; \
+    rm -rf torch/test torch/utils/tensorboard torch/utils/bottleneck 2>/dev/null || true; \
+    find torch -type f -name '*.a' -delete 2>/dev/null || true; \
+    find . -type f -name 'RECORD' -path '*dist-info*' -delete; \
+    find nvidia -type f -name '*.a' -delete 2>/dev/null || true; \
+    rm -rf /app/.venv/share/jupyter 2>/dev/null || true; \
+    find /app/.venv -exec touch -h -d @0 {} + 2>/dev/null || true
+
+# =============================================================================
+# Stage 3: Builder - bundle-specific deps
 # =============================================================================
 FROM base AS builder
 
 ARG BUNDLE
-
-# Resolve bundle-specific dependencies
-COPY packages/sie_server/bundles bundles/
-COPY packages/sie_server/models models/
 
 RUN .venv/bin/python -m sie_server.cli resolve-deps \
     --bundle "${BUNDLE}" \
@@ -81,70 +112,82 @@ RUN .venv/bin/python -m sie_server.cli resolve-deps \
     && echo "Bundle ${BUNDLE} requirements:" \
     && cat /tmp/bundle-requirements.txt
 
-# Install bundle-specific deps
+# Bundle-specific deps land in a separate site-packages tree so the shared
+# venv layer stays byte-identical across bundles of the same platform.
+# The cu11 `default` bundle skips flash-attn (wheel is cu128), so
+# /app/bundle-libs may be empty — create the directory either way so the
+# runtime COPY never fails.
 RUN --mount=type=cache,target=/root/.cache/pip \
+    mkdir -p /app/bundle-libs; \
     if [ -s /tmp/bundle-requirements.txt ]; then \
         .venv/bin/pip install \
             --index-url https://download.pytorch.org/whl/cu118 \
             --extra-index-url https://pypi.org/simple \
+            --target=/app/bundle-libs \
+            --no-compile \
             -r /tmp/bundle-requirements.txt; \
     fi
 
-# Clean up to reduce image size
-RUN find .venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true \
-    && find .venv -type f -name "*.pyc" -delete 2>/dev/null || true \
-    && find .venv -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true \
-    && find .venv -type d -name "test" -exec rm -rf {} + 2>/dev/null || true \
-    && rm -rf .venv/share/jupyter 2>/dev/null || true
+# bundle-libs cleanup (symmetric to the .venv cleanup in base).
+RUN set -eux; \
+    if [ -d /app/bundle-libs ]; then \
+        cd /app/bundle-libs; \
+        find . -type d -name '__pycache__' -prune -exec rm -rf {} +; \
+        find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete; \
+        find . -type d -name 'tests' -prune -exec rm -rf {} +; \
+        rm -rf torch/test torch/utils/tensorboard torch/utils/bottleneck 2>/dev/null || true; \
+        find torch -type f -name '*.a' -delete 2>/dev/null || true; \
+        find . -type f -name 'RECORD' -path '*dist-info*' -delete; \
+        find nvidia -type f -name '*.a' -delete 2>/dev/null || true; \
+    fi; \
+    find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true
 
 # =============================================================================
-# Stage 2: Runtime
+# Stage 4: Runtime
 # =============================================================================
-# Use base image - PyTorch bundles CUDA libs
 FROM nvidia/cuda:11.8.0-base-ubuntu22.04 AS runtime
-
-ARG BUNDLE
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python 3.12 runtime + gcc (needed for triton kernel compilation)
-# libnuma1 is required by sgl_kernel (SGLang bundle) - without it, imports fail with misleading SM arch errors
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    gnupg \
     ca-certificates \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
     gcc \
     libc6-dev \
-    libnuma1 \
-    && rm -rf /var/lib/apt/lists/*
+    libgomp1 \
+    libnuma1
 
-# Create non-root user
 RUN groupadd -g 1000 sie && useradd -u 1000 -g sie -m sie
 
 WORKDIR /app
 
-# Copy virtual environment from builder (with correct ownership to avoid chown layer)
-COPY --from=builder --chown=sie:sie /app/.venv /app/.venv
+COPY --link --from=base /opt/python /opt/python
+RUN set -e; \
+    py=$(ls -d /opt/python/cpython-3.12*/bin/python3.12 | head -1); \
+    [ -x "$py" ] || { echo "no standalone python found under /opt/python"; exit 1; }; \
+    ln -sf "$py" /usr/local/bin/python3.12; \
+    ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3; \
+    ln -sf /usr/local/bin/python3.12 /usr/local/bin/python
 
-# Copy source code (uv sync creates editable install with .pth pointing to /app/src)
-COPY --from=builder --chown=sie:sie /app/src /app/src
+# --link shared COPYs — produce independent layer tars without parent-dir
+# headers carrying a build-time mtime, so resulting layer digests match
+# across bundles of the same platform. Numeric --chown because --link has
+# no /etc/passwd visible (the sie user exists in the runtime FS but --link
+# layers are created in isolation).
+COPY --link --from=base --chown=1000:1000 /app/.venv /app/.venv
+COPY --link --from=base --chown=1000:1000 /app/src /app/src
+COPY --link --from=base --chown=1000:1000 /tmp/sie_sdk/src /tmp/sie_sdk/src
+COPY --link --from=base --chown=1000:1000 /app/models /app/models
+COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
+COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
 
-# Copy sie-sdk source (installed as editable in /tmp)
-COPY --from=builder --chown=sie:sie /tmp/sie_sdk/src /tmp/sie_sdk/src
-
-# Copy model configs and bundles (needed for runtime model discovery)
-COPY --from=builder --chown=sie:sie /app/models /app/models
-COPY --from=builder --chown=sie:sie /app/bundles /app/bundles
-
-# Create directories for runtime
 RUN mkdir -p /app/evals /app/.cache/huggingface && chown -R sie:sie /app/evals /app/.cache
 
-# Labels
+# Declare BUNDLE arg only here, where it is first used (LABEL + ENV),
+# so every RUN/COPY layer above is bundle-agnostic in its cache key.
+ARG BUNDLE
+
 LABEL org.opencontainers.image.title="SIE Server" \
       org.opencontainers.image.description="Search Inference Engine - ${BUNDLE} bundle (CUDA 11.8)" \
       sie.bundle="${BUNDLE}"

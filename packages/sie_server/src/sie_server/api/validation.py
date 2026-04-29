@@ -53,7 +53,7 @@ def validate_machine_profile_header(x_machine_profile: str | None) -> None:
             detail={
                 "code": ErrorCode.INVALID_INPUT.value,
                 "message": f"Request targets machine profile '{x_machine_profile}' but this worker is '{worker_identity}'. "
-                "This may indicate a routing error. Check your router configuration.",
+                "This may indicate a routing error. Check your gateway configuration.",
                 "requested_profile": x_machine_profile,
                 "worker_identity": worker_identity,
             },

@@ -205,8 +205,11 @@ def _download_from_cluster_cache(model_id: str, config: CacheConfig) -> bool:
     model_folder = f"models--{model_id.replace('/', '--')}"
     cluster_model_path = join_path(config.cluster_cache, model_folder)
 
-    # Check if model exists in cluster cache
-    if not backend.exists(join_path(cluster_model_path, "snapshots")):
+    # Check if model exists in cluster cache.
+    # ``snapshots`` is a directory-like prefix; ``has_children`` does a
+    # list-with-MaxKeys=1 instead of head_object, which would 404 on every
+    # S3-compatible backend even when children are clearly present.
+    if not backend.has_children(join_path(cluster_model_path, "snapshots")):
         logger.debug("Model %s not found in cluster cache", model_id)
         return False
 

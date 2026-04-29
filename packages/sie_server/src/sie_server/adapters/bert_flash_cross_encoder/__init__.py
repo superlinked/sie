@@ -139,6 +139,14 @@ class BertFlashCrossEncoderAdapter(FlashBaseAdapter):
             self._use_sigmoid,
         )
 
+        # Clamp configured max_seq_length to whatever the tokenizer/model
+        # actually support to avoid OOB position embeddings on long inputs.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_seq_length,
+        )
+
     def _should_use_sigmoid(self, config: Any) -> bool:
         """Determine if sigmoid should be applied (matching sentence-transformers logic).
 
@@ -271,7 +279,9 @@ class BertFlashCrossEncoderAdapter(FlashBaseAdapter):
             raise RuntimeError(ERR_NOT_LOADED)
 
         opts = options or {}
-        max_length = opts.get("max_seq_length", self._max_seq_length)
+        # Hard-clamp to the load-time ceiling so runtime overrides cannot
+        # push past the model's positional capacity.
+        max_length = min(opts.get("max_seq_length", self._max_seq_length), self._max_seq_length)
 
         # Build (query, doc) pairs
         pairs = []

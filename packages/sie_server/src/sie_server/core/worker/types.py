@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput, ScoreOutput
+from sie_server.core.oom import OomRecoveryConfig, OomRecoveryStats
 from sie_server.core.timing import RequestTiming
 
 if TYPE_CHECKING:
@@ -115,6 +116,9 @@ class WorkerConfig:
     max_queue_size: int = 1000  # Maximum pending items in queue (0 = unlimited)
     instrumentation: bool = False
     adaptive_batching: AdaptiveBatchingParams = field(default_factory=AdaptiveBatchingParams)
+    # Reactive OOM recovery applied inside `_process_batch`. When disabled,
+    # OOM exceptions propagate as before (legacy behaviour).
+    oom_recovery: OomRecoveryConfig = field(default_factory=OomRecoveryConfig)
 
 
 @dataclass
@@ -125,6 +129,10 @@ class WorkerStats:
     items_processed: int = 0
     total_tokens_processed: int = 0
     inference_errors: int = 0
+
+    # OOM recovery counters (populated by BatchExecutor). Always present so
+    # callers can read counters without conditional checks.
+    oom_recoveries: OomRecoveryStats = field(default_factory=OomRecoveryStats)
 
     # Detailed instrumentation (for performance analysis)
     batch_sizes: list[int] | None = None  # Items per batch

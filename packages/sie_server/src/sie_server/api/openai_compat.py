@@ -150,12 +150,12 @@ def _normalize_input(input_data: OpenAIInput, registry: object, model: str) -> t
 
     if isinstance(first, str):
         # list[str] - multiple texts
-        return list(input_data), _estimate_tokens(input_data)  # type: ignore[arg-type]
+        return list(input_data), _estimate_tokens(input_data)  # type: ignore
 
     if isinstance(first, int):
         # list[int] - single token array, decode it
         token_count = len(input_data)
-        text = _decode_tokens(input_data, registry, model)  # type: ignore[arg-type]
+        text = _decode_tokens(input_data, registry, model)  # type: ignore
         return [text], token_count
 
     if isinstance(first, list):
@@ -187,7 +187,7 @@ def _decode_tokens(tokens: list[int], registry: object, model: str) -> str:
         Decoded text string
     """
     try:
-        preprocessor_registry = registry.preprocessor_registry  # type: ignore[attr-defined]
+        preprocessor_registry = registry.preprocessor_registry  # type: ignore
         if preprocessor_registry.has_preprocessor(model, "text"):
             tokenizer = preprocessor_registry.get_tokenizer(model)
             if tokenizer is not None:
@@ -203,13 +203,13 @@ def _decode_tokens(tokens: list[int], registry: object, model: str) -> str:
 
 async def _load_model_if_needed(registry: object, model: str, device: str, span: object) -> None:
     """Load model if not already loaded."""
-    if not registry.is_loaded(model):  # type: ignore[attr-defined]
+    if not registry.is_loaded(model):  # type: ignore
         try:
             logger.info("Loading model %s on device %s", model, device)
-            await registry.load_async(model, device=device)  # type: ignore[attr-defined]
+            await registry.load_async(model, device=device)  # type: ignore
         except Exception as e:
             logger.exception("Failed to load model %s", model)
-            span.set_attribute("error", "model_load_failed")  # type: ignore[attr-defined]
+            span.set_attribute("error", "model_load_failed")  # type: ignore
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={

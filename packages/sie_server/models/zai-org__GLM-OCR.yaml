@@ -1,0 +1,21 @@
+sie_id: zai-org/GLM-OCR
+hf_id: zai-org/GLM-OCR
+inputs:
+  text: false
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.glm_ocr:GlmOcrAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        max_new_tokens: 8192
+        num_beams: 1

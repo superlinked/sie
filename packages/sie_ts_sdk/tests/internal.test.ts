@@ -5,7 +5,7 @@
  * 1. Retry logic with backoff works correctly for resilient requests
  * 2. GPU parameter parsing handles pool/gpu format correctly
  * 3. Response parsing correctly transforms wire format to SDK types
- * 4. Capacity info parsing correctly handles router health responses
+ * 4. Capacity info parsing correctly handles gateway health responses
  */
 
 import { describe, expect, it } from "vitest";
@@ -226,10 +226,10 @@ describe("Real-world retry scenarios", () => {
 });
 
 describe("Capacity info parsing", () => {
-  it("should parse router health response", () => {
+  it("should parse gateway health response", () => {
     const wireData = {
       status: "healthy",
-      type: "router",
+      type: "gateway",
       cluster: {
         worker_count: 3,
         gpu_count: 3,
@@ -274,7 +274,7 @@ describe("Capacity info parsing", () => {
   it("should filter workers by GPU when specified", () => {
     const wireData = {
       status: "healthy",
-      type: "router",
+      type: "gateway",
       cluster: {
         worker_count: 4,
         gpu_count: 4,

@@ -19,11 +19,14 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
+from sie_server.core.extract_cost import build_extract_prepared_items, extract_item_cost
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
-from sie_server.types.responses import Entity
+from sie_server.core.worker.handlers.extract import ExtractHandler
+from sie_server.types.inputs import Item
+from sie_server.types.responses import Classification, Entity
 
 # Patch msgpack for numpy support
 m.patch()
@@ -606,8 +609,6 @@ class TestFormatOutput:
 
     def test_format_output_classifications_none_produces_empty_list(self) -> None:
         """When classifications is None, format_output still includes an empty list per item."""
-        from sie_server.core.worker.handlers.extract import ExtractHandler
-
         output = ExtractOutput(
             entities=[[Entity(text="Apple", label="ORG", score=0.95, start=0, end=5)]],
             classifications=None,
@@ -619,9 +620,6 @@ class TestFormatOutput:
 
     def test_format_output_with_populated_classifications(self) -> None:
         """When classifications are populated, format_output serializes them correctly."""
-        from sie_server.core.worker.handlers.extract import ExtractHandler
-        from sie_server.types.responses import Classification
-
         output = ExtractOutput(
             entities=[[]],
             classifications=[
@@ -642,9 +640,6 @@ class TestFormatOutput:
 
     def test_format_output_multiple_items_mixed(self) -> None:
         """format_output handles multiple items with classifications correctly."""
-        from sie_server.core.worker.handlers.extract import ExtractHandler
-        from sie_server.types.responses import Classification
-
         output = ExtractOutput(
             entities=[
                 [Entity(text="Apple", label="ORG", score=0.95, start=0, end=5)],
@@ -661,3 +656,77 @@ class TestFormatOutput:
         assert results[0]["classifications"][0]["label"] == "tech"
         assert results[1]["entities"] == []
         assert results[1]["classifications"][0]["label"] == "finance"
+
+    def test_format_output_data_none_produces_empty_dict(self) -> None:
+        """When data is None, format_output emits an empty dict per item."""
+        output = ExtractOutput(entities=[[]], data=None)
+        results = ExtractHandler.format_output(output)
+        assert results[0]["data"] == {}
+
+    def test_format_output_with_populated_data(self) -> None:
+        """When data is populated, format_output passes it through verbatim."""
+        payload = {"document": {"pages": [{"text": "hello"}]}}
+        output = ExtractOutput(entities=[[], []], data=[payload, {}])
+        results = ExtractHandler.format_output(output)
+        assert results[0]["data"] == payload
+        assert results[1]["data"] == {}
+
+
+class TestExtractOutputData:
+    """Validation around the new ExtractOutput.data field."""
+
+    def test_data_length_must_match_batch_size(self) -> None:
+        with pytest.raises(ValueError, match="data list length"):
+            ExtractOutput(entities=[[], []], data=[{"a": 1}])
+
+    def test_slice_output_threads_data(self) -> None:
+        output = ExtractOutput(
+            entities=[[], []],
+            data=[{"page": 0}, {"page": 1}],
+        )
+        sliced = ExtractHandler().slice_output(output, 1)
+        assert sliced.data == [{"page": 1}]
+
+    def test_assemble_output_reassembles_data(self) -> None:
+        partials = {
+            0: ExtractOutput(entities=[[]], data=[{"page": 0}]),
+            1: ExtractOutput(entities=[[]], data=[{"page": 1}]),
+        }
+        assembled = ExtractHandler().assemble_output(partials, batch_size=2)
+        assert assembled.data == [{"page": 0}, {"page": 1}]
+
+    def test_assemble_output_data_partial_coverage(self) -> None:
+        """When only one partial has data, the missing slots default to {}."""
+        partials = {
+            0: ExtractOutput(entities=[[]], data=[{"page": 0}]),
+            1: ExtractOutput(entities=[[]], data=None),
+        }
+        assembled = ExtractHandler().assemble_output(partials, batch_size=2)
+        assert assembled.data == [{"page": 0}, {}]
+
+
+class TestExtractCost:
+    """Cost calculation for prepared extract items."""
+
+    def test_text_item_uses_character_count(self) -> None:
+        assert extract_item_cost(Item(text="hello world")) == 11
+
+    def test_document_item_uses_byte_size(self) -> None:
+        document = {"data": b"%PDF-1.4 fake content", "format": "pdf"}
+        assert extract_item_cost(Item(document=document)) == len(document["data"])
+
+    def test_document_takes_priority_over_text(self) -> None:
+        document = {"data": b"AB", "format": "pdf"}
+        item = Item(text="ignored-since-document-present", document=document)
+        assert extract_item_cost(item) == 2
+
+    def test_empty_item_has_zero_cost(self) -> None:
+        assert extract_item_cost(Item()) == 0
+
+    def test_build_extract_prepared_items_assigns_indices(self) -> None:
+        items = [
+            Item(text="abc"),
+            Item(document={"data": b"hello world", "format": "pdf"}),
+        ]
+        prepared = build_extract_prepared_items(items)
+        assert [(p.cost, p.original_index) for p in prepared] == [(3, 0), (11, 1)]

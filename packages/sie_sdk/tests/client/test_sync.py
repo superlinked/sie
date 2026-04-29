@@ -268,13 +268,14 @@ class TestErrorHandling:
     """Tests for error handling."""
 
     def test_connection_error(self) -> None:
-        """Connection errors are wrapped as SIEConnectionError."""
+        # `wait_for_capacity=False` opts out of the issue-#95 retry path;
+        # see test_transport_error_retry.py for retry coverage.
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
             mock_client.return_value.post.side_effect = httpx.ConnectError("Connection refused")
             client = SIEClient("http://localhost:8080")
 
             with pytest.raises(SIEConnectionError, match="Failed to connect"):
-                client.encode("bge-m3", {"text": "hello"})
+                client.encode("bge-m3", {"text": "hello"}, wait_for_capacity=False)
             client.close()
 
     def test_timeout_error(self) -> None:
@@ -698,4 +699,54 @@ class TestExtract:
             result = client.extract("gliner", {"id": "doc-123", "text": "Test"})
 
             assert result.get("id") == "doc-123"
+            client.close()
+
+    def test_extract_converts_document_to_wire_format(self) -> None:
+        """extract() converts document inputs (bytes/path) to {data, format} on the wire."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = msgpack.packb(
+            {
+                "model": "docling",
+                "items": [{"entities": [], "data": {"document": {"pages": []}}}],
+            },
+            use_bin_type=True,
+        )
+
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post.return_value = mock_response
+            client = SIEClient("http://localhost:8080")
+            result = client.extract(
+                "docling",
+                {"document": b"%PDF-1.4 fake content"},
+            )
+
+            call_args = mock_client.return_value.post.call_args
+            request_body = msgpack.unpackb(call_args.kwargs["content"], raw=False)
+            wire_doc = request_body["items"][0]["document"]
+            assert wire_doc["data"] == b"%PDF-1.4 fake content"
+            assert wire_doc["format"] is None  # bytes have no inferable format
+            assert result["data"] == {"document": {"pages": []}}
+            client.close()
+
+    def test_extract_passes_through_prepared_document_dict(self) -> None:
+        """A pre-built {data, format} dict is forwarded as-is."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = msgpack.packb(
+            {"model": "docling", "items": [{"entities": []}]},
+            use_bin_type=True,
+        )
+
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post.return_value = mock_response
+            client = SIEClient("http://localhost:8080")
+            client.extract(
+                "docling",
+                {"document": {"data": b"raw", "format": "pdf"}},
+            )
+
+            call_args = mock_client.return_value.post.call_args
+            request_body = msgpack.unpackb(call_args.kwargs["content"], raw=False)
+            assert request_body["items"][0]["document"] == {"data": b"raw", "format": "pdf"}
             client.close()

@@ -355,22 +355,22 @@ def docker_client(sie_docker_server: str) -> SIEClient:
 
 
 # =============================================================================
-# Docker-based SIE Router (for router image tests)
+# Docker-based SIE Gateway (for gateway image tests)
 # =============================================================================
 
 
-def _build_router_image(tag: str = "sie-router:test") -> None:
-    """Build SIE Router Docker image using docker buildx.
+def _build_config_image(tag: str = "sie-config:test") -> None:
+    """Build SIE Config Service Docker image using docker buildx.
 
-    In CI, the image should be pre-built by the workflow (set SIE_ROUTER_IMAGE).
+    In CI, the image should be pre-built by the workflow (set SIE_CONFIG_IMAGE).
     This function is used for local development only.
     """
-    dockerfile_path = _project_root / "packages" / "sie_router" / "Dockerfile"
+    dockerfile_path = _project_root / "packages" / "sie_config" / "Dockerfile"
 
     if not dockerfile_path.exists():
-        pytest.fail(f"Router Dockerfile not found: {dockerfile_path}")
+        pytest.fail(f"Gateway Dockerfile not found: {dockerfile_path}")
 
-    logger.info("Building SIE Router Docker image from %s", dockerfile_path)
+    logger.info("Building SIE Config Service Docker image from %s", dockerfile_path)
 
     cmd = [
         "docker",
@@ -380,7 +380,7 @@ def _build_router_image(tag: str = "sie-router:test") -> None:
         "--platform",
         "linux/amd64",
         "-f",
-        "packages/sie_router/Dockerfile",
+        "packages/sie_config/Dockerfile",
         "-t",
         tag,
         "--load",
@@ -410,37 +410,37 @@ def _build_router_image(tag: str = "sie-router:test") -> None:
 
         if returncode != 0:
             output = "\n".join(output_lines[-50:])
-            pytest.fail(f"Router Docker build failed with exit code {returncode}.\nOutput:\n{output}")
+            pytest.fail(f"Config service Docker build failed with exit code {returncode}.\nOutput:\n{output}")
 
-        logger.info("SIE Router Docker image built: %s", tag)
+        logger.info("SIE Config Service Docker image built: %s", tag)
 
     except subprocess.TimeoutExpired:
         if proc is not None:
             proc.kill()
-        pytest.fail("Router Docker build timed out after 10 minutes")
+        pytest.fail("Config service Docker build timed out after 10 minutes")
     except Exception as e:  # noqa: BLE001
-        pytest.fail(f"Failed to build Router Docker image: {e}")
+        pytest.fail(f"Failed to build Config Service Docker image: {e}")
 
 
 @pytest.fixture(scope="session")
-def sie_docker_router() -> Generator[str]:
-    """Build and start SIE Router Docker container for tests.
+def sie_docker_config() -> Generator[str]:
+    """Build and start SIE Config Service Docker container for tests.
 
     Yields the server URL. Container is stopped after all tests in the session.
 
-    Starts the router without any worker URLs -- just validates the image
+    Starts the config service -- just validates the image
     can start and respond to health checks.
 
-    Set SIE_ROUTER_IMAGE env var to use a pre-built image (skips build).
+    Set SIE_CONFIG_IMAGE env var to use a pre-built image (skips build).
     """
     docker_client = _get_docker_client()
 
-    image_tag = os.environ.get("SIE_ROUTER_IMAGE", "")
+    image_tag = os.environ.get("SIE_CONFIG_IMAGE", "")
     if image_tag:
-        logger.info("Using pre-built Router Docker image: %s", image_tag)
+        logger.info("Using pre-built Config Service Docker image: %s", image_tag)
     else:
-        image_tag = "sie-router:test"
-        _build_router_image(tag=image_tag)
+        image_tag = "sie-config:test"
+        _build_config_image(tag=image_tag)
 
     port = _find_free_port(8090, 8200)
 
@@ -457,7 +457,7 @@ def sie_docker_router() -> Generator[str]:
         "remove": True,
     }
 
-    logger.info("Starting SIE Router Docker container on port %d", port)
+    logger.info("Starting SIE Config Service Docker container on port %d", port)
 
     container = docker_client.containers.run(**container_config)
     container_id = container.id
@@ -472,13 +472,13 @@ def sie_docker_router() -> Generator[str]:
             time.sleep(1.0)
         else:
             logs = container.logs().decode("utf-8", errors="replace")
-            pytest.fail(f"Router container did not start within 30s. Logs:\n{logs}")
+            pytest.fail(f"Gateway container did not start within 30s. Logs:\n{logs}")
 
         if not _wait_for_health(url, timeout_s=60.0, poll_interval_s=1.0):
             logs = container.logs().decode("utf-8", errors="replace")
-            pytest.fail(f"Router container health check failed. Logs:\n{logs}")
+            pytest.fail(f"Gateway container health check failed. Logs:\n{logs}")
 
-        logger.info("Router Docker test server ready at %s", url)
+        logger.info("Gateway Docker test server ready at %s", url)
         yield url
 
     finally:
@@ -486,5 +486,143 @@ def sie_docker_router() -> Generator[str]:
             container = docker_client.containers.get(container_id)
             container.stop(timeout=10)
         except Exception as e:  # noqa: BLE001
-            logger.warning("Error stopping router container: %s", e)
-        logger.info("Router Docker test server stopped")
+            logger.warning("Error stopping gateway container: %s", e)
+        logger.info("Gateway Docker test server stopped")
+
+
+# =============================================================================
+# Docker-based SIE Gateway (for gateway image tests)
+# =============================================================================
+
+
+def _build_gateway_image(tag: str = "sie-gateway:test") -> None:
+    """Build SIE Gateway Docker image using docker buildx.
+
+    In CI, the image should be pre-built by the workflow (set SIE_GATEWAY_IMAGE).
+    This function is used for local development only.
+    """
+    dockerfile_path = _project_root / "packages" / "sie_gateway" / "Dockerfile"
+
+    if not dockerfile_path.exists():
+        pytest.fail(f"Gateway Dockerfile not found: {dockerfile_path}")
+
+    logger.info("Building SIE Gateway Docker image from %s", dockerfile_path)
+
+    cmd = [
+        "docker",
+        "buildx",
+        "build",
+        "--progress=plain",
+        "--platform",
+        "linux/amd64",
+        "-f",
+        "packages/sie_gateway/Dockerfile",
+        "-t",
+        tag,
+        "--load",
+        str(_project_root),
+    ]
+
+    logger.info("Docker build command: %s", " ".join(cmd))
+
+    proc: subprocess.Popen[str] | None = None
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            cmd,
+            cwd=_project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        output_lines: list[str] = []
+        if proc.stdout:
+            for line in proc.stdout:
+                line = line.rstrip()
+                output_lines.append(line)
+                logger.info("[docker build] %s", line)
+
+        returncode = proc.wait(timeout=600)
+
+        if returncode != 0:
+            output = "\n".join(output_lines[-50:])
+            pytest.fail(f"Gateway Docker build failed with exit code {returncode}.\nOutput:\n{output}")
+
+        logger.info("SIE Gateway Docker image built: %s", tag)
+
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            proc.kill()
+        pytest.fail("Gateway Docker build timed out after 10 minutes")
+    except Exception as e:  # noqa: BLE001
+        pytest.fail(f"Failed to build Gateway Docker image: {e}")
+
+
+@pytest.fixture(scope="session")
+def sie_docker_gateway() -> Generator[str]:
+    """Build and start SIE Gateway Docker container for tests.
+
+    Yields the server URL. Container is stopped after all tests in the session.
+
+    Starts the gateway without any worker URLs and without Kubernetes discovery --
+    just validates the image can start and respond to health/readiness probes.
+
+    Set SIE_GATEWAY_IMAGE env var to use a pre-built image (skips build).
+    """
+    docker_client = _get_docker_client()
+
+    image_tag = os.environ.get("SIE_GATEWAY_IMAGE", "")
+    if image_tag:
+        logger.info("Using pre-built Gateway Docker image: %s", image_tag)
+    else:
+        image_tag = "sie-gateway:test"
+        _build_gateway_image(tag=image_tag)
+
+    port = _find_free_port(8090, 8200)
+
+    container_config = {
+        "image": image_tag,
+        "detach": True,
+        "ports": {"8080/tcp": port},
+        # Override the Dockerfile CMD to skip --kubernetes (no cluster to
+        # discover workers from in the test environment).
+        "command": [
+            "--port",
+            "8080",
+            "--host",
+            "0.0.0.0",  # noqa: S104
+        ],
+        "remove": True,
+    }
+
+    logger.info("Starting SIE Gateway Docker container on port %d", port)
+
+    container = docker_client.containers.run(**container_config)
+    container_id = container.id
+    url = f"http://localhost:{port}"
+
+    try:
+        start = time.monotonic()
+        while time.monotonic() - start < 30:
+            container.reload()
+            if container.status == "running":
+                break
+            time.sleep(1.0)
+        else:
+            logs = container.logs().decode("utf-8", errors="replace")
+            pytest.fail(f"Gateway container did not start within 30s. Logs:\n{logs}")
+
+        if not _wait_for_health(url, timeout_s=60.0, poll_interval_s=1.0):
+            logs = container.logs().decode("utf-8", errors="replace")
+            pytest.fail(f"Gateway container health check failed. Logs:\n{logs}")
+
+        logger.info("Gateway Docker test server ready at %s", url)
+        yield url
+
+    finally:
+        try:
+            container = docker_client.containers.get(container_id)
+            container.stop(timeout=10)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Error stopping gateway container: %s", e)
+        logger.info("Gateway Docker test server stopped")

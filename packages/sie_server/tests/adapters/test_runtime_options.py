@@ -724,10 +724,12 @@ class TestExtractRuntimeOptions:
 
         adapter = GLiClassAdapter("test-model")
 
-        # Mock the pipeline to return known classification results
+        # Mock the pipeline to return known classification results.
+        # The adapter calls the pipeline with return_hierarchical=True and a
+        # flat label list, which yields a list of {label: score} dicts.
         mock_pipeline = MagicMock()
         mock_pipeline.return_value = [
-            [{"label": "positive", "score": 0.9}, {"label": "negative", "score": 0.1}],
+            {"positive": 0.9, "negative": 0.1},
         ]
         adapter._pipeline = mock_pipeline
         adapter._device = "cpu"
@@ -745,6 +747,239 @@ class TestExtractRuntimeOptions:
 
         # Entities should be empty lists (one per item)
         assert output.entities == [[]]
+
+    def test_gliclass_returns_all_label_scores(self) -> None:
+        """All requested labels come back with scores (regression for #263).
+
+        Previously the adapter forwarded the runtime ``threshold`` to the
+        gliclass library, which dropped sub-threshold labels. The adapter must
+        now return every requested label with its score by default.
+        """
+        from unittest.mock import MagicMock
+
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        adapter = GLiClassAdapter("test-model")
+
+        mock_pipeline = MagicMock()
+        # Hierarchical output: every requested label appears with its score,
+        # including labels that would be below a 0.5 threshold.
+        mock_pipeline.return_value = [
+            {"company": 0.43, "person": 0.21, "location": 0.18, "technology": 0.18},
+        ]
+        adapter._pipeline = mock_pipeline
+        adapter._device = "cpu"
+
+        items = [Item(text="Apple was founded by Steve Jobs in California.")]
+        output = adapter.extract(
+            items,
+            labels=["company", "person", "location", "technology"],
+        )
+
+        assert output.classifications is not None
+        assert len(output.classifications[0]) == 4
+        labels_returned = {c["label"] for c in output.classifications[0]}
+        assert labels_returned == {"company", "person", "location", "technology"}
+        # Sorted descending
+        assert output.classifications[0][0]["label"] == "company"
+        assert output.classifications[0][0]["score"] == pytest.approx(0.43)
+
+    def test_gliclass_calls_pipeline_with_zero_threshold_and_hierarchical(self) -> None:
+        """Pipeline is invoked with threshold=0.0 and return_hierarchical=True.
+
+        Even when callers request a non-zero ``options["threshold"]``, the
+        adapter must NOT push that into the gliclass library (which would drop
+        labels in single-label mode). Threshold filtering is applied
+        server-side after the pipeline returns all label scores.
+        """
+        from unittest.mock import MagicMock
+
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        adapter = GLiClassAdapter("test-model")
+        mock_pipeline = MagicMock()
+        mock_pipeline.return_value = [{"a": 0.9, "b": 0.1}]
+        adapter._pipeline = mock_pipeline
+        adapter._device = "cpu"
+
+        adapter.extract(
+            [Item(text="hello")],
+            labels=["a", "b"],
+            options={"threshold": 0.7},
+        )
+
+        assert mock_pipeline.call_count == 1
+        kwargs = mock_pipeline.call_args.kwargs
+        assert kwargs.get("threshold") == 0.0
+        assert kwargs.get("return_hierarchical") is True
+
+    def test_gliclass_post_filters_threshold_server_side(self) -> None:
+        """When caller explicitly passes a threshold, sub-threshold labels are dropped."""
+        from unittest.mock import MagicMock
+
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        adapter = GLiClassAdapter("test-model")
+        mock_pipeline = MagicMock()
+        mock_pipeline.return_value = [{"a": 0.9, "b": 0.4, "c": 0.1}]
+        adapter._pipeline = mock_pipeline
+        adapter._device = "cpu"
+
+        output = adapter.extract(
+            [Item(text="hello")],
+            labels=["a", "b", "c"],
+            options={"threshold": 0.5},
+        )
+
+        assert output.classifications is not None
+        labels_returned = [c["label"] for c in output.classifications[0]]
+        assert labels_returned == ["a"]
+
+    def test_gliclass_default_threshold_returns_all_labels(self) -> None:
+        """Adapter default threshold is 0.0, so all labels come through."""
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        adapter = GLiClassAdapter("test-model")
+        assert adapter._threshold == 0.0
+
+    def test_gliclass_constructor_accepts_max_seq_length(self) -> None:
+        """Adapter constructor stores max_seq_length passed by the loader."""
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        adapter = GLiClassAdapter("test-model", max_seq_length=512)
+        assert adapter._max_seq_length == 512
+
+    def test_gliclass_load_bounds_tokenizer_max_length(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``load()`` clamps ``tokenizer.model_max_length`` to ``max_seq_length``.
+
+        Regression for sie-test#88 / sie-test#89: long inputs crashed inside the
+        gliclass pipeline because the library default ``max_length=1024``
+        exceeds the 512-token position-embedding capacity of these models.
+        """
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        # Stub gliclass and transformers imports inside load().
+        fake_gliclass = types.ModuleType("gliclass")
+        fake_model = MagicMock()
+        # ``model.to(...)`` returns the model itself so the adapter can chain.
+        fake_model.to.return_value = fake_model
+        fake_gliclass.GLiClassModel = MagicMock()
+        fake_gliclass.GLiClassModel.from_pretrained.return_value = fake_model
+        captured: dict[str, object] = {}
+
+        def fake_pipeline_ctor(**kwargs: object) -> MagicMock:
+            captured.update(kwargs)
+            return MagicMock()
+
+        fake_gliclass.ZeroShotClassificationPipeline = fake_pipeline_ctor
+
+        fake_transformers = types.ModuleType("transformers")
+        fake_tokenizer = MagicMock()
+        fake_tokenizer.model_max_length = 1_000_000  # default before clamp
+        fake_transformers.AutoTokenizer = MagicMock()
+        fake_transformers.AutoTokenizer.from_pretrained.return_value = fake_tokenizer
+
+        # Inject stubs so ``from gliclass import ...`` inside load() picks them
+        # up. ``monkeypatch.setitem`` restores the original modules on teardown
+        # even if the test is interrupted.
+        monkeypatch.setitem(sys.modules, "gliclass", fake_gliclass)
+        monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+        adapter = GLiClassAdapter("test-model", max_seq_length=512)
+        adapter.load("cpu")
+
+        assert fake_tokenizer.model_max_length == 512
+        assert captured.get("max_length") == 512
+
+    def test_gliclass_handles_empty_pipeline_output(self) -> None:
+        """Adapter does not crash when the pipeline returns an empty/None entry."""
+        from unittest.mock import MagicMock
+
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        adapter = GLiClassAdapter("test-model")
+        mock_pipeline = MagicMock()
+        mock_pipeline.return_value = [None]
+        adapter._pipeline = mock_pipeline
+        adapter._device = "cpu"
+
+        output = adapter.extract([Item(text="hello")], labels=["a", "b"])
+
+        assert output.classifications == [[]]
+        assert output.entities == [[]]
+
+    def test_gliclass_translates_argmax_crash_to_validation_error(self) -> None:
+        """The infamous ``argmax(): ... numel() == 0`` crash is surfaced as
+        ValueError (validation), not RuntimeError (500 INFERENCE_ERROR).
+
+        Regression for sie-test#88 / sie-test#89.
+        """
+        from unittest.mock import MagicMock
+
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        adapter = GLiClassAdapter("test-model")
+        mock_pipeline = MagicMock()
+        mock_pipeline.side_effect = RuntimeError(
+            "argmax(): Expected reduction dim to be specified for input.numel() == 0."
+        )
+        adapter._pipeline = mock_pipeline
+        adapter._device = "cpu"
+
+        with pytest.raises(ValueError, match="empty tensor"):
+            adapter.extract([Item(text="x" * 6000)], labels=["Electronics"])
+
+    def test_gliclass_unrelated_runtime_error_propagates(self) -> None:
+        """RuntimeErrors that are not the specific empty-tensor argmax crash
+        must propagate untouched (so genuine bugs surface as 500s instead of
+        being silently rewritten to 4xx validation errors).
+        """
+        from unittest.mock import MagicMock
+
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        adapter = GLiClassAdapter("test-model")
+        mock_pipeline = MagicMock()
+        mock_pipeline.side_effect = RuntimeError("CUDA out of memory")
+        adapter._pipeline = mock_pipeline
+        adapter._device = "cpu"
+
+        with pytest.raises(RuntimeError, match="CUDA out of memory"):
+            adapter.extract([Item(text="hello")], labels=["a", "b"])
+
+        # Also: a RuntimeError mentioning argmax but NOT numel must propagate.
+        mock_pipeline.side_effect = RuntimeError("argmax() got an unexpected keyword argument")
+        with pytest.raises(RuntimeError, match="argmax"):
+            adapter.extract([Item(text="hello")], labels=["a", "b"])
+
+    def test_gliclass_long_input_does_not_crash(self) -> None:
+        """A 6 KB Lorem-ipsum-style input flows through the adapter without crashing
+        when the pipeline is properly bounded by max_seq_length.
+
+        Regression for sie-test#89: 54x repeated ``Lorem ipsum dolor sit amet,
+        consectetur adipiscing elit. `` with a single label ``Electronics``.
+        """
+        from unittest.mock import MagicMock
+
+        from sie_server.adapters.gliclass import GLiClassAdapter
+
+        adapter = GLiClassAdapter("test-model", max_seq_length=512)
+        mock_pipeline = MagicMock()
+        mock_pipeline.return_value = [{"Electronics": 0.27}]
+        adapter._pipeline = mock_pipeline
+        adapter._device = "cpu"
+
+        long_text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 54
+        output = adapter.extract([Item(text=long_text)], labels=["Electronics"])
+
+        assert output.classifications is not None
+        assert len(output.classifications) == 1
+        assert output.classifications[0][0]["label"] == "Electronics"
+        assert output.classifications[0][0]["score"] == pytest.approx(0.27)
 
     def test_nli_classification_flash_populates_classifications_not_entities(self) -> None:
         """NLI Classification Flash adapter returns classifications in ExtractOutput, not entities."""

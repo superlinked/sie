@@ -134,6 +134,14 @@ class ModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
 
         logger.debug("ModernBERT hidden_size: %d", self._dense_dim)
 
+        # Clamp configured max_seq_length to whatever the tokenizer/model
+        # actually support to avoid OOB position embeddings on long inputs.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_seq_length,
+        )
+
         # Warmup flash attention kernels
         logger.info("Warming up CUDA kernels...")
         warmup_items = [Item(text="warmup")]

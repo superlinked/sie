@@ -58,28 +58,60 @@ groups:
           summary: "GPU ECC double-bit errors on {{ $labels.gpu }}"
           description: "GPU {{ $labels.gpu }} has uncorrectable ECC errors. Hardware issue likely."
 
-  # Router alerts
-  - name: sie-router-health
+  # Gateway alerts
+  - name: sie-gateway-health
     rules:
-      - alert: SIERouterDown
-        expr: up{job="sie-router"} == 0
+      - alert: SIEGatewayDown
+        expr: up{job="sie-gateway"} == 0
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "SIE Router is down"
-          description: "Router pod {{ $labels.pod }} is unreachable. Traffic cannot be routed."
+          summary: "SIE Gateway is down"
+          description: "Gateway pod {{ $labels.pod }} is unreachable. Traffic cannot be routed."
 
       - alert: SIEHighErrorRate
+        # Real-failure error rate. Subtracts the SDK-retryable rejections
+        # from the 5xx numerator so a transient OOM episode (or a
+        # cold-start model load) that the SDK fully retries through
+        # doesn't page on-call. The three excluded labels:
+        #
+        #   - resource_exhausted             — worker WorkResult unanimous
+        #                                      RESOURCE_EXHAUSTED (OOM
+        #                                      recovery exhausted).
+        #   - upstream_model_loading         — worker WorkResult unanimous
+        #                                      MODEL_LOADING (model still
+        #                                      warming up).
+        #   - upstream_timeout_model_loading — gateway-synthesised 503 +
+        #                                      MODEL_LOADING when the
+        #                                      result-await timeout fires
+        #                                      (typically while a worker
+        #                                      cold-loads the target model
+        #                                      on demand).
+        #
+        # All three are auto-retried by the SDK under the SDK's
+        # ``provision_timeout_s`` / ``max_oom_retries`` budgets — see
+        # ``packages/sie_sdk/src/sie_sdk/client/_shared.py``. Operators
+        # still see these events via the dedicated
+        # ``SIEResourceExhaustedSpike`` informational alert and the
+        # ``sie_gateway_rejected_requests_total`` counter.
+        #
+        # PromQL ``=~`` is full-string anchored (RE2 with implicit
+        # ``^…$``); the list below matches exact reasons only. Keep in
+        # sync with ``record_rejected_request`` callers in proxy.rs.
         expr: |
-          sum(rate(sie_router_requests_total{status=~"5.."}[5m]))
-          / sum(rate(sie_router_requests_total[5m])) > 0.05
+          clamp_min(
+            sum(rate(sie_gateway_requests_total{status=~"5.."}[5m]))
+            - sum(rate(sie_gateway_rejected_requests_total{reason=~"resource_exhausted|upstream_model_loading|upstream_timeout_model_loading|upstream_lora_loading"}[5m])),
+            0
+          )
+          / sum(rate(sie_gateway_requests_total[5m])) > 0.05
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "SIE error rate > 5%"
-          description: "{{ $value | humanizePercentage }} of requests are failing."
+          summary: "SIE non-retryable error rate > 5%"
+          description: "{{ $value | humanizePercentage }} of requests are failing with non-retryable errors (excludes RESOURCE_EXHAUSTED, MODEL_LOADING, and upstream_lora_loading which the SDK auto-retries)."
 
       - alert: SIEHighLatency
         expr: histogram_quantile(0.95, sum by (le) (rate(sie_request_duration_seconds_bucket[5m]))) > 5
@@ -89,6 +121,41 @@ groups:
         annotations:
           summary: "SIE p95 latency > 5s"
           description: "95th percentile latency is {{ $value | humanizeDuration }}."
+
+      - alert: SIEResourceExhaustedSpike
+        # Informational signal: workers are exhausting OOM recovery and
+        # the gateway is collapsing whole batches into 503
+        # RESOURCE_EXHAUSTED. The SDK retries automatically — this alert
+        # is for capacity planning, not on-call paging. Sustained firing
+        # means workers are systematically running out of GPU memory
+        # (e.g., a memory leak, an undersized GPU pool, or a workload
+        # whose activation memory exceeds what split_batch can shrink to
+        # fit). Investigate ``oom_recoveries.terminal_failures`` on the
+        # affected workers and consider scaling up the pool or raising
+        # ``SIE_OOM_RECOVERY__MAX_SPLIT_DEPTH``.
+        expr: |
+          sum(rate(sie_gateway_rejected_requests_total{reason="resource_exhausted"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "SIE workers exhausting OOM recovery"
+          description: "Workers are reporting RESOURCE_EXHAUSTED at {{ $value | humanize }} req/s after exhausting their reactive recovery loop. SDK retries are masking this from clients but capacity is constrained."
+
+  # Config service alerts
+  # sie-config runs as a singleton control plane (replicas=1, Recreate). While
+  # the gateway tolerates a brief outage (cached config keeps routing working),
+  # prolonged downtime blocks all POST /v1/configs/* writes cluster-wide.
+  - name: sie-config-health
+    rules:
+      - alert: SIEConfigDown
+        expr: up{job="sie-config"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SIE Config service is down"
+          description: "sie-config pod {{ $labels.pod }} has been unreachable for 2 minutes. Config writes are blocked; gateways continue serving from cached state."
 
   # Provisioning alerts
   - name: sie-provisioning

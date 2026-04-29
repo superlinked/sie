@@ -37,12 +37,15 @@ from sie_sdk.queue_types import (
 )
 
 from sie_server.core.adaptive_batching import LatencyTracker
+from sie_server.core.extract_cost import build_extract_prepared_items
 from sie_server.core.inference_output import ScoreOutput
-from sie_server.core.prepared import ExtractPreparedItem, ScorePreparedItem
+from sie_server.core.oom import is_oom_error
+from sie_server.core.prepared import ScorePreparedItem
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers.extract import ExtractHandler
 from sie_server.types.inputs import Item
+from sie_server.types.responses import ErrorCode
 
 msgpack_numpy.patch()
 
@@ -75,6 +78,14 @@ _DRAIN_TIMEOUT_S = 30.0
 # Configurable via SIE_NAK_DELAY_S; with max_deliver=20, the default gives
 # ~100s total retry budget — enough for cold model downloads.
 _NAK_DELAY_S = float(os.environ.get("SIE_NAK_DELAY_S", "5.0"))
+
+# NAK delay for items that hit OOM (RESOURCE_EXHAUSTED) on this worker.
+# Slightly longer than the default to give the OOMed worker time to drain
+# its in-flight requests (and for any sibling worker to pick up the NAKed
+# item via JetStream redelivery). The delay is intentionally NOT zero —
+# instant redelivery would just reroute the same item back to the still-
+# pressured worker. Tunable via SIE_OOM_NAK_DELAY_S.
+_OOM_NAK_DELAY_S = float(os.environ.get("SIE_OOM_NAK_DELAY_S", "10.0"))
 
 # Maximum delivery attempts before a message is sent to the DLQ.
 # Configurable via SIE_MAX_DELIVER; must be high enough to cover model load
@@ -119,7 +130,7 @@ def _wrap_encode_output(output: dict, config: Any) -> dict:
 
     The HTTP path does this via ``encode.py:_build_response_items`` + Pydantic
     ``EncodeResult``.  In the queue path the worker must produce the same shape
-    *before* msgpack-serializing, because the router embeds the blob as-is.
+    *before* msgpack-serializing, because the gateway embeds the blob as-is.
     """
     import numpy as np  # noqa: PLC0415
 
@@ -195,8 +206,8 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Minimal payload store (read-only) — avoids cross-package import from
-# ``sie_router.payload_store``.
+# Minimal payload store (read-only) — self-contained to avoid cross-package
+# imports from the config service or gateway.
 # ---------------------------------------------------------------------------
 
 
@@ -252,7 +263,7 @@ class _S3PayloadStore(_PayloadStore):
 
         def _fetch() -> bytes:
             client = self._get_client()
-            response = client.get_object(Bucket=self._bucket, Key=full_key)  # type: ignore[union-attr]
+            response = client.get_object(Bucket=self._bucket, Key=full_key)  # type: ignore
             body = response["Body"]
             try:
                 return body.read()
@@ -374,7 +385,7 @@ class NatsPullLoop:
         self._load_history: list[tuple[str, float]] = []  # (model_id, timestamp) for thrash detection
 
         # Adaptive fetch timeout: tracks queue-path latency (time from
-        # router publish to result publish) and adjusts fetch_timeout to
+        # gateway publish to result publish) and adjusts fetch_timeout to
         # balance item accumulation (throughput) vs head-of-line delay.
         # When latency is under the target, the timeout can increase to
         # allow more items to accumulate → larger GPU batches.  When over
@@ -609,7 +620,7 @@ class NatsPullLoop:
 
         Compares the hash from the work item against the local config.
         Mismatches are logged but do not reject the item, because hash
-        computation differs between router and worker registries.
+        computation differs between gateway and worker registries.
         """
         expected_hash = wi.get("bundle_config_hash")
         if not expected_hash:
@@ -628,11 +639,11 @@ class NatsPullLoop:
                 return True
 
         if self._config_hash_cache and self._config_hash_cache != expected_hash:
-            # Log-only: hash computation differs between router and worker
+            # Log-only: hash computation differs between gateway and worker
             # registries (different model filtering). Allow processing to
             # proceed — the hash is a soft check, not a hard gate.
             logger.debug(
-                "Config hash mismatch for %s (router=%s, worker=%s) — processing anyway",
+                "Config hash mismatch for %s (gateway=%s, worker=%s) — processing anyway",
                 wi.get("work_item_id"),
                 expected_hash[:8],
                 self._config_hash_cache[:8],
@@ -1085,10 +1096,35 @@ class NatsPullLoop:
                     except Exception:  # noqa: BLE001
                         logger.debug("Failed to NAK message for evicted model %s", model_id)
             except Exception as e:  # noqa: BLE001
-                logger.warning("Encode sub-batch failed for model %s: %s", model_id, e)
+                code, msg_text = self._classify_inference_exception(e)
+                logger.warning(
+                    "Encode sub-batch failed for model %s (code=%s): %s",
+                    model_id,
+                    code,
+                    e,
+                )
+                # For non-retryable codes: publish the error result to the
+                # gateway's reply subject and ACK the JetStream message —
+                # redelivering would just reproduce the same failure.
+                #
+                # For RESOURCE_EXHAUSTED: skip ``_publish_error`` and only
+                # NAK so JetStream can redeliver the work item to a sibling
+                # worker (or this worker after memory clears). Publishing
+                # the error here would fill the gateway's per-item slot and
+                # complete the request immediately, dropping the redelivered
+                # work on arrival (the gateway's inbox handler discards
+                # replies whose ``request_id`` is no longer pending). The
+                # caller still sees a 503 RESOURCE_EXHAUSTED — the gateway
+                # synthesises one from result-await timeouts — and the SDK
+                # auto-retries; the NAK simply gives non-retrying clients
+                # (``max_oom_retries=0``) a real second attempt instead of
+                # the wasted compute the previous "publish + NAK"
+                # combination produced.
+                is_resource_exhausted = code == ErrorCode.RESOURCE_EXHAUSTED.value
                 for wi, msg, _, _fm in group:
-                    await self._publish_error(wi, "inference_error", str(e))
-                    await msg.ack()
+                    if not is_resource_exhausted:
+                        await self._publish_error(wi, code, msg_text)
+                    await self._ack_or_nak_after_error(msg, code)
 
         if _HAS_METRICS:
             elapsed = time.monotonic() - batch_start
@@ -1174,7 +1210,7 @@ class NatsPullLoop:
         # Resolve offloaded score payload
         payload_fetch_ms = 0.0
         if query is None and wi.get("query_payload_ref"):
-            ref_key: str = wi["query_payload_ref"]  # type: ignore[assignment]
+            ref_key: str = wi["query_payload_ref"]  # type: ignore
             fetch_start = time.monotonic()
             payload_data = await self._fetch_payload(ref_key)
             payload_fetch_ms = (time.monotonic() - fetch_start) * 1000
@@ -1220,9 +1256,9 @@ class NatsPullLoop:
             worker_result = await future
 
             # Extract scores and build ranked ScoreEntry list.
-            # The router wraps this in {"model": ..., "items": <blob>}, so
+            # The gateway wraps this in {"model": ..., "items": <blob>}, so
             # result_data must be the scores list, not a full ScoreResponse.
-            score_output: ScoreOutput = worker_result.output  # type: ignore[assignment]
+            score_output: ScoreOutput = worker_result.output  # type: ignore
             raw_scores = [float(score_output.scores[i]) for i in range(score_output.batch_size)]
 
             scored_items = []
@@ -1237,9 +1273,20 @@ class NatsPullLoop:
             result_data = msgpack.packb(score_entries, use_bin_type=True)
             inference_ms = timing.inference_ms
         except Exception as e:  # noqa: BLE001
-            logger.warning("Score failed for %s: %s", wi.get("work_item_id"), e)
-            await self._publish_error(wi, "inference_error", str(e))
-            await msg.ack()
+            code, msg_text = self._classify_inference_exception(e)
+            logger.warning(
+                "Score failed for %s (code=%s): %s",
+                wi.get("work_item_id"),
+                code,
+                e,
+            )
+            # See ``_process_encode_group`` for the rationale: for
+            # ``RESOURCE_EXHAUSTED`` we skip ``_publish_error`` and only NAK so
+            # JetStream can redeliver to a sibling worker, leaving the
+            # gateway's per-item slot free for the retry.
+            if code != ErrorCode.RESOURCE_EXHAUSTED.value:
+                await self._publish_error(wi, code, msg_text)
+            await self._ack_or_nak_after_error(msg, code)
             return
 
         # Publish result
@@ -1299,11 +1346,9 @@ class NatsPullLoop:
         try:
             timing = RequestTiming()
 
-            # Build prepared items with cost (character count)
+            # Build prepared items with cost (character count for text, byte size for documents)
             timing.start_tokenization()
-            text = item.text
-            char_count = len(text) if text else 0
-            prepared_items = [ExtractPreparedItem(cost=char_count, original_index=0)]
+            prepared_items = build_extract_prepared_items([item])
             timing.end_tokenization()
 
             # Submit to worker and await result
@@ -1319,13 +1364,24 @@ class NatsPullLoop:
             worker_result = await future
 
             # Format output using ExtractHandler (matches api/extract.py)
-            extraction_results = ExtractHandler.format_output(worker_result.output)  # type: ignore[arg-type]
+            extraction_results = ExtractHandler.format_output(worker_result.output)  # type: ignore
             result_data = msgpack.packb(extraction_results[0] if extraction_results else {}, use_bin_type=True)
             inference_ms = timing.inference_ms
         except Exception as e:  # noqa: BLE001
-            logger.warning("Extract failed for %s: %s", wi.get("work_item_id"), e)
-            await self._publish_error(wi, "inference_error", str(e))
-            await msg.ack()
+            code, msg_text = self._classify_inference_exception(e)
+            logger.warning(
+                "Extract failed for %s (code=%s): %s",
+                wi.get("work_item_id"),
+                code,
+                e,
+            )
+            # See ``_process_encode_group`` for the rationale: for
+            # ``RESOURCE_EXHAUSTED`` we skip ``_publish_error`` and only NAK so
+            # JetStream can redeliver to a sibling worker, leaving the
+            # gateway's per-item slot free for the retry.
+            if code != ErrorCode.RESOURCE_EXHAUSTED.value:
+                await self._publish_error(wi, code, msg_text)
+            await self._ack_or_nak_after_error(msg, code)
             return
 
         # Publish result
@@ -1400,6 +1456,76 @@ class NatsPullLoop:
         except KeyError:
             logger.warning("Payload not found: %s", ref_key)
             return None
+
+    async def _ack_or_nak_after_error(self, msg: Any, code: str) -> None:
+        """Decide ACK vs NAK after a failed inference handler.
+
+        Retryable codes (currently just ``RESOURCE_EXHAUSTED``) are NAKed
+        with a delay so JetStream redelivers the work item — potentially
+        to a sibling worker, or to this worker after its memory pressure
+        clears. This means a client without SDK auto-retry (or with
+        ``max_oom_retries=0``) still gets the work executed eventually,
+        instead of silently losing it.
+
+        Non-retryable codes (the legacy ``"inference_error"`` literal,
+        ``"unknown_operation"``, ``"payload_error"``, ``"internal_error"``)
+        are ACKed: redelivering them would just reproduce the same failure.
+
+        Behaviour on delivery-status failures:
+        - ACK exceptions are swallowed at debug level — the error response
+          has already been published, and JetStream's ack-wait will
+          eventually redeliver, which is harmless for non-retryable
+          failures (the redelivered request will fail the same way and
+          ACK again).
+        - NAK exceptions on the ``RESOURCE_EXHAUSTED`` path are
+          *deliberately not* followed by an ACK fallback. Falling through
+          to ACK would silently drop the work item — JetStream would
+          consider it delivered and never retry — which is exactly the
+          opposite of the retryable contract. Instead, we log the NAK
+          failure and return without ACKing, leaving the message unacked
+          so JetStream redelivers it after ``ack_wait`` expires.
+        """
+        if code == ErrorCode.RESOURCE_EXHAUSTED.value:
+            try:
+                await msg.nak(delay=_OOM_NAK_DELAY_S)
+            except Exception:  # noqa: BLE001
+                # Do NOT fall through to ACK — that would silently drop
+                # the work item. Leave it unacked; JetStream will
+                # redeliver after ack_wait expires.
+                logger.warning(
+                    "Failed to NAK RESOURCE_EXHAUSTED message; leaving unacked for JetStream redelivery",
+                    exc_info=True,
+                )
+            return
+        try:
+            await msg.ack()
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to ACK message after error", exc_info=True)
+
+    @staticmethod
+    def _classify_inference_exception(exc: BaseException) -> tuple[str, str]:
+        """Map an inference-path exception to ``(error_code, error_msg)``.
+
+        Used by the queue (NATS) path's catch-all error handler so the
+        gateway — which translates ``WorkResult.error_code`` into HTTP
+        responses — can emit the same retryable contract the HTTP path
+        emits via ``InferenceErrorHandler``.
+
+        Currently distinguishes:
+        - OOM (any flavour, including ``ResourceExhaustedError``) →
+          ``RESOURCE_EXHAUSTED`` (gateway maps to 503 + Retry-After,
+          SDK auto-retries).
+        - Everything else → the legacy ``"inference_error"`` literal so
+          existing dashboards / alerts keep working.
+
+        Note the case mismatch: ``"inference_error"`` (lowercase) is the
+        wire value the queue path has used historically; ``ErrorCode``
+        enum values are uppercase. Aligning the legacy literal is out of
+        scope here — see follow-up work.
+        """
+        if is_oom_error(exc):
+            return ErrorCode.RESOURCE_EXHAUSTED.value, str(exc)
+        return "inference_error", str(exc)
 
     async def _publish_error(self, wi: WorkItem, error_code: str, error_msg: str) -> None:
         """Publish an error result to the reply subject."""

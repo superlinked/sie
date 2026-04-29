@@ -1,0 +1,20 @@
+sie_id: fastino/gliner2-base-v1
+hf_id: fastino/gliner2-base-v1
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliner2:GLiNER2Adapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

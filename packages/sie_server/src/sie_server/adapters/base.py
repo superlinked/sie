@@ -22,7 +22,9 @@ class ModelCapabilities(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    inputs: list[Literal["text", "image", "audio", "video"]] = Field(description="Input modalities supported")
+    inputs: list[Literal["text", "image", "audio", "video", "document"]] = Field(
+        description="Input modalities supported"
+    )
     outputs: list[Literal["dense", "sparse", "multivector", "score", "json"]] = Field(
         description="Output types the adapter can produce"
     )

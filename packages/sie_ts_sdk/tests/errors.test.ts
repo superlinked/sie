@@ -69,6 +69,12 @@ describe("SIEConnectionError - network failures", () => {
     expect(error.stack).toBeDefined();
     expect(error.toString()).toContain("SIEConnectionError");
   });
+
+  it("exposes kind discriminator with backward-compatible default", () => {
+    expect(new SIEConnectionError("x").kind).toBe("other");
+    expect(new SIEConnectionError("x", "connect").kind).toBe("connect");
+    expect(new SIEConnectionError("x", "timeout").kind).toBe("timeout");
+  });
 });
 
 describe("RequestError - client errors (4xx)", () => {

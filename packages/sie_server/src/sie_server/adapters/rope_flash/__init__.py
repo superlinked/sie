@@ -139,6 +139,14 @@ class RoPEFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._dense_dim = self._model.config.hidden_size
         logger.debug("RoPE model hidden_size: %d", self._dense_dim)
 
+        # Clamp configured max_seq_length to whatever the tokenizer/model
+        # actually support to avoid OOB position embeddings on long inputs.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_seq_length,
+        )
+
     def encode(
         self,
         items: list[Item],

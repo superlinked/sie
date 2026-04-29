@@ -12,6 +12,7 @@ from sie_server.adapters.base import ModelAdapter
 from sie_server.config.model import ModelConfig, ProfileAdaptiveBatching
 from sie_server.core.inference import AttentionBackend, ComputePrecision
 from sie_server.core.loader import load_adapter
+from sie_server.core.oom import OomRecoveryConfig
 from sie_server.core.worker import ModelWorker, WorkerConfig
 from sie_server.core.worker.types import AdaptiveBatchingParams
 from sie_server.observability.metrics import set_model_loaded, set_model_memory
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from sie_server.core.disk_cache import ModelDiskCacheManager
     from sie_server.core.postprocessor_registry import PostprocessorRegistry
     from sie_server.core.preprocessor_registry import PreprocessorRegistry
+    from sie_server.core.worker.oom_recovery import RegistryCallbacks
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,8 @@ class ModelLoader:
         max_loras_per_model: int = DEFAULT_MAX_LORAS,
         disk_cache_manager: ModelDiskCacheManager | None = None,
         adaptive_batching: AdaptiveBatchingParams | None = None,
+        oom_recovery: OomRecoveryConfig | None = None,
+        registry_callbacks: RegistryCallbacks | None = None,
     ) -> None:
         """Initialize the model loader.
 
@@ -119,6 +123,10 @@ class ModelLoader:
         self._max_loras_per_model = max_loras_per_model
         self._disk_cache = disk_cache_manager
         self._adaptive_batching = adaptive_batching or AdaptiveBatchingParams()
+        # Reactive OOM recovery config + sibling-eviction callbacks. Default
+        # config has recovery enabled; passing ``None`` here keeps that.
+        self._oom_recovery = oom_recovery or OomRecoveryConfig()
+        self._registry_callbacks = registry_callbacks
         self._load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-load")
 
     def update_configs(self, configs: dict[str, ModelConfig]) -> None:
@@ -406,12 +414,14 @@ class ModelLoader:
             max_queue_size=self._max_queue_size or WorkerConfig().max_queue_size,
             instrumentation=self._instrumentation,
             adaptive_batching=adaptive_params,
+            oom_recovery=self._oom_recovery,
         )
         worker = ModelWorker(
             adapter,
             worker_config,
             model_name=name,
             postprocessor_registry=self._postprocessor_registry,
+            registry_callbacks=self._registry_callbacks,
         )
 
         # Record Prometheus metrics

@@ -167,6 +167,14 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         else:
             self._activation_mode = "v1"
 
+        # Clamp configured max_seq_length to whatever the tokenizer/model
+        # actually support to avoid OOB position embeddings on long inputs.
+        self._max_seq_length = self._resolve_tokenizer_ceiling(
+            self._tokenizer,
+            self._model,
+            self._max_seq_length,
+        )
+
     def encode(
         self,
         items: list[Item],

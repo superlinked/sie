@@ -1,0 +1,25 @@
+sie_id: PaddlePaddle/PaddleOCR-VL-1.5
+hf_id: PaddlePaddle/PaddleOCR-VL-1.5
+hf_revision: 6819afc8509ac9afa50e91b34627a7cf8f7900bb
+inputs:
+  text: false
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.paddleocr_vl:PaddleOCRVLAdapter
+    adapter_options:
+      loadtime:
+        trust_remote_code: true
+        default_task: ocr
+      runtime:
+        task: ocr
+        max_new_tokens: 4096
+        num_beams: 1

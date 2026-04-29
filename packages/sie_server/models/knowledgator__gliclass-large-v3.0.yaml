@@ -19,4 +19,4 @@ profiles:
       loadtime:
         classification_type: single-label
       runtime:
-        threshold: 0.5
+        threshold: 0.0

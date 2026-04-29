@@ -139,6 +139,8 @@ class ExtractOutput:
             None when the adapter does not produce relations.
         objects: Detected objects per item. Each is list[DetectedObject].
             None when the adapter does not produce object detections.
+        data: Structured extraction payload per item (e.g., Docling document JSON).
+            None when the adapter does not produce structured data.
         batch_size: Number of items processed.
     """
 
@@ -146,6 +148,7 @@ class ExtractOutput:
     classifications: list[list[Classification]] | None = None  # len=batch or None
     relations: list[list[Relation]] | None = None  # len=batch or None
     objects: list[list[DetectedObject]] | None = None  # len=batch or None
+    data: list[dict[str, Any]] | None = None  # len=batch or None
 
     # Metadata
     batch_size: int = 0
@@ -168,4 +171,8 @@ class ExtractOutput:
 
         if self.objects is not None and len(self.objects) != self.batch_size:
             msg = f"objects list length {len(self.objects)} != batch_size {self.batch_size}"
+            raise ValueError(msg)
+
+        if self.data is not None and len(self.data) != self.batch_size:
+            msg = f"data list length {len(self.data)} != batch_size {self.batch_size}"
             raise ValueError(msg)

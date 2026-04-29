@@ -1,5 +1,5 @@
 # ConfigMap containing available GPU types and machine profiles for the cluster
-# Router reads this to report available GPUs/profiles even when workers are scaled to zero
+# Gateway reads this to report available GPUs/profiles even when workers are scaled to zero
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -26,7 +26,7 @@ data:
   {{- end }}
   {{- end }}
   available-gpus: {{ join "," $gpuTypes | quote }}
-  # Machine profiles JSON for router (used for pool validation and routing)
+  # Machine profiles JSON for gateway (used for pool validation and routing)
   # Format: {"profile_name": {"gpuType": "...", "machineType": "...", "spot": bool}}
   machine-profiles: |
     {{- $profiles := dict }}

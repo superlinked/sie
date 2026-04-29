@@ -50,19 +50,35 @@ app.kubernetes.io/part-of: sie
 {{- end }}
 
 {{/*
-Router labels
+Gateway labels
 */}}
-{{- define "sie-cluster.router.labels" -}}
+{{- define "sie-cluster.gateway.labels" -}}
 {{ include "sie-cluster.labels" . }}
-app.kubernetes.io/component: router
+app.kubernetes.io/component: gateway
 {{- end }}
 
 {{/*
-Router selector labels
+Gateway selector labels
 */}}
-{{- define "sie-cluster.router.selectorLabels" -}}
+{{- define "sie-cluster.gateway.selectorLabels" -}}
 {{ include "sie-cluster.selectorLabels" . }}
-app.kubernetes.io/component: router
+app.kubernetes.io/component: gateway
+{{- end }}
+
+{{/*
+Config service labels
+*/}}
+{{- define "sie-cluster.config.labels" -}}
+{{ include "sie-cluster.labels" . }}
+app.kubernetes.io/component: config
+{{- end }}
+
+{{/*
+Config service selector labels
+*/}}
+{{- define "sie-cluster.config.selectorLabels" -}}
+{{ include "sie-cluster.selectorLabels" . }}
+app.kubernetes.io/component: config
 {{- end }}
 
 {{/*
@@ -100,11 +116,40 @@ Namespace to use
 {{- end }}
 
 {{/*
-Router image
+Gateway image
 */}}
-{{- define "sie-cluster.router.image" -}}
-{{- $tag := default .Chart.AppVersion .Values.router.image.tag }}
-{{- printf "%s:%s" .Values.router.image.repository $tag }}
+{{- define "sie-cluster.gateway.image" -}}
+{{- $tag := default .Chart.AppVersion .Values.gateway.image.tag }}
+{{- printf "%s:%s" .Values.gateway.image.repository $tag }}
+{{- end }}
+
+{{/*
+Config service image
+*/}}
+{{- define "sie-cluster.config.image" -}}
+{{- $tag := default .Chart.AppVersion .Values.config.image.tag }}
+{{- printf "%s:%s" .Values.config.image.repository $tag }}
+{{- end }}
+
+{{/*
+Config service resource name (Deployment / Service)
+*/}}
+{{- define "sie-cluster.config.serviceName" -}}
+{{- $fullname := include "sie-cluster.fullname" . }}
+{{- printf "%s-config" $fullname }}
+{{- end }}
+
+{{/*
+In-cluster URL used by the gateway to reach the config service for the
+bootstrap GET /v1/configs/export call and the periodic GET /v1/configs/epoch
+drift poll. Built from the Helm-owned Service name and port so it stays
+correct on overlays.
+*/}}
+{{- define "sie-cluster.config.internalUrl" -}}
+{{- $svc := include "sie-cluster.config.serviceName" . }}
+{{- $ns := include "sie-cluster.namespace" . }}
+{{- $port := .Values.config.service.port | default 8080 }}
+{{- printf "http://%s.%s.svc.cluster.local:%v" $svc $ns $port }}
 {{- end }}
 
 {{/*
@@ -124,11 +169,11 @@ Worker Service name (headless service for StatefulSet)
 {{- end }}
 
 {{/*
-Router service name (used for worker discovery)
+Gateway service name (used for worker discovery)
 */}}
-{{- define "sie-cluster.router.serviceName" -}}
+{{- define "sie-cluster.gateway.serviceName" -}}
 {{- $fullname := include "sie-cluster.fullname" . }}
-{{- printf "%s-router" $fullname }}
+{{- printf "%s-gateway" $fullname }}
 {{- end }}
 
 {{/*
@@ -166,10 +211,18 @@ Health gate hook: ScaledObject readiness SA name
 {{- end }}
 
 {{/*
-Health gate hook: Router readiness SA name
+Health gate hook: Gateway readiness SA name
 */}}
-{{- define "sie-cluster.healthGate.router.serviceAccountName" -}}
-{{- printf "%s-health-router" (include "sie-cluster.fullname" . | trunc 49 | trimSuffix "-") }}
+{{- define "sie-cluster.healthGate.gateway.serviceAccountName" -}}
+{{- printf "%s-health-gateway" (include "sie-cluster.fullname" . | trunc 49 | trimSuffix "-") }}
+{{- end }}
+
+{{/*
+Health gate hook: Config readiness SA name.
+Budget: prefix (≤49) + "-health-config" (14) = 63 (DNS-1123 label max).
+*/}}
+{{- define "sie-cluster.healthGate.config.serviceAccountName" -}}
+{{- printf "%s-health-config" (include "sie-cluster.fullname" . | trunc 49 | trimSuffix "-") }}
 {{- end }}
 
 {{/*

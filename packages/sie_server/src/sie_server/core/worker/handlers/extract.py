@@ -91,11 +91,13 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
         classifications = [output.classifications[index]] if output.classifications is not None else None
         relations = [output.relations[index]] if output.relations is not None else None
         objects = [output.objects[index]] if output.objects is not None else None
+        data = [output.data[index]] if output.data is not None else None
         return ExtractOutput(
             entities=[output.entities[index]],
             classifications=classifications,
             relations=relations,
             objects=objects,
+            data=data,
             batch_size=1,
         )
 
@@ -145,11 +147,21 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
                 p_obj = partials[i].objects
                 objects.append(p_obj[0] if p_obj is not None else [])
 
+        # Reassemble structured data if any partial has it
+        has_data = any(p.data is not None for p in partials.values())
+        data: list[dict[str, Any]] | None = None
+        if has_data:
+            data = []
+            for i in range(batch_size):
+                p_data = partials[i].data
+                data.append(p_data[0] if p_data is not None else {})
+
         return ExtractOutput(
             entities=entities,
             classifications=classifications,
             relations=relations,
             objects=objects,
+            data=data,
             batch_size=batch_size,
         )
 
@@ -171,5 +183,9 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
                 item["objects"] = list(output.objects[i])
             else:
                 item["objects"] = []
+            if output.data is not None:
+                item["data"] = output.data[i]
+            else:
+                item["data"] = {}
             results.append(item)
         return results

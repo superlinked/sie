@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import errno
+import logging
+import socket
+import ssl
+import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any, Protocol
 
 import msgpack
 import numpy as np
+
+_logger = logging.getLogger(__name__)
 
 
 class _HttpResponse(Protocol):
@@ -42,6 +49,7 @@ JSON_CONTENT_TYPE = "application/json"
 HTTP_ACCEPTED = 202
 HTTP_CLIENT_ERROR = 400
 HTTP_SERVER_ERROR = 500
+HTTP_GATEWAY_TIMEOUT = 504
 
 # Default provisioning settings
 DEFAULT_PROVISION_TIMEOUT_S = 900.0  # 15 minutes
@@ -59,6 +67,16 @@ LORA_LOADING_ERROR_CODE = "LORA_LOADING"  # Error code from server
 MODEL_LOADING_MAX_RETRIES = 60  # Max retries (60 * 5s = 5 min, matches provision timeout)
 MODEL_LOADING_DEFAULT_DELAY_S = 5.0  # Default retry delay (model loads take longer than LoRA)
 MODEL_LOADING_ERROR_CODE = "MODEL_LOADING"  # Error code from server
+
+# Resource-exhausted retry settings (server-side OOM recovery exhausted).
+# Default backoff sequence: 5 -> 10 -> 20 s (capped at 30s). Three attempts
+# is enough to cover the typical eviction + retry window without making
+# pathological cases hang indefinitely. Callers can opt out with
+# ``max_oom_retries=0``.
+RESOURCE_EXHAUSTED_MAX_RETRIES = 3
+RESOURCE_EXHAUSTED_DEFAULT_DELAY_S = 5.0
+RESOURCE_EXHAUSTED_MAX_DELAY_S = 30.0
+RESOURCE_EXHAUSTED_ERROR_CODE = "RESOURCE_EXHAUSTED"
 
 # Version negotiation headers
 SDK_VERSION_HEADER = "X-SIE-SDK-Version"
@@ -119,6 +137,73 @@ def parse_gpu_param(gpu: str) -> tuple[str | None, str]:
     return None, gpu
 
 
+# Errnos retried under `wait_for_capacity=True`; everything else (SSL,
+# EAI_NONAME, EACCES, …) fails fast.
+_TRANSIENT_CONNECT_ERRNOS: frozenset[int] = frozenset(
+    n
+    for n in (
+        getattr(errno, "ECONNREFUSED", None),
+        getattr(errno, "ECONNRESET", None),
+        getattr(errno, "ETIMEDOUT", None),
+        getattr(errno, "EHOSTUNREACH", None),
+        getattr(errno, "ENETUNREACH", None),
+        getattr(errno, "ENETDOWN", None),
+        getattr(errno, "EHOSTDOWN", None),
+        getattr(socket, "EAI_AGAIN", None),
+    )
+    if n is not None
+)
+
+
+def is_transient_connect_error(exc: BaseException) -> bool:
+    """True iff a connect-time exception is worth retrying.
+
+    Walks ``__cause__`` / ``__context__`` and ``os_error`` to handle both
+    ``aiohttp.ClientConnectorError`` and ``httpx.ConnectError``. Defaults
+    to True when no errno/SSL marker is found (preserves bare-exception
+    test cases and platforms that don't surface errno).
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ssl.SSLError):
+            return False
+        os_err = getattr(cur, "os_error", None)
+        if isinstance(os_err, OSError) and os_err.errno is not None:
+            return os_err.errno in _TRANSIENT_CONNECT_ERRNOS
+        if isinstance(cur, OSError) and cur.errno is not None:
+            return cur.errno in _TRANSIENT_CONNECT_ERRNOS
+        cur = cur.__cause__ or cur.__context__
+    return True
+
+
+def compute_retry_delay(
+    *,
+    start_time: float,
+    timeout: float,
+    error_label: str,
+    error: BaseException,
+) -> float | None:
+    """Sleep duration for the next transport-error retry, or ``None`` if
+    the provision-timeout budget is exhausted (caller must re-raise).
+    """
+    elapsed = time.monotonic() - start_time
+    if elapsed >= timeout:
+        return None
+    actual_delay = min(MODEL_LOADING_DEFAULT_DELAY_S, timeout - elapsed)
+    _logger.info(
+        "%s (%s), retrying in %.1fs (elapsed: %.1fs, timeout: %.1fs): %s",
+        error_label,
+        type(error).__name__,
+        actual_delay,
+        elapsed,
+        timeout,
+        error,
+    )
+    return actual_delay
+
+
 def get_retry_after(response: _HttpResponse) -> float | None:
     """Extract Retry-After header value from response.
 
@@ -135,6 +220,56 @@ def get_retry_after(response: _HttpResponse) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def compute_oom_backoff(
+    retry_after: float | None,
+    attempt: int,
+    *,
+    base_delay: float = RESOURCE_EXHAUSTED_DEFAULT_DELAY_S,
+    max_delay: float = RESOURCE_EXHAUSTED_MAX_DELAY_S,
+) -> float:
+    """Compute the next sleep interval for a RESOURCE_EXHAUSTED retry.
+
+    Honours a server-supplied ``Retry-After`` (when present) for the first
+    attempt, then applies bounded exponential backoff:
+    ``base * 2**attempt`` capped at ``max_delay``. The cap exists because
+    a misbehaving server that holds OOM forever shouldn't push the SDK
+    into multi-minute sleeps; the floor at ``0.0`` defends against a
+    negative or malformed header value being passed straight to
+    ``time.sleep`` (which raises ``ValueError`` on negative input).
+
+    Args:
+        retry_after: Value parsed from the ``Retry-After`` header, or None.
+        attempt: 0-indexed retry number (0 = first retry).
+        base_delay: Base interval when no Retry-After is supplied.
+        max_delay: Hard ceiling on the returned delay.
+
+    Returns:
+        Seconds to sleep before the next attempt. Always non-negative.
+    """
+    # Defensive floor: a negative ``Retry-After`` (malformed / malicious
+    # upstream) would otherwise crash ``time.sleep``.
+    safe_retry_after = max(retry_after, 0.0) if retry_after is not None else None
+    if safe_retry_after is not None and attempt == 0:
+        # Trust the first server hint (capped to ``max_delay`` so a buggy
+        # header can't strand the caller).
+        return min(safe_retry_after, max_delay)
+    # On subsequent attempts, the exponential base is the larger of
+    # ``base_delay`` and the server-supplied hint:
+    #
+    #   * Using the hint alone would collapse the backoff to zero when
+    #     the server returns ``Retry-After: 0`` (``0 * 2**N == 0``).
+    #   * Using ``base_delay`` alone would sleep *less* on attempt 1 than
+    #     the server asked for on attempt 0 if the server's hint exceeds
+    #     ``base_delay`` (e.g. ``Retry-After: 20`` then 5*2 = 10 s) —
+    #     producing a non-monotonic schedule that contradicts the
+    #     server's "wait at least N seconds" instruction.
+    #
+    # ``max(...)`` covers both: a zero hint falls back to ``base_delay``,
+    # and a hint above ``base_delay`` keeps the schedule non-decreasing.
+    base = max(base_delay, safe_retry_after) if safe_retry_after is not None else base_delay
+    return max(0.0, min(base * (2**attempt), max_delay))
 
 
 def get_error_code(response: _HttpResponse) -> str | None:

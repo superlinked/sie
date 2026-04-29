@@ -30,6 +30,11 @@ if TYPE_CHECKING:
     from sie_server.types.inputs import Item
 
 _ERR_REQUIRES_LABELS = "Zero-shot classification requires labels parameter."
+_ERR_INPUT_TOO_LONG = (
+    "Input produced an empty tensor inside the gliclass pipeline; "
+    "this typically indicates the input exceeds the model's max sequence length "
+    "even after truncation. Reduce input length or split into chunks."
+)
 
 ClassificationType = Literal["single-label", "multi-label"]
 
@@ -59,7 +64,8 @@ class GLiClassAdapter(BaseAdapter):
         model_name_or_path: str | Path,
         *,
         classification_type: ClassificationType = "single-label",
-        threshold: float = 0.5,
+        threshold: float = 0.0,
+        max_seq_length: int | None = None,
         compute_precision: ComputePrecision = "float16",
         **kwargs: Any,
     ) -> None:
@@ -69,13 +75,19 @@ class GLiClassAdapter(BaseAdapter):
             model_name_or_path: HuggingFace model ID or local path.
             classification_type: "single-label" for mutually exclusive classes,
                 "multi-label" for multiple classes per text.
-            threshold: Confidence threshold for multi-label classification (0-1).
+            threshold: Default server-side post-filter threshold (0-1). Defaults
+                to 0.0 so all requested labels are returned with their scores.
+                Callers can override per-request via ``options={"threshold": ...}``.
+            max_seq_length: Maximum input sequence length in tokens. Used to bound
+                tokenization inside the gliclass pipeline so inputs cannot exceed
+                the model's position-embedding capacity.
             compute_precision: Precision for inference (float16, float32, bfloat16).
             **kwargs: Additional arguments (ignored for compatibility).
         """
         self._model_name_or_path = str(model_name_or_path)
         self._classification_type = classification_type
         self._threshold = threshold
+        self._max_seq_length = max_seq_length
         self._compute_precision = compute_precision
 
         self._pipeline: ZeroShotClassificationPipeline | None = None
@@ -107,13 +119,27 @@ class GLiClassAdapter(BaseAdapter):
         model = model.to(device, dtype=torch_dtype)
         tokenizer = AutoTokenizer.from_pretrained(self._model_name_or_path)
 
-        # Create pipeline
-        self._pipeline = ZeroShotClassificationPipeline(
-            model=model,
-            tokenizer=tokenizer,
-            classification_type=self._classification_type,
-            device=device,
-        )
+        # Bound the tokenizer's max length so any internal tokenization in the
+        # gliclass library auto-truncates to the model's actual capacity.
+        if self._max_seq_length is not None:
+            tokenizer.model_max_length = self._max_seq_length
+
+        # Create pipeline. Pass max_length explicitly so the pipeline's
+        # ``tokenizer(..., truncation=True, max_length=self.max_length)`` calls
+        # cap inputs at the model's position-embedding limit. Without this the
+        # library defaults to 1024, which exceeds the 512-token capacity of the
+        # current GLiClass models and causes argmax-on-empty-tensor crashes for
+        # long inputs (see sie-test#88, sie-test#89).
+        pipeline_kwargs: dict[str, Any] = {
+            "model": model,
+            "tokenizer": tokenizer,
+            "classification_type": self._classification_type,
+            "device": device,
+        }
+        if self._max_seq_length is not None:
+            pipeline_kwargs["max_length"] = self._max_seq_length
+
+        self._pipeline = ZeroShotClassificationPipeline(**pipeline_kwargs)
 
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item.
@@ -144,6 +170,10 @@ class GLiClassAdapter(BaseAdapter):
     ) -> ExtractOutput:
         """Classify texts with zero-shot labels.
 
+        Returns scores for *every* requested label (sorted by score descending).
+        If callers pass ``options={"threshold": <float>}``, labels scoring below
+        that threshold are filtered out server-side before returning.
+
         Args:
             items: List of items to classify (must have text).
             labels: Classification labels (e.g., ["positive", "negative", "neutral"]).
@@ -154,16 +184,14 @@ class GLiClassAdapter(BaseAdapter):
                 Supported: threshold (float), classification_type (str).
 
         Returns:
-            List of dicts, one per item, each containing:
-                - "classifications": List of classification results, each with:
-                    - "label": Classification label
-                    - "score": Confidence score (0-1)
-                - "entities": Empty list (for interface compatibility)
-                - "data": Empty dict
+            ExtractOutput where ``classifications[i]`` is the list of
+            ``Classification(label, score)`` for ``items[i]``, sorted by score
+            descending.
 
         Raises:
             RuntimeError: If model not loaded.
-            ValueError: If labels not provided or items lack text.
+            ValueError: If labels not provided or items lack text, or if the
+                input produced an empty tensor inside the gliclass pipeline.
         """
         self._check_loaded()
         if self._pipeline is None:
@@ -175,31 +203,52 @@ class GLiClassAdapter(BaseAdapter):
         # Extract texts from all items (batch processing)
         texts = [self._extract_text(item) for item in items]
 
-        # Get options with fallback to model defaults
+        # Get options with fallback to model defaults. The threshold is applied
+        # server-side as a post-filter so we always get all label scores from the
+        # underlying pipeline regardless of caller preferences.
         opts = options or {}
-        effective_threshold = opts.get("threshold", self._threshold)
+        effective_threshold = float(opts.get("threshold", self._threshold))
 
-        # Run batch classification
-        # GLiClass pipeline supports batch input via 'texts' parameter
-        with torch.inference_mode():
-            batch_results = self._pipeline(
-                texts,
-                labels,
-                threshold=effective_threshold,
-            )
+        # Run batch classification.
+        # - threshold=0.0: never let the gliclass library drop labels for us
+        #   (in single-label mode the lib returns only argmax anyway, so we
+        #   need return_hierarchical=True to recover all label scores).
+        # - return_hierarchical=True with a flat ``labels`` list yields a list
+        #   of ``{label: score}`` dicts with every requested label present.
+        try:
+            with torch.inference_mode():
+                batch_results = self._pipeline(
+                    texts,
+                    labels,
+                    threshold=0.0,
+                    return_hierarchical=True,
+                )
+        except RuntimeError as exc:
+            # The gliclass library calls torch.argmax on potentially-empty
+            # tensors when inputs blow past the model's position-embedding
+            # capacity. Surface this as a clear validation error rather than a
+            # 500 INFERENCE_ERROR. Match on BOTH phrases to avoid catching
+            # unrelated runtime errors.
+            msg = str(exc)
+            if "numel() == 0" in msg and "argmax" in msg:
+                raise ValueError(_ERR_INPUT_TOO_LONG) from exc
+            raise
 
-        # Convert to our format
         all_classifications: list[list[Classification]] = []
         for item_results in batch_results:
-            # Each item's results is a list of {label, score} dicts
-            classifications: list[Classification] = []
-            for result in item_results:
-                classifications.append(
-                    Classification(
-                        label=result["label"],
-                        score=float(result["score"]),
-                    )
-                )
+            # With return_hierarchical=True and a flat label list the library
+            # returns a dict {label: score}. Anything else (e.g. None for an
+            # empty input) yields no classifications rather than crashing.
+            if isinstance(item_results, dict):
+                pairs: list[tuple[str, float]] = [(str(k), float(v)) for k, v in item_results.items()]
+            else:
+                pairs = []
+
+            classifications: list[Classification] = [Classification(label=label, score=score) for label, score in pairs]
+
+            # Server-side post-filter when the caller explicitly requested one.
+            if effective_threshold > 0.0:
+                classifications = [c for c in classifications if c["score"] >= effective_threshold]
 
             # Sort by score descending
             classifications.sort(key=lambda x: x["score"], reverse=True)

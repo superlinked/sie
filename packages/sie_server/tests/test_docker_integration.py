@@ -133,21 +133,21 @@ class TestDockerCachePermissions:
         )
 
 
-class TestDockerRouter:
-    """Tests for the SIE Router Docker image.
+class TestDockerGateway:
+    """Tests for the SIE Gateway Docker image.
 
-    Verifies the router image can start and respond to health/readiness probes.
-    The router is started without worker URLs -- just validates the image works.
+    Verifies the gateway image can start and respond to health/readiness probes.
+    The gateway is started without worker URLs -- just validates the image works.
     """
 
-    def test_health_endpoint(self, sie_docker_router: str) -> None:
-        """Router Docker container responds to liveness probe."""
-        response = httpx.get(f"{sie_docker_router}/healthz", timeout=10.0)
+    def test_health_endpoint(self, sie_docker_gateway: str) -> None:
+        """Gateway Docker container responds to liveness probe."""
+        response = httpx.get(f"{sie_docker_gateway}/healthz", timeout=10.0)
         assert response.status_code == 200
 
-    def test_readiness_endpoint(self, sie_docker_router: str) -> None:
-        """Router Docker container responds to readiness probe."""
-        response = httpx.get(f"{sie_docker_router}/readyz", timeout=10.0)
+    def test_readiness_endpoint(self, sie_docker_gateway: str) -> None:
+        """Gateway Docker container responds to readiness probe."""
+        response = httpx.get(f"{sie_docker_gateway}/readyz", timeout=10.0)
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ready"

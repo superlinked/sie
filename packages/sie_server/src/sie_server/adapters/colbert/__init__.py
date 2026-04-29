@@ -881,19 +881,19 @@ class ColBERTAdapter(BaseAdapter):
 
         # Support both BERT (word_embeddings) and ModernBERT (tok_embeddings)
         if hasattr(embeddings, "word_embeddings"):
-            word_emb = embeddings.word_embeddings(input_ids)  # type: ignore[call-non-callable]
+            word_emb = embeddings.word_embeddings(input_ids)  # type: ignore
         elif hasattr(embeddings, "tok_embeddings"):
-            word_emb = embeddings.tok_embeddings(input_ids)  # type: ignore[call-non-callable]
+            word_emb = embeddings.tok_embeddings(input_ids)  # type: ignore
         else:
             msg = f"Embeddings layer missing 'word_embeddings' and 'tok_embeddings'. Got: {type(embeddings).__name__}"
             raise AttributeError(msg)
 
         # Handle position embeddings (BERT has them, ModernBERT uses RoPE in attention)
         if hasattr(embeddings, "position_embeddings"):
-            pos_emb = embeddings.position_embeddings(position_ids)  # type: ignore[call-non-callable]
+            pos_emb = embeddings.position_embeddings(position_ids)  # type: ignore
             # Token type embeddings (BERT only)
             if hasattr(embeddings, "token_type_embeddings"):
-                token_type_emb = embeddings.token_type_embeddings(torch.zeros_like(input_ids))  # type: ignore[call-non-callable]
+                token_type_emb = embeddings.token_type_embeddings(torch.zeros_like(input_ids))  # type: ignore
                 hidden = word_emb + pos_emb + token_type_emb
             else:
                 hidden = word_emb + pos_emb
@@ -903,15 +903,15 @@ class ColBERTAdapter(BaseAdapter):
 
         # Handle LayerNorm variants (BERT: LayerNorm, ModernBERT: norm)
         if hasattr(embeddings, "LayerNorm"):
-            hidden = embeddings.LayerNorm(hidden)  # type: ignore[call-non-callable]
+            hidden = embeddings.LayerNorm(hidden)  # type: ignore
         elif hasattr(embeddings, "norm"):
             hidden = embeddings.norm(hidden)
 
         # Handle dropout variants (BERT: dropout, ModernBERT: drop)
         if hasattr(embeddings, "dropout"):
-            hidden = embeddings.dropout(hidden)  # type: ignore[call-non-callable]
+            hidden = embeddings.dropout(hidden)  # type: ignore
         elif hasattr(embeddings, "drop"):
-            hidden = embeddings.drop(hidden)  # type: ignore[call-non-callable]
+            hidden = embeddings.drop(hidden)  # type: ignore
 
         return hidden
 
@@ -937,7 +937,7 @@ class ColBERTAdapter(BaseAdapter):
         head_dim = hidden_size // num_heads
         softmax_scale = 1.0 / (head_dim**0.5)
 
-        for layer_untyped in self._model.encoder.layer:  # type: ignore[union-attr]
+        for layer_untyped in self._model.encoder.layer:  # type: ignore
             layer = cast("Any", layer_untyped)
             attention = layer.attention.self
 

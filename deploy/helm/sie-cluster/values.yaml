@@ -1,5 +1,16 @@
 # SIE Cluster Helm Values
-# Configuration for SIE router and GPU worker pools
+# Configuration for SIE config service, gateway, and GPU worker pools.
+#
+# Control-plane topology:
+#   - sie-config  (Python): authoritative config control plane. Owns POST /v1/configs/*
+#                 writes, persistence, and NATS delta publication. Internal-only
+#                 service (no public ingress).
+#   - sie-gateway (Rust):   inference hot path. Consumes GET /v1/configs/export on
+#                 cold start (retried with backoff) and every 30s via
+#                 GET /v1/configs/epoch for drift detection. Live updates flow
+#                 on sie.config.models.* NATS subjects. POST /v1/configs/models
+#                 is not registered on the gateway — axum returns 405.
+#   - workers:    GPU pods driven by pool manager.
 
 # -- Global settings
 global:
@@ -8,13 +19,109 @@ global:
   # -- Namespace override (defaults to release namespace)
   namespace: ""
 
-# -- Router configuration
-router:
-  # -- Number of router replicas (minimum 2 for HA)
-  replicas: 2
+# -- Filesystem seed paths consumed only by sie-config (the gateway no longer
+# bakes a seed: it pulls bundles+models from sie-config at startup via
+# /v1/configs/bundles and /v1/configs/export — see
+# packages/sie_gateway/src/state/config_bootstrap.rs). Kept under `sharedPaths`
+# for the legacy gateway ConfigMap overlays (gateway.embeddedConfigs /
+# gateway.configMap) which still mount their bundle/model files from disk; in
+# the default deploy these are sie-config-only knobs.
+sharedPaths:
+  bundlesDir: /app/bundles
+  modelsDir: /app/models
+
+# -- Config service (Python) configuration.
+# The sie-config service is the authoritative control plane for config reads/writes
+# and NATS delta publication. It is deployed as a standalone workload with its own
+# image, service, and (optional) persistent config store PVC.
+#
+# Single-replica caveat: running with replicas=1 is a conscious control-plane SPOF.
+# See packages/sie_gateway/docs/architecture-guide.md §11 for the failure model.
+config:
+  # -- Deploy the sie-config workload. Set false to skip rendering the
+  # Deployment, Service, and PVC (useful for dev environments that rely on
+  # filesystem-seeded configs only).
+  enabled: true
+
+  # NOTE: replica count is intentionally hardcoded to 1 in
+  # templates/config-deployment.yaml — there is no `replicas` key here by
+  # design. Going multi-replica requires leader election + shared
+  # idempotency + a single-writer discipline on the epoch file, plus an
+  # RWX PVC (or leader-only mount). See the template comment and
+  # packages/sie_gateway/docs/architecture-guide.md §3 and §11.
 
   image:
-    repository: ghcr.io/superlinked/sie-router
+    repository: ghcr.io/superlinked/sie-config
+    tag: ""  # Defaults to appVersion
+    pullPolicy: IfNotPresent
+
+  # -- Resource requests/limits (lightweight, no GPU).
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+
+  # -- Service configuration. ClusterIP only: sie-config is internal-only and
+  # must not be exposed via public ingress.
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+
+  # -- Pod annotations
+  podAnnotations: {}
+
+  # -- Node selector
+  nodeSelector: {}
+
+  # -- Tolerations
+  tolerations: []
+
+  # -- Affinity rules
+  affinity: {}
+
+  # -- Auth (admin token gates POST /v1/configs/*). Leave mode=none in test clusters.
+  auth:
+    # -- Mode: none | static
+    mode: none
+    # -- Secret with the admin token value (key: SIE_ADMIN_TOKEN by default)
+    adminTokenSecretName: ""
+    adminTokenSecretKey: "SIE_ADMIN_TOKEN"
+
+  # -- Persistent config store for sie-config. Owned by sie-config only (the
+  # gateway no longer persists config). Keep enabled=false in test clusters where
+  # the pod can drop state on restart.
+  configStore:
+    # -- Enable the PVC + volume mount. When true, SIE_CONFIG_RESTORE is set to
+    # "true" and SIE_CONFIG_STORE_DIR points at the mounted path.
+    enabled: false
+    # -- Mount path inside the container
+    mountPath: /var/lib/sie-config
+    # -- PVC storage size
+    size: 1Gi
+    # -- PVC storage class (leave empty to use the cluster default)
+    storageClassName: ""
+
+# -- Gateway configuration (Rust-based request gateway).
+# The gateway is a pure config-consumer: it bootstraps in the background via
+# GET /v1/configs/export against sie-config (with exponential backoff), polls
+# GET /v1/configs/epoch every 30s for drift detection, and subscribes to NATS
+# config deltas. It does not own config persistence or writes;
+# POST /v1/configs/models is not registered on the gateway (axum returns 405).
+gateway:
+  # -- Number of gateway replicas (default 1; bump to 2+ for HA).
+  # Also used as KEDA's `minReplicaCount` floor (see
+  # templates/keda-scaledobject.yaml). The gateway is stateless on the
+  # request path, so a single replica is correct for dev/smoke and
+  # low-QPS prod. Bump before any environment where a single pod
+  # restart is an unacceptable blip on inference traffic.
+  replicas: 1
+
+  image:
+    repository: ghcr.io/superlinked/sie-gateway
     tag: ""  # Defaults to appVersion
     pullPolicy: IfNotPresent
 
@@ -45,7 +152,7 @@ router:
   # -- Affinity rules
   affinity: {}
 
-  # -- Router auth (static token)
+  # -- Gateway auth (static token)
   auth:
     # -- Mode: none | static
     mode: none
@@ -53,11 +160,26 @@ router:
     tokenSecretName: ""
     tokenSecretKey: "SIE_AUTH_TOKEN"
 
-  # -- Embedded configs: auto-generate ConfigMaps from files/ in chart
-  # Disabled by default: the router Docker image embeds model and bundle configs
-  # at build time (/app/bundles and /app/models). Enable this only if you need to
-  # override image configs via ConfigMaps (e.g., for testing with modified configs).
-  # For production with hot-reload, use NATS-based config distribution (see nats section below).
+  # -- Extra environment variables for the gateway pod.
+  #
+  # Standard Kubernetes env entry list (name/value or name/valueFrom).
+  # Mirrors ``workers.common.extraEnv`` for parity. The gateway has no
+  # OOM-recovery toggles of its own (the reactive recovery loop runs on
+  # workers); use this for unrelated future tunables or for emergency
+  # diagnostics overrides.
+  #
+  # Example — bump log verbosity for one pod without touching the chart:
+  #   - name: SIE_LOG_LEVEL
+  #     value: "debug"
+  extraEnv: []
+
+  # -- Embedded configs: auto-generate ConfigMaps from files/ in chart and
+  # mount them at /configs/{bundles,models} on the gateway. Disabled by
+  # default: the gateway pulls bundles+models live from sie-config at startup
+  # (see packages/sie_gateway/src/state/config_bootstrap.rs). Enable this only
+  # for the rare case of running the gateway WITHOUT a sie-config control
+  # plane (e.g., a self-contained smoke test) or for pinning a frozen seed
+  # while sie-config is reconfigured.
   embeddedConfigs:
     # -- Enable embedded config delivery (auto-generates ConfigMaps from files/bundles and files/models)
     enabled: false
@@ -120,8 +242,9 @@ workers:
   common:
     image:
       repository: ghcr.io/superlinked/sie-server
-      # -- Base image tag without bundle suffix (e.g. "v0.1.0-cuda12").
-      # -- The template appends "-<bundle>" automatically.
+      # -- Base image tag only, without platform or bundle suffix (e.g. "v0.1.0").
+      # -- The template appends "-<platform>-<bundle>" automatically
+      # -- (see templates/worker-statefulset.yaml).
       # -- Leave empty to use .Chart.AppVersion.
       tag: ""
       pullPolicy: IfNotPresent
@@ -163,6 +286,36 @@ workers:
       tokenSecret: ""
       tokenSecretKey: token
 
+    # -- Extra environment variables for worker pods.
+    #
+    # Standard Kubernetes env entry list (name/value or name/valueFrom).
+    # Use this for server tunables not promoted to first-class chart keys.
+    # Pydantic BaseSettings on the worker reads any ``SIE_``-prefixed env
+    # var at startup; nested settings use the ``__`` delimiter (e.g.
+    # ``SIE_OOM_RECOVERY__ENABLED``).
+    #
+    # Common knobs (full reference in product/design.md §3.6):
+    #
+    #   # Convenience kill switch for OOM recovery (incident triage).
+    #   # When set, server returns the legacy 500 INFERENCE_ERROR for OOM
+    #   # instead of attempting cache_clear → evict_lru → split_batch.
+    #   - name: SIE_DISABLE_OOM_RECOVERY
+    #     value: "1"
+    #
+    #   # Proactive idle-eviction TTL (seconds, default disabled).
+    #   # Unloads models that have been idle longer than this threshold.
+    #   # Additive to the 85% pressure monitor; helps free cold weights
+    #   # before pressure builds up under load.
+    #   - name: SIE_IDLE_EVICT_S
+    #     value: "300"
+    #
+    #   # Fine-grained OOM recovery overrides (defaults are sensible).
+    #   - name: SIE_OOM_RECOVERY__MAX_SPLIT_DEPTH
+    #     value: "4"
+    #   - name: SIE_OOM_RECOVERY__RETRY_AFTER_S
+    #     value: "5"
+    extraEnv: []
+
   # -- Worker pools (one StatefulSet per pool)
   # Each pool creates a WorkerGroup: one StatefulSet + one pre-pull DaemonSet.
   # Pool naming convention: <machineProfile> (e.g. l4, a100-40gb, cpu).
@@ -180,7 +333,7 @@ workers:
       # -- Machine profile name (key from machineProfiles section)
       # Used for routing, metrics, and KEDA scaling
       machineProfile: l4
-      # -- GPU type label for routing (short form used by router)
+      # -- GPU type label for routing (short form used by gateway)
       gpuType: l4
       # -- Bundle to use (overrides common.bundle if set)
       bundle: default
@@ -416,7 +569,7 @@ dashboards:
   enabled: false
 
 # -- Health gate hooks (post-install/post-upgrade Jobs)
-# When enabled, helm install/upgrade blocks until Prometheus, KEDA ScaledObjects, and router are ready.
+# When enabled, helm install/upgrade blocks until Prometheus, KEDA ScaledObjects, and gateway are ready.
 healthGates:
   # -- Enable health gate hook Jobs; requires Prometheus and KEDA (set true for GCP installs)
   enabled: false
@@ -447,30 +600,23 @@ logging:
   # -- Enable structured JSON logging (required for Loki)
   json: true
 
-# -- NATS configuration for config distribution
+# -- NATS configuration for config distribution and (optionally) the work queue.
 # When nats.install=true, a NATS server is deployed as a sub-chart.
 # When nats.install=false but nats.enabled=true, connect to an external NATS server.
-# The config store uses pod-local filesystem by default. For multi-router production
-# deployments, override SIE_CONFIG_STORE_DIR with an S3 or GCS URL.
+#
+# Config persistence lives on sie-config (see the config.configStore section);
+# the gateway is a pure config consumer.
 nats:
   # -- Deploy NATS server as a sub-chart.
   # IMPORTANT: If install=true, enabled must also be true (otherwise NATS deploys but nothing connects).
-  install: false
+  install: true
   # -- Enable NATS-based config distribution (requires nats.install=true or external NATS)
-  enabled: false
+  enabled: true
   # -- NATS server URL. Auto-set when install=true. Override for external NATS.
   url: ""
   # -- Override the NATS service name used to build the default SIE_NATS_URL.
   # Defaults to "<release>-nats" if not set.
   serviceName: ""
-  # -- Config store directory. Accepts local path, s3://, or gs:// URL.
-  # WARNING: The default /tmp path is ephemeral — data is lost on pod restart.
-  # For persistent storage, use an S3 or GCS URL (e.g., s3://bucket/sie-config).
-  configStoreDir: "/tmp/sie-config-store"
-  # -- Restore API-added models from config store on router startup.
-  # Only effective with a persistent configStoreDir (S3/GCS). Default is false
-  # because the default /tmp path does not survive pod restarts.
-  configRestore: false
   # -- JetStream configuration for queue-based routing (SIE_CLUSTER_ROUTING=queue).
   # JetStream is required for the work queue. It is NOT required for config distribution
   # (which uses plain NATS pub/sub).
@@ -479,8 +625,8 @@ nats:
   config:
     jetstream:
       # -- Enable JetStream for the NATS work queue.
-      # Only needed when clusterRouting=queue.
-      enabled: false
+      # Required when clusterRouting=queue (the default).
+      enabled: true
       # -- In-memory storage for work items (ephemeral, low latency).
       # NOTE: maxSize uses NATS notation (MB/GB), NOT Kubernetes (Mi/Gi).
       memoryStore:
@@ -504,11 +650,12 @@ nats:
       # JetStream detailed metrics (streams + consumers)
       NATS_EXPORTER_OPTS: "-connz -routez -subz -jsz=all"
 
-# -- Cluster routing mode: "direct" (HTTP forwarding) or "queue" (NATS JetStream work queue).
-# "direct" is the default and uses the existing HTTP proxy path.
-# "queue" publishes work items to NATS JetStream and workers pull them.
+# -- Cluster routing mode. Today the only supported value is "queue": the
+# gateway publishes work items to NATS JetStream and workers pull them.
+# The Rust gateway has no direct-mode code path (queue-only since the
+# Python-gateway deprecation); the chart will reject any other value.
 # Requires nats.enabled=true and nats.config.jetstream.enabled=true.
-clusterRouting: "direct"
+clusterRouting: "queue"
 
 # -- Queue routing tuning knobs (only used when clusterRouting=queue).
 queueRouting:
@@ -532,19 +679,19 @@ queueRouting:
 # When a work item exceeds 1MB, the payload is offloaded to this store.
 # Only used when clusterRouting=queue.
 # IMPORTANT: payloadStore.url must point to shared storage accessible by both
-# router and worker pods. Use s3://bucket/prefix or gs://bucket/prefix.
+# gateway and worker pods. Use s3://bucket/prefix or gs://bucket/prefix.
 # Local filesystem paths (e.g., /tmp/payloads) will NOT work in queue mode
-# because router and worker pods have different filesystems.
+# because gateway and worker pods have different filesystems.
 payloadStore:
   # -- Enable payload store for large item offload.
   enabled: false
   # -- Payload store URL. Must be an S3 or GCS URL (s3://bucket/prefix or gs://bucket/prefix).
-  # Local paths are rejected when clusterRouting=queue (see router-deployment.yaml validation).
+  # Local paths are rejected when clusterRouting=queue (see gateway-deployment.yaml validation).
   url: ""
   # -- TTL for stored payloads in seconds.
   # For S3: configure via S3 lifecycle rules on the bucket.
   # For GCS: configure via GCS lifecycle rules on the bucket.
-  # This value is passed as SIE_PAYLOAD_STORE_TTL env var to the router.
+  # This value is passed as SIE_PAYLOAD_STORE_TTL env var to the gateway.
   ttlSeconds: 300
 
 # =============================================================================

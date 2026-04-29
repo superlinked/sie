@@ -210,12 +210,12 @@ class TestWebSocketEndpoint:
             data = websocket.receive_json()
             assert isinstance(data["models"], list)
 
-    def test_websocket_has_router_fields(self, client: TestClient) -> None:
-        """Status includes router-friendly summary fields."""
+    def test_websocket_has_gateway_fields(self, client: TestClient) -> None:
+        """Status includes gateway-friendly summary fields."""
         with client.websocket_connect("/ws/status") as websocket:
             data = websocket.receive_json()
 
-            # Router-friendly fields at top level
+            # Gateway-friendly fields at top level
             assert "machine_profile" in data
             assert "gpu_count" in data
             assert "loaded_models" in data

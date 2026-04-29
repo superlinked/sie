@@ -1,0 +1,250 @@
+{{- /* Validate: at most one static overlay may be active. Zero overlays is the
+     default — the gateway fetches bundles+models from sie-config at startup
+     and has NO baked-in filesystem seed (see
+     packages/sie_gateway/docs/architecture-guide.md §4). */}}
+{{- $modesEnabled := list }}
+{{- if .Values.gateway.embeddedConfigs.enabled }}{{- $modesEnabled = append $modesEnabled "embeddedConfigs" }}{{- end }}
+{{- if .Values.gateway.configMap.enabled }}{{- $modesEnabled = append $modesEnabled "configMap" }}{{- end }}
+{{- if gt (len $modesEnabled) 1 }}
+  {{- fail (printf "gateway: multiple config delivery modes enabled (%v). Enable only one of: embeddedConfigs, configMap." $modesEnabled) }}
+{{- end }}
+{{- /* Validate: gateway needs SOME source of bundles/models. Since the image
+     no longer bakes a seed, disabling sie-config without also enabling a
+     static overlay would leave the gateway permanently empty and 404 every
+     model request — an obvious deployment-time bug that's worth catching
+     before the cluster runs. */}}
+{{- if and (not .Values.config.enabled) (eq (len $modesEnabled) 0) }}
+  {{- fail "gateway: config.enabled=false requires one of gateway.embeddedConfigs.enabled or gateway.configMap.enabled — the gateway image no longer bakes bundles/models, so something must provide them. See packages/sie_gateway/docs/architecture-guide.md §11 caveat 7." }}
+{{- end }}
+{{- /* Validate: `clusterRouting` is queue-only today. The Rust gateway has
+     no direct-mode code path — the legacy "direct" value was a Python-gateway
+     artifact and is now a footgun (operators requesting direct would silently
+     get queue behavior). Workers still honor SIE_CLUSTER_ROUTING=queue for
+     pull-loop gating; see packages/sie_server/src/sie_server/app/app_factory.py.
+     Queue mode requires NATS+JetStream and an object-store payload store. */}}
+{{- $routing := default "queue" .Values.clusterRouting }}
+{{- if ne $routing "queue" }}
+  {{- fail (printf "clusterRouting=%q is not supported; the gateway is queue-only. Set clusterRouting: queue or leave unset." $routing) }}
+{{- end }}
+{{- if not .Values.nats.enabled }}
+  {{- fail "clusterRouting=queue requires nats.enabled=true" }}
+{{- end }}
+{{- if not .Values.nats.config.jetstream.enabled }}
+  {{- fail "clusterRouting=queue requires nats.config.jetstream.enabled=true" }}
+{{- end }}
+{{- if .Values.payloadStore.enabled }}
+  {{- if not (or (hasPrefix "s3://" (default "" .Values.payloadStore.url)) (hasPrefix "gs://" (default "" .Values.payloadStore.url))) }}
+    {{- fail "payloadStore.url must be an object-store URL (s3://bucket/prefix or gs://bucket/prefix), not a local path" }}
+  {{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sie-cluster.gateway.serviceName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "sie-cluster.gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sie-cluster.gateway.selectorLabels" . | nindent 8 }}
+      {{- with .Values.gateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "sie-cluster.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "sie-cluster.serviceAccountName" . }}
+      containers:
+        - name: gateway
+          image: {{ include "sie-cluster.gateway.image" . }}
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # Kubernetes-based worker discovery
+            - name: SIE_GATEWAY_KUBERNETES
+              value: "true"
+            - name: SIE_GATEWAY_K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SIE_GATEWAY_K8S_SERVICE
+              value: {{ include "sie-cluster.worker.serviceName" . }}
+            # Available GPU types (from Helm values, survives scale-to-zero)
+            - name: SIE_GATEWAY_CONFIGURED_GPUS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "sie-cluster.fullname" . }}-gpu-config
+                  key: available-gpus
+            # Machine profiles (JSON format for pool validation and routing)
+            - name: SIE_GATEWAY_MACHINE_PROFILES
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "sie-cluster.fullname" . }}-gpu-config
+                  key: machine-profiles
+            # Logging configuration
+            - name: SIE_LOG_LEVEL
+              value: {{ .Values.logging.level | quote }}
+            {{- if .Values.logging.json }}
+            - name: SIE_LOG_JSON
+              value: "true"
+            {{- end }}
+            # Gateway auth (static token)
+            - name: SIE_AUTH_MODE
+              value: {{ .Values.gateway.auth.mode | quote }}
+            {{- if .Values.gateway.auth.tokenSecretName }}
+            - name: SIE_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.auth.tokenSecretName }}
+                  key: {{ .Values.gateway.auth.tokenSecretKey }}
+            {{- end }}
+            {{- if .Values.nats.enabled }}
+            - name: SIE_NATS_URL
+              value: {{ .Values.nats.url | default (printf "nats://%s-nats:4222" .Release.Name) | quote }}
+            {{- end }}
+            {{- if .Values.config.enabled }}
+            # URL of the sie-config control plane. The gateway uses it for
+            # the cold-start GET /v1/configs/export bootstrap and the 30-s
+            # GET /v1/configs/epoch drift poll. See
+            # packages/sie_gateway/docs/architecture-guide.md §4.
+            - name: SIE_CONFIG_SERVICE_URL
+              value: {{ include "sie-cluster.config.internalUrl" . | quote }}
+            {{- if .Values.config.auth.adminTokenSecretName }}
+            # Shared admin secret. Gateway presents it as a bearer token on
+            # both GET /v1/configs/export (admin-auth) and
+            # GET /v1/configs/epoch. Both services read the same secret.
+            - name: SIE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.auth.adminTokenSecretName }}
+                  key: {{ .Values.config.auth.adminTokenSecretKey }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.payloadStore.enabled }}
+            - name: SIE_PAYLOAD_STORE_URL
+              value: {{ .Values.payloadStore.url | quote }}
+            - name: SIE_PAYLOAD_STORE_TTL
+              value: {{ .Values.payloadStore.ttlSeconds | quote }}
+            {{- end }}
+            {{- if or .Values.gateway.embeddedConfigs.enabled .Values.gateway.configMap.enabled }}
+            # Optional ConfigMap overlay: when enabled, the gateway reads its
+            # bundle/model seed from /configs at startup. By default neither
+            # overlay is on and the gateway fetches everything from sie-config
+            # via /v1/configs/bundles + /v1/configs/export — see
+            # packages/sie_gateway/src/state/config_bootstrap.rs.
+            - name: SIE_BUNDLES_DIR
+              value: /configs/bundles
+            - name: SIE_MODELS_DIR
+              value: /configs/models
+            {{- end }}
+            {{- if .Values.gateway.configMap.enabled }}
+            # Enable hot reload for ConfigMap-based configs (kubelet syncs changes to mounted volume)
+            - name: SIE_GATEWAY_HOT_RELOAD
+              value: "true"
+            # Use polling watcher for ConfigMap (inotify doesn't work with K8s symlink-based mounts)
+            - name: SIE_GATEWAY_POLLING_WATCHER
+              value: "true"
+            {{- end }}
+            {{- with .Values.gateway.extraEnv }}
+            # Operator-supplied env passthrough (parity with workers.common.extraEnv).
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          {{- if or .Values.gateway.embeddedConfigs.enabled .Values.gateway.configMap.enabled }}
+          volumeMounts:
+            {{- if .Values.gateway.embeddedConfigs.enabled }}
+            - name: bundles-config
+              mountPath: /configs/bundles
+              readOnly: true
+            - name: models-config
+              mountPath: /configs/models
+              readOnly: true
+            {{- else if .Values.gateway.configMap.enabled }}
+            - name: config-repo
+              mountPath: /configs
+              readOnly: true
+            {{- end }}
+          {{- end }}
+
+      {{- if or .Values.gateway.embeddedConfigs.enabled .Values.gateway.configMap.enabled }}
+      volumes:
+        {{- if .Values.gateway.embeddedConfigs.enabled }}
+        # Auto-generated ConfigMaps from chart files/bundles and files/models
+        - name: bundles-config
+          configMap:
+            name: {{ include "sie-cluster.fullname" . }}-bundles
+        - name: models-config
+          configMap:
+            name: {{ include "sie-cluster.fullname" . }}-models
+            # With flat YAML structure, configs are directly in models/ directory
+            items:
+              {{- range $path, $_ := .Files.Glob "files/models/*.yaml" }}
+              {{- $parts := splitList "/" $path }}
+              {{- $filename := index $parts (sub (len $parts) 1) }}
+              - key: {{ $filename }}
+                path: {{ $filename }}
+              {{- end }}
+        {{- else if .Values.gateway.configMap.enabled }}
+        - name: config-repo
+          projected:
+            sources:
+              - configMap:
+                  name: {{ .Values.gateway.configMap.bundlesConfigMap | default (printf "%s-bundles" .Values.gateway.configMap.name) }}
+                  items:
+                    {{- range .Values.gateway.configMap.bundles }}
+                    - key: {{ .key }}
+                      path: bundles/{{ .file }}
+                    {{- end }}
+              - configMap:
+                  name: {{ .Values.gateway.configMap.modelsConfigMap | default (printf "%s-models" .Values.gateway.configMap.name) }}
+                  items:
+                    {{- range .Values.gateway.configMap.models }}
+                    - key: {{ .key }}
+                      path: models/{{ .key }}.yaml
+                    {{- end }}
+        {{- end }}
+
+      {{- end }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

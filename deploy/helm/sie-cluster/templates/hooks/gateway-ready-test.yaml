@@ -1,0 +1,74 @@
+{{- if .Values.healthGates.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "sie-cluster.healthGate.gateway.serviceAccountName" . }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: gateway
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "4"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-health-gateway-%d" (include "sie-cluster.fullname" .) .Release.Revision | trunc 63 | trimSuffix "-" }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: gateway
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "4"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 360
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sie-health-test
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: {{ include "sie-cluster.healthGate.gateway.serviceAccountName" . }}
+      restartPolicy: Never
+      containers:
+        - name: test
+          image: alpine:3.19
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              GATEWAY_SERVICE="http://{{ include "sie-cluster.gateway.serviceName" . }}.{{ include "sie-cluster.namespace" . }}.svc:8080/healthz"
+              TIMEOUT=300
+              INTERVAL=5
+              echo "=== Gateway Readiness Test ==="
+              elapsed=0
+              while [ $elapsed -lt $TIMEOUT ]; do
+                response=$(wget -qO- --timeout=5 "$GATEWAY_SERVICE" 2>/dev/null || echo "{}")
+                if echo "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+                  echo "SUCCESS: Gateway is healthy"
+                  exit 0
+                fi
+                echo "Waiting... (${elapsed}s/${TIMEOUT}s)"
+                sleep $INTERVAL
+                elapsed=$((elapsed + INTERVAL))
+              done
+              echo "FAILED: Gateway did not become ready"
+              exit 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+{{- end }}

@@ -164,8 +164,8 @@ class TestEnsureModelCached:
             mock_backend = MagicMock()
             mock_get_backend.return_value = mock_backend
 
-            # Simulate model exists in cluster cache
-            mock_backend.exists.return_value = True
+            # Simulate model exists in cluster cache (snapshots prefix non-empty)
+            mock_backend.has_children.return_value = True
 
             # list_dirs returns subdirectories - we need to simulate the HF cache structure
             # First call lists snapshots dir contents, subsequent calls return empty
@@ -176,7 +176,7 @@ class TestEnsureModelCached:
             ensure_model_cached("BAAI/bge-m3", config)
 
             # Should call backend methods
-            mock_backend.exists.assert_called()
+            mock_backend.has_children.assert_called()
             # Result depends on whether files were actually downloaded
             # In mocked scenario, we just verify the logic flow
 
@@ -191,7 +191,7 @@ class TestEnsureModelCached:
         with patch("sie_sdk.cache.get_storage_backend") as mock_get_backend:
             mock_backend = MagicMock()
             mock_get_backend.return_value = mock_backend
-            mock_backend.exists.return_value = False
+            mock_backend.has_children.return_value = False
 
             with pytest.raises(RuntimeError, match="not found in local or cluster cache"):
                 ensure_model_cached("BAAI/bge-m3", config)
@@ -230,7 +230,7 @@ class TestCacheHierarchy:
         with patch("sie_sdk.cache.get_storage_backend") as mock_get:
             mock_backend = MagicMock()
             mock_get.return_value = mock_backend
-            mock_backend.exists.return_value = False  # Not in cluster either
+            mock_backend.has_children.return_value = False  # Not in cluster either
 
             with pytest.raises(RuntimeError, match="not found in local or cluster cache"):
                 ensure_model_cached("org/model", config)

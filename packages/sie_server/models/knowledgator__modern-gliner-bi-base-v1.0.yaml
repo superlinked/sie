@@ -1,0 +1,29 @@
+sie_id: knowledgator/modern-gliner-bi-base-v1.0
+hf_id: knowledgator/modern-gliner-bi-base-v1.0
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 2048
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliner_bi:GLiNERBiAdapter
+    adapter_options:
+      loadtime:
+        attn_implementation: flash_attention_2
+        max_len: 2048
+      runtime:
+        threshold: 0.3
+        precompute_labels: true
+  sdpa:
+    extends: default
+    adapter_options:
+      loadtime:
+        attn_implementation: sdpa

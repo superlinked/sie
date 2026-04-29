@@ -35,6 +35,7 @@ from sie_server.core.adaptive_batching import (
 from sie_server.core.batcher import BatchConfig, BatchFormer, FormattedBatch, HasCost
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers import EncodeHandler, ExtractHandler, OperationHandler, ScoreHandler
+from sie_server.core.worker.oom_recovery import BatchExecutor, RegistryCallbacks
 from sie_server.core.worker.types import (
     QueueFullError,
     RequestMetadata,
@@ -135,6 +136,7 @@ class ModelWorker:
         model_name: str | None = None,
         postprocessor_registry: PostprocessorRegistry | None = None,
         handlers: dict[str, OperationHandler[Any]] | None = None,
+        registry_callbacks: RegistryCallbacks | None = None,
     ) -> None:
         """Initialize the model worker.
 
@@ -145,11 +147,16 @@ class ModelWorker:
             postprocessor_registry: Registry for postprocessors (optional).
             handlers: Optional dict of operation handlers for dependency injection.
                       Defaults to standard handlers if not provided.
+            registry_callbacks: Slim callback protocol used by reactive OOM
+                recovery to evict cold models from sibling workers. Optional —
+                when None, the EVICT_LRU strategy is a no-op (the rest of
+                recovery still works).
         """
         self._adapter = adapter
         self._config = config or WorkerConfig()
         self._model_name = model_name
         self._postprocessor_registry = postprocessor_registry
+        self._registry_callbacks = registry_callbacks
 
         # Initialize operation handlers (dependency injection point)
         if handlers is not None:
@@ -214,6 +221,16 @@ class ModelWorker:
         self._stopping = False  # True when graceful stop has begun
         self._process_task: asyncio.Task[None] | None = None
         self._stats = WorkerStats()
+
+        # Reactive OOM recovery — wraps the per-config-group dispatch. The
+        # per-group dispatch closure is built inside ``_process_batch`` (it
+        # captures the config_key); the executor itself is constructed once.
+        self._batch_executor = BatchExecutor(
+            model_name=model_name or "unknown",
+            registry=self._registry_callbacks,
+            config=self._config.oom_recovery,
+            stats=self._stats.oom_recoveries,
+        )
 
     # =========================================================================
     # Properties
@@ -788,45 +805,120 @@ class ModelWorker:
                 if metadata.timing._inference_start is None:
                     metadata.timing.start_inference()
 
-        # Run ONE inference call per unique configuration using handlers
+        # Run ONE inference call per unique configuration using handlers.
+        # The BatchExecutor wraps dispatch with reactive OOM recovery —
+        # cache_clear → evict_lru → split_batch → terminal failure. On
+        # success it populates ``metadata._partial_results`` exactly as the
+        # in-line code did before. On non-OOM exception or terminal OOM it
+        # sets the exception on all affected futures.
+        #
+        # Counter semantics under recovery (preserved across this PR):
+        # - ``inference_errors`` bumps once per config group whose dispatch
+        #   either OOMed-and-recovered or surfaced any exception. This keeps
+        #   pre-existing dashboards meaningful: an OOM that the recovery
+        #   layer absorbed still counts as an error event (use
+        #   ``oom_recoveries.recoveries_succeeded`` to distinguish recovered
+        #   from terminal).
+        # - ``items_processed`` counts items whose future completed *without*
+        #   an exception, so partial-success splits don't overcount.
         for config_key, group_data in config_groups.items():
             operation = config_key[0]
             items_list, metadata_list, original_indices_list, prepared_items_list = group_data
             handler = self._handlers[operation]
 
-            try:
-                # Run inference via handler (in thread pool)
-                output = await self._run_handler_inference(
-                    handler,
-                    items_list,
-                    config_key[1:],  # Strip operation prefix
-                    prepared_items_list,
-                    metadata_list,
+            # Snapshot recovery counters and per-future done-state so we can
+            # attribute changes to *this* group only.
+            recoveries_before = self._stats.oom_recoveries.recoveries_attempted
+            done_before = {id(m): m.future.done() for m in metadata_list}
+
+            # Build a per-group dispatch closure: it captures the config_key
+            # (operation params) so the executor can re-invoke dispatch on
+            # halved sub-batches without re-deriving config from metadata.
+            handler_config_key = config_key[1:]
+
+            async def _dispatch(
+                h: OperationHandler[Any],
+                group: tuple[list[Item], list[RequestMetadata], list[int], list[HasCost]],
+            ) -> Any:
+                sub_items, sub_metadata, _sub_indices, sub_prepared = group
+                return await self._run_handler_inference(
+                    h,
+                    sub_items,
+                    handler_config_key,
+                    sub_prepared,
+                    sub_metadata,
                 )
 
-                # Fan out results using handler's slice method
-                for batch_idx, (metadata, original_idx) in enumerate(
-                    zip(metadata_list, original_indices_list, strict=True)
-                ):
-                    if metadata._partial_results is None:
-                        metadata._partial_results = {}
-                    metadata._partial_results[original_idx] = handler.slice_output(output, batch_idx)
-
-                # Update stats
-                self._stats.items_processed += len(items_list)
-
-            except Exception as e:
-                logger.exception("Inference error for batch config %s", config_key)
-                self._stats.inference_errors += 1
-
-                # Set exception on all affected requests
-                failed_metadata: set[int] = set()
+            try:
+                await self._batch_executor.run(
+                    handler,
+                    (items_list, metadata_list, original_indices_list, prepared_items_list),
+                    _dispatch,
+                )
+            except Exception as exc:
+                # Defensive fan-out: BatchExecutor.run is supposed to fail
+                # every per-request future on any exception (see
+                # ``_fail_group``), but a bug in recovery primitives could
+                # let an exception escape unannotated. Without this fan-out,
+                # callers would hang until the HTTP-layer / queue-layer
+                # timeout fires. Set the exception on every distinct,
+                # not-yet-done future so callers see the failure
+                # immediately rather than waiting on a leaked promise.
+                logger.exception("Unexpected exception escaping BatchExecutor for %s", config_key)
+                _seen: set[int] = set()
                 for metadata in metadata_list:
-                    meta_id = id(metadata)
-                    if meta_id not in failed_metadata:
-                        failed_metadata.add(meta_id)
-                        if not metadata.future.done():
-                            metadata.future.set_exception(e)
+                    mid = id(metadata)
+                    if mid in _seen:
+                        continue
+                    _seen.add(mid)
+                    if not metadata.future.done():
+                        metadata.future.set_exception(exc)
+
+            # Accounting: ``newly_failed`` is the count of *distinct*
+            # request metadata objects whose future transitioned to
+            # done-with-exception in this group (terminal failure even
+            # under recovery). Multi-item requests appear N times in
+            # ``metadata_list`` (one per item); we dedup by ``id(metadata)``
+            # so a single 5-item request that fails counts as one error
+            # event, not five. ``items_with_partial`` counts items whose
+            # partial result was populated by a successful sub-batch
+            # dispatch — these are the items that *were* successfully
+            # processed, including under split-recovery, regardless of
+            # whether their parent metadata future is done yet (the future
+            # only completes after assemble in ``_complete_requests``).
+            failed_metadata_ids: set[int] = set()
+            for metadata in metadata_list:
+                meta_id = id(metadata)
+                if done_before.get(meta_id) is True:
+                    continue  # was done before — not our responsibility
+                if meta_id in failed_metadata_ids:
+                    continue  # already counted this request
+                if metadata.future.done() and metadata.future.exception() is not None:
+                    failed_metadata_ids.add(meta_id)
+            newly_failed = len(failed_metadata_ids)
+
+            items_with_partial = sum(
+                1
+                for metadata, original_idx in zip(metadata_list, original_indices_list, strict=True)
+                if metadata._partial_results is not None and original_idx in metadata._partial_results
+            )
+
+            recovery_engaged = self._stats.oom_recoveries.recoveries_attempted > recoveries_before
+            if newly_failed > 0 or recovery_engaged:
+                # One error event per config group, regardless of how many
+                # futures failed and regardless of whether recovery succeeded.
+                # This matches pre-PR dashboard semantics for "an OOM
+                # happened on this batch".
+                self._stats.inference_errors += 1
+                if newly_failed > 0:
+                    logger.warning(
+                        "Inference error for batch config %s: %d future(s) failed",
+                        config_key,
+                        newly_failed,
+                    )
+
+            # Count successfully-dispatched items (partial result present).
+            self._stats.items_processed += items_with_partial
 
         # Complete requests that have all their results
         self._complete_requests(batch)

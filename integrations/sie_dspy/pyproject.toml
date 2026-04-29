@@ -1,12 +1,13 @@
 [project]
 name = "sie-dspy"
-version = "0.2.0"
+version = "0.3.0"
 description = "SIE integration for DSPy"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "sie-sdk>=0.1.0",
     "dspy>=2.6",
+    "litellm>=1.83.7" # <1.83.7 had a vulnerability
 ]
 
 [project.optional-dependencies]

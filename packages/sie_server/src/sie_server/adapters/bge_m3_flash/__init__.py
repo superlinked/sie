@@ -122,7 +122,7 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
 
     def _load_linear_layers(self, model_path: str, dtype: torch.dtype, device: str) -> None:
         """Load the colbert and sparse linear layers from checkpoint."""
-        hidden_size = self._model.config.hidden_size  # type: ignore[union-attr]
+        hidden_size = self._model.config.hidden_size  # type: ignore
 
         # Resolve the actual directory: could be a local path or HF model ID
         base_path = Path(model_path)
@@ -253,7 +253,7 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
 
     def _run_embeddings(self, input_ids: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
         """Compute embeddings for packed input."""
-        embeddings = self._model.embeddings  # type: ignore[union-attr]
+        embeddings = self._model.embeddings  # type: ignore
 
         word_emb = embeddings.word_embeddings(input_ids)
         pos_emb = embeddings.position_embeddings(position_ids)
@@ -275,12 +275,12 @@ class BGEM3FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         """Run transformer layers using flash_attn_varlen_func."""
         from flash_attn import flash_attn_varlen_func
 
-        num_heads = self._model.config.num_attention_heads  # type: ignore[union-attr]
-        hidden_size = self._model.config.hidden_size  # type: ignore[union-attr]
+        num_heads = self._model.config.num_attention_heads  # type: ignore
+        hidden_size = self._model.config.hidden_size  # type: ignore
         head_dim = hidden_size // num_heads
         softmax_scale = 1.0 / (head_dim**0.5)
 
-        for layer in self._model.encoder.layer:  # type: ignore[union-attr]
+        for layer in self._model.encoder.layer:  # type: ignore
             attention = layer.attention.self
 
             # QKV projections

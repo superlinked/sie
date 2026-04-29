@@ -129,47 +129,76 @@ data:
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
-            metricName: sie_router_pending_demand_{{ $poolName }}
-            query: sum(sie_router_pending_demand{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
+            metricName: sie_gateway_pending_demand_{{ $poolName }}
+            query: sum(sie_gateway_pending_demand{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
             threshold: "1"
             activationThreshold: "0"
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
-            metricName: sie_router_queue_depth_{{ $poolName }}
-            query: sum(sie_router_worker_queue_depth{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
+            metricName: sie_gateway_queue_depth_{{ $poolName }}
+            query: sum(sie_gateway_worker_queue_depth{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
             threshold: {{ $root.Values.autoscaling.queueDepthThreshold | quote }}
             activationThreshold: {{ $root.Values.autoscaling.queueDepthActivation | quote }}
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
-            metricName: sie_router_active_lease_gpus_{{ $poolName }}
-            query: sum(sie_router_active_lease_gpus{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
+            metricName: sie_gateway_active_lease_gpus_{{ $poolName }}
+            query: sum(sie_gateway_active_lease_gpus{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
             threshold: "1"
             activationThreshold: "0"
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
-            metricName: sie_router_rejected_rate_{{ $poolName }}
-            query: sum(rate(sie_router_rejected_requests_total{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}[2m])) or vector(0)
+            metricName: sie_gateway_rejected_rate_{{ $poolName }}
+            # Filter out reasons the SDK already retries against the same
+            # worker pool — they are per-request transient signals, not
+            # "we need more workers" signals:
+            #   - resource_exhausted: worker hit GPU OOM after recovery
+            #     (cache_clear → evict_lru → split_batch). The SDK retries
+            #     with bounded exponential backoff; scaling up here would
+            #     cold-start a new GPU pod for what is a transient memory
+            #     pressure event on an otherwise-healthy worker.
+            #   - upstream_model_loading: worker is cold-loading the
+            #     target model on demand (explicit MODEL_LOADING result).
+            #     The SDK retries under `provision_timeout_s`.
+            #   - upstream_timeout_model_loading: gateway-synthesised
+            #     MODEL_LOADING when the result-await timeout fires (most
+            #     commonly during the same cold-load case as above, but
+            #     observed via the timeout instead of an explicit result).
+            #     SDK retries with the same budget.
+            #   - upstream_lora_loading: worker is loading a LoRA adapter
+            #     on demand. SDK retries with LORA_LOADING budget.
+            # Genuine "the gateway is dropping requests because the pool
+            # is undersized" signals (timeout/capacity/no_workers other
+            # than the cold-load timeout) still drive scale-up via this
+            # trigger.
+            #
+            # Note on regex anchoring: PromQL ``=~`` / ``!~`` are RE2 with
+            # implicit ``^…$`` full-string anchors. The list below matches
+            # exact reason values only — a future suffixed reason like
+            # ``resource_exhausted_extended`` would NOT be excluded and
+            # would drive scale-up. If new retryable reasons are added in
+            # ``proxy.rs::record_rejected_request``, append them here.
+            query: sum(rate(sie_gateway_rejected_requests_total{machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}", reason!~"resource_exhausted|upstream_model_loading|upstream_timeout_model_loading|upstream_lora_loading"}[2m])) or vector(0)
             threshold: "1"
             activationThreshold: "0"
 {{- end }}
 {{- end }}
-  # Router ScaledObject
-  scaledobject-router.yaml: |
+  # Gateway ScaledObject
+  scaledobject-gateway.yaml: |
     apiVersion: keda.sh/v1alpha1
     kind: ScaledObject
     metadata:
-      name: {{ include "sie-cluster.fullname" . }}-router-scaler
+      name: {{ include "sie-cluster.fullname" . }}-gateway-scaler
       namespace: {{ include "sie-cluster.namespace" . }}
       labels:
-        {{- include "sie-cluster.router.labels" . | nindent 8 }}
+        {{- include "sie-cluster.gateway.labels" . | nindent 8 }}
     spec:
       scaleTargetRef:
         kind: Deployment
-        name: {{ include "sie-cluster.router.serviceName" . }}
-      minReplicaCount: {{ .Values.router.replicas }}
+        name: {{ include "sie-cluster.gateway.serviceName" . }}
+      minReplicaCount: {{ .Values.gateway.replicas }}
       maxReplicaCount: 10
       pollingInterval: 30
       cooldownPeriod: 300
@@ -177,8 +206,8 @@ data:
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
-            metricName: sie_router_request_rate
-            query: sum(rate(sie_router_requests_total[1m])) or vector(0)
+            metricName: sie_gateway_request_rate
+            query: sum(rate(sie_gateway_requests_total[1m])) or vector(0)
             threshold: "100"
 ---
 # ── Hook Job: wait for KEDA CRDs then apply ScaledObjects ───────────────────

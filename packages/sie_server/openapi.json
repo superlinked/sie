@@ -1,0 +1,1788 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SIE Server",
+    "description": "Search Inference Engine - GPU inference server for search workloads",
+    "version": "0.3.0"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "Root",
+        "description": "Basic HTML status page for the root endpoint.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Healthz",
+        "description": "Liveness probe.\n\nReturns 200 if the server process is alive and responding.\nUsed by Kubernetes to detect if the container needs to be restarted.\n\nReturns:\n    200 OK with \"ok\" body.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Readyz",
+        "description": "Readiness probe.\n\nReturns 200 if the server is ready to accept traffic.\nUsed by Kubernetes to determine if traffic should be routed to this pod.\n\nThe readiness state is managed by the lifespan handler:\n- Ready after startup completes (all initialization done)\n- Not ready during shutdown (draining in-flight requests)\n\nReturns:\n    200 OK with \"ok\" body if ready.\n    503 Service Unavailable if not ready (starting up or shutting down).",
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/encode/{model}": {
+      "post": {
+        "tags": [
+          "encode"
+        ],
+        "summary": "Encode",
+        "description": "Generate embeddings for input items.\n\nSupports both msgpack and JSON request bodies (Content-Type header).\nReturns msgpack by default, JSON if Accept header requests it.\n\nArgs:\n    model: Model name to use for encoding.\n    http_request: FastAPI request object (for body and app state).\n    accept: Accept header for response content negotiation.\n    x_machine_profile: Machine profile header for routing validation.\n\nReturns:\n    EncodeResponse with embeddings for each input item.\n    Format depends on Accept header: msgpack (default) or JSON.\n\nRaises:\n    HTTPException: 400 for invalid input or profile mismatch, 404 if model not found,\n        503 if not loaded.",
+        "operationId": "encode_v1_encode__model__post",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model"
+            }
+          },
+          {
+            "name": "accept",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Accept"
+            }
+          },
+          {
+            "name": "X-SIE-MACHINE-PROFILE",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sie-Machine-Profile"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Embeddings generated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EncodeResponseModel"
+                }
+              },
+              "application/msgpack": {}
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Model not loaded or service unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EncodeRequestModel"
+              }
+            },
+            "application/msgpack": {
+              "schema": {
+                "$ref": "#/components/schemas/EncodeRequestModel"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/extract/{model}": {
+      "post": {
+        "tags": [
+          "extract"
+        ],
+        "summary": "Extract",
+        "description": "Extract entities or structured data from items.\n\nSupports both msgpack and JSON request bodies (Content-Type header).\nReturns msgpack by default, JSON if Accept header requests it.\n\nArgs:\n    model: Model name to use for extraction.\n    http_request: FastAPI request object (for body and app state).\n    accept: Accept header for response content negotiation.\n    x_machine_profile: Machine profile header for routing validation.\n\nReturns:\n    ExtractResponse with extraction results for each item.\n    Format depends on Accept header: msgpack (default) or JSON.\n\nRaises:\n    HTTPException: 400 for invalid input or profile mismatch, 404 if model not found,\n        503 if not loaded.",
+        "operationId": "extract_v1_extract__model__post",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model"
+            }
+          },
+          {
+            "name": "accept",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Accept"
+            }
+          },
+          {
+            "name": "X-SIE-MACHINE-PROFILE",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sie-Machine-Profile"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Extraction completed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtractResponseModel"
+                }
+              },
+              "application/msgpack": {}
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Model not loaded or service unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtractRequestModel"
+              }
+            },
+            "application/msgpack": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtractRequestModel"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/score/{model}": {
+      "post": {
+        "tags": [
+          "score"
+        ],
+        "summary": "Score",
+        "description": "Score items against a query using a reranker model.\n\nSupports both msgpack and JSON request bodies (Content-Type header).\nReturns msgpack by default, JSON if Accept header requests it.\n\nArgs:\n    model: Model name to use for scoring.\n    http_request: FastAPI request object (for body and app state).\n    accept: Accept header for response content negotiation.\n    x_machine_profile: Machine profile header for routing validation.\n\nReturns:\n    ScoreResponse with scores sorted by relevance (descending).\n    Format depends on Accept header: msgpack (default) or JSON.\n\nRaises:\n    HTTPException: 400 for invalid input or profile mismatch, 404 if model not found,\n        503 if not loaded.",
+        "operationId": "score_v1_score__model__post",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model"
+            }
+          },
+          {
+            "name": "accept",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Accept"
+            }
+          },
+          {
+            "name": "X-SIE-MACHINE-PROFILE",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sie-Machine-Profile"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scores computed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoreResponseModel"
+                }
+              },
+              "application/msgpack": {}
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Model not loaded or service unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScoreRequestModel"
+              }
+            },
+            "application/msgpack": {
+              "schema": {
+                "$ref": "#/components/schemas/ScoreRequestModel"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "List Models",
+        "description": "List all available models.\n\nArgs:\n    http_request: FastAPI request object (for accessing app state).\n\nReturns:\n    List of all models with their info.",
+        "operationId": "list_models_v1_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models/{model}": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Get Model",
+        "description": "Get details for a specific model.\n\nArgs:\n    model: Model name.\n    http_request: FastAPI request object (for accessing app state).\n\nReturns:\n    Model info.\n\nRaises:\n    HTTPException: 404 if model not found.",
+        "operationId": "get_model_v1_models__model__get",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "Metrics",
+        "description": "Expose Prometheus metrics for scraping.\n\nReturns metrics in Prometheus text exposition format.",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Prometheus metrics in text format",
+            "content": {
+              "text/plain": {}
+            }
+          }
+        }
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "tags": [
+          "openai-compat"
+        ],
+        "summary": "Create Embeddings",
+        "description": "Create embeddings using OpenAI-compatible API.\n\nThis endpoint is compatible with OpenAI's /v1/embeddings API, allowing\ndrop-in replacement for any OpenAI SDK or client.\n\nArgs:\n    request: OpenAI-format embedding request.\n    http_request: FastAPI request (for app state).\n    x_machine_profile: Machine profile header for routing validation.\n\nReturns:\n    OpenAI-format embedding response with embeddings and usage info.",
+        "operationId": "create_embeddings_v1_embeddings_post",
+        "parameters": [
+          {
+            "name": "X-SIE-MACHINE-PROFILE",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sie-Machine-Profile"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenAIEmbeddingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Embeddings generated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIEmbeddingResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "503": {
+            "description": "Service unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ClassificationModel": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "Classification label"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score",
+            "description": "Confidence score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "label",
+          "score"
+        ],
+        "title": "ClassificationModel",
+        "description": "Classification result."
+      },
+      "DenseVectorModel": {
+        "properties": {
+          "dims": {
+            "type": "integer",
+            "title": "Dims",
+            "description": "Vector dimensionality"
+          },
+          "dtype": {
+            "type": "string",
+            "enum": [
+              "float32",
+              "float16",
+              "int8",
+              "uint8",
+              "binary"
+            ],
+            "title": "Dtype",
+            "description": "Data type"
+          },
+          "values": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Values",
+            "description": "Vector values"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dims",
+          "dtype",
+          "values"
+        ],
+        "title": "DenseVectorModel",
+        "description": "Dense embedding vector."
+      },
+      "EncodeResponseModel": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "Model used for encoding"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EncodeResultModel"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "Encoding results for each input item"
+          },
+          "timing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimingInfoModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Request timing breakdown"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model",
+          "items"
+        ],
+        "title": "EncodeResponseModel",
+        "description": "Response from encode endpoint."
+      },
+      "EncodeResultModel": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id",
+            "description": "Item ID (if provided in request)"
+          },
+          "dense": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DenseVectorModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Dense embedding"
+          },
+          "sparse": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SparseVectorModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sparse embedding"
+          },
+          "multivector": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MultiVectorModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Multi-vector embedding"
+          }
+        },
+        "type": "object",
+        "title": "EncodeResultModel",
+        "description": "Single item encoding result."
+      },
+      "EntityModel": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text",
+            "description": "Entity text"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "Entity label/type"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score",
+            "description": "Confidence score"
+          },
+          "start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start",
+            "description": "Start character offset"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End",
+            "description": "End character offset"
+          },
+          "bbox": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bbox",
+            "description": "Bounding box for document entities"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text",
+          "label",
+          "score"
+        ],
+        "title": "EntityModel",
+        "description": "Extracted entity."
+      },
+      "ExtractResponseModel": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "Model used for extraction"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ExtractResultModel"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "Extraction results for each input item"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model",
+          "items"
+        ],
+        "title": "ExtractResponseModel",
+        "description": "Response from extract endpoint."
+      },
+      "ExtractResultModel": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Item ID"
+          },
+          "entities": {
+            "items": {
+              "$ref": "#/components/schemas/EntityModel"
+            },
+            "type": "array",
+            "title": "Entities",
+            "description": "Extracted entities"
+          },
+          "relations": {
+            "items": {
+              "$ref": "#/components/schemas/RelationModel"
+            },
+            "type": "array",
+            "title": "Relations",
+            "description": "Extracted relations"
+          },
+          "classifications": {
+            "items": {
+              "$ref": "#/components/schemas/ClassificationModel"
+            },
+            "type": "array",
+            "title": "Classifications",
+            "description": "Classification results"
+          },
+          "data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Data",
+            "description": "Structured extraction data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "ExtractResultModel",
+        "description": "Single item extraction result."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ModelInfo": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "inputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Inputs"
+          },
+          "outputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Outputs"
+          },
+          "dims": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Dims"
+          },
+          "loaded": {
+            "type": "boolean",
+            "title": "Loaded"
+          },
+          "max_sequence_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Sequence Length"
+          },
+          "profiles": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProfileInfo"
+            },
+            "type": "object",
+            "title": "Profiles",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "inputs",
+          "outputs",
+          "dims",
+          "loaded"
+        ],
+        "title": "ModelInfo",
+        "description": "Information about a model."
+      },
+      "ModelsListResponse": {
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelInfo"
+            },
+            "type": "array",
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "models"
+        ],
+        "title": "ModelsListResponse",
+        "description": "Response for listing models."
+      },
+      "MultiVectorModel": {
+        "properties": {
+          "token_dims": {
+            "type": "integer",
+            "title": "Token Dims",
+            "description": "Dimension per token"
+          },
+          "num_tokens": {
+            "type": "integer",
+            "title": "Num Tokens",
+            "description": "Number of tokens"
+          },
+          "dtype": {
+            "type": "string",
+            "enum": [
+              "float32",
+              "float16",
+              "int8",
+              "uint8",
+              "binary"
+            ],
+            "title": "Dtype",
+            "description": "Data type"
+          },
+          "values": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Values",
+            "description": "Token embeddings (num_tokens x token_dims)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token_dims",
+          "num_tokens",
+          "dtype",
+          "values"
+        ],
+        "title": "MultiVectorModel",
+        "description": "Multi-vector (token-level) embedding."
+      },
+      "OpenAIEmbeddingData": {
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "embedding",
+            "title": "Object",
+            "default": "embedding"
+          },
+          "embedding": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Embedding",
+            "description": "Embedding vector (floats or base64)"
+          },
+          "index": {
+            "type": "integer",
+            "title": "Index",
+            "description": "Index in the input array"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "embedding",
+          "index"
+        ],
+        "title": "OpenAIEmbeddingData",
+        "description": "Single embedding result in OpenAI format."
+      },
+      "OpenAIEmbeddingRequest": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "Model ID to use for embedding"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "items": {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Input",
+            "description": "Input text(s) or token array(s) to embed."
+          },
+          "encoding_format": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "float",
+                  "base64"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Encoding Format",
+            "description": "Format for embeddings: 'float' or 'base64'",
+            "default": "float"
+          },
+          "dimensions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dimensions",
+            "description": "Number of dimensions (not supported by SIE, ignored)"
+          },
+          "user": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User",
+            "description": "User ID for tracking (ignored by SIE)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model",
+          "input"
+        ],
+        "title": "OpenAIEmbeddingRequest",
+        "description": "OpenAI-compatible embedding request.\n\nSee: https://platform.openai.com/docs/api-reference/embeddings"
+      },
+      "OpenAIEmbeddingResponse": {
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list",
+            "title": "Object",
+            "default": "list"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/OpenAIEmbeddingData"
+            },
+            "type": "array",
+            "title": "Data",
+            "description": "Embedding results"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "Model used"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/OpenAIUsage",
+            "description": "Token usage"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "data",
+          "model",
+          "usage"
+        ],
+        "title": "OpenAIEmbeddingResponse",
+        "description": "OpenAI-compatible embedding response."
+      },
+      "OpenAIUsage": {
+        "properties": {
+          "prompt_tokens": {
+            "type": "integer",
+            "title": "Prompt Tokens",
+            "description": "Number of tokens in the input"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens",
+            "description": "Total tokens (same as prompt_tokens for embeddings)"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "prompt_tokens",
+          "total_tokens"
+        ],
+        "title": "OpenAIUsage",
+        "description": "Token usage information."
+      },
+      "ProfileInfo": {
+        "properties": {
+          "is_default": {
+            "type": "boolean",
+            "title": "Is Default",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "ProfileInfo",
+        "description": "Information about a profile."
+      },
+      "RelationModel": {
+        "properties": {
+          "head": {
+            "type": "string",
+            "title": "Head",
+            "description": "Head entity text"
+          },
+          "tail": {
+            "type": "string",
+            "title": "Tail",
+            "description": "Tail entity text"
+          },
+          "relation": {
+            "type": "string",
+            "title": "Relation",
+            "description": "Relation type"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score",
+            "description": "Confidence score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "head",
+          "tail",
+          "relation",
+          "score"
+        ],
+        "title": "RelationModel",
+        "description": "Extracted relation between entities."
+      },
+      "ScoreEntryModel": {
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "title": "Item Id",
+            "description": "Item ID"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score",
+            "description": "Relevance score"
+          },
+          "rank": {
+            "type": "integer",
+            "title": "Rank",
+            "description": "Rank (0 = most relevant)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "item_id",
+          "score",
+          "rank"
+        ],
+        "title": "ScoreEntryModel",
+        "description": "Single score entry."
+      },
+      "ScoreResponseModel": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "Model used for scoring"
+          },
+          "query_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Id",
+            "description": "Query ID (if provided)"
+          },
+          "scores": {
+            "items": {
+              "$ref": "#/components/schemas/ScoreEntryModel"
+            },
+            "type": "array",
+            "title": "Scores",
+            "description": "Scores sorted by relevance (descending)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model",
+          "scores"
+        ],
+        "title": "ScoreResponseModel",
+        "description": "Response from score endpoint."
+      },
+      "SparseVectorModel": {
+        "properties": {
+          "dims": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dims",
+            "description": "Vocabulary size"
+          },
+          "dtype": {
+            "type": "string",
+            "enum": [
+              "float32",
+              "float16"
+            ],
+            "title": "Dtype",
+            "description": "Data type"
+          },
+          "indices": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Indices",
+            "description": "Non-zero indices"
+          },
+          "values": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Values",
+            "description": "Non-zero values"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dtype",
+          "indices",
+          "values"
+        ],
+        "title": "SparseVectorModel",
+        "description": "Sparse embedding vector."
+      },
+      "TimingInfoModel": {
+        "properties": {
+          "total_ms": {
+            "type": "number",
+            "title": "Total Ms",
+            "description": "Total request time in milliseconds"
+          },
+          "queue_ms": {
+            "type": "number",
+            "title": "Queue Ms",
+            "description": "Time waiting in queue"
+          },
+          "tokenization_ms": {
+            "type": "number",
+            "title": "Tokenization Ms",
+            "description": "Tokenization time"
+          },
+          "inference_ms": {
+            "type": "number",
+            "title": "Inference Ms",
+            "description": "Model inference time"
+          },
+          "postprocessing_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Postprocessing Ms",
+            "description": "Postprocessing time"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_ms",
+          "queue_ms",
+          "tokenization_ms",
+          "inference_ms"
+        ],
+        "title": "TimingInfoModel",
+        "description": "Request timing breakdown."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "DocumentInputModel": {
+        "description": "Document input for composite-document extractors (PDF, DOCX, HTML, ...).",
+        "properties": {
+          "data": {
+            "description": "Document bytes (raw file content)",
+            "format": "binary",
+            "title": "Data",
+            "type": "string"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Document format hint: 'pdf', 'docx', 'html', etc.",
+            "title": "Format"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DocumentInputModel",
+        "type": "object"
+      },
+      "EncodeParamsModel": {
+        "description": "Parameters for encode requests.",
+        "properties": {
+          "output_types": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "dense",
+                    "sparse",
+                    "multivector"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Output types to return",
+            "title": "Output Types"
+          },
+          "instruction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Task instruction for instruction-tuned models",
+            "title": "Instruction"
+          },
+          "output_dtype": {
+            "anyOf": [
+              {
+                "enum": [
+                  "float32",
+                  "float16",
+                  "int8",
+                  "binary"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Output dtype",
+            "title": "Output Dtype"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Runtime options",
+            "title": "Options"
+          }
+        },
+        "title": "EncodeParamsModel",
+        "type": "object"
+      },
+      "ImageInputModel": {
+        "description": "Image input for multimodal models.",
+        "properties": {
+          "data": {
+            "description": "Image data as bytes",
+            "format": "binary",
+            "title": "Data",
+            "type": "string"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Image format hint: 'jpeg', 'png', etc.",
+            "title": "Format"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ImageInputModel",
+        "type": "object"
+      },
+      "ItemModel": {
+        "additionalProperties": true,
+        "description": "A single item to encode.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional identifier for this item. Returned in response.",
+            "title": "Id"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Text content to encode",
+            "examples": [
+              "Hello, world!"
+            ],
+            "title": "Text"
+          },
+          "images": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/ImageInputModel"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Images for multimodal models",
+            "title": "Images"
+          },
+          "document": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DocumentInputModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Document for composite-document extractors (PDF, DOCX, HTML, ...)"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Arbitrary metadata. Returned in response.",
+            "title": "Metadata"
+          }
+        },
+        "title": "ItemModel",
+        "type": "object"
+      },
+      "EncodeRequestModel": {
+        "description": "Request body for encode endpoint.",
+        "examples": [
+          {
+            "items": [
+              {
+                "text": "Hello, world!"
+              },
+              {
+                "text": "How are you?"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "items": {
+            "description": "Items to encode",
+            "items": {
+              "$ref": "#/$defs/ItemModel"
+            },
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EncodeParamsModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Encoding parameters"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "EncodeRequestModel",
+        "type": "object"
+      },
+      "ExtractParamsModel": {
+        "description": "Parameters for extract requests.",
+        "properties": {
+          "labels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Entity labels to extract",
+            "title": "Labels"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Schema for structured extraction",
+            "title": "Output Schema"
+          },
+          "instruction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Task instruction",
+            "title": "Instruction"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Adapter-specific options",
+            "title": "Options"
+          }
+        },
+        "title": "ExtractParamsModel",
+        "type": "object"
+      },
+      "ExtractRequestModel": {
+        "description": "Request body for extract endpoint.",
+        "examples": [
+          {
+            "items": [
+              {
+                "text": "Apple Inc. was founded by Steve Jobs in Cupertino, California."
+              }
+            ],
+            "params": {
+              "labels": [
+                "person",
+                "organization",
+                "location"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "items": {
+            "description": "Items to extract from",
+            "items": {
+              "$ref": "#/$defs/ItemModel"
+            },
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExtractParamsModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Extraction parameters"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ExtractRequestModel",
+        "type": "object"
+      },
+      "ScoreRequestModel": {
+        "description": "Request body for score endpoint.",
+        "examples": [
+          {
+            "items": [
+              {
+                "text": "Machine learning is a branch of AI..."
+              },
+              {
+                "text": "The weather is nice today."
+              }
+            ],
+            "query": {
+              "text": "What is machine learning?"
+            }
+          }
+        ],
+        "properties": {
+          "query": {
+            "$ref": "#/$defs/ItemModel",
+            "description": "Query item to score against"
+          },
+          "items": {
+            "description": "Items to score",
+            "items": {
+              "$ref": "#/$defs/ItemModel"
+            },
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "instruction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional scoring instruction",
+            "title": "Instruction"
+          }
+        },
+        "required": [
+          "query",
+          "items"
+        ],
+        "title": "ScoreRequestModel",
+        "type": "object"
+      }
+    }
+  }
+}

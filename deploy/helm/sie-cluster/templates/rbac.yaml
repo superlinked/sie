@@ -1,7 +1,7 @@
 {{- if .Values.rbac.create }}
-# Role for router to discover worker endpoints
+# Role for gateway to discover worker endpoints
 # Namespace-scoped: only needs 'get' on 'endpoints' in the release namespace
-# See: packages/sie_router/src/sie_router/discovery.py (uses read_namespaced_endpoints)
+# See: Rust gateway discovery (uses read_namespaced_endpoints)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -30,9 +30,9 @@ subjects:
     name: {{ include "sie-cluster.serviceAccountName" . }}
     namespace: {{ include "sie-cluster.namespace" . }}
 ---
-# Role for router to manage resource pools (ConfigMaps + Leases)
+# Role for gateway to manage resource pools (ConfigMaps + Leases)
 # Per DESIGN.md Section 10.3: Pools use ConfigMap for spec/status, Lease for TTL
-# See: packages/sie_router/src/sie_router/pools.py
+# See: Rust gateway pool management
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

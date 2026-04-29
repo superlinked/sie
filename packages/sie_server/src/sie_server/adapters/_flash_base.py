@@ -9,6 +9,11 @@ from sie_server.adapters.base import ModelAdapter
 
 logger = logging.getLogger(__name__)
 
+# HuggingFace tokenizers use a very large integer as a sentinel meaning
+# "no model_max_length set" (transformers.tokenization_utils_base.VERY_LARGE_INTEGER
+# is int(1e30)). Anything at or above this threshold should be treated as "unknown".
+_HF_TOKENIZER_MAX_LENGTH_SENTINEL = int(1e29)
+
 
 def _import_adapter_class(adapter_path: str) -> type[ModelAdapter]:
     """Import an adapter class from a 'module:ClassName' string.
@@ -67,6 +72,104 @@ class FlashBaseAdapter(BaseAdapter):
     # Subclasses set these to enable automatic flash -> non-flash fallback.
     fallback_adapter_path: ClassVar[str | None] = None
     fallback_kwargs_overrides: ClassVar[dict[str, Any]] = {}
+
+    # -- Shared helpers ------------------------------------------------------
+
+    def _resolve_tokenizer_ceiling(
+        self,
+        tokenizer: Any,
+        model: Any,
+        requested: int,
+    ) -> int:
+        """Return the largest safe sequence length for this tokenizer+model.
+
+        Clamps ``requested`` to the minimum of ``tokenizer.model_max_length``
+        and ``model.config.max_position_embeddings`` when those are set to
+        real (non-sentinel) values. Logs a warning if clamping had to occur.
+
+        This guards against bundled YAMLs or runtime overrides asking for a
+        sequence length that the model's positional embeddings cannot
+        actually support — feeding such inputs through the model triggers a
+        device-side index-out-of-bounds in
+        ``embedding(position_ids)`` which on CUDA poisons the worker.
+
+        Args:
+            tokenizer: A HuggingFace tokenizer (anything with
+                ``model_max_length``); may be ``None``.
+            model: A HuggingFace model whose ``.config`` may carry
+                ``max_position_embeddings``. Pass ``None`` when the adapter
+                loads weights without a HF model object (e.g. raw safetensors
+                in nomic_flash) — the helper will then fall back to the
+                tokenizer cap alone.
+            requested: The currently configured ``max_seq_length``.
+
+        Returns:
+            ``min(requested, *valid_caps)``; ``requested`` unchanged when
+            no informative cap is available.
+        """
+        caps: list[int] = []
+
+        tok_max = getattr(tokenizer, "model_max_length", None)
+        if isinstance(tok_max, int) and tok_max > 0 and tok_max < _HF_TOKENIZER_MAX_LENGTH_SENTINEL:
+            caps.append(tok_max)
+
+        model_config = getattr(model, "config", None)
+        pos_max = getattr(model_config, "max_position_embeddings", None)
+        if isinstance(pos_max, int) and pos_max > 0:
+            caps.append(pos_max)
+
+        if not caps:
+            return requested
+
+        ceiling = min(caps)
+        if requested > ceiling:
+            logger.warning(
+                "%s: configured max_seq_length=%d exceeds model capacity %d "
+                "(tokenizer.model_max_length=%s, model.config.max_position_embeddings=%s); "
+                "clamping to %d to avoid out-of-bounds position embeddings.",
+                type(self).__name__,
+                requested,
+                ceiling,
+                tok_max,
+                pos_max,
+                ceiling,
+            )
+            return ceiling
+        return requested
+
+    @staticmethod
+    def _coerce_runtime_max_length(raw: Any, ceiling: int) -> int:
+        """Validate a runtime ``max_seq_length`` override and clamp to ``ceiling``.
+
+        Runtime overrides arrive untyped from request payloads / profile JSON
+        and may be ``None``, a string, a float, or a negative number. A
+        malformed value must never reach ``min(...)`` (which crashes for
+        ``None`` / non-numerics) and must never bypass the load-time ceiling.
+
+        Args:
+            raw: The raw ``opts.get("max_seq_length")`` value.
+            ceiling: The load-time resolved ceiling (positive int).
+
+        Returns:
+            ``min(int(raw), ceiling)`` when ``raw`` is a positive integer
+            (or a string/float coercible to one); otherwise ``ceiling``.
+        """
+        if raw is None:
+            return ceiling
+        # Reject bools (which are ``int`` subclasses) — they are never a
+        # meaningful sequence length.
+        if isinstance(raw, bool):
+            return ceiling
+        if isinstance(raw, int):
+            candidate = raw
+        else:
+            try:
+                candidate = int(raw)
+            except (TypeError, ValueError):
+                return ceiling
+        if candidate <= 0:
+            return ceiling
+        return min(candidate, ceiling)
 
     @classmethod
     def create_for_device(cls, device: str, **kwargs: Any) -> ModelAdapter:
