@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -27,6 +29,28 @@ logger = logging.getLogger(__name__)
 
 # Default maximum LoRAs per model before LRU eviction
 DEFAULT_MAX_LORAS = 10
+
+# Default per-model load timeout. Loads exceeding this raise TimeoutError and
+# the load thread is abandoned (cannot be killed in Python) the executor is
+# replaced so subsequent loads do not queue behind a hung thread.
+DEFAULT_MODEL_LOAD_TIMEOUT_S = 600.0
+
+
+def _read_load_timeout_from_env() -> float | None:
+    """Read SIE_MODEL_LOAD_TIMEOUT_S. ``0`` or negative disables the timeout."""
+    raw = os.environ.get("SIE_MODEL_LOAD_TIMEOUT_S")
+    if raw is None or raw == "":
+        return DEFAULT_MODEL_LOAD_TIMEOUT_S
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid SIE_MODEL_LOAD_TIMEOUT_S=%r; falling back to default %.0fs",
+            raw,
+            DEFAULT_MODEL_LOAD_TIMEOUT_S,
+        )
+        return DEFAULT_MODEL_LOAD_TIMEOUT_S
+    return val if val > 0 else None
 
 
 @dataclass
@@ -102,6 +126,7 @@ class ModelLoader:
         adaptive_batching: AdaptiveBatchingParams | None = None,
         oom_recovery: OomRecoveryConfig | None = None,
         registry_callbacks: RegistryCallbacks | None = None,
+        model_load_timeout_s: float | None = None,
     ) -> None:
         """Initialize the model loader.
 
@@ -128,6 +153,10 @@ class ModelLoader:
         self._oom_recovery = oom_recovery or OomRecoveryConfig()
         self._registry_callbacks = registry_callbacks
         self._load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-load")
+        # ``None`` (or ``0``/negative env value) disables the timeout entirely.
+        self._model_load_timeout_s = (
+            model_load_timeout_s if model_load_timeout_s is not None else _read_load_timeout_from_env()
+        )
 
     def update_configs(self, configs: dict[str, ModelConfig]) -> None:
         """Update the config reference (called after rescan)."""
@@ -240,9 +269,12 @@ class ModelLoader:
 
         Returns:
             The unloaded adapter instance (may be fallback adapter for non-CUDA devices).
+
+        Raises:
+            TimeoutError: If instantiation exceeds the configured load timeout.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        fut = loop.run_in_executor(
             self._load_executor,
             self.instantiate_adapter,
             name,
@@ -250,6 +282,38 @@ class ModelLoader:
             model_dir,
             device,
         )
+        return await self._await_with_load_timeout(name, fut)
+
+    async def _await_with_load_timeout(self, name: str, awaitable: Any) -> Any:
+        """Await ``awaitable`` with the configured per-model load timeout.
+
+        On timeout the executor is shut down with ``wait=False`` (the running
+        thread cannot be killed but we stop blocking new submissions on it) and
+        a fresh single-thread executor takes its place so subsequent loads do
+        not queue behind the hung thread.
+
+        Args:
+            name: Model name (used in the timeout message).
+            awaitable: A coroutine or future to await.
+
+        Raises:
+            TimeoutError: If the awaitable does not finish within the timeout.
+        """
+        timeout = self._model_load_timeout_s
+        if timeout is None:
+            return await awaitable
+
+        start = time.monotonic()
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError as e:
+            elapsed = time.monotonic() - start
+            self._load_executor.shutdown(wait=False)
+            self._load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-load")
+            raise TimeoutError(
+                f"Model '{name}' load timed out after {elapsed:.1f}s "
+                f"(timeout={timeout:.1f}s); load executor was recreated"
+            ) from e
 
     def load_and_register(
         self,
@@ -321,6 +385,9 @@ class ModelLoader:
 
         Returns:
             LoadedModel containing the loaded state.
+
+        Raises:
+            TimeoutError: If the load exceeds the configured load timeout.
         """
         loop = asyncio.get_running_loop()
 
@@ -329,7 +396,8 @@ class ModelLoader:
             _run_load_with_markers(name, device, adapter)
             return self._finish_load(name, device, adapter, config)
 
-        return await loop.run_in_executor(self._load_executor, _load_sync)
+        fut = loop.run_in_executor(self._load_executor, _load_sync)
+        return await self._await_with_load_timeout(name, fut)
 
     def _load_main_thread(
         self,
