@@ -14,10 +14,10 @@
 <p>85+ models. Three functions. From laptop to Kubernetes. All Apache 2.0.</p>
 
 <p>
-  <a href="https://sie.dev/docs/">Docs</a> ·
-  <a href="https://sie.dev/docs/quickstart/">Quickstart</a> ·
-  <a href="https://sie.dev/docs/reference/api/">API Reference</a> ·
-  <a href="https://sie.dev/docs/reference/models/">Models</a>
+  <a href="https://superlinked.com/docs">Docs</a> ·
+  <a href="https://superlinked.com/docs/quickstart">Quickstart</a> ·
+  <a href="https://superlinked.com/docs/reference/api">API Reference</a> ·
+  <a href="https://superlinked.com/models">Models</a>
 </p>
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](LICENSE)
