@@ -21,7 +21,7 @@ ImageIO==2.37.3
 jiter==0.13.0
 joblib==1.5.3
 lazy-loader==0.5
-msgpack==1.1.2
+msgpack==1.2.1
 msgpack-numpy==0.4.8
 multidict==6.7.1
 networkx==3.6.1
