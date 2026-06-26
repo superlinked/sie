@@ -83,7 +83,7 @@ utoipa = "5.4.0"
 # break compat across minor versions; bumping requires updating all
 # four lines.
 opentelemetry = "0.24"
-opentelemetry_sdk = { version = "0.24", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.17", default-features = false, features = ["grpc-tonic", "trace"] }
 opentelemetry-http = "0.13"
 tracing-opentelemetry = "0.25"
