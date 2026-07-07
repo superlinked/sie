@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 360" role="img" aria-label="account-signal-scoring architecture diagram">
+  <defs>
+    <style><![CDATA[
+      .bg     { fill: #0e1014; }
+      .card   { fill: #161a22; stroke: #232936; stroke-width: 1; }
+      .head   { fill: #1c2230; }
+      .label  { font: 600 12px "Inter", system-ui, sans-serif; fill: #e6e8ec; }
+      .sub    { font: 400 11px "Inter", system-ui, sans-serif; fill: #8b94a7; }
+      .mono   { font: 11px ui-monospace, "JetBrains Mono", monospace; fill: #c89cff; }
+      .accent { fill: #7c5dff; }
+      .info   { fill: #62b6ff; }
+      .succ   { fill: #5fd28b; }
+      .stroke-mute { stroke: #232936; stroke-width: 1.5; fill: none; }
+      .pill-bg-accent { fill: rgba(124,93,255,0.15); }
+      .pill-bg-info   { fill: rgba(98,182,255,0.15); }
+      .pill-bg-succ   { fill: rgba(95,210,139,0.15); }
+      .pill-bg-mag    { fill: rgba(197,140,255,0.15); }
+    ]]></style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L6,3 z" fill="#8b94a7" />
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="920" height="360" />
+
+  <!-- Step 1: account signals -->
+  <g transform="translate(28,140)">
+    <rect class="card" width="176" height="92" rx="10" />
+    <rect class="head" x="0" y="0" width="176" height="22" rx="10" />
+    <rect class="head" x="0" y="12" width="176" height="10" />
+    <text class="label" x="14" y="16">account signals</text>
+    <text class="sub" x="14" y="42">Stripe cancel · usage drop</text>
+    <text class="sub" x="14" y="58">support · seat cap · renewal</text>
+    <text class="mono" x="14" y="78">→ one 0-100 score</text>
+    <circle class="info" cx="162" cy="11" r="4" />
+  </g>
+
+  <!-- Step 2: SIE server -->
+  <g transform="translate(250,72)">
+    <rect class="card" width="400" height="216" rx="10" />
+    <rect class="head" x="0" y="0" width="400" height="22" rx="10" />
+    <rect class="head" x="0" y="12" width="400" height="10" />
+    <text class="label" x="14" y="16">one SIE server</text>
+    <text class="sub" x="386" y="16" text-anchor="end">extract · encode · score (+ chat)</text>
+    <circle class="accent" cx="378" cy="11" r="3" />
+
+    <g transform="translate(16,38)">
+      <rect class="pill-bg-info" width="86" height="56" rx="6" />
+      <text class="label" x="43" y="22" text-anchor="middle">extract</text>
+      <text class="sub" x="43" y="40" text-anchor="middle">GLiNER</text>
+      <text class="sub" x="43" y="52" text-anchor="middle">entities</text>
+    </g>
+    <g transform="translate(110,38)">
+      <rect class="pill-bg-accent" width="86" height="56" rx="6" />
+      <text class="label" x="43" y="22" text-anchor="middle">encode</text>
+      <text class="sub" x="43" y="40" text-anchor="middle">MiniLM-L6</text>
+      <text class="sub" x="43" y="52" text-anchor="middle">dense 384-d</text>
+    </g>
+    <g transform="translate(204,38)">
+      <rect class="pill-bg-succ" width="86" height="56" rx="6" />
+      <text class="label" x="43" y="22" text-anchor="middle">score</text>
+      <text class="sub" x="43" y="40" text-anchor="middle">BGE-rerank</text>
+      <text class="sub" x="43" y="52" text-anchor="middle">top-K</text>
+    </g>
+    <g transform="translate(298,38)">
+      <rect class="pill-bg-mag" width="86" height="56" rx="6" />
+      <text class="label" x="43" y="22" text-anchor="middle">chat</text>
+      <text class="sub" x="43" y="40" text-anchor="middle">optional LLM</text>
+      <text class="sub" x="43" y="52" text-anchor="middle">brief</text>
+    </g>
+
+    <!-- corpus -->
+    <g transform="translate(70,120)">
+      <rect class="card" width="260" height="76" rx="8" />
+      <text class="label" x="130" y="24" text-anchor="middle">playbooks.json</text>
+      <text class="sub" x="130" y="43" text-anchor="middle">8 past outcomes, pre-encoded</text>
+      <text class="mono" x="130" y="60" text-anchor="middle">cosine top-3 → reranker → play</text>
+    </g>
+  </g>
+
+  <!-- Step 3: brief / board -->
+  <g transform="translate(700,72)">
+    <rect class="card" width="192" height="216" rx="10" />
+    <rect class="head" x="0" y="0" width="192" height="22" rx="10" />
+    <rect class="head" x="0" y="12" width="192" height="10" />
+    <text class="label" x="14" y="16">score + play</text>
+    <circle class="succ" cx="178" cy="11" r="4" />
+
+    <g transform="translate(16,36)">
+      <rect class="pill-bg-succ" width="160" height="34" rx="6" />
+      <text class="label succ" x="14" y="22">green</text>
+      <text class="sub" x="72" y="22">score &lt; 10</text>
+    </g>
+    <g transform="translate(16,76)">
+      <rect width="160" height="34" rx="6" fill="rgba(247,201,72,0.18)" />
+      <text class="label" x="14" y="22" fill="#f7c948">amber</text>
+      <text class="sub" x="72" y="22">10 - 40</text>
+    </g>
+    <g transform="translate(16,116)">
+      <rect width="160" height="34" rx="6" fill="rgba(255,107,107,0.18)" />
+      <text class="label" x="14" y="22" fill="#ff6b6b">red</text>
+      <text class="sub" x="72" y="22">&gt; 40</text>
+    </g>
+    <g transform="translate(16,168)">
+      <text class="sub" x="0" y="0">→ triage board (risk/upsell)</text>
+      <text class="sub" x="0" y="16">→ recommended play + brief</text>
+    </g>
+  </g>
+
+  <!-- Arrows -->
+  <line class="stroke-mute" x1="204" y1="180" x2="248" y2="180" marker-end="url(#arrow)" />
+  <line class="stroke-mute" x1="650" y1="180" x2="698" y2="180" marker-end="url(#arrow)" />
+
+  <!-- Title / footer -->
+  <text class="label" x="450" y="38" text-anchor="middle">account-signal-scoring</text>
+  <text class="sub" x="450" y="54" text-anchor="middle">turn a pile of account signals into one score a team can act on</text>
+  <text class="sub" x="450" y="340" text-anchor="middle">Apache 2.0 · runs locally with docker compose · CPU-only by default</text>
+</svg>

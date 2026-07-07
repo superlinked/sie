@@ -1,0 +1,66 @@
+[
+  {
+    "id": "pb_billing_downgrade",
+    "direction": "risk",
+    "label": "billing_downgrade_before_renewal",
+    "summary": "A downgrade or cancellation is staged in Stripe ahead of an imminent renewal, usually after a billing dispute or a champion losing budget. Revenue walks unless an owner intervenes directly.",
+    "outcome": "saved_by_exec_call",
+    "play": "Direct call from the account owner before the cycle closes; lead with a concrete credit or make-good, then re-commit the roadmap."
+  },
+  {
+    "id": "pb_usage_cliff",
+    "direction": "risk",
+    "label": "usage_cliff_core_feature",
+    "summary": "Core product usage (API calls, active seats, key workflows) drops sharply over two to three weeks. The account has effectively stopped getting value and is coasting to churn.",
+    "outcome": "recovered_with_health_check",
+    "play": "Book a technical health check with the power user or engineering sponsor this week to unblock adoption before renewal."
+  },
+  {
+    "id": "pb_champion_left",
+    "direction": "risk",
+    "label": "champion_departed",
+    "summary": "The internal champion or renewal sponsor has left the company, active usage is sliding, and no replacement owner has been identified. Renewal risk is high even if the numbers looked fine last quarter.",
+    "outcome": "renewed_with_new_champion",
+    "play": "Map and multi-thread a new champion now; re-introduce the platform's value to the surviving team before the renewal conversation."
+  },
+  {
+    "id": "pb_support_friction",
+    "direction": "risk",
+    "label": "support_escalation_backlog",
+    "summary": "Support tickets are piling up past SLA and executive sentiment (NPS/CSAT) is falling. Trust is eroding faster than the product problem itself.",
+    "outcome": "stabilized_after_resolution",
+    "play": "Resolve the open escalations, then follow up within 24 hours to rebuild trust and confirm the fix landed."
+  },
+  {
+    "id": "pb_flat_no_owner",
+    "direction": "risk",
+    "label": "flat_usage_unclear_owner",
+    "summary": "A large account has flat usage and no clear executive owner for the upcoming renewal. Nothing is on fire, but nobody is driving the buying committee either.",
+    "outcome": "escalated_to_human_csm",
+    "play": "Escalate to a human CSM to map the buying committee and confirm the economic owner well ahead of the renewal date."
+  },
+  {
+    "id": "pb_seat_cap",
+    "direction": "opportunity",
+    "label": "seat_capacity_expansion",
+    "summary": "Seat or usage capacity is above 90% and still climbing, so the account is about to hit a hard cap. This is a growth signal and a natural moment to expand the contract.",
+    "outcome": "seat_expansion_signed",
+    "play": "Offer a proactive same-rate seat expansion before the cap is hit so no user gets locked out; send the paperwork the same day."
+  },
+  {
+    "id": "pb_champion_referral",
+    "direction": "opportunity",
+    "label": "champion_referral_multi_team",
+    "summary": "A happy champion is referring new internal teams and month-over-month usage is climbing ahead of an early renewal. High intent to expand.",
+    "outcome": "expansion_at_early_renewal",
+    "play": "Lock in an expanded, multi-team plan ahead of the renewal date while momentum and internal advocacy are high."
+  },
+  {
+    "id": "pb_early_renewal_advocate",
+    "direction": "opportunity",
+    "label": "early_renewal_advocate",
+    "summary": "The account renewed early, CSAT is excellent, and the champion is publicly advocating. Low risk, high trust, and receptive to a bigger commitment.",
+    "outcome": "expansion_closed",
+    "play": "Thank the champion, then present a tier upgrade or additional module while goodwill and trust are at their peak."
+  }
+]

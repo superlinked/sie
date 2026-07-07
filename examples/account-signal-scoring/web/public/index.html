@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>account-signal-scoring</title>
+    <link rel="preconnect" href="https://rsms.me/" />
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="title">
+        <span class="logo">📊</span>
+        <h1>account-signal-scoring</h1>
+        <span class="badge" id="badge">idle</span>
+      </div>
+      <div class="meta" id="sie-state">checking SIE...</div>
+      <div class="meta" id="brief-state">brief: ...</div>
+      <div class="cta-row">
+        <a class="cta" href="https://github.com/superlinked/sie/tree/main/examples/account-signal-scoring" target="_blank" rel="noopener">
+          <span>↗</span> Source
+        </a>
+        <a class="cta" href="https://github.com/superlinked/sie" target="_blank" rel="noopener">
+          <span>★</span> SIE repo
+        </a>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div class="hero-text">
+        <p>
+          A CSM opens the day to a pile of account signals — a Stripe
+          downgrade, an API-usage cliff, a seat cap about to hit. SIE turns
+          them into <strong>one score a team can act on</strong>:
+          <em>extract</em> the entities, <em>encode</em> the account's story,
+          and <em>score</em> it against a corpus of past outcomes to pick the
+          play. Click an account on the left to watch the pipeline run and draft
+          the brief.
+        </p>
+      </div>
+      <div class="hero-diagram">
+        <img src="/static/architecture.svg" alt="account-signal-scoring architecture" class="diagram-svg" />
+      </div>
+    </section>
+
+    <main>
+      <section class="panel" id="panel-accounts">
+        <header><h2>Accounts &amp; signals</h2></header>
+        <div class="list" id="accounts">loading...</div>
+      </section>
+
+      <section class="panel" id="panel-pipeline">
+        <header>
+          <h2>SIE scoring pipeline</h2>
+          <span class="hint" id="pipeline-meta"></span>
+        </header>
+        <div class="risk" id="pipeline">
+          <p class="hint">Click an account on the left.</p>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-brief">
+        <header>
+          <h2>Account brief</h2>
+          <span class="hint" id="brief-meta"></span>
+        </header>
+        <div class="checkout" id="brief">
+          <p class="hint">The recommended play and account brief appear here once a score is computed.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span id="footer">SIE on <code id="sie-url">http://localhost:8080</code></span>
+      <span id="timings"></span>
+    </footer>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
