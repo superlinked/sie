@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root{--bg:#f4f6fb;--card:#fff;--ink:#1b2330;--soft:#6b7686;--line:#e7eaf0;--ac:#6a5bd6;--acs:#eeebfb}
+  *{box-sizing:border-box}
+  body{width:340px;margin:0;background:var(--bg);color:var(--ink);font:13.5px/1.5 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}
+  .head{display:flex;align-items:center;gap:8px;padding:12px 14px;background:#fff;border-bottom:1px solid var(--line)}
+  .head .logo{font-size:18px}.head b{font-size:14px}.head .sub{margin-left:auto;font-size:10.5px;color:var(--soft)}
+  .hero{display:flex;align-items:center;gap:12px;padding:14px}
+  .hero .big{font-size:46px;filter:drop-shadow(0 6px 10px rgba(0,0,0,.18))}
+  .hero .nm{font-weight:800;font-size:16px}.hero .hint{color:var(--soft);font-size:11.5px}
+  .sec{font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--soft);padding:4px 14px 6px}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:0 14px 8px}
+  .tile{position:relative;background:#fff;border:1.5px solid var(--line);border-radius:13px;padding:10px 4px;text-align:center;cursor:pointer}
+  .tile .e{font-size:30px;line-height:1}
+  .tile .te{width:40px;height:40px;object-fit:contain;display:block;margin:0 auto}
+  .big img{width:58px;height:58px;object-fit:contain}
+  .tile .t{font-size:10px;font-weight:700;margin-top:4px;color:#3a4256}
+  .tile.active{border-color:var(--ac);background:var(--acs)}
+  .tile.locked{cursor:default;filter:grayscale(1);opacity:.55}
+  .tile.locked .e{filter:blur(3px)}
+  .tile.locked::after{content:"🔒";position:absolute;top:6px;right:7px;font-size:11px;filter:none}
+  .unlock{margin:4px 14px 12px;border-radius:13px;padding:12px;text-align:center}
+  .unlock.go{background:linear-gradient(135deg,#6a5bd6,#9b6ff0);color:#fff;cursor:pointer;box-shadow:0 8px 20px rgba(106,91,214,.34)}
+  .unlock.go b{font-size:14px}.unlock.go small{display:block;opacity:.9;font-size:11px;margin-top:2px}
+  .unlock.wait{background:#eef1f6;color:var(--soft);font-size:12px}
+  details{margin:0 14px 12px;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  summary{padding:10px 12px;font-weight:700;font-size:12.5px;cursor:pointer;list-style:none}
+  summary::-webkit-details-marker{display:none}
+  .keys{padding:0 12px 12px;display:flex;flex-direction:column;gap:8px}
+  .keys label{font-size:11px;font-weight:700;color:#3a4256}
+  .keys input{width:100%;border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:12px;outline:none}
+  .keys input:focus{border-color:var(--ac)}
+  .keys .row{display:flex;justify-content:space-between;align-items:center}
+  .keys a{font-size:10.5px;color:var(--ac);text-decoration:none}
+  .save{border:none;border-radius:9px;background:var(--ac);color:#fff;font-weight:700;padding:9px;cursor:pointer;font-size:12.5px}
+  .clear{border:1px solid var(--line);border-radius:9px;background:#fff;color:#c0556a;font-weight:700;padding:9px;cursor:pointer;font-size:12.5px}
+  .saved{color:#1f9d57;font-size:11px;text-align:center;height:14px}
+  .powers{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 12px}
+  .pw{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#3a4256;
+    background:#fff;border:1px solid var(--line);border-radius:999px;padding:5px 10px}
+  .pw .dot{width:7px;height:7px;border-radius:50%;background:#1f9d57}
+  .pw.off{color:#aeb6c4}.pw.off .dot{background:#cdd4df}
+  .actions{display:flex;gap:8px;padding:6px 14px 10px}
+  .actions button{flex:1;border:1px solid var(--line);background:#fff;border-radius:10px;padding:9px;font-size:12px;font-weight:700;cursor:pointer;color:#3a4256}
+  .actions button:hover{border-color:var(--ac);color:var(--ac)}
+  .actions .reset{color:#c0556a}
+  footer{text-align:center;color:#aeb6c4;font-size:10px;padding:6px 0 12px}
+</style>
+</head>
+<body>
+  <div class="head"><span class="logo">🪄</span><b>Patronus AI</b><span class="sub" id="streak"></span></div>
+
+  <div class="hero">
+    <div class="big" id="heroE">👵</div>
+    <div><div class="nm" id="heroN">Surf Granny</div><div class="hint">your guardian - it lives on every page</div></div>
+  </div>
+
+  <div class="sec">Your souls</div>
+  <div class="grid" id="grid"></div>
+
+  <div id="unlockBox"></div>
+
+  <div class="sec">Powers</div>
+  <div class="powers" id="powers"></div>
+
+  <details>
+    <summary>API settings</summary>
+    <div class="keys">
+      <label>Gemini API key
+        <input id="keyGemini" type="password" autocomplete="off" placeholder="optional">
+      </label>
+      <label>Gemini model
+        <input id="keyGeminiModel" autocomplete="off" placeholder="gemini-2.5-flash">
+      </label>
+      <label>SLNG API key
+        <input id="keySlng" type="password" autocomplete="off" placeholder="optional voice">
+      </label>
+      <label>Tavily API key
+        <input id="keyTavily" type="password" autocomplete="off" placeholder="optional web research">
+      </label>
+      <label>Mubit API key
+        <input id="keyMubit" type="password" autocomplete="off" placeholder="optional model routing">
+      </label>
+      <label>Superlinked URL
+        <input id="keySuperlinkedUrl" autocomplete="off" placeholder="http://localhost:8800">
+      </label>
+      <label>Superlinked token
+        <input id="keySuperlinkedToken" type="password" autocomplete="off" placeholder="optional">
+      </label>
+      <button id="saveKeys" class="save">Save settings</button>
+      <button id="clearKeys" class="clear">Clear keys</button>
+      <div id="keyStatus" class="saved"></div>
+    </div>
+  </details>
+
+  <div class="actions">
+    <button id="logBtn">📊 Integration log</button>
+    <button id="resetBtn" class="reset">🧹 Reset for demo</button>
+  </div>
+
+  <footer>Open a normal website to meet your patronus.</footer>
+  <script src="popup.js"></script>
+</body>
+</html>

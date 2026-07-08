@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+memory_server/data/
+memory_server/.env
+memory_server/.venv/
+extension/config.local.js

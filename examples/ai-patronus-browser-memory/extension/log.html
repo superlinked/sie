@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Patronus AI - integration usage log</title>
+<style>
+  :root{--bg:#0e141d;--card:#161d28;--ink:#e7eef7;--soft:#8aa0b6;--line:#243140}
+  *{box-sizing:border-box}
+  body{margin:0;color:var(--ink);font:13px/1.5 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;
+    background:linear-gradient(rgba(14,20,29,.55),rgba(14,20,29,.72)), url(log_bg.png) center/cover fixed, var(--bg)}
+  header{position:sticky;top:0;display:flex;align-items:center;gap:12px;padding:14px 20px;background:#0b1119;border-bottom:1px solid var(--line)}
+  header h1{font-size:15px;margin:0}header .sub{color:var(--soft);font-size:12px}
+  header .sp{margin-left:auto;display:flex;gap:8px}
+  button{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer}
+  button:hover{border-color:#3a4a5e}
+  button.danger{border-color:#5a2330;color:#ffb4b4}
+  .wrap{max-width:900px;margin:0 auto;padding:18px 20px 60px}
+  .summary{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px}
+  .badge{display:inline-block;color:#fff;font-weight:800;font-size:11px;padding:3px 8px;border-radius:999px}
+  .grp{margin-bottom:18px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .via{padding:10px 14px;background:#11202e;font-weight:700;color:#cfe3f5;border-bottom:1px solid var(--line)}
+  .call{border-top:1px solid var(--line)}
+  .call:first-of-type{border-top:none}
+  .call summary{list-style:none;cursor:pointer;padding:10px 14px;display:flex;align-items:center;gap:8px}
+  .call summary::-webkit-details-marker{display:none}
+  .call summary b{font-size:12.5px}.call .t{margin-left:auto;color:var(--soft);font-size:11px}
+  .call .err{color:#ff9b9b;font-size:11px;font-weight:700}
+  .kv{color:var(--soft);font-size:10.5px;font-weight:800;letter-spacing:.06em;padding:6px 14px 0}
+  pre{margin:4px 14px 10px;padding:10px 12px;background:#0b1119;border:1px solid var(--line);border-radius:8px;
+    font:11.5px/1.5 ui-monospace,Menlo,monospace;color:#9fd0a8;white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto}
+  .empty{color:var(--soft);text-align:center;padding:60px 20px}
+</style>
+</head>
+<body>
+  <header>
+    <div><h1>🪄 Patronus AI - integration usage log</h1><div class="sub">local integration call metadata. Expand any call.</div></div>
+    <div class="sp"><button id="refresh">↻ Refresh</button><button id="clear" class="danger">🧹 Clear log</button></div>
+  </header>
+  <div class="wrap"><div id="log"></div></div>
+  <script src="log.js"></script>
+</body>
+</html>

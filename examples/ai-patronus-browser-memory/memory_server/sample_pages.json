@@ -1,0 +1,17 @@
+[
+  {
+    "title": "Patronus project notes",
+    "url": "https://example.local/patronus-notes",
+    "text": "Patronus is a browser companion that can save useful pages on request. Superlinked SIE provides embeddings so memories can be recalled semantically instead of by exact keyword."
+  },
+  {
+    "title": "SIE setup checklist",
+    "url": "https://example.local/sie-setup",
+    "text": "Run the SIE server locally, start the Patronus memory bridge on port 8800, load the Chrome extension unpacked, and set the Superlinked URL to the local bridge endpoint."
+  },
+  {
+    "title": "Privacy policy draft",
+    "url": "https://example.local/privacy",
+    "text": "Patronus should never upload all browsing history automatically. The user must explicitly ask the extension to remember a page before page text is sent to the local memory bridge."
+  }
+]
