@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Patronus AI",
+  "version": "0.1.0",
+  "description": "Pick your guardian - cat, dog, or surf-internet grandma. It lives on your pages, reacts, talks back with a real voice, researches the web, and launches games. Unlock one new soul a day.",
+  "action": { "default_popup": "popup.html", "default_title": "Patronus AI" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.slng.ai/*",
+    "https://api.tavily.com/*",
+    "https://api.minima.sh/*",
+    "http://localhost:8080/*",
+    "http://127.0.0.1:8080/*",
+    "http://127.0.0.1:8800/*",
+    "http://localhost:8800/*"
+  ],
+  "web_accessible_resources": [
+    { "resources": ["char.png", "icon128.png", "chars/*", "souls/*"], "matches": ["<all_urls>"] }
+  ],
+  "icons": { "16": "icon128.png", "48": "icon128.png", "128": "icon128.png" }
+}
