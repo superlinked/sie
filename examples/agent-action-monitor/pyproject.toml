@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dusk-agent-action-monitor"
+version = "0.1.0"
+description = "DUSK's agent action gate, judging a proposed agent action against a per-agent behavioural baseline, with Superlinked SIE surfacing the anomalies."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Ritik Sah" }, { name = "Tanvir Farhad" }]
+keywords = ["security", "ai-agents", "behavioral-analysis", "superlinked"]
+
+dependencies = [
+    "PyYAML>=6.0",
+    "flask>=3.0",
+    "flask-cors>=4.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+sie = [
+    # Tested compatibility pair: SDK 0.6.17 with server v0.4.1-cpu-default.
+    "sie-sdk==0.6.17",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-env>=1.1.0",
+    "ruff>=0.4.4",
+    "mypy>=1.10.0",
+    "bandit[toml]>=1.7.8",
+    "types-PyYAML>=6.0",
+    "requests>=2.31", # agent-demo/harness.py's HTTP calls to the gate and mock-prod
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "agent-demo", "mock-prod"]
+env = ["PYTHONIOENCODING=utf-8"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "S", "B", "C90", "UP", "ANN"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "ANN"]
+"lab/*" = ["S", "ANN"]
+"agent-demo/test_*.py" = ["S", "ANN"]
+"mock-prod/test_*.py" = ["S", "ANN"]
+# Bare-name statements are vulture's own documented whitelist syntax, not a
+# real code smell -- see scripts/vulture_whitelist.py's module docstring.
+"scripts/vulture_whitelist.py" = ["B018"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+
+[[tool.mypy.overrides]]
+module = ["dusk.api"]
+ignore_missing_imports = true
+disable_error_code = ["type-var", "untyped-decorator", "unused-ignore", "import-untyped", "import-not-found"]
+
+[[tool.mypy.overrides]]
+module = ["dusk.trace.*"]
+ignore_missing_imports = true
+disable_error_code = ["import-untyped", "attr-defined", "unused-ignore"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]

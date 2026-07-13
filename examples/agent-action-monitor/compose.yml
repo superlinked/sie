@@ -1,0 +1,81 @@
+# DUSK agent-action-monitor -- self-contained example stack. `docker compose
+# up` runs it keyless. Watch mode is the default; DUSK_ENFORCE switches to
+# enforce. Not egress-blocked (sie needs one-time model-weight downloads on
+# cold start); nothing here makes an outbound call while serving a request.
+
+services:
+  dusk-gate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DUSK_ENFORCE: "false"
+      DUSK_GATE_BASELINE_PATH: "/app/sample-data/baseline.json"
+      DUSK_GATE_BASELINE_SOURCE: "generic"
+      DUSK_DEMO_INTEGRATIONS: "false"
+      DUSK_SIE_ENDPOINT: "http://sie:8080"
+      DUSK_SIE_ENCODE_MODEL: "BAAI/bge-m3"
+      DUSK_SIE_SCORE_MODEL: "BAAI/bge-reranker-v2-m3"
+      DUSK_SIE_EXTRACT_MODEL: "urchade/gliner_multi-v2.1"
+      DUSK_N8N_ALERT_URL: "http://n8n:5678/webhook/dusk-alert"
+      DUSK_N8N_REPORT_URL: "http://n8n:5678/webhook/dusk-report"
+      DUSK_N8N_DECISION_URL: "http://n8n:5678/webhook/dusk-decision"
+      DUSK_OFFENSE_MEMORY_PATH: "/app/state/dusk-offense-memory.json"
+    volumes:
+      - ./sample-data:/app/sample-data:ro
+      - offense-memory:/app/state
+    depends_on:
+      sie: { condition: service_healthy }
+      n8n: { condition: service_healthy }
+    networks: [internal]
+    ports: ["8000:8000"] # /v1/gate
+
+  sie:
+    # Reproducible version used for the recorded live validation. Upgrade only with the SDK pin.
+    image: ghcr.io/superlinked/sie-server:v0.4.1-cpu-default
+    # Upstream is amd64-only (no arm64 manifest); this pin works native on amd64, emulated on arm64.
+    platform: linux/amd64
+    volumes:
+      - sie-hf-cache:/app/.cache/huggingface
+    networks: [internal]
+    # No ports published: internal-only. Add "8080:8080" locally to poke it.
+
+  n8n:
+    build:
+      context: ./n8n # bakes in the three DUSK webhooks, active from startup -- no manual import
+    environment:
+      N8N_SECURE_COOKIE: "false"
+      N8N_USER_MANAGEMENT_DISABLED: "true" # keyless: no owner-account setup step blocking startup
+    networks: [internal]
+    ports: ["5678:5678"] # open the n8n UI to inspect the executions list
+
+  mock-prod:
+    build:
+      context: ./mock-prod
+    environment:
+      MOCK_PROD_HOST: "0.0.0.0"
+    networks: [internal]
+    ports: ["9000:9000"] # /apply, /log -- watch the applied-actions log from the host
+    # Dummy controller/DB target: actions hit /apply on ALLOW, never on BLOCK.
+
+  agent-demo:
+    build:
+      context: .
+      dockerfile: agent-demo/Dockerfile
+    environment:
+      USE_REAL_BEDROCK: "false"
+      DUSK_GATE_URL: "http://dusk-gate:8000/v1/gate"
+      MOCK_PROD_URL: "http://mock-prod:9000/apply"
+    depends_on:
+      dusk-gate: { condition: service_healthy }
+      mock-prod: { condition: service_healthy }
+    networks: [internal]
+    # mock-Bedrock by default (keyless); USE_REAL_BEDROCK=true for real Bedrock.
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  sie-hf-cache:
+  offense-memory:
