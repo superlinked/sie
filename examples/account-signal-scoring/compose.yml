@@ -1,0 +1,30 @@
+services:
+  sie:
+    image: ghcr.io/superlinked/sie-server:latest-cpu-default
+    platform: linux/amd64
+    command:
+      - serve
+      - --port
+      - "8080"
+      # All three models live in the `default` SIE bundle. Combined ~440 MB.
+      # The optional LLM brief uses a generation model (SIE_CHAT_MODEL) that is
+      # NOT preloaded here — it needs the generation bundle / a GPU. Without it
+      # the demo falls back to a deterministic brief, so this stays CPU-only.
+      - --preload
+      - urchade/gliner_multi-v2.1,sentence-transformers/all-MiniLM-L6-v2,BAAI/bge-reranker-base
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 240s
+    volumes:
+      - sie-cache:/app/.cache/huggingface
+
+volumes:
+  sie-cache:
+    name: sie-cache
+    external: false

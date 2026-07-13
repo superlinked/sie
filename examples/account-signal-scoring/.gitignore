@@ -1,0 +1,4 @@
+node_modules/
+.env
+*.log
+data/playbook_index.json

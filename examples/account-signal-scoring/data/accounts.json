@@ -1,0 +1,120 @@
+[
+  {
+    "id": "pemberton",
+    "name": "Pemberton & Co",
+    "domain": "pemberton.co",
+    "owner": "Rae Whitlock",
+    "arr": 142000,
+    "seats": 132,
+    "seatsUsed": 120,
+    "renewalDays": 9,
+    "contact": { "name": "James Pemberton", "title": "VP Operations" },
+    "signals": [
+      { "type": "stripe_cancellation", "note": "Plan downgrade staged in Stripe for next cycle", "detected": "2d ago" },
+      { "type": "negative_support_ticket", "note": "Exec NPS dropped from 4 to 1 after a billing incident", "detected": "5d ago" }
+    ]
+  },
+  {
+    "id": "cloudscale",
+    "name": "CloudScale Systems",
+    "domain": "cloudscale.io",
+    "owner": "Marcus Vela",
+    "arr": 180000,
+    "seats": 240,
+    "seatsUsed": 150,
+    "renewalDays": 14,
+    "contact": { "name": "Dana Reyes", "title": "Director of Engineering" },
+    "signals": [
+      { "type": "usage_drop", "note": "Core API calls down 41% over 21 days", "detected": "3d ago", "value": 41 },
+      { "type": "negative_support_ticket", "note": "Two escalations unresolved past 72h", "detected": "6d ago" }
+    ]
+  },
+  {
+    "id": "helix",
+    "name": "Helix Robotics",
+    "domain": "helixrobotics.com",
+    "owner": "Anika Roth",
+    "arr": 96000,
+    "seats": 80,
+    "seatsUsed": 52,
+    "renewalDays": 31,
+    "contact": { "name": "Priya Nair", "title": "Head of Platform" },
+    "signals": [
+      { "type": "usage_drop", "note": "Active seats down 33% since the champion left", "detected": "8d ago", "value": 33 },
+      { "type": "negative_support_ticket", "note": "Renewal sponsor departed the company", "detected": "11d ago" }
+    ]
+  },
+  {
+    "id": "atlaspay",
+    "name": "Atlas Pay",
+    "domain": "atlaspay.com",
+    "owner": "Priya Sundar",
+    "arr": 320000,
+    "seats": 500,
+    "seatsUsed": 470,
+    "renewalDays": 47,
+    "contact": { "name": "Sofia Marenco", "title": "Chief Operating Officer" },
+    "signals": [
+      { "type": "usage_drop", "note": "Daily actives flat for 14 days, no growth", "detected": "4d ago", "value": 12 }
+    ]
+  },
+  {
+    "id": "kestrel",
+    "name": "Kestrel Bank",
+    "domain": "kestrelbank.com",
+    "owner": "Priya Sundar",
+    "arr": 525000,
+    "seats": 600,
+    "seatsUsed": 540,
+    "renewalDays": 340,
+    "contact": { "name": "Margaret Lowe", "title": "Head of Digital" },
+    "signals": [
+      { "type": "renewal_approaching", "note": "Renewed 11 months early", "detected": "20d ago" },
+      { "type": "positive_support_ticket", "note": "CSAT 9.6 across the last 10 tickets", "detected": "9d ago" }
+    ]
+  },
+  {
+    "id": "lumen",
+    "name": "Lumen Health",
+    "domain": "lumenhealth.io",
+    "owner": "Rae Whitlock",
+    "arr": 410000,
+    "seats": 450,
+    "seatsUsed": 423,
+    "renewalDays": 188,
+    "contact": { "name": "Aaron Vance", "title": "Chief Technology Officer" },
+    "signals": [
+      { "type": "usage_near_limit", "note": "94% seat capacity, up 22% month-over-month", "detected": "1d ago", "value": 94 },
+      { "type": "positive_support_ticket", "note": "Champion referred two internal teams", "detected": "12d ago" }
+    ]
+  },
+  {
+    "id": "globalpeak",
+    "name": "Global Peak Inc",
+    "domain": "globalpeak.com",
+    "owner": "Marcus Vela",
+    "arr": 290000,
+    "seats": 320,
+    "seatsUsed": 301,
+    "renewalDays": 210,
+    "contact": { "name": "Nina Kovac", "title": "VP Revenue" },
+    "signals": [
+      { "type": "usage_near_limit", "note": "94% seat capacity, hard cap in about 8 days", "detected": "2d ago", "value": 94 },
+      { "type": "positive_support_ticket", "note": "NPS 72 this quarter", "detected": "15d ago" }
+    ]
+  },
+  {
+    "id": "sandhill",
+    "name": "Sandhill Capital",
+    "domain": "sandhill.fund",
+    "owner": "Anika Roth",
+    "arr": 96000,
+    "seats": 110,
+    "seatsUsed": 104,
+    "renewalDays": 96,
+    "contact": { "name": "Grace Okonkwo", "title": "Partner" },
+    "signals": [
+      { "type": "usage_near_limit", "note": "95% seat capacity with steady growth", "detected": "3d ago", "value": 95 }
+    ]
+  }
+]
