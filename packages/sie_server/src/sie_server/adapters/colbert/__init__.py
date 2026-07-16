@@ -623,28 +623,40 @@ class ColBERTAdapter(BaseAdapter):
         # Adjust max_length if we need to insert a prefix token
         effective_max_length = max_length - 1 if prefix_id is not None else max_length
 
-        # For query expansion, pad to exact length using MASK tokens
-        if use_expansion:
-            # Temporarily swap pad_token_id to mask_token_id for MASK token padding
-            original_pad_id = self._tokenizer.pad_token_id
-            self._tokenizer.pad_token_id = self._expansion_token_id
-            batch = self._tokenizer(
-                texts,
-                max_length=effective_max_length,
-                padding="max_length",
-                truncation=True,
-                return_tensors="pt",
-            )
-            self._tokenizer.pad_token_id = original_pad_id
-        else:
-            # Standard padding for documents
-            batch = self._tokenizer(
-                texts,
-                max_length=effective_max_length,
-                padding=True,
-                truncation=True,
-                return_tensors="pt",
-            )
+        # Serialise all tokenizer access (including the transient
+        # ``pad_token_id`` swap) against the §7.3 metering tokenization that
+        # runs on a separate thread — a bare fast tokenizer would raise
+        # ``Already borrowed`` under concurrency (#1800).
+        with self._tokenizer_guard():
+            # For query expansion, pad to exact length using MASK tokens
+            if use_expansion:
+                # Temporarily swap pad_token_id to mask_token_id for MASK token
+                # padding. Restore in ``finally`` so a tokenizer failure (bad
+                # input / OOM) cannot leave the instance's ``pad_token_id`` stuck
+                # at the MASK id — under ``_tokenizer_guard()`` that corruption
+                # would leak to every later guarded caller (including metering),
+                # silently mis-padding until reload (CodeRabbit #1800).
+                original_pad_id = self._tokenizer.pad_token_id
+                self._tokenizer.pad_token_id = self._expansion_token_id
+                try:
+                    batch = self._tokenizer(
+                        texts,
+                        max_length=effective_max_length,
+                        padding="max_length",
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                finally:
+                    self._tokenizer.pad_token_id = original_pad_id
+            else:
+                # Standard padding for documents
+                batch = self._tokenizer(
+                    texts,
+                    max_length=effective_max_length,
+                    padding=True,
+                    truncation=True,
+                    return_tensors="pt",
+                )
 
         # Insert prefix token ID at position 1 (after [CLS])
         if prefix_id is not None:
@@ -740,34 +752,45 @@ class ColBERTAdapter(BaseAdapter):
         # Adjust max_length if we need to insert a prefix token
         effective_max_length = max_length - 1 if prefix_id is not None else max_length
 
-        # For query expansion, pad to exact max_length using MASK tokens
-        if use_expansion:
-            original_pad_id = self._tokenizer.pad_token_id
-            self._tokenizer.pad_token_id = self._expansion_token_id
-            encodings = [
-                self._tokenizer(
-                    text,
-                    max_length=effective_max_length,
-                    padding="max_length",
-                    truncation=True,
-                    return_tensors="pt",
-                    return_attention_mask=True,
-                )
-                for text in texts
-            ]
-            self._tokenizer.pad_token_id = original_pad_id
-        else:
-            # Tokenize each sequence individually (no padding)
-            encodings = [
-                self._tokenizer(
-                    text,
-                    max_length=effective_max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                    return_attention_mask=True,
-                )
-                for text in texts
-            ]
+        # Serialise all tokenizer access (including the transient
+        # ``pad_token_id`` swap) against the §7.3 metering tokenization that
+        # runs on a separate thread — a bare fast tokenizer would raise
+        # ``Already borrowed`` under concurrency (#1800).
+        with self._tokenizer_guard():
+            # For query expansion, pad to exact max_length using MASK tokens.
+            # Restore ``pad_token_id`` in ``finally`` so a mid-comprehension
+            # tokenizer failure cannot leave it stuck at the MASK id and leak the
+            # corruption to every later guarded caller under ``_tokenizer_guard()``
+            # (CodeRabbit #1800).
+            if use_expansion:
+                original_pad_id = self._tokenizer.pad_token_id
+                self._tokenizer.pad_token_id = self._expansion_token_id
+                try:
+                    encodings = [
+                        self._tokenizer(
+                            text,
+                            max_length=effective_max_length,
+                            padding="max_length",
+                            truncation=True,
+                            return_tensors="pt",
+                            return_attention_mask=True,
+                        )
+                        for text in texts
+                    ]
+                finally:
+                    self._tokenizer.pad_token_id = original_pad_id
+            else:
+                # Tokenize each sequence individually (no padding)
+                encodings = [
+                    self._tokenizer(
+                        text,
+                        max_length=effective_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                        return_attention_mask=True,
+                    )
+                    for text in texts
+                ]
 
         # Insert prefix token ID at position 1 (after [CLS]) for each encoding
         if prefix_id is not None:

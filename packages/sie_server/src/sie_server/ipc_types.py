@@ -71,7 +71,12 @@ class PingResponse(msgspec.Struct):
 # EnsureModelReady
 # -----------------------------------------------------------------------------
 
-ReadinessState = Literal["ready", "loading_started", "loading_in_progress", "retry_later"]
+# ``"failed"`` is the terminal, non-retryable state (the registry holds a
+# PERMANENT ``LoadFailure``, ``cooldown=permanent``). The sidecar
+# dead-letters a group in this state as ``MODEL_LOAD_FAILED`` (gateway ->
+# 502) instead of re-driving ``EnsureModelReady`` forever — the fast-path
+# twin of the ``run_batch`` / direct-HTTP #1786 typed-502 mapping.
+ReadinessState = Literal["ready", "loading_started", "loading_in_progress", "retry_later", "failed"]
 
 
 class EnsureModelReadyRequest(msgspec.Struct):

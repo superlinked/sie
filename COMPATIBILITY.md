@@ -202,7 +202,7 @@ SIE will declare 1.0 when all of the following are true:
 
 ### Quality and Correctness
 
-- [ ] Full matrix evaluation (85+ models) passes with >95% pass rate on GKE
+- [ ] Full matrix evaluation (full model catalog) passes with >95% pass rate on GKE
 - [ ] Quality targets exist and are met for all supported models
 - [ ] Performance baselines documented for representative hardware (L4, A100-40GB, A100-80GB)
 

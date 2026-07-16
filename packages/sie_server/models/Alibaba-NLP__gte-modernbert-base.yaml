@@ -1,5 +1,6 @@
 sie_id: Alibaba-NLP/gte-modernbert-base
 hf_id: Alibaba-NLP/gte-modernbert-base
+hf_revision: e7f32e3c00f91d699e8c43b53106206bcc72bb22
 inputs:
   text: true
   image: false

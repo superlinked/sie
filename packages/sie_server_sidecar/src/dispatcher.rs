@@ -52,6 +52,15 @@ use crate::tokenize::TokenizerRegistry;
 use crate::work_types::WorkItem;
 
 const MODEL_LOADING_ERROR_CODE: &str = "MODEL_LOADING";
+/// Terminal, non-retryable model-load failure. Emitted on the `WorkResult`
+/// (encode/score/extract) or the generation terminal chunk when the Python
+/// executor reports [`ReadinessState::Failed`] (registry holds a PERMANENT
+/// `LoadFailure`). The gateway maps this code to a typed HTTP 502 via
+/// `build_model_load_failed_response` (unary/batch path) — the fast-path twin
+/// of the #1786 `run_batch` mapping. Kept byte-identical to the gateway
+/// constant `sie_gateway::handlers::proxy::MODEL_LOAD_FAILED_ERROR_CODE` and
+/// the Python `ErrorCode.MODEL_LOAD_FAILED`.
+const MODEL_LOAD_FAILED_ERROR_CODE: &str = "MODEL_LOAD_FAILED";
 
 #[derive(serde::Serialize)]
 struct GenerateTerminalErrorChunk<'a> {
@@ -169,7 +178,9 @@ fn readiness_progress_delay_ms(state: &ReadinessState, base_delay_ms: u64) -> Op
         ReadinessState::LoadingInProgress => {
             Some(base_delay_ms.saturating_mul(2).min(max_delay_ms))
         }
-        ReadinessState::Ready | ReadinessState::RetryLater => None,
+        // `Failed` is terminal: no progress delay — the caller dead-letters
+        // the group instead of re-driving `EnsureModelReady`.
+        ReadinessState::Ready | ReadinessState::RetryLater | ReadinessState::Failed => None,
     }
 }
 
@@ -980,6 +991,69 @@ impl Dispatcher {
                 }
                 return;
             }
+            ReadinessState::Failed => {
+                // Terminal load failure (permanent cooldown). Re-driving would
+                // hang the streaming client forever (#1786 fast-path gap), so
+                // publish a terminal MODEL_LOAD_FAILED chunk + ACK — the
+                // gateway's streaming collector maps the code to a typed
+                // failure exactly like the batch path.
+                info!(
+                    work_item_id = %wi.work_item_id,
+                    request_id = %wi.request_id,
+                    model = %model_id,
+                    readiness = ?readiness_resp.state,
+                    subject = %delivery.subject,
+                    stream = %delivery.stream,
+                    consumer = %delivery.consumer,
+                    stream_seq = delivery.stream_sequence,
+                    consumer_seq = delivery.consumer_sequence,
+                    delivery_count = delivery.delivered,
+                    pending = delivery.pending,
+                    "generate model load failed terminally — publishing MODEL_LOAD_FAILED chunk + ACK"
+                );
+                let message = format!("Model '{model_id}' failed to load permanently.");
+                match self
+                    .publish_generate_terminal_error(&wi, MODEL_LOAD_FAILED_ERROR_CODE, &message)
+                    .await
+                {
+                    Ok(_) => match ack_msg(&msg).await {
+                        Ok(()) => {
+                            self.metrics.messages_acked_total.inc();
+                            self.metrics
+                                .generate_model_loading_responses_total
+                                .with_label_values(&[&model_lbl, "failed", "published_acked"])
+                                .inc();
+                        }
+                        Err(e) => {
+                            warn!(
+                                work_item_id = %wi.work_item_id,
+                                request_id = %wi.request_id,
+                                model = %model_id,
+                                stream_seq = delivery.stream_sequence,
+                                delivery_count = delivery.delivered,
+                                error = %e,
+                                "ack after MODEL_LOAD_FAILED chunk publish failed"
+                            );
+                            self.metrics.jetstream_ack_failures_total.inc();
+                            self.metrics
+                                .generate_model_loading_responses_total
+                                .with_label_values(&[&model_lbl, "failed", "published_ack_failed"])
+                                .inc();
+                        }
+                    },
+                    Err(_) => {
+                        self.metrics
+                            .generate_model_loading_responses_total
+                            .with_label_values(&[&model_lbl, "failed", "publish_failed"])
+                            .inc();
+                        // Terminal failure but the publish itself failed: NAK
+                        // so redelivery can retry surfacing the typed error
+                        // rather than silently dropping the client's request.
+                        nak_msg(&msg, base_delay_ms, &self.metrics).await;
+                    }
+                }
+                return;
+            }
         }
 
         // Resolve an offloaded generate payload. The gateway offloads large
@@ -1239,6 +1313,22 @@ impl Dispatcher {
             };
             if readiness_resp.state == ReadinessState::Ready {
                 break readiness_resp;
+            }
+            if readiness_resp.state == ReadinessState::Failed {
+                // Terminal load failure (permanent cooldown on the Python
+                // registry). Re-driving `EnsureModelReady` would loop forever
+                // and hang the client (#1786 fast-path gap), so dead-letter
+                // the whole group as `MODEL_LOAD_FAILED` — the gateway maps
+                // that code to a typed 502, exactly like the batch/`run_batch`
+                // path. ACK each item after publishing its error so JetStream
+                // stops redelivering the doomed work.
+                info!(
+                    model = %model_id,
+                    group_size,
+                    "model load failed terminally — dead-lettering group as MODEL_LOAD_FAILED"
+                );
+                self.dead_letter_all(&items, model_id).await;
+                return Ok(());
             }
             if let Some(delay_ms) =
                 readiness_progress_delay_ms(&readiness_resp.state, base_delay_ms)
@@ -2073,6 +2163,49 @@ impl Dispatcher {
                 Err(e)
             }
         }
+    }
+
+    /// Dead-letter a whole (op, model) group on a TERMINAL load failure:
+    /// publish a typed `MODEL_LOAD_FAILED` error `WorkResult` for every item
+    /// and ACK it. This is the [`ReadinessState::Failed`] fast-path twin of
+    /// the batch/`run_batch` `MODEL_LOAD_FAILED` mapping (#1786) — the gateway
+    /// turns the code into an HTTP 502 so the client fails fast instead of
+    /// blocking while the sidecar re-drives a doomed model forever.
+    ///
+    /// Per-item settlement mirrors [`Self::apply_outcome`] for a
+    /// `PublishErrorAndAck` outcome: ACK once the error is published (or the
+    /// item is fire-and-forget); if the NATS publish itself fails, NAK so
+    /// JetStream redelivers and another attempt can surface the failure.
+    async fn dead_letter_all(&self, items: &[(WorkItem, Delivery)], model_id: &str) {
+        let message = format!("Model '{model_id}' failed to load permanently.");
+        for (wi, delivery) in items {
+            match self
+                .publish_error(wi, delivery, MODEL_LOAD_FAILED_ERROR_CODE, &message)
+                .await
+            {
+                Ok(_) => match ack(delivery).await {
+                    Ok(()) => self.metrics.messages_acked_total.inc(),
+                    Err(e) => {
+                        warn!(
+                            work_item_id = %wi.work_item_id,
+                            error = %e,
+                            "ack after MODEL_LOAD_FAILED publish failed"
+                        );
+                        self.metrics.jetstream_ack_failures_total.inc();
+                    }
+                },
+                Err(_) => {
+                    // Publish failed — the client never got the typed error,
+                    // so rely on redelivery rather than ACKing it away.
+                    nak_one(delivery, base_nak_delay_ms(), &self.metrics).await;
+                }
+            }
+        }
+        debug!(
+            count = items.len(),
+            model = %model_id,
+            "dead-lettered group as MODEL_LOAD_FAILED"
+        );
     }
 
     /// Generate-path twin of [`Self::publish_error`]. The generate flow is
@@ -4309,6 +4442,12 @@ mod tests {
         );
         assert_eq!(
             readiness_progress_delay_ms(&ReadinessState::RetryLater, 5_000),
+            None
+        );
+        // Terminal failure is NOT a loading state — no progress-ACK re-drive;
+        // the caller dead-letters instead.
+        assert_eq!(
+            readiness_progress_delay_ms(&ReadinessState::Failed, 5_000),
             None
         );
     }

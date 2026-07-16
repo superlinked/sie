@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -683,3 +686,265 @@ class TestColBERTScorePairsOptions:
         assert out.scores.shape == (2,)
         # Options must NOT be threaded into score().
         assert "options" not in mock_score.call_args.kwargs
+
+
+class _ReentrancyDetectingTokenizer:
+    """Emulates a HuggingFace fast tokenizer's non-re-entrancy.
+
+    A real fast tokenizer wraps a Rust object behind a ``RefCell``; a second
+    call that begins while a first is still in flight raises
+    ``RuntimeError("Already borrowed")`` (issue #1800). This fake reproduces
+    that exact failure mode: it raises if two threads are inside a tokenizer
+    call at the same time, so a correct serialization guard makes it pass and a
+    missing guard makes it fail.
+    """
+
+    def __init__(self) -> None:
+        self.pad_token_id = 0
+        self.mask_token_id = 103
+        self._active = 0
+        self._active_lock = threading.Lock()
+
+    def _enter(self) -> None:
+        with self._active_lock:
+            if self._active != 0:
+                raise RuntimeError("Already borrowed")
+            self._active += 1
+
+    def _exit(self) -> None:
+        with self._active_lock:
+            self._active -= 1
+
+    def _tokenize_one(self, text: str) -> list[int]:
+        # Deterministic per-text length: [CLS] + one id per word + [SEP].
+        return [1, *[42 for _ in text.split()], 2]
+
+    def __call__(self, texts: Any, **kwargs: Any) -> Any:
+        self._enter()
+        try:
+            # Simulate real tokenizer latency so overlapping threads collide.
+            time.sleep(0.002)
+            single = isinstance(texts, str)
+            text_list = [texts] if single else list(texts)
+            padding = kwargs.get("padding")
+            ids = [self._tokenize_one(t) for t in text_list]
+            if padding in (True, "max_length"):
+                width = kwargs.get("max_length") if padding == "max_length" else max(len(x) for x in ids)
+                assert width is not None
+                pad_id = self.pad_token_id
+                mask = [[1] * len(x) + [0] * (width - len(x)) for x in ids]
+                ids = [x + [pad_id] * (width - len(x)) for x in ids]
+            else:
+                mask = [[1] * len(x) for x in ids]
+            if kwargs.get("return_tensors") == "pt":
+                return _FakeTensorBatch(
+                    input_ids=torch.tensor(ids),
+                    attention_mask=torch.tensor(mask),
+                )
+            return {"input_ids": ids, "attention_mask": mask}
+        finally:
+            self._exit()
+
+
+class _FakeTensorBatch(dict):
+    def to(self, _device: str) -> _FakeTensorBatch:
+        return self
+
+
+class TestColBERTTokenizerConcurrencyGuard:
+    """Regression tests for issue #1800: colbert-small multivector encode
+    desync surfaced as ``inference_error: Already borrowed`` under concurrency.
+
+    The encode path tokenizes on the inference-executor thread while the §7.3
+    metering fallback (``count_input_tokens``) tokenizes on a separate
+    thread-pool thread for another concurrent request against the *same*
+    tokenizer. ``_tokenizer_guard()`` must serialise both.
+    """
+
+    def _make_adapter(self) -> ColBERTAdapter:
+        adapter = ColBERTAdapter("test-model", skip_special_tokens=False, query_expansion=False)
+        adapter._device = "cpu"
+        adapter._actual_token_dim = 8
+        adapter._max_seq_length = 512
+        tokenizer = _ReentrancyDetectingTokenizer()
+        adapter._tokenizer = tokenizer  # ty: ignore[invalid-assignment]
+
+        def _fake_forward(**batch: Any) -> Any:
+            input_ids = batch["input_ids"]
+            b, seq = input_ids.shape
+            hidden = torch.ones(b, seq, 8, dtype=torch.float32)
+            return SimpleNamespace(last_hidden_state=hidden)
+
+        adapter._model = MagicMock(side_effect=_fake_forward)
+        return adapter
+
+    def test_encode_and_metering_do_not_collide_under_concurrency(self) -> None:
+        """Encoding on one thread and metering-tokenizing on another must not
+        raise ``Already borrowed`` — the guard serialises tokenizer access.
+        """
+        adapter = self._make_adapter()
+        texts = ["a", "the quick brown fox", "x", "a considerably longer piece of text here"]
+        items = [Item(text=t) for t in texts]
+
+        errors: list[BaseException] = []
+        stop = threading.Event()
+
+        def encode_loop() -> None:
+            try:
+                for _ in range(40):
+                    if stop.is_set():
+                        return
+                    out = adapter._encode_native(texts, max_length=64, use_expansion=False, is_query=False)
+                    assert len(out) == len(texts)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        def metering_loop() -> None:
+            try:
+                for _ in range(40):
+                    if stop.is_set():
+                        return
+                    counts = adapter.count_input_tokens(items)
+                    assert counts is not None
+                    assert len(counts) == len(items)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=encode_loop) for _ in range(2)]
+        threads += [threading.Thread(target=metering_loop) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        stop.set()
+
+        assert not errors, f"tokenizer collision under concurrency: {errors!r}"
+
+    def test_reentrancy_detector_fires_without_guard(self) -> None:
+        """Sanity check the harness: bare concurrent tokenizer calls (no guard)
+        DO raise ``Already borrowed`` — otherwise the guard test is vacuous.
+        """
+        tokenizer = _ReentrancyDetectingTokenizer()
+        errors: list[BaseException] = []
+
+        def call_loop() -> None:
+            try:
+                for _ in range(40):
+                    tokenizer(["a", "b c"], return_tensors="pt", padding=True)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=call_loop) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert any(isinstance(e, RuntimeError) and "Already borrowed" in str(e) for e in errors)
+
+
+class TestColBERTRaggedMultivectorBatch:
+    """Issue #1800: multivector encode must return exactly one vector-set per
+    input, in worker-item order, for any batch/length mix.
+    """
+
+    def test_encode_native_ragged_batch_one_set_per_input_in_order(self) -> None:
+        # normalize=False so the per-row hidden fill is preserved and we can
+        # assert worker-item ordering directly.
+        adapter = ColBERTAdapter("test-model", skip_special_tokens=False, query_expansion=False, normalize=False)
+        adapter._device = "cpu"
+        adapter._actual_token_dim = 8
+        adapter._max_seq_length = 512
+        tokenizer = _ReentrancyDetectingTokenizer()
+        adapter._tokenizer = tokenizer  # ty: ignore[invalid-assignment]
+
+        def _fake_forward(**batch: Any) -> Any:
+            input_ids = batch["input_ids"]
+            b, seq = input_ids.shape
+            # Row-distinct hidden states so we can assert per-item ordering.
+            base = torch.arange(b, dtype=torch.float32).reshape(b, 1, 1)
+            hidden = torch.ones(b, seq, 8, dtype=torch.float32) + base
+            return SimpleNamespace(last_hidden_state=hidden)
+
+        adapter._model = MagicMock(side_effect=_fake_forward)
+
+        # Ragged: very short and long inputs mixed.
+        texts = ["a", "one two three four five", "x", "a b", "the fox ran quickly over"]
+        out = adapter._encode_native(texts, max_length=64, use_expansion=False, is_query=False)
+
+        # Exactly one vector-set per input, in order.
+        assert len(out) == len(texts)
+        for mv in out:
+            assert mv.ndim == 2
+            assert mv.shape[1] == 8
+            assert mv.shape[0] > 0
+
+        # Per-input token counts follow the (padded then attention-masked)
+        # lengths: [CLS] + words + [SEP], with PAD rows dropped by the mask.
+        expected_lens = [len(t.split()) + 2 for t in texts]
+        assert [mv.shape[0] for mv in out] == expected_lens
+
+        # Order preserved: row i's hidden fill == 1.0 + i (from _fake_forward).
+        for i, mv in enumerate(out):
+            assert float(mv[0, 0]) == 1.0 + i
+
+
+class _RaisingExpansionTokenizer:
+    """Fake tokenizer whose call raises, used to prove the query-expansion
+    ``pad_token_id`` swap is restored even when tokenization fails.
+
+    Exposes a mutable ``pad_token_id`` (the swap target) so the test can assert
+    it is back to the original after the raising call propagates.
+    """
+
+    def __init__(self) -> None:
+        self.pad_token_id = 7  # sentinel "original" pad id
+        self.mask_token_id = 103
+
+    def __call__(self, *_args: Any, **_kwargs: Any) -> Any:
+        # Malformed-input / OOM analogue: the tokenizer raises mid-call, after
+        # ``pad_token_id`` has already been swapped to the MASK id by the caller.
+        raise RuntimeError("tokenizer boom")
+
+
+class TestColBERTExpansionPadTokenRestore:
+    """CodeRabbit #1800: the query-expansion branches swap ``pad_token_id`` to
+    the MASK id before tokenizing and must restore it in ``finally``.
+
+    Because the swap now runs under ``_tokenizer_guard()``, a tokenizer failure
+    that skipped the restore would leave the instance's ``pad_token_id`` stuck at
+    the MASK id and leak that corruption to every later guarded caller
+    (including the §7.3 metering re-tokenize) — silently mis-padding and
+    mis-counting until the model is reloaded. The ``finally`` must restore the
+    original id even when the tokenizer raises.
+    """
+
+    def _adapter(self) -> ColBERTAdapter:
+        adapter = ColBERTAdapter("test-model", skip_special_tokens=False, query_expansion=True)
+        adapter._device = "cpu"
+        adapter._actual_token_dim = 8
+        adapter._max_seq_length = 512
+        adapter._expansion_token_id = 103  # MASK id swapped in during expansion
+        adapter._tokenizer = _RaisingExpansionTokenizer()  # ty: ignore[invalid-assignment]
+        adapter._model = MagicMock()
+        return adapter
+
+    def test_encode_native_restores_pad_token_id_on_tokenizer_error(self) -> None:
+        adapter = self._adapter()
+        original = adapter._tokenizer.pad_token_id
+        assert original == 7
+        with pytest.raises(RuntimeError, match="tokenizer boom"):
+            adapter._encode_native(["query one two"], max_length=8, use_expansion=True, is_query=True)
+        # The finally restored the original id despite the raise (not left at
+        # the MASK/expansion id 103).
+        assert adapter._tokenizer.pad_token_id == original
+        assert adapter._tokenizer.pad_token_id != adapter._expansion_token_id
+
+    def test_encode_manual_flash_restores_pad_token_id_on_tokenizer_error(self) -> None:
+        adapter = self._adapter()
+        original = adapter._tokenizer.pad_token_id
+        assert original == 7
+        with pytest.raises(RuntimeError, match="tokenizer boom"):
+            adapter._encode_manual_flash(["query one two"], max_length=8, use_expansion=True, is_query=True)
+        assert adapter._tokenizer.pad_token_id == original
+        assert adapter._tokenizer.pad_token_id != adapter._expansion_token_id

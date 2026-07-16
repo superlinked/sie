@@ -1,5 +1,6 @@
 sie_id: knowledgator/gliclass-large-v1.0
 hf_id: knowledgator/gliclass-large-v1.0
+hf_revision: ae8a18644e84cfda53325bd91c7941f2f6fd0ccb
 inputs:
   text: true
   image: false

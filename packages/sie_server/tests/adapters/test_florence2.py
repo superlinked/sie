@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sie_server.types.inputs import Item
@@ -190,6 +190,130 @@ class TestFlorence2Adapter:
         assert kwargs["task"] == "<DocVQA>"
         assert out.entities[0][0]["text"] == "1.8 to 5.5 V"
         assert out.entities[0][0]["label"] == "answer"
+
+
+class TestFlorence2ProcessorLoading:
+    """Tests for the checkpoint-remote processor loading path.
+
+    transformers >= 4.49 ships a *native* ``Florence2Processor`` whose ``__init__``
+    reads ``tokenizer.image_token`` — an attribute the published Florence-2
+    checkpoints' ``BartTokenizerFast`` does not have. Loading via a bare
+    ``AutoProcessor`` can resolve to that native class and crash with
+    ``AttributeError: BartTokenizerFast has no attribute image_token``. The adapter
+    therefore loads the class named in the checkpoint's ``auto_map`` directly so the
+    checkpoint's own (Bart-compatible) remote processor is always used.
+    """
+
+    def _adapter(self, model_id: str = "microsoft/Florence-2-base", revision: str | None = None):
+        from sie_server.adapters.florence2 import Florence2Adapter
+
+        return Florence2Adapter(model_id, revision=revision)
+
+    def test_resolve_processor_auto_map_reads_preprocessor_config(self) -> None:
+        """The AutoProcessor auto_map is discovered from the checkpoint configs."""
+        import json
+
+        adapter = self._adapter(revision="deadbeef")
+
+        def fake_cached_file(model_id: str, filename: str, **kwargs: object) -> str | None:
+            # Florence-2 checkpoints carry the auto_map in preprocessor_config.json,
+            # not processor_config.json — the resolver must scan past the first miss.
+            return f"/fake/{filename}" if filename == "preprocessor_config.json" else None
+
+        payload = {"auto_map": {"AutoProcessor": "processing_florence2.Florence2Processor"}}
+        with (
+            patch("transformers.utils.cached_file", side_effect=fake_cached_file),
+            patch("builtins.open", new_callable=MagicMock),
+            patch.object(json, "load", return_value=payload),
+        ):
+            ref = adapter._resolve_processor_auto_map({"trust_remote_code": True, "revision": "deadbeef"})
+        assert ref == "processing_florence2.Florence2Processor"
+
+    def test_load_processor_forces_checkpoint_remote_class(self) -> None:
+        """When an auto_map ref exists, the remote class is loaded verbatim.
+
+        Regression: the cross-repo form ``<repo>--module.Class`` must be passed
+        through unmodified so transformers fetches the upstream repo's code (the
+        Florence-2-FT-DocVQA fork points at microsoft/Florence-2-base-ft).
+        """
+        adapter = self._adapter("mynkchaudhry/Florence-2-FT-DocVQA", revision="abc123")
+        cross_repo_ref = "microsoft/Florence-2-base-ft--processing_florence2.Florence2Processor"
+
+        fake_cls = MagicMock()
+        fake_cls.from_pretrained.return_value = MagicMock(name="remote_processor")
+        with (
+            patch.object(adapter, "_resolve_processor_auto_map", return_value=cross_repo_ref),
+            patch(
+                "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+                return_value=fake_cls,
+            ) as get_cls,
+        ):
+            proc = adapter._load_processor({"trust_remote_code": True, "revision": "abc123"})
+
+        # Full ref passed verbatim (prefix NOT stripped) so cross-repo code resolves.
+        get_cls.assert_called_once_with(
+            cross_repo_ref,
+            "mynkchaudhry/Florence-2-FT-DocVQA",
+            revision="abc123",
+        )
+        fake_cls.from_pretrained.assert_called_once()
+        assert proc is fake_cls.from_pretrained.return_value
+
+    def test_load_processor_falls_back_to_autoprocessor_without_auto_map(self) -> None:
+        """A local export with no remote auto_map falls back to AutoProcessor."""
+        adapter = self._adapter("./some-local-export")
+        with (
+            patch.object(adapter, "_resolve_processor_auto_map", return_value=None),
+            patch("transformers.AutoProcessor.from_pretrained", return_value="auto_proc") as auto_proc,
+        ):
+            proc = adapter._load_processor({"trust_remote_code": True})
+        auto_proc.assert_called_once()
+        assert proc == "auto_proc"
+
+
+@pytest.mark.model
+class TestFlorence2CpuInference:
+    """Heavy end-to-end test: real weights on CPU (deselected by default).
+
+    Guards the transformers-4.57 native-processor regression at the level that
+    actually failed on staging: load the pinned checkpoint via the adapter and run
+    a real OCR + OD forward. Run with ``mise run test -- -m model``.
+    """
+
+    REVISION = "5ca5edf5bd017b9919c05d08aebef5e4c7ac3bac"
+
+    def test_load_and_forward_cpu(self) -> None:
+        import io
+
+        from PIL import Image as PILImage
+        from PIL import ImageDraw
+        from sie_server.adapters.florence2 import Florence2Adapter
+        from sie_server.types.inputs import ImageInput
+
+        adapter = Florence2Adapter(
+            "microsoft/Florence-2-base",
+            revision=self.REVISION,
+            default_task="<OCR>",
+            attn_implementation="eager",
+        )
+        adapter.load("cpu")
+
+        # The bug loaded the native processor from transformers.models.florence2;
+        # the fix must load the checkpoint's own remote (transformers_modules) class.
+        assert type(adapter._processor).__module__.startswith("transformers_modules")
+
+        img = PILImage.new("RGB", (200, 80), (255, 255, 255))
+        ImageDraw.Draw(img).text((10, 30), "HELLO", fill=(0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        items = [Item(images=[ImageInput(data=buf.getvalue(), format="png")])]
+
+        ocr = adapter.extract(items, options={"task": "<OCR>", "max_new_tokens": 24})
+        assert ocr.entities, "OCR forward returned no entities"
+        assert ocr.entities[0], "OCR forward returned an empty entity list"
+
+        od = adapter.extract(items, options={"task": "<OD>", "max_new_tokens": 24})
+        assert od.objects is not None, "OD forward returned no objects container"
 
 
 class TestResolveFlorence2Prompt:

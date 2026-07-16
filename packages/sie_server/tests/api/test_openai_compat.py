@@ -168,6 +168,8 @@ class TestOpenAIEmbeddings:
     def test_model_not_found(self, client: TestClient, mock_registry: MagicMock) -> None:
         """Test 404 when model doesn't exist."""
         mock_registry.has_model.return_value = False
+        # Real registry raises for unknown models: guards the KeyError-500 regression.
+        mock_registry.get_worker.side_effect = KeyError("Model 'nonexistent-model' not found in registry")
 
         response = client.post(
             "/v1/embeddings",

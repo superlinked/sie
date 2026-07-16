@@ -602,12 +602,33 @@ class QueueExecutor:
         - ``loading_started``: progress-ACK and recheck (this call triggered a new load)
         - ``loading_in_progress``: progress-ACK and recheck with a longer delay
         - ``retry_later``: NAK with base delay (unknown error path)
+        - ``failed``: TERMINAL — dead-letter as ``MODEL_LOAD_FAILED`` (do NOT
+          recheck). Emitted when the registry holds a PERMANENT
+          ``LoadFailure`` (``cooldown=permanent``).
+
+        #1786 fast-path twin: a permanent load failure (e.g. gated repo,
+        missing dependency) otherwise collapses into ``loading_in_progress``
+        here — ``start_load_async`` returns ``False`` under the
+        ``registry.is_failed`` guard, indistinguishable from "still loading".
+        The Rust sidecar then re-drives ``EnsureModelReady`` every ~10s
+        forever and the client hangs. We consult the registry's failure
+        record DIRECTLY and report the terminal ``failed`` state for the
+        *permanent* classes only, using the SAME ``get_failure().is_permanent``
+        classification as the direct-HTTP ``check_not_failed`` gate and the
+        Modal lane's ``worker_runtime._terminal_load_failure``. Transient
+        in-cooldown classes (OOM / NETWORK / TIMEOUT) are intentionally NOT
+        terminal — they stay ``loading_in_progress`` so the caller retries
+        after the short cooldown.
         """
         if not self._registry.has_model(model_id):
             return "retry_later"
 
         if self._registry.is_loaded(model_id):
             return "ready"
+
+        failure = self._registry.get_failure(model_id)
+        if failure is not None and failure.is_permanent:
+            return "failed"
 
         if self._registry.is_loading(model_id):
             return "loading_in_progress"
@@ -622,7 +643,17 @@ class QueueExecutor:
             logger.warning("ensure_model_ready: start_load_async failed for %s", model_id, exc_info=True)
             return "retry_later"
 
-        return "loading_started" if started else "loading_in_progress"
+        if started:
+            return "loading_started"
+        # ``start_load_async`` refused to start a new attempt. Usually a
+        # transient failure still in cooldown or a concurrent load already
+        # in flight — both retryable. But it could also be a PERMANENT
+        # failure recorded in the narrow window since the up-front check, so
+        # re-read the record and dead-letter rather than re-drive forever.
+        failure = self._registry.get_failure(model_id)
+        if failure is not None and failure.is_permanent:
+            return "failed"
+        return "loading_in_progress"
 
     # -- Handshake-driven model descriptor --------------------------------
 

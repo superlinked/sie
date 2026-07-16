@@ -446,16 +446,19 @@ def _make_registry_with_chat_config(
     chat_template_kwargs: dict[str, Any] | None = None,
     context_length: int = 32768,
     hf_id: str = "test/model",
+    hf_revision: str | None = None,
 ) -> MagicMock:
     """Variant of :func:`_make_registry` that also fakes ``get_config``.
 
     The streaming processor's chat-template path reads
     ``config.tasks.generate.chat_template_kwargs`` and the context-length
     path reads ``config.tasks.generate.context_length`` and ``config.hf_id``.
+    The tokenizer load also reads ``config.hf_revision`` to pin the load.
     """
     registry = _make_registry(adapter)
     config = MagicMock()
     config.hf_id = hf_id
+    config.hf_revision = hf_revision
     config.weights_path = None
     config.tasks.generate.chat_template_kwargs = chat_template_kwargs or {}
     config.tasks.generate.context_length = context_length
@@ -516,6 +519,50 @@ async def test_streaming_processor_renders_chat_template(monkeypatch) -> None:
     decoded = _decode_chunks(nc)
     assert decoded[-1]["done"] is True
     assert decoded[-1]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_streaming_processor_pins_tokenizer_revision(monkeypatch) -> None:
+    """The tokenizer load forwards the model's pinned ``hf_revision``.
+
+    Under ``HF_HUB_OFFLINE=1`` a no-revision load resolves ``refs/main``,
+    which is absent for repos staged by pinned SHA — pinning the revision
+    resolves the ``snapshots/<sha>`` dir directly (#1801).
+    """
+    nc = AsyncMock()
+    script = [
+        GenerationChunk(text_delta="ok", is_first=True),
+        GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=1, completion_tokens=1),
+    ]
+    adapter = _FakeGenAdapter(script)
+    sha = "cdbee75f17c01a7cc42f958dc650907174af0554"
+    registry = _make_registry_with_chat_config(adapter, hf_id="test/model", hf_revision=sha)
+
+    seen: dict[str, Any] = {}
+
+    class _StubTok:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+            return "<rendered>" + "".join(m["content"] for m in messages) + "</rendered>"
+
+        def encode(self, text, *, add_special_tokens):
+            return [0] * len(text.split())
+
+    def _spy_load(source, *, trust_remote_code=False, revision=None):
+        seen["source"] = source
+        seen["revision"] = revision
+        return _StubTok()
+
+    from sie_server.processors import streaming as streaming_mod
+
+    monkeypatch.setattr(streaming_mod, "load_tokenizer", _spy_load)
+
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    wi = _make_work_item(messages=[{"role": "user", "content": "ping"}])
+    msg = _make_msg(wi)
+    await proc.process(msg, "test/model")
+
+    assert seen["source"] == "test/model"
+    assert seen["revision"] == sha
 
 
 @pytest.mark.asyncio

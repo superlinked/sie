@@ -1,5 +1,6 @@
 sie_id: opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill
 hf_id: opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill
+hf_revision: babf71f3c48695e2e53a978208e8aba48335e3c0
 inputs:
   text: true
   image: false

@@ -1,6 +1,6 @@
 [package]
 name = "sie-server-sidecar"
-version = "0.6.18"
+version = "0.6.19"
 edition = "2021"
 description = "SIE worker sidecar: NATS JetStream consumer, scheduler, IPC client, and GPU-independent prep for sie-server pods."
 

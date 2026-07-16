@@ -190,6 +190,102 @@ def _get_idempotency_state(app_state: Any) -> _IdempotencyState:
     return existing
 
 
+async def _idempotency_claim(
+    idem: _IdempotencyState,
+    idempotency_key: str,
+    body_hash: str,
+) -> tuple[Response | None, _IdempotencyInFlight | None]:
+    """Wait-or-claim an idempotent write, mirroring ``add_model`` exactly.
+
+    Returns ``(response, owner)``: exactly one is non-``None``. A non-``None``
+    ``response`` is a cached/synthetic replay the caller must return verbatim;
+    a non-``None`` ``owner`` is the in-flight marker this caller now owns and
+    must later resolve via :func:`_idempotency_finalize` / :func:`_idempotency_fail`.
+    Factored out of ``add_model`` so ``PUT`` shares byte-identical semantics
+    (mismatch=422, cancelled/aborted owner=503, evicted-replay=200).
+    """
+    waited_in_flight: _IdempotencyInFlight | None = None
+    while True:
+        if waited_in_flight is not None:
+            if waited_in_flight.exception is not None:
+                if isinstance(waited_in_flight.exception, asyncio.CancelledError):
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "error": "idempotent_inflight_cancelled",
+                            "idempotency_key": idempotency_key,
+                            "message": (
+                                "The prior in-flight request with this Idempotency-Key was cancelled "
+                                "before it completed. Retry the request to execute it."
+                            ),
+                        },
+                    ) from waited_in_flight.exception
+                raise waited_in_flight.exception
+            if not waited_in_flight.succeeded:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "idempotent_inflight_aborted",
+                        "idempotency_key": idempotency_key,
+                        "message": (
+                            "The prior in-flight request with this Idempotency-Key ended without "
+                            "a completed response. Retry the request to execute it."
+                        ),
+                    },
+                )
+
+        async with idem.lock:
+            cached = idem.cache.get(idempotency_key)
+            if cached is not None:
+                cached_status, cached_body, cached_payload_hash = cached
+                if body_hash != cached_payload_hash:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "error": "idempotency_mismatch",
+                            "message": "Idempotency-Key reused with different payload.",
+                        },
+                    )
+                return (
+                    Response(content=cached_body, status_code=cached_status, media_type="application/json"),
+                    None,
+                )
+            if waited_in_flight is not None:
+                return (
+                    Response(
+                        content=orjson.dumps(
+                            {
+                                "error": "idempotent_replay_evicted",
+                                "idempotency_key": idempotency_key,
+                                "message": (
+                                    "A prior request with this Idempotency-Key completed successfully, "
+                                    "but its cached response was evicted. The write was applied exactly once; "
+                                    "query GET /v1/configs/models/{id} to see the current state."
+                                ),
+                            }
+                        ).decode(),
+                        status_code=200,
+                        media_type="application/json",
+                    ),
+                    None,
+                )
+            in_flight = idem.in_flight.get(idempotency_key)
+            if in_flight is None:
+                owner = _IdempotencyInFlight(body_hash)
+                idem.in_flight[idempotency_key] = owner
+                return (None, owner)
+            if body_hash != in_flight.payload_hash:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "idempotency_mismatch",
+                        "message": "Idempotency-Key reused with different payload.",
+                    },
+                )
+        waited_in_flight = in_flight
+        await in_flight.event.wait()
+
+
 def _emit_audit_log(
     request: Request,
     *,
@@ -434,99 +530,19 @@ async def add_model(request: Request) -> Response:
             },
         )
 
-    # Idempotency-Key support (checked after body read for payload hash)
+    # Idempotency-Key support (checked after body read for payload hash).
+    # The wait/replay/claim dance is shared with PUT via _idempotency_claim:
+    # a non-None replay is returned verbatim; otherwise this request owns the
+    # in-flight marker and must resolve it below (success caches + wakes, any
+    # error records the exception + wakes so waiters aren't stuck forever).
     idempotency_key = request.headers.get("Idempotency-Key")
     body_hash = hashlib.sha256(body).hexdigest()
     idem = _get_idempotency_state(request.app.state) if idempotency_key else None
+    owner_in_flight: _IdempotencyInFlight | None = None
     if idempotency_key and idem is not None:
-        # Track the in-flight record we waited on. A cache miss after
-        # waiting can mean either "successful response was evicted" or
-        # "the owner failed/cancelled before caching"; only the former
-        # may synthesize success.
-        waited_in_flight: _IdempotencyInFlight | None = None
-        owner_in_flight: _IdempotencyInFlight | None = None
-        while True:
-            if waited_in_flight is not None:
-                if waited_in_flight.exception is not None:
-                    if isinstance(waited_in_flight.exception, asyncio.CancelledError):
-                        raise HTTPException(
-                            status_code=503,
-                            detail={
-                                "error": "idempotent_inflight_cancelled",
-                                "idempotency_key": idempotency_key,
-                                "message": (
-                                    "The prior in-flight request with this Idempotency-Key was cancelled "
-                                    "before it completed. Retry the request to execute it."
-                                ),
-                            },
-                        ) from waited_in_flight.exception
-                    raise waited_in_flight.exception
-                if not waited_in_flight.succeeded:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "error": "idempotent_inflight_aborted",
-                            "idempotency_key": idempotency_key,
-                            "message": (
-                                "The prior in-flight request with this Idempotency-Key ended without "
-                                "a completed response. Retry the request to execute it."
-                            ),
-                        },
-                    )
-
-            async with idem.lock:
-                cached = idem.cache.get(idempotency_key)
-                if cached is not None:
-                    cached_status, cached_body, cached_payload_hash = cached
-                    if body_hash != cached_payload_hash:
-                        raise HTTPException(
-                            status_code=422,
-                            detail={
-                                "error": "idempotency_mismatch",
-                                "message": "Idempotency-Key reused with different payload.",
-                            },
-                        )
-                    return Response(
-                        content=cached_body,
-                        status_code=cached_status,
-                        media_type="application/json",
-                    )
-                if waited_in_flight is not None:
-                    # Woken by a completer but the response was evicted
-                    # before we grabbed the lock. This waiter belongs to
-                    # that completed owner, not to any later same-key
-                    # retry that may have started after eviction.
-                    return Response(
-                        content=orjson.dumps(
-                            {
-                                "error": "idempotent_replay_evicted",
-                                "idempotency_key": idempotency_key,
-                                "message": (
-                                    "A prior request with this Idempotency-Key completed successfully, "
-                                    "but its cached response was evicted. The write was applied exactly once; "
-                                    "query GET /v1/configs/models/{id} to see the current state."
-                                ),
-                            }
-                        ).decode(),
-                        status_code=200,
-                        media_type="application/json",
-                    )
-                in_flight = idem.in_flight.get(idempotency_key)
-                if in_flight is None:
-                    # Genuinely first request for this key.
-                    owner_in_flight = _IdempotencyInFlight(body_hash)
-                    idem.in_flight[idempotency_key] = owner_in_flight
-                    break
-                if body_hash != in_flight.payload_hash:
-                    raise HTTPException(
-                        status_code=422,
-                        detail={
-                            "error": "idempotency_mismatch",
-                            "message": "Idempotency-Key reused with different payload.",
-                        },
-                    )
-            waited_in_flight = in_flight
-            await in_flight.event.wait()
+        replay, owner_in_flight = await _idempotency_claim(idem, idempotency_key, body_hash)
+        if replay is not None:
+            return replay
 
     cancellation_deferred = False
 
@@ -896,6 +912,273 @@ async def add_model(request: Request) -> Response:
         status_code=status_code,
         media_type="application/json",
     )
+
+
+def _canonical_config_for_compare(config: dict[str, Any]) -> Any:
+    """A stable JSON-comparable form of a model config for unchanged detection.
+
+    Sorts keys at every level so two YAML documents that differ only in key
+    order / whitespace compare equal — the PUT no-op gate must not churn the
+    epoch just because the serializer reordered a mapping.
+    """
+    return orjson.dumps(config, option=orjson.OPT_SORT_KEYS)
+
+
+@router.put("/models/{model_id:path}")
+async def replace_model(request: Request, model_id: str) -> Response:
+    """Replace a model's full config — the catalog-convergence write (#1771).
+
+    ``POST /v1/configs/models`` is append-only: a profile that already exists
+    with different content is a 409, so it cannot heal a catalog entry whose
+    stored YAML has drifted from the current in-repo source (the stale bge-m3
+    class that NAKs staging traffic on a ``bundle_config_hash`` mismatch). This
+    endpoint REPLACES the stored config wholesale so the catalog converges to
+    the source YAML regardless of prior content.
+
+    Same admin write-auth, same ``Idempotency-Key`` semantics, and the same
+    persist -> mutate-registry -> increment-epoch -> publish ordering (under the
+    per-app write lock) as ``add_model``. Unchanged content is a genuine no-op:
+    it neither bumps the epoch nor publishes, so a re-sync of an already-current
+    catalog produces no churn.
+    """
+    _check_write_auth(request)
+    start_time = time.monotonic()
+
+    model_registry = _require_model_registry(request)
+    nats_publisher: NatsPublisher | None = getattr(request.app.state, "nats_publisher", None)
+    config_store: ConfigStore | None = getattr(request.app.state, "config_store", None)
+
+    _validate_model_id(model_id)
+
+    if nats_publisher and not nats_publisher.connected:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "nats_unavailable", "message": "NATS not connected -- cannot distribute config changes."},
+        )
+
+    body = await request.body()
+    if len(body) > _MAX_CONFIG_BODY_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "payload_too_large",
+                "message": f"Config body exceeds {_MAX_CONFIG_BODY_BYTES} bytes limit.",
+            },
+        )
+
+    idempotency_key = request.headers.get("Idempotency-Key")
+    # Fold the request TARGET (method + model path) into the fingerprint: the
+    # idempotency cache is application-wide, so two PUTs to different model paths
+    # that share a key and an identical body (e.g. a body omitting sie_id) would
+    # otherwise replay the first response and never write the second model.
+    body_hash = hashlib.sha256(b"PUT\0" + model_id.encode("utf-8") + b"\0" + body).hexdigest()
+    idem = _get_idempotency_state(request.app.state) if idempotency_key else None
+    owner_in_flight: _IdempotencyInFlight | None = None
+    if idempotency_key and idem is not None:
+        replay, owner_in_flight = await _idempotency_claim(idem, idempotency_key, body_hash)
+        if replay is not None:
+            return replay
+
+    cancellation_deferred = False
+
+    async def _await_committed(awaitable: Any) -> Any:
+        nonlocal cancellation_deferred
+        task = asyncio.ensure_future(awaitable)
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is None or not current_task.cancelling():
+                    raise
+                cancellation_deferred = True
+                while current_task.cancelling():
+                    current_task.uncancel()
+                if task.done():
+                    return task.result()
+
+    try:
+        try:
+            config = yaml.safe_load(body.decode())
+        except yaml.YAMLError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "parse_error", "message": f"Invalid YAML: {e}"},
+            ) from e
+
+        if not isinstance(config, dict):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "parse_error", "message": "Expected YAML mapping at top level"},
+            )
+
+        body_sie_id = config.get("sie_id")
+        if body_sie_id and body_sie_id != model_id:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "model_id_mismatch",
+                    "message": f"Body sie_id {body_sie_id!r} does not match path model id {model_id!r}.",
+                },
+            )
+        config.setdefault("sie_id", model_id)
+        _validate_model_id(config["sie_id"])
+
+        write_lock = _get_write_lock(request.app.state)
+        async with write_lock:
+            # Validate WITHOUT the append-only conflict gate — replace is
+            # deliberate — so a malformed/unroutable body is still rejected.
+            try:
+                model_registry._validate_structure_locked(config)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "validation_error", "details": [{"message": str(e)}]},
+                ) from e
+
+            # Unchanged-content no-op: compare the incoming config against the
+            # registry's current merged config. Equal => no epoch bump, no
+            # publish (a re-sync of an already-current catalog stays quiet).
+            existing_full = model_registry.get_full_config(model_id)
+            changed = existing_full is None or _canonical_config_for_compare(
+                existing_full
+            ) != _canonical_config_for_compare(config)
+
+            affected_bundles: list[str] = []
+            epoch = 0
+            config_yaml = ""
+            if changed:
+                config_yaml = yaml.dump(config, default_flow_style=False, sort_keys=False)
+                # Persist FIRST (disk is source of truth on restart), then mutate.
+                if config_store:
+                    await _await_committed(asyncio.to_thread(config_store.write_model, model_id, config_yaml))
+                try:
+                    affected_bundles = model_registry.replace_model_config(config)
+                except ValueError as e:  # pragma: no cover -- validated above
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"error": "validation_error", "details": [{"message": str(e)}]},
+                    ) from e
+                # Serialize the registry's authoritative merged form for the NATS
+                # delta (matches add_model's no-store behaviour).
+                merged = model_registry.get_full_config(model_id)
+                if merged is not None:
+                    config_yaml = yaml.dump(merged, default_flow_style=False, sort_keys=False)
+                if config_store:
+                    epoch = await _await_committed(asyncio.to_thread(config_store.increment_epoch))
+
+                total = len(model_registry.list_models())
+                api_count = 0
+                if config_store:
+                    api_count = len(await _await_committed(asyncio.to_thread(config_store.list_models)))
+                sie_metrics.update_models_gauge(
+                    api_count=api_count,
+                    filesystem_count=max(total - api_count, 0),
+                )
+
+            bundle_config_hashes = {}
+            for bundle_id in affected_bundles:
+                bundle_config_hashes[bundle_id] = model_registry.compute_bundle_config_hash(bundle_id)
+            all_bundle_pool_config_hashes = model_registry.compute_bundle_pool_config_hashes()
+            bundle_pool_config_hashes = {
+                bundle_id: all_bundle_pool_config_hashes.get(bundle_id, {}) for bundle_id in affected_bundles
+            }
+            model_pool = model_registry.get_model_pool_name(model_id)
+
+            nats_publish_failed = False
+            partial_publish_failed_bundles: list[str] = []
+            if changed and nats_publisher and nats_publisher.connected and affected_bundles:
+                try:
+                    await _await_committed(
+                        nats_publisher.publish_config_notification(
+                            model_id=model_id,
+                            profiles_added=sorted(model_registry.get_model_profile_names(model_id)),
+                            affected_bundles=affected_bundles,
+                            bundle_config_hashes=bundle_config_hashes,
+                            epoch=epoch,
+                            model_config_yaml=config_yaml,
+                            model_pool=model_pool,
+                            bundle_pool_config_hashes=bundle_pool_config_hashes,
+                        )
+                    )
+                except PartialPublishError as e:
+                    logger.exception(
+                        "Partial NATS publish for replaced model %s: %s/%s bundles failed: %s",
+                        model_id,
+                        len(e.failed_bundles),
+                        e.total,
+                        e.failed_bundles,
+                    )
+                    nats_publish_failed = True
+                    partial_publish_failed_bundles = e.failed_bundles
+                except Exception:
+                    logger.exception("Failed to publish NATS notification for replaced model %s", model_id)
+                    nats_publish_failed = True
+
+        router_id = nats_publisher.router_id if nats_publisher else "standalone"
+        warnings: list[str] = []
+        if partial_publish_failed_bundles:
+            warnings.append(
+                "nats_publish_partial: Config persisted but NATS notification failed for bundle(s) "
+                f"{partial_publish_failed_bundles}. Workers on those bundles will stay on the previous "
+                "epoch until the gateway's periodic epoch poll triggers a re-export."
+            )
+        elif nats_publish_failed:
+            warnings.append(
+                "nats_publish_failed: Config persisted but NATS notification failed. Workers may not be updated."
+            )
+
+        response_body: dict[str, Any] = {
+            "model_id": model_id,
+            "replaced": changed,
+            "unchanged": not changed,
+            "affected_bundles": affected_bundles,
+            "warnings": warnings,
+            "router_id": router_id,
+        }
+        response_json = orjson.dumps(response_body).decode()
+        status_code = 200
+
+        if idempotency_key and idem is not None and owner_in_flight is not None:
+            await _await_committed(idem.lock.acquire())
+            try:
+                idem.cache[idempotency_key] = (status_code, response_json, body_hash)
+                idem.cache.move_to_end(idempotency_key)
+                while len(idem.cache) > _MAX_IDEMPOTENCY_CACHE_SIZE:
+                    idem.cache.popitem(last=False)
+                owner_in_flight.succeeded = True
+                if idem.in_flight.get(idempotency_key) is owner_in_flight:
+                    idem.in_flight.pop(idempotency_key, None)
+                owner_in_flight.event.set()
+            finally:
+                idem.lock.release()
+
+    except (Exception, asyncio.CancelledError) as e:
+        if idempotency_key and idem is not None and owner_in_flight is not None:
+            await _await_committed(idem.lock.acquire())
+            try:
+                owner_in_flight.exception = e
+                if idem.in_flight.get(idempotency_key) is owner_in_flight:
+                    idem.in_flight.pop(idempotency_key, None)
+                owner_in_flight.event.set()
+            finally:
+                idem.lock.release()
+        raise
+
+    elapsed_ms = (time.monotonic() - start_time) * 1000
+    _emit_audit_log(
+        request,
+        event="config.replace_model",
+        status=status_code,
+        model=model_id,
+        latency_ms=round(elapsed_ms, 2),
+        body_bytes=len(body),
+    )
+
+    if cancellation_deferred:
+        raise asyncio.CancelledError
+
+    return Response(content=response_json, status_code=status_code, media_type="application/json")
 
 
 @router.post("/resolve")

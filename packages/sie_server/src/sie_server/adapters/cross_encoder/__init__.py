@@ -169,8 +169,15 @@ class CrossEncoderAdapter(BaseAdapter):
         # Build (query, document) pairs
         pairs = [(query_text, self._extract_text(item)) for item in items]
 
-        # Score pairs
-        with torch.inference_mode():
+        # Score pairs. ``CrossEncoder.predict`` tokenizes ``self._model.tokenizer``
+        # internally (fused with the forward, unlike colbert where the two are
+        # separable); the §7.3 metering fallback re-tokenizes that same tokenizer
+        # on a separate thread-pool thread, so a bare HF fast tokenizer would race
+        # into ``RuntimeError("Already borrowed")``. Serialise with the shared
+        # ``_tokenizer_guard()`` (class-fix for #1800). The inference executor is
+        # single-threaded, so predicts are already serial — the guard adds no GPU
+        # throughput cost, it only holds off the concurrent metering re-tokenize.
+        with torch.inference_mode(), self._tokenizer_guard():
             scores = self._model.predict(pairs)
 
         # Convert to Python floats
@@ -214,8 +221,15 @@ class CrossEncoderAdapter(BaseAdapter):
             doc_text = self._extract_text(doc)
             pairs.append((query_text, doc_text))
 
-        # Score pairs
-        with torch.inference_mode():
+        # Score pairs. See ``score()``: ``predict`` tokenizes ``self._model``'s
+        # tokenizer internally (fused with the forward), and ``_pair_input_token_counts``
+        # below re-tokenizes it for §7.3 metering, while the shared metering
+        # fallback re-tokenizes it on another thread — all serialised through
+        # ``_tokenizer_guard()`` to avoid the ``Already borrowed`` race (#1800).
+        # The guard is released between predict and the metering re-tokenize
+        # (separate ``with`` blocks); the lock is non-reentrant, so they must not
+        # nest.
+        with torch.inference_mode(), self._tokenizer_guard():
             scores = self._model.predict(pairs)
 
         # Convert to float32 numpy array and wrap in ScoreOutput
@@ -270,16 +284,31 @@ class CrossEncoderAdapter(BaseAdapter):
         applies (:meth:`_metering_max_length`). Best-effort: any tokenizer quirk
         returns ``None`` so the meter falls back to its reserve estimate rather
         than failing the score or billing an approximation as a count.
+
+        Runs inline on the inference-executor thread inside :meth:`score_pairs`,
+        re-tokenizing the very tokenizer ``CrossEncoder.predict`` just used (and
+        that the §7.3 metering fallback re-tokenizes on a separate thread-pool
+        thread for another concurrent request). A bare HF fast tokenizer wraps a
+        Rust ``RefCell`` and raises ``RuntimeError("Already borrowed")`` under
+        concurrent use, so this re-tokenize is serialised with
+        ``_tokenizer_guard()`` — the encode/score-side sibling of the guard the
+        shared ``count_pair_input_tokens`` entry point already holds. The lock is
+        held only for the pure tokenization (no GPU forward), matching colbert's
+        fix for the same class (#1800). NOTE: reached only via ``score_pairs`` —
+        never through ``count_pair_input_tokens`` (which already holds the guard
+        and routes to ``_token_counts_or_none`` directly), so no non-reentrant
+        deadlock.
         """
         tokenizer = self._metering_tokenizer()
         if tokenizer is None:
             return None
-        return self._token_counts_or_none(
-            tokenizer,
-            [q for q, _ in pairs],
-            [d for _, d in pairs],
-            expected_len=len(pairs),
-        )
+        with self._tokenizer_guard():
+            return self._token_counts_or_none(
+                tokenizer,
+                [q for q, _ in pairs],
+                [d for _, d in pairs],
+                expected_len=len(pairs),
+            )
 
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""

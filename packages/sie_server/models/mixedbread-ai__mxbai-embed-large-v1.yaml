@@ -1,5 +1,6 @@
 sie_id: mixedbread-ai/mxbai-embed-large-v1
 hf_id: mixedbread-ai/mxbai-embed-large-v1
+hf_revision: b33106f585b9ce46904ad7443a3b52b7a63e231c
 inputs:
   text: true
   image: false

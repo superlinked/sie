@@ -32,6 +32,11 @@ def _make_registry(*, loaded: bool = True, loading: bool = False) -> MagicMock:
     reg.is_loaded.return_value = loaded
     reg.is_loading.return_value = loading
     reg.get_config.return_value = MagicMock()
+    # No recorded load failure by default — a bare MagicMock would otherwise
+    # return a truthy stub for ``get_failure(...)`` and its ``.is_permanent``,
+    # which ``ensure_model_ready`` now reads to gate the terminal ``failed``
+    # state (#1786 fast-path). Tests that want the terminal path set this.
+    reg.get_failure.return_value = None
     return reg
 
 
@@ -158,6 +163,69 @@ class TestEnsureModelReady:
         reg.start_load_async = AsyncMock(side_effect=KeyError("test/model"))
         ex = QueueExecutor(reg)
         assert await ex.ensure_model_ready("test/model") == "retry_later"
+
+    @pytest.mark.asyncio
+    async def test_permanent_failure_returns_terminal_failed(self) -> None:
+        """#1786 fast-path: a PERMANENT load failure surfaces as the terminal
+        ``failed`` state (not ``loading_in_progress``) so the sidecar
+        dead-letters instead of re-driving forever.
+        """
+        from sie_server.core.load_errors import LoadErrorClass, LoadFailure
+
+        reg = _make_registry(loaded=False, loading=False)
+        reg.get_failure.return_value = LoadFailure(
+            error_class=LoadErrorClass.GATED,
+            message="repository is gated",
+            attempts=1,
+            last_attempt_ts=time.monotonic(),
+            cooldown_s=None,  # permanent
+        )
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "failed"
+        # Terminal — must NOT try to (re)start a doomed load.
+        reg.start_load_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_is_not_terminal(self) -> None:
+        """A TRANSIENT in-cooldown failure (OOM/NETWORK/TIMEOUT) stays
+        retryable — it must not be reported as terminal ``failed``.
+        """
+        from sie_server.core.load_errors import LoadErrorClass, LoadFailure
+
+        reg = _make_registry(loaded=False, loading=False)
+        reg.get_failure.return_value = LoadFailure(
+            error_class=LoadErrorClass.OOM,
+            message="cuda oom",
+            attempts=1,
+            last_attempt_ts=time.monotonic(),
+            cooldown_s=30.0,  # transient
+        )
+        reg.start_load_async = AsyncMock(return_value=False)
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "loading_in_progress"
+
+    @pytest.mark.asyncio
+    async def test_permanent_failure_recorded_mid_start_returns_failed(self) -> None:
+        """A load that flips to a PERMANENT failure while ``start_load_async``
+        runs (so it returns ``False``) is dead-lettered, not re-driven.
+        """
+        from sie_server.core.load_errors import LoadErrorClass, LoadFailure
+
+        reg = _make_registry(loaded=False, loading=False)
+        # Clean at the up-front check, permanent by the time start returns False.
+        reg.get_failure.side_effect = [
+            None,
+            LoadFailure(
+                error_class=LoadErrorClass.DEPENDENCY,
+                message="missing dep",
+                attempts=1,
+                last_attempt_ts=time.monotonic(),
+                cooldown_s=None,
+            ),
+        ]
+        reg.start_load_async = AsyncMock(return_value=False)
+        ex = QueueExecutor(reg)
+        assert await ex.ensure_model_ready("test/model") == "failed"
 
     @pytest.mark.asyncio
     @patch("sie_server.core.model_loader.load_adapter")

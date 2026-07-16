@@ -1,6 +1,6 @@
 # Find SOTA embedding models by MTEB task
 
-**You're using SIE and you need to pick a model.** SIE ships 85+
+**You're using SIE and you need to pick a model.** SIE ships 100+
 specialized models for encoding, reranking, and extraction (BGE,
 Qwen3, Stella, ColBERT, ColPali, GLiNER, Florence-2, and more). Which
 one is right for *your* task?

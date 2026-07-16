@@ -1,5 +1,6 @@
 sie_id: nomic-ai/nomic-embed-text-v2-moe
 hf_id: nomic-ai/nomic-embed-text-v2-moe
+hf_revision: 1066b6599d099fbb93dfcb64f9c37a7c9e503e85
 inputs:
   text: true
   image: false

@@ -2,6 +2,8 @@
 
 A project gallery of full end-to-end applications built with SIE. Each project lives in its own subdirectory. Clone it, run it, learn from it.
 
+New to SIE? Start with the **[quickstart notebook](./quickstart.ipynb)** [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/superlinked/sie/blob/main/examples/quickstart.ipynb): encode, score, and extract in 5 minutes, then pick a project below.
+
 ## Gallery
 
 Use this table to pick the right starting point. "Runnable" means the
@@ -19,8 +21,8 @@ service keys.
 | [Build a multi-modal product classifier with embeddings](./taxonomy-classification) | Evaluating text, image, NLI, and reranking approaches for hierarchical product taxonomy classification | `extract`, `encode`, `score` | SIE endpoint, Shopify dataset prep via `uv run` scripts, standalone `uv` project | Runnable evaluation example |
 | [Swap an OCR model with one identifier change](./document-ocr) | Driving recognition (VLM-OCR), structured extraction (Donut), and zero-shot NER (GLiNER) through the same `extract` call by swapping the model ID | `extract` | Docker Compose plus Node UI, no API key required, hosted version on [Hugging Face Spaces](https://huggingface.co/spaces/superlinked/document-ocr) | Runnable demo |
 | [A Stripe Link checkout with an SIE fraud-risk gate](./stripe-link-fraud) | Wiring all three SIE primitives into a pre-authorization fraud-risk gate that runs in the same round-trip as the Stripe PaymentIntent | `extract`, `encode`, `score` | Docker Compose plus Node UI; Stripe test-mode keys optional (runs in mock mode without them) | Runnable demo |
-| [Vision-first document RAG](./vision-doc-rag) | Retrieving and answering questions over a multi-tenant page corpus by looking at page images — including scanned drawings — with OCR kept out of the score path | `encode`, `chat/completions`, `score` (optional) | GPU SIE deployment required: ColQwen2.5 retriever + Qwen3.5-4B answer model (runs on the generation bundle) | Runnable demo |
-| [Multi-model contract review with the OpenAI Agents SDK](./contract-review-agent) | Running an OpenAI Agents SDK agent whose every model call — triage, orchestration, vision, OCR, embeddings, rerank, entity extraction, text-to-SQL, reasoning, and a safety guardrail — is served by one SIE cluster, each step on the right catalog model, with per-model observability | `chat/completions`, `encode`, `score`, `extract` | GPU SIE deployment required; standalone `uv` project; real contracts fetched from CUAD (CC BY 4.0) | Runnable demo |
+| [Vision-first document RAG](./vision-doc-rag) | Retrieving and answering questions over a multi-tenant page corpus by looking at page images (including scanned drawings) with OCR kept out of the score path | `encode`, `chat/completions`, `score` (optional) | GPU SIE deployment required: ColQwen2.5 retriever + Qwen3.5-4B answer model (runs on the generation bundle) | Runnable demo |
+| [Multi-model contract review with the OpenAI Agents SDK](./contract-review-agent) | Running an OpenAI Agents SDK agent whose every model call (triage, orchestration, vision, OCR, embeddings, rerank, entity extraction, text-to-SQL, reasoning, and a safety guardrail) is served by one SIE cluster, each step on the right catalog model, with per-model observability | `chat/completions`, `encode`, `score`, `extract` | GPU SIE deployment required; standalone `uv` project; real contracts fetched from CUAD (CC BY 4.0) | Runnable demo |
 | [A behavioural gate that catches hijacked AI agents by their actions, not their credentials](./agent-action-monitor) | Judging a proposed AI agent action against that agent's own learned baseline in real time, before it reaches a downstream system | `encode`, `score`, `extract` | Docker Compose (gate + self-hosted SIE + n8n + mock downstream), no API key required | Runnable demo |
 
 For docs publishing, lead with the quickest runnable demos, then use the

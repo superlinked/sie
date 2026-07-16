@@ -332,7 +332,7 @@ def main() -> None:
     parser.add_argument(
         "--readiness",
         default="ready",
-        choices=["ready", "loading_started", "loading_in_progress", "retry_later"],
+        choices=["ready", "loading_started", "loading_in_progress", "retry_later", "failed"],
         help="Canned readiness state returned for every EnsureModelReady",
     )
     parser.add_argument("--log-level", default="INFO")

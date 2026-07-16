@@ -621,3 +621,110 @@ class TestConcurrentAddModelConfig:
             for f in reader_futs:
                 f.result()
         assert inconsistencies == [], f"Reader observed torn state: {inconsistencies[:5]}"
+
+
+class TestReplaceModelConfig:
+    """replace_model_config: the wholesale (non-append) convergence path (#1771)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path) -> None:
+        self._root = tmp_path
+
+    def _cfg(self, sie_id: str, tokens: int = 8192, profiles: tuple[str, ...] = ("default",)) -> dict:
+        return {
+            "sie_id": sie_id,
+            "profiles": {
+                p: {"adapter_path": "sie_server.adapters.bert_flash:BertAdapter", "max_batch_tokens": tokens}
+                for p in profiles
+            },
+        }
+
+    def test_replace_creates_new_model(self) -> None:
+        registry, _ = _setup_registry(self._root / "r_new")
+        bundles = registry.replace_model_config(self._cfg("new/model"))
+        assert "default" in bundles
+        assert registry.model_exists("new/model")
+
+    def test_replace_converges_changed_profile(self) -> None:
+        registry, _ = _setup_registry(self._root / "r_change")
+        registry.add_model_config(self._cfg("m/model", tokens=1024))
+        assert registry.get_full_config("m/model")["profiles"]["default"]["max_batch_tokens"] == 1024
+        registry.replace_model_config(self._cfg("m/model", tokens=4096))
+        assert registry.get_full_config("m/model")["profiles"]["default"]["max_batch_tokens"] == 4096
+
+    def test_replace_drops_stale_profiles(self) -> None:
+        registry, _ = _setup_registry(self._root / "r_drop")
+        registry.replace_model_config(self._cfg("m/model", profiles=("default", "fast")))
+        assert registry.get_model_profile_names("m/model") == {"default", "fast"}
+        registry.replace_model_config(self._cfg("m/model", profiles=("default",)))
+        # The dropped profile must not survive a replace (unlike append-only add).
+        assert registry.get_model_profile_names("m/model") == {"default"}
+        # And its profile-variant route identity must be gone too.
+        assert not registry.model_exists("m/model:fast")
+
+    def test_replace_rejects_unroutable(self) -> None:
+        registry, _ = _setup_registry(self._root / "r_bad")
+        cfg = {
+            "sie_id": "bad/model",
+            "profiles": {"default": {"adapter_path": "sie_server.adapters.nope:X", "max_batch_tokens": 8192}},
+        }
+        with pytest.raises(ValueError, match="not in any known bundle"):
+            registry.replace_model_config(cfg)
+
+    def test_replace_rejects_missing_profiles(self) -> None:
+        registry, _ = _setup_registry(self._root / "r_empty")
+        with pytest.raises(ValueError, match="profiles"):
+            registry.replace_model_config({"sie_id": "x/y"})
+
+    def test_replace_updates_bundle_config_hash(self) -> None:
+        registry, _ = _setup_registry(self._root / "r_hash")
+        registry.add_model_config(self._cfg("m/model", tokens=1024))
+        before = registry.compute_bundle_config_hash("default")
+        registry.replace_model_config(self._cfg("m/model", tokens=4096))
+        after = registry.compute_bundle_config_hash("default")
+        # A content change must move the worker-parity hash (the drift the sync heals).
+        assert before != after
+
+    def test_replace_rejects_dangling_extends(self) -> None:
+        # A replace discards prior profiles, so `extends` resolves against ONLY
+        # the incoming set: a profile that extends a parent absent from this body
+        # cannot resolve an adapter_path and must be rejected (an `extends` value
+        # alone no longer exempts it — that would persist an unrouteable variant).
+        registry, _ = _setup_registry(self._root / "r_dangling")
+        cfg = {
+            "sie_id": "d/model",
+            "profiles": {
+                "default": {"adapter_path": "sie_server.adapters.bert_flash:BertAdapter", "max_batch_tokens": 8192},
+                # extends a parent that is NOT in this body -> unresolvable.
+                "orphan": {"extends": "not-in-this-body"},
+            },
+        }
+        with pytest.raises(ValueError, match="missing adapter_path"):
+            registry.replace_model_config(cfg)
+
+    def test_replace_notifies_the_bundle_that_loses_the_model(self) -> None:
+        # A replace that MOVES a model from bundle A to bundle B must notify BOTH:
+        # B (the new home) AND A (which loses the model), or A keeps a stale
+        # bundle_config_hash that still counts the departed model until a later
+        # full refresh (#1771 lane↔catalog hash-parity).
+        registry, _ = _setup_registry(
+            self._root / "r_move",
+            bundles={
+                "a": ["sie_server.adapters.bert_flash"],
+                "b": ["sie_server.adapters.sentence_transformer"],
+            },
+        )
+        registry.replace_model_config(
+            {
+                "sie_id": "mv/model",
+                "profiles": {"default": {"adapter_path": "sie_server.adapters.bert_flash:BertAdapter"}},
+            }
+        )
+        moved = registry.replace_model_config(
+            {
+                "sie_id": "mv/model",
+                "profiles": {"default": {"adapter_path": "sie_server.adapters.sentence_transformer:STAdapter"}},
+            }
+        )
+        # Both the old bundle (a) and the new bundle (b) are notified.
+        assert set(moved) >= {"a", "b"}

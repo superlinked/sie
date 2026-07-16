@@ -120,7 +120,7 @@ members = [
 [tool.pytest.ini_options]
 # Note: integrations are NOT in testpaths because each has its own conftest.py
 # which causes pytest plugin conflicts. Run with: mise run test integrations/
-testpaths = ["packages/sie_server/tests", "packages/sie_sdk/tests", "packages/sie_bench/tests", "packages/sie_admin/tests", "packages/sie_config/tests", "packages/sie_mcp/tests", "packages/sie_tools/tests", "tools/mise_tasks/tests", "tools/quality_eval/tests", "product/research/sie-cost-model/bill-cut-model/tests"]
+testpaths = ["packages/sie_server/tests", "packages/sie_sdk/tests", "packages/sie_bench/tests", "packages/sie_admin/tests", "packages/sie_config/tests", "packages/sie_mcp/tests", "packages/sie_tools/tests", "tools/mise_tasks/tests", "tools/quality_eval/tests", "tools/model_ops/tests", "product/research/sie-cost-model/bill-cut-model/tests"]
 pythonpath = ["packages/sie_server/src", "packages/sie_sdk/src", "packages/sie_bench/src", "packages/sie_admin/src", "packages/sie_config/src", "packages/sie_mcp/src", "packages/sie_tools/src", "tools/mise_tasks"]
 addopts = "-m 'not integration and not docker and not model' --import-mode=importlib"
 asyncio_mode = "auto"

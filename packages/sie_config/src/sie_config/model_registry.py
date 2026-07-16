@@ -1230,6 +1230,183 @@ class ModelRegistry:
 
             return created_profiles, skipped_profiles, affected_bundles
 
+    def _validate_structure_locked(self, config: dict) -> None:
+        """Structural + routability checks WITHOUT the append-only conflict gate.
+
+        Must be called with ``self._lock`` held. This is the subset of
+        ``_validate_config_locked`` that does not consult the model's prior
+        profiles: required ``sie_id``/``profiles``, per-profile shape +
+        ``adapter_path`` resolution, and the "every adapter module lands in
+        some bundle" routability check. ``replace_model_config`` uses it
+        because a REPLACE deliberately overwrites existing profiles (the
+        append-only conflict check would reject exactly the stale-entry heal
+        it exists to perform), yet must still refuse an unroutable or
+        malformed body.
+        """
+        sie_id = config.get("sie_id")
+        if not sie_id:
+            msg = "Missing required field: sie_id"
+            raise ValueError(msg)
+
+        _normalize_pool_name(config)
+
+        profiles = config.get("profiles", {})
+        if not profiles:
+            msg = "Missing required field: profiles"
+            raise ValueError(msg)
+        if not isinstance(profiles, dict):
+            msg = "Field 'profiles' must be a mapping of profile_name -> profile_config"
+            raise ValueError(msg)
+
+        for profile_name, profile in profiles.items():
+            _validate_profile_name(str(profile_name))
+            if not isinstance(profile, dict):
+                msg = f"Profile '{profile_name}' must be a mapping"
+                raise ValueError(msg)
+            # A REPLACE discards prior profiles, so _effective_adapter_path
+            # resolves ``extends`` against ONLY the incoming set (no merge with
+            # existing state, unlike the append-only path). An unresolved value —
+            # including a dangling ``extends`` whose parent is absent from this
+            # body — must be rejected here: there is no prior state to rescue it,
+            # so exempting a profile merely because it declares ``extends`` would
+            # persist an unrouteable variant.
+            adapter_path = _effective_adapter_path(profiles, str(profile_name))
+            if not adapter_path:
+                msg = f"Profile '{profile_name}' missing adapter_path"
+                raise ValueError(msg)
+
+        # A REPLACE resolves routability against ONLY the incoming profiles
+        # (it discards the prior ones), so unlike the append-only path there
+        # is no merge with existing profiles here.
+        new_adapter_modules = _adapter_modules_for_profiles(profiles)
+        all_bundle_adapters: set[str] = set()
+        for bundle in self._bundles.values():
+            all_bundle_adapters.update(bundle.adapters)
+        unroutable = new_adapter_modules - all_bundle_adapters
+        if unroutable:
+            msg = f"Adapter(s) not in any known bundle: {', '.join(sorted(unroutable))}"
+            raise ValueError(msg)
+
+    def replace_model_config(self, config: dict) -> list[str]:
+        """Replace a model's config wholesale (the catalog-convergence path).
+
+        Unlike :meth:`add_model_config` (append-only: existing profiles are
+        immutable), this REPLACES the model's stored profiles + top-level
+        metadata with ``config`` exactly. It exists to heal a catalog entry
+        whose stored content has drifted from the current source YAML — the
+        append-only POST path 409s on a changed profile, so a differing entry
+        can only converge through a deliberate replace.
+
+        Rebuilds the model's registry state (profiles, adapter modules, route
+        + profile-variant maps, unrouteable snapshot) from the incoming
+        config alone. Structural + routability validation still applies (a
+        malformed or unroutable body is rejected). Returns the sorted list of
+        bundles the replaced model now affects.
+
+        Raises:
+            ValueError: If validation fails (missing fields, unroutable adapter).
+        """
+        with self._lock:
+            self._validate_structure_locked(config)
+
+            sie_id = config["sie_id"]
+            profiles = config["profiles"]
+            existing = self._models.get(sie_id)
+
+            # Build the post-replace state in fresh containers; only the
+            # top-level pointer swaps are visible to lock-free readers, so they
+            # observe the pre- or post-state, never a half-rebuilt entry (same
+            # atomic-pointer-store discipline as add_model_config).
+            new_profile_names = {str(pname) for pname in profiles}
+            new_profile_configs = {str(pname): _canonical_profile_dict(pdata) for pname, pdata in profiles.items()}
+
+            new_full_config: dict = dict(config)
+            new_full_config["profiles"] = {str(pname): dict(pdata) for pname, pdata in profiles.items()}
+            new_full_config["sie_id"] = sie_id
+
+            # Bundles the model belonged to BEFORE this replace (captured before
+            # the _model_adapter_modules swap below). A replace that moves or
+            # drops a profile changes which bundles route to the model, so its OLD
+            # bundles must also be notified — otherwise they keep a stale
+            # bundle_config_hash (still counting the now-departed model) until a
+            # later full refresh, and workers on them NAK on the mismatch (#1771).
+            old_affected_bundles = _matching_bundle_names(
+                self._model_adapter_modules.get(sie_id, set()),
+                self._bundles,
+            )
+            new_adapter_modules_set = _adapter_modules_for_profiles(new_full_config["profiles"])
+            route_adapter_modules = _base_route_adapter_modules(new_full_config["profiles"])
+            affected_bundles = old_affected_bundles + _matching_bundle_names(new_adapter_modules_set, self._bundles)
+            new_model_info = ModelInfo(
+                name=sie_id,
+                bundles=_matching_bundle_names(route_adapter_modules, self._bundles),
+            )
+
+            # Rebuild this model's profile-variant entries from scratch: drop
+            # every variant that belonged to sie_id (stale profiles must not
+            # survive a replace) and re-derive from the incoming profiles.
+            new_profile_variant_models = {
+                name: info
+                for name, info in self._profile_variant_models.items()
+                if self._profile_variant_base_models.get(name) != sie_id
+            }
+            new_profile_variant_names_lower = {
+                lower: name
+                for lower, name in self._profile_variant_names_lower.items()
+                if self._profile_variant_base_models.get(name) != sie_id
+            }
+            new_profile_variant_base_models = {
+                name: base for name, base in self._profile_variant_base_models.items() if base != sie_id
+            }
+            for profile_name in sorted(new_profile_names):
+                if profile_name == "default":
+                    continue
+                adapter_path = _effective_adapter_path(new_full_config["profiles"], profile_name)
+                module_path = _adapter_module_from_path(adapter_path)
+                variant_modules = {module_path} if module_path else set()
+                variant_name = f"{sie_id}:{profile_name}"
+                new_profile_variant_models[variant_name] = ModelInfo(
+                    name=variant_name,
+                    bundles=_matching_bundle_names(variant_modules, self._bundles),
+                )
+                new_profile_variant_names_lower[variant_name.lower()] = variant_name
+                new_profile_variant_base_models[variant_name] = sie_id
+                affected_bundles.extend(new_profile_variant_models[variant_name].bundles)
+            affected_bundles.sort()
+            affected_bundles = list(dict.fromkeys(affected_bundles))
+
+            self._models = {**self._models, sie_id: new_model_info}
+            if not existing:
+                self._model_names_lower = {**self._model_names_lower, sie_id.lower(): sie_id}
+            self._profile_variant_models = new_profile_variant_models
+            self._profile_variant_names_lower = new_profile_variant_names_lower
+            self._profile_variant_base_models = new_profile_variant_base_models
+            self._model_adapter_modules = {**self._model_adapter_modules, sie_id: new_adapter_modules_set}
+            self._model_profiles = {**self._model_profiles, sie_id: new_profile_names}
+            self._model_profile_configs = {**self._model_profile_configs, sie_id: new_profile_configs}
+            self._model_full_configs = {**self._model_full_configs, sie_id: new_full_config}
+
+            all_bundle_adapters: set[str] = set()
+            for bundle in self._bundles.values():
+                all_bundle_adapters.update(bundle.adapters)
+            missing_for_sie_id = new_adapter_modules_set - all_bundle_adapters
+            new_unrouteable = {m: set(mods) for m, mods in self._unrouteable_models.items()}
+            if missing_for_sie_id:
+                new_unrouteable[sie_id] = missing_for_sie_id
+            else:
+                new_unrouteable.pop(sie_id, None)
+            self._unrouteable_models = new_unrouteable
+
+            self._bundle_hash_cache = {}
+
+            logger.info(
+                "Replaced model config: %s (profiles=%s, bundles=%s)",
+                sie_id,
+                sorted(new_profile_names),
+                affected_bundles,
+            )
+            return affected_bundles
+
     def get_model_profile_names(self, model_name: str) -> set[str]:
         """Get known profile names for a model."""
         with self._lock:

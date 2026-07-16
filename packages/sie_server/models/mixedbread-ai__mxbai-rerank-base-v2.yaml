@@ -1,5 +1,6 @@
 sie_id: mixedbread-ai/mxbai-rerank-base-v2
 hf_id: mixedbread-ai/mxbai-rerank-base-v2
+hf_revision: 3ea9d4dffa7d12a4f366be8e275c349de9fc9865
 inputs:
   text: true
   image: false

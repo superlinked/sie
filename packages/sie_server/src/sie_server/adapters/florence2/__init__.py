@@ -126,7 +126,7 @@ class Florence2Adapter(BaseAdapter):
         Args:
             device: Device string (e.g., "cuda:0", "cpu").
         """
-        from transformers import AutoModelForCausalLM, AutoProcessor
+        from transformers import AutoModelForCausalLM
 
         self._device = device
 
@@ -145,11 +145,9 @@ class Florence2Adapter(BaseAdapter):
             self._attn_implementation,
         )
 
-        # Load processor with trust_remote_code (required for Florence-2 custom processor)
-        self._processor = AutoProcessor.from_pretrained(
-            self._model_name_or_path,
-            **shared_kwargs,
-        )
+        # Load the checkpoint's own (remote) processor. AutoProcessor alone is not
+        # safe on transformers >= 4.49 — see _load_processor for the incompatibility.
+        self._processor = self._load_processor(shared_kwargs)
 
         # Load model with trust_remote_code to use model's custom code
         # attn_implementation options: "eager", "sdpa", "flash_attention_2"
@@ -167,6 +165,90 @@ class Florence2Adapter(BaseAdapter):
         self._create_preprocessor()
 
         logger.info("Florence-2 model loaded successfully")
+
+    def _load_processor(self, shared_kwargs: dict[str, Any]) -> Any:
+        """Load the Florence-2 processor bound to the checkpoint's own remote code.
+
+        transformers >= 4.49 ships a *native* ``Florence2Processor`` (model type
+        ``florence2``). Its ``__init__`` reads ``tokenizer.image_token`` /
+        ``tokenizer.image_token_id``, which the published microsoft/Florence-2-*
+        checkpoints do not provide — they ship a plain ``BartTokenizerFast`` and a
+        remote ``processing_florence2.py``. When ``AutoProcessor`` resolves to the
+        native class (e.g. the staged copy's ``auto_map`` did not survive
+        re-serialization, or trust-remote-code was not honored) construction fails
+        with ``AttributeError: BartTokenizerFast has no attribute image_token``.
+
+        We therefore load the processor class declared in the checkpoint's
+        ``auto_map`` directly, so the checkpoint's own (Bart-compatible) remote
+        processor is always used regardless of the installed transformers version.
+        AutoProcessor is used only as a fallback for checkpoints/local paths that do
+        not advertise a remote processor.
+        """
+        from transformers import AutoProcessor
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        auto_map_ref = self._resolve_processor_auto_map(shared_kwargs)
+        if auto_map_ref is not None:
+            # Pass the auto_map ref verbatim: get_class_from_dynamic_module parses a
+            # "<upstream_repo>--module.Class" prefix itself and fetches the code from
+            # that upstream repo (the Florence-2-FT-DocVQA fork points at
+            # microsoft/Florence-2-base-ft). ``revision`` is applied only when the
+            # code lives in this checkpoint (same-repo), never to the upstream repo.
+            revision = shared_kwargs.get("revision")
+            processor_class = get_class_from_dynamic_module(
+                auto_map_ref,
+                self._model_name_or_path,
+                revision=revision,
+            )
+            logger.info(
+                "Loading Florence-2 processor from checkpoint remote code: %s",
+                auto_map_ref,
+            )
+            # processor_class is a ProcessorMixin subclass with .from_pretrained;
+            # get_class_from_dynamic_module is only typed as returning ``type``.
+            return processor_class.from_pretrained(  # ty: ignore[unresolved-attribute]
+                self._model_name_or_path, **shared_kwargs
+            )
+
+        # No remote processor advertised (e.g. a local export) — fall back to
+        # AutoProcessor and let transformers resolve the class.
+        logger.info("Florence-2 checkpoint has no remote processor auto_map; using AutoProcessor")
+        return AutoProcessor.from_pretrained(self._model_name_or_path, **shared_kwargs)
+
+    def _resolve_processor_auto_map(self, shared_kwargs: dict[str, Any]) -> str | None:
+        """Return the ``auto_map['AutoProcessor']`` ref for the checkpoint, if any.
+
+        Mirrors how ``AutoProcessor.from_pretrained`` discovers a remote processor:
+        it scans ``processor_config.json``, ``preprocessor_config.json`` and
+        ``tokenizer_config.json`` for an ``auto_map['AutoProcessor']`` entry — for
+        the microsoft/Florence-2-* checkpoints it lives in
+        ``preprocessor_config.json``. We only read the class *name*, never
+        instantiating the (possibly native, incompatible) processor.
+        """
+        import json
+
+        from transformers.utils import cached_file
+
+        revision = shared_kwargs.get("revision")
+        for filename in ("processor_config.json", "preprocessor_config.json", "tokenizer_config.json"):
+            try:
+                resolved = cached_file(
+                    self._model_name_or_path,
+                    filename,
+                    revision=revision,
+                    _raise_exceptions_for_missing_entries=False,
+                )
+            except Exception:  # noqa: BLE001 — auto_map discovery is best-effort; fall through to next config
+                logger.debug("Could not resolve %s for %s", filename, self._model_name_or_path, exc_info=True)
+                continue
+            if not resolved:
+                continue
+            with open(resolved, encoding="utf-8") as reader:
+                config_dict = json.load(reader)
+            ref = (config_dict.get("auto_map") or {}).get("AutoProcessor")
+            if isinstance(ref, str):
+                return ref
+        return None
 
     def _resolve_dtype(self) -> torch.dtype:
         """Resolve dtype based on device and config."""

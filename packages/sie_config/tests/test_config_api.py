@@ -1983,3 +1983,173 @@ class TestMissingRegistryReturns503:
         resp = client.get("/v1/configs/export")
         assert resp.status_code == 503
         assert resp.json()["detail"]["error"] == "registry_unavailable"
+
+
+class TestConfigAPIReplace:
+    """PUT /v1/configs/models/{id}: the catalog-convergence write (#1771).
+
+    Unlike append-only POST, PUT replaces a model's stored config wholesale so
+    a catalog entry whose content has drifted from the source YAML converges
+    (the stale-bge-m3 heal). Unchanged content is a genuine no-op (no epoch
+    churn). Same admin write-auth + Idempotency-Key semantics as POST.
+    """
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmpdir.name)
+        self._bundles = self._root / "bundles"
+        self._models = self._root / "models"
+        self._store = self._root / "store"
+        self._bundles.mkdir()
+        self._models.mkdir()
+        _write_bundle(self._bundles, "default", ["sie_server.adapters.bert_flash"])
+        self.app = _create_test_app(self._bundles, self._models, str(self._store))
+        self.client = TestClient(self.app)
+
+    def teardown_method(self) -> None:
+        self._tmpdir.cleanup()
+
+    @staticmethod
+    def _yaml(sie_id: str, *, tokens: int = 8192, profiles: str = "default") -> str:
+        blocks = "".join(
+            f"  {p}:\n    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n    max_batch_tokens: {tokens}\n"
+            for p in profiles.split(",")
+        )
+        return f"sie_id: {sie_id}\nprofiles:\n{blocks}"
+
+    def test_put_creates_new_model(self) -> None:
+        resp = self.client.put("/v1/configs/models/new/model", content=self._yaml("new/model"))
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["model_id"] == "new/model"
+        assert data["replaced"] is True
+        assert data["unchanged"] is False
+        assert self.app.state.config_store.read_model("new/model") is not None
+        assert self.app.state.config_store.read_epoch() == 1
+
+    def test_put_heals_a_differing_entry(self) -> None:
+        # Seed a "stale" entry (append-only POST would 409 on a changed
+        # profile) then converge it with a full replace.
+        assert self.client.post("/v1/configs/models", content=self._yaml("stale/model", tokens=1024)).status_code == 201
+        resp = self.client.put("/v1/configs/models/stale/model", content=self._yaml("stale/model", tokens=4096))
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["replaced"] is True
+
+        export = self.client.get("/v1/configs/export")
+        entry = {m["model_id"]: m for m in export.json()["models"]}["stale/model"]
+        assert entry["model_config"]["profiles"]["default"]["max_batch_tokens"] == 4096
+
+    def test_put_unchanged_content_is_a_noop_no_epoch_bump(self) -> None:
+        body = self._yaml("noop/model")
+        assert self.client.put("/v1/configs/models/noop/model", content=body).status_code == 200
+        epoch_after_first = self.app.state.config_store.read_epoch()
+        assert epoch_after_first == 1
+
+        resp = self.client.put("/v1/configs/models/noop/model", content=body)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["unchanged"] is True
+        assert resp.json()["replaced"] is False
+        # No churn: the epoch must not advance on an unchanged re-sync.
+        assert self.app.state.config_store.read_epoch() == epoch_after_first
+
+    def test_put_drops_stale_profiles(self) -> None:
+        # Seed two profiles, then replace with only one — the dropped profile
+        # must not survive (replace is not a merge).
+        assert (
+            self.client.put(
+                "/v1/configs/models/multi/model", content=self._yaml("multi/model", profiles="default,fast")
+            ).status_code
+            == 200
+        )
+        resp = self.client.put("/v1/configs/models/multi/model", content=self._yaml("multi/model", profiles="default"))
+        assert resp.status_code == 200, resp.text
+
+        export = self.client.get("/v1/configs/export")
+        entry = {m["model_id"]: m for m in export.json()["models"]}["multi/model"]
+        assert set(entry["model_config"]["profiles"]) == {"default"}
+
+    def test_put_body_sie_id_mismatch_is_400(self) -> None:
+        resp = self.client.put("/v1/configs/models/path/id", content=self._yaml("other/id"))
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"] == "model_id_mismatch"
+
+    def test_put_defaults_sie_id_from_path(self) -> None:
+        body = (
+            "profiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:Bert\n    max_batch_tokens: 8192\n"
+        )
+        resp = self.client.put("/v1/configs/models/derived/id", content=body)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["model_id"] == "derived/id"
+
+    def test_put_unroutable_adapter_is_422(self) -> None:
+        body = "profiles:\n  default:\n    adapter_path: sie_server.adapters.unknown:X\n    max_batch_tokens: 8192\n"
+        resp = self.client.put("/v1/configs/models/bad/model", content=body)
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["error"] == "validation_error"
+
+    def test_put_invalid_yaml_is_400(self) -> None:
+        resp = self.client.put("/v1/configs/models/x/y", content="{{bad")
+        assert resp.status_code == 400
+
+    def test_put_requires_admin_token(self, monkeypatch) -> None:
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "admin-secret")
+        resp = self.client.put("/v1/configs/models/auth/model", content=self._yaml("auth/model"))
+        assert resp.status_code == 401  # missing Authorization header
+        resp = self.client.put(
+            "/v1/configs/models/auth/model",
+            content=self._yaml("auth/model"),
+            headers={"Authorization": "Bearer wrong"},
+        )
+        assert resp.status_code == 403
+        resp = self.client.put(
+            "/v1/configs/models/auth/model",
+            content=self._yaml("auth/model"),
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    def test_put_idempotency_key_replay(self) -> None:
+        body = self._yaml("idem/model")
+        headers = {"Idempotency-Key": "put-k1"}
+        r1 = self.client.put("/v1/configs/models/idem/model", content=body, headers=headers)
+        assert r1.status_code == 200, r1.text
+        r2 = self.client.put("/v1/configs/models/idem/model", content=body, headers=headers)
+        assert r2.status_code == 200
+        assert r2.json() == r1.json()
+        # Exactly one write applied.
+        assert self.app.state.config_store.read_epoch() == 1
+
+    def test_put_idempotency_key_reuse_different_body_is_422(self) -> None:
+        headers = {"Idempotency-Key": "put-k2"}
+        assert (
+            self.client.put(
+                "/v1/configs/models/idem2/model", content=self._yaml("idem2/model", tokens=1024), headers=headers
+            ).status_code
+            == 200
+        )
+        resp = self.client.put(
+            "/v1/configs/models/idem2/model", content=self._yaml("idem2/model", tokens=2048), headers=headers
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["error"] == "idempotency_mismatch"
+
+    def test_put_idempotency_same_key_body_different_path_does_not_false_replay(self) -> None:
+        # The idempotency cache is application-wide, so the fingerprint folds in
+        # the request target (model path). A body that omits sie_id (filled from
+        # the path) is byte-identical across two paths; WITHOUT the target in the
+        # fingerprint the second PUT would replay the first (returning 200 with
+        # model_id="idemx/first") and never write idemx/second. WITH it the second
+        # request has a distinct fingerprint, so it is caught as a key reused with a
+        # different payload (422) rather than silently mis-written as the first.
+        body = "profiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
+        headers = {"Idempotency-Key": "put-shared"}
+        r1 = self.client.put("/v1/configs/models/idemx/first", content=body, headers=headers)
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["model_id"] == "idemx/first"
+        r2 = self.client.put("/v1/configs/models/idemx/second", content=body, headers=headers)
+        # NOT a false 200 replay writing the wrong model — the target is in the hash.
+        assert r2.status_code == 422
+        assert r2.json()["detail"]["error"] == "idempotency_mismatch"
+        # The first model still exists; the second was never (mis)written under the key.
+        assert self.client.get("/v1/configs/models/idemx/first").status_code == 200
+        assert self.client.get("/v1/configs/models/idemx/second").status_code == 404

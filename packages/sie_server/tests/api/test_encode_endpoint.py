@@ -218,6 +218,8 @@ class TestEncodeEndpoint:
     def test_encode_model_not_found(self, client: TestClient, mock_registry: MagicMock) -> None:
         """Returns 404 for unknown model."""
         mock_registry.has_model.return_value = False
+        # Real registry raises for unknown models: guards the KeyError-500 regression.
+        mock_registry.get_worker.side_effect = KeyError("Model 'unknown-model' not found in registry")
         response = client.post(
             "/v1/encode/unknown-model",
             json={"items": [{"text": "Hello"}]},

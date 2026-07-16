@@ -9,6 +9,16 @@ gets back. The raw bytes and any PII reach your edge, never the model API.
 cluster credential, exposes the document tools below over streamable-HTTP MCP, and
 authenticates clients with a connector secret.
 
+The offload is context management as much as it is privacy and cost. A parsed artifact
+is roughly 85% fewer tokens than native document ingestion (the text plus a rendered
+image per page), which does three things at once: it cuts the token bill, it keeps raw
+bytes and PII on the cluster, and it keeps the agent's context window small. The last
+one matters because models measurably degrade as context fills (context rot, the
+lost-in-the-middle effect), so an agent that works from artifacts instead of raw
+documents stays accurate deeper into a session and hits context compaction later. The
+effect is strongest for `docs_to_markdown` (near-lossless density win); the summarize
+and extract tools trade some information for even smaller context.
+
 ![SIE MCP edge architecture: Claude connects over MCP to the sie-mcp edge in your VPC, which holds the cluster credential and calls the SIE gateway and GPU workers](docs/architecture.png)
 
 > Editable source: [`docs/architecture.excalidraw`](docs/architecture.excalidraw), open at [excalidraw.com](https://excalidraw.com) or the VS Code / Obsidian Excalidraw plugin.
@@ -78,8 +88,8 @@ From the repo root:
 export SIE_MCP_URL="https://<mcp-host>/mcp"
 export SIE_MCP_CONNECTOR_SECRET="<connector-secret>"
 
-mise run mcp-plugin-pack -- \
-  --cluster-label sie-test \
+uv run --package sie-mcp sie-mcp plugin-pack \
+  --cluster-label sie \
   --mcp-url "$SIE_MCP_URL"
 ```
 
@@ -112,7 +122,7 @@ Use the full plugin pack for normal installs. If you only need the uploadable
 claude.ai skill ZIP:
 
 ```bash
-mise exec -- uv run --package sie-mcp python -m sie_mcp.cli skill-zip
+uv run --package sie-mcp sie-mcp skill-zip
 ```
 
 By default this writes
@@ -129,7 +139,7 @@ export SIE_BASE_URL="https://<cluster-gateway>"
 export SIE_API_KEY="<cluster-api-key>"                 # omit if the gateway has no auth
 export SIE_MCP_CONNECTOR_SECRETS="local-dev-secret:local-dev"
 
-mise run mcp-serve -- --host 127.0.0.1 --port 8088
+uv run --package sie-mcp sie-mcp serve --host 127.0.0.1 --port 8088
 ```
 
 In another shell, verify the server:
@@ -189,7 +199,7 @@ connector client: remote streamable HTTP plus an Authorization bearer secret.
 List the tools:
 
 ```bash
-mise exec -- uv run --package sie-mcp python packages/sie_mcp/docs/examples/mcp_smoke.py \
+uv run --package sie-mcp python packages/sie_mcp/docs/examples/mcp_smoke.py \
   --url http://127.0.0.1:8088/mcp \
   --secret local-dev-secret \
   --list
@@ -198,7 +208,7 @@ mise exec -- uv run --package sie-mcp python packages/sie_mcp/docs/examples/mcp_
 Convert a sample HTML document to markdown:
 
 ```bash
-mise exec -- uv run --package sie-mcp python packages/sie_mcp/docs/examples/mcp_smoke.py \
+uv run --package sie-mcp python packages/sie_mcp/docs/examples/mcp_smoke.py \
   --url http://127.0.0.1:8088/mcp \
   --secret local-dev-secret \
   --file packages/sie_mcp/docs/examples/sample.html \
@@ -211,7 +221,7 @@ For a quick custom document:
 ```bash
 printf '<h1>Hello</h1><p>local smoke test</p>' > /tmp/sie-mcp-smoke.html
 
-mise exec -- uv run --package sie-mcp python packages/sie_mcp/docs/examples/mcp_smoke.py \
+uv run --package sie-mcp python packages/sie_mcp/docs/examples/mcp_smoke.py \
   --url http://127.0.0.1:8088/mcp \
   --secret local-dev-secret \
   --file /tmp/sie-mcp-smoke.html \
@@ -226,13 +236,13 @@ The first model-backed request can be slow while the cluster loads models.
 Run the package tests from the repo root:
 
 ```bash
-mise exec -- uv run --package sie-mcp python -m pytest packages/sie_mcp/tests
+uv run --package sie-mcp python -m pytest packages/sie_mcp/tests
 ```
 
 For a focused check of this plugin-pack and PR #1336 integration path:
 
 ```bash
-mise exec -- uv run --package sie-mcp python -m pytest \
+uv run --package sie-mcp python -m pytest \
   packages/sie_mcp/tests/test_offload.py \
   packages/sie_mcp/tests/test_plugin_pack.py \
   packages/sie_mcp/tests/test_skill_zip.py
@@ -241,7 +251,6 @@ mise exec -- uv run --package sie-mcp python -m pytest \
 Useful lightweight checks:
 
 ```bash
-bash -n tools/mise_tasks/mcp-plugin-pack.bash
 git diff --check
 ```
 
@@ -250,7 +259,7 @@ git diff --check
 Once the local edge is running, generate an install pack that points at it:
 
 ```bash
-SIE_MCP_CONNECTOR_SECRET=local-dev-secret mise run mcp-plugin-pack -- \
+SIE_MCP_CONNECTOR_SECRET=local-dev-secret uv run --package sie-mcp sie-mcp plugin-pack \
   --cluster-label local-dev \
   --mcp-url http://127.0.0.1:8088/mcp \
   --out-dir /tmp/sie-mcp-plugin-pack
@@ -260,13 +269,7 @@ Then follow `/tmp/sie-mcp-plugin-pack/INSTALL.md`.
 
 ## Build And Run The Docker Server
 
-Build with the repo's Docker task:
-
-```bash
-mise run docker -- --mcp --docker-platform linux/amd64 --bake-tag local
-```
-
-Or build directly:
+Build from the repo root:
 
 ```bash
 docker build -t sie-mcp:local -f packages/sie_mcp/Dockerfile .
@@ -335,7 +338,7 @@ curl -s https://<mcp-host>/healthz
 Then generate a user install pack:
 
 ```bash
-SIE_MCP_CONNECTOR_SECRET=tester-secret mise run mcp-plugin-pack -- \
+SIE_MCP_CONNECTOR_SECRET=tester-secret uv run --package sie-mcp sie-mcp plugin-pack \
   --cluster-label <cluster-name> \
   --mcp-url https://<mcp-host>/mcp
 ```

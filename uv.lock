@@ -5723,7 +5723,7 @@ dev = [
 
 [[package]]
 name = "sie-admin"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "packages/sie_admin" }
 dependencies = [
     { name = "httpx" },
@@ -5756,7 +5756,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-bench"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "packages/sie_bench" }
 dependencies = [
     { name = "aiohttp" },
@@ -5841,7 +5841,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-chroma"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "integrations/sie_chroma" }
 dependencies = [
     { name = "chromadb" },
@@ -5913,7 +5913,7 @@ dev = [
 
 [[package]]
 name = "sie-crewai"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "integrations/sie_crewai" }
 dependencies = [
     { name = "crewai" },
@@ -5938,7 +5938,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-dspy"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "integrations/sie_dspy" }
 dependencies = [
     { name = "dspy" },
@@ -5963,7 +5963,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-haystack"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "integrations/sie_haystack" }
 dependencies = [
     { name = "haystack-ai" },
@@ -5990,7 +5990,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-lancedb"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "integrations/sie_lancedb" }
 dependencies = [
     { name = "lancedb" },
@@ -6017,7 +6017,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-langchain"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "integrations/sie_langchain" }
 dependencies = [
     { name = "langchain-core" },
@@ -6044,7 +6044,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-llamaindex"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "integrations/sie_llamaindex" }
 dependencies = [
     { name = "llama-index-core" },
@@ -6110,7 +6110,7 @@ dev = [
 
 [[package]]
 name = "sie-qdrant"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "integrations/sie_qdrant" }
 dependencies = [
     { name = "qdrant-client" },
@@ -6133,7 +6133,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-sdk"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "packages/sie_sdk" }
 dependencies = [
     { name = "aiohttp" },
@@ -6186,7 +6186,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-server"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "packages/sie_server" }
 dependencies = [
     { name = "blake3" },
@@ -6324,7 +6324,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-weaviate"
-version = "0.6.18"
+version = "0.6.19"
 source = { editable = "integrations/sie_weaviate" }
 dependencies = [
     { name = "sie-sdk" },

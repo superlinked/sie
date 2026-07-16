@@ -210,6 +210,7 @@ impl BackendRouter {
                     ReadinessState::LoadingStarted => "loading_started",
                     ReadinessState::LoadingInProgress => "loading_in_progress",
                     ReadinessState::RetryLater => "retry_later",
+                    ReadinessState::Failed => "failed",
                 },
                 Err(BackendError::UnsupportedModel(_)) => "unsupported",
                 Err(BackendError::Draining) => "draining",

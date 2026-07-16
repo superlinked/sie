@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from sie_server.adapters._spec import AdapterSpec
@@ -32,6 +35,19 @@ class BaseAdapter(ModelAdapter):
     """
 
     spec: ClassVar[AdapterSpec]
+
+    # Guards the lazy creation of each instance's ``_tokenizer_lock`` (below).
+    # A HuggingFace *fast* tokenizer wraps a Rust object behind a ``RefCell``:
+    # calling it from two threads at once — or mutating shared state like
+    # ``pad_token_id`` mid-call — raises ``RuntimeError("Already borrowed")``.
+    # On the managed worker path the single-threaded inference executor runs an
+    # adapter's ``encode()`` (which tokenizes) while a *different* asyncio
+    # thread-pool thread runs the §7.3 metering fallback
+    # (``count_input_tokens`` → ``_token_counts_or_none``) for another
+    # concurrent request against the *same* tokenizer object. Both sides take
+    # ``_tokenizer_guard()`` so tokenizer access is serialised per adapter
+    # instance and can never overlap. See issue #1800.
+    _tokenizer_lock_init: ClassVar[threading.Lock] = threading.Lock()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -165,6 +181,32 @@ class BaseAdapter(ModelAdapter):
             raise NotImplementedError(msg)
         return grouped_score_pairs(self.score, queries, docs, instruction=instruction)
 
+    # -- Tokenizer concurrency guard -----------------------------------------
+
+    @contextmanager
+    def _tokenizer_guard(self) -> Iterator[None]:
+        """Serialise access to ``self._tokenizer`` across threads.
+
+        HuggingFace fast tokenizers are not re-entrant: concurrent calls (or a
+        ``pad_token_id`` swap mid-call) raise ``RuntimeError("Already
+        borrowed")``. The encode/score paths tokenize on the inference-executor
+        thread while the metering fallback tokenizes on an asyncio thread-pool
+        thread for a *different* concurrent request; wrapping both in this lock
+        prevents the collision. The lock is created lazily (adapters set
+        ``self._tokenizer`` in their own ``__init__``/``load`` and don't all
+        call ``super().__init__``) under a class-level lock so two threads
+        cannot race to build it. See issue #1800.
+        """
+        lock = getattr(self, "_tokenizer_lock", None)
+        if lock is None:
+            with BaseAdapter._tokenizer_lock_init:
+                lock = getattr(self, "_tokenizer_lock", None)
+                if lock is None:
+                    lock = threading.Lock()
+                    self._tokenizer_lock = lock
+        with lock:
+            yield
+
     # -- Unit-meter token counting (§7.3) ------------------------------------
 
     def _metering_tokenizer(self) -> Any | None:
@@ -236,7 +278,11 @@ class BaseAdapter(ModelAdapter):
             texts.append(text)
         if not texts:
             return []
-        return self._token_counts_or_none(tokenizer, texts, expected_len=len(items))
+        # Serialise against the encode/score tokenization running on the
+        # inference-executor thread — a bare fast tokenizer raises ``Already
+        # borrowed`` when re-tokenized concurrently (#1800).
+        with self._tokenizer_guard():
+            return self._token_counts_or_none(tokenizer, texts, expected_len=len(items))
 
     def count_pair_input_tokens(
         self,
@@ -269,12 +315,15 @@ class BaseAdapter(ModelAdapter):
             doc_texts.append(doc_text)
         if not doc_texts:
             return []
-        return self._token_counts_or_none(
-            tokenizer,
-            [query_text] * len(doc_texts),
-            doc_texts,
-            expected_len=len(docs),
-        )
+        # Serialise against the encode/score tokenization on the inference
+        # thread (#1800), same as ``count_input_tokens``.
+        with self._tokenizer_guard():
+            return self._token_counts_or_none(
+                tokenizer,
+                [query_text] * len(doc_texts),
+                doc_texts,
+                expected_len=len(docs),
+            )
 
     def _token_counts_or_none(
         self,
@@ -288,6 +337,13 @@ class BaseAdapter(ModelAdapter):
         per-entry ``len(input_ids)``; ``None`` on any quirk so a malformed count
         is never mis-attributed.
         """
+        # NOTE: callers that already hold ``_tokenizer_guard()`` (e.g. CLIP /
+        # SigLIP ``_encode_texts`` serialise the whole tokenize-then-count block
+        # under their own ``_tokenizer_lock``) invoke this helper directly, so it
+        # must NOT re-acquire the guard — the lock is non-reentrant and would
+        # deadlock. Serialisation for the standalone metering path is applied at
+        # the ``count_input_tokens`` / ``count_pair_input_tokens`` entry points
+        # instead. See issue #1800.
         max_length = self._metering_max_length()
         try:
             if text_pair is not None:

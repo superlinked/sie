@@ -1,5 +1,6 @@
 sie_id: colbert-ir/colbertv2.0
 hf_id: colbert-ir/colbertv2.0
+hf_revision: c1e84128e85ef755c096a95bdb06b47793b13acf
 inputs:
   text: true
   image: false

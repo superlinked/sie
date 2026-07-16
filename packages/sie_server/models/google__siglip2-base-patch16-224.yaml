@@ -1,5 +1,6 @@
 sie_id: google/siglip2-base-patch16-224
 hf_id: google/siglip2-base-patch16-224
+hf_revision: 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2
 inputs:
   text: true
   image: true

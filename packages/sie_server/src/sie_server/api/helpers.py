@@ -154,9 +154,14 @@ def extract_request_context(
         if token:
             api_key = _mask_api_key(token)
 
-    # queue_depth: from worker's pending_count
+    # queue_depth: from worker's pending_count. Best-effort: endpoints call this
+    # before check_exists(), so an unknown model must fall through to their 404
+    # instead of KeyError-500ing here.
     queue_depth: int | None = None
-    worker = registry.get_worker(model)
+    try:
+        worker = registry.get_worker(model)
+    except KeyError:
+        worker = None
     if worker is not None:
         queue_depth = worker.pending_count
 

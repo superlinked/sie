@@ -19,6 +19,7 @@ bge-m3 / GLiNER / cross_encoder keep their exact values).
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -30,6 +31,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.bert_flash import BertFlashAdapter
 from sie_server.adapters.clip import CLIPAdapter
 from sie_server.adapters.colbert import ColBERTAdapter
+from sie_server.adapters.cross_encoder import CrossEncoderAdapter
 from sie_server.adapters.jina_flash_cross_encoder import JinaFlashCrossEncoderAdapter
 from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
 from sie_server.adapters.siglip import SiglipAdapter
@@ -864,3 +866,162 @@ class TestVisionTextTokenStamp:
         adapter._encode_texts = fake_encode_texts  # type: ignore[method-assign]
         out = adapter.encode([Item(text="a b c")], ["dense"])
         assert out.extra["input_token_counts"] == [5]
+
+
+# ---------------------------------------------------------------------------
+# cross_encoder predict/metering concurrency guard (#1800 class-fix, #1782)
+# ---------------------------------------------------------------------------
+
+
+class _ReentrancyDetectingTokenizer:
+    """Emulates a HuggingFace fast tokenizer's non-re-entrancy.
+
+    A real fast tokenizer wraps a Rust object behind a ``RefCell``; a second
+    call that begins while a first is still in flight raises
+    ``RuntimeError("Already borrowed")`` (#1800). This fake reproduces that
+    exact failure mode: it raises if two calls are inside a tokenizer call at
+    the same time, so a correct serialization guard makes it pass and a missing
+    guard makes it fail. It matches the shape the base metering counter expects
+    (list-of-lists ``input_ids``, joint ``(text, text_pair)`` support).
+    """
+
+    def __init__(self, model_max_length: int = 512) -> None:
+        self.model_max_length = model_max_length
+        self._active = 0
+        self._active_lock = threading.Lock()
+
+    def _enter(self) -> None:
+        with self._active_lock:
+            if self._active != 0:
+                raise RuntimeError("Already borrowed")
+            self._active += 1
+
+    def _exit(self) -> None:
+        with self._active_lock:
+            self._active -= 1
+
+    def __call__(
+        self,
+        text: list[str] | str,
+        text_pair: list[str] | str | None = None,
+        *,
+        truncation: bool = False,
+        max_length: int | None = None,
+        **_: Any,
+    ) -> dict[str, list[list[int]]]:
+        self._enter()
+        try:
+            # Simulate real tokenizer latency so overlapping threads collide.
+            time.sleep(0.002)
+            texts = [text] if isinstance(text, str) else list(text)
+            if text_pair is not None:
+                pairs = [text_pair] if isinstance(text_pair, str) else list(text_pair)
+                lengths = [len(a.split()) + len(b.split()) + 3 for a, b in zip(texts, pairs, strict=True)]
+            else:
+                lengths = [len(t.split()) + 2 for t in texts]
+            if truncation and max_length is not None:
+                lengths = [min(n, max_length) for n in lengths]
+            return {"input_ids": [[0] * n for n in lengths]}
+        finally:
+            self._exit()
+
+
+class TestCrossEncoderTokenizerConcurrencyGuard:
+    """Regression for the #1800 class-fix on the sentence-transformers
+    ``CrossEncoderAdapter``.
+
+    ``score_pairs`` runs on the single inference-executor thread and does two
+    things against the SAME ``self._model.tokenizer``: ``CrossEncoder.predict``
+    tokenizes internally (fused with the GPU forward), then the inline
+    ``_pair_input_token_counts`` re-tokenizes the pairs for §7.3 metering. The
+    shared ``count_pair_input_tokens`` metering fallback re-tokenizes the very
+    same tokenizer on a separate thread-pool thread for another concurrent
+    request. A bare HF fast tokenizer raises ``Already borrowed`` when two
+    tokenize calls overlap; ``_tokenizer_guard()`` on the encode/score-side
+    re-tokenize (the sibling of the guard the metering entry point already
+    holds) must serialise them.
+    """
+
+    def _make_adapter(self, tokenizer: _ReentrancyDetectingTokenizer) -> CrossEncoderAdapter:
+        adapter = CrossEncoderAdapter("stub/reranker")
+        adapter._device = "cpu"
+
+        def _fake_predict(pairs: list[tuple[str, str]]) -> np.ndarray:
+            # Mirror CrossEncoder.predict: tokenize the batch (fused with the
+            # forward) on the same tokenizer the metering path re-tokenizes.
+            tokenizer([q for q, _ in pairs], [d for _, d in pairs], truncation=True, max_length=512)
+            return np.zeros(len(pairs), dtype=np.float32)
+
+        model = MagicMock()
+        model.predict.side_effect = _fake_predict
+        model.tokenizer = tokenizer
+        model.max_length = 512
+        adapter._model = model  # ty: ignore[invalid-assignment]
+        return adapter
+
+    def test_score_and_metering_do_not_collide_under_concurrency(self) -> None:
+        """Batched scoring on one thread and metering-tokenizing on another must
+        not raise ``Already borrowed`` — the guard serialises tokenizer access.
+        """
+        tokenizer = _ReentrancyDetectingTokenizer()
+        adapter = self._make_adapter(tokenizer)
+        query = Item(text="the query terms")
+        docs = [Item(text="doc one"), Item(text="a considerably longer document body")]
+        queries = [query] * len(docs)
+
+        errors: list[BaseException] = []
+        stop = threading.Event()
+
+        def score_loop() -> None:
+            try:
+                for _ in range(40):
+                    if stop.is_set():
+                        return
+                    out = adapter.score_pairs(queries, docs)
+                    assert out.input_token_counts is not None
+                    assert len(out.input_token_counts) == len(docs)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        def metering_loop() -> None:
+            try:
+                for _ in range(40):
+                    if stop.is_set():
+                        return
+                    counts = adapter.count_pair_input_tokens(query, docs)
+                    assert counts is not None
+                    assert len(counts) == len(docs)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=score_loop) for _ in range(2)]
+        threads += [threading.Thread(target=metering_loop) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        stop.set()
+
+        assert not errors, f"tokenizer collision under concurrency: {errors!r}"
+
+    def test_reentrancy_detector_fires_without_guard(self) -> None:
+        """Sanity check the harness: bare concurrent tokenizer calls (no guard)
+        DO raise ``Already borrowed`` — otherwise the guard test is vacuous.
+        """
+        tokenizer = _ReentrancyDetectingTokenizer()
+        errors: list[BaseException] = []
+
+        def call_loop() -> None:
+            try:
+                for _ in range(40):
+                    tokenizer(["a", "b c"], ["x", "y z"], truncation=True, max_length=512)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=call_loop) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert any(isinstance(e, RuntimeError) and "Already borrowed" in str(e) for e in errors)

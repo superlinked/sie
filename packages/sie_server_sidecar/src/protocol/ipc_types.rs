@@ -175,6 +175,19 @@ pub enum ReadinessState {
     LoadingStarted,
     LoadingInProgress,
     RetryLater,
+    /// Terminal, non-retryable load failure. The Python executor
+    /// reports this when the registry holds a PERMANENT `LoadFailure`
+    /// (`cooldown=permanent`: `GATED` / `NOT_FOUND` / `DEPENDENCY` /
+    /// `UNKNOWN`) — the same classification the direct-HTTP
+    /// `check_not_failed` gate and the Modal lane's
+    /// `worker_runtime._terminal_load_failure` use for #1786. It exists
+    /// so the sidecar can DISTINGUISH "still loading" (retry) from
+    /// "dead on arrival" (dead-letter): on `Failed` the dispatcher stops
+    /// re-driving `EnsureModelReady` and publishes a typed
+    /// `MODEL_LOAD_FAILED` error `WorkResult` (gateway → 502), matching
+    /// the batch/`run_batch` path. Wire format is the plain string
+    /// `"failed"` (see Python `ReadinessState` Literal).
+    Failed,
 }
 
 /// Model descriptor carried on the `EnsureModelReady` handshake.
@@ -959,6 +972,14 @@ mod tests {
 
         let s = serde_json::to_string(&ReadinessState::RetryLater).unwrap();
         assert_eq!(s, "\"retry_later\"");
+
+        // Terminal load-failure variant — the string the Python executor
+        // sends so the sidecar can dead-letter instead of re-driving.
+        let s = serde_json::to_string(&ReadinessState::Failed).unwrap();
+        assert_eq!(s, "\"failed\"");
+        let bytes = rmp_serde::to_vec_named(&ReadinessState::Failed).unwrap();
+        let back: ReadinessState = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back, ReadinessState::Failed);
     }
 
     #[test]

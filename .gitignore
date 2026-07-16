@@ -272,4 +272,5 @@ tmp/
 .local/
 
 .requirements-modal.txt
+b6_results.json
 packages/sie_cloud/deploy/manifests/archive/

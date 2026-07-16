@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.6.19
+
+- chore(main): release 0.6.19
+- fix(gateway): bump yanked spin 0.10.0 to 0.10.1 in Cargo.lock
+- fix(server): return 404 instead of 500 for unknown models on inference endpoints
+- fix(server): guard cross_encoder predict tokenization against the concurrent-metering race (class-fix for #1800)
+- fix(server): colbert-small multivector encode returns one vector-set per input, worker-item order (#1800)
+- fix(server): load tokenizer by pinned revision so offline chat-template rendering doesn't need refs/main (#1801)
+- fix(server): terminal Failed readiness state so the sidecar dead-letters permanently-failed model loads
+- chore(models): pin hf_revision for 12 unpinned launch-set models (§6.6)
+- fix(server): Florence-2 processor compat with transformers 4.57
+- docs(mcp): portable uv commands + context-management framing in README
+- fix(cloud): address CodeRabbit review findings on #1782
+- feat(cloud): idempotent catalog-sync converges the config catalog to in-repo model YAMLs (#1771)
+
 ## v0.6.18
 
 - chore(main): release 0.6.18

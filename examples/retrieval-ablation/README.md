@@ -109,7 +109,7 @@ See [RESULTS.md](RESULTS.md) for full methodology, all benchmarking conditions, 
 
 - **Model-agnostic**: swap `bge-m3` for `jina-colbert-v2` with one parameter change
 - **Multi-model pipelines**: two encoders plus a cross-encoder rerank in one script, one cluster
-- **85+ models available**: not locked into one vendor's embeddings
+- **100+ models available**: not locked into one vendor's embeddings
 - **Async-native**: fire hundreds of concurrent requests, SIE handles batching and GPU scheduling
 
 ## API Keys Required

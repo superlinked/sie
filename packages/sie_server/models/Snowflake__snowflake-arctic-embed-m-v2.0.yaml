@@ -1,5 +1,6 @@
 sie_id: Snowflake/snowflake-arctic-embed-m-v2.0
 hf_id: Snowflake/snowflake-arctic-embed-m-v2.0
+hf_revision: 95c2741480856aa9666782eb4afe11959938017f
 inputs:
   text: true
   image: false

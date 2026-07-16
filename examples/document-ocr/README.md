@@ -153,7 +153,7 @@ SIE collapses that into one process:
   end-to-end document AI, and zero-shot NER. Swap the model ID alone.
 - **Open source, runs in your VPC.** Customer documents never leave the
   host running this compose. Compliance teams stop blocking you.
-- **85+ models, swappable.** Need a different OCR-VLM, a domain-tuned
+- **A full catalog of models, swappable.** Need a different OCR-VLM, a domain-tuned
   GLiNER, a layout model, a multilingual reranker, or a custom LoRA?
   All live in the same catalog. Swap a model ID in `src/config.ts`.
 - **Same code laptop to Kubernetes.** SIE ships a Helm chart, KEDA
@@ -252,7 +252,7 @@ HTML + CSS + JavaScript driven by `EventSource` for the SSE stream from SIE.
   with layout + table-structure detection in one call.
 - **Embed the recognized text.** Pair `extract` with `client.encode` to
   build a semantic search index over your processed documents. The SDK
-  call is the same; the model ID picks an embedding model from SIE's 85+
+  call is the same; the model ID picks an embedding model from SIE's catalog of 100+
   catalog.
 - **Fine-tune for your schema.** If your documents look like one of the
   Donut training corpora (CORD, RVL-CDIP, DocVQA), pick the matching

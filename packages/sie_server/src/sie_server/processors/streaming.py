@@ -2943,10 +2943,20 @@ class StreamingProcessor:
             if not isinstance(source, str | Path):
                 msg = f"model '{model_id}' has no hf_id or weights_path; cannot load tokenizer"
                 raise RuntimeError(msg)
+            # Pin the tokenizer load to the model's immutable ``hf_revision``
+            # when loading from an ``hf_id`` — mirrors how the weights loader
+            # pins the revision (``core/loader.py``). Under ``HF_HUB_OFFLINE=1``
+            # the offline HF cache resolves the exact ``snapshots/<sha>`` dir
+            # directly and never touches the ``refs/main`` alias (absent for
+            # repos staged by pinned SHA), which otherwise fails the
+            # chat-template render (#1801). A local ``weights_path`` has no HF
+            # revision, so it stays unpinned.
+            revision = config.hf_revision if config.hf_id else None
             tok = await asyncio.to_thread(
                 load_tokenizer,
                 source,
                 trust_remote_code=True,
+                revision=revision,
             )
             self._tokenizers[model_id] = tok
             return tok
