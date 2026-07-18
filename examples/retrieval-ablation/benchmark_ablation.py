@@ -10,6 +10,7 @@ Conditions:
 
 Usage:
     uv run python benchmark_ablation.py --gpu l4-spot
+    uv run python benchmark_ablation.py --sample --gpu l4-spot
     uv run python benchmark_ablation.py --gpu l4-spot --skip-conditions 5,6
     uv run python benchmark_ablation.py --gpu rtx6000-spot --skip-conditions 1,2,3,4,5
 """
@@ -78,8 +79,12 @@ ALL_MV_MODELS = {
     "colbertv2": {"model": "colbert-ir/colbertv2.0", "dim": 128, "max_tokens": 512},
 }
 
-CACHE_DIR = Path(__file__).parent / "cache" / "ablation"
-RESULTS_CSV = Path(__file__).parent / "ablation_results.csv"
+EXAMPLE_DIR = Path(__file__).parent
+CACHE_DIR = EXAMPLE_DIR / "cache" / "ablation"
+RESULTS_CSV = EXAMPLE_DIR / "ablation_results.csv"
+SAMPLE_FIXTURE = EXAMPLE_DIR / "fixtures" / "sample.json"
+SAMPLE_MAX_DOCUMENTS = 12
+SAMPLE_MAX_QUERIES = 6
 
 
 # ── Caching ────────────────────────────────────────────────────────────────
@@ -206,11 +211,11 @@ def write_results_csv(results_log, path):
         writer.writerows(results_log)
 
 
-def append_result(results_log, result):
+def append_result(results_log, result, path=RESULTS_CSV):
     results_log.append(result)
-    write_results_csv(results_log, RESULTS_CSV)
+    write_results_csv(results_log, path)
     logger.info(
-        f"  -> {result.get('condition')}: NDCG@10={result.get('ndcg@10')} [{len(results_log)} results in {RESULTS_CSV}]"
+        f"  -> {result.get('condition')}: NDCG@10={result.get('ndcg@10')} [{len(results_log)} results in {path}]"
     )
 
 
@@ -266,6 +271,71 @@ def load_dataset():
     query_items = [{"query_id": r["query_id"], "text": r["query"]} for r in queries.iter_rows(named=True)]
     logger.info(
         f"Corpus: {len(corpus_items)}, Queries: {len(query_items)}, Qrels: {sum(len(v) for v in qrel_map.values())}"
+    )
+    return corpus_items, query_items, qrel_map
+
+
+def load_sample_dataset(path=SAMPLE_FIXTURE):
+    """Load and validate the checked-in bounded sample."""
+    fixture = json.loads(path.read_text())
+    documents = fixture.get("documents")
+    queries = fixture.get("queries")
+    if not isinstance(documents, list) or not documents or len(documents) > SAMPLE_MAX_DOCUMENTS:
+        raise ValueError(f"sample must contain 1-{SAMPLE_MAX_DOCUMENTS} documents")
+    if not isinstance(queries, list) or not queries or len(queries) > SAMPLE_MAX_QUERIES:
+        raise ValueError(f"sample must contain 1-{SAMPLE_MAX_QUERIES} queries")
+
+    corpus_items = []
+    document_ids = set()
+    for document in documents:
+        corpus_id = document.get("id")
+        title = document.get("title")
+        text = document.get("text")
+        if not isinstance(corpus_id, int) or corpus_id <= 0 or corpus_id in document_ids:
+            raise ValueError("sample document IDs must be unique positive integers")
+        if not isinstance(title, str) or not title.strip() or not isinstance(text, str) or not text.strip():
+            raise ValueError(f"sample document {corpus_id} must have a non-empty title and text")
+        document_ids.add(corpus_id)
+        corpus_items.append(
+            {
+                "corpus_id": corpus_id,
+                "text": f"{title}\n\n{text}",
+                "doc_id": f"sample-{corpus_id:02d}",
+                "page_number": 1,
+            }
+        )
+
+    query_items = []
+    query_ids = set()
+    qrel_map = {}
+    for query in queries:
+        query_id = query.get("id")
+        text = query.get("text")
+        relevant = query.get("relevant")
+        if not isinstance(query_id, str) or not query_id.strip() or query_id in query_ids:
+            raise ValueError("sample query IDs must be unique non-empty strings")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"sample query {query_id} must have non-empty text")
+        if not isinstance(relevant, dict) or not relevant:
+            raise ValueError(f"sample query {query_id} must have relevance judgments")
+
+        qrels = {}
+        for raw_corpus_id, score in relevant.items():
+            try:
+                corpus_id = int(raw_corpus_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"sample query {query_id} has an invalid document ID") from exc
+            if corpus_id not in document_ids or not isinstance(score, int) or score <= 0:
+                raise ValueError(f"sample query {query_id} has an invalid relevance judgment")
+            qrels[corpus_id] = score
+
+        query_ids.add(query_id)
+        query_items.append({"query_id": query_id, "text": text})
+        qrel_map[query_id] = qrels
+
+    logger.info(
+        f"Sample loaded: {len(corpus_items)} documents, {len(query_items)} queries, "
+        f"{sum(len(v) for v in qrel_map.values())} qrels"
     )
     return corpus_items, query_items, qrel_map
 
@@ -546,10 +616,11 @@ def retrieve_multivector(query_mvs, corpus_ids, normed_corpus_mvs, cache_path=No
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Retrieval Ablation Benchmark on vidore_v3_finance_en",
+        description="Retrieval Ablation Benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
         "  uv run python benchmark_ablation.py --gpu l4-spot\n"
+        "  uv run python benchmark_ablation.py --sample --gpu l4-spot\n"
         "  uv run python benchmark_ablation.py --skip-conditions 5,6\n"
         "  uv run python benchmark_ablation.py --ce-models mxbai-rerank --mv-models colbert\n"
         "  uv run python benchmark_ablation.py --dry-run\n",
@@ -565,6 +636,11 @@ async def main():
     parser.add_argument(
         "--mv-models", default="all", help=f"MV models: comma-separated from {list(ALL_MV_MODELS.keys())}, or 'all'"
     )
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help=f"Use the checked-in bounded sample ({SAMPLE_MAX_DOCUMENTS} documents, {SAMPLE_MAX_QUERIES} queries)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate config and print plan without running")
     args = parser.parse_args()
 
@@ -572,7 +648,11 @@ async def main():
     skip = set(int(x) for x in args.skip_conditions.split(",") if x.strip())
     run_mv_rerank = 5 not in skip
     run_mv_direct = 6 not in skip
-    ns_name = args.namespace or f"ablation-{slugify(ENCODER)}"
+    dataset_name = "sample" if args.sample else "vidore_v3_finance_en"
+    cache_dir = CACHE_DIR / "sample" if args.sample else CACHE_DIR
+    results_csv = EXAMPLE_DIR / "sample_ablation_results.csv" if args.sample else RESULTS_CSV
+    default_namespace = f"ablation-{'sample-' if args.sample else ''}{slugify(ENCODER)}"
+    ns_name = args.namespace or default_namespace
 
     # Resolve model selections
     if args.ce_models == "all":
@@ -593,27 +673,34 @@ async def main():
     if args.dry_run:
         conditions = [c for c in range(1, 7) if c not in skip]
         logger.info("=== DRY RUN ===")
+        logger.info(f"Dataset: {dataset_name}")
         logger.info(f"GPU: {gpu or 'router picks'}")
         logger.info(f"Namespace: {ns_name}")
         logger.info(f"Conditions: {conditions}")
         logger.info(f"CE models: {[slugify(r) for r in ce_rerankers]}")
         logger.info(f"MV models: {[m['model'] for m in mv_rerankers]}")
         logger.info(f"TOP_K: {TOP_K_RETRIEVE}, Hybrid pool: ~{TOP_K_RETRIEVE * 2} candidates")
-        logger.info(f"Cache dir: {CACHE_DIR} (exists={CACHE_DIR.exists()})")
+        logger.info(f"Cache dir: {cache_dir} (exists={cache_dir.exists()})")
+        logger.info(f"Results: {results_csv}")
         logger.info(f"SIE endpoint: {sie_base_url}")
         logger.info(f"SIE auth: {'configured' if sie_api_key else 'not configured'}")
+        if args.sample:
+            load_sample_dataset()
         logger.info("Config OK. Remove --dry-run to execute.")
         return
 
     tpuf_api_key = _require_env("TURBOPUFFER_API_KEY")
 
     np.random.seed(RANDOM_SEED)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     async with SIEAsyncClient(sie_base_url, api_key=sie_api_key, timeout_s=900, max_connections=10) as sie:
         tpuf = AsyncTurbopuffer(api_key=tpuf_api_key, region="aws-us-east-1")
 
-        corpus_items, query_items, qrel_map = load_dataset()
+        if args.sample:
+            corpus_items, query_items, qrel_map = load_sample_dataset()
+        else:
+            corpus_items, query_items, qrel_map = load_dataset()
         text_map = {item["corpus_id"]: item["text"] for item in corpus_items}
         corpus_texts = [item["text"] for item in corpus_items]
         query_texts = [qi["text"] for qi in query_items]
@@ -633,7 +720,7 @@ async def main():
             is_query=False,
             gpu=gpu,
             semaphore=semaphore,
-            cache_path=CACHE_DIR / "dense_corpus.npz",
+            cache_path=cache_dir / "dense_corpus.npz",
         )
         _, query_vecs = await asyncio.gather(
             index_corpus(tpuf, corpus_items, corpus_vecs, ns_name),
@@ -644,7 +731,7 @@ async def main():
                 is_query=True,
                 gpu=gpu,
                 semaphore=semaphore,
-                cache_path=CACHE_DIR / "dense_query.npz",
+                cache_path=cache_dir / "dense_query.npz",
             ),
         )
         elapsed = time.perf_counter() - t0
@@ -658,8 +745,8 @@ async def main():
         t0 = time.perf_counter()
 
         bm25_results, vec_results = await asyncio.gather(
-            search_bm25(tpuf, ns_name, query_texts, cache_path=CACHE_DIR / f"bm25_top{TOP_K_RETRIEVE}.json"),
-            search_vector(tpuf, ns_name, query_vecs, cache_path=CACHE_DIR / f"vector_top{TOP_K_RETRIEVE}.json"),
+            search_bm25(tpuf, ns_name, query_texts, cache_path=cache_dir / f"bm25_top{TOP_K_RETRIEVE}.json"),
+            search_vector(tpuf, ns_name, query_vecs, cache_path=cache_dir / f"vector_top{TOP_K_RETRIEVE}.json"),
         )
         elapsed = time.perf_counter() - t0
         logger.info(
@@ -670,16 +757,28 @@ async def main():
         # ── Eval: BM25, Vector, RRF baselines ─────────────────────
         if 1 not in skip:
             m = evaluate(bm25_results, query_items, qrel_map)
-            append_result(results_log, {"condition_num": 1, "condition": "BM25-only", "reranker": "-", **m})
+            append_result(
+                results_log,
+                {"condition_num": 1, "condition": "BM25-only", "reranker": "-", **m},
+                results_csv,
+            )
 
         if 2 not in skip:
             m = evaluate(vec_results, query_items, qrel_map)
-            append_result(results_log, {"condition_num": 2, "condition": "Vector-only", "reranker": "-", **m})
+            append_result(
+                results_log,
+                {"condition_num": 2, "condition": "Vector-only", "reranker": "-", **m},
+                results_csv,
+            )
 
         if 3 not in skip:
             rrf_results = [rrf_fuse([b, v]) for b, v in zip(bm25_results, vec_results)]
             m = evaluate(rrf_results, query_items, qrel_map)
-            append_result(results_log, {"condition_num": 3, "condition": "RRF(BM25+Vec)", "reranker": "-", **m})
+            append_result(
+                results_log,
+                {"condition_num": 3, "condition": "RRF(BM25+Vec)", "reranker": "-", **m},
+                results_csv,
+            )
 
         # ── Build hybrid pool ──────────────────────────────────────
         hybrid_pools = [build_hybrid_pool(b, v) for b, v in zip(bm25_results, vec_results)]
@@ -703,7 +802,7 @@ async def main():
                 text_map,
                 gpu,
                 semaphore,
-                cache_path=CACHE_DIR / f"rerank_ce_{slug}_hybrid{TOP_K_RETRIEVE}.json",
+                cache_path=cache_dir / f"rerank_ce_{slug}_hybrid{TOP_K_RETRIEVE}.json",
             )
             m = evaluate(reranked, query_items, qrel_map)
             return {"condition_num": 4, "condition": f"CE-Rerank(hybrid-{TOP_K_RETRIEVE})", "reranker": reranker, **m}
@@ -721,7 +820,7 @@ async def main():
                 is_query=False,
                 gpu=gpu,
                 semaphore=semaphore,
-                cache_path=CACHE_DIR / f"mv_corpus_{slug}.npz",
+                cache_path=cache_dir / f"mv_corpus_{slug}.npz",
             )
             query_mvs = await encode_multivector(
                 sie,
@@ -730,7 +829,7 @@ async def main():
                 is_query=True,
                 gpu=gpu,
                 semaphore=semaphore,
-                cache_path=CACHE_DIR / f"mv_query_{slug}.npz",
+                cache_path=cache_dir / f"mv_query_{slug}.npz",
             )
 
             # Pre-normalize corpus once (not per-query)
@@ -748,7 +847,7 @@ async def main():
                     query_mvs,
                     normed_corpus_mv_map,
                     hybrid_pools,
-                    CACHE_DIR / f"rerank_mv_{slug}_hybrid{TOP_K_RETRIEVE}.json",
+                    cache_dir / f"rerank_mv_{slug}_hybrid{TOP_K_RETRIEVE}.json",
                 )
                 m = evaluate(reranked, query_items, qrel_map)
                 results.append(
@@ -768,7 +867,7 @@ async def main():
                     query_mvs,
                     corpus_ids,
                     normed_corpus_mvs,
-                    CACHE_DIR / f"retrieve_mv_{slug}.json",
+                    cache_dir / f"retrieve_mv_{slug}.json",
                 )
                 m = evaluate(ranked, query_items, qrel_map)
                 results.append(
@@ -789,9 +888,9 @@ async def main():
             r = await coro
             if isinstance(r, list):
                 for item in r:
-                    append_result(results_log, item)
+                    append_result(results_log, item, results_csv)
             else:
-                append_result(results_log, r)
+                append_result(results_log, r, results_csv)
 
         elapsed = time.perf_counter() - t0
         n_experiments = len([r for r in results_log if r.get("condition_num", 0) >= 4])
@@ -799,7 +898,7 @@ async def main():
         total = time.perf_counter() - t_total
         logger.info(f"Total: {total:.1f}s ({len(results_log)} conditions evaluated)")
 
-    write_results_csv(results_log, RESULTS_CSV)
+    write_results_csv(results_log, results_csv)
     print_summary(results_log)
 
 

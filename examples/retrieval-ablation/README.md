@@ -75,12 +75,21 @@ uv sync
 # Validate config (no GPU needed)
 uv run python benchmark_ablation.py --dry-run
 
+# Run the same pipeline on the checked-in sample (12 documents, 6 queries)
+uv run python benchmark_ablation.py --sample --gpu l4-spot
+
 # Run the production pipeline end-to-end (all 7 models, all 1,854 queries)
 uv run python benchmark_ablation.py --gpu l4-spot
 
 # Or run just the winning combination (skip baselines and alternatives)
 uv run python benchmark_ablation.py --gpu l4-spot --skip-conditions 1,2,3
 ```
+
+`--sample` uses fictional, redistributable passages and the canonical
+NDCG@10, MRR@10, and Recall@10 evaluator. It still requires SIE and
+Turbopuffer because it runs the same retrieval conditions as the full
+benchmark. Its index, cache, and result file are isolated from full
+benchmark runs.
 
 All expensive operations (encoding, search) cache to `cache/ablation/`. Re-runs skip completed steps. Cross-encoder reranking checkpoints every 100 queries for crash recovery.
 

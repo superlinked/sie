@@ -1,0 +1,98 @@
+{
+  "license": "Apache-2.0",
+  "description": "Fictional operational passages for a bounded retrieval ablation.",
+  "documents": [
+    {
+      "id": 1,
+      "title": "Invoice approval",
+      "text": "Invoices above 10000 dollars require approval from both the finance director and the department owner."
+    },
+    {
+      "id": 2,
+      "title": "Invoice due dates",
+      "text": "Approved supplier invoices are paid within 30 calendar days after receipt."
+    },
+    {
+      "id": 3,
+      "title": "Access review",
+      "text": "Production access is reviewed quarterly. Managers must revoke access for people who change roles."
+    },
+    {
+      "id": 4,
+      "title": "Incident severity",
+      "text": "A severity one incident is any outage affecting all customers or causing confirmed loss of customer data."
+    },
+    {
+      "id": 5,
+      "title": "Incident response",
+      "text": "The on-call engineer acknowledges severity one incidents within five minutes and opens a public status update."
+    },
+    {
+      "id": 6,
+      "title": "Backup schedule",
+      "text": "The primary database receives an encrypted full backup every 24 hours and incremental backups every hour."
+    },
+    {
+      "id": 7,
+      "title": "Backup retention",
+      "text": "Daily backups are retained for 35 days. Monthly archives are retained for one year."
+    },
+    {
+      "id": 8,
+      "title": "Vendor security",
+      "text": "Critical vendors complete a security review before onboarding and once every twelve months afterward."
+    },
+    {
+      "id": 9,
+      "title": "Contract renewal",
+      "text": "Customer contracts renew for one year unless either party gives written notice at least 60 days before renewal."
+    },
+    {
+      "id": 10,
+      "title": "Data deletion",
+      "text": "Verified deletion requests remove customer content from active systems within seven days and backups within 35 days."
+    },
+    {
+      "id": 11,
+      "title": "Expense receipts",
+      "text": "Travel expenses above 25 dollars require an itemized receipt and manager approval."
+    },
+    {
+      "id": 12,
+      "title": "Change management",
+      "text": "High-risk production changes require peer review, a rollback plan, and approval from the on-call engineer."
+    }
+  ],
+  "queries": [
+    {
+      "id": "q01",
+      "text": "Who must approve a large supplier invoice?",
+      "relevant": {"1": 2, "2": 1}
+    },
+    {
+      "id": "q02",
+      "text": "How quickly must the team respond to a company-wide outage?",
+      "relevant": {"5": 2, "4": 1}
+    },
+    {
+      "id": "q03",
+      "text": "How long are database backups kept?",
+      "relevant": {"7": 2, "6": 1}
+    },
+    {
+      "id": "q04",
+      "text": "When is a supplier security assessment required?",
+      "relevant": {"8": 2}
+    },
+    {
+      "id": "q05",
+      "text": "What notice prevents an automatic contract renewal?",
+      "relevant": {"9": 2}
+    },
+    {
+      "id": "q06",
+      "text": "What controls are required before a risky production deployment?",
+      "relevant": {"12": 2, "3": 1}
+    }
+  ]
+}
