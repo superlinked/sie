@@ -2,7 +2,10 @@
 
 A project gallery of full end-to-end applications built with SIE. Each project lives in its own subdirectory. Clone it, run it, learn from it.
 
-New to SIE? Start with the **[quickstart notebook](./quickstart.ipynb)** [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/superlinked/sie/blob/main/examples/quickstart.ipynb): encode, score, and extract in 5 minutes, then pick a project below. ABI course participants can also use the dependency-free [managed SIE smoke test](./abi-course) once the course catalog is live.
+New to SIE? Start with the **[Python quickstart](./quickstart)** for one
+SDK call against local, self-deployed, or managed SIE. Continue with the
+**[quickstart notebook](./quickstart.ipynb)** [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/superlinked/sie/blob/main/examples/quickstart.ipynb)
+to try encode, score, and extract, then pick a project below.
 
 ## Gallery
 
@@ -13,7 +16,6 @@ service keys.
 
 | Example | Best for | SIE primitives | Setup | Status |
 |---|---|---|---|---|
-| [ABI course managed SIE smoke test](./abi-course) | Verifying a course API key and catalog embedding model with one inexpensive request | `encode` through `/v1/embeddings` | Python 3.12 standard library plus managed SIE API key | Code and mocked tests complete; catalog release and US-production validation pending |
 | [Self-hosted product search in 5 min](./ecommerce-product-search) | Showing the fastest local product-search path with extraction, embeddings, and reranking | `extract`, `encode`, `score` | Local SIE Docker image, Python or TypeScript app | Runnable |
 | [Find the best retrieval strategy for your RAG](./retrieval-ablation) | Picking a production RAG retrieval pipeline by evals on real financial documents | `encode`, `score` | SIE endpoint, Turbopuffer key, optional SIE API key for auth-enabled clusters | Runnable benchmark |
 | [Find SOTA embedding models by MTEB task](./sie-hugging-face-mteb-semantic-search) | Searching ~14K HF embedding models ranked by task-specific MTEB scores | `encode`, `score` | Backend seed script plus Vite frontend; falls back without a live SIE endpoint | Runnable |
