@@ -1,0 +1,99 @@
+{
+  "schema_version": "abi-course-retrieval-fixture/v1",
+  "license": "Apache-2.0",
+  "description": "Fictional, redistributable operational passages for a bounded retrieval ablation.",
+  "documents": [
+    {
+      "id": "d01",
+      "title": "Invoice approval",
+      "text": "Invoices above 10000 dollars require approval from both the finance director and the department owner."
+    },
+    {
+      "id": "d02",
+      "title": "Invoice due dates",
+      "text": "Approved supplier invoices are paid within 30 calendar days after receipt."
+    },
+    {
+      "id": "d03",
+      "title": "Access review",
+      "text": "Production access is reviewed quarterly. Managers must revoke access for people who change roles."
+    },
+    {
+      "id": "d04",
+      "title": "Incident severity",
+      "text": "A severity one incident is any outage affecting all customers or causing confirmed loss of customer data."
+    },
+    {
+      "id": "d05",
+      "title": "Incident response",
+      "text": "The on-call engineer acknowledges severity one incidents within five minutes and opens a public status update."
+    },
+    {
+      "id": "d06",
+      "title": "Backup schedule",
+      "text": "The primary database receives an encrypted full backup every 24 hours and incremental backups every hour."
+    },
+    {
+      "id": "d07",
+      "title": "Backup retention",
+      "text": "Daily backups are retained for 35 days. Monthly archives are retained for one year."
+    },
+    {
+      "id": "d08",
+      "title": "Vendor security",
+      "text": "Critical vendors complete a security review before onboarding and once every twelve months afterward."
+    },
+    {
+      "id": "d09",
+      "title": "Contract renewal",
+      "text": "Customer contracts renew for one year unless either party gives written notice at least 60 days before renewal."
+    },
+    {
+      "id": "d10",
+      "title": "Data deletion",
+      "text": "Verified deletion requests remove customer content from active systems within seven days and backups within 35 days."
+    },
+    {
+      "id": "d11",
+      "title": "Expense receipts",
+      "text": "Travel expenses above 25 dollars require an itemized receipt and manager approval."
+    },
+    {
+      "id": "d12",
+      "title": "Change management",
+      "text": "High-risk production changes require peer review, a rollback plan, and approval from the on-call engineer."
+    }
+  ],
+  "queries": [
+    {
+      "id": "q01",
+      "text": "Who must approve a large supplier invoice?",
+      "relevant": {"d01": 2, "d02": 1}
+    },
+    {
+      "id": "q02",
+      "text": "How quickly must the team respond to a company-wide outage?",
+      "relevant": {"d05": 2, "d04": 1}
+    },
+    {
+      "id": "q03",
+      "text": "How long are database backups kept?",
+      "relevant": {"d07": 2, "d06": 1}
+    },
+    {
+      "id": "q04",
+      "text": "When is a supplier security assessment required?",
+      "relevant": {"d08": 2}
+    },
+    {
+      "id": "q05",
+      "text": "What notice prevents an automatic contract renewal?",
+      "relevant": {"d09": 2}
+    },
+    {
+      "id": "q06",
+      "text": "What controls are required before a risky production deployment?",
+      "relevant": {"d12": 2, "d03": 1}
+    }
+  ]
+}

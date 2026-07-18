@@ -1,5 +1,10 @@
 # Find the best retrieval strategy for your RAG
 
+> ABI course: start with the 12-document, six-query ablation in
+> [`../abi-course-deep`](../abi-course-deep). It removes the external vector
+> store and dataset download from the first run and keeps live model/cost claims
+> gated on catalog and production measurements.
+
 RAG quality lives or dies by the retrieval step. Most teams pick a
 retrieval pipeline by feel, by averaged leaderboard scores, or by what
 is already in the stack. None of those tell you how each strategy

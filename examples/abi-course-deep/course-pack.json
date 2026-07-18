@@ -1,0 +1,205 @@
+{
+  "schema_version": "abi-course-pack/v1",
+  "release_status": "live_validation_required",
+  "dependencies": {
+    "catalog_issue": "superlinked/sie-internal#1943",
+    "examples_issue": "superlinked/sie-internal#1963"
+  },
+  "security": {
+    "credential_env": "SIE_API_KEY",
+    "allow_key_in_source": false,
+    "allow_key_in_cli_arguments": false,
+    "allow_key_in_output": false
+  },
+  "projects": [
+    {
+      "id": "contract-review",
+      "source": "../contract-review-agent",
+      "selection": "required_principal_example",
+      "sample": {
+        "kind": "synthetic_contracts",
+        "prepare": "uv run make-sample",
+        "run": "uv run review --contract acme-msa",
+        "max_corpus_items": 3,
+        "max_run_items": 1,
+        "source_sha256": "b2292b21b9e9b55c0ca7b5bfbd1f255f988883d73e7d1d232017848c97dfa7eb"
+      },
+      "what_to_change": [
+        "one role-to-model mapping",
+        "search.top_k_candidates",
+        "search.top_k_results"
+      ],
+      "what_to_measure": [
+        "expected_fact_recall",
+        "unsupported_fact_count",
+        "stage_cold_latency_ms",
+        "stage_warm_latency_ms",
+        "request_ids",
+        "usage",
+        "settled_credits"
+      ],
+      "expected_output": {
+        "required_top_level": ["review", "stage_ledger", "measurement"],
+        "required_review_fields": [
+          "document_type",
+          "parties",
+          "effective_date",
+          "renewal_terms",
+          "governing_law",
+          "executed",
+          "key_obligations",
+          "risk_flags",
+          "recommendation"
+        ]
+      },
+      "model_gate": {
+        "status": "catalog_freeze_required",
+        "roles": [
+          {"role": "triage", "model_id": null, "revision": null},
+          {"role": "orchestrator", "model_id": null, "revision": null},
+          {"role": "vision", "model_id": null, "revision": null},
+          {"role": "reasoning", "model_id": null, "revision": null},
+          {"role": "sql", "model_id": null, "revision": null},
+          {"role": "guard", "model_id": null, "revision": null},
+          {"role": "ocr", "model_id": null, "revision": null},
+          {"role": "embed", "model_id": null, "revision": null},
+          {"role": "rerank", "model_id": null, "revision": null},
+          {"role": "entities", "model_id": null, "revision": null}
+        ]
+      },
+      "budget": {
+        "status": "live_measurement_required",
+        "cold_run_credits": null,
+        "warm_run_credits": null,
+        "student_allocation_credits": null
+      }
+    },
+    {
+      "id": "vision-document-rag",
+      "source": "../vision-doc-rag",
+      "selection": "required_multimodal_example",
+      "sample": {
+        "kind": "synthetic_document_images",
+        "prepare": "uv run python scripts/prepare_vision_sample.py",
+        "max_corpus_items": 3,
+        "max_run_items": 3,
+        "fixtures": [
+          {
+            "path": "../document-ocr/data/samples/receipt.png",
+            "sha256": "feb5f42448901d1094af5266c4bda37fd3ecb0e26404a268a82dcd0434d7ade5"
+          },
+          {
+            "path": "../document-ocr/data/samples/invoice.png",
+            "sha256": "2e0a5b12f3d626b52304c6ffe4121d8507d39fd03690350f097b222067223f41"
+          },
+          {
+            "path": "../document-ocr/data/samples/slide.png",
+            "sha256": "5df0640aeb85a4adca39afac765f9007ae33edf21e845d209c2416c075a02150"
+          }
+        ]
+      },
+      "what_to_change": [
+        "OCR disabled versus enabled",
+        "visual reranking disabled versus enabled",
+        "one retriever model",
+        "search.top_k_candidates"
+      ],
+      "what_to_measure": [
+        "top_1_fixture_accuracy",
+        "citation_integrity",
+        "ocr_completeness",
+        "stage_cold_latency_ms",
+        "stage_warm_latency_ms",
+        "request_ids",
+        "usage",
+        "settled_credits"
+      ],
+      "expected_output": {
+        "required_top_level": ["query", "client", "answer", "results", "timings", "measurement"],
+        "required_result_fields": [
+          "page_id",
+          "client",
+          "source_pdf",
+          "page_number",
+          "citation",
+          "scores"
+        ]
+      },
+      "model_gate": {
+        "status": "catalog_freeze_required",
+        "roles": [
+          {"role": "retriever", "model_id": null, "revision": null},
+          {"role": "reranker", "model_id": null, "revision": null},
+          {"role": "answer", "model_id": null, "revision": null},
+          {"role": "sglang_ocr", "model_id": null, "revision": null}
+        ]
+      },
+      "budget": {
+        "status": "live_measurement_required",
+        "cold_run_credits": null,
+        "warm_run_credits": null,
+        "student_allocation_credits": null
+      }
+    },
+    {
+      "id": "retrieval-ablation",
+      "source": "../retrieval-ablation",
+      "selection": "selected_third_example",
+      "selection_evidence": [
+        "committed qrels and NDCG/Recall evaluator",
+        "reranking is a single controlled subsystem change",
+        "bounded path removes Turbopuffer and dataset-download dependencies"
+      ],
+      "sample": {
+        "kind": "synthetic_retrieval_qrels",
+        "path": "fixtures/retrieval-course.json",
+        "run": "uv run python scripts/course_ablation.py",
+        "max_corpus_items": 12,
+        "max_run_items": 6,
+        "max_candidates_per_query": 4
+      },
+      "what_to_change": [
+        "reranking disabled versus enabled",
+        "candidate count from 2 to 4",
+        "one embedding model",
+        "one reranker model"
+      ],
+      "what_to_measure": [
+        "ndcg_at_3",
+        "recall_at_3",
+        "condition_cold_latency_ms",
+        "condition_warm_latency_ms",
+        "request_ids",
+        "usage",
+        "settled_credits"
+      ],
+      "expected_output": {
+        "schema_version": "abi-course-ablation/v1",
+        "required_top_level": ["schema_version", "mode", "dataset", "conditions", "measurement_gate"],
+        "required_condition_fields": [
+          "name",
+          "models",
+          "metrics",
+          "latency_ms",
+          "request_count",
+          "request_ids",
+          "usage",
+          "settled_credits"
+        ]
+      },
+      "model_gate": {
+        "status": "catalog_freeze_required",
+        "roles": [
+          {"role": "embed", "model_id": null, "revision": null},
+          {"role": "rerank", "model_id": null, "revision": null}
+        ]
+      },
+      "budget": {
+        "status": "live_measurement_required",
+        "cold_run_credits": null,
+        "warm_run_credits": null,
+        "student_allocation_credits": null
+      }
+    }
+  ]
+}

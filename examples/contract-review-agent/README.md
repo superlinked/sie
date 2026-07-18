@@ -1,5 +1,9 @@
 # Contract review with the OpenAI Agents SDK, on one SIE cluster
 
+> ABI course: use the bounded synthetic path and release gates in
+> [`../abi-course-deep`](../abi-course-deep). The model IDs below are example
+> configuration until the managed course catalog is frozen and live-validated.
+
 A multi-agent contract reviewer built with the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) where **every model call is served by SIE**. No `api.openai.com`, no per-token bill. An **investigator** agent autonomously calls tools to gather grounded facts, then a **synthesizer** agent turns them into a structured review. Each step runs on the **right model from the SIE catalog**: a fast triage model, a vision model that reads the scanned signature page, a reasoning sub-agent for clause risk, a text-to-SQL specialist, an OCR model, embedding and reranker models for clause search, a zero-shot entity extractor, and a safety guardrail. Ten specialized jobs, one cluster.
 
 This is the "one cluster powers every model your agent calls" idea from the [SIE landing page](https://superlinked.com), made real and runnable.

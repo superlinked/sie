@@ -1,5 +1,10 @@
 # Vision-first document RAG
 
+> ABI course: start with the three verified, redistributable fixtures and
+> release gates in [`../abi-course-deep`](../abi-course-deep). The model IDs
+> below are example configuration until the managed course catalog is frozen
+> and live-validated.
+
 Retrieve by image, answer by image. The whole pipeline is Qwen-family:
 ColQwen2.5 reads each PDF page as a picture and ranks pages via late
 interaction; Qwen3.5-4B (a vision LLM) reads the winning page image and

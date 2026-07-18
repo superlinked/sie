@@ -1,0 +1,24 @@
+[project]
+name = "abi-course-deep"
+version = "0.1.0"
+description = "Offline contracts and bounded fixtures for the ABI inference course"
+requires-python = "==3.12.*"
+dependencies = [
+    "sie-sdk==0.6.8",
+]
+
+[dependency-groups]
+dev = [
+    "ruff==0.15.12",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "S", "UP"]
+ignore = [
+    "S101",
+    "S603",
+]
