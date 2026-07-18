@@ -14,33 +14,43 @@ Turbopuffer); the encode call is the same.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import yaml
-
 from sie_sdk import SIEClient
 from sie_sdk.types import Item
 
+EXAMPLE_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PAGES_MANIFEST = EXAMPLE_ROOT / "data" / "pages_manifest.json"
 
-def load_config():
-    return yaml.safe_load((Path(__file__).resolve().parent.parent / "config.yaml").read_text())
+
+def load_config() -> dict[str, Any]:
+    return yaml.safe_load((EXAMPLE_ROOT / "config.yaml").read_text())
 
 
-def load_pages():
-    pages_path = Path(__file__).resolve().parent.parent / "data" / "pages_manifest.json"
+def load_pages(pages_path: Path = DEFAULT_PAGES_MANIFEST) -> list[dict[str, Any]]:
     if not pages_path.exists():
-        raise FileNotFoundError(
-            "data/pages_manifest.json not found. Run `python data/fetch_pdfs.py` "
-            "and `python data/render_pages.py` first."
-        )
+        if pages_path == DEFAULT_PAGES_MANIFEST:
+            hint = " Run `python data/fetch_pdfs.py` and `python data/render_pages.py` first."
+        else:
+            hint = ""
+        raise FileNotFoundError(f"{pages_path} not found.{hint}")
     return json.loads(pages_path.read_text())
 
 
-def encode_pages(client: SIEClient, model: str, pages: list[dict], gpu: str, timeout: float):
+def encode_pages(
+    client: SIEClient,
+    model: str,
+    pages: list[dict[str, Any]],
+    gpu: str,
+    timeout: float,
+) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
     data_dir = Path(__file__).resolve().parent.parent / "data"
     multivectors: list[np.ndarray] = []
     metadata: list[dict] = []
@@ -83,9 +93,18 @@ def encode_pages(client: SIEClient, model: str, pages: list[dict], gpu: str, tim
     return multivectors, metadata
 
 
-def main():
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--pages-manifest",
+        type=Path,
+        default=DEFAULT_PAGES_MANIFEST,
+        help="page manifest to ingest (defaults to data/pages_manifest.json)",
+    )
+    args = parser.parse_args()
+
     config = load_config()
-    pages = load_pages()
+    pages = load_pages(args.pages_manifest)
     print(f"Loaded {len(pages)} pages")
 
     cluster_url = os.environ.get("SIE_CLUSTER_URL", config["cluster"]["url"])
@@ -113,7 +132,7 @@ def main():
         by_client[m["client"]] = by_client.get(m["client"], 0) + 1
 
     print(f"\n  Saved {len(metadata)} multivectors to data/multivectors.npz")
-    print(f"  Saved metadata to data/metadata.json")
+    print("  Saved metadata to data/metadata.json")
     print(f"  Total visual tokens: {total_tokens}")
     print("  Pages per tenant:")
     for client_name in sorted(by_client):

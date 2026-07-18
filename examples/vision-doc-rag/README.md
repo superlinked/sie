@@ -31,8 +31,22 @@ data/pdfs/                # downloaded PDFs
 data/pdfs_manifest.json   # source manifest from fetch_pdfs.py
 data/pages/               # rendered PNG pages
 data/pages_manifest.json  # page-level metadata from render_pages.py
+data/sample/              # deterministic no-download sample corpus
 data/metadata.json        # index metadata from ingest.py
 data/multivectors.npz     # page multivectors from ingest.py
+```
+
+### No-download sample corpus
+
+For a quick, deterministic ingest, prepare the three synthetic document images
+already committed under `examples/document-ocr`. The script verifies their
+hashes and replaces only `data/sample/`; it does not change the primary
+`data/pages_manifest.json`.
+
+```bash
+cd examples/vision-doc-rag
+python data/prepare_sample_corpus.py
+python python/ingest.py --pages-manifest data/sample/pages_manifest.json
 ```
 
 ## SIE features used

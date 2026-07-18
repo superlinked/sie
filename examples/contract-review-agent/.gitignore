@@ -2,7 +2,6 @@
 __pycache__/
 .env
 *.log
-uv.lock
 .ruff_cache/
 # Generated sample artifacts (recreate with `uv run make-sample`)
 contract_review_agent/data/generated/

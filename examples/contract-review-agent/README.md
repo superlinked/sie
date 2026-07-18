@@ -48,6 +48,22 @@ The flow is **two agents**:
 
 > Two agents instead of one: a single structured-output agent tends to emit the schema immediately and skip the tools, sometimes hallucinating the fields. Splitting "gather with tools" from "format the result" keeps the fan-out real and the output grounded.
 
+## Offline synthetic quickstart
+
+Generate and inspect three fictional contracts without downloading a corpus or
+calling a model:
+
+```bash
+cd examples/contract-review-agent
+uv sync --frozen
+uv run make-sample
+uv run review --list
+```
+
+This creates an Acme MSA, an NDA, an SOW, a signature image, and a local SQLite
+obligations database. Configure SIE and run `uv run review --contract acme-msa`
+when you are ready to execute the model-backed review.
+
 ## Run it
 
 You need Python 3.12 and a **GPU-backed SIE deployment**. The generative models run on SIE's generation bundle (CUDA), so the `latest-cpu-default` image can't serve them.
@@ -59,7 +75,7 @@ docker run --gpus all -p 8080:8080 -v sie-hf-cache:/app/.cache/huggingface \
 
 cd examples/contract-review-agent
 cp .env.example .env          # edit SIE_CLUSTER_URL / SIE_API_KEY if not localhost
-uv sync
+uv sync --frozen
 
 # 2. Fetch a handful of real contracts from CUAD (CC BY 4.0). Downloads a ~18 MB archive once.
 uv run fetch-contracts                 # or: uv run make-sample  (offline synthetic contracts)

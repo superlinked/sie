@@ -5,5 +5,6 @@ data/pdfs_manifest.json
 data/pages_manifest.json
 data/pdfs/
 data/pages/
+data/sample/
 data/multivectors.npz
 data/metadata.json
