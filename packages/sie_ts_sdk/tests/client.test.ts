@@ -1156,6 +1156,41 @@ describe("Real-world usage patterns", () => {
 
     await client.close();
   });
+
+  it("should convert audio and video to wire format before encode serialization", async () => {
+    const client = new SIEClient("http://localhost:8080");
+    const audioBytes = new Uint8Array([1, 2, 3]);
+    const videoBytes = new Uint8Array([4, 5, 6]);
+
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        items: [{ dense: { values: new Float32Array([0.1, 0.2]) } }],
+      }),
+    );
+
+    await client.encode("media-encoder", {
+      audio: { data: audioBytes, format: "pcm", sampleRate: 16_000 },
+      video: { data: videoBytes, format: "mp4" },
+    });
+
+    const fetchCall = mockFetch.mock.calls[0];
+    const body = fetchCall?.[1]?.body as Uint8Array;
+    const parsed = unpackMessage<{
+      items?: {
+        audio?: { data: Uint8Array; format?: string; sample_rate?: number };
+        video?: { data: Uint8Array; format?: string };
+      }[];
+    }>(body);
+
+    expect(parsed.items?.[0]?.audio).toEqual({
+      data: audioBytes,
+      format: "pcm",
+      sample_rate: 16_000,
+    });
+    expect(parsed.items?.[0]?.video).toEqual({ data: videoBytes, format: "mp4" });
+
+    await client.close();
+  });
 });
 
 describe("SIEClient.score() - reranking", () => {
@@ -1270,6 +1305,32 @@ describe("SIEClient.score() - reranking", () => {
     expect(parsed.query?.images?.[0]?.format).toBe("jpeg");
     expect(parsed.items?.[0]?.images?.[0]?.data).toEqual(itemImage);
     expect(parsed.items?.[0]?.images?.[0]?.format).toBe("jpeg");
+  });
+
+  it("should convert media query and items before score serialization", async () => {
+    const queryAudio = new Uint8Array([1, 2]);
+    const itemVideo = new Uint8Array([3, 4]);
+
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        model: "media-reranker",
+        scores: [{ item_id: "clip-1", score: 0.9, rank: 0 }],
+      }),
+    );
+
+    await client.score("media-reranker", { audio: { data: queryAudio, format: "wav" } }, [
+      { id: "clip-1", video: { data: itemVideo, format: "webm" } },
+    ]);
+
+    const fetchCall = mockFetch.mock.calls[0];
+    const body = fetchCall?.[1]?.body as Uint8Array;
+    const parsed = unpackMessage<{
+      query?: { audio?: { data: Uint8Array; format?: string } };
+      items?: { video?: { data: Uint8Array; format?: string } }[];
+    }>(body);
+
+    expect(parsed.query?.audio).toEqual({ data: queryAudio, format: "wav" });
+    expect(parsed.items?.[0]?.video).toEqual({ data: itemVideo, format: "webm" });
   });
 });
 
@@ -1400,6 +1461,42 @@ describe("SIEClient.extract() - NER", () => {
 
     expect(parsed.items?.[0]?.images?.[0]?.data).toEqual(imageBytes);
     expect(parsed.items?.[0]?.images?.[0]?.format).toBe("jpeg");
+  });
+
+  it("should convert audio to wire format and preserve structured extract data", async () => {
+    const audioBytes = new Uint8Array([1, 2, 3]);
+
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        items: [
+          {
+            entities: [],
+            data: { text: "Transcribed speech", language: "en" },
+          },
+        ],
+      }),
+    );
+
+    const result = await client.extract(
+      "openai/whisper-base",
+      { audio: { data: audioBytes, format: "wav", sampleRate: 16_000 } },
+      { labels: [] },
+    );
+
+    const fetchCall = mockFetch.mock.calls[0];
+    const body = fetchCall?.[1]?.body as Uint8Array;
+    const parsed = unpackMessage<{
+      items?: {
+        audio?: { data: Uint8Array; format?: string; sample_rate?: number };
+      }[];
+    }>(body);
+
+    expect(parsed.items?.[0]?.audio).toEqual({
+      data: audioBytes,
+      format: "wav",
+      sample_rate: 16_000,
+    });
+    expect(result.data).toEqual({ text: "Transcribed speech", language: "en" });
   });
 
   it("should pass threshold option in params", async () => {

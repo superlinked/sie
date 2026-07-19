@@ -52,6 +52,7 @@ export { SDK_VERSION } from "./version.js";
 export type {
   // Core types
   Item,
+  DocumentInput,
   SparseResult,
   TimingInfo,
   EncodeResult,
@@ -167,3 +168,13 @@ export {
   type ImageInput,
   type ImageWireFormat,
 } from "./images.js";
+export {
+  toAudioWireFormat,
+  toMediaBytes,
+  toVideoWireFormat,
+  type AudioInput,
+  type AudioWireFormat,
+  type MediaInput,
+  type VideoInput,
+  type VideoWireFormat,
+} from "./media.js";

@@ -308,6 +308,7 @@ interface WireExtractResult {
   relations?: WireRelation[];
   classifications?: WireClassification[];
   objects?: WireDetectedObject[];
+  data?: Record<string, unknown>;
 }
 
 /**
@@ -407,7 +408,7 @@ function parseEntity(data: WireEntity): Entity {
  * Parse wire format to ExtractResult
  */
 export function parseExtractResult(data: WireExtractResult): ExtractResult {
-  return {
+  const result: ExtractResult = {
     id: data.id,
     entities: data.entities.map(parseEntity),
     relations: (data.relations ?? []).map(
@@ -432,6 +433,10 @@ export function parseExtractResult(data: WireExtractResult): ExtractResult {
       }),
     ),
   };
+  if (data.data !== undefined) {
+    result.data = data.data;
+  }
+  return result;
 }
 
 /**

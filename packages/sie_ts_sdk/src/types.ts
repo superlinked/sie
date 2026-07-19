@@ -6,6 +6,13 @@
  */
 
 import type { ImageInput, ImageWireFormat } from "./images.js";
+import type {
+  AudioInput,
+  AudioWireFormat,
+  MediaInput,
+  VideoInput,
+  VideoWireFormat,
+} from "./media.js";
 
 /**
  * Output dtype options for quantized embeddings.
@@ -50,6 +57,10 @@ export interface DocumentInput {
  * // With a document for composite-document extractors (Docling, ...)
  * { document: { data: pdfBytes, format: "pdf" } }
  *
+ * // With audio or video for media-capable models
+ * { audio: { data: wavBytes, format: "wav", sampleRate: 16000 } }
+ * { video: { data: mp4Bytes, format: "mp4" } }
+ *
  * // Pre-encoded multivector (for use with maxsim utility)
  * { multivector: [tokenEmbedding1, tokenEmbedding2, ...] }
  */
@@ -60,6 +71,10 @@ export interface Item {
   text?: string;
   /** Images for multimodal models; converted to wire format by the client */
   images?: (ImageInput | ImageWireFormat)[];
+  /** Audio for audio-capable models; converted to wire format by the client */
+  audio?: MediaInput | AudioInput | AudioWireFormat;
+  /** Video for video-capable models; converted to wire format by the client */
+  video?: MediaInput | VideoInput | VideoWireFormat;
   /** Document for composite-document extractors (PDF, DOCX, HTML, ...) */
   document?: DocumentInput;
   /** Pre-encoded multivector (for use with maxsim utility) */
@@ -261,6 +276,8 @@ export interface ExtractResult {
   classifications: Classification[];
   /** List of detected objects */
   objects: DetectedObject[];
+  /** Additional structured extractor output (for example Docling document data) */
+  data?: Record<string, unknown>;
 }
 
 /**

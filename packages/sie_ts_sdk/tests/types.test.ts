@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { AudioInput, VideoInput } from "../src/media.js";
 import type {
   DocumentInput,
   EncodeResult,
@@ -102,6 +103,22 @@ describe("Item creation - common user patterns", () => {
     const item: Item = { document: { data: new Uint8Array([0x00, 0x01]) } };
 
     expect(item.document?.format).toBeUndefined();
+  });
+
+  it("creates audio and video items with generic binary payloads", () => {
+    const audio: AudioInput = {
+      data: new Uint8Array([1, 2, 3]),
+      format: "wav",
+      sampleRate: 16_000,
+    };
+    const video: VideoInput = {
+      data: new Uint8Array([4, 5, 6]),
+      format: "mp4",
+    };
+    const item: Item = { audio, video };
+
+    expect("sampleRate" in (item.audio ?? {})).toBe(true);
+    expect("format" in (item.video ?? {})).toBe(true);
   });
 });
 

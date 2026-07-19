@@ -89,6 +89,8 @@ import {
   decodeChunkBytes,
   jobChunks,
 } from "./jobs.js";
+import { toAudioWireFormat, toVideoWireFormat } from "./media.js";
+import type { AudioWireFormat, VideoWireFormat } from "./media.js";
 import { packMessage, unpackMessage } from "./msgpack.js";
 import { parseSseStream } from "./sse.js";
 import type {
@@ -232,8 +234,11 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
 
 const _LEASE_RENEWAL_MAX_RETRIES = 5;
 
-type ItemWithWireImages = Omit<Item, "images"> & { images?: ImageWireFormat[] };
-type ItemForWire = Item | ItemWithWireImages;
+type ItemForWire = Omit<Item, "images" | "audio" | "video"> & {
+  images?: ImageWireFormat[];
+  audio?: AudioWireFormat;
+  video?: VideoWireFormat;
+};
 
 function isImageWireFormat(image: ImageInput | ImageWireFormat): image is ImageWireFormat {
   return typeof image === "object" && image !== null && "data" in image;
@@ -246,15 +251,23 @@ async function imageForWire(image: ImageInput | ImageWireFormat): Promise<ImageW
   return toImageWireFormat(image);
 }
 
-async function itemImagesForWire(item: Item): Promise<ItemForWire> {
-  if (!item.images || item.images.length === 0) {
-    return item;
+async function itemForWire(item: Item): Promise<ItemForWire> {
+  const { images, audio, video, ...rest } = item;
+  const result: ItemForWire = rest;
+  if (images && images.length > 0) {
+    result.images = await Promise.all(images.map(imageForWire));
   }
-  return { ...item, images: await Promise.all(item.images.map(imageForWire)) };
+  if (audio !== undefined) {
+    result.audio = await toAudioWireFormat(audio);
+  }
+  if (video !== undefined) {
+    result.video = await toVideoWireFormat(video);
+  }
+  return result;
 }
 
-async function itemsImagesForWire(items: Item[]): Promise<ItemForWire[]> {
-  return Promise.all(items.map(itemImagesForWire));
+async function itemsForWire(items: Item[]): Promise<ItemForWire[]> {
+  return Promise.all(items.map(itemForWire));
 }
 
 /**
@@ -435,12 +448,12 @@ export class SIEClient {
   ): Promise<EncodeResult | EncodeResult[]> {
     const isSingleItem = !Array.isArray(items);
     const itemsArray = isSingleItem ? [items] : items;
-    const itemsForWire = await itemsImagesForWire(itemsArray);
+    const serializedItems = await itemsForWire(itemsArray);
 
     // Build request body - model is in URL path, not body
     // Wire format uses snake_case
     const body: Record<string, unknown> = {
-      items: itemsForWire,
+      items: serializedItems,
     };
 
     // Add params if any are specified
@@ -1216,13 +1229,13 @@ export class SIEClient {
     items: Item[],
     options: ScoreOptions = {},
   ): Promise<ScoreResult> {
-    const queryForWire = await itemImagesForWire(query);
-    const itemsForWire = await itemsImagesForWire(items);
+    const serializedQuery = await itemForWire(query);
+    const serializedItems = await itemsForWire(items);
 
     // Build request body
     const body: Record<string, unknown> = {
-      query: queryForWire,
-      items: itemsForWire,
+      query: serializedQuery,
+      items: serializedItems,
     };
 
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
@@ -1289,11 +1302,11 @@ export class SIEClient {
   ): Promise<ExtractResult | ExtractResult[]> {
     const isSingleItem = !Array.isArray(items);
     const itemsArray = isSingleItem ? [items] : items;
-    const itemsForWire = await itemsImagesForWire(itemsArray);
+    const serializedItems = await itemsForWire(itemsArray);
 
     // Build request body
     const body: Record<string, unknown> = {
-      items: itemsForWire,
+      items: serializedItems,
     };
 
     // Add params
