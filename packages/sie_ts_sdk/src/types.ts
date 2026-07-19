@@ -1009,7 +1009,11 @@ export interface GenerateChunk {
  */
 export interface ExtractOptions {
   /** Entity labels to extract (e.g., ["person", "organization"]) */
-  labels: string[];
+  labels?: string[];
+  /** JSON schema for structured extraction output */
+  outputSchema?: Record<string, unknown>;
+  /** Optional extraction instruction for instruction-aware adapters */
+  instruction?: string;
   /** Minimum confidence threshold (0-1) */
   threshold?: number;
   /** GPU type for this request */

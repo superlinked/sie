@@ -1264,7 +1264,7 @@ export class SIEClient {
    * @param options - Extract options with labels
    * @returns Extract result with entities
    */
-  async extract(model: string, item: Item, options: ExtractOptions): Promise<ExtractResult>;
+  async extract(model: string, item: Item, options?: ExtractOptions): Promise<ExtractResult>;
 
   /**
    * Extract entities from multiple items.
@@ -1274,7 +1274,7 @@ export class SIEClient {
    * @param options - Extract options with labels
    * @returns Array of extract results in same order as input
    */
-  async extract(model: string, items: Item[], options: ExtractOptions): Promise<ExtractResult[]>;
+  async extract(model: string, items: Item[], options?: ExtractOptions): Promise<ExtractResult[]>;
 
   /**
    * Extract entities from one or more items.
@@ -1298,7 +1298,7 @@ export class SIEClient {
   async extract(
     model: string,
     items: Item | Item[],
-    options: ExtractOptions,
+    options: ExtractOptions = {},
   ): Promise<ExtractResult | ExtractResult[]> {
     const isSingleItem = !Array.isArray(items);
     const itemsArray = isSingleItem ? [items] : items;
@@ -1310,16 +1310,25 @@ export class SIEClient {
     };
 
     // Add params
-    const params: Record<string, unknown> = {
-      labels: options.labels,
-    };
+    const params: Record<string, unknown> = {};
+    if (options.labels !== undefined) {
+      params.labels = options.labels;
+    }
+    if (options.outputSchema !== undefined) {
+      params.output_schema = options.outputSchema;
+    }
+    if (options.instruction !== undefined) {
+      params.instruction = options.instruction;
+    }
     if (options.threshold !== undefined) {
       params.threshold = options.threshold;
     }
     if (options.adapterOptions !== undefined) {
       params.options = options.adapterOptions;
     }
-    body.params = params;
+    if (Object.keys(params).length > 0) {
+      body.params = params;
+    }
 
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
     const { pool, gpu } = this.parseGpuParam(options.gpu);

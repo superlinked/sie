@@ -1442,6 +1442,59 @@ describe("SIEClient.extract() - NER", () => {
     expect(parsed.params?.labels).toEqual(["person", "organization", "location"]);
   });
 
+  it("should allow extraction without labels or params", async () => {
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        items: [{ entities: [], data: { markdown: "# Invoice" } }],
+      }),
+    );
+
+    const result = await client.extract("docling", {
+      document: { data: new Uint8Array([1, 2]), format: "pdf" },
+    });
+
+    const fetchCall = mockFetch.mock.calls[0];
+    const body = fetchCall?.[1]?.body as Uint8Array;
+    const parsed = unpackMessage<{ params?: Record<string, unknown> }>(body);
+
+    expect(parsed.params).toBeUndefined();
+    expect(result.data).toEqual({ markdown: "# Invoice" });
+  });
+
+  it("should serialize outputSchema and instruction using wire parameter names", async () => {
+    const outputSchema = {
+      type: "object",
+      properties: { total: { type: "string" } },
+      required: ["total"],
+    };
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        items: [{ entities: [], data: { total: "$355.00" } }],
+      }),
+    );
+
+    await client.extract(
+      "document-fields",
+      { text: "Total due: $355.00" },
+      {
+        outputSchema,
+        instruction: "Extract the requested invoice fields.",
+      },
+    );
+
+    const fetchCall = mockFetch.mock.calls[0];
+    const body = fetchCall?.[1]?.body as Uint8Array;
+    const parsed = unpackMessage<{
+      params?: {
+        output_schema?: Record<string, unknown>;
+        instruction?: string;
+      };
+    }>(body);
+
+    expect(parsed.params?.output_schema).toEqual(outputSchema);
+    expect(parsed.params?.instruction).toBe("Extract the requested invoice fields.");
+  });
+
   it("should convert images to wire format before extract serialization", async () => {
     const imageBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
 

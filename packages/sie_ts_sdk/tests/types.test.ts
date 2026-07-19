@@ -15,6 +15,7 @@ import type {
   DocumentInput,
   EncodeResult,
   Entity,
+  ExtractOptions,
   ExtractResult,
   Item,
   ModelCapabilities,
@@ -299,6 +300,20 @@ describe("ScoreResult - reranking results", () => {
 });
 
 describe("ExtractResult - NER results", () => {
+  it("supports optional labels plus structured output and instruction options", () => {
+    const options: ExtractOptions = {
+      instruction: "Extract invoice fields.",
+      outputSchema: {
+        type: "object",
+        properties: { total: { type: "string" } },
+      },
+    };
+
+    expect(options.labels).toBeUndefined();
+    expect(options.instruction).toBe("Extract invoice fields.");
+    expect(options.outputSchema?.type).toBe("object");
+  });
+
   it("provides extracted entities with positions", () => {
     // User scenario: "I want to highlight entities in my UI"
     const result: ExtractResult = {
