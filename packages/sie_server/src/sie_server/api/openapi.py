@@ -63,9 +63,25 @@ def _add_request_body_schemas(openapi_schema: dict[str, Any]) -> None:
             if "$defs" in full_schema:
                 for def_name, def_schema in full_schema["$defs"].items():
                     if def_name not in schemas:
-                        schemas[def_name] = def_schema
+                        schemas[def_name] = _rewrite_definition_refs(def_schema)
                 del full_schema["$defs"]
-            schemas[model_name] = full_schema
+            schemas[model_name] = _rewrite_definition_refs(full_schema)
+
+
+def _rewrite_definition_refs(value: Any) -> Any:
+    """Point Pydantic ``$defs`` references at OpenAPI components."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                item.replace("#/$defs/", "#/components/schemas/")
+                if key == "$ref" and isinstance(item, str)
+                else _rewrite_definition_refs(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_rewrite_definition_refs(item) for item in value]
+    return value
 
 
 def _set_model_examples(openapi_schema: dict[str, Any], model_name: str) -> None:

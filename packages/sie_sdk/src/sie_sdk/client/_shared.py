@@ -18,6 +18,7 @@ import msgpack
 import numpy as np
 
 from sie_sdk.images import convert_item_images
+from sie_sdk.media import convert_item_media
 
 _logger = logging.getLogger(__name__)
 
@@ -121,13 +122,19 @@ RETRY_JITTER_FRACTION = 0.25
 _retry_rng = random.Random()  # noqa: S311 — non-cryptographic jitter only
 
 
-def convert_score_images_for_wire(query: Any, items: Sequence[Any]) -> tuple[Any, list[Any]]:
-    """Convert image-bearing score query/items to the SDK image wire shape."""
-    query_for_wire = convert_item_images({**query}) if "images" in query else query
-    items_for_wire = [
-        convert_item_images({**item}) if "images" in item else item  # ty: ignore[invalid-argument-type]
-        for item in items
-    ]
+def convert_score_media_for_wire(query: Any, items: Sequence[Any]) -> tuple[Any, list[Any]]:
+    """Convert media-bearing score query/items to SDK wire shapes."""
+
+    def convert(item: Any) -> Any:
+        if not any(field in item for field in ("images", "audio", "video")):
+            return item
+        item_for_wire = {**item}
+        if "images" in item_for_wire:
+            item_for_wire = convert_item_images(item_for_wire)
+        return convert_item_media(item_for_wire)
+
+    query_for_wire = convert(query)
+    items_for_wire = [convert(item) for item in items]
     return query_for_wire, items_for_wire
 
 

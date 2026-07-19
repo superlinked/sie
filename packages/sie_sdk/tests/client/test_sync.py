@@ -227,6 +227,28 @@ class TestEncode:
             assert result["dense"].shape == (4,)
             client.close()
 
+    def test_encode_converts_audio_to_wire_format(self) -> None:
+        """encode() converts audio shorthand before msgpack serialization."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = msgpack.packb(
+            {
+                "model": "audio-encoder",
+                "items": [{"dense": {"dims": 2, "dtype": "float32", "values": np.array([1.0, 2.0], dtype=np.float32)}}],
+            },
+            use_bin_type=True,
+        )
+
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post.return_value = mock_response
+            client = SIEClient("http://localhost:8080")
+            client.encode("audio-encoder", {"audio": b"audio"})
+
+            call_args = mock_client.return_value.post.call_args
+            request_body = msgpack.unpackb(call_args.kwargs["content"], raw=False)
+            assert request_body["items"][0]["audio"] == {"data": b"audio", "format": None}
+            client.close()
+
     def test_encode_list_returns_list(self) -> None:
         """List of items input returns list of results."""
         mock_response = MagicMock()
@@ -776,7 +798,7 @@ class TestScore:
             client.close()
 
     def test_score_converts_image_query_and_items_to_wire_format(self) -> None:
-        """score() converts image query/items before msgpack serialization."""
+        """score() converts media query/items before msgpack serialization."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.content = msgpack.packb(
@@ -789,8 +811,8 @@ class TestScore:
 
         query_image = b"\xff\xd8\xff\xe0query"
         item_image = b"\xff\xd8\xff\xe0item"
-        query = {"text": "rocket nozzle", "images": [query_image]}
-        item = {"id": "page-1", "images": [item_image]}
+        query = {"text": "rocket nozzle", "images": [query_image], "audio": b"query-audio"}
+        item = {"id": "page-1", "images": [item_image], "video": b"item-video"}
 
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
             mock_client.return_value.post.return_value = mock_response
@@ -803,8 +825,12 @@ class TestScore:
             item_wire = request_body["items"][0]["images"][0]
             assert query_wire == {"data": query_image, "format": "jpeg"}
             assert item_wire == {"data": item_image, "format": "jpeg"}
+            assert request_body["query"]["audio"] == {"data": b"query-audio", "format": None}
+            assert request_body["items"][0]["video"] == {"data": b"item-video", "format": None}
             assert query["images"][0] == query_image
+            assert query["audio"] == b"query-audio"
             assert item["images"][0] == item_image
+            assert item["video"] == b"item-video"
             client.close()
 
     def test_score_with_query_id(self) -> None:
@@ -944,7 +970,7 @@ class TestExtract:
             client.close()
 
     def test_extract_converts_document_to_wire_format(self) -> None:
-        """extract() converts document inputs (bytes/path) to {data, format} on the wire."""
+        """extract() converts document and audio inputs to their wire formats."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.content = msgpack.packb(
@@ -960,7 +986,7 @@ class TestExtract:
             client = SIEClient("http://localhost:8080")
             result = client.extract(
                 "docling",
-                {"document": b"%PDF-1.4 fake content"},
+                {"document": b"%PDF-1.4 fake content", "audio": b"audio"},
             )
 
             call_args = mock_client.return_value.post.call_args
@@ -968,6 +994,7 @@ class TestExtract:
             wire_doc = request_body["items"][0]["document"]
             assert wire_doc["data"] == b"%PDF-1.4 fake content"
             assert wire_doc["format"] is None  # bytes have no inferable format
+            assert request_body["items"][0]["audio"] == {"data": b"audio", "format": None}
             assert result["data"] == {"document": {"pages": []}}
             client.close()
 

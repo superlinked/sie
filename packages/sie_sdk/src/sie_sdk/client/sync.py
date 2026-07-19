@@ -54,6 +54,7 @@ from sie_sdk.documents import convert_item_document
 from sie_sdk.files import resolve_upload
 from sie_sdk.images import convert_item_images
 from sie_sdk.jobs import TERMINAL_JOB_STATES, build_job_body, decode_chunk_bytes, job_chunks
+from sie_sdk.media import convert_item_media
 from sie_sdk.types import (
     Batch,
     CapacityInfo,
@@ -104,7 +105,7 @@ from ._shared import (
     check_version_skew,
     compute_oom_backoff,
     compute_retry_delay,
-    convert_score_images_for_wire,
+    convert_score_media_for_wire,
     get_error_code,
     get_retry_after,
     get_sdk_version,
@@ -1081,12 +1082,17 @@ class SIEClient:
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
 
-        # Convert images to JPEG bytes for transport.
-        # Only copy items that have images — text-only items are passed through directly
-        items_for_wire = [
-            convert_item_images({**item}) if "images" in item else item  # ty: ignore[invalid-argument-type]
-            for item in items_list
-        ]
+        # Convert media to bytes for transport.
+        # Only copy media-bearing items; text-only items pass through directly.
+        items_for_wire = []
+        for item in items_list:
+            if not any(field in item for field in ("images", "audio", "video")):
+                items_for_wire.append(item)
+                continue
+            wire_item: dict[str, Any] = {**item}  # ty: ignore[invalid-argument-type]
+            if "images" in wire_item:
+                wire_item = convert_item_images(wire_item)
+            items_for_wire.append(convert_item_media(wire_item))
 
         # Build request body
         request_body: dict[str, Any] = {"items": items_for_wire}
@@ -1729,7 +1735,7 @@ class SIEClient:
         # Resolve defaults and pool
         pool_name, resolved_gpu = self._resolve_pool_and_gpu(gpu)
         resolved_options = self._resolve_options(options)
-        query_for_wire, items_for_wire = convert_score_images_for_wire(query, items)
+        query_for_wire, items_for_wire = convert_score_media_for_wire(query, items)
 
         # Build request body
         request_body: dict[str, Any] = {
@@ -2569,7 +2575,7 @@ class SIEClient:
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
 
-        # Convert images and documents to wire format (bytes + format hint)
+        # Convert media and documents to wire format (bytes + format hint)
         items_for_wire = []
         for item in items_list:
             wire_item: dict[str, Any] = {**item}  # ty: ignore[invalid-argument-type]
@@ -2577,6 +2583,7 @@ class SIEClient:
                 wire_item = convert_item_images(wire_item)
             if "document" in wire_item:
                 wire_item = convert_item_document(wire_item)
+            wire_item = convert_item_media(wire_item)
             items_for_wire.append(wire_item)
 
         # Build request body

@@ -1505,6 +1505,48 @@
         ],
         "title": "ValidationError"
       },
+      "AudioInputModel": {
+        "description": "Audio input for audio models.",
+        "properties": {
+          "data": {
+            "description": "Audio data as bytes",
+            "format": "binary",
+            "title": "Data",
+            "type": "string"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Audio format hint: 'wav', 'mp3', etc.",
+            "title": "Format"
+          },
+          "sample_rate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Audio sample rate in Hz",
+            "title": "Sample Rate"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AudioInputModel",
+        "type": "object"
+      },
       "DocumentInputModel": {
         "description": "Document input for composite-document extractors (PDF, DOCX, HTML, ...).",
         "properties": {
@@ -1674,7 +1716,7 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/$defs/ImageInputModel"
+                  "$ref": "#/components/schemas/ImageInputModel"
                 },
                 "type": "array"
               },
@@ -1686,10 +1728,34 @@
             "description": "Images for multimodal models",
             "title": "Images"
           },
+          "audio": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AudioInputModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Audio for audio-capable models"
+          },
+          "video": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoInputModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Video for video-capable models"
+          },
           "document": {
             "anyOf": [
               {
-                "$ref": "#/$defs/DocumentInputModel"
+                "$ref": "#/components/schemas/DocumentInputModel"
               },
               {
                 "type": "null"
@@ -1716,6 +1782,35 @@
         "title": "ItemModel",
         "type": "object"
       },
+      "VideoInputModel": {
+        "description": "Video input for video models.",
+        "properties": {
+          "data": {
+            "description": "Video data as bytes",
+            "format": "binary",
+            "title": "Data",
+            "type": "string"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Video format hint: 'mp4', 'webm', etc.",
+            "title": "Format"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "VideoInputModel",
+        "type": "object"
+      },
       "EncodeRequestModel": {
         "description": "Request body for encode endpoint.",
         "examples": [
@@ -1734,7 +1829,7 @@
           "items": {
             "description": "Items to encode",
             "items": {
-              "$ref": "#/$defs/ItemModel"
+              "$ref": "#/components/schemas/ItemModel"
             },
             "minItems": 1,
             "title": "Items",
@@ -1743,7 +1838,7 @@
           "params": {
             "anyOf": [
               {
-                "$ref": "#/$defs/EncodeParamsModel"
+                "$ref": "#/components/schemas/EncodeParamsModel"
               },
               {
                 "type": "null"
@@ -1862,7 +1957,7 @@
           "items": {
             "description": "Items to extract from",
             "items": {
-              "$ref": "#/$defs/ItemModel"
+              "$ref": "#/components/schemas/ItemModel"
             },
             "minItems": 1,
             "title": "Items",
@@ -1871,7 +1966,7 @@
           "params": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExtractParamsModel"
+                "$ref": "#/components/schemas/ExtractParamsModel"
               },
               {
                 "type": "null"
@@ -1906,13 +2001,13 @@
         ],
         "properties": {
           "query": {
-            "$ref": "#/$defs/ItemModel",
+            "$ref": "#/components/schemas/ItemModel",
             "description": "Query item to score against"
           },
           "items": {
             "description": "Items to score",
             "items": {
-              "$ref": "#/$defs/ItemModel"
+              "$ref": "#/components/schemas/ItemModel"
             },
             "minItems": 1,
             "title": "Items",

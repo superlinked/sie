@@ -41,6 +41,36 @@
         ],
         "type": "object"
       },
+      "AudioInput": {
+        "properties": {
+          "data": {
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sample_rate": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "BundleConfigDocument": {
         "properties": {
           "adapters": {
@@ -1702,6 +1732,16 @@
       },
       "ItemInput": {
         "properties": {
+          "audio": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AudioInput"
+              }
+            ]
+          },
           "document": {
             "oneOf": [
               {
@@ -1732,6 +1772,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "video": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VideoInput"
+              }
             ]
           }
         },
@@ -2927,6 +2977,28 @@
           "queue_ms",
           "tokenization_ms",
           "inference_ms"
+        ],
+        "type": "object"
+      },
+      "VideoInput": {
+        "properties": {
+          "data": {
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
         ],
         "type": "object"
       },

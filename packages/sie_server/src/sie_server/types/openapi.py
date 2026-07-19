@@ -20,6 +20,21 @@ class ImageInputModel(BaseModel):
     format: str | None = Field(default=None, description="Image format hint: 'jpeg', 'png', etc.")
 
 
+class AudioInputModel(BaseModel):
+    """Audio input for audio models."""
+
+    data: bytes = Field(..., description="Audio data as bytes")
+    format: str | None = Field(default=None, description="Audio format hint: 'wav', 'mp3', etc.")
+    sample_rate: int | None = Field(default=None, description="Audio sample rate in Hz")
+
+
+class VideoInputModel(BaseModel):
+    """Video input for video models."""
+
+    data: bytes = Field(..., description="Video data as bytes")
+    format: str | None = Field(default=None, description="Video format hint: 'mp4', 'webm', etc.")
+
+
 class DocumentInputModel(BaseModel):
     """Document input for composite-document extractors (PDF, DOCX, HTML, ...)."""
 
@@ -33,6 +48,8 @@ class ItemModel(BaseModel):
     id: str | None = Field(default=None, description="Optional identifier for this item. Returned in response.")
     text: str | None = Field(default=None, description="Text content to encode", examples=["Hello, world!"])
     images: list[ImageInputModel] | None = Field(default=None, description="Images for multimodal models")
+    audio: AudioInputModel | None = Field(default=None, description="Audio for audio-capable models")
+    video: VideoInputModel | None = Field(default=None, description="Video for video-capable models")
     document: DocumentInputModel | None = Field(
         default=None, description="Document for composite-document extractors (PDF, DOCX, HTML, ...)"
     )

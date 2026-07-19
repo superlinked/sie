@@ -309,6 +309,25 @@ class TestAsyncEncode:
         await client.close()
 
     @pytest.mark.asyncio
+    async def test_encode_converts_video_to_wire_format(self) -> None:
+        """Async encode converts video shorthand before msgpack serialization."""
+        resp = _make_msgpack_response(
+            {
+                "model": "video-encoder",
+                "items": [{"dense": {"dims": 2, "dtype": "float32", "values": np.array([1.0, 2.0], dtype=np.float32)}}],
+            }
+        )
+
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(return_value=resp)  # type: ignore
+        await client.encode("video-encoder", {"video": b"video"})
+
+        body = client._post.call_args.kwargs["data"]
+        request_body = msgpack.unpackb(body, raw=False)
+        assert request_body["items"][0]["video"] == {"data": b"video", "format": None}
+        await client.close()
+
+    @pytest.mark.asyncio
     async def test_encode_list_returns_list(self) -> None:
         resp = _make_msgpack_response(
             {
@@ -421,7 +440,7 @@ class TestAsyncScore:
 
     @pytest.mark.asyncio
     async def test_score_converts_image_query_and_items_to_wire_format(self) -> None:
-        """Async score converts image query/items before msgpack serialization."""
+        """Async score converts media query/items before msgpack serialization."""
         resp = _make_msgpack_response(
             {
                 "model": "qwen3-vl-reranker",
@@ -431,8 +450,8 @@ class TestAsyncScore:
 
         query_image = b"\xff\xd8\xff\xe0query"
         item_image = b"\xff\xd8\xff\xe0item"
-        query = {"text": "rocket nozzle", "images": [query_image]}
-        item = {"id": "page-1", "images": [item_image]}
+        query = {"text": "rocket nozzle", "images": [query_image], "audio": b"query-audio"}
+        item = {"id": "page-1", "images": [item_image], "video": b"item-video"}
 
         client = SIEAsyncClient("http://localhost:8080")
         client._post = AsyncMock(return_value=resp)  # type: ignore
@@ -444,8 +463,12 @@ class TestAsyncScore:
         item_wire = request_body["items"][0]["images"][0]
         assert query_wire == {"data": query_image, "format": "jpeg"}
         assert item_wire == {"data": item_image, "format": "jpeg"}
+        assert request_body["query"]["audio"] == {"data": b"query-audio", "format": None}
+        assert request_body["items"][0]["video"] == {"data": b"item-video", "format": None}
         assert query["images"][0] == query_image
+        assert query["audio"] == b"query-audio"
         assert item["images"][0] == item_image
+        assert item["video"] == b"item-video"
         await client.close()
 
 
@@ -507,7 +530,7 @@ class TestAsyncExtract:
 
     @pytest.mark.asyncio
     async def test_extract_converts_document_to_wire_format(self) -> None:
-        """Async extract converts document inputs and returns parsed `data`."""
+        """Async extract converts document and video inputs."""
         resp = _make_msgpack_response(
             {
                 "model": "docling",
@@ -519,7 +542,7 @@ class TestAsyncExtract:
         client._post = AsyncMock(return_value=resp)  # type: ignore
         result = await client.extract(
             "docling",
-            {"document": b"%PDF-1.4 fake content"},
+            {"document": b"%PDF-1.4 fake content", "video": b"video"},
         )
 
         body = client._post.call_args.kwargs["data"]
@@ -527,6 +550,7 @@ class TestAsyncExtract:
         wire_doc = request_body["items"][0]["document"]
         assert wire_doc["data"] == b"%PDF-1.4 fake content"
         assert wire_doc["format"] is None
+        assert request_body["items"][0]["video"] == {"data": b"video", "format": None}
         assert result["data"] == {"document": {"pages": []}}
         await client.close()
 

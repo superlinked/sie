@@ -79,6 +79,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         InferenceInternalServerErrorResponse,
         InferenceServiceUnavailableResponse,
         AllItemsFailedResponse,
+        AudioInput,
         BundleRoutingConflictDetail,
         BundleConflictResponse,
         DocumentInput,
@@ -144,6 +145,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ScoreResponse,
         SparseVector,
         TimingInfo,
+        VideoInput,
         crate::types::pool::AssignedWorker,
         crate::types::worker::WorkerInfo
     )),
@@ -2174,6 +2176,22 @@ pub struct ImageInput {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AudioInput {
+    pub data: Vec<u8>,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct VideoInput {
+    pub data: Vec<u8>,
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DocumentInput {
     pub data: Vec<u8>,
     #[serde(default)]
@@ -2188,6 +2206,10 @@ pub struct ItemInput {
     pub text: Option<String>,
     #[serde(default)]
     pub images: Option<Vec<ImageInput>>,
+    #[serde(default)]
+    pub audio: Option<AudioInput>,
+    #[serde(default)]
+    pub video: Option<VideoInput>,
     #[serde(default)]
     pub document: Option<DocumentInput>,
     #[serde(default)]
@@ -2414,6 +2436,21 @@ mod tests {
         assert_eq!(
             spec["components"]["securitySchemes"]["bearerAuth"]["scheme"],
             "bearer"
+        );
+    }
+
+    #[test]
+    fn openapi_json_documents_native_audio_and_video_inputs() {
+        let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
+        let properties = &spec["components"]["schemas"]["ItemInput"]["properties"];
+
+        assert_eq!(
+            properties["audio"]["oneOf"][1]["$ref"],
+            "#/components/schemas/AudioInput"
+        );
+        assert_eq!(
+            properties["video"]["oneOf"][1]["$ref"],
+            "#/components/schemas/VideoInput"
         );
     }
 

@@ -34,6 +34,16 @@ def test_openapi_has_request_body_schemas() -> None:
         assert name in schemas, f"Missing schema: {name}"
 
 
+def test_openapi_item_documents_audio_and_video() -> None:
+    """The published Item schema includes every native media field."""
+    result = runner.invoke(app, ["openapi"])
+    spec = json.loads(result.output)
+    item_properties = spec["components"]["schemas"]["ItemModel"]["properties"]
+
+    assert item_properties["audio"]["anyOf"][0]["$ref"] == "#/components/schemas/AudioInputModel"
+    assert item_properties["video"]["anyOf"][0]["$ref"] == "#/components/schemas/VideoInputModel"
+
+
 def test_openapi_output_file(tmp_path: Path) -> None:
     """CLI writes spec to a file when --output is given."""
     out = tmp_path / "spec.json"
