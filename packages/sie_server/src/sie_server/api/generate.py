@@ -640,6 +640,11 @@ async def _stream_generate_events(
     completion_tokens = 0
     saw_terminal = False
     terminal_error: dict[str, str] | None = None
+    optional_adapter_inputs: dict[str, Any] = {}
+    if grammar is not None:
+        optional_adapter_inputs["grammar"] = grammar
+    if images is not None:
+        optional_adapter_inputs["images"] = images
     try:
         async for chunk in adapter.generate(
             prompt=prompt,
@@ -651,12 +656,11 @@ async def _stream_generate_events(
             presence_penalty=presence_penalty,
             top_k=top_k,
             min_new_tokens=min_new_tokens,
-            grammar=grammar,
             seed=seed,
             logit_bias=logit_bias,
             logprobs=logprobs,
             top_logprobs=top_logprobs,
-            images=images,
+            **optional_adapter_inputs,
         ):
             if chunk.done:
                 saw_terminal = True
@@ -1029,6 +1033,11 @@ async def generate(
             # local-dev route keeps the walking-skeleton's blocking response shape
             # for backwards compatibility — drain the iterator into an
             # aggregate. SDK / gateway consume the iterator directly.
+            optional_adapter_inputs: dict[str, Any] = {}
+            if grammar is not None:
+                optional_adapter_inputs["grammar"] = grammar
+            if images is not None:
+                optional_adapter_inputs["images"] = images
             chunks = adapter.generate(
                 prompt=generation_prompt,
                 max_new_tokens=max_new_tokens,
@@ -1039,10 +1048,9 @@ async def generate(
                 presence_penalty=presence_penalty,
                 top_k=top_k,
                 min_new_tokens=min_new_tokens,
-                grammar=grammar,
                 seed=seed,
                 logit_bias=logit_bias,
-                images=images,
+                **optional_adapter_inputs,
             )
             result = await collect_generation(chunks)
         except Exception as e:

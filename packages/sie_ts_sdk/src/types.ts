@@ -782,8 +782,14 @@ export interface GenerateOptions {
   frequencyPenalty?: number;
   /** OpenAI-compatible presence penalty in [-2, 2]. */
   presencePenalty?: number;
-  /** Native structured-output grammar. */
-  grammar?: GenerateGrammar;
+  /**
+   * Native structured-output grammar.
+   *
+   * The broad record arm preserves the pre-existing SDK input contract for
+   * callers that keep valid grammar objects in `Record<string, unknown>`
+   * variables. The SDK still validates the exact three-arm shape at runtime.
+   */
+  grammar?: GenerateGrammar | Record<string, unknown>;
   /**
    * Optional per-request sampling seed. Must be a JavaScript safe integer
    * (-(2^53 - 1) through 2^53 - 1) so JSON serialization preserves it exactly.

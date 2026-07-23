@@ -277,7 +277,7 @@ function validateGenerationSeed(seed: number): number {
 }
 
 /** Validate the discriminated native grammar before issuing a billable request. */
-function validateGenerateGrammar(grammar: GenerateGrammar): void {
+function validateGenerateGrammar(grammar: GenerateGrammar | Record<string, unknown>): void {
   if (typeof grammar !== "object" || grammar === null || Array.isArray(grammar)) {
     throw new TypeError("grammar must be an object");
   }

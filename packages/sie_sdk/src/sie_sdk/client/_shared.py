@@ -184,8 +184,13 @@ _GENERATE_GRAMMAR_VARIANTS = frozenset({"json_schema", "regex", "ebnf"})
 _GENERATE_GRAMMAR_FIELDS = _GENERATE_GRAMMAR_VARIANTS | {"label", "strict"}
 
 
-def validate_generate_grammar(grammar: GenerateGrammar) -> GenerateGrammar:
-    """Validate and detach the native structured-output grammar envelope."""
+def validate_generate_grammar(grammar: GenerateGrammar | Mapping[str, Any]) -> GenerateGrammar:
+    """Validate and detach the native structured-output grammar envelope.
+
+    ``generate`` historically accepted a broad dictionary here. Keep that
+    source-compatible input type while validating the exact native three-arm
+    shape before issuing a request.
+    """
     if not isinstance(grammar, Mapping):
         msg = "grammar must be a mapping"
         raise TypeError(msg)

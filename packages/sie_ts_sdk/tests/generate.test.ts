@@ -123,6 +123,24 @@ describe("SIEClient.generate", () => {
     });
   });
 
+  it("accepts a valid grammar held in the legacy broad record type", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        model: "m",
+        text: "123",
+        finish_reason: "stop",
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    );
+    const grammar: Record<string, unknown> = { regex: "\\d+" };
+
+    const client = new SIEClient("http://localhost:8080");
+    await client.generate("m", "Return digits", { maxNewTokens: 8, grammar });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.grammar).toEqual(grammar);
+  });
+
   it("serializes images and typed JSON-schema grammar", async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({

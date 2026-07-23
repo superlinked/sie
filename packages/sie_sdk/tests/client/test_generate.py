@@ -11,6 +11,7 @@ Mocks the HTTP layer; exercises:
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -160,11 +161,11 @@ class TestSyncGenerate:
             {"ebnf": 'root ::= "yes" | "no"'},
         ],
     )
-    def test_generate_preserves_each_typed_grammar_variant(self, grammar: dict) -> None:
+    def test_generate_preserves_each_typed_grammar_variant(self, grammar: dict[str, Any]) -> None:
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
             mock_client.return_value.post.return_value = _ok_response(_ok_envelope())
             client = SIEClient("http://localhost:8080")
-            client.generate("m", prompt="Hi", grammar=grammar, max_new_tokens=8)  # type: ignore[arg-type]
+            client.generate("m", prompt="Hi", grammar=grammar, max_new_tokens=8)
             sent = json.loads(mock_client.return_value.post.call_args.kwargs["content"])
             assert sent["grammar"] == grammar
             client.close()
@@ -178,11 +179,11 @@ class TestSyncGenerate:
             {"ebnf": "root", "unknown": True},
         ],
     )
-    def test_generate_rejects_invalid_grammar_before_request(self, grammar: dict) -> None:
+    def test_generate_rejects_invalid_grammar_before_request(self, grammar: dict[str, Any]) -> None:
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
             client = SIEClient("http://localhost:8080")
             with pytest.raises((TypeError, ValueError)):
-                client.generate("m", prompt="Hi", grammar=grammar, max_new_tokens=8)  # type: ignore[arg-type]
+                client.generate("m", prompt="Hi", grammar=grammar, max_new_tokens=8)
             mock_client.return_value.post.assert_not_called()
             client.close()
 

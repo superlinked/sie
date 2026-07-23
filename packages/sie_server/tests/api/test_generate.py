@@ -112,6 +112,53 @@ class _FakeGenAdapter(GenerationAdapter):
         )
 
 
+class _LegacyTextGenAdapter(_FakeGenAdapter):
+    """Third-party-style adapter implementing the pre-grammar call signature."""
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        stop: list[str] | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        top_k: int | None = None,
+        repetition_penalty: float | None = None,
+        min_new_tokens: int | None = None,
+        seed: int | None = None,
+        logit_bias: dict[str, float] | None = None,
+        logprobs: bool = False,
+        top_logprobs: int | None = None,
+    ) -> AsyncIterator[GenerationChunk]:
+        self.last_call = {
+            "prompt": prompt,
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop": stop,
+            "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
+            "top_k": top_k,
+            "repetition_penalty": repetition_penalty,
+            "min_new_tokens": min_new_tokens,
+            "seed": seed,
+            "logit_bias": logit_bias,
+            "logprobs": logprobs,
+            "top_logprobs": top_logprobs,
+        }
+        yield GenerationChunk(text_delta=f"echo:{prompt}", is_first=True)
+        yield GenerationChunk(
+            text_delta="",
+            done=True,
+            finish_reason="stop",
+            prompt_tokens=len(prompt.split()),
+            completion_tokens=2,
+        )
+
+
 def _make_config(
     *,
     grammar: list[Literal["json_schema", "regex", "ebnf"]] | None = None,
@@ -167,6 +214,28 @@ def client(registry: MagicMock) -> TestClient:
 
 
 class TestGenerateEndpoint:
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_text_only_generate_preserves_legacy_adapter_call_signature(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        stream: bool,
+    ) -> None:
+        legacy_adapter = _LegacyTextGenAdapter()
+        registry.get.return_value = legacy_adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hello", "max_new_tokens": 8, "stream": stream},
+        )
+
+        assert response.status_code == 200, response.text
+        assert legacy_adapter.last_call is not None
+        assert legacy_adapter.last_call["prompt"] == "Hello"
+        if stream:
+            assert '"finish_reason": "error"' not in response.text
+            assert "data: [DONE]" in response.text
+
     def test_sdk_multimodal_grammar_snippet_runs_against_local_route(
         self,
         client: TestClient,
