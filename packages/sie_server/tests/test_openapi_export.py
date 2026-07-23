@@ -51,6 +51,19 @@ def test_openapi_documents_generate_contract() -> None:
     assert request_schema == {"$ref": "#/components/schemas/GenerateRequestModel"}
 
     schema = spec["components"]["schemas"]["GenerateRequestModel"]
+    images = schema["properties"]["images"]
+    assert images["anyOf"][0]["items"]["$ref"] == "#/components/schemas/NativeGenerateImageModel"
+    assert images["anyOf"][0]["minItems"] == 1
+    assert images["anyOf"][0]["maxItems"] == 16
+    image_schema = spec["components"]["schemas"]["NativeGenerateImageModel"]
+    assert image_schema["properties"]["data"]["maxLength"] == 22_369_624
+    grammar = schema["properties"]["grammar"]
+    grammar_refs = {variant["$ref"] for variant in grammar["anyOf"] if "$ref" in variant}
+    assert grammar_refs == {
+        "#/components/schemas/NativeJsonSchemaGrammarModel",
+        "#/components/schemas/NativeRegexGrammarModel",
+        "#/components/schemas/NativeEbnfGrammarModel",
+    }
     assert set(schema["required"]) == {"prompt", "max_new_tokens"}
     assert schema["properties"]["stream"]["anyOf"][0] == {"type": "boolean"}
     seed_schema = schema["properties"]["seed"]
@@ -61,7 +74,7 @@ def test_openapi_documents_generate_contract() -> None:
     assert schema["properties"]["logprobs"]["anyOf"][0] == {"type": "boolean"}
     assert schema["properties"]["top_logprobs"]["anyOf"][0]["minimum"] == 0
     assert schema["properties"]["top_logprobs"]["anyOf"][0]["maximum"] == 20
-    for unsupported in ("grammar", "lora_adapter", "n", "best_of", "stream_options"):
+    for unsupported in ("lora_adapter", "n", "best_of", "stream_options"):
         assert unsupported not in schema["properties"]
 
     response_content = operation["responses"]["200"]["content"]

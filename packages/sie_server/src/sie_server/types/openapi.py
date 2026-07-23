@@ -270,10 +270,68 @@ class ScoreResponseModel(BaseModel):
 
 
 # Generate endpoint models
+class NativeGenerateImageModel(BaseModel):
+    """One inline image on the SIE-native generate surface."""
+
+    data: str = Field(
+        ...,
+        min_length=1,
+        max_length=22_369_624,
+        description="Canonical standard-base64 image bytes, at most 16 MiB decoded",
+    )
+    format: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9.+-]+$",
+        description="Short media-format hint such as png or jpeg",
+    )
+
+
+class NativeJsonSchemaGrammarModel(BaseModel):
+    """JSON Schema structured-output constraint."""
+
+    json_schema: dict[str, Any]
+    label: str | None = None
+    strict: bool | None = None
+    model_config = {"extra": "forbid"}
+
+
+class NativeRegexGrammarModel(BaseModel):
+    """Regular-expression structured-output constraint."""
+
+    regex: str
+    label: str | None = None
+    strict: bool | None = None
+    model_config = {"extra": "forbid"}
+
+
+class NativeEbnfGrammarModel(BaseModel):
+    """EBNF structured-output constraint."""
+
+    ebnf: str
+    label: str | None = None
+    strict: bool | None = None
+    model_config = {"extra": "forbid"}
+
+
 class GenerateRequestModel(BaseModel):
     """Request body for the SIE-native generate endpoint."""
 
     prompt: str = Field(..., min_length=1, description="Prompt text to generate from")
+    images: list[NativeGenerateImageModel] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=16,
+        description=(
+            "Optional inline images paired with prompt. The worker renders one user turn through "
+            "the model's native chat template; remote URLs are not accepted."
+        ),
+    )
+    grammar: NativeJsonSchemaGrammarModel | NativeRegexGrammarModel | NativeEbnfGrammarModel | None = Field(
+        default=None,
+        description="Optional structured-output grammar; exactly one of json_schema, regex, or ebnf",
+    )
     max_new_tokens: int = Field(..., ge=1, description="Maximum number of tokens to generate")
     temperature: float | None = Field(default=None, ge=0, description="Sampling temperature override")
     top_p: float | None = Field(default=None, gt=0, le=1, description="Nucleus-sampling probability override")

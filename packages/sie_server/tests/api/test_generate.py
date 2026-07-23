@@ -8,25 +8,32 @@ calls the adapter directly (no NATS, no gateway). The gateway-side handler
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from unittest.mock import MagicMock
+from typing import Literal
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_sdk import SIEClient
 from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.api import generate as generate_api
 from sie_server.api.generate import router as generate_router
 from sie_server.config.model import (
     AdapterOptions,
     GenerateCapabilities,
     GenerateTask,
+    InputModalities,
     ModelConfig,
     ProfileConfig,
     Tasks,
 )
 from sie_server.core.registry import ModelRegistry
+from sie_server.types.grammar import GrammarSpec
+from sie_server.types.inputs import ImageInput
 
 
 class _FakeGenAdapter(GenerationAdapter):
@@ -67,10 +74,12 @@ class _FakeGenAdapter(GenerationAdapter):
         top_k: int | None = None,
         repetition_penalty: float | None = None,
         min_new_tokens: int | None = None,
+        grammar: GrammarSpec | None = None,
         seed: int | None = None,
         logit_bias: dict[str, float] | None = None,
         logprobs: bool = False,
         top_logprobs: int | None = None,
+        images: list[ImageInput] | None = None,
     ) -> AsyncIterator[GenerationChunk]:
         self.last_call = {
             "prompt": prompt,
@@ -83,11 +92,14 @@ class _FakeGenAdapter(GenerationAdapter):
             "top_k": top_k,
             "repetition_penalty": repetition_penalty,
             "min_new_tokens": min_new_tokens,
+            "grammar": grammar,
             "seed": seed,
             "logit_bias": logit_bias,
             "logprobs": logprobs,
             "top_logprobs": top_logprobs,
         }
+        if images is not None:
+            self.last_call["images"] = images
         # Yield one delta + a terminal chunk so the local-dev route can
         # drain the iterator into the walking-skeleton-shaped aggregate response.
         yield GenerationChunk(text_delta=f"echo:{prompt}", is_first=True)
@@ -100,7 +112,10 @@ class _FakeGenAdapter(GenerationAdapter):
         )
 
 
-def _make_config() -> ModelConfig:
+def _make_config(
+    *,
+    grammar: list[Literal["json_schema", "regex", "ebnf"]] | None = None,
+) -> ModelConfig:
     return ModelConfig(
         sie_id="Qwen/Qwen3-4B-Instruct",
         hf_id="Qwen/Qwen3-4B-Instruct",
@@ -108,7 +123,7 @@ def _make_config() -> ModelConfig:
             generate=GenerateTask(
                 context_length=32768,
                 max_output_tokens=4096,
-                capabilities=GenerateCapabilities(),
+                capabilities=GenerateCapabilities(grammar=grammar or []),
             ),
         ),
         profiles={
@@ -152,6 +167,372 @@ def client(registry: MagicMock) -> TestClient:
 
 
 class TestGenerateEndpoint:
+    def test_sdk_multimodal_grammar_snippet_runs_against_local_route(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = _make_config(grammar=["json_schema"])
+        config.inputs = InputModalities(text=True, image=True)
+        registry.get_config.return_value = config
+
+        async def render(_config: object, prompt: str, image_count: int) -> str:
+            assert prompt == "Extract the title"
+            assert image_count == 1
+            return "<image>Extract the title"
+
+        monkeypatch.setattr("sie_server.api.generate._render_native_image_prompt", render)
+        sdk = SIEClient("http://testserver")
+        sdk._client.close()
+        sdk._client = client  # type: ignore[assignment]
+
+        result = sdk.generate(
+            "Qwen/Qwen3-4B-Instruct",
+            "Extract the title",
+            images=[{"data": b"\x89PNG\r\n\x1a\npayload"}],
+            grammar={
+                "json_schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                }
+            },
+            max_new_tokens=32,
+        )
+
+        assert result["model"] == "Qwen/Qwen3-4B-Instruct"
+        assert fake_adapter.last_call is not None
+        assert fake_adapter.last_call["prompt"] == "<image>Extract the title"
+        assert fake_adapter.last_call["images"] == [{"data": b"\x89PNG\r\n\x1a\npayload", "format": "png"}]
+        assert fake_adapter.last_call["grammar"] == GrammarSpec(
+            kind="json_schema",
+            value={
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+            },
+        )
+
+    def test_request_body_is_rejected_before_unbounded_aggregation(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(generate_api, "_MAX_GENERATE_BODY_BYTES", 64)
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "x" * 128, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 413
+        assert response.json()["detail"]["code"] == "INPUT_TOO_LONG"
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_native_images_render_model_prompt_and_reach_adapter_as_bytes(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: bool,
+    ) -> None:
+        config = _make_config()
+        config.inputs = InputModalities(text=True, image=True)
+        registry.get_config.return_value = config
+
+        async def render(_config: object, prompt: str, image_count: int) -> str:
+            assert prompt == "Read the image"
+            assert image_count == 1
+            return "<image>Read the image"
+
+        monkeypatch.setattr("sie_server.api.generate._render_native_image_prompt", render)
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Read the image",
+                "images": [{"data": "aGVsbG8=", "format": "PNG"}],
+                "max_new_tokens": 8,
+                "stream": stream,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert fake_adapter.last_call is not None
+        assert fake_adapter.last_call["prompt"] == "<image>Read the image"
+        assert fake_adapter.last_call["images"] == [{"data": b"hello", "format": "png"}]
+
+    @pytest.mark.parametrize(
+        ("grammar_body", "expected"),
+        [
+            (
+                {
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {"title": {"type": "string"}},
+                        "required": ["title"],
+                    },
+                    "label": "document",
+                    "strict": True,
+                },
+                GrammarSpec(
+                    kind="json_schema",
+                    value={
+                        "type": "object",
+                        "properties": {"title": {"type": "string"}},
+                        "required": ["title"],
+                    },
+                    label="document",
+                    strict=True,
+                ),
+            ),
+            ({"regex": r"\d{3}-\d{4}"}, GrammarSpec(kind="regex", value=r"\d{3}-\d{4}")),
+            ({"ebnf": 'root ::= "yes" | "no"'}, GrammarSpec(kind="ebnf", value='root ::= "yes" | "no"')),
+        ],
+    )
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_native_grammar_reaches_adapter(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        grammar_body: dict[str, object],
+        expected: GrammarSpec,
+        stream: bool,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=[expected.kind])
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Return structured output",
+                "grammar": grammar_body,
+                "max_new_tokens": 8,
+                "stream": stream,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert fake_adapter.last_call is not None
+        assert fake_adapter.last_call["grammar"] == expected
+
+    def test_native_grammar_dereferences_internal_schema_refs(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema"])
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Return structured output",
+                "grammar": {
+                    "json_schema": {
+                        "$defs": {"Title": {"type": "string", "minLength": 1}},
+                        "type": "object",
+                        "properties": {"title": {"$ref": "#/$defs/Title"}},
+                    }
+                },
+                "max_new_tokens": 8,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert fake_adapter.last_call is not None
+        grammar = fake_adapter.last_call["grammar"]
+        assert isinstance(grammar, GrammarSpec)
+        assert grammar.value == {
+            "type": "object",
+            "properties": {"title": {"type": "string", "minLength": 1}},
+        }
+
+    @pytest.mark.parametrize(
+        "grammar",
+        [
+            {},
+            {"json_schema": {}, "regex": "x"},
+            {"regex": 123},
+            {"ebnf": "root", "unknown": True},
+            {"json_schema": {"$ref": "https://example.com/schema.json"}},
+        ],
+    )
+    def test_native_grammar_rejects_invalid_shape_before_adapter(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+        grammar: dict[str, object],
+    ) -> None:
+        registry.get_config.return_value = _make_config(grammar=["json_schema", "regex", "ebnf"])
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "grammar": grammar, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert fake_adapter.last_call is None
+
+    def test_native_grammar_requires_model_capability(
+        self,
+        client: TestClient,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "grammar": {"regex": "[a-z]+"}, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["param"] == "grammar.regex"
+        assert fake_adapter.last_call is None
+
+    def test_native_image_prompt_uses_pinned_trusted_model_tokenizer(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = _make_config()
+        config.hf_revision = "0123456789abcdef0123456789abcdef01234567"
+        assert config.tasks.generate is not None
+        config.tasks.generate.chat_template_kwargs = {"enable_thinking": False}
+        captured: dict[str, object] = {}
+
+        class _Tokenizer:
+            def apply_chat_template(self, messages: object, **kwargs: object) -> str:
+                captured["messages"] = messages
+                captured["template_kwargs"] = kwargs
+                return "<image>Read"
+
+        def load(source: object, **kwargs: object) -> _Tokenizer:
+            captured["source"] = source
+            captured["load_kwargs"] = kwargs
+            return _Tokenizer()
+
+        generate_api._load_native_tokenizer_cached.cache_clear()
+        monkeypatch.setattr(generate_api, "load_tokenizer", load)
+        rendered = asyncio.run(generate_api._render_native_image_prompt(config, "Read", 1))
+
+        assert rendered == "<image>Read"
+        assert captured["source"] == "Qwen/Qwen3-4B-Instruct"
+        assert captured["load_kwargs"] == {
+            "trust_remote_code": True,
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+        }
+        assert captured["messages"] == [
+            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Read"}]}
+        ]
+        assert captured["template_kwargs"] == {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "enable_thinking": False,
+        }
+
+    def test_native_image_prompt_coalesces_and_caches_tokenizer_loads(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = _make_config()
+        config.hf_revision = "0123456789abcdef0123456789abcdef01234567"
+        loads = 0
+
+        class _Tokenizer:
+            def apply_chat_template(self, _messages: object, **_kwargs: object) -> str:
+                return "<image>Read"
+
+        def load(_source: object, **_kwargs: object) -> _Tokenizer:
+            nonlocal loads
+            loads += 1
+            return _Tokenizer()
+
+        async def render_twice() -> list[str]:
+            return await asyncio.gather(
+                generate_api._render_native_image_prompt(config, "Read", 1),
+                generate_api._render_native_image_prompt(config, "Read", 1),
+            )
+
+        generate_api._load_native_tokenizer_cached.cache_clear()
+        monkeypatch.setattr(generate_api, "load_tokenizer", load)
+        rendered = asyncio.run(render_twice())
+
+        assert rendered == ["<image>Read", "<image>Read"]
+        assert loads == 1
+
+    @pytest.mark.parametrize(
+        ("images", "expected_param"),
+        [
+            ([], "images"),
+            ([{"data": "!!!"}], "images[0].data"),
+            ([{"data": "aGk"}], "images[0].data"),
+            ([{"data": "__8="}], "images[0].data"),
+            ([{"data": "AB=="}], "images[0].data"),
+            ([{"data": "aGVsbG8=", "url": "https://example.com/a.png"}], "images[0].url"),
+            ([{"data": "aGVsbG8=", "format": "png;bad"}], "images[0].format"),
+            ([{"data": "aGk="}] * 17, "images"),
+        ],
+    )
+    def test_native_images_reject_malformed_envelopes_before_load(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        images: object,
+        expected_param: str,
+    ) -> None:
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Read", "images": images, "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["param"] == expected_param
+        registry.load_async.assert_not_called()
+
+    def test_native_images_reject_nonvision_model_before_load(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Read", "images": [{"data": "aGVsbG8="}], "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "unsupported_field",
+            "message": "Model 'Qwen__Qwen3-4B-Instruct' does not support image input",
+            "param": "images",
+        }
+        registry.load_async.assert_not_called()
+
+    def test_native_image_template_failure_is_rejected_before_model_load(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = _make_config()
+        config.inputs = InputModalities(text=True, image=True)
+        registry.get_config.return_value = config
+        registry.is_loaded.return_value = False
+        registry.load_async = AsyncMock()
+
+        async def reject_template(_config: object, _prompt: str, _image_count: int) -> str:
+            raise generate_api._bad_request("image prompt template failed", param="images")
+
+        monkeypatch.setattr(generate_api, "_render_native_image_prompt", reject_template)
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Read", "images": [{"data": "aGVsbG8="}], "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["param"] == "images"
+        registry.load_async.assert_not_awaited()
+
     def test_happy_path_returns_text_finish_reason_usage(
         self, client: TestClient, fake_adapter: _FakeGenAdapter
     ) -> None:
@@ -181,6 +562,7 @@ class TestGenerateEndpoint:
             "top_k": None,
             "repetition_penalty": None,
             "min_new_tokens": None,
+            "grammar": None,
             "seed": None,
             "logit_bias": None,
             "logprobs": False,
@@ -435,26 +817,6 @@ class TestGenerateEndpoint:
         assert response.status_code == 200, response.text
         assert fake_adapter.last_call is not None
         assert fake_adapter.last_call[field] == 0.5
-
-    @pytest.mark.parametrize(
-        "grammar",
-        [
-            "not-an-object",
-            {"regex": "[a-z]+"},
-            {"regex": "[a-z]+", "ebnf": 'root ::= "x"'},
-        ],
-    )
-    def test_grammar_is_rejected_when_adapter_cannot_apply_it(self, client: TestClient, grammar: object) -> None:
-        response = client.post(
-            "/v1/generate/Qwen__Qwen3-4B-Instruct",
-            json={"prompt": "Hi", "max_new_tokens": 8, "grammar": grammar},
-        )
-        assert response.status_code == 400, response.text
-        assert response.json()["detail"] == {
-            "code": "unsupported_field",
-            "message": "unsupported field(s): ['grammar']",
-            "param": "grammar",
-        }
 
     def test_prompt_at_cap_is_accepted(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
         # A prompt exactly at the byte cap is allowed (boundary check).

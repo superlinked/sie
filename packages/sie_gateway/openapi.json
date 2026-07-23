@@ -1518,6 +1518,18 @@
           "grammar": {
             "description": "Optional grammar object accepted by the gateway grammar validator."
           },
+          "images": {
+            "description": "Optional inline images paired with ``prompt``. When present, the worker\nrenders one user turn through the model's native chat template.",
+            "items": {
+              "$ref": "#/components/schemas/NativeGenerateImage"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "logit_bias": {
             "additionalProperties": {
               "format": "double",
@@ -2265,6 +2277,31 @@
           "num_tokens",
           "dtype",
           "values"
+        ],
+        "type": "object"
+      },
+      "NativeGenerateImage": {
+        "description": "One inline image on the SIE-native generate surface.",
+        "properties": {
+          "data": {
+            "description": "Canonical standard-base64 encoded image bytes, at most 16 MiB decoded.\nRemote URLs are not accepted.",
+            "maxLength": 22369624,
+            "minLength": 1,
+            "type": "string"
+          },
+          "format": {
+            "description": "Short media-format hint such as ``png`` or ``jpeg``.",
+            "maxLength": 32,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9.+-]+$",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
         ],
         "type": "object"
       },
@@ -5853,7 +5890,7 @@
     },
     "/v1/generate/{model}": {
       "post": {
-        "description": "SIE-native text generation. Omit `stream` or set it to false for a blocking JSON response; set `stream: true` for SIE-native Server-Sent Events terminated by `data: [DONE]`. The model path parameter must use the SIE-safe ID (for example `Qwen__Qwen3-4B-Instruct`); HF-style slashes reject with 400.",
+        "description": "SIE-native generation with optional bounded inline images. Omit `stream` or set it to false for a blocking JSON response; set `stream: true` for SIE-native Server-Sent Events terminated by `data: [DONE]`. The model path parameter must use the SIE-safe ID (for example `Qwen__Qwen3-4B-Instruct`); HF-style slashes reject with 400.",
         "operationId": "proxy_generate",
         "parameters": [
           {

@@ -1,4 +1,4 @@
-"""Direct HTTP route for blocking text generation (walking-skeleton local-dev path).
+"""Direct HTTP route for native generation (walking-skeleton local-dev path).
 
 This is the **local-dev** counterpart of the gateway's ``proxy_generate`` —
 it bypasses NATS/JetStream entirely and calls the
@@ -23,8 +23,9 @@ Request shape mirrors the gateway's walking-skeleton contract verbatim:
 
 .. code-block:: json
 
-   { "prompt": "...", "max_new_tokens": 64, "temperature": 0.7,
-     "top_p": 0.9, "stop": ["</s>"] }
+   { "prompt": "...", "images": [{"data": "<base64>", "format": "png"}],
+     "max_new_tokens": 64, "temperature": 0.7, "top_p": 0.9,
+     "stop": ["</s>"] }
 
 Response shape::
 
@@ -38,14 +39,20 @@ Response shape::
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
 import json
 import logging
 import math
 import os
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Annotated, Any
+from functools import lru_cache
+from pathlib import Path
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -55,7 +62,10 @@ from sie_server.adapters._generation_base import GenerationAdapter, collect_gene
 from sie_server.api.helpers import ModelStateChecker
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.core.runtime_options import apply_generation_runtime_options
+from sie_server.core.tokenizer import image_first_chat_message, load_tokenizer
 from sie_server.observability.tracing import tracer
+from sie_server.types.grammar import GrammarSpec
+from sie_server.types.inputs import ImageInput
 from sie_server.types.openapi import (
     GenerateInputTooLongErrorResponse,
     GenerateModelLoadFailedErrorResponse,
@@ -90,6 +100,7 @@ router = APIRouter(prefix="/v1", tags=["generate"])
 #   ``prompt_cache_key`` / ``safety_identifier``.
 _SUPPORTED_FIELDS = {
     "prompt",
+    "images",
     "max_new_tokens",
     "temperature",
     "top_p",
@@ -97,6 +108,7 @@ _SUPPORTED_FIELDS = {
     "stream",
     "frequency_penalty",
     "presence_penalty",
+    "grammar",
     "seed",
     "logit_bias",
     "logprobs",
@@ -108,16 +120,34 @@ _SUPPORTED_FIELDS = {
 }
 
 
-# Maximum prompt size accepted by this direct route, in UTF-8 bytes.
-# Mirrors the gateway's per-endpoint generate body cap
-# (``MAX_GENERATE_BODY = 4 MiB`` in ``proxy.rs``): generate is pure text,
-# Qwen3.5's 32k context is ~128 KiB of UTF-8, so 4 MiB is ~30× headroom
-# while closing the trivial-OOM-under-concurrency vector. The gateway caps
-# the whole body; this worker-local dev route never sits behind the
-# gateway, so without this cap an oversized prompt would be deserialised,
-# tokenised, and forwarded unbounded. Override via
-# ``SIE_GENERATE_MAX_PROMPT_BYTES``.
+# Maximum prompt size accepted by this direct route, in UTF-8 bytes. The
+# gateway caps the whole body at 24 MiB so one 16 MiB decoded inline image
+# fits after base64 expansion. This worker-local dev route never sits behind
+# the gateway, so it independently caps both the prompt and request body.
+# Override the prompt limit via ``SIE_GENERATE_MAX_PROMPT_BYTES``.
 _MAX_PROMPT_BYTES = int(os.environ.get("SIE_GENERATE_MAX_PROMPT_BYTES", str(4 * 1024 * 1024)))
+_MAX_GENERATE_BODY_BYTES = int(os.environ.get("SIE_GENERATE_MAX_BODY_BYTES", str(24 * 1024 * 1024)))
+_MAX_GENERATE_IMAGES = 16
+_MAX_GENERATE_IMAGE_BYTES = 16 * 1024 * 1024
+_MAX_GENERATE_IMAGE_BASE64_CHARS = 4 * ((_MAX_GENERATE_IMAGE_BYTES + 2) // 3)
+_MAX_GENERATE_IMAGE_FORMAT_LENGTH = 32
+_MAX_GRAMMAR_BYTES = 64 * 1024
+_MAX_SCHEMA_DEPTH = 16
+_MAX_SCHEMA_NODES = 16 * 1024
+_MAX_REGEX_LENGTH = 4 * 1024
+_MAX_EBNF_LENGTH = 8 * 1024
+_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset(
+    {
+        "$dynamicRef",
+        "if",
+        "then",
+        "else",
+        "unevaluatedProperties",
+        "dependentSchemas",
+    }
+)
+_NATIVE_TOKENIZER_CACHE_SIZE = 16
+_NATIVE_TOKENIZER_LOAD_LOCK = threading.Lock()
 
 # OpenAI penalty range (mirrors the gateway's ``proxy.rs::parse_penalty``):
 # ``frequency_penalty`` / ``presence_penalty`` must be a finite number in
@@ -243,6 +273,305 @@ def _validate_logprobs(logprobs_value: Any, top_logprobs_value: Any) -> tuple[bo
     return bool(logprobs_enabled), top_logprobs_value
 
 
+def _parse_native_images(value: Any) -> list[ImageInput] | None:
+    """Validate and decode the native JSON image envelope."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not (1 <= len(value) <= _MAX_GENERATE_IMAGES):
+        raise _bad_request(
+            f"'images' must contain between 1 and {_MAX_GENERATE_IMAGES} entries",
+            param="images",
+        )
+    images: list[ImageInput] = []
+    for index, entry in enumerate(value):
+        owner = f"images[{index}]"
+        if not isinstance(entry, dict):
+            raise _bad_request(f"'{owner}' must be an object", param=owner)
+        entry_dict = cast("dict[str, Any]", entry)
+        unknown = set(entry_dict) - {"data", "format"}
+        if unknown:
+            param = f"{owner}.{sorted(unknown)[0]}"
+            raise _bad_request(f"'{param}' is not supported", param=param, code="unsupported_field")
+        encoded = entry_dict.get("data")
+        data_owner = f"{owner}.data"
+        if not isinstance(encoded, str) or not encoded:
+            raise _bad_request(f"'{data_owner}' must be a non-empty base64 string", param=data_owner)
+        if len(encoded) > _MAX_GENERATE_IMAGE_BASE64_CHARS:
+            raise _bad_request(f"'{data_owner}' exceeds the 16 MiB decoded-image limit", param=data_owner)
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise _bad_request(f"'{data_owner}' must be valid standard base64", param=data_owner) from exc
+        if base64.b64encode(data).decode("ascii") != encoded:
+            raise _bad_request(f"'{data_owner}' must use canonical standard base64", param=data_owner)
+        if not data or len(data) > _MAX_GENERATE_IMAGE_BYTES:
+            raise _bad_request(
+                f"'{data_owner}' must decode to between 1 byte and 16 MiB",
+                param=data_owner,
+            )
+        format_value = entry_dict.get("format")
+        if format_value is not None and (
+            not isinstance(format_value, str)
+            or not (1 <= len(format_value) <= _MAX_GENERATE_IMAGE_FORMAT_LENGTH)
+            or not all(
+                character.isascii() and (character.isalnum() or character in ".+-") for character in format_value
+            )
+        ):
+            format_owner = f"{owner}.format"
+            raise _bad_request(f"'{format_owner}' must be a short media-format token", param=format_owner)
+        images.append({"data": data, "format": format_value.lower() if format_value else None})
+    return images
+
+
+def _schema_child_context(parent: str, key: str) -> str:
+    if parent == "schema":
+        if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}:
+            return "schema_map"
+        if key in {"oneOf", "anyOf", "allOf", "prefixItems"}:
+            return "schema_array"
+        if key in {
+            "items",
+            "additionalProperties",
+            "contains",
+            "propertyNames",
+            "not",
+            "if",
+            "then",
+            "else",
+        }:
+            return "schema"
+        return "other"
+    if parent == "schema_map":
+        return "schema"
+    return "other"
+
+
+def _json_pointer(root: Any, pointer: str) -> Any:
+    current = root
+    if not pointer:
+        return current
+    for raw_token in pointer.removeprefix("/").split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict) and token in current:
+            current = current[token]
+        elif isinstance(current, list) and token.isdigit() and int(token) < len(current):
+            current = current[int(token)]
+        else:
+            raise KeyError(pointer)
+    return current
+
+
+def _dereference_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    visited = 0
+    stack: list[str] = []
+
+    def resolve(value: Any, path: str, context: str) -> Any:
+        nonlocal visited
+        visited += 1
+        if visited > _MAX_SCHEMA_NODES:
+            raise _bad_request(
+                f"JSON Schema node count exceeds limit ({_MAX_SCHEMA_NODES})",
+                param=path,
+            )
+        if isinstance(value, dict):
+            if context == "schema" and "$ref" in value:
+                ref = value["$ref"]
+                ref_path = f"{path}.$ref"
+                if not isinstance(ref, str):
+                    raise _bad_request("'$ref' must be a string", param=ref_path)
+                if not ref.startswith("#"):
+                    raise _bad_request("external '$ref' is not supported", param=ref_path, code="unsupported_field")
+                pointer = ref[1:]
+                if pointer and not pointer.startswith("/"):
+                    raise _bad_request(
+                        "only internal JSON-pointer '$ref' values are supported",
+                        param=ref_path,
+                        code="unsupported_field",
+                    )
+                if pointer in stack:
+                    raise _bad_request(f"recursive '$ref' cycle detected at {ref!r}", param=ref_path)
+                try:
+                    target = _json_pointer(schema, pointer)
+                except KeyError as exc:
+                    raise _bad_request(f"unresolved internal '$ref' {ref!r}", param=ref_path) from exc
+                stack.append(pointer)
+                resolved = resolve(target, path, "schema")
+                stack.pop()
+                siblings = {
+                    key: resolve(child, f"{path}.{key}", _schema_child_context(context, key))
+                    for key, child in value.items()
+                    if key not in {"$ref", "$defs", "definitions"}
+                }
+                return resolved if not siblings else {"allOf": [resolved, siblings]}
+
+            return {
+                key: resolve(child, f"{path}.{key}", _schema_child_context(context, key))
+                for key, child in value.items()
+                if not (context == "schema" and key in {"$defs", "definitions"})
+            }
+        if isinstance(value, list):
+            child_context = "schema" if context in {"schema", "schema_array"} else "other"
+            return [resolve(child, f"{path}[{index}]", child_context) for index, child in enumerate(value)]
+        return value
+
+    resolved = resolve(schema, "grammar.json_schema", "schema")
+    return cast("dict[str, Any]", resolved)
+
+
+def _validate_schema_shape(schema: Any) -> None:
+    visited = 0
+    nesting_keys = {
+        "properties",
+        "patternProperties",
+        "additionalProperties",
+        "unevaluatedProperties",
+        "items",
+        "prefixItems",
+        "contains",
+        "propertyNames",
+        "oneOf",
+        "anyOf",
+        "allOf",
+        "not",
+        "definitions",
+        "$defs",
+        "dependentSchemas",
+        "if",
+        "then",
+        "else",
+    }
+
+    def walk(value: Any, path: str, depth: int) -> None:
+        nonlocal visited
+        visited += 1
+        if visited > _MAX_SCHEMA_NODES:
+            raise _bad_request(
+                f"JSON Schema node count exceeds limit ({_MAX_SCHEMA_NODES})",
+                param=path,
+            )
+        if depth > _MAX_SCHEMA_DEPTH:
+            raise _bad_request(f"JSON Schema depth exceeds limit ({_MAX_SCHEMA_DEPTH})", param=path)
+        if isinstance(value, dict):
+            unsupported = _UNSUPPORTED_SCHEMA_KEYWORDS.intersection(value)
+            if unsupported:
+                keyword = sorted(unsupported)[0]
+                raise _bad_request(
+                    f"JSON Schema keyword '{keyword}' is not supported",
+                    param=f"{path}.{keyword}",
+                    code="unsupported_field",
+                )
+            for key, child in value.items():
+                walk(child, f"{path}.{key}", depth + 1 if key in nesting_keys else depth)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, f"{path}[{index}]", depth)
+
+    walk(schema, "grammar.json_schema", 0)
+
+
+def _parse_native_grammar(value: Any) -> GrammarSpec | None:
+    """Validate the public native grammar envelope and build the adapter type."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _bad_request("'grammar' must be a JSON object", param="grammar")
+    encoded_size = len(json.dumps(value, separators=(",", ":")).encode("utf-8"))
+    if encoded_size > _MAX_GRAMMAR_BYTES:
+        raise _bad_request(
+            f"grammar payload {encoded_size} bytes exceeds limit ({_MAX_GRAMMAR_BYTES} bytes)",
+            param="grammar",
+        )
+    unknown = set(value) - {"json_schema", "regex", "ebnf", "label", "strict"}
+    if unknown:
+        field = sorted(unknown)[0]
+        raise _bad_request(f"'grammar.{field}' is not supported", param=f"grammar.{field}", code="unsupported_field")
+    kinds = [kind for kind in ("json_schema", "regex", "ebnf") if kind in value]
+    if len(kinds) != 1:
+        raise _bad_request(
+            "'grammar' must contain exactly one of 'json_schema', 'regex' or 'ebnf'",
+            param="grammar",
+        )
+    label = value.get("label")
+    if label is not None and not isinstance(label, str):
+        raise _bad_request("'grammar.label' must be a string", param="grammar.label")
+    strict = value.get("strict")
+    if strict is not None and not isinstance(strict, bool):
+        raise _bad_request("'grammar.strict' must be a boolean", param="grammar.strict")
+
+    kind = kinds[0]
+    payload = value[kind]
+    if kind == "json_schema":
+        if not isinstance(payload, dict):
+            raise _bad_request("'grammar.json_schema' must be an object", param="grammar.json_schema")
+        payload = _dereference_schema_refs(cast("dict[str, Any]", payload))
+        _validate_schema_shape(payload)
+        resolved_size = len(
+            json.dumps(
+                {
+                    "json_schema": payload,
+                    **({"label": label} if label is not None else {}),
+                    **({"strict": strict} if strict is not None else {}),
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        if resolved_size > _MAX_GRAMMAR_BYTES:
+            raise _bad_request(
+                f"grammar payload {resolved_size} bytes exceeds limit ({_MAX_GRAMMAR_BYTES} bytes)",
+                param="grammar",
+            )
+    else:
+        limit = _MAX_REGEX_LENGTH if kind == "regex" else _MAX_EBNF_LENGTH
+        if not isinstance(payload, str):
+            raise _bad_request(f"'grammar.{kind}' must be a string", param=f"grammar.{kind}")
+        if len(payload) > limit:
+            raise _bad_request(f"{kind} length {len(payload)} exceeds limit ({limit})", param=f"grammar.{kind}")
+
+    return GrammarSpec(kind=cast("Any", kind), value=payload, label=label, strict=strict)
+
+
+async def _render_native_image_prompt(config: Any, prompt: str, image_count: int) -> str:
+    """Render one image-aware user turn with the model's own chat template."""
+    source = config.hf_id or config.weights_path
+    if not isinstance(source, str | Path):
+        raise _bad_request("model has no tokenizer source for image generation", param="images")
+    revision = config.hf_revision if config.hf_id else None
+    try:
+        tokenizer = await asyncio.to_thread(
+            _load_native_tokenizer_coalesced,
+            str(source),
+            revision,
+        )
+        message = image_first_chat_message(role="user", text=prompt, image_count=image_count)
+        kwargs = dict(config.tasks.generate.chat_template_kwargs or {})
+        apply_chat_template = cast("Any", tokenizer.apply_chat_template)
+        rendered = await asyncio.to_thread(
+            apply_chat_template,
+            [message],
+            tokenize=False,
+            add_generation_prompt=True,
+            **kwargs,
+        )
+    except Exception as exc:
+        logger.info("native image prompt render failed for %s: %s", config.name, exc)
+        raise _bad_request("failed to render the model-native image prompt", param="images") from exc
+    if not isinstance(rendered, str) or not rendered:
+        raise _bad_request("model-native image prompt rendering returned no text", param="images")
+    return rendered
+
+
+@lru_cache(maxsize=_NATIVE_TOKENIZER_CACHE_SIZE)
+def _load_native_tokenizer_cached(source: str, revision: str | None) -> Any:
+    """Load one pinned tokenizer into the bounded direct-route cache."""
+    return load_tokenizer(source, trust_remote_code=True, revision=revision)
+
+
+def _load_native_tokenizer_coalesced(source: str, revision: str | None) -> Any:
+    """Coalesce concurrent cache misses without blocking the event loop."""
+    with _NATIVE_TOKENIZER_LOAD_LOCK:
+        return _load_native_tokenizer_cached(source, revision)
+
+
 def _payload_too_large(message: str, *, param: str | None = None) -> HTTPException:
     """413 Payload Too Large, OpenAI-shaped error detail."""
     detail: dict[str, Any] = {
@@ -252,6 +581,25 @@ def _payload_too_large(message: str, *, param: str | None = None) -> HTTPExcepti
     if param is not None:
         detail["param"] = param
     return HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=detail)
+
+
+async def _read_bounded_request_body(request: Request, limit: int) -> bytes:
+    """Read an ASGI request without aggregating more than ``limit`` bytes."""
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = -1
+        if declared_length > limit:
+            raise _payload_too_large(f"request body exceeds the limit of {limit} bytes")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > limit - len(body):
+            raise _payload_too_large(f"request body exceeds the limit of {limit} bytes")
+        body.extend(chunk)
+    return bytes(body)
 
 
 async def _stream_generate_events(
@@ -266,10 +614,12 @@ async def _stream_generate_events(
     presence_penalty: float | None,
     top_k: int | None,
     min_new_tokens: int | None,
+    grammar: GrammarSpec | None,
     seed: int | None,
     logit_bias: dict[str, float] | None,
     logprobs: bool,
     top_logprobs: int | None,
+    images: list[ImageInput] | None = None,
 ) -> AsyncIterator[str]:
     """Yield SIE-native ``GenerateChunk`` SSE lines for ``SIEClient.stream_generate``.
 
@@ -301,10 +651,12 @@ async def _stream_generate_events(
             presence_penalty=presence_penalty,
             top_k=top_k,
             min_new_tokens=min_new_tokens,
+            grammar=grammar,
             seed=seed,
             logit_bias=logit_bias,
             logprobs=logprobs,
             top_logprobs=top_logprobs,
+            images=images,
         ):
             if chunk.done:
                 saw_terminal = True
@@ -473,8 +825,9 @@ async def generate(
         if x_machine_profile:
             span.set_attribute("machine_profile", x_machine_profile)
 
+        raw_body = await _read_bounded_request_body(http_request, _MAX_GENERATE_BODY_BYTES)
         try:
-            body = await http_request.json()
+            body = json.loads(raw_body)
         except (json.JSONDecodeError, ValueError) as exc:
             raise _bad_request("request body must be a JSON object") from exc
         if not isinstance(body, dict):
@@ -509,6 +862,8 @@ async def generate(
                 f"'prompt' is {prompt_bytes} bytes, exceeds the limit of {_MAX_PROMPT_BYTES} bytes",
                 param="prompt",
             )
+        images = _parse_native_images(body.get("images"))
+        grammar = _parse_native_grammar(body.get("grammar"))
 
         max_new_tokens = body.get("max_new_tokens")
         # ``isinstance(x, int)`` is True for ``bool`` in Python — reject
@@ -536,6 +891,18 @@ async def generate(
             raise _bad_request(
                 f"Model '{model}' does not declare a generate task",
                 code=ErrorCode.MODEL_NOT_FOUND.value,
+            )
+        if images and not config.inputs.image:
+            raise _bad_request(
+                f"Model '{model}' does not support image input",
+                param="images",
+                code="unsupported_field",
+            )
+        if grammar is not None and grammar.kind not in gen_task.capabilities.grammar:
+            raise _bad_request(
+                f"Model '{model}' does not declare '{grammar.kind}' grammar support",
+                param=f"grammar.{grammar.kind}",
+                code="unsupported_field",
             )
         if max_new_tokens > gen_task.max_output_tokens:
             raise _bad_request(
@@ -618,6 +985,10 @@ async def generate(
                 )
         logprobs, top_logprobs = _validate_logprobs(body.get("logprobs"), body.get("top_logprobs"))
 
+        generation_prompt = prompt
+        if images:
+            generation_prompt = await _render_native_image_prompt(config, prompt, len(images))
+
         # Do not start a potentially expensive model load until the complete
         # request has passed validation.
         await checker.ensure_loaded(device)
@@ -633,7 +1004,7 @@ async def generate(
             return StreamingResponse(
                 _stream_generate_events(
                     adapter,
-                    prompt=prompt,
+                    prompt=generation_prompt,
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     top_p=top_p,
@@ -644,8 +1015,10 @@ async def generate(
                     logit_bias=logit_bias,
                     top_k=top_k,
                     min_new_tokens=min_new_tokens,
+                    grammar=grammar,
                     logprobs=logprobs,
                     top_logprobs=top_logprobs,
+                    images=images,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -657,7 +1030,7 @@ async def generate(
             # for backwards compatibility — drain the iterator into an
             # aggregate. SDK / gateway consume the iterator directly.
             chunks = adapter.generate(
-                prompt=prompt,
+                prompt=generation_prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
@@ -666,8 +1039,10 @@ async def generate(
                 presence_penalty=presence_penalty,
                 top_k=top_k,
                 min_new_tokens=min_new_tokens,
+                grammar=grammar,
                 seed=seed,
                 logit_bias=logit_bias,
+                images=images,
             )
             result = await collect_generation(chunks)
         except Exception as e:

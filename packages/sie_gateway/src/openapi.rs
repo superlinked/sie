@@ -122,6 +122,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         OpenAITranscriptionResponse,
         OpenAITranscriptionResponseFormat,
         OpenAITranscriptionUsage,
+        NativeGenerateImage,
         GenerateRequest,
         GenerateResponse,
         GenerateChunk,
@@ -470,8 +471,9 @@ fn patch_generate_path(value: &mut Value) {
     post.insert(
         "description".to_string(),
         json!(
-            "SIE-native text generation. Omit `stream` or set it to false for a blocking JSON \
-             response; set `stream: true` for SIE-native Server-Sent Events terminated by \
+            "SIE-native generation with optional bounded inline images. Omit `stream` or set it \
+             to false for a blocking JSON response; set `stream: true` for SIE-native \
+             Server-Sent Events terminated by \
              `data: [DONE]`. The model path parameter must use the SIE-safe ID (for example \
              `Qwen__Qwen3-4B-Instruct`); HF-style slashes reject with 400."
         ),
@@ -1750,11 +1752,29 @@ pub struct OpenAITranscriptionResponse {
 }
 // ── /v1/generate/{model} schemas ──────────────────────────────────
 
+/// One inline image on the SIE-native generate surface.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct NativeGenerateImage {
+    /// Canonical standard-base64 encoded image bytes, at most 16 MiB decoded.
+    /// Remote URLs are not accepted.
+    #[schema(min_length = 1, max_length = 22369624)]
+    pub data: String,
+    /// Short media-format hint such as ``png`` or ``jpeg``.
+    #[schema(min_length = 1, max_length = 32, pattern = "^[A-Za-z0-9.+-]+$")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
 /// SIE-native text-generation request. Set ``stream`` to true for SSE.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GenerateRequest {
     #[schema(min_length = 1)]
     pub prompt: String,
+    /// Optional inline images paired with ``prompt``. When present, the worker
+    /// renders one user turn through the model's native chat template.
+    #[schema(min_items = 1, max_items = 16)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<NativeGenerateImage>>,
     #[schema(minimum = 1)]
     pub max_new_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3134,6 +3154,19 @@ mod tests {
 
         let request = &spec["components"]["schemas"]["GenerateRequest"];
         assert_eq!(request["required"], json!(["prompt", "max_new_tokens"]));
+        assert_eq!(
+            request["properties"]["images"]["items"]["$ref"],
+            "#/components/schemas/NativeGenerateImage"
+        );
+        assert_eq!(request["properties"]["images"]["maxItems"], json!(16));
+        assert_eq!(
+            spec["components"]["schemas"]["NativeGenerateImage"]["required"],
+            json!(["data"])
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["NativeGenerateImage"]["properties"]["data"]["maxLength"],
+            json!(22_369_624)
+        );
         let seed = &request["properties"]["seed"];
         assert_eq!(seed["type"], json!(["integer", "null"]));
         assert_eq!(seed["format"], "int64");

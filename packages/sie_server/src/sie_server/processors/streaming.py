@@ -57,7 +57,7 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.core.runtime_options import apply_generation_runtime_options
 from sie_server.core.text_tokens import estimate_tokens_from_chars
-from sie_server.core.tokenizer import load_tokenizer
+from sie_server.core.tokenizer import image_first_chat_message, load_tokenizer
 from sie_server.observability import worker_telemetry as _metrics
 from sie_server.processors.grammar_cache import GrammarLRU
 from sie_server.processors.grammar_compile import compile_outlines
@@ -3219,10 +3219,7 @@ class StreamingProcessor:
                 # key off the ``"image"`` part type; the bytes travel separately
                 # as ``image_data``). Images lead, then the text — the flat image
                 # order the adapter receives.
-                content_parts: list[dict[str, Any]] = [{"type": "image"} for _ in m.images]
-                if m.content:
-                    content_parts.append({"type": "text", "text": m.content})
-                d = {"role": role, "content": content_parts}
+                d = image_first_chat_message(role=role, text=m.content, image_count=len(m.images))
             else:
                 d = {"role": role, "content": m.content}
             if m.tool_calls:

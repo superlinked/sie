@@ -48,6 +48,7 @@ from sie_server.core.oom import ResourceExhausted, ResourceExhaustedError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from sie_server.types.grammar import GrammarSpec
     from sie_server.types.inputs import ImageInput, Item
 
 # Default declared footprint. Consumed by the MemoryManager once the
@@ -409,6 +410,7 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         top_k: int | None = None,
         repetition_penalty: float | None = None,
         min_new_tokens: int | None = None,
+        grammar: GrammarSpec | None = None,
         seed: int | None = None,
         logit_bias: dict[str, float] | None = None,
         logprobs: bool = False,
@@ -423,6 +425,7 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
             presence_penalty,
             top_k,
             repetition_penalty,
+            grammar,
             seed,
             logit_bias,
             min_new_tokens,

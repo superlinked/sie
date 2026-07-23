@@ -2446,6 +2446,157 @@
         "title": "GenerateChunk",
         "type": "object"
       },
+      "NativeEbnfGrammarModel": {
+        "additionalProperties": false,
+        "description": "EBNF structured-output constraint.",
+        "properties": {
+          "ebnf": {
+            "title": "Ebnf",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "strict": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Strict"
+          }
+        },
+        "required": [
+          "ebnf"
+        ],
+        "title": "NativeEbnfGrammarModel",
+        "type": "object"
+      },
+      "NativeGenerateImageModel": {
+        "description": "One inline image on the SIE-native generate surface.",
+        "properties": {
+          "data": {
+            "description": "Canonical standard-base64 image bytes, at most 16 MiB decoded",
+            "maxLength": 22369624,
+            "minLength": 1,
+            "title": "Data",
+            "type": "string"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9.+-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Short media-format hint such as png or jpeg",
+            "title": "Format"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "NativeGenerateImageModel",
+        "type": "object"
+      },
+      "NativeJsonSchemaGrammarModel": {
+        "additionalProperties": false,
+        "description": "JSON Schema structured-output constraint.",
+        "properties": {
+          "json_schema": {
+            "additionalProperties": true,
+            "title": "Json Schema",
+            "type": "object"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "strict": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Strict"
+          }
+        },
+        "required": [
+          "json_schema"
+        ],
+        "title": "NativeJsonSchemaGrammarModel",
+        "type": "object"
+      },
+      "NativeRegexGrammarModel": {
+        "additionalProperties": false,
+        "description": "Regular-expression structured-output constraint.",
+        "properties": {
+          "regex": {
+            "title": "Regex",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "strict": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Strict"
+          }
+        },
+        "required": [
+          "regex"
+        ],
+        "title": "NativeRegexGrammarModel",
+        "type": "object"
+      },
       "GenerateRequestModel": {
         "description": "Request body for the SIE-native generate endpoint.",
         "examples": [
@@ -2463,6 +2614,43 @@
             "minLength": 1,
             "title": "Prompt",
             "type": "string"
+          },
+          "images": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/NativeGenerateImageModel"
+                },
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional inline images paired with prompt. The worker renders one user turn through the model's native chat template; remote URLs are not accepted.",
+            "title": "Images"
+          },
+          "grammar": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeJsonSchemaGrammarModel"
+              },
+              {
+                "$ref": "#/components/schemas/NativeRegexGrammarModel"
+              },
+              {
+                "$ref": "#/components/schemas/NativeEbnfGrammarModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional structured-output grammar; exactly one of json_schema, regex, or ebnf",
+            "title": "Grammar"
           },
           "max_new_tokens": {
             "description": "Maximum number of tokens to generate",

@@ -23,6 +23,7 @@ from typing import Any, ClassVar, Literal, cast
 
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import ImageInput
 
 logger = logging.getLogger(__name__)
@@ -245,6 +246,7 @@ class GenerationAdapter(ModelAdapter):
         top_k: int | None = None,
         repetition_penalty: float | None = None,
         min_new_tokens: int | None = None,
+        grammar: GrammarSpec | None = None,
         seed: int | None = None,
         logit_bias: dict[str, float] | None = None,
         logprobs: bool = False,
@@ -270,6 +272,7 @@ class GenerationAdapter(ModelAdapter):
                 default (typically 0.0). Gateway-validated upstream.
             min_new_tokens: Optional minimum generated-token floor. Adapters
                 that cannot enforce it must reject rather than silently ignore it.
+            grammar: Optional structured-output grammar.
             presence_penalty: Optional OpenAI-style presence penalty
                 in ``[-2.0, 2.0]``. Same semantics as
                 ``frequency_penalty``.

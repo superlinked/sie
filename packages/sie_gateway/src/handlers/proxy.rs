@@ -35,7 +35,13 @@ use super::models::{extract_bearer_token, mask_token};
 
 const GATEWAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_PROXY_BODY: usize = 16 * 1024 * 1024;
-const MAX_GENERATE_BODY: usize = 4 * 1024 * 1024;
+// Native generate accepts bounded inline images. A 16 MiB decoded image grows
+// to ~21.4 MiB in base64; leave room for the prompt and JSON envelope while
+// still bounding aggregate request memory at ingress.
+const MAX_GENERATE_BODY: usize = 24 * 1024 * 1024;
+const MAX_GENERATE_IMAGES: usize = 16;
+const MAX_GENERATE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GENERATE_IMAGE_BASE64_CHARS: usize = 4 * MAX_GENERATE_IMAGE_BYTES.div_ceil(3);
 // The audio preprocessor accepts 24 MiB of encoded media. Base64 expands that
 // to exactly 32 MiB; leave bounded room for the surrounding native JSON item.
 const MAX_EXTRACT_BODY: usize = 34 * 1024 * 1024;
@@ -1666,10 +1672,10 @@ pub(crate) async fn proxy_request(
         .unwrap_or(false);
     let use_msgpack_out = publisher::wants_msgpack(req.headers());
 
-    // Per-endpoint body cap. `generate` is pure text — Qwen3.5's 32k
-    // context is ~128 KiB of UTF-8, so 4 MiB gives ~30× headroom and
-    // closes the trivial-OOM-under-concurrency vector that the legacy
-    // 256 MiB cap left open. The remaining endpoints routed here
+    // Per-endpoint body cap. `generate` allows one 16 MiB decoded inline
+    // image after JSON base64 expansion, so its 24 MiB cap closes the
+    // trivial-OOM-under-concurrency vector while admitting the maximum
+    // legal image. The remaining endpoints routed here
     // (encode / score) get the same text-appropriate 16 MiB cap as the
     // chat / embeddings paths. Extract accepts bounded binary media, so
     // its cap covers the maximum legal audio after JSON base64 expansion.
@@ -1969,6 +1975,28 @@ async fn queue_mode_proxy(
                             .into_response();
                     }
                 }
+            }
+        }
+        let has_images = params
+            .generate
+            .as_ref()
+            .is_some_and(generate_params_have_images);
+        if has_images {
+            let image_supported = state
+                .model_registry
+                .get_model_info(model)
+                .is_some_and(|info| info.info_extras.supports_vision_generation());
+            if !native_generate_image_input_allowed(params.generate.as_ref(), image_supported) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        format!("Model '{display_model}' does not support image input"),
+                        oai_type::INVALID_REQUEST,
+                        Some("images"),
+                        oai_code::UNSUPPORTED_FIELD,
+                    )),
+                )
+                    .into_response();
             }
         }
     }
@@ -9659,6 +9687,7 @@ fn parse_lora_adapter_field(value: Option<&serde_json::Value>) -> Result<Option<
 /// (``n`` / ``best_of`` / ``stream_options``) stay on the OpenAI adapters.
 const GENERATE_ACCEPTED_FIELDS: &[&str] = &[
     "prompt",
+    "images",
     "max_new_tokens",
     "temperature",
     "top_p",
@@ -9678,6 +9707,141 @@ const GENERATE_ACCEPTED_FIELDS: &[&str] = &[
     "stream",
 ];
 
+/// Parse the SIE-native JSON image envelope used by ``/v1/generate``.
+///
+/// The gateway never fetches URLs. Each entry is an exact
+/// ``{data: <standard-base64>, format?: <short token>}`` object and remains
+/// base64 on the generate work wire so it can round-trip through the
+/// sidecar's ``serde_json::Value`` representation.
+#[allow(clippy::result_large_err)]
+fn parse_native_generate_images(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<Vec<publisher::ChatImage>>, Response> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(entries) = value.as_array() else {
+        return Err(sampler_bad_request(
+            "'images' must be a non-empty array".to_string(),
+            "images",
+            oai_code::INVALID_REQUEST,
+        ));
+    };
+    if entries.is_empty() || entries.len() > MAX_GENERATE_IMAGES {
+        return Err(sampler_bad_request(
+            format!("'images' must contain between 1 and {MAX_GENERATE_IMAGES} entries"),
+            "images",
+            oai_code::INVALID_REQUEST,
+        ));
+    }
+    let mut images = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let param = format!("images[{index}]");
+        let Some(object) = entry.as_object() else {
+            return Err(sampler_bad_request(
+                format!("'{param}' must be an object"),
+                &param,
+                oai_code::INVALID_REQUEST,
+            ));
+        };
+        if let Some(unknown) = object
+            .keys()
+            .find(|key| !matches!(key.as_str(), "data" | "format"))
+        {
+            let unknown_param = format!("{param}.{unknown}");
+            return Err(sampler_bad_request(
+                format!("'{unknown_param}' is not supported"),
+                &unknown_param,
+                oai_code::UNSUPPORTED_FIELD,
+            ));
+        }
+        let data_param = format!("{param}.data");
+        let Some(data) = object.get("data").and_then(serde_json::Value::as_str) else {
+            return Err(sampler_bad_request(
+                format!("'{data_param}' must be a non-empty base64 string"),
+                &data_param,
+                oai_code::INVALID_REQUEST,
+            ));
+        };
+        if !native_generate_image_encoded_size_allowed(data.len()) {
+            return Err(sampler_bad_request(
+                format!(
+                    "'{data_param}' must decode to between 1 byte and {MAX_GENERATE_IMAGE_BYTES} bytes"
+                ),
+                &data_param,
+                oai_code::INVALID_REQUEST,
+            ));
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| {
+                sampler_bad_request(
+                    format!("'{data_param}' must be valid standard base64"),
+                    &data_param,
+                    oai_code::INVALID_REQUEST,
+                )
+            })?;
+        if decoded.is_empty() || decoded.len() > MAX_GENERATE_IMAGE_BYTES {
+            return Err(sampler_bad_request(
+                format!(
+                    "'{data_param}' must decode to between 1 byte and {MAX_GENERATE_IMAGE_BYTES} bytes"
+                ),
+                &data_param,
+                oai_code::INVALID_REQUEST,
+            ));
+        }
+        let format = match object.get("format") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(format))
+                if !format.is_empty()
+                    && format.len() <= 32
+                    && format.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-')
+                    }) =>
+            {
+                Some(format.to_ascii_lowercase())
+            }
+            Some(_) => {
+                let format_param = format!("{param}.format");
+                return Err(sampler_bad_request(
+                    format!("'{format_param}' must be a short media-format token"),
+                    &format_param,
+                    oai_code::INVALID_REQUEST,
+                ));
+            }
+        };
+        images.push(publisher::ChatImage {
+            data: data.to_string(),
+            format,
+        });
+    }
+    Ok(Some(images))
+}
+
+fn native_generate_image_encoded_size_allowed(length: usize) -> bool {
+    (1..=MAX_GENERATE_IMAGE_BASE64_CHARS).contains(&length)
+}
+
+fn generate_params_have_images(params: &publisher::GenerateParams) -> bool {
+    matches!(
+        &params.input,
+        publisher::GenerateInput::Messages { messages }
+            if messages.iter().any(|message| {
+                message.images.as_ref().is_some_and(|images| !images.is_empty())
+            })
+    )
+}
+
+fn native_generate_image_input_allowed(
+    params: Option<&publisher::GenerateParams>,
+    model_supports_vision_generation: bool,
+) -> bool {
+    !params.is_some_and(generate_params_have_images) || model_supports_vision_generation
+}
+
 /// Parse the walking-skeleton ``/v1/generate/{model}`` JSON body shape into a
 /// :class:`GenerateParams`. Returns ``Ok(None)`` when required fields are
 /// missing or malformed — the caller surfaces a generic 400 in that case.
@@ -9685,9 +9849,9 @@ const GENERATE_ACCEPTED_FIELDS: &[&str] = &[
 /// that response is the precise OpenAI envelope and is returned
 /// verbatim.
 ///
-/// Only the ``Prompt`` arm is exposed via this entrypoint; chat requests
-/// flow through :func:`chat_params_from_json` and assemble
-/// the ``Messages`` arm there.
+/// Text-only requests preserve the ``Prompt`` arm. Native image requests and
+/// chat requests assemble the existing ``Messages`` arm so both reach the
+/// worker's model-native template renderer.
 #[allow(clippy::result_large_err)]
 fn generate_params_from_json(
     parsed: &serde_json::Value,
@@ -9704,6 +9868,7 @@ fn generate_params_from_json(
             ))
         }
     };
+    let images = parse_native_generate_images(parsed.get("images"))?;
     // Granular `max_new_tokens` rejection so OpenAI-shaped error
     // envelopes carry the correct `param` field. Previously every
     // failure mode collapsed to `Ok(None)` and the caller emitted
@@ -9911,8 +10076,21 @@ fn generate_params_from_json(
     let top_logprobs = parse_top_logprobs_field(parsed.get("top_logprobs"))?;
     check_logprobs_consistency(logprobs, top_logprobs)?;
 
+    let input = match images {
+        Some(images) => publisher::GenerateInput::Messages {
+            messages: vec![publisher::ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+                tool_calls: None,
+                tool_call_id: None,
+                images: Some(images),
+                content_parts: None,
+            }],
+        },
+        None => publisher::GenerateInput::Prompt { prompt },
+    };
     Ok(Some(publisher::GenerateParams {
-        input: publisher::GenerateInput::Prompt { prompt },
+        input,
         max_new_tokens,
         temperature,
         top_p,
@@ -10060,6 +10238,11 @@ fn generate_params_from_rmpv(
             ))
         }
     };
+    let images = parse_native_generate_images(
+        rmpv_map_get(parsed, "images")
+            .map(rmpv_to_json_owned)
+            .as_ref(),
+    )?;
     // Mirror the JSON path's granular error attribution so SDKs that
     // branch on `error.param` see the same field name whether the
     // wire format is JSON or msgpack.
@@ -10311,8 +10494,21 @@ fn generate_params_from_rmpv(
     let top_logprobs = parse_top_logprobs_field(bridge("top_logprobs").as_ref())?;
     check_logprobs_consistency(logprobs, top_logprobs)?;
 
+    let input = match images {
+        Some(images) => publisher::GenerateInput::Messages {
+            messages: vec![publisher::ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+                tool_calls: None,
+                tool_call_id: None,
+                images: Some(images),
+                content_parts: None,
+            }],
+        },
+        None => publisher::GenerateInput::Prompt { prompt },
+    };
     Ok(Some(publisher::GenerateParams {
-        input: publisher::GenerateInput::Prompt { prompt },
+        input,
         max_new_tokens,
         temperature,
         top_p,
@@ -13161,6 +13357,131 @@ mod tests {
         assert_eq!(params.top_p, Some(0.9_f32));
         assert_eq!(params.stop.as_deref(), Some(&["</s>".to_string()][..]));
         assert!(params.grammar.is_none());
+    }
+
+    #[test]
+    fn test_generate_params_from_json_maps_native_images_to_worker_messages() {
+        for stream in [false, true] {
+            let body = serde_json::json!({
+                "prompt": "Read the image",
+                "images": [{"data": "aGVsbG8=", "format": "PNG"}],
+                "max_new_tokens": 8,
+                "stream": stream,
+            });
+            let params = _expect_generate_ok(&body);
+            assert_eq!(params.stream, stream);
+            assert!(generate_params_have_images(&params));
+            let publisher::GenerateInput::Messages { messages } = params.input else {
+                panic!("image-native generate must use the worker message path")
+            };
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, "user");
+            assert_eq!(messages[0].content, "Read the image");
+            let images = messages[0].images.as_ref().expect("one image");
+            assert_eq!(images[0].data, "aGVsbG8=");
+            assert_eq!(images[0].format.as_deref(), Some("png"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_params_from_json_rejects_malformed_native_images() {
+        let too_many = serde_json::Value::Array(vec![
+            serde_json::json!({"data": "aGk="});
+            MAX_GENERATE_IMAGES + 1
+        ]);
+        let cases = [
+            (serde_json::json!([]), "images"),
+            (serde_json::json!([{"data": "!!!"}]), "images[0].data"),
+            (serde_json::json!([{"data": "aGk"}]), "images[0].data"),
+            (serde_json::json!([{"data": "__8="}]), "images[0].data"),
+            (serde_json::json!([{"data": "AB=="}]), "images[0].data"),
+            (
+                serde_json::json!([{"data": "aGVsbG8=", "url": "https://example.com/image.png"}]),
+                "images[0].url",
+            ),
+            (
+                serde_json::json!([{"data": "aGVsbG8=", "format": "png;bad"}]),
+                "images[0].format",
+            ),
+            (too_many, "images"),
+        ];
+        for (images, expected_param) in cases {
+            let body = serde_json::json!({
+                "prompt": "Read",
+                "images": images,
+                "max_new_tokens": 8,
+            });
+            let error = _expect_generate_err(&body).await;
+            assert_eq!(error["error"]["param"], expected_param);
+        }
+    }
+
+    #[test]
+    fn test_generate_params_from_rmpv_maps_native_images_to_worker_messages() {
+        let body = serde_json::json!({
+            "prompt": "Read",
+            "images": [{"data": "aGVsbG8=", "format": "png"}],
+            "max_new_tokens": 8,
+        });
+        let rmpv::Value::Map(map) = json_to_rmpv(body) else {
+            panic!("object must map")
+        };
+        let params = generate_params_from_rmpv(&map)
+            .expect("valid request")
+            .expect("generate params");
+        assert!(generate_params_have_images(&params));
+    }
+
+    #[test]
+    fn test_generate_native_image_validation_has_json_msgpack_parity() {
+        let body = serde_json::json!({
+            "prompt": "Read",
+            "images": [{"data": "aGk"}],
+            "max_new_tokens": 8,
+        });
+        assert!(generate_params_from_json(&body).is_err());
+        let rmpv::Value::Map(map) = json_to_rmpv(body) else {
+            panic!("object must map")
+        };
+        assert!(generate_params_from_rmpv(&map).is_err());
+    }
+
+    #[test]
+    fn test_generate_native_images_fail_closed_on_model_capability() {
+        let image_body = serde_json::json!({
+            "prompt": "Read",
+            "images": [{"data": "aGk="}],
+            "max_new_tokens": 8,
+        });
+        let image_params = _expect_generate_ok(&image_body);
+        assert!(!native_generate_image_input_allowed(
+            Some(&image_params),
+            false
+        ));
+        assert!(native_generate_image_input_allowed(
+            Some(&image_params),
+            true
+        ));
+
+        let text_params = _expect_generate_ok(&serde_json::json!({
+            "prompt": "Read",
+            "max_new_tokens": 8,
+        }));
+        assert!(native_generate_image_input_allowed(
+            Some(&text_params),
+            false
+        ));
+    }
+
+    #[test]
+    fn test_generate_native_image_caps_fit_bounded_aggregate_body() {
+        assert!(native_generate_image_encoded_size_allowed(
+            MAX_GENERATE_IMAGE_BASE64_CHARS
+        ));
+        assert!(!native_generate_image_encoded_size_allowed(0));
+        assert!(!native_generate_image_encoded_size_allowed(
+            MAX_GENERATE_IMAGE_BASE64_CHARS + 1
+        ));
     }
 
     #[test]
