@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
-from sie_sdk.images import convert_item_images, to_jpeg_bytes
+from sie_sdk.images import convert_images_for_json, convert_item_images, to_jpeg_bytes
 
 
 class TestToJpegBytes:
@@ -182,3 +182,34 @@ class TestConvertItemImages:
         for img_input in result["images"]:
             assert isinstance(img_input, dict)
             assert isinstance(img_input["data"], bytes)
+
+    def test_raw_png_bytes_preserve_detected_format(self) -> None:
+        png_bytes = b"\x89PNG\r\n\x1a\npayload"
+
+        result = convert_item_images({"images": [png_bytes, {"data": png_bytes, "format": "PNG"}]})
+
+        assert result["images"] == [
+            {"data": png_bytes, "format": "png"},
+            {"data": png_bytes, "format": "png"},
+        ]
+
+    @pytest.mark.parametrize("declared_format", ["jpeg", "png;url=https://example.com", 7])
+    def test_declared_format_mismatch_or_invalid_token_fails_closed(self, declared_format: object) -> None:
+        png_bytes = b"\x89PNG\r\n\x1a\npayload"
+
+        with pytest.raises(ValueError, match="Image format"):
+            convert_item_images({"images": [{"data": png_bytes, "format": declared_format}]})
+
+    def test_unknown_raw_bytes_fail_closed(self) -> None:
+        with pytest.raises(ValueError, match="Could not detect encoded image format"):
+            convert_item_images({"images": [b"not-an-image"]})
+
+
+class TestConvertImagesForJson:
+    def test_base64_encodes_detected_image(self) -> None:
+        assert convert_images_for_json([b"\xff\xd8\xff\xe0hello"]) == [{"data": "/9j/4GhlbGxv", "format": "jpeg"}]
+
+    @pytest.mark.parametrize("images", [[], [b"\xff\xd8\xff"] * 17])
+    def test_rejects_invalid_image_count(self, images: list[bytes]) -> None:
+        with pytest.raises(ValueError, match="between 1 and 16"):
+            convert_images_for_json(images)

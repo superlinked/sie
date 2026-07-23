@@ -54,7 +54,7 @@ import msgpack_numpy as m
 from sie_sdk.audio import convert_item_audio
 from sie_sdk.documents import convert_item_document
 from sie_sdk.files import resolve_upload
-from sie_sdk.images import convert_item_images
+from sie_sdk.images import ImageLike, convert_images_for_json, convert_item_images
 from sie_sdk.jobs import TERMINAL_JOB_STATES, build_job_body, decode_chunk_bytes, job_chunks
 from sie_sdk.types import (
     Batch,
@@ -70,6 +70,8 @@ from sie_sdk.types import (
     File,
     FileDeleted,
     GenerateChunk,
+    GenerateGrammar,
+    GenerateImage,
     GenerateResult,
     Item,
     JobResults,
@@ -132,6 +134,7 @@ from ._shared import (
     sse_chunk_error,
     sse_headers,
     validate_encode_result_count,
+    validate_generate_grammar,
     websocket_matches_base_url_origin,
 )
 from ._sse import iter_sse_payloads
@@ -2030,12 +2033,13 @@ class SIEClient:
         prompt: str,
         *,
         max_new_tokens: int,
+        images: Sequence[ImageLike | GenerateImage] | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         stop: list[str] | None = None,
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,
-        grammar: dict[str, Any] | None = None,
+        grammar: GenerateGrammar | None = None,
         seed: int | None = None,
         logit_bias: dict[str, float] | None = None,
         routing_key: str | None = None,
@@ -2065,6 +2069,9 @@ class SIEClient:
                 helpers in the SDK (use the OpenAI SDK against
                 ``/v1/chat/completions`` for chat-shaped requests).
             max_new_tokens: Hard cap on output tokens.
+            images: Optional native image inputs. Pass encoded bytes, a path,
+                a PIL/NumPy image, or ``{"data": ..., "format": "png"}``.
+                The format hint is optional when the SDK can detect it.
             temperature: Sampling temperature override. Omit to use the
                 selected model profile's default.
             top_p: Nucleus sampling cutoff override. Omit to use the selected
@@ -2072,7 +2079,8 @@ class SIEClient:
             stop: Optional list of stop strings.
             frequency_penalty: OpenAI-compatible frequency penalty in ``[-2, 2]``.
             presence_penalty: OpenAI-compatible presence penalty in ``[-2, 2]``.
-            grammar: Optional native structured-output grammar.
+            grammar: Optional native structured-output grammar. Set exactly
+                one of ``json_schema``, ``regex``, or ``ebnf``.
             seed: Optional signed 64-bit per-request sampling seed. Exact
                 reproducibility depends on the active generation backend and
                 deployment configuration.
@@ -2104,6 +2112,7 @@ class SIEClient:
                 retried) or other 5xx responses.
         """
         self._reset_retry_count()
+        resolved_grammar = validate_generate_grammar(grammar) if grammar is not None else None
         pool_name, resolved_gpu = self._resolve_pool_and_gpu(gpu)
 
         safe_model = model.replace("/", "__")
@@ -2113,6 +2122,8 @@ class SIEClient:
             "prompt": prompt,
             "max_new_tokens": max_new_tokens,
         }
+        if images is not None:
+            request_body["images"] = convert_images_for_json(images)
         if stop is not None:
             request_body["stop"] = stop
         optional_fields = {
@@ -2121,7 +2132,7 @@ class SIEClient:
             "options": resolved_options,
             "frequency_penalty": frequency_penalty,
             "presence_penalty": presence_penalty,
-            "grammar": grammar,
+            "grammar": resolved_grammar,
             "seed": seed,
             "logit_bias": logit_bias,
             "routing_key": routing_key,
@@ -2494,12 +2505,13 @@ class SIEClient:
         prompt: str,
         *,
         max_new_tokens: int,
+        images: Sequence[ImageLike | GenerateImage] | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         stop: list[str] | None = None,
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,
-        grammar: dict[str, Any] | None = None,
+        grammar: GenerateGrammar | None = None,
         seed: int | None = None,
         logit_bias: dict[str, float] | None = None,
         logprobs: bool = False,
@@ -2521,6 +2533,7 @@ class SIEClient:
         ``done: true`` plus ``usage`` / ``ttft_ms``. Error semantics match
         :meth:`stream_chat_completions`.
         """
+        resolved_grammar = validate_generate_grammar(grammar) if grammar is not None else None
         pool_name, resolved_gpu = self._resolve_pool_and_gpu(gpu)
         safe_model = model.replace("/", "__")
         resolved_options = self._resolve_options(options)
@@ -2529,6 +2542,8 @@ class SIEClient:
             "max_new_tokens": max_new_tokens,
             "stream": True,
         }
+        if images is not None:
+            req["images"] = convert_images_for_json(images)
         if stop is not None:
             req["stop"] = stop
         optional_fields = {
@@ -2537,7 +2552,7 @@ class SIEClient:
             "top_p": top_p,
             "options": resolved_options,
             "presence_penalty": presence_penalty,
-            "grammar": grammar,
+            "grammar": resolved_grammar,
             "seed": seed,
             "logit_bias": logit_bias,
             "routing_key": routing_key,

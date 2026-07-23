@@ -130,6 +130,62 @@ def _make_session_post(seq_source: AsyncMock):
 
 
 class TestSyncGenerate:
+    def test_generate_serializes_images_and_typed_json_schema_grammar(self) -> None:
+        grammar = {
+            "json_schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+            "label": "document",
+            "strict": True,
+        }
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post.return_value = _ok_response(_ok_envelope())
+            client = SIEClient("http://localhost:8080")
+            client.generate(
+                "vision-model",
+                prompt="Read this document",
+                images=[{"data": b"\x89PNG\r\n\x1a\npayload"}],
+                grammar=grammar,
+                max_new_tokens=32,
+            )
+
+            sent = json.loads(mock_client.return_value.post.call_args.kwargs["content"])
+            assert sent["images"] == [{"data": "iVBORw0KGgpwYXlsb2Fk", "format": "png"}]
+            assert sent["grammar"] == grammar
+            client.close()
+
+    @pytest.mark.parametrize(
+        "grammar",
+        [
+            {"json_schema": {"type": "object"}},
+            {"regex": r"\d{3}-\d{4}"},
+            {"ebnf": 'root ::= "yes" | "no"'},
+        ],
+    )
+    def test_generate_preserves_each_typed_grammar_variant(self, grammar: dict) -> None:
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post.return_value = _ok_response(_ok_envelope())
+            client = SIEClient("http://localhost:8080")
+            client.generate("m", prompt="Hi", grammar=grammar, max_new_tokens=8)  # type: ignore[arg-type]
+            sent = json.loads(mock_client.return_value.post.call_args.kwargs["content"])
+            assert sent["grammar"] == grammar
+            client.close()
+
+    @pytest.mark.parametrize(
+        "grammar",
+        [
+            {},
+            {"json_schema": {}, "regex": "x"},
+            {"regex": 123},
+            {"ebnf": "root", "unknown": True},
+        ],
+    )
+    def test_generate_rejects_invalid_grammar_before_request(self, grammar: dict) -> None:
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            client = SIEClient("http://localhost:8080")
+            with pytest.raises((TypeError, ValueError)):
+                client.generate("m", prompt="Hi", grammar=grammar, max_new_tokens=8)  # type: ignore[arg-type]
+            mock_client.return_value.post.assert_not_called()
+            client.close()
+
     def test_generate_happy_path_parses_envelope(self) -> None:
         envelope = {
             "model": "Qwen__Qwen3-4B-Instruct-2507",
@@ -171,6 +227,9 @@ class TestSyncGenerate:
             sent = json.loads(mock_client.return_value.post.call_args.kwargs["content"].decode("utf-8"))
             assert "temperature" not in sent
             assert "top_p" not in sent
+            assert mock_client.return_value.post.call_args.kwargs["content"] == (
+                b'{"prompt": "Hi", "max_new_tokens": 32}'
+            )
 
             client.close()
 
@@ -387,6 +446,36 @@ class TestSyncGenerate:
 
 
 class TestAsyncGenerate:
+    @pytest.mark.asyncio
+    async def test_generate_serializes_native_image_and_ebnf_grammar(self) -> None:
+        raw = MagicMock()
+        raw.status = 200
+        raw.headers = {}
+        raw.read = AsyncMock(return_value=json.dumps(_ok_envelope()).encode())
+        post_ctx = MagicMock()
+        post_ctx.__aenter__ = AsyncMock(return_value=raw)
+        post_ctx.__aexit__ = AsyncMock(return_value=None)
+        session = MagicMock()
+        session.post = MagicMock(return_value=post_ctx)
+        session.close = AsyncMock()
+
+        with patch("sie_sdk.client.async_.aiohttp.ClientSession", return_value=session):
+            client = SIEAsyncClient("http://localhost:8080")
+            try:
+                await client.generate(
+                    "vision-model",
+                    prompt="Answer yes or no",
+                    images=[b"\xff\xd8\xff\xe0hello"],
+                    grammar={"ebnf": 'root ::= "yes" | "no"'},
+                    max_new_tokens=8,
+                )
+            finally:
+                await client.close()
+
+        sent = json.loads(session.post.call_args.kwargs["data"])
+        assert sent["images"] == [{"data": "/9j/4GhlbGxv", "format": "jpeg"}]
+        assert sent["grammar"] == {"ebnf": 'root ::= "yes" | "no"'}
+
     @pytest.mark.asyncio
     async def test_generate_non_dict_response_retains_request_metadata(self) -> None:
         client = SIEAsyncClient("http://localhost:8080")

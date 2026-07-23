@@ -39,7 +39,7 @@ import {
   SIEStreamError,
   ServerError,
 } from "./errors.js";
-import { toImageWireFormat } from "./images.js";
+import { detectImageFormat, toImageBytes, toImageWireFormat } from "./images.js";
 import type { ImageInput, ImageWireFormat } from "./images.js";
 import {
   DEFAULT_JOB_WAIT_POLL,
@@ -109,6 +109,8 @@ import type {
   ExtractResult,
   FileDeleted,
   GenerateChunk,
+  GenerateGrammar,
+  GenerateImage,
   GenerateOptions,
   GenerateResult,
   Item,
@@ -227,10 +229,7 @@ function parseRequestMetadata(headers: Headers): RequestMetadata | undefined {
     metadata.id = requestId;
   }
   const executionIdentitySha256 = headers.get("x-sie-execution-identity-sha256");
-  if (
-    executionIdentitySha256 !== null &&
-    /^[0-9a-f]{64}$/.test(executionIdentitySha256)
-  ) {
+  if (executionIdentitySha256 !== null && /^[0-9a-f]{64}$/.test(executionIdentitySha256)) {
     metadata.executionIdentitySha256 = executionIdentitySha256;
   }
 
@@ -277,6 +276,41 @@ function validateGenerationSeed(seed: number): number {
   return seed;
 }
 
+/** Validate the discriminated native grammar before issuing a billable request. */
+function validateGenerateGrammar(grammar: GenerateGrammar): void {
+  if (typeof grammar !== "object" || grammar === null || Array.isArray(grammar)) {
+    throw new TypeError("grammar must be an object");
+  }
+  const allowed = new Set(["json_schema", "regex", "ebnf", "label", "strict"]);
+  const unknown = Object.keys(grammar).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new TypeError(`grammar contains unsupported field(s): ${unknown.sort().join(", ")}`);
+  }
+  const variants = ["json_schema", "regex", "ebnf"].filter((key) => Object.hasOwn(grammar, key));
+  if (variants.length !== 1) {
+    throw new TypeError("grammar must contain exactly one of json_schema, regex, or ebnf");
+  }
+  const variant = variants[0];
+  const value = grammar[variant as keyof GenerateGrammar];
+  if (
+    variant === "json_schema"
+      ? typeof value !== "object" || value === null || Array.isArray(value)
+      : typeof value !== "string"
+  ) {
+    throw new TypeError(
+      variant === "json_schema"
+        ? "grammar.json_schema must be an object"
+        : `grammar.${variant} must be a string`,
+    );
+  }
+  if (grammar.label !== undefined && typeof grammar.label !== "string") {
+    throw new TypeError("grammar.label must be a string");
+  }
+  if (grammar.strict !== undefined && typeof grammar.strict !== "boolean") {
+    throw new TypeError("grammar.strict must be a boolean");
+  }
+}
+
 /** Serialize the controls shared by blocking and streaming native generation. */
 function applyGenerateOptions(body: Record<string, unknown>, options: GenerateOptions): void {
   if (options.temperature !== undefined) body.temperature = options.temperature;
@@ -285,7 +319,10 @@ function applyGenerateOptions(body: Record<string, unknown>, options: GenerateOp
   if (options.stop !== undefined) body.stop = options.stop;
   if (options.frequencyPenalty !== undefined) body.frequency_penalty = options.frequencyPenalty;
   if (options.presencePenalty !== undefined) body.presence_penalty = options.presencePenalty;
-  if (options.grammar !== undefined) body.grammar = options.grammar;
+  if (options.grammar !== undefined) {
+    validateGenerateGrammar(options.grammar);
+    body.grammar = options.grammar;
+  }
   if (options.seed !== undefined) body.seed = validateGenerationSeed(options.seed);
   if (options.logitBias !== undefined) body.logit_bias = options.logitBias;
   if (options.routingKey !== undefined) body.routing_key = options.routingKey;
@@ -346,6 +383,59 @@ async function imageForWire(image: ImageInput | ImageWireFormat): Promise<ImageW
     return image;
   }
   return toImageWireFormat(image);
+}
+
+function imageBytesToBase64(data: Uint8Array): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("base64");
+  }
+  let binary = "";
+  const chunkSize = 32_768;
+  for (let offset = 0; offset < data.length; offset += chunkSize) {
+    binary += String.fromCharCode(...data.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function isGenerateImage(image: ImageInput | GenerateImage): image is GenerateImage {
+  return typeof image === "object" && image !== null && "data" in image;
+}
+
+async function generationImagesForWire(
+  images: (ImageInput | GenerateImage)[],
+): Promise<{ data: string; format: string }[]> {
+  if (images.length === 0 || images.length > 16) {
+    throw new RangeError("images must contain between 1 and 16 entries");
+  }
+  return Promise.all(
+    images.map(async (image) => {
+      const data = await toImageBytes(isGenerateImage(image) ? image.data : image);
+      if (data.byteLength === 0 || data.byteLength > 16 * 1024 * 1024) {
+        throw new RangeError("each image must contain between 1 byte and 16 MiB");
+      }
+      const detected = detectImageFormat(data);
+      const declared = isGenerateImage(image) ? image.format : undefined;
+      let format: string;
+      if (declared === undefined) {
+        if (detected === "unknown") {
+          throw new TypeError("could not detect image format; provide a format hint");
+        }
+        format = detected;
+      } else {
+        if (!/^[A-Za-z0-9.+-]{1,32}$/.test(declared)) {
+          throw new TypeError("image format must be a short ASCII media-format token");
+        }
+        format = declared.toLowerCase();
+        if (format === "jpg" || format === "jpe") format = "jpeg";
+        if (detected !== "unknown" && format !== detected) {
+          throw new TypeError(
+            `image format mismatch: declared '${format}', detected '${detected}'`,
+          );
+        }
+      }
+      return { data: imageBytesToBase64(data), format };
+    }),
+  );
 }
 
 async function itemImagesForWire(item: Item): Promise<ItemForWire> {
@@ -821,12 +911,30 @@ export class SIEClient {
    * console.log(result.text);
    * console.log(`TTFT: ${result.ttftMs}ms`);
    * ```
+   *
+   * Vision and structured output use the same method:
+   * ```typescript
+   * const result = await client.generate("vision-model", "Extract the title.", {
+   *   maxNewTokens: 128,
+   *   images: [{ data: imageBytes, format: "png" }],
+   *   grammar: {
+   *     json_schema: {
+   *       type: "object",
+   *       properties: { title: { type: "string" } },
+   *       required: ["title"],
+   *     },
+   *   },
+   * });
+   * ```
    */
   async generate(model: string, prompt: string, options: GenerateOptions): Promise<GenerateResult> {
     const body: Record<string, unknown> = {
       prompt,
       max_new_tokens: options.maxNewTokens,
     };
+    if (options.images !== undefined) {
+      body.images = await generationImagesForWire(options.images);
+    }
     applyGenerateOptions(body, options);
 
     const { pool, gpu } = this.parseGpuParam(options.gpu);
@@ -1085,6 +1193,9 @@ export class SIEClient {
       max_new_tokens: options.maxNewTokens,
       stream: true,
     };
+    if (options.images !== undefined) {
+      body.images = await generationImagesForWire(options.images);
+    }
     applyGenerateOptions(body, options);
     if (options.logprobs !== undefined) body.logprobs = options.logprobs;
     if (options.topLogprobs !== undefined) {

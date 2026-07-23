@@ -65,6 +65,7 @@ describe("SIEClient.generate", () => {
     const omittedSamplerBody = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(omittedSamplerBody).not.toHaveProperty("temperature");
     expect(omittedSamplerBody).not.toHaveProperty("top_p");
+    expect(mockFetch.mock.calls[0][1].body).toBe('{"prompt":"Hi","max_new_tokens":32}');
   });
 
   it("sends a JSON body with snake_case field names", async () => {
@@ -120,6 +121,66 @@ describe("SIEClient.generate", () => {
       lora_adapter: "sql-adapter",
       options: { overall_timeout_s: 30 },
     });
+  });
+
+  it("serializes images and typed JSON-schema grammar", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        model: "vision-model",
+        text: '{"title":"Launch"}',
+        finish_reason: "stop",
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    );
+
+    const client = new SIEClient("http://localhost:8080");
+    await client.generate("vision-model", "Read this document", {
+      maxNewTokens: 32,
+      images: [{ data: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10, 1]) }],
+      grammar: {
+        json_schema: { type: "object", properties: { title: { type: "string" } } },
+        label: "document",
+        strict: true,
+      },
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.images).toEqual([{ data: "iVBORw0KGgoB", format: "png" }]);
+    expect(body.grammar).toEqual({
+      json_schema: { type: "object", properties: { title: { type: "string" } } },
+      label: "document",
+      strict: true,
+    });
+  });
+
+  it.each([{}, { json_schema: {}, regex: "x" }, { regex: 123 }, { ebnf: "root", unknown: true }])(
+    "rejects an invalid grammar before request: %j",
+    async (grammar) => {
+      const client = new SIEClient("http://localhost:8080");
+      await expect(
+        client.generate("m", "Hi", {
+          maxNewTokens: 8,
+          grammar: grammar as never,
+        }),
+      ).rejects.toThrow();
+      expect(mockFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a mismatched image format before request", async () => {
+    const client = new SIEClient("http://localhost:8080");
+    await expect(
+      client.generate("m", "Hi", {
+        maxNewTokens: 8,
+        images: [
+          {
+            data: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10, 1]),
+            format: "jpeg",
+          },
+        ],
+      }),
+    ).rejects.toThrow("image format mismatch");
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it.each([Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1, 1.5, Number.NaN])(

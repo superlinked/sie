@@ -727,10 +727,51 @@ export interface GenerationUsage {
   totalTokens: number;
 }
 
+/** One image paired with a native generation prompt. */
+export interface GenerateImage {
+  /** Encoded image bytes, a Blob/File, or base64/data-URL text. */
+  data: ImageInput;
+  /** Optional media format hint. The SDK infers JPEG, PNG, and WebP. */
+  format?: string;
+}
+
+interface GrammarMetadata {
+  /** Optional schema/grammar label used by structured-output backends. */
+  label?: string;
+  /** Optional strictness hint for structured-output backends. */
+  strict?: boolean;
+}
+
+/** Constrain native generation to a JSON Schema. */
+export type JsonSchemaGrammar = GrammarMetadata & {
+  json_schema: Record<string, unknown>;
+  regex?: never;
+  ebnf?: never;
+};
+
+/** Constrain native generation to a regular expression. */
+export type RegexGrammar = GrammarMetadata & {
+  json_schema?: never;
+  regex: string;
+  ebnf?: never;
+};
+
+/** Constrain native generation to an EBNF grammar. */
+export type EbnfGrammar = GrammarMetadata & {
+  json_schema?: never;
+  regex?: never;
+  ebnf: string;
+};
+
+/** Native structured-output grammar. Exactly one grammar variant is set. */
+export type GenerateGrammar = JsonSchemaGrammar | RegexGrammar | EbnfGrammar;
+
 /** Options for the generate operation. */
 export interface GenerateOptions {
   /** Hard cap on output tokens. Required. */
   maxNewTokens: number;
+  /** Optional images rendered with the prompt for vision-capable models. */
+  images?: (ImageInput | GenerateImage)[];
   /** Sampling temperature. */
   temperature?: number;
   /** Nucleus sampling cutoff. */
@@ -742,7 +783,7 @@ export interface GenerateOptions {
   /** OpenAI-compatible presence penalty in [-2, 2]. */
   presencePenalty?: number;
   /** Native structured-output grammar. */
-  grammar?: Record<string, unknown>;
+  grammar?: GenerateGrammar;
   /**
    * Optional per-request sampling seed. Must be a JavaScript safe integer
    * (-(2^53 - 1) through 2^53 - 1) so JSON serialization preserves it exactly.

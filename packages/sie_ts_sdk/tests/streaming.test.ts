@@ -498,6 +498,7 @@ describe("SIEClient.streamGenerate", () => {
     const client = new SIEClient("http://localhost:8080");
     for await (const _ of client.streamGenerate("Qwen/Qwen3-4B-Instruct-2507", "hi", {
       maxNewTokens: 4,
+      images: [Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1])],
       temperature: 0.5,
       topP: 0.9,
       stop: ["</s>"],
@@ -521,6 +522,7 @@ describe("SIEClient.streamGenerate", () => {
     expect(body).toEqual({
       prompt: "hi",
       max_new_tokens: 4,
+      images: [{ data: "/9j/4AE=", format: "jpeg" }],
       temperature: 0.5,
       top_p: 0.9,
       stop: ["</s>"],

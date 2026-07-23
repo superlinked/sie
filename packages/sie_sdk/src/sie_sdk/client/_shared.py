@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import urljoin, urlsplit
 
 import msgpack
@@ -147,6 +147,7 @@ from sie_sdk.types import (
     EntityResult,
     ExtractItemErrorDetail,
     ExtractResult,
+    GenerateGrammar,
     Relation,
     RequestMetadata,
     RequestUsage,
@@ -178,6 +179,47 @@ HTTP_GATEWAY_TIMEOUT = 504
 # Default provisioning settings
 DEFAULT_PROVISION_TIMEOUT_S = 900.0  # 15 minutes
 DEFAULT_RETRY_DELAY_S = 5.0  # Retry every 5 seconds if no Retry-After header
+
+_GENERATE_GRAMMAR_VARIANTS = frozenset({"json_schema", "regex", "ebnf"})
+_GENERATE_GRAMMAR_FIELDS = _GENERATE_GRAMMAR_VARIANTS | {"label", "strict"}
+
+
+def validate_generate_grammar(grammar: GenerateGrammar) -> GenerateGrammar:
+    """Validate and detach the native structured-output grammar envelope."""
+    if not isinstance(grammar, Mapping):
+        msg = "grammar must be a mapping"
+        raise TypeError(msg)
+
+    unknown = set(grammar) - _GENERATE_GRAMMAR_FIELDS
+    if unknown:
+        names = ", ".join(sorted(str(name) for name in unknown))
+        msg = f"grammar contains unsupported field(s): {names}"
+        raise ValueError(msg)
+
+    variants = _GENERATE_GRAMMAR_VARIANTS.intersection(grammar)
+    if len(variants) != 1:
+        msg = "grammar must contain exactly one of json_schema, regex, or ebnf"
+        raise ValueError(msg)
+
+    variant = next(iter(variants))
+    value = grammar[variant]
+    if variant == "json_schema":
+        if not isinstance(value, Mapping):
+            msg = "grammar.json_schema must be a mapping"
+            raise TypeError(msg)
+    elif not isinstance(value, str):
+        msg = f"grammar.{variant} must be a string"
+        raise TypeError(msg)
+
+    if "label" in grammar and not isinstance(grammar["label"], str):
+        msg = "grammar.label must be a string"
+        raise TypeError(msg)
+    if "strict" in grammar and not isinstance(grammar["strict"], bool):
+        msg = "grammar.strict must be a boolean"
+        raise TypeError(msg)
+
+    return cast("GenerateGrammar", dict(grammar))
+
 
 # Pool settings
 DEFAULT_LEASE_RENEWAL_INTERVAL_S = 60.0  # Renew lease every 60s (lease is 1200s)

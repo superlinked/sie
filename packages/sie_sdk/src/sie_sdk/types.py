@@ -10,7 +10,7 @@ These types support flexible Python inputs
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, Required, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, Never, NotRequired, Required, TypedDict
 
 import numpy as np
 
@@ -384,6 +384,47 @@ class ExtractResult(TypedDict, total=False):
 # (TTFT, TPOT, attempt_id). Future SDK additions may surface chunks as an
 # async iterator.
 FinishReason = Literal["stop", "length", "cancelled", "content_filter", "error"]
+
+
+class GenerateImage(TypedDict):
+    """One image paired with a native generation prompt."""
+
+    data: Image.Image | NDArray[Any] | bytes | str | Path
+    format: NotRequired[str]
+
+
+class JsonSchemaGrammar(TypedDict):
+    """Constrain generation to a JSON Schema."""
+
+    json_schema: dict[str, Any]
+    regex: NotRequired[Never]
+    ebnf: NotRequired[Never]
+    label: NotRequired[str]
+    strict: NotRequired[bool]
+
+
+class RegexGrammar(TypedDict):
+    """Constrain generation to a regular expression."""
+
+    json_schema: NotRequired[Never]
+    regex: str
+    ebnf: NotRequired[Never]
+    label: NotRequired[str]
+    strict: NotRequired[bool]
+
+
+class EbnfGrammar(TypedDict):
+    """Constrain generation to an EBNF grammar."""
+
+    json_schema: NotRequired[Never]
+    regex: NotRequired[Never]
+    ebnf: str
+    label: NotRequired[str]
+    strict: NotRequired[bool]
+
+
+GenerateGrammar = JsonSchemaGrammar | RegexGrammar | EbnfGrammar
+"""Native structured-output grammar. Exactly one grammar variant is set."""
 
 
 class GenerationUsage(TypedDict):
