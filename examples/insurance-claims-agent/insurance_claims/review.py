@@ -212,19 +212,30 @@ def _analyze_photo(
     photo_path: Path,
     provision_timeout_s: float,
 ) -> tuple[dict[str, Any], str, float]:
+    labels = [
+        "standing water",
+        "flooded room",
+        "water damaged wall",
+        "damaged furniture",
+        "debris",
+    ]
     started = time.perf_counter()
     result = client.extract(
         model,
         Item(id="damage-photo", images=[photo_path]),
-        options={"task": "<DETAILED_CAPTION>", "max_new_tokens": 512},
+        labels=labels,
+        options={"score_threshold": 0.05},
         wait_for_capacity=True,
         provision_timeout_s=provision_timeout_s,
     )
     duration_ms = round((time.perf_counter() - started) * 1000, 1)
-    entities = result.get("data", {}).get("entities", [])
-    content = str(entities[0].get("text", "")) if entities else ""
-    if not content.strip():
-        raise RuntimeError("Photo model returned no caption")
+    objects = result.get("data", {}).get("objects", [])
+    content = "\n".join(
+        f"- {item['label']}: confidence {float(item['score']):.3f}, bbox {item['bbox']}"
+        for item in objects
+    )
+    if not content:
+        content = "- No requested damage category exceeded the 0.05 confidence threshold."
     return result, content, duration_ms
 
 

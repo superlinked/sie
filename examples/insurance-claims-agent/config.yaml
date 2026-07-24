@@ -9,7 +9,7 @@ models:
   parse: "docling"
   extract: "fastino/gliner2-large-v1"
   rerank: "BAAI/bge-reranker-v2-m3"
-  vision: "microsoft/Florence-2-base-ft"
+  vision: "google/owlv2-base-patch16-ensemble"
   review: "Qwen/Qwen3.5-4B:no-spec"
 
 retrieval:
