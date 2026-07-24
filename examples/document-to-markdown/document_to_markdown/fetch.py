@@ -12,14 +12,14 @@ from pathlib import Path
 
 from rich.console import Console
 
-from document_to_markdown.config import DATA_DIR, PDF_DIR, load_config, select_documents
+from document_to_markdown.config import DATA_DIR, PDF_DIR, DocumentSource, load_config, select_documents
 
 console = Console()
 
 
-def _download(url: str, destination: Path) -> bytes:
+def _download(document: DocumentSource, destination: Path) -> tuple[bytes, str]:
     request = urllib.request.Request(
-        url,
+        document.url,
         headers={
             "Accept": "application/pdf,*/*",
             "User-Agent": (
@@ -31,22 +31,30 @@ def _download(url: str, destination: Path) -> bytes:
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             payload = response.read()
+        retrieval = "publisher"
     except urllib.error.HTTPError as error:
         curl = shutil.which("curl")
         if error.code != 403 or curl is None:
             raise
-        response = subprocess.run(
-            [curl, "-fsSL", "--retry", "3", url],
-            check=True,
-            capture_output=True,
-            timeout=180,
-        )
-        payload = response.stdout
+        try:
+            response = subprocess.run(
+                [curl, "-fsSL", "--retry", "3", document.url],
+                check=True,
+                capture_output=True,
+                timeout=180,
+            )
+            payload = response.stdout
+            retrieval = "publisher"
+        except subprocess.CalledProcessError:
+            if document.fixture_path is None or not document.fixture_path.exists():
+                raise
+            payload = document.fixture_path.read_bytes()
+            retrieval = "bundled-government-source"
     if not payload.startswith(b"%PDF"):
-        raise ValueError(f"{url} did not return a PDF")
+        raise ValueError(f"{document.url} did not return a PDF")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(payload)
-    return payload
+    return payload, retrieval
 
 
 def fetch_documents(slugs: list[str], *, refresh: bool) -> Path:
@@ -58,8 +66,9 @@ def fetch_documents(slugs: list[str], *, refresh: bool) -> Path:
         if document.path.exists() and not refresh:
             payload = document.path.read_bytes()
             status = "cached"
+            retrieval = "cache"
         else:
-            payload = _download(document.url, document.path)
+            payload, retrieval = _download(document, document.path)
             status = "downloaded"
         checksum = hashlib.sha256(payload).hexdigest()
         rows.append(
@@ -71,6 +80,7 @@ def fetch_documents(slugs: list[str], *, refresh: bool) -> Path:
                 "url": document.url,
                 "source_page": document.source_page,
                 "rights": document.rights,
+                "retrieval": retrieval,
                 "bytes": len(payload),
                 "sha256": checksum,
             }

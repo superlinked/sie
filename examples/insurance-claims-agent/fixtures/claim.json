@@ -1,0 +1,57 @@
+{
+  "fictional": true,
+  "claim_number": "NFIP-SAMPLE-482019",
+  "insured_name": "Jordan Ellis",
+  "policy_number": "FEMA-TEST-482019",
+  "property": {
+    "street": "100 Sample Street",
+    "city": "Lake Charles",
+    "state": "Louisiana",
+    "zip": "70601"
+  },
+  "date_of_loss": "04/14/2025",
+  "mailing_address": "100 Sample Street",
+  "contact": {
+    "phone": "555-010-4820",
+    "email": "jordan.ellis@example.invalid"
+  },
+  "flood_description": "River overflow entered the first floor and remained for approximately six hours.",
+  "coverage": {
+    "building": 250000,
+    "contents": 100000
+  },
+  "proof_of_loss": {
+    "building_rcv": 72480,
+    "building_acv": 68180,
+    "building_depreciation": 4300,
+    "building_deductible": 2000,
+    "building_net_claimed": 66180,
+    "contents_rcv": 19720,
+    "contents_acv": 15880,
+    "contents_deductible": 1000,
+    "contents_net_claimed": 14880
+  },
+  "estimate": {
+    "building": [
+      ["Water extraction and antimicrobial cleaning", 1, "job", 4180],
+      ["Remove and replace gypsum wallboard", 1260, "sq ft", 13.5],
+      ["Replace wall insulation", 1260, "sq ft", 4.25],
+      ["Remove and replace resilient flooring", 980, "sq ft", 18.5],
+      ["Replace base cabinets", 18, "linear ft", 425],
+      ["Electrical inspection and affected outlets", 1, "job", 4280],
+      ["Prime and paint repaired interior walls", 2100, "sq ft", 3.75],
+      ["Debris removal", 1, "job", 3300]
+    ],
+    "contents": [
+      ["Sofa", 1, "item", 1800],
+      ["Dining table and chairs", 1, "set", 1200],
+      ["Area rugs", 3, "items", 300],
+      ["Television and small electronics", 1, "lot", 2400],
+      ["Washer and dryer", 1, "set", 2100],
+      ["Kitchen contents", 1, "lot", 1480],
+      ["Clothing", 1, "lot", 3000],
+      ["Storage shelving", 1, "lot", 1200],
+      ["Bed and mattress", 1, "set", 1800]
+    ]
+  }
+}

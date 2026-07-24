@@ -30,11 +30,16 @@ class DocumentSource:
     url: str
     source_page: str
     rights: str
+    fixture_file: str | None
     checks: DocumentChecks
 
     @property
     def path(self) -> Path:
         return PDF_DIR / self.file_name
+
+    @property
+    def fixture_path(self) -> Path | None:
+        return ROOT / self.fixture_file if self.fixture_file else None
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,7 @@ def load_config() -> AppConfig:
             url=row["url"],
             source_page=row["source_page"],
             rights=row["rights"],
+            fixture_file=row.get("fixture_file"),
             checks=DocumentChecks(
                 required_text=tuple(row["checks"].get("required_text", [])),
                 ordered_text=tuple(row["checks"].get("ordered_text", [])),

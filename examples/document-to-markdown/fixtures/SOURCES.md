@@ -37,6 +37,9 @@ not committed to this repository.
 - Rights basis: work of the U.S. federal government under 17 U.S.C. § 105.
   Do not imply FEMA or DHS endorsement. Government seals and insignia may have
   separate restrictions.
+- Reproducibility: the exact government PDF is bundled as a fallback because
+  FEMA may reject requests from datacenter IP addresses. The manifest still
+  records the official publisher URL.
 
 `uv run fetch-documents` writes the acquired size and SHA-256 for every file to
 `data/manifest.json`.

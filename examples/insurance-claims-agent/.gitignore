@@ -1,0 +1,5 @@
+.env
+.venv/
+data/
+runs/*
+!runs/.gitkeep

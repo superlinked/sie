@@ -5,8 +5,9 @@ parts that usually break downstream agents: table structure, reading order,
 headings, and form labels.
 
 The source set includes an NVIDIA CFO commentary, a SiriusPoint investor deck,
-the Docling paper, and a FEMA proof-of-loss form. The PDFs stay at their
-publisher URLs. The fetch command records an exact checksum for each local copy.
+the Docling paper, and a FEMA proof-of-loss form. The fetch command records the
+publisher URL and exact checksum for each local copy. The federal government
+form is bundled as a fallback because FEMA may block datacenter downloads.
 
 ## What the run proves
 
@@ -71,4 +72,3 @@ This example measures whether the converted structure keeps the facts and order
 needed by an application. It does not claim a universal PDF benchmark score.
 Encrypted files, handwriting, and pages dominated by diagrams need separate
 tests and may need an OCR or vision model instead of the default Docling profile.
-

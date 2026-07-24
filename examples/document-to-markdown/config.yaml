@@ -71,6 +71,7 @@ documents:
     url: "https://www.fema.gov/sites/default/files/documents/fema_hpcc-proof-of-loss-form-english-exp-11.30.2026.pdf"
     source_page: "https://www.fema.gov/flood-insurance/find-form/underwriting"
     rights: "U.S. federal government work. Do not imply FEMA or DHS endorsement."
+    fixture_file: "fixtures/sources/fema-proof-of-loss-form.pdf"
     checks:
       required_text:
         - "PROOF OF LOSS"
