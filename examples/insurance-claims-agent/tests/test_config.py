@@ -12,7 +12,8 @@ def test_source_set_uses_public_government_and_photo_sources() -> None:
         "flooded-house-interior",
     ]
     assert config.models.parse == "docling"
-    assert config.models.vision == "Qwen/Qwen3.5-4B"
+    assert config.models.vision == "microsoft/Florence-2-base-ft"
+    assert config.models.review == "Qwen/Qwen3.5-4B:no-spec"
 
 
 def test_claim_fixture_is_explicitly_fictional() -> None:

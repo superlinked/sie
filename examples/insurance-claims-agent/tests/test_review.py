@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from insurance_claims.evaluate import evaluate_review
-from insurance_claims.review import _extract_claim_identity, chunk_markdown
+from insurance_claims.review import (
+    _extract_claim_identity,
+    _json_object_from_text,
+    chunk_markdown,
+)
 
 
 class FakeExtractClient:
@@ -33,6 +37,12 @@ def test_claim_identity_passes_gliner2_labels() -> None:
         "date and time of loss",
         "insured property address",
     ]
+
+
+def test_review_json_accepts_fenced_model_output() -> None:
+    assert _json_object_from_text('```json\n{"route": "manual_review"}\n```') == {
+        "route": "manual_review"
+    }
 
 
 def test_evaluation_accepts_expected_review() -> None:

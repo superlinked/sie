@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
 from rich.console import Console
 from rich.table import Table
 from sie_sdk import SIEClient
@@ -208,55 +206,45 @@ def _extract_claim_identity(
     return result, round((time.perf_counter() - started) * 1000, 1)
 
 
-def _openai_client(base_url: str, api_key: str, timeout_s: float) -> OpenAI:
-    return OpenAI(
-        base_url=f"{base_url.rstrip('/')}/v1",
-        api_key=api_key or "not-needed",
-        timeout=timeout_s,
-        max_retries=0,
-    )
-
-
-def _analyze_photo(client: OpenAI, model: str, photo_path: Path) -> tuple[dict[str, Any], str, float]:
-    encoded = base64.b64encode(photo_path.read_bytes()).decode("ascii")
+def _analyze_photo(
+    client: SIEClient,
+    model: str,
+    photo_path: Path,
+    provision_timeout_s: float,
+) -> tuple[dict[str, Any], str, float]:
     started = time.perf_counter()
-    response = client.chat.completions.create(
-        model=model,
-        temperature=0,
-        max_tokens=700,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Inspect insurance claim photographs. State only visible conditions. "
-                    "Separate direct observations from limits. Do not infer coverage or approve a claim."
-                ),
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Describe the visible damage and which categories in a flood repair estimate "
-                            "the image can or cannot support."
-                        ),
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
-                    },
-                ],
-            },
-        ],
+    result = client.extract(
+        model,
+        Item(id="damage-photo", images=[photo_path]),
+        options={"task": "<DETAILED_CAPTION>", "max_new_tokens": 512},
+        wait_for_capacity=True,
+        provision_timeout_s=provision_timeout_s,
     )
     duration_ms = round((time.perf_counter() - started) * 1000, 1)
-    content = response.choices[0].message.content or ""
-    return response.model_dump(mode="json"), content, duration_ms
+    entities = result.get("data", {}).get("entities", [])
+    content = str(entities[0].get("text", "")) if entities else ""
+    if not content.strip():
+        raise RuntimeError("Photo model returned no caption")
+    return result, content, duration_ms
+
+
+def _json_object_from_text(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[-1]
+        stripped = stripped.rsplit("```", 1)[0].strip()
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("Review model returned no JSON object")
+    value = json.loads(stripped[start : end + 1])
+    if not isinstance(value, dict):
+        raise TypeError("Review model JSON must be an object")
+    return value
 
 
 def _final_review(
-    client: OpenAI,
+    client: SIEClient,
     model: str,
     *,
     form_markdown: str,
@@ -266,6 +254,7 @@ def _final_review(
     photo_analysis: str,
     claim_note: str,
     totals: dict[str, Any],
+    provision_timeout_s: float,
 ) -> tuple[dict[str, Any], dict[str, Any], float]:
     policy_evidence = "\n\n".join(f"[policy chunk {chunk['chunk_id']}]\n{chunk['text']}" for chunk in policy_chunks)
     prompt = f"""
@@ -299,35 +288,29 @@ Damage photograph analysis:
 
 Retrieved policy language:
 {policy_evidence}
+
+Required JSON schema:
+{json.dumps(REVIEW_SCHEMA, indent=2)}
 """.strip()
+    generation_prompt = f"""<|im_start|>system
+You review claim evidence for an insurance operations team. Return sourced discrepancies and the next evidence request. Never make a final coverage, fraud, liability, or payment decision. Return only one JSON object that matches the supplied schema.<|im_end|>
+<|im_start|>user
+{prompt}<|im_end|>
+<|im_start|>assistant
+"""
     started = time.perf_counter()
-    response = client.chat.completions.create(
-        model=model,
+    result = client.generate(
+        model,
+        generation_prompt,
+        max_new_tokens=1500,
         temperature=0,
-        max_tokens=1500,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "insurance_claim_review",
-                "strict": True,
-                "schema": REVIEW_SCHEMA,
-            },
-        },
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You review claim evidence for an insurance operations team. "
-                    "Return sourced discrepancies and the next evidence request. "
-                    "Never make a final coverage, fraud, liability, or payment decision."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
+        top_p=1,
+        wait_for_capacity=True,
+        provision_timeout_s=provision_timeout_s,
     )
     duration_ms = round((time.perf_counter() - started) * 1000, 1)
-    content = response.choices[0].message.content or ""
-    return response.model_dump(mode="json"), json.loads(content), duration_ms
+    content = str(result.get("text", ""))
+    return result, _json_object_from_text(content), duration_ms
 
 
 def _require_packet() -> Path:
@@ -432,16 +415,17 @@ def run_generation_stage(run_id: str) -> Path:
     policy_chunks = json.loads((run_dir / "policy-evidence.json").read_text(encoding="utf-8"))
     timings = dict(default_stage["timings_ms"])
 
-    generation_client = _openai_client(
+    generation_client = SIEClient(
         config.cluster.generation_url,
-        config.cluster.api_key,
-        config.cluster.request_timeout_s,
+        api_key=config.cluster.api_key or None,
+        timeout_s=config.cluster.request_timeout_s,
     )
     try:
         photo_raw, photo_analysis, timings["analyze_photo_ms"] = _analyze_photo(
             generation_client,
             config.models.vision,
             PACKET_DIR / "damage-photo.jpg",
+            config.cluster.provision_timeout_s,
         )
         _write_json(raw_dir / "photo-analysis.json", photo_raw)
         (run_dir / "photo-analysis.md").write_text(photo_analysis.rstrip() + "\n", encoding="utf-8")
@@ -457,6 +441,7 @@ def run_generation_stage(run_id: str) -> Path:
             photo_analysis=photo_analysis,
             claim_note=(PACKET_DIR / "claim-note.txt").read_text(encoding="utf-8"),
             totals=totals,
+            provision_timeout_s=config.cluster.provision_timeout_s,
         )
         _write_json(raw_dir / "review-completion.json", review_raw)
         _write_json(run_dir / "review.json", review)

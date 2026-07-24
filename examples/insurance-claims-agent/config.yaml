@@ -9,8 +9,8 @@ models:
   parse: "docling"
   extract: "fastino/gliner2-large-v1"
   rerank: "BAAI/bge-reranker-v2-m3"
-  vision: "Qwen/Qwen3.5-4B"
-  review: "Qwen/Qwen3.5-4B"
+  vision: "microsoft/Florence-2-base-ft"
+  review: "Qwen/Qwen3.5-4B:no-spec"
 
 retrieval:
   candidate_chunks: 16

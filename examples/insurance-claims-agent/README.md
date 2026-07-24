@@ -15,11 +15,11 @@ $80,660 after deductibles.
 | Parse the form, estimate, and policy | `docling` | Markdown with form labels, tables, and policy text |
 | Read the claim identity | `fastino/gliner2-large-v1` | Typed name, policy number, loss date, and property address |
 | Retrieve controlling policy language | `BAAI/bge-reranker-v2-m3` | Ranked passages about proof of loss and supporting records |
-| Inspect the submitted photograph | `Qwen/Qwen3.5-4B` | Visible conditions and limits of the image |
-| Produce the evidence review | `Qwen/Qwen3.5-4B` | JSON with route, totals, sourced findings, and next actions |
+| Describe the submitted photograph | `microsoft/Florence-2-base-ft` | Visible conditions from the image |
+| Produce the evidence review | `Qwen/Qwen3.5-4B:no-spec` | JSON with route, totals, sourced findings, and next actions |
 
-Every model call goes through SIE. On a managed cluster, the SDK and
-OpenAI-compatible calls use the same base URL.
+Every model call goes through SIE. The review uses the generation endpoint; the
+photograph uses Florence-2 through the extract endpoint.
 
 ## Run it
 
@@ -52,17 +52,17 @@ separate ports:
 # Terminal 1: Docling, GLiNER2, and reranking
 sie-server serve --port 8080
 
-# Terminal 2: Qwen vision and structured generation
-sie-server serve -b sglang --port 8081
+# Terminal 2: Florence-2 and Qwen generation
+sie-server serve --models microsoft/Florence-2-base-ft,Qwen/Qwen3.5-4B:no-spec --port 8081
 
 SIE_GENERATION_URL=http://localhost:8081 uv run review-claim --run-id local
 ```
 
-On one GPU, release the default bundle before loading Qwen:
+On one GPU, release the default bundle before loading the generation models:
 
 ```bash
 uv run review-claim --run-id local --stage default
-# Stop the default server, then start the sglang server on the same port.
+# Stop the default server, then start the Florence-2 + Qwen server on the same port.
 uv run review-claim --run-id local --stage generation
 ```
 
