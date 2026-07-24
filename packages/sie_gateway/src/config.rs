@@ -507,6 +507,10 @@ fn build_model_aliases(overrides: HashMap<String, String>) -> HashMap<String, St
         "guard".to_string(),
         "ibm-granite/granite-guardian-3.0-2b".to_string(),
     );
+    // Docling is package-backed and registered internally as `docling`.
+    // Accept the upstream repository path so public snippets follow the same
+    // org/model shape as weight-backed models.
+    map.insert("docling-project/docling".to_string(), "docling".to_string());
     for (alias, target) in overrides {
         let alias = alias.trim().to_lowercase();
         let target = target.trim().to_string();
@@ -1082,6 +1086,15 @@ mod tests {
         assert_eq!(
             result.get("guard"),
             Some(&"ibm-granite/granite-guardian-3.0-2b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_model_aliases_has_builtin_docling_public_id() {
+        let result = build_model_aliases(HashMap::new());
+        assert_eq!(
+            result.get("docling-project/docling"),
+            Some(&"docling".to_string())
         );
     }
 
