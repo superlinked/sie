@@ -12,7 +12,7 @@ def test_source_set_uses_public_government_and_photo_sources() -> None:
         "flooded-house-interior",
     ]
     assert config.models.parse == "docling"
-    assert config.models.vision == "google/owlv2-base-patch16-ensemble"
+    assert config.models.vision == "IDEA-Research/grounding-dino-tiny"
     assert config.models.review == "Qwen/Qwen3.5-4B:no-spec"
 
 

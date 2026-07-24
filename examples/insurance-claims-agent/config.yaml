@@ -9,7 +9,7 @@ models:
   parse: "docling"
   extract: "fastino/gliner2-large-v1"
   rerank: "BAAI/bge-reranker-v2-m3"
-  vision: "google/owlv2-base-patch16-ensemble"
+  vision: "IDEA-Research/grounding-dino-tiny"
   review: "Qwen/Qwen3.5-4B:no-spec"
 
 retrieval:

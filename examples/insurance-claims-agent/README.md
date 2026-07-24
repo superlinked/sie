@@ -15,11 +15,11 @@ $80,660 after deductibles.
 | Parse the form, estimate, and policy | `docling` | Markdown with form labels, tables, and policy text |
 | Read the claim identity | `fastino/gliner2-large-v1` | Typed name, policy number, loss date, and property address |
 | Retrieve controlling policy language | `BAAI/bge-reranker-v2-m3` | Ranked passages about proof of loss and supporting records |
-| Detect visible damage categories | `google/owlv2-base-patch16-ensemble` | Labels, confidence scores, and boxes |
+| Detect visible damage categories | `IDEA-Research/grounding-dino-tiny` | Labels, confidence scores, and boxes |
 | Produce the evidence review | `Qwen/Qwen3.5-4B:no-spec` | JSON with route, totals, sourced findings, and next actions |
 
 Every model call goes through SIE. The review uses the generation endpoint; the
-photograph uses OWLv2 through the extract endpoint.
+photograph uses Grounding DINO through the extract endpoint.
 
 ## Run it
 
@@ -52,8 +52,8 @@ separate ports:
 # Terminal 1: Docling, GLiNER2, and reranking
 sie-server serve --port 8080
 
-# Terminal 2: OWLv2 and Qwen generation
-sie-server serve --models google/owlv2-base-patch16-ensemble,Qwen/Qwen3.5-4B:no-spec --port 8081
+# Terminal 2: Grounding DINO and Qwen generation
+sie-server serve --models IDEA-Research/grounding-dino-tiny,Qwen/Qwen3.5-4B:no-spec --port 8081
 
 SIE_GENERATION_URL=http://localhost:8081 uv run review-claim --run-id local
 ```
@@ -62,7 +62,7 @@ On one GPU, release the default bundle before loading the generation models:
 
 ```bash
 uv run review-claim --run-id local --stage default
-# Stop the default server, then start the OWLv2 + Qwen server on the same port.
+# Stop the default server, then start the Grounding DINO + Qwen server on the same port.
 uv run review-claim --run-id local --stage generation
 ```
 
