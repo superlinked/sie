@@ -28,7 +28,7 @@ not committed to this repository.
 - Rights basis: the authors retain copyright. Fetch the paper from arXiv and
   use short attributed excerpts.
 
-## FEMA Proof of Loss Form
+## FEMA Hermit's Peak/Calf Canyon Proof of Loss Form
 
 - Document: https://www.fema.gov/sites/default/files/documents/fema_hpcc-proof-of-loss-form-english-exp-11.30.2026.pdf
 - Publisher page: https://www.fema.gov/flood-insurance/find-form/underwriting
@@ -40,4 +40,3 @@ not committed to this repository.
 
 `uv run fetch-documents` writes the acquired size and SHA-256 for every file to
 `data/manifest.json`.
-

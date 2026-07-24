@@ -65,7 +65,7 @@ documents:
       minimum_markdown_tables: 1
 
   - slug: "fema-proof-of-loss"
-    title: "FEMA Proof of Loss Form"
+    title: "FEMA Hermit's Peak/Calf Canyon Proof of Loss Form"
     publisher: "Federal Emergency Management Agency"
     file_name: "fema-proof-of-loss-form.pdf"
     url: "https://www.fema.gov/sites/default/files/documents/fema_hpcc-proof-of-loss-form-english-exp-11.30.2026.pdf"
@@ -73,12 +73,12 @@ documents:
     rights: "U.S. federal government work. Do not imply FEMA or DHS endorsement."
     checks:
       required_text:
-        - "SWORN STATEMENT IN PROOF OF LOSS"
-        - "POLICY NUMBER"
-        - "DATE OF LOSS"
-        - "SIGNATURE OF INSURED"
+        - "PROOF OF LOSS"
+        - "CLAIMANT CONTACT INFORMATION"
+        - "TYPE OF PROOF OF LOSS"
+        - "AMOUNTS CLAIMED"
       ordered_text:
-        - "INSURANCE COMPANY"
-        - "POLICY NUMBER"
-        - "AMOUNT OF WHOLE LOSS"
+        - "CLAIMANT CONTACT INFORMATION"
+        - "TYPE OF PROOF OF LOSS"
+        - "AMOUNTS CLAIMED"
       minimum_markdown_tables: 0
