@@ -335,14 +335,17 @@ Retrieved policy language:
     return response.model_dump(mode="json"), json.loads(content), duration_ms
 
 
-def run_review(run_id: str | None = None) -> Path:
-    config = load_config()
-    claim = load_claim()
+def _require_packet() -> Path:
     packet_manifest_path = PACKET_DIR / "manifest.json"
     if not packet_manifest_path.exists():
         raise FileNotFoundError("Missing prepared packet. Run `uv run prepare-claim` first.")
-    selected_run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = RUNS_DIR / selected_run_id
+    return packet_manifest_path
+
+
+def run_default_stage(run_id: str) -> Path:
+    config = load_config()
+    _require_packet()
+    run_dir = RUNS_DIR / run_id
     raw_dir = run_dir / "raw"
     markdown_dir = run_dir / "markdown"
     raw_dir.mkdir(parents=True, exist_ok=False)
@@ -395,6 +398,45 @@ def run_review(run_id: str | None = None) -> Path:
     finally:
         parse_client.close()
 
+    _write_json(
+        run_dir / "default-stage.json",
+        {
+            "endpoint": config.cluster.url,
+            "models": {
+                "parse": config.models.parse,
+                "extract": config.models.extract,
+                "rerank": config.models.rerank,
+            },
+            "timings_ms": timings,
+            "claim_identity": identity_result.get("data", {}),
+        },
+    )
+    table = Table("Default-bundle call", "Latency")
+    for name, duration_ms in timings.items():
+        table.add_row(name, f"{duration_ms:,.1f} ms")
+    console.print(table)
+    console.print(f"Default stage: {run_dir}")
+    return run_dir
+
+
+def run_generation_stage(run_id: str) -> Path:
+    config = load_config()
+    claim = load_claim()
+    packet_manifest_path = _require_packet()
+    run_dir = RUNS_DIR / run_id
+    raw_dir = run_dir / "raw"
+    markdown_dir = run_dir / "markdown"
+    default_stage_path = run_dir / "default-stage.json"
+    if not default_stage_path.exists():
+        raise FileNotFoundError(f"Missing {default_stage_path}. Run the default stage first.")
+    default_stage = json.loads(default_stage_path.read_text(encoding="utf-8"))
+    markdown = {
+        name: (markdown_dir / f"{name}.md").read_text(encoding="utf-8")
+        for name in ("proof_of_loss", "estimate", "policy")
+    }
+    policy_chunks = json.loads((run_dir / "policy-evidence.json").read_text(encoding="utf-8"))
+    timings = dict(default_stage["timings_ms"])
+
     generation_client = _openai_client(
         config.cluster.generation_url,
         config.cluster.api_key,
@@ -410,13 +452,12 @@ def run_review(run_id: str | None = None) -> Path:
         (run_dir / "photo-analysis.md").write_text(photo_analysis.rstrip() + "\n", encoding="utf-8")
 
         totals = {key: float(value) for key, value in reconciliation(claim).items()}
-        identity = identity_result.get("data", {})
         review_raw, review, timings["synthesize_review_ms"] = _final_review(
             generation_client,
             config.models.review,
             form_markdown=markdown["proof_of_loss"],
             estimate_markdown=markdown["estimate"],
-            claim_identity=identity,
+            claim_identity=default_stage["claim_identity"],
             policy_chunks=policy_chunks,
             photo_analysis=photo_analysis,
             claim_note=(PACKET_DIR / "claim-note.txt").read_text(encoding="utf-8"),
@@ -428,17 +469,15 @@ def run_review(run_id: str | None = None) -> Path:
         generation_client.close()
 
     manifest = {
-        "run_id": selected_run_id,
+        "run_id": run_id,
         "run_at": datetime.now(UTC).isoformat(),
         "fictional_claim": True,
         "endpoints": {
-            "cluster": config.cluster.url,
+            "cluster": default_stage["endpoint"],
             "generation": config.cluster.generation_url,
         },
         "models": {
-            "parse": config.models.parse,
-            "extract": config.models.extract,
-            "rerank": config.models.rerank,
+            **default_stage["models"],
             "vision": config.models.vision,
             "review": config.models.review,
         },
@@ -467,11 +506,31 @@ def run_review(run_id: str | None = None) -> Path:
     return run_dir
 
 
+def run_review(run_id: str | None = None) -> Path:
+    selected_run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_default_stage(selected_run_id)
+    return run_generation_stage(selected_run_id)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Review the fictional flood claim through SIE")
     parser.add_argument("--run-id")
+    parser.add_argument(
+        "--stage",
+        choices=("all", "default", "generation"),
+        default="all",
+        help="Run both stages, or release the GPU between the default and generation bundles",
+    )
     args = parser.parse_args()
-    run_review(args.run_id)
+    selected_run_id = args.run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    if args.stage == "default":
+        run_default_stage(selected_run_id)
+    elif args.stage == "generation":
+        if not args.run_id:
+            parser.error("--run-id is required for --stage generation")
+        run_generation_stage(selected_run_id)
+    else:
+        run_review(selected_run_id)
 
 
 if __name__ == "__main__":

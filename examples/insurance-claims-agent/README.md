@@ -58,6 +58,14 @@ sie-server serve -b sglang --port 8081
 SIE_GENERATION_URL=http://localhost:8081 uv run review-claim --run-id local
 ```
 
+On one GPU, release the default bundle before loading Qwen:
+
+```bash
+uv run review-claim --run-id local --stage default
+# Stop the default server, then start the sglang server on the same port.
+uv run review-claim --run-id local --stage generation
+```
+
 ## Evidence bundle
 
 ```text
