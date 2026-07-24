@@ -229,7 +229,7 @@ def _analyze_photo(
         provision_timeout_s=provision_timeout_s,
     )
     duration_ms = round((time.perf_counter() - started) * 1000, 1)
-    objects = result.get("data", {}).get("objects", [])
+    objects = result.get("data", {}).get("objects", result.get("objects", []))
     content = "\n".join(
         f"- {item['label']}: confidence {float(item['score']):.3f}, bbox {item['bbox']}"
         for item in objects
@@ -397,7 +397,7 @@ def run_default_stage(run_id: str) -> Path:
                 "rerank": config.models.rerank,
             },
             "timings_ms": timings,
-            "claim_identity": identity_result.get("data", {}),
+            "claim_identity": identity_result.get("data", identity_result),
         },
     )
     table = Table("Default-bundle call", "Latency")
@@ -419,6 +419,10 @@ def run_generation_stage(run_id: str) -> Path:
     if not default_stage_path.exists():
         raise FileNotFoundError(f"Missing {default_stage_path}. Run the default stage first.")
     default_stage = json.loads(default_stage_path.read_text(encoding="utf-8"))
+    if not default_stage.get("claim_identity"):
+        default_stage["claim_identity"] = json.loads(
+            (raw_dir / "claim-identity.json").read_text(encoding="utf-8")
+        )
     markdown = {
         name: (markdown_dir / f"{name}.md").read_text(encoding="utf-8")
         for name in ("proof_of_loss", "estimate", "policy")
