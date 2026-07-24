@@ -23,7 +23,9 @@ markdown = result["data"]["markdown"]
 
 The saved run contains the raw SIE response, exported Markdown, endpoint, model,
 latency, source URL, and deterministic checks. The checks look for exact facts,
-section order, and Markdown tables. They do not score formatting by eye.
+section order where linear order applies, and Markdown tables. The form check
+asserts labels, choices, amount sections, and certification language. It does
+not pretend a form has one useful reading order.
 
 ## Run it
 

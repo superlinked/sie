@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -32,27 +34,32 @@ def _table_count(markdown: str) -> int:
     )
 
 
+def _normalized(text: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(text)).strip().casefold()
+
+
 def _evaluate_markdown(
     markdown: str, required: tuple[str, ...], ordered: tuple[str, ...], tables: int
 ) -> list[CheckResult]:
-    folded = markdown.casefold()
+    folded = _normalized(markdown)
     checks = [
         CheckResult(
             name=f"contains:{text}",
-            passed=text.casefold() in folded,
+            passed=_normalized(text) in folded,
             detail=text,
         )
         for text in required
     ]
-    positions = [folded.find(text.casefold()) for text in ordered]
-    ordered_passed = all(position >= 0 for position in positions) and positions == sorted(positions)
-    checks.append(
-        CheckResult(
-            name="reading-order",
-            passed=ordered_passed,
-            detail=" -> ".join(ordered),
+    if ordered:
+        positions = [folded.find(_normalized(text)) for text in ordered]
+        ordered_passed = all(position >= 0 for position in positions) and positions == sorted(positions)
+        checks.append(
+            CheckResult(
+                name="reading-order",
+                passed=ordered_passed,
+                detail=" -> ".join(ordered),
+            )
         )
-    )
     actual_tables = _table_count(markdown)
     checks.append(
         CheckResult(

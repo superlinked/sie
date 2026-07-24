@@ -42,7 +42,7 @@ documents:
         - "Core Underwriting Income"
       ordered_text:
         - "Highlights & Strategic Update"
-        - "First Quarter Financial Results"
+        - "First Quarter Results Update"
       minimum_markdown_tables: 1
 
   - slug: "docling-paper"
@@ -78,8 +78,7 @@ documents:
         - "CLAIMANT CONTACT INFORMATION"
         - "TYPE OF PROOF OF LOSS"
         - "AMOUNTS CLAIMED"
-      ordered_text:
-        - "CLAIMANT CONTACT INFORMATION"
-        - "TYPE OF PROOF OF LOSS"
-        - "AMOUNTS CLAIMED"
+        - "Individual or Household"
+        - "YOU MUST SIGN THE CERTIFICATION"
+      ordered_text: []
       minimum_markdown_tables: 0

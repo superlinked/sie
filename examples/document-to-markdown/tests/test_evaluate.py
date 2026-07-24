@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from document_to_markdown.evaluate import _evaluate_markdown, _table_count
+from document_to_markdown.evaluate import _evaluate_markdown, _normalized, _table_count
 
 
 def test_table_count_finds_markdown_tables() -> None:
@@ -51,3 +51,13 @@ def test_evaluation_surfaces_wrong_reading_order() -> None:
     )
 
     assert next(check for check in checks if check.name == "reading-order").passed is False
+
+
+def test_normalization_handles_tabs_and_html_entities() -> None:
+    assert _normalized("Highlights\t&amp;\tStrategic Update") == "highlights & strategic update"
+
+
+def test_empty_order_does_not_create_a_vacuous_check() -> None:
+    checks = _evaluate_markdown("Proof of loss", required=("Proof of loss",), ordered=(), tables=0)
+
+    assert [check.name for check in checks] == ["contains:Proof of loss", "markdown-tables"]
