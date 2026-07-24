@@ -191,22 +191,17 @@ def _extract_claim_identity(
     markdown: str,
     provision_timeout_s: float,
 ) -> tuple[dict[str, Any], float]:
-    schema = {
-        "type": "object",
-        "properties": {
-            "insured_name": {"type": "string", "description": "Name of insured"},
-            "policy_number": {"type": "string", "description": "Flood insurance policy number"},
-            "date_of_loss": {"type": "string", "description": "Date and time of loss"},
-            "property_address": {"type": "string", "description": "Address of insured property"},
-        },
-        "required": ["insured_name", "policy_number", "date_of_loss"],
-        "additionalProperties": False,
-    }
+    labels = [
+        "insured name",
+        "flood insurance policy number",
+        "date and time of loss",
+        "insured property address",
+    ]
     started = time.perf_counter()
     result = client.extract(
         model,
         Item(id="claim-identity", text=markdown[:5000]),
-        output_schema=schema,
+        labels=labels,
         wait_for_capacity=True,
         provision_timeout_s=provision_timeout_s,
     )

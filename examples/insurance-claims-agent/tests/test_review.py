@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 from insurance_claims.evaluate import evaluate_review
-from insurance_claims.review import chunk_markdown
+from insurance_claims.review import _extract_claim_identity, chunk_markdown
+
+
+class FakeExtractClient:
+    def __init__(self) -> None:
+        self.labels: list[str] | None = None
+
+    def extract(self, _model: str, _item: object, **kwargs: object) -> dict[str, object]:
+        self.labels = kwargs.get("labels")  # type: ignore[assignment]
+        return {"data": {"entities": []}}
 
 
 def test_chunk_markdown_keeps_all_paragraphs() -> None:
@@ -11,6 +20,19 @@ def test_chunk_markdown_keeps_all_paragraphs() -> None:
 
     assert "\n\n".join(chunks) == markdown
     assert len(chunks) == 2
+
+
+def test_claim_identity_passes_gliner2_labels() -> None:
+    client = FakeExtractClient()
+
+    _extract_claim_identity(client, "fastino/gliner2-large-v1", "claim text", 60)
+
+    assert client.labels == [
+        "insured name",
+        "flood insurance policy number",
+        "date and time of loss",
+        "insured property address",
+    ]
 
 
 def test_evaluation_accepts_expected_review() -> None:
