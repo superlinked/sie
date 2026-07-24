@@ -4,4 +4,3 @@ data/pdfs/
 data/manifest.json
 runs/*
 !runs/.gitkeep
-

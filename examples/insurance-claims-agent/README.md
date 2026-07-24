@@ -10,7 +10,7 @@ $80,660 after deductibles.
 
 ## What SIE does
 
-| Call | Model | Result |
+| Stage | Model | Result |
 |---|---|---|
 | Parse the form, estimate, and policy | `docling` | Markdown with form labels, tables, and policy text |
 | Read the claim identity | `fastino/gliner2-large-v1` | Typed name, policy number, loss date, and property address |
