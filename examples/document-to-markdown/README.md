@@ -27,6 +27,18 @@ section order where linear order applies, and Markdown tables. The form check
 asserts labels, choices, amount sections, and certification language. It does
 not pretend a form has one useful reading order.
 
+## Verified result
+
+We ran the example on an NVIDIA L4 through a local SIE endpoint on July 24,
+2026. All 25 checks passed:
+
+| Document | Checks | SIE latency |
+|---|---:|---:|
+| NVIDIA Q4 FY2025 CFO commentary | 6/6 | 50.3 s |
+| SiriusPoint Q1 2025 investor presentation | 6/6 | 16.3 s |
+| Docling technical report | 6/6 | 11.7 s |
+| FEMA proof-of-loss form | 7/7 | 10.0 s |
+
 ## Run it
 
 Use Python 3.12 and a SIE endpoint that serves `docling`.

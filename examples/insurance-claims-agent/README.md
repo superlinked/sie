@@ -21,6 +21,17 @@ $80,660 after deductibles.
 Every model call goes through SIE. The review uses the generation endpoint; the
 photograph uses Grounding DINO through the extract endpoint.
 
+## Verified result
+
+We ran the complete packet on an NVIDIA L4 on July 23, 2026. The evaluator
+passed all six checks. Qwen returned `manual_review` with two sourced findings:
+
+- Blocking: `Proof of Loss lacks required signature and date`
+- High priority: `Claimed total exceeds attachment total by $400.00`
+
+Grounding DINO found furniture at 0.509 confidence and standing water at 0.276
+confidence. The saved boxes use the original 3072 by 2304 image coordinates.
+
 ## Run it
 
 ```bash
