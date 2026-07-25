@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "integrity_policy": "Each input is a verbatim excerpt from the linked primary source. Authored evaluation queries are labeled as such.",
+  "synthetic_or_paraphrased_evidence": false,
+  "sources": {
+    "sec_pathward_10ka": {
+      "file": "pathward-2025-10ka.html",
+      "url": "https://www.sec.gov/Archives/edgar/data/907471/000090747125000083/cash-20240930.htm",
+      "publisher": "U.S. Securities and Exchange Commission",
+      "document": "Pathward Financial, Inc. Amendment No. 1 on Form 10-K/A",
+      "accession": "0000907471-25-000083",
+      "filed": "2025-08-29",
+      "sha256": "eed8ca33bfaea864627fef65e0da305323e7d72e8640d47cb6c8781e3181b01a",
+      "byte_length": 9711929
+    },
+    "cms_lower_limb": {
+      "file": "cms-lower-limb-orthoses.html",
+      "url": "https://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/lower-limb-orthoses",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "document": "Lower Limb Orthoses",
+      "page_last_modified": "2026-02-11",
+      "sha256": "27ececf8b249af6f01a8785c03aeda27235bf40a6b62e5e7b77be06e0724df28",
+      "byte_length": 217383
+    },
+    "ntsb_east_palestine": {
+      "file": "ntsb-east-palestine-digest.pdf",
+      "url": "https://www.ntsb.gov/investigations/AccidentReports/Reports/SPC2406.pdf",
+      "publisher": "National Transportation Safety Board",
+      "document": "Norfolk Southern Railway Train Derailment with Subsequent Hazardous Material Release and Fires, Illustrated Digest",
+      "report_number": "SPC-24-06",
+      "sha256": "8c7dc02006f8a9ce21b77657553c8f14e6a7a00ec94b0c6ad05d60eec297d89f",
+      "byte_length": 5205715
+    },
+    "scotus_coinbase_suski": {
+      "file": "scotus-coinbase-v-suski.pdf",
+      "url": "https://www.supremecourt.gov/opinions/23pdf/23-3_879d.pdf",
+      "publisher": "Supreme Court of the United States",
+      "document": "Coinbase, Inc. v. Suski et al., 602 U.S. 143 (2024)",
+      "docket": "23-3",
+      "decided": "2024-05-23",
+      "sha256": "591f0fdecf41cb297427288a18fd72230e14d4aefe9af4f2d86d6c64dcc4476f",
+      "byte_length": 111243
+    }
+  }
+}

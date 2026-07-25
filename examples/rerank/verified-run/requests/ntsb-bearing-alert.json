@@ -1,0 +1,37 @@
+{
+  "method": "SIEClient.score",
+  "endpoint": "/v1/score/Qwen/Qwen3-Reranker-4B",
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "query": {
+    "id": "ntsb_detector_alert-query",
+    "text": "Which passage shows that the bearing was visibly on fire at Salem while the detector alert went to the Wayside Help Desk instead of the crew?"
+  },
+  "items": [
+    {
+      "id": "ntsb-sebring-no-alert",
+      "text": "At 7:37 p.m., at the Sebring HBD, the reading for the L1 bearing was only 38°F above ambient—not high enough to trigger an alert. The R1 bearing measured 20°F above ambient. But the L1 bearing was hotter.",
+      "source_id": "ntsb_east_palestine",
+      "source_excerpt_sha256": "58ec7805f08ff98282a31680b98a4f0bb131565b5d9df1ebb2d41643820930eb"
+    },
+    {
+      "id": "ntsb-salem-noncritical",
+      "text": "At 8:13 p.m., at the Salem HBD, the reading for the L1 bearing was 103°F above ambient. This reading was high enough to trigger a noncritical alert to the Wayside Help Desk (see box), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing (right). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted.",
+      "source_id": "ntsb_east_palestine",
+      "source_excerpt_sha256": "bdcb66ca5dd4ceb3033d229dfc7c2b286f065f6b7cb33da001f57f9dfebdac4b"
+    },
+    {
+      "id": "ntsb-east-palestine-critical",
+      "text": "About 8:52 p.m., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253°F above ambient at the L1 bearing; bearing R1 remained at 20°F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab.",
+      "source_id": "ntsb_east_palestine",
+      "source_excerpt_sha256": "2dc95188d1b5c64256c4cb91566bb6ba5386fa0e1c71ab0b5017a0fc0bc09e16"
+    },
+    {
+      "id": "ntsb-help-desk-process",
+      "text": "The Wayside Help Desk in Atlanta, Georgia, monitors alerts from NS’s HBDs. Critical alarms broadcast straight to the train crew. For noncritical alerts, the analyst monitors the train over HBDs it crosses later, paying attention to temperature trends. The single analyst on duty did not notice the Salem noncritical alert, as he dealt with higher-priority alerts.",
+      "source_id": "ntsb_east_palestine",
+      "source_excerpt_sha256": "ef13dd88ead7354a32982862ac590b843c9221d66801b9e1150c8f77512b69e4"
+    }
+  ],
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

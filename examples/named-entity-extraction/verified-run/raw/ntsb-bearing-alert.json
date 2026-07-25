@@ -1,0 +1,113 @@
+{
+  "entities": [
+    {
+      "text": "8:13 p.m.",
+      "label": "time",
+      "score": 0.93701171875,
+      "start": 3,
+      "end": 12,
+      "bbox": null
+    },
+    {
+      "text": "Salem",
+      "label": "location",
+      "score": 0.81982421875,
+      "start": 21,
+      "end": 26,
+      "bbox": null
+    },
+    {
+      "text": "L1 bearing",
+      "label": "bearing",
+      "score": 0.96484375,
+      "start": 52,
+      "end": 62,
+      "bbox": null
+    },
+    {
+      "text": "103°F above ambient",
+      "label": "temperature",
+      "score": 0.869140625,
+      "start": 67,
+      "end": 86,
+      "bbox": null
+    },
+    {
+      "text": "noncritical alert",
+      "label": "alert type",
+      "score": 0.5439453125,
+      "start": 130,
+      "end": 147,
+      "bbox": null
+    },
+    {
+      "text": "Salem",
+      "label": "location",
+      "score": 0.705078125,
+      "start": 240,
+      "end": 245,
+      "bbox": null
+    },
+    {
+      "text": "Sebring",
+      "label": "location",
+      "score": 0.7451171875,
+      "start": 308,
+      "end": 315,
+      "bbox": null
+    },
+    {
+      "text": "8:52 p.m.",
+      "label": "time",
+      "score": 0.91064453125,
+      "start": 386,
+      "end": 395,
+      "bbox": null
+    },
+    {
+      "text": "253°F above ambient",
+      "label": "temperature",
+      "score": 0.83935546875,
+      "start": 501,
+      "end": 520,
+      "bbox": null
+    },
+    {
+      "text": "L1 bearing",
+      "label": "bearing",
+      "score": 0.9716796875,
+      "start": 528,
+      "end": 538,
+      "bbox": null
+    },
+    {
+      "text": "bearing R1",
+      "label": "bearing",
+      "score": 0.79736328125,
+      "start": 540,
+      "end": 550,
+      "bbox": null
+    },
+    {
+      "text": "20°F above ambient",
+      "label": "temperature",
+      "score": 0.84765625,
+      "start": 563,
+      "end": 581,
+      "bbox": null
+    },
+    {
+      "text": "critical alarm",
+      "label": "alert type",
+      "score": 0.54296875,
+      "start": 617,
+      "end": 631,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ntsb_detector_alert-source",
+  "model": "urchade/gliner_multi-v2.1"
+}

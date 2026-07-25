@@ -1,0 +1,37 @@
+{
+  "method": "SIEClient.score",
+  "endpoint": "/v1/score/Qwen/Qwen3-Reranker-4B",
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "query": {
+    "id": "scotus_two_contracts-query",
+    "text": "Which passage says a court must decide which contract governs when the parties agreed to two contracts?"
+  },
+  "items": [
+    {
+      "id": "scotus-one-contract-rule",
+      "text": "In cases where parties have agreed to only one contract, and that contract contains an arbitration clause with a delegation provision, then, absent a successful challenge to the delegation provision, courts must send all arbitrability disputes to arbitration.",
+      "source_id": "scotus_coinbase_suski",
+      "source_excerpt_sha256": "7d9037437b5a840973c09770d94f96ec0df0f6a86338d0011b62994b648b08e6"
+    },
+    {
+      "id": "scotus-arbitration-clause",
+      "text": "All such matters shall be decided by an arbitrator and not by a court or judge.",
+      "source_id": "scotus_coinbase_suski",
+      "source_excerpt_sha256": "841b401364eb1d80739db61b992f22cfe47111aaf2574cae8d315f4d8659f78c"
+    },
+    {
+      "id": "scotus-forum-clause",
+      "text": "The California courts (state and federal) shall have sole jurisdiction of any controversies regarding the [sweepstakes] promotion and the laws of the state of California shall govern the promotion.",
+      "source_id": "scotus_coinbase_suski",
+      "source_excerpt_sha256": "078b6b6e3c9ad0f5739a846563af8dbe587b835b52baa745c74d1497bc101990"
+    },
+    {
+      "id": "scotus-two-contract-holding",
+      "text": "But, where, as here, parties have agreed to two contracts—one sending arbitrability disputes to arbitration, and the other either explicitly or implicitly sending arbitrability disputes to the courts—a court must decide which contract governs.",
+      "source_id": "scotus_coinbase_suski",
+      "source_excerpt_sha256": "421ec0cffca2e46f484a7caadc4bdc5d16913a644641778920d1a097801543d9"
+    }
+  ],
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

@@ -1,0 +1,29 @@
+{
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "scores": [
+    {
+      "item_id": "sec-non-reliance",
+      "score": 1.0,
+      "rank": 0
+    },
+    {
+      "item_id": "sec-amendment-scope",
+      "score": 0.10693359375,
+      "rank": 1
+    },
+    {
+      "item_id": "sec-material-weakness",
+      "score": 0.007171630859375,
+      "rank": 2
+    },
+    {
+      "item_id": "sec-accounting-errors",
+      "score": 0.00225830078125,
+      "rank": 3
+    }
+  ],
+  "query_id": "sec_filing_amendment-query",
+  "usage": {
+    "input_tokens": 1131
+  }
+}

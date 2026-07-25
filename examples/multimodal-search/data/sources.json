@@ -1,0 +1,100 @@
+{
+  "schema_version": "1.0",
+  "query": {
+    "text": "a red leather handbag",
+    "provenance": "authored retrieval query"
+  },
+  "synthetic_or_generated_images": false,
+  "images": [
+    {
+      "file": "images/black-camera.png",
+      "sha256": "cfb7740d0569f1c3cd2dc462ab2e75ff0b580782f35be7726baaa2c354724316",
+      "byte_length": 87916,
+      "width": 384,
+      "height": 384,
+      "format": "PNG",
+      "mode": "P",
+      "subject": "Black Nikon FE SLR camera",
+      "source": "https://www.flickr.com/photos/10456228@N00/7972305222",
+      "license": "CC0 1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "creator": "Akairom",
+      "derivative": "Exact evaluated bytes. Source image was resized or cropped for this example without semantic edits."
+    },
+    {
+      "file": "images/blue-running-sneaker.png",
+      "sha256": "0be82d701632164af8aabde05d04cf129976420044428bd16b5c3eb556fa41da",
+      "byte_length": 77302,
+      "width": 384,
+      "height": 384,
+      "format": "PNG",
+      "mode": "P",
+      "subject": "Blue Diadora running sneaker",
+      "source": "https://commons.wikimedia.org/w/index.php?curid=186982438",
+      "license": "CC0 1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "creator": "WorldTravleerAndPhotoTaker",
+      "derivative": "Exact evaluated bytes. Source image was resized or cropped for this example without semantic edits."
+    },
+    {
+      "file": "images/green-backpack.png",
+      "sha256": "0ccafd77f1dabbc20e871b01395f778af54d7ca2c74c933cca4f6db1b9e42a8f",
+      "byte_length": 85291,
+      "width": 384,
+      "height": 384,
+      "format": "PNG",
+      "mode": "P",
+      "subject": "Olive-green backpack",
+      "source": "https://stocksnap.io/photo/bag-backpack-THRCTPZSJP",
+      "license": "CC0 1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "creator": "Jakob Owens",
+      "derivative": "Exact evaluated bytes. Source image was resized or cropped for this example without semantic edits."
+    },
+    {
+      "file": "images/red-leather-handbag.png",
+      "sha256": "535c76fbb350e171b3a150b96661954010527bb562f9c22230a120ab5c94893f",
+      "byte_length": 59394,
+      "width": 384,
+      "height": 384,
+      "format": "PNG",
+      "mode": "P",
+      "subject": "Red leather barrel purse",
+      "source": "https://commons.wikimedia.org/wiki/File:Red_Leather_Barrel-Shaped_Purse_Used_by_Bonnie_Blake_-_DPLA_-_e849136953ed7fb210ad4532b5fef93e_(page_1).jpg",
+      "license": "No Copyright, United States",
+      "license_url": "https://rightsstatements.org/page/NoC-US/1.0/",
+      "creator": "Missouri Historical Society via DPLA",
+      "derivative": "Exact evaluated bytes. Source image was resized or cropped for this example without semantic edits."
+    },
+    {
+      "file": "images/black-handbag.jpg",
+      "sha256": "75cf60b0cc0c43b2d916a75cf0747ac0a15ecc42b6d2eccbd3c4de7b1e809632",
+      "byte_length": 369633,
+      "width": 960,
+      "height": 1280,
+      "format": "JPEG",
+      "mode": "RGB",
+      "subject": "Black handbag",
+      "source": "https://commons.wikimedia.org/wiki/File:Black_handbag.jpg",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "creator": "Tahrirchiqiz",
+      "derivative": "Exact evaluated bytes. Source image was resized or cropped for this example without semantic edits."
+    },
+    {
+      "file": "images/red-shoes.jpg",
+      "sha256": "9d8819824d27486352afd83f5d1fe9e443a621747ba51a27b49a6321b96fa898",
+      "byte_length": 136109,
+      "width": 960,
+      "height": 640,
+      "format": "JPEG",
+      "mode": "RGB",
+      "subject": "Red shoes",
+      "source": "https://commons.wikimedia.org/wiki/File:Red_Shoes_(34075396).jpeg",
+      "license": "CC BY 3.0",
+      "license_url": "https://creativecommons.org/licenses/by/3.0/",
+      "creator": "Benjamin Caviezel",
+      "derivative": "Exact evaluated bytes. Source image was resized or cropped for this example without semantic edits."
+    }
+  ]
+}

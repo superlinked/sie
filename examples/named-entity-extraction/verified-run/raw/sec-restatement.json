@@ -1,0 +1,201 @@
+{
+  "entities": [
+    {
+      "text": "Pathward Financial, Inc.",
+      "label": "company",
+      "score": 0.8876953125,
+      "start": 0,
+      "end": 24,
+      "bbox": null
+    },
+    {
+      "text": "Form 10-K/A",
+      "label": "filing form",
+      "score": 0.92578125,
+      "start": 75,
+      "end": 86,
+      "bbox": null
+    },
+    {
+      "text": "Form 10-K/A",
+      "label": "filing form",
+      "score": 0.86376953125,
+      "start": 94,
+      "end": 105,
+      "bbox": null
+    },
+    {
+      "text": "September 30, 2024",
+      "label": "date",
+      "score": 0.890625,
+      "start": 201,
+      "end": 219,
+      "bbox": null
+    },
+    {
+      "text": "September 30, 2023",
+      "label": "date",
+      "score": 0.783203125,
+      "start": 224,
+      "end": 242,
+      "bbox": null
+    },
+    {
+      "text": "September 30, 2024",
+      "label": "date",
+      "score": 0.576171875,
+      "start": 268,
+      "end": 286,
+      "bbox": null
+    },
+    {
+      "text": "Form 10-K",
+      "label": "filing form",
+      "score": 0.8310546875,
+      "start": 347,
+      "end": 356,
+      "bbox": null
+    },
+    {
+      "text": "Securities and Exchange Commission",
+      "label": "government agency",
+      "score": 0.88623046875,
+      "start": 372,
+      "end": 406,
+      "bbox": null
+    },
+    {
+      "text": "SEC",
+      "label": "government agency",
+      "score": 0.6728515625,
+      "start": 413,
+      "end": 416,
+      "bbox": null
+    },
+    {
+      "text": "November 26, 2024",
+      "label": "date",
+      "score": 0.87255859375,
+      "start": 422,
+      "end": 439,
+      "bbox": null
+    },
+    {
+      "text": "Affected Periods",
+      "label": "reporting period",
+      "score": 0.69287109375,
+      "start": 574,
+      "end": 590,
+      "bbox": null
+    },
+    {
+      "text": "Form 10-K/A",
+      "label": "filing form",
+      "score": 0.83740234375,
+      "start": 616,
+      "end": 627,
+      "bbox": null
+    },
+    {
+      "text": "Form 10-K/A",
+      "label": "filing form",
+      "score": 0.78466796875,
+      "start": 720,
+      "end": 731,
+      "bbox": null
+    },
+    {
+      "text": "Form 8-K",
+      "label": "filing form",
+      "score": 0.546875,
+      "start": 788,
+      "end": 796,
+      "bbox": null
+    },
+    {
+      "text": "SEC",
+      "label": "government agency",
+      "score": 0.654296875,
+      "start": 812,
+      "end": 815,
+      "bbox": null
+    },
+    {
+      "text": "July 2, 2025",
+      "label": "date",
+      "score": 0.8046875,
+      "start": 819,
+      "end": 831,
+      "bbox": null
+    },
+    {
+      "text": "June 26, 2025",
+      "label": "date",
+      "score": 0.8720703125,
+      "start": 836,
+      "end": 849,
+      "bbox": null
+    },
+    {
+      "text": "Crowe LLP",
+      "label": "accounting firm",
+      "score": 0.8154296875,
+      "start": 986,
+      "end": 995,
+      "bbox": null
+    },
+    {
+      "text": "September 30, 2024",
+      "label": "date",
+      "score": 0.7109375,
+      "start": 1087,
+      "end": 1105,
+      "bbox": null
+    },
+    {
+      "text": "September 30, 2024",
+      "label": "date",
+      "score": 0.78369140625,
+      "start": 1173,
+      "end": 1191,
+      "bbox": null
+    },
+    {
+      "text": "Form 10-K",
+      "label": "filing form",
+      "score": 0.80615234375,
+      "start": 1227,
+      "end": 1236,
+      "bbox": null
+    },
+    {
+      "text": "Form 10-Q",
+      "label": "filing form",
+      "score": 0.603515625,
+      "start": 1511,
+      "end": 1520,
+      "bbox": null
+    },
+    {
+      "text": "December 31, 2024",
+      "label": "date",
+      "score": 0.64111328125,
+      "start": 1575,
+      "end": 1592,
+      "bbox": null
+    },
+    {
+      "text": "Affected Periods",
+      "label": "reporting period",
+      "score": 0.544921875,
+      "start": 1599,
+      "end": 1615,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "sec_filing_amendment-source",
+  "model": "urchade/gliner_multi-v2.1"
+}

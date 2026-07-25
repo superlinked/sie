@@ -1,0 +1,81 @@
+{
+  "entities": [
+    {
+      "text": "A supplier",
+      "label": "organization",
+      "score": 0.541015625,
+      "start": 0,
+      "end": 10,
+      "bbox": null
+    },
+    {
+      "text": "L1851",
+      "label": "medical code",
+      "score": 0.798828125,
+      "start": 31,
+      "end": 36,
+      "bbox": null
+    },
+    {
+      "text": "Knee orthosis",
+      "label": "medical equipment",
+      "score": 0.6806640625,
+      "start": 38,
+      "end": 51,
+      "bbox": null
+    },
+    {
+      "text": "review contractor",
+      "label": "organization",
+      "score": 0.708984375,
+      "start": 319,
+      "end": 336,
+      "bbox": null
+    },
+    {
+      "text": "7 months ago",
+      "label": "duration",
+      "score": 0.69189453125,
+      "start": 394,
+      "end": 406,
+      "bbox": null
+    },
+    {
+      "text": "6 months",
+      "label": "duration",
+      "score": 0.84130859375,
+      "start": 468,
+      "end": 476,
+      "bbox": null
+    },
+    {
+      "text": "proof of delivery",
+      "label": "missing documentation",
+      "score": 0.54052734375,
+      "start": 480,
+      "end": 497,
+      "bbox": null
+    },
+    {
+      "text": "review contractor",
+      "label": "organization",
+      "score": 0.7470703125,
+      "start": 503,
+      "end": 520,
+      "bbox": null
+    },
+    {
+      "text": "MAC",
+      "label": "organization",
+      "score": 0.724609375,
+      "start": 589,
+      "end": 592,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "cms_lower_limb_orthosis-source",
+  "model": "urchade/gliner_multi-v2.1"
+}

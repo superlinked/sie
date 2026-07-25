@@ -1,0 +1,65 @@
+{
+  "entities": [
+    {
+      "text": "SUPREME COURT OF THE UNITED STATES",
+      "label": "court",
+      "score": 0.88525390625,
+      "start": 0,
+      "end": 34,
+      "bbox": null
+    },
+    {
+      "text": "No. 23–3",
+      "label": "case number",
+      "score": 0.7373046875,
+      "start": 35,
+      "end": 43,
+      "bbox": null
+    },
+    {
+      "text": "COINBASE, INC.",
+      "label": "organization",
+      "score": 0.57421875,
+      "start": 44,
+      "end": 58,
+      "bbox": null
+    },
+    {
+      "text": "DAVID SUSKI",
+      "label": "person",
+      "score": 0.94140625,
+      "start": 74,
+      "end": 85,
+      "bbox": null
+    },
+    {
+      "text": "COURT OF APPEALS FOR THE NINTH CIRCUIT",
+      "label": "court",
+      "score": 0.79052734375,
+      "start": 137,
+      "end": 175,
+      "bbox": null
+    },
+    {
+      "text": "May 23, 2024",
+      "label": "date",
+      "score": 0.970703125,
+      "start": 177,
+      "end": 189,
+      "bbox": null
+    },
+    {
+      "text": "JUSTICE JACKSON",
+      "label": "judge",
+      "score": 0.96728515625,
+      "start": 191,
+      "end": 206,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "scotus_two_contracts-source",
+  "model": "urchade/gliner_multi-v2.1"
+}

@@ -1,0 +1,21 @@
+{
+  "method": "SIEClient.extract",
+  "endpoint": "/v1/extract/urchade/gliner_multi-v2.1",
+  "model": "urchade/gliner_multi-v2.1",
+  "item": {
+    "id": "scotus_two_contracts-source",
+    "text": "SUPREME COURT OF THE UNITED STATES\nNo. 23–3\nCOINBASE, INC., PETITIONER v. DAVID SUSKI, ET AL.\nON WRIT OF CERTIORARI TO THE UNITED STATES COURT OF APPEALS FOR THE NINTH CIRCUIT\n[May 23, 2024]\nJUSTICE JACKSON delivered the opinion of the Court.",
+    "source_id": "scotus_coinbase_suski",
+    "source_excerpt_sha256": "30d4450da291d2434af7aa04fd1f6056f32016ff1e4059d491a03ebe13ad7306"
+  },
+  "labels": [
+    "court",
+    "case number",
+    "organization",
+    "person",
+    "date",
+    "judge"
+  ],
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

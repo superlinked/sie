@@ -1,0 +1,37 @@
+{
+  "method": "SIEClient.score",
+  "endpoint": "/v1/score/Qwen/Qwen3-Reranker-4B",
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "query": {
+    "id": "sec_filing_amendment-query",
+    "text": "Which passage records the Audit Committee’s non-reliance conclusion and defines the affected annual and interim reporting periods?"
+  },
+  "items": [
+    {
+      "id": "sec-amendment-scope",
+      "text": "Pathward Financial, Inc. (the \"Company\") is filing this Amendment No. 1 on Form 10-K/A (this “Form 10-K/A”) to amend and restate its audited financial statements and related footnote information as of September 30, 2024 and September 30, 2023, and for the years ended September 30, 2024, 2023 and 2022, previously included in its Annual Report on Form 10-K filed with the Securities and Exchange Commission (the “SEC”) on November 26, 2024 (the “Original Report”). Additionally, it includes the restated unaudited interim condensed consolidated financial statements for the Affected Periods (as defined below). This Form 10-K/A also amends certain other Items in the Original Report, as listed in “Items Amended in this Form 10-K/A” below.",
+      "source_id": "sec_pathward_10ka",
+      "source_excerpt_sha256": "de8ab0a0e06207ac8b441f74a37de0fe604f1a8d20f663d5fb41bdf11db4fb6b"
+    },
+    {
+      "id": "sec-non-reliance",
+      "text": "As described in the Company’s Current Report on Form 8-K filed with the SEC on July 2, 2025, on June 26, 2025, the Audit Committee of our Board of Directors, after discussion with management and our independent registered public accounting firm, Crowe LLP, concluded that our audited consolidated financial statements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year periods ended September 30, 2024 contained in our Annual Reports on Form 10-K, and our unaudited consolidated financial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31, 2024, 2023, and 2022, June 30, 2024, 2023, and 2022, and September 30, 2024, 2023, and 2022 contained in our Quarterly Reports on Form 10-Q (collectively, but excluding the interim period ended December 31, 2024, the “Affected Periods”) should no longer be relied upon and should be restated because of errors identified in such financial statements, as described below.",
+      "source_id": "sec_pathward_10ka",
+      "source_excerpt_sha256": "0534acbc7edb26f346f6306b3ebf3edc55f4e3d95119db5178cd704c05fb2767"
+    },
+    {
+      "id": "sec-accounting-errors",
+      "text": "The errors relate to the Company's accounting and financial reporting of certain third-party lending and servicing relationships within the Consumer Solutions business. Historically, we accounted for all borrower payments and credit enhancement payments under these programs on a single unit or net basis, with all such payments presented as interest income representing our effective yield on the portfolios. We determined that these payments should instead be accounted for on a separate unit of account or gross basis, with loan yields and interest income recorded at the gross borrower loan rate, and credit losses and associated provisions for credit losses recorded on a gross basis over the life of the loans, and with all credit enhancement payments and servicing payments recorded separately in noninterest expense (the “Gross Basis Approach”). Additionally, there are tax adjustments that relate to the tax impact of the restatement entries discussed.",
+      "source_id": "sec_pathward_10ka",
+      "source_excerpt_sha256": "e1039015d0fd5e2fc438a28fff88b57d5fa23311ed04db2483667140b9357524"
+    },
+    {
+      "id": "sec-material-weakness",
+      "text": "In addition, our management has concluded that there is a material weakness in internal control over financial reporting relating to the errors described above for the year ended September 30, 2024. For a discussion of management’s evaluation of our disclosure controls and procedures and the material weakness identified, see “Item 9A – Controls and Procedures” of this Form 10-K/A.",
+      "source_id": "sec_pathward_10ka",
+      "source_excerpt_sha256": "e49c23c3f2802795dae9392b621cd4914e8a012ab22f25b408856629e360d921"
+    }
+  ],
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

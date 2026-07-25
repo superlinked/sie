@@ -1,0 +1,176 @@
+{
+  "schema_version": "1.0",
+  "integrity_policy": {
+    "candidate_text": "Every rerank candidate is a verbatim primary-source excerpt.",
+    "entity_text": "Every entity input is verbatim source text; adjacent passages are separated only by newlines.",
+    "queries": "Evaluation questions are authored prompts and are explicitly marked as such.",
+    "synthetic_or_paraphrased_evidence": false
+  },
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "cases": {
+    "sec_filing_amendment": {
+      "query": "Which passage records the Audit Committee’s non-reliance conclusion and defines the affected annual and interim reporting periods?",
+      "query_provenance": "authored evaluation query; it asserts no facts beyond the source candidates",
+      "expected_top_candidate_id": "sec-non-reliance",
+      "candidates": [
+        {
+          "id": "sec-amendment-scope",
+          "text": "Pathward Financial, Inc. (the \"Company\") is filing this Amendment No. 1 on Form 10-K/A (this “Form 10-K/A”) to amend and restate its audited financial statements and related footnote information as of September 30, 2024 and September 30, 2023, and for the years ended September 30, 2024, 2023 and 2022, previously included in its Annual Report on Form 10-K filed with the Securities and Exchange Commission (the “SEC”) on November 26, 2024 (the “Original Report”). Additionally, it includes the restated unaudited interim condensed consolidated financial statements for the Affected Periods (as defined below). This Form 10-K/A also amends certain other Items in the Original Report, as listed in “Items Amended in this Form 10-K/A” below.",
+          "source_id": "sec_pathward_10ka",
+          "locator": "Explanatory Note, normalized visible-text line 5374",
+          "extraction": "verbatim visible text; whitespace normalized",
+          "sha256": "de8ab0a0e06207ac8b441f74a37de0fe604f1a8d20f663d5fb41bdf11db4fb6b"
+        },
+        {
+          "id": "sec-non-reliance",
+          "text": "As described in the Company’s Current Report on Form 8-K filed with the SEC on July 2, 2025, on June 26, 2025, the Audit Committee of our Board of Directors, after discussion with management and our independent registered public accounting firm, Crowe LLP, concluded that our audited consolidated financial statements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year periods ended September 30, 2024 contained in our Annual Reports on Form 10-K, and our unaudited consolidated financial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31, 2024, 2023, and 2022, June 30, 2024, 2023, and 2022, and September 30, 2024, 2023, and 2022 contained in our Quarterly Reports on Form 10-Q (collectively, but excluding the interim period ended December 31, 2024, the “Affected Periods”) should no longer be relied upon and should be restated because of errors identified in such financial statements, as described below.",
+          "source_id": "sec_pathward_10ka",
+          "locator": "Restatement Background, normalized visible-text line 5376",
+          "extraction": "verbatim visible text; whitespace normalized",
+          "sha256": "0534acbc7edb26f346f6306b3ebf3edc55f4e3d95119db5178cd704c05fb2767"
+        },
+        {
+          "id": "sec-accounting-errors",
+          "text": "The errors relate to the Company's accounting and financial reporting of certain third-party lending and servicing relationships within the Consumer Solutions business. Historically, we accounted for all borrower payments and credit enhancement payments under these programs on a single unit or net basis, with all such payments presented as interest income representing our effective yield on the portfolios. We determined that these payments should instead be accounted for on a separate unit of account or gross basis, with loan yields and interest income recorded at the gross borrower loan rate, and credit losses and associated provisions for credit losses recorded on a gross basis over the life of the loans, and with all credit enhancement payments and servicing payments recorded separately in noninterest expense (the “Gross Basis Approach”). Additionally, there are tax adjustments that relate to the tax impact of the restatement entries discussed.",
+          "source_id": "sec_pathward_10ka",
+          "locator": "Restatement Background, normalized visible-text line 5377",
+          "extraction": "verbatim visible text; whitespace normalized",
+          "sha256": "e1039015d0fd5e2fc438a28fff88b57d5fa23311ed04db2483667140b9357524"
+        },
+        {
+          "id": "sec-material-weakness",
+          "text": "In addition, our management has concluded that there is a material weakness in internal control over financial reporting relating to the errors described above for the year ended September 30, 2024. For a discussion of management’s evaluation of our disclosure controls and procedures and the material weakness identified, see “Item 9A – Controls and Procedures” of this Form 10-K/A.",
+          "source_id": "sec_pathward_10ka",
+          "locator": "Restatement Background, normalized visible-text line 5379",
+          "extraction": "verbatim visible text; whitespace normalized",
+          "sha256": "e49c23c3f2802795dae9392b621cd4914e8a012ab22f25b408856629e360d921"
+        }
+      ]
+    },
+    "cms_lower_limb_orthosis": {
+      "query": "What did the doctor fail to document within 6 months of proof of delivery in the published L1851 claim example?",
+      "query_provenance": "authored evaluation query; it asserts no facts beyond the source candidates",
+      "expected_top_candidate_id": "cms-missing-documentation",
+      "candidates": [
+        {
+          "id": "cms-six-month-requirement",
+          "text": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS codes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before prescribing the item. See the",
+          "source_id": "cms_lower_limb",
+          "locator": "Billing & Coding Criteria, normalized visible-text line 1232",
+          "extraction": "verbatim visible text; whitespace normalized",
+          "sha256": "36e54e61854afbe95b719bfe7f4bcd42df5380805a03aff54b71550273cf3c73"
+        },
+        {
+          "id": "cms-claim-description",
+          "text": "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable flexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without varus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review contractor’s request:",
+          "source_id": "cms_lower_limb",
+          "locator": "Example of Improper Payments, normalized visible-text line 1242",
+          "extraction": "verbatim visible text; whitespace normalized",
+          "sha256": "805697f59fd70019041766d758d611606a07fe4c48ee047ae6043367b07fb34a"
+        },
+        {
+          "id": "cms-seven-month-evidence",
+          "text": "Proof of delivery with face-to-face encounter 7 months ago",
+          "source_id": "cms_lower_limb",
+          "locator": "Example of Improper Payments, normalized visible-text line 1245",
+          "extraction": "verbatim visible text; whitespace normalized",
+          "sha256": "02ea6561a2f2593960d9b67bc0c32a73dde6d1ea65bb32c91a77c33169335ed7"
+        },
+        {
+          "id": "cms-missing-documentation",
+          "text": "The doctor didn’t document the face-to-face encounter within 6 months of proof of delivery.",
+          "source_id": "cms_lower_limb",
+          "locator": "What Documentation Was Missing?, normalized visible-text line 1247",
+          "extraction": "verbatim visible text; whitespace normalized",
+          "sha256": "cb7e39136bdd070855759fa8caeb7b915f877638deeb6eb29ff1cf3d7ca072bb"
+        },
+        {
+          "id": "cms-recoupment",
+          "text": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.",
+          "source_id": "cms_lower_limb",
+          "locator": "What Happens Next?, normalized visible-text line 1249",
+          "extraction": "verbatim visible text; whitespace normalized",
+          "sha256": "0ddc7dda57a2fcbf6b01a6f411888c1fa23404bc6d8a5c8c0f5b3276f025b89d"
+        }
+      ]
+    },
+    "ntsb_detector_alert": {
+      "query": "Which passage shows that the bearing was visibly on fire at Salem while the detector alert went to the Wayside Help Desk instead of the crew?",
+      "query_provenance": "authored evaluation query; it asserts no facts beyond the source candidates",
+      "expected_top_candidate_id": "ntsb-salem-noncritical",
+      "candidates": [
+        {
+          "id": "ntsb-sebring-no-alert",
+          "text": "At 7:37 p.m., at the Sebring HBD, the reading for the L1 bearing was only 38°F above ambient—not high enough to trigger an alert. The R1 bearing measured 20°F above ambient. But the L1 bearing was hotter.",
+          "source_id": "ntsb_east_palestine",
+          "locator": "PDF page 3 (printed pages 4–5), \"Sebring\"",
+          "extraction": "verbatim PDF text; visual line wraps joined",
+          "sha256": "58ec7805f08ff98282a31680b98a4f0bb131565b5d9df1ebb2d41643820930eb"
+        },
+        {
+          "id": "ntsb-salem-noncritical",
+          "text": "At 8:13 p.m., at the Salem HBD, the reading for the L1 bearing was 103°F above ambient. This reading was high enough to trigger a noncritical alert to the Wayside Help Desk (see box), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing (right). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted.",
+          "source_id": "ntsb_east_palestine",
+          "locator": "PDF page 3 (printed pages 4–5), \"Salem\"",
+          "extraction": "verbatim PDF text; visual line wraps joined",
+          "sha256": "bdcb66ca5dd4ceb3033d229dfc7c2b286f065f6b7cb33da001f57f9dfebdac4b"
+        },
+        {
+          "id": "ntsb-east-palestine-critical",
+          "text": "About 8:52 p.m., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253°F above ambient at the L1 bearing; bearing R1 remained at 20°F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab.",
+          "source_id": "ntsb_east_palestine",
+          "locator": "PDF page 3 (printed pages 4–5), \"East Palestine\"",
+          "extraction": "verbatim PDF text; visual line wraps joined",
+          "sha256": "2dc95188d1b5c64256c4cb91566bb6ba5386fa0e1c71ab0b5017a0fc0bc09e16"
+        },
+        {
+          "id": "ntsb-help-desk-process",
+          "text": "The Wayside Help Desk in Atlanta, Georgia, monitors alerts from NS’s HBDs. Critical alarms broadcast straight to the train crew. For noncritical alerts, the analyst monitors the train over HBDs it crosses later, paying attention to temperature trends. The single analyst on duty did not notice the Salem noncritical alert, as he dealt with higher-priority alerts.",
+          "source_id": "ntsb_east_palestine",
+          "locator": "PDF page 3 (printed pages 4–5), \"The Wayside Help Desk\"",
+          "extraction": "verbatim PDF text; visual line wraps joined",
+          "sha256": "ef13dd88ead7354a32982862ac590b843c9221d66801b9e1150c8f77512b69e4"
+        }
+      ]
+    },
+    "scotus_two_contracts": {
+      "query": "Which passage says a court must decide which contract governs when the parties agreed to two contracts?",
+      "query_provenance": "authored evaluation query; it asserts no facts beyond the source candidates",
+      "expected_top_candidate_id": "scotus-two-contract-holding",
+      "candidates": [
+        {
+          "id": "scotus-one-contract-rule",
+          "text": "In cases where parties have agreed to only one contract, and that contract contains an arbitration clause with a delegation provision, then, absent a successful challenge to the delegation provision, courts must send all arbitrability disputes to arbitration.",
+          "source_id": "scotus_coinbase_suski",
+          "locator": "Slip opinion page 8, Opinion of the Court",
+          "extraction": "verbatim PDF text; visual line wraps and end-of-line hyphenation normalized",
+          "sha256": "7d9037437b5a840973c09770d94f96ec0df0f6a86338d0011b62994b648b08e6"
+        },
+        {
+          "id": "scotus-arbitration-clause",
+          "text": "All such matters shall be decided by an arbitrator and not by a court or judge.",
+          "source_id": "scotus_coinbase_suski",
+          "locator": "Slip opinion page 2, quoted User Agreement",
+          "extraction": "verbatim PDF text; visual line wraps and end-of-line hyphenation normalized",
+          "sha256": "841b401364eb1d80739db61b992f22cfe47111aaf2574cae8d315f4d8659f78c"
+        },
+        {
+          "id": "scotus-forum-clause",
+          "text": "The California courts (state and federal) shall have sole jurisdiction of any controversies regarding the [sweepstakes] promotion and the laws of the state of California shall govern the promotion.",
+          "source_id": "scotus_coinbase_suski",
+          "locator": "Slip opinion page 3, quoted Official Rules",
+          "extraction": "verbatim PDF text; visual line wraps and end-of-line hyphenation normalized",
+          "sha256": "078b6b6e3c9ad0f5739a846563af8dbe587b835b52baa745c74d1497bc101990"
+        },
+        {
+          "id": "scotus-two-contract-holding",
+          "text": "But, where, as here, parties have agreed to two contracts—one sending arbitrability disputes to arbitration, and the other either explicitly or implicitly sending arbitrability disputes to the courts—a court must decide which contract governs.",
+          "source_id": "scotus_coinbase_suski",
+          "locator": "Slip opinion page 8, Opinion of the Court",
+          "extraction": "verbatim PDF text; visual line wraps and end-of-line hyphenation normalized",
+          "sha256": "421ec0cffca2e46f484a7caadc4bdc5d16913a644641778920d1a097801543d9"
+        }
+      ]
+    }
+  }
+}

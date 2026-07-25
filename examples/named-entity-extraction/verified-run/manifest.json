@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Verified public SIE entities example",
+  "run": {
+    "started_at_utc": "2026-07-24T23:41:21.148341Z",
+    "completed_at_utc": "2026-07-24T23:42:12.770481Z",
+    "runtime": "Public Superlinked Inference Engine v0.6.23 in Modal",
+    "hardware": {
+      "modal_gpu_class": "L4",
+      "nvidia_smi": "NVIDIA L4, GPU-5a8a5e16-921e-e6f7-0267-888a1aa89bbf, 580.95.05, 23034",
+      "platform": "Linux-4.19.0-gvisor-x86_64-with-glibc2.36",
+      "python": "3.12.12"
+    },
+    "server": {
+      "release": "v0.6.23",
+      "git_commit": "9d6ca6b00f788b6ab19f8d6dc9506e1b31dad2f0",
+      "git_describe": "v0.6.23",
+      "expected_commit": "9d6ca6b00f788b6ab19f8d6dc9506e1b31dad2f0"
+    },
+    "sdk": {
+      "package": "sie-sdk",
+      "version": "0.6.19"
+    },
+    "model": {
+      "sie_id": "urchade/gliner_multi-v2.1",
+      "hf_revision": "443d26d654e0324125a96bebd8e796c14ff2efe6"
+    }
+  },
+  "inputs": {
+    "cases": "data/cases.json",
+    "cases_sha256": "e906d9b3e4f99b642915c679c81bfddc7912f51330c0f95d54da0ea78241aaf6",
+    "sources": "data/sources.json",
+    "sources_sha256": "4c1bf7f1c8d0d5a53e9ac186798570ddefeb13b7a66b61822fbd7a85437ec63d",
+    "synthetic_or_paraphrased_evidence": false
+  },
+  "artifacts": {
+    "sec_filing_amendment": {
+      "request": "verified-run/requests/sec-restatement.json",
+      "request_sha256": "9364ca6a85fdb3aff59b55a1770f0ea6ae1573e88db6e02a91553e404077735b",
+      "raw_response": "verified-run/raw/sec-restatement.json",
+      "raw_response_sha256": "e2b2a59d1f732a19be89d94238cb67c0ea8140a1c42333ec574357706a4d2a34",
+      "latency_ms": 21091.355
+    },
+    "cms_lower_limb_orthosis": {
+      "request": "verified-run/requests/cms-orthosis-documentation.json",
+      "request_sha256": "68a6513add03d9c7f95adc90186d2da897e3e828e55869672ab6297248912683",
+      "raw_response": "verified-run/raw/cms-orthosis-documentation.json",
+      "raw_response_sha256": "205a973deacf53874de2b2bce4dc9c0c36fc3bdb1c724f1d400c787ac2db5f16",
+      "latency_ms": 187.721
+    },
+    "ntsb_detector_alert": {
+      "request": "verified-run/requests/ntsb-bearing-alert.json",
+      "request_sha256": "63b0077f1e1f6f83dfb447ad7379c185dcf16394ad5ac022d1bc9505dad834a6",
+      "raw_response": "verified-run/raw/ntsb-bearing-alert.json",
+      "raw_response_sha256": "d5f170b760d1cdb0117adf4579e4a4d3e0b504fcf5b9113a74972a5070612a35",
+      "latency_ms": 128.9
+    },
+    "scotus_two_contracts": {
+      "request": "verified-run/requests/supreme-court-caption.json",
+      "request_sha256": "aef5a3ff177e7e3f3dcbf171422f3e762d8d347b1f7e398ed8d6dacd42615bf3",
+      "raw_response": "verified-run/raw/supreme-court-caption.json",
+      "raw_response_sha256": "fab170199d356c21a2af4765edd1a38ee79b7299490c33bf9cb8d4241a23d69a",
+      "latency_ms": 347.26
+    }
+  },
+  "evaluation": {
+    "file": "verified-run/evaluation.json",
+    "sha256": "0a07d80de6b2c748b70cd8ec09227902bfdd51469e50583f2d96d9dd1d483cd2",
+    "passed": true
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Verified public SIE multimodal search example",
+  "run": {
+    "purpose": "Six-image SigLIP hard-negative visual-search evaluation",
+    "started_at_utc": "2026-07-24T23:21:34.943610Z",
+    "completed_at_utc": "2026-07-24T23:21:59.794865Z",
+    "endpoint": "http://127.0.0.1:8080",
+    "runtime": "Public Superlinked Inference Engine server in Modal",
+    "hardware": {
+      "modal_gpu_class": "L4",
+      "nvidia_smi": "NVIDIA L4, GPU-d7782a41-2040-19b8-9281-91b4f122dbba, 580.95.05, 23034",
+      "platform": "Linux-4.19.0-gvisor-x86_64-with-glibc2.36",
+      "python": "3.12.12"
+    },
+    "server": {
+      "release": "v0.6.23",
+      "git_commit": "9d6ca6b00f788b6ab19f8d6dc9506e1b31dad2f0",
+      "git_describe": "v0.6.23"
+    },
+    "model": {
+      "sie_id": "google/siglip-so400m-patch14-384",
+      "hf_revision": "9fdffc58afc957d1a03a25b10dba0329ab15c2a3",
+      "embedding_dimensions": 1152
+    }
+  },
+  "inputs": {
+    "sources": "data/sources.json",
+    "sources_sha256": "07d235b0612b43f7418ac12cf25328b6dd23ef85be40767dbe51d3dacc3aa672",
+    "synthetic_or_generated_images": false,
+    "image_files": {
+      "data/images/black-camera.png": "cfb7740d0569f1c3cd2dc462ab2e75ff0b580782f35be7726baaa2c354724316",
+      "data/images/black-handbag.jpg": "75cf60b0cc0c43b2d916a75cf0747ac0a15ecc42b6d2eccbd3c4de7b1e809632",
+      "data/images/blue-running-sneaker.png": "0be82d701632164af8aabde05d04cf129976420044428bd16b5c3eb556fa41da",
+      "data/images/green-backpack.png": "0ccafd77f1dabbc20e871b01395f778af54d7ca2c74c933cca4f6db1b9e42a8f",
+      "data/images/red-leather-handbag.png": "535c76fbb350e171b3a150b96661954010527bb562f9c22230a120ab5c94893f",
+      "data/images/red-shoes.jpg": "9d8819824d27486352afd83f5d1fe9e443a621747ba51a27b49a6321b96fa898"
+    }
+  },
+  "artifacts": {
+    "verified-run/evaluation.json": "c13ca6329d90eabedb7960a450f266c1450f7dd15da4d8fb1c050d59c18d17e6",
+    "verified-run/raw/image-candidate-embeddings.json": "7dc9f118808dcd3071031aca65acb36c6f5f466408b50e5a9fe3bcba8e829bda",
+    "verified-run/raw/text-query-embedding.json": "a9350f78365d5537dde1e41a5be76f22b487401d4aeffe6ec6870da9fc42cbb4",
+    "verified-run/requests/image-candidates.json": "3924ec094516492773948ff724820d54c2a5b3bd8358cf3bfb78a13070357490",
+    "verified-run/requests/text-query.json": "c8796e0c2772e81e0ed11ca1744d75bb7be53ec25a59717dc6bef1d861ef006a"
+  },
+  "integrity": {
+    "embedding_dimensions": 1152,
+    "metric": "cosine_similarity",
+    "expected_top_match": "red-leather-handbag.png"
+  }
+}

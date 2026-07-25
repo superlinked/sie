@@ -1,0 +1,290 @@
+{
+  "schema_version": "1.0",
+  "passed": true,
+  "task": "entities",
+  "case_count": 4,
+  "checks": [
+    {
+      "task": "entities",
+      "case_id": "sec_filing_amendment",
+      "passed": true,
+      "entity_count": 24,
+      "returned_labels": [
+        "accounting firm",
+        "company",
+        "date",
+        "filing form",
+        "government agency",
+        "reporting period"
+      ],
+      "required_anchor_count": 8,
+      "matched_anchor_count": 8,
+      "anchor_checks": [
+        {
+          "text": "Pathward Financial, Inc.",
+          "label": "company",
+          "start": 0,
+          "end": 24,
+          "passed": true
+        },
+        {
+          "text": "Form 10-K/A",
+          "label": "filing form",
+          "start": 75,
+          "end": 86,
+          "passed": true
+        },
+        {
+          "text": "Form 10-K/A",
+          "label": "filing form",
+          "start": 94,
+          "end": 105,
+          "passed": true
+        },
+        {
+          "text": "September 30, 2024",
+          "label": "date",
+          "start": 201,
+          "end": 219,
+          "passed": true
+        },
+        {
+          "text": "September 30, 2023",
+          "label": "date",
+          "start": 224,
+          "end": 242,
+          "passed": true
+        },
+        {
+          "text": "September 30, 2024",
+          "label": "date",
+          "start": 268,
+          "end": 286,
+          "passed": true
+        },
+        {
+          "text": "Form 10-K",
+          "label": "filing form",
+          "start": 347,
+          "end": 356,
+          "passed": true
+        },
+        {
+          "text": "Securities and Exchange Commission",
+          "label": "government agency",
+          "start": 372,
+          "end": 406,
+          "passed": true
+        }
+      ],
+      "display_transform": "Use the raw start/end offsets to highlight input text; keep labels unchanged; round score * 100 to one decimal only in display data."
+    },
+    {
+      "task": "entities",
+      "case_id": "cms_lower_limb_orthosis",
+      "passed": true,
+      "entity_count": 9,
+      "returned_labels": [
+        "duration",
+        "medical code",
+        "medical equipment",
+        "missing documentation",
+        "organization"
+      ],
+      "required_anchor_count": 5,
+      "matched_anchor_count": 5,
+      "anchor_checks": [
+        {
+          "text": "L1851",
+          "label": "medical code",
+          "start": 31,
+          "end": 36,
+          "passed": true
+        },
+        {
+          "text": "Knee orthosis",
+          "label": "medical equipment",
+          "start": 38,
+          "end": 51,
+          "passed": true
+        },
+        {
+          "text": "7 months ago",
+          "label": "duration",
+          "start": 394,
+          "end": 406,
+          "passed": true
+        },
+        {
+          "text": "6 months",
+          "label": "duration",
+          "start": 468,
+          "end": 476,
+          "passed": true
+        },
+        {
+          "text": "MAC",
+          "label": "organization",
+          "start": 589,
+          "end": 592,
+          "passed": true
+        }
+      ],
+      "known_false_positive": {
+        "text": "proof of delivery",
+        "label": "missing documentation",
+        "start": 480,
+        "end": 497,
+        "required_anchor": false,
+        "note": "Preserved from the raw model response; the source says the missing documentation was the face-to-face encounter."
+      },
+      "display_transform": "Use the raw start/end offsets to highlight input text; keep labels unchanged; round score * 100 to one decimal only in display data."
+    },
+    {
+      "task": "entities",
+      "case_id": "ntsb_detector_alert",
+      "passed": true,
+      "entity_count": 13,
+      "returned_labels": [
+        "alert type",
+        "bearing",
+        "location",
+        "temperature",
+        "time"
+      ],
+      "required_anchor_count": 8,
+      "matched_anchor_count": 8,
+      "anchor_checks": [
+        {
+          "text": "8:13 p.m.",
+          "label": "time",
+          "start": 3,
+          "end": 12,
+          "passed": true
+        },
+        {
+          "text": "Salem",
+          "label": "location",
+          "start": 21,
+          "end": 26,
+          "passed": true
+        },
+        {
+          "text": "L1 bearing",
+          "label": "bearing",
+          "start": 52,
+          "end": 62,
+          "passed": true
+        },
+        {
+          "text": "103°F above ambient",
+          "label": "temperature",
+          "start": 67,
+          "end": 86,
+          "passed": true
+        },
+        {
+          "text": "noncritical alert",
+          "label": "alert type",
+          "start": 130,
+          "end": 147,
+          "passed": true
+        },
+        {
+          "text": "Salem",
+          "label": "location",
+          "start": 240,
+          "end": 245,
+          "passed": true
+        },
+        {
+          "text": "Sebring",
+          "label": "location",
+          "start": 308,
+          "end": 315,
+          "passed": true
+        },
+        {
+          "text": "8:52 p.m.",
+          "label": "time",
+          "start": 386,
+          "end": 395,
+          "passed": true
+        }
+      ],
+      "display_transform": "Use the raw start/end offsets to highlight input text; keep labels unchanged; round score * 100 to one decimal only in display data."
+    },
+    {
+      "task": "entities",
+      "case_id": "scotus_two_contracts",
+      "passed": true,
+      "entity_count": 7,
+      "returned_labels": [
+        "case number",
+        "court",
+        "date",
+        "judge",
+        "organization",
+        "person"
+      ],
+      "required_anchor_count": 7,
+      "matched_anchor_count": 7,
+      "anchor_checks": [
+        {
+          "text": "SUPREME COURT OF THE UNITED STATES",
+          "label": "court",
+          "start": 0,
+          "end": 34,
+          "passed": true
+        },
+        {
+          "text": "No. 23–3",
+          "label": "case number",
+          "start": 35,
+          "end": 43,
+          "passed": true
+        },
+        {
+          "text": "COINBASE, INC.",
+          "label": "organization",
+          "start": 44,
+          "end": 58,
+          "passed": true
+        },
+        {
+          "text": "DAVID SUSKI",
+          "label": "person",
+          "start": 74,
+          "end": 85,
+          "passed": true
+        },
+        {
+          "text": "COURT OF APPEALS FOR THE NINTH CIRCUIT",
+          "label": "court",
+          "start": 137,
+          "end": 175,
+          "passed": true
+        },
+        {
+          "text": "May 23, 2024",
+          "label": "date",
+          "start": 177,
+          "end": 189,
+          "passed": true
+        },
+        {
+          "text": "JUSTICE JACKSON",
+          "label": "judge",
+          "start": 191,
+          "end": 206,
+          "passed": true
+        }
+      ],
+      "display_transform": "Use the raw start/end offsets to highlight input text; keep labels unchanged; round score * 100 to one decimal only in display data."
+    }
+  ],
+  "synthetic_or_paraphrased_evidence": false,
+  "offset_contract": "Every returned entity text equals input_text[start:end].",
+  "required_anchor_contract": "All 28 exact spans featured on the task page must be present with the recorded label and offsets.",
+  "api_output_boundary": "Public SIE v0.6.23 extract responses expose spans, labels, character offsets, and span scores. Token logits are not part of the response."
+}

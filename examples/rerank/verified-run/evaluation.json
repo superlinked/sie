@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "passed": true,
+  "task": "rerank",
+  "case_count": 4,
+  "checks": [
+    {
+      "task": "rerank",
+      "case_id": "sec_filing_amendment",
+      "passed": true,
+      "expected_top_candidate_id": "sec-non-reliance",
+      "observed_top_candidate_id": "sec-non-reliance",
+      "candidate_count": 4,
+      "display_transform": "Join raw response rows to candidates by item_id; sort by zero-based rank; show rank + 1 and round score * 100 to one decimal only in display data."
+    },
+    {
+      "task": "rerank",
+      "case_id": "cms_lower_limb_orthosis",
+      "passed": true,
+      "expected_top_candidate_id": "cms-missing-documentation",
+      "observed_top_candidate_id": "cms-missing-documentation",
+      "candidate_count": 5,
+      "display_transform": "Join raw response rows to candidates by item_id; sort by zero-based rank; show rank + 1 and round score * 100 to one decimal only in display data."
+    },
+    {
+      "task": "rerank",
+      "case_id": "ntsb_detector_alert",
+      "passed": true,
+      "expected_top_candidate_id": "ntsb-salem-noncritical",
+      "observed_top_candidate_id": "ntsb-salem-noncritical",
+      "candidate_count": 4,
+      "display_transform": "Join raw response rows to candidates by item_id; sort by zero-based rank; show rank + 1 and round score * 100 to one decimal only in display data."
+    },
+    {
+      "task": "rerank",
+      "case_id": "scotus_two_contracts",
+      "passed": true,
+      "expected_top_candidate_id": "scotus-two-contract-holding",
+      "observed_top_candidate_id": "scotus-two-contract-holding",
+      "candidate_count": 4,
+      "display_transform": "Join raw response rows to candidates by item_id; sort by zero-based rank; show rank + 1 and round score * 100 to one decimal only in display data."
+    }
+  ],
+  "synthetic_or_paraphrased_evidence": false,
+  "rerank_contract": "Every candidate is scored exactly once and the expected verbatim passage ranks first.",
+  "api_output_boundary": "Public SIE v0.6.23 score responses expose item_id, score, rank, and token usage. The model's internal yes/no logits are not part of the public API response, so no logits are invented or reconstructed."
+}

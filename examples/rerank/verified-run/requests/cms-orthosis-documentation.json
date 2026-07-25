@@ -1,0 +1,43 @@
+{
+  "method": "SIEClient.score",
+  "endpoint": "/v1/score/Qwen/Qwen3-Reranker-4B",
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "query": {
+    "id": "cms_lower_limb_orthosis-query",
+    "text": "What did the doctor fail to document within 6 months of proof of delivery in the published L1851 claim example?"
+  },
+  "items": [
+    {
+      "id": "cms-six-month-requirement",
+      "text": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS codes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before prescribing the item. See the",
+      "source_id": "cms_lower_limb",
+      "source_excerpt_sha256": "36e54e61854afbe95b719bfe7f4bcd42df5380805a03aff54b71550273cf3c73"
+    },
+    {
+      "id": "cms-claim-description",
+      "text": "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable flexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without varus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review contractor’s request:",
+      "source_id": "cms_lower_limb",
+      "source_excerpt_sha256": "805697f59fd70019041766d758d611606a07fe4c48ee047ae6043367b07fb34a"
+    },
+    {
+      "id": "cms-seven-month-evidence",
+      "text": "Proof of delivery with face-to-face encounter 7 months ago",
+      "source_id": "cms_lower_limb",
+      "source_excerpt_sha256": "02ea6561a2f2593960d9b67bc0c32a73dde6d1ea65bb32c91a77c33169335ed7"
+    },
+    {
+      "id": "cms-missing-documentation",
+      "text": "The doctor didn’t document the face-to-face encounter within 6 months of proof of delivery.",
+      "source_id": "cms_lower_limb",
+      "source_excerpt_sha256": "cb7e39136bdd070855759fa8caeb7b915f877638deeb6eb29ff1cf3d7ca072bb"
+    },
+    {
+      "id": "cms-recoupment",
+      "text": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.",
+      "source_id": "cms_lower_limb",
+      "source_excerpt_sha256": "0ddc7dda57a2fcbf6b01a6f411888c1fa23404bc6d8a5c8c0f5b3276f025b89d"
+    }
+  ],
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

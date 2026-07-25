@@ -1,0 +1,29 @@
+{
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "scores": [
+    {
+      "item_id": "ntsb-salem-noncritical",
+      "score": 1.0,
+      "rank": 0
+    },
+    {
+      "item_id": "ntsb-help-desk-process",
+      "score": 0.9921875,
+      "rank": 1
+    },
+    {
+      "item_id": "ntsb-east-palestine-critical",
+      "score": 0.1005859375,
+      "rank": 2
+    },
+    {
+      "item_id": "ntsb-sebring-no-alert",
+      "score": 0.0311279296875,
+      "rank": 3
+    }
+  ],
+  "query_id": "ntsb_detector_alert-query",
+  "usage": {
+    "input_tokens": 699
+  }
+}

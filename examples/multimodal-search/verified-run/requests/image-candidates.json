@@ -1,0 +1,68 @@
+{
+  "method": "SIEClient.encode",
+  "model": "google/siglip-so400m-patch14-384",
+  "input": [
+    {
+      "id": "black-camera.png",
+      "images": [
+        {
+          "file": "black-camera.png",
+          "sha256": "cfb7740d0569f1c3cd2dc462ab2e75ff0b580782f35be7726baaa2c354724316",
+          "byte_length": 87916
+        }
+      ]
+    },
+    {
+      "id": "blue-running-sneaker.png",
+      "images": [
+        {
+          "file": "blue-running-sneaker.png",
+          "sha256": "0be82d701632164af8aabde05d04cf129976420044428bd16b5c3eb556fa41da",
+          "byte_length": 77302
+        }
+      ]
+    },
+    {
+      "id": "green-backpack.png",
+      "images": [
+        {
+          "file": "green-backpack.png",
+          "sha256": "0ccafd77f1dabbc20e871b01395f778af54d7ca2c74c933cca4f6db1b9e42a8f",
+          "byte_length": 85291
+        }
+      ]
+    },
+    {
+      "id": "red-leather-handbag.png",
+      "images": [
+        {
+          "file": "red-leather-handbag.png",
+          "sha256": "535c76fbb350e171b3a150b96661954010527bb562f9c22230a120ab5c94893f",
+          "byte_length": 59394
+        }
+      ]
+    },
+    {
+      "id": "black-handbag.jpg",
+      "images": [
+        {
+          "file": "black-handbag.jpg",
+          "sha256": "75cf60b0cc0c43b2d916a75cf0747ac0a15ecc42b6d2eccbd3c4de7b1e809632",
+          "byte_length": 369633
+        }
+      ]
+    },
+    {
+      "id": "red-shoes.jpg",
+      "images": [
+        {
+          "file": "red-shoes.jpg",
+          "sha256": "9d8819824d27486352afd83f5d1fe9e443a621747ba51a27b49a6321b96fa898",
+          "byte_length": 136109
+        }
+      ]
+    }
+  ],
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

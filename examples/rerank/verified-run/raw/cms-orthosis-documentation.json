@@ -1,0 +1,34 @@
+{
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "scores": [
+    {
+      "item_id": "cms-missing-documentation",
+      "score": 1.0,
+      "rank": 0
+    },
+    {
+      "item_id": "cms-seven-month-evidence",
+      "score": 0.81640625,
+      "rank": 1
+    },
+    {
+      "item_id": "cms-six-month-requirement",
+      "score": 0.796875,
+      "rank": 2
+    },
+    {
+      "item_id": "cms-recoupment",
+      "score": 0.140625,
+      "rank": 3
+    },
+    {
+      "item_id": "cms-claim-description",
+      "score": 0.07568359375,
+      "rank": 4
+    }
+  ],
+  "query_id": "cms_lower_limb_orthosis-query",
+  "usage": {
+    "input_tokens": 672
+  }
+}

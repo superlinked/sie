@@ -1,0 +1,21 @@
+{
+  "method": "SIEClient.extract",
+  "endpoint": "/v1/extract/urchade/gliner_multi-v2.1",
+  "model": "urchade/gliner_multi-v2.1",
+  "item": {
+    "id": "ntsb_detector_alert-source",
+    "text": "At 8:13 p.m., at the Salem HBD, the reading for the L1 bearing was 103°F above ambient. This reading was high enough to trigger a noncritical alert to the Wayside Help Desk (see box), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing (right). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted.\nAbout 8:52 p.m., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253°F above ambient at the L1 bearing; bearing R1 remained at 20°F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab.",
+    "source_id": "ntsb_east_palestine",
+    "source_excerpt_sha256": "982d5b8af59904057dae58fe6fe64f1c68e7ca16746e24f9c3304ae58ba8eb55"
+  },
+  "labels": [
+    "time",
+    "location",
+    "bearing",
+    "temperature",
+    "alert type",
+    "recipient"
+  ],
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

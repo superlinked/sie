@@ -1,0 +1,9 @@
+{
+  "method": "SIEClient.encode",
+  "model": "google/siglip-so400m-patch14-384",
+  "input": {
+    "text": "a red leather handbag"
+  },
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

@@ -1,0 +1,29 @@
+{
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "scores": [
+    {
+      "item_id": "scotus-two-contract-holding",
+      "score": 1.0,
+      "rank": 0
+    },
+    {
+      "item_id": "scotus-one-contract-rule",
+      "score": 0.439453125,
+      "rank": 1
+    },
+    {
+      "item_id": "scotus-arbitration-clause",
+      "score": 0.0023956298828125,
+      "rank": 2
+    },
+    {
+      "item_id": "scotus-forum-clause",
+      "score": 0.00136566162109375,
+      "rank": 3
+    }
+  ],
+  "query_id": "scotus_two_contracts-query",
+  "usage": {
+    "input_tokens": 506
+  }
+}

@@ -1,0 +1,260 @@
+{
+  "schema_version": "1.0",
+  "integrity_policy": {
+    "candidate_text": "Every rerank candidate is a verbatim primary-source excerpt.",
+    "entity_text": "Every entity input is verbatim source text; adjacent passages are separated only by newlines.",
+    "queries": "Evaluation questions are authored prompts and are explicitly marked as such.",
+    "synthetic_or_paraphrased_evidence": false
+  },
+  "model": "urchade/gliner_multi-v2.1",
+  "cases": {
+    "sec_filing_amendment": {
+      "text": "Pathward Financial, Inc. (the \"Company\") is filing this Amendment No. 1 on Form 10-K/A (this “Form 10-K/A”) to amend and restate its audited financial statements and related footnote information as of September 30, 2024 and September 30, 2023, and for the years ended September 30, 2024, 2023 and 2022, previously included in its Annual Report on Form 10-K filed with the Securities and Exchange Commission (the “SEC”) on November 26, 2024 (the “Original Report”). Additionally, it includes the restated unaudited interim condensed consolidated financial statements for the Affected Periods (as defined below). This Form 10-K/A also amends certain other Items in the Original Report, as listed in “Items Amended in this Form 10-K/A” below.\nAs described in the Company’s Current Report on Form 8-K filed with the SEC on July 2, 2025, on June 26, 2025, the Audit Committee of our Board of Directors, after discussion with management and our independent registered public accounting firm, Crowe LLP, concluded that our audited consolidated financial statements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year periods ended September 30, 2024 contained in our Annual Reports on Form 10-K, and our unaudited consolidated financial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31, 2024, 2023, and 2022, June 30, 2024, 2023, and 2022, and September 30, 2024, 2023, and 2022 contained in our Quarterly Reports on Form 10-Q (collectively, but excluding the interim period ended December 31, 2024, the “Affected Periods”) should no longer be relied upon and should be restated because of errors identified in such financial statements, as described below.",
+      "labels": [
+        "company",
+        "filing form",
+        "government agency",
+        "date",
+        "accounting firm",
+        "reporting period"
+      ],
+      "required_anchors": [
+        {
+          "text": "Pathward Financial, Inc.",
+          "label": "company",
+          "start": 0,
+          "end": 24
+        },
+        {
+          "text": "Form 10-K/A",
+          "label": "filing form",
+          "start": 75,
+          "end": 86
+        },
+        {
+          "text": "Form 10-K/A",
+          "label": "filing form",
+          "start": 94,
+          "end": 105
+        },
+        {
+          "text": "September 30, 2024",
+          "label": "date",
+          "start": 201,
+          "end": 219
+        },
+        {
+          "text": "September 30, 2023",
+          "label": "date",
+          "start": 224,
+          "end": 242
+        },
+        {
+          "text": "September 30, 2024",
+          "label": "date",
+          "start": 268,
+          "end": 286
+        },
+        {
+          "text": "Form 10-K",
+          "label": "filing form",
+          "start": 347,
+          "end": 356
+        },
+        {
+          "text": "Securities and Exchange Commission",
+          "label": "government agency",
+          "start": 372,
+          "end": 406
+        }
+      ],
+      "source": {
+        "text": "Pathward Financial, Inc. (the \"Company\") is filing this Amendment No. 1 on Form 10-K/A (this “Form 10-K/A”) to amend and restate its audited financial statements and related footnote information as of September 30, 2024 and September 30, 2023, and for the years ended September 30, 2024, 2023 and 2022, previously included in its Annual Report on Form 10-K filed with the Securities and Exchange Commission (the “SEC”) on November 26, 2024 (the “Original Report”). Additionally, it includes the restated unaudited interim condensed consolidated financial statements for the Affected Periods (as defined below). This Form 10-K/A also amends certain other Items in the Original Report, as listed in “Items Amended in this Form 10-K/A” below.\nAs described in the Company’s Current Report on Form 8-K filed with the SEC on July 2, 2025, on June 26, 2025, the Audit Committee of our Board of Directors, after discussion with management and our independent registered public accounting firm, Crowe LLP, concluded that our audited consolidated financial statements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year periods ended September 30, 2024 contained in our Annual Reports on Form 10-K, and our unaudited consolidated financial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31, 2024, 2023, and 2022, June 30, 2024, 2023, and 2022, and September 30, 2024, 2023, and 2022 contained in our Quarterly Reports on Form 10-Q (collectively, but excluding the interim period ended December 31, 2024, the “Affected Periods”) should no longer be relied upon and should be restated because of errors identified in such financial statements, as described below.",
+        "source_id": "sec_pathward_10ka",
+        "locator": "Explanatory Note and Restatement Background, normalized visible-text lines 5374 and 5376",
+        "extraction": "two adjacent verbatim source paragraphs joined with a newline",
+        "sha256": "d5241aa366c1f5cb15f4973ab456f1d86b2870d61dfb6b919e071558b3063f19"
+      }
+    },
+    "cms_lower_limb_orthosis": {
+      "text": "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable flexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without varus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review contractor’s request:\nProof of delivery with face-to-face encounter 7 months ago\nThe doctor didn’t document the face-to-face encounter within 6 months of proof of delivery.\nThe review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.",
+      "labels": [
+        "medical code",
+        "medical equipment",
+        "duration",
+        "missing documentation",
+        "organization",
+        "payment action"
+      ],
+      "required_anchors": [
+        {
+          "text": "L1851",
+          "label": "medical code",
+          "start": 31,
+          "end": 36
+        },
+        {
+          "text": "Knee orthosis",
+          "label": "medical equipment",
+          "start": 38,
+          "end": 51
+        },
+        {
+          "text": "7 months ago",
+          "label": "duration",
+          "start": 394,
+          "end": 406
+        },
+        {
+          "text": "6 months",
+          "label": "duration",
+          "start": 468,
+          "end": 476
+        },
+        {
+          "text": "MAC",
+          "label": "organization",
+          "start": 589,
+          "end": 592
+        }
+      ],
+      "source": {
+        "text": "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable flexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without varus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review contractor’s request:\nProof of delivery with face-to-face encounter 7 months ago\nThe doctor didn’t document the face-to-face encounter within 6 months of proof of delivery.\nThe review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.",
+        "source_id": "cms_lower_limb",
+        "locator": "Example of Improper Payments and outcome, normalized visible-text lines 1242, 1245, 1247, 1249",
+        "extraction": "four adjacent verbatim source passages joined with newlines",
+        "sha256": "26461fcd40bd6ba26345e7b332439d5c54bee851a4e8f30ff87884c40d294cef"
+      }
+    },
+    "ntsb_detector_alert": {
+      "text": "At 8:13 p.m., at the Salem HBD, the reading for the L1 bearing was 103°F above ambient. This reading was high enough to trigger a noncritical alert to the Wayside Help Desk (see box), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing (right). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted.\nAbout 8:52 p.m., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253°F above ambient at the L1 bearing; bearing R1 remained at 20°F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab.",
+      "labels": [
+        "time",
+        "location",
+        "bearing",
+        "temperature",
+        "alert type",
+        "recipient"
+      ],
+      "required_anchors": [
+        {
+          "text": "8:13 p.m.",
+          "label": "time",
+          "start": 3,
+          "end": 12
+        },
+        {
+          "text": "Salem",
+          "label": "location",
+          "start": 21,
+          "end": 26
+        },
+        {
+          "text": "L1 bearing",
+          "label": "bearing",
+          "start": 52,
+          "end": 62
+        },
+        {
+          "text": "103°F above ambient",
+          "label": "temperature",
+          "start": 67,
+          "end": 86
+        },
+        {
+          "text": "noncritical alert",
+          "label": "alert type",
+          "start": 130,
+          "end": 147
+        },
+        {
+          "text": "Salem",
+          "label": "location",
+          "start": 240,
+          "end": 245
+        },
+        {
+          "text": "Sebring",
+          "label": "location",
+          "start": 308,
+          "end": 315
+        },
+        {
+          "text": "8:52 p.m.",
+          "label": "time",
+          "start": 386,
+          "end": 395
+        }
+      ],
+      "source": {
+        "text": "At 8:13 p.m., at the Salem HBD, the reading for the L1 bearing was 103°F above ambient. This reading was high enough to trigger a noncritical alert to the Wayside Help Desk (see box), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing (right). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted.\nAbout 8:52 p.m., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253°F above ambient at the L1 bearing; bearing R1 remained at 20°F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab.",
+        "source_id": "ntsb_east_palestine",
+        "locator": "PDF page 3 (printed pages 4–5), \"Salem\" and \"East Palestine\"",
+        "extraction": "two adjacent verbatim PDF passages joined with a newline; visual line wraps joined",
+        "sha256": "982d5b8af59904057dae58fe6fe64f1c68e7ca16746e24f9c3304ae58ba8eb55"
+      }
+    },
+    "scotus_two_contracts": {
+      "text": "SUPREME COURT OF THE UNITED STATES\nNo. 23–3\nCOINBASE, INC., PETITIONER v. DAVID SUSKI, ET AL.\nON WRIT OF CERTIORARI TO THE UNITED STATES COURT OF APPEALS FOR THE NINTH CIRCUIT\n[May 23, 2024]\nJUSTICE JACKSON delivered the opinion of the Court.",
+      "labels": [
+        "court",
+        "case number",
+        "organization",
+        "person",
+        "date",
+        "judge"
+      ],
+      "required_anchors": [
+        {
+          "text": "SUPREME COURT OF THE UNITED STATES",
+          "label": "court",
+          "start": 0,
+          "end": 34
+        },
+        {
+          "text": "No. 23–3",
+          "label": "case number",
+          "start": 35,
+          "end": 43
+        },
+        {
+          "text": "COINBASE, INC.",
+          "label": "organization",
+          "start": 44,
+          "end": 58
+        },
+        {
+          "text": "DAVID SUSKI",
+          "label": "person",
+          "start": 74,
+          "end": 85
+        },
+        {
+          "text": "COURT OF APPEALS FOR THE NINTH CIRCUIT",
+          "label": "court",
+          "start": 137,
+          "end": 175
+        },
+        {
+          "text": "May 23, 2024",
+          "label": "date",
+          "start": 177,
+          "end": 189
+        },
+        {
+          "text": "JUSTICE JACKSON",
+          "label": "judge",
+          "start": 191,
+          "end": 206
+        }
+      ],
+      "source": {
+        "text": "SUPREME COURT OF THE UNITED STATES\nNo. 23–3\nCOINBASE, INC., PETITIONER v. DAVID SUSKI, ET AL.\nON WRIT OF CERTIORARI TO THE UNITED STATES COURT OF APPEALS FOR THE NINTH CIRCUIT\n[May 23, 2024]\nJUSTICE JACKSON delivered the opinion of the Court.",
+        "source_id": "scotus_coinbase_suski",
+        "locator": "Slip opinion page 1, caption",
+        "extraction": "verbatim PDF text; visual line wraps joined",
+        "sha256": "30d4450da291d2434af7aa04fd1f6056f32016ff1e4059d491a03ebe13ad7306"
+      }
+    }
+  }
+}

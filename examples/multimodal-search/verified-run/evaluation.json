@@ -1,0 +1,46 @@
+{
+  "query": "a red leather handbag",
+  "metric": "cosine_similarity",
+  "query_latency_ms": 21639.605,
+  "images_batch_latency_ms": 2250.086,
+  "total_client_latency_ms": 23889.691,
+  "image_count": 6,
+  "sorted_matches": [
+    {
+      "rank": 1,
+      "file": "red-leather-handbag.png",
+      "score": 0.18045249488802445,
+      "sha256": "535c76fbb350e171b3a150b96661954010527bb562f9c22230a120ab5c94893f"
+    },
+    {
+      "rank": 2,
+      "file": "red-shoes.jpg",
+      "score": 0.06813392616610392,
+      "sha256": "9d8819824d27486352afd83f5d1fe9e443a621747ba51a27b49a6321b96fa898"
+    },
+    {
+      "rank": 3,
+      "file": "black-handbag.jpg",
+      "score": 0.06742722211332886,
+      "sha256": "75cf60b0cc0c43b2d916a75cf0747ac0a15ecc42b6d2eccbd3c4de7b1e809632"
+    },
+    {
+      "rank": 4,
+      "file": "green-backpack.png",
+      "score": 0.05288749049698821,
+      "sha256": "0ccafd77f1dabbc20e871b01395f778af54d7ca2c74c933cca4f6db1b9e42a8f"
+    },
+    {
+      "rank": 5,
+      "file": "black-camera.png",
+      "score": 0.016016203743613126,
+      "sha256": "cfb7740d0569f1c3cd2dc462ab2e75ff0b580782f35be7726baaa2c354724316"
+    },
+    {
+      "rank": 6,
+      "file": "blue-running-sneaker.png",
+      "score": -0.008386863945257427,
+      "sha256": "0be82d701632164af8aabde05d04cf129976420044428bd16b5c3eb556fa41da"
+    }
+  ]
+}

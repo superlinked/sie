@@ -1,0 +1,21 @@
+{
+  "method": "SIEClient.extract",
+  "endpoint": "/v1/extract/urchade/gliner_multi-v2.1",
+  "model": "urchade/gliner_multi-v2.1",
+  "item": {
+    "id": "sec_filing_amendment-source",
+    "text": "Pathward Financial, Inc. (the \"Company\") is filing this Amendment No. 1 on Form 10-K/A (this “Form 10-K/A”) to amend and restate its audited financial statements and related footnote information as of September 30, 2024 and September 30, 2023, and for the years ended September 30, 2024, 2023 and 2022, previously included in its Annual Report on Form 10-K filed with the Securities and Exchange Commission (the “SEC”) on November 26, 2024 (the “Original Report”). Additionally, it includes the restated unaudited interim condensed consolidated financial statements for the Affected Periods (as defined below). This Form 10-K/A also amends certain other Items in the Original Report, as listed in “Items Amended in this Form 10-K/A” below.\nAs described in the Company’s Current Report on Form 8-K filed with the SEC on July 2, 2025, on June 26, 2025, the Audit Committee of our Board of Directors, after discussion with management and our independent registered public accounting firm, Crowe LLP, concluded that our audited consolidated financial statements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year periods ended September 30, 2024 contained in our Annual Reports on Form 10-K, and our unaudited consolidated financial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31, 2024, 2023, and 2022, June 30, 2024, 2023, and 2022, and September 30, 2024, 2023, and 2022 contained in our Quarterly Reports on Form 10-Q (collectively, but excluding the interim period ended December 31, 2024, the “Affected Periods”) should no longer be relied upon and should be restated because of errors identified in such financial statements, as described below.",
+    "source_id": "sec_pathward_10ka",
+    "source_excerpt_sha256": "d5241aa366c1f5cb15f4973ab456f1d86b2870d61dfb6b919e071558b3063f19"
+  },
+  "labels": [
+    "company",
+    "filing form",
+    "government agency",
+    "date",
+    "accounting firm",
+    "reporting period"
+  ],
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

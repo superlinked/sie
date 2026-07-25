@@ -1,0 +1,21 @@
+{
+  "method": "SIEClient.extract",
+  "endpoint": "/v1/extract/urchade/gliner_multi-v2.1",
+  "model": "urchade/gliner_multi-v2.1",
+  "item": {
+    "id": "cms_lower_limb_orthosis-source",
+    "text": "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable flexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without varus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review contractor’s request:\nProof of delivery with face-to-face encounter 7 months ago\nThe doctor didn’t document the face-to-face encounter within 6 months of proof of delivery.\nThe review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.",
+    "source_id": "cms_lower_limb",
+    "source_excerpt_sha256": "26461fcd40bd6ba26345e7b332439d5c54bee851a4e8f30ff87884c40d294cef"
+  },
+  "labels": [
+    "medical code",
+    "medical equipment",
+    "duration",
+    "missing documentation",
+    "organization",
+    "payment action"
+  ],
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}
