@@ -7,6 +7,7 @@ from maintenance_triage.review import (
     _map_exact_source_fields,
     _require_entity_evidence,
     _require_gliner2_evidence,
+    _runtime_model_id,
     build_review,
 )
 
@@ -18,6 +19,13 @@ def test_fixture_is_the_exact_ntsb_page_spread() -> None:
     assert hashlib.sha256(source.read_bytes()).hexdigest() == (
         "0556a971978198a493acda277dfdfd75a837be4ba5c626d6f03565cb17cee8ca"
     )
+
+
+def test_public_docling_id_translates_only_for_a_direct_local_server() -> None:
+    local = {"cluster": {"url": "http://[::1]:8080"}, "models": {"parse": "docling-project/docling"}}
+    cloud = {"cluster": {"url": "https://api.superlinked.com"}, "models": {"parse": "docling-project/docling"}}
+    assert _runtime_model_id(local, "parse") == "docling"
+    assert _runtime_model_id(cloud, "parse") == "docling-project/docling"
 
 
 def structured_data() -> dict[str, str]:
@@ -147,8 +155,17 @@ def test_gliner2_gate_requires_recorded_detector_spans() -> None:
         raise AssertionError("GLiNER2 gate accepted Salem evidence without the alert recipient")
 
 
-def test_preserves_the_unsupported_output_schema_response() -> None:
-    response = json.loads((ROOT / "fixtures" / "unsupported-output-schema-response.json").read_text(encoding="utf-8"))
+def test_preserves_the_recorded_output_schema_request_and_response() -> None:
+    request = json.loads((ROOT / "fixtures" / "output-schema-probe-request.json").read_text(encoding="utf-8"))
+    response = json.loads((ROOT / "fixtures" / "output-schema-probe-response.json").read_text(encoding="utf-8"))
+    source = json.loads((ROOT / request["item"]["source_artifact"]).read_text(encoding="utf-8"))
+    by_id = {row["chunk_id"]: row["text"] for row in source["ranking"]}
+    reconstructed_text = request["item"]["join_separator"].join(
+        by_id[chunk_id] for chunk_id in request["item"]["source_chunk_ids"]
+    )
+    assert reconstructed_text == request["item"]["text"]
+    assert hashlib.sha256(reconstructed_text.encode()).hexdigest() == request["item"]["text_sha256"]
+    assert set(request["output_schema"]["required"]) == set(response["data"])
     assert response["model"] == "fastino/gliner2-large-v1"
     assert response["data"]["salem_recipient_source_text"] == ["Wayside Help Desk"]
     assert response["data"]["sebring_source_phrase"] == []
@@ -236,6 +253,8 @@ def test_verified_manifest_hashes() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     fixture = manifest["fixture"]
     assert hashlib.sha256((ROOT / fixture["path"]).read_bytes()).hexdigest() == fixture["sha256"]
+    for entry in manifest["diagnostic_fixtures"]:
+        assert hashlib.sha256((ROOT / entry["path"]).read_bytes()).hexdigest() == entry["sha256"]
     for entry in manifest["artifacts"]:
         artifact = manifest_path.parent / entry["path"]
         assert hashlib.sha256(artifact.read_bytes()).hexdigest() == entry["sha256"]

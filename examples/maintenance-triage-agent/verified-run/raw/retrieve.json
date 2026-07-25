@@ -1029,10 +1029,10 @@
     ],
     "model": "BAAI/bge-m3",
     "timing": {
-      "total_ms": 965.3220210000057,
-      "queue_ms": 0.2929780000044957,
-      "tokenization_ms": 0.03716099999451217,
-      "inference_ms": 964.2625500000008,
+      "total_ms": 18.97879499999533,
+      "queue_ms": 2.163505999988047,
+      "tokenization_ms": 0.017859999999814136,
+      "inference_ms": 16.66648600000542,
       "postprocessing_ms": null
     }
   },
@@ -2067,10 +2067,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 562.7275260000033,
-        "queue_ms": 1.789471999998682,
-        "tokenization_ms": 0.0314910000014379,
-        "inference_ms": 560.7209979999936,
+        "total_ms": 15.358657999996694,
+        "queue_ms": 0.10244199999931425,
+        "tokenization_ms": 0.016650000006279697,
+        "inference_ms": 15.091482000002543,
         "postprocessing_ms": null
       }
     },
@@ -3104,10 +3104,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 18.40420199999926,
-        "queue_ms": 1.7032499999913853,
-        "tokenization_ms": 0.02174099999763257,
-        "inference_ms": 16.517358000001536,
+        "total_ms": 15.509692000009068,
+        "queue_ms": 1.5471530000041867,
+        "tokenization_ms": 0.017560000003413734,
+        "inference_ms": 13.784053999998491,
         "postprocessing_ms": null
       }
     },
@@ -4141,10 +4141,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 18.51952500000209,
-        "queue_ms": 2.02854800001262,
-        "tokenization_ms": 0.02552099999775237,
-        "inference_ms": 16.307311999995022,
+        "total_ms": 16.76146799999856,
+        "queue_ms": 1.4572910000083539,
+        "tokenization_ms": 0.018409999995583348,
+        "inference_ms": 15.164564000002656,
         "postprocessing_ms": null
       }
     },
@@ -5178,10 +5178,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 20.70738899999469,
-        "queue_ms": 2.077509999992344,
-        "tokenization_ms": 0.02625999999850137,
-        "inference_ms": 18.424184000011223,
+        "total_ms": 18.04185500000699,
+        "queue_ms": 1.7034959999904231,
+        "tokenization_ms": 0.01857999998833293,
+        "inference_ms": 16.131075000004103,
         "postprocessing_ms": null
       }
     },
@@ -6215,10 +6215,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 20.72782999999845,
-        "queue_ms": 1.629886999992891,
-        "tokenization_ms": 0.022131000008585033,
-        "inference_ms": 18.925598000009813,
+        "total_ms": 17.337781000009045,
+        "queue_ms": 2.2332079999927146,
+        "tokenization_ms": 0.01820999999324613,
+        "inference_ms": 14.968249999995464,
         "postprocessing_ms": null
       }
     },
@@ -7252,10 +7252,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 16.31393200000275,
-        "queue_ms": 2.030068999999912,
-        "tokenization_ms": 0.024900999989085904,
-        "inference_ms": 14.085106999999653,
+        "total_ms": 15.201044999997748,
+        "queue_ms": 1.2174160000029133,
+        "tokenization_ms": 0.020331000001760913,
+        "inference_ms": 13.793675000002281,
         "postprocessing_ms": null
       }
     },
@@ -8289,10 +8289,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 14.073426999999583,
-        "queue_ms": 0.0996129999890627,
-        "tokenization_ms": 0.021500999991985736,
-        "inference_ms": 13.799059000007219,
+        "total_ms": 17.58623499999601,
+        "queue_ms": 2.079604999991602,
+        "tokenization_ms": 0.03321100000164279,
+        "inference_ms": 15.039851000011595,
         "postprocessing_ms": null
       }
     },
@@ -9326,10 +9326,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 14.937062000001333,
-        "queue_ms": 2.0520989999965877,
-        "tokenization_ms": 0.022439999995071958,
-        "inference_ms": 12.734628999993447,
+        "total_ms": 16.822959999998943,
+        "queue_ms": 1.8113290000059123,
+        "tokenization_ms": 0.019399999999336615,
+        "inference_ms": 14.856786999999372,
         "postprocessing_ms": null
       }
     },
@@ -10363,10 +10363,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 17.378303000000983,
-        "queue_ms": 2.1586320000039905,
-        "tokenization_ms": 0.020311000000106105,
-        "inference_ms": 14.59793300000456,
+        "total_ms": 16.007012000002874,
+        "queue_ms": 1.3025869999978568,
+        "tokenization_ms": 0.019829999999387837,
+        "inference_ms": 14.548071000007212,
         "postprocessing_ms": null
       }
     },
@@ -11400,10 +11400,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 16.594150000003083,
-        "queue_ms": 1.6999789999943005,
-        "tokenization_ms": 0.021191000001863358,
-        "inference_ms": 14.714605000008874,
+        "total_ms": 16.752568000001133,
+        "queue_ms": 1.2562969999976303,
+        "tokenization_ms": 0.018960999994988015,
+        "inference_ms": 15.356018000005633,
         "postprocessing_ms": null
       }
     },
@@ -12437,10 +12437,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 13.733736999995472,
-        "queue_ms": 1.1841939999897022,
-        "tokenization_ms": 0.01965100000234088,
-        "inference_ms": 12.380508000006785,
+        "total_ms": 15.712034999992852,
+        "queue_ms": 2.1118049999984123,
+        "tokenization_ms": 0.01670000000331129,
+        "inference_ms": 13.468168000002834,
         "postprocessing_ms": null
       }
     },
@@ -13474,10 +13474,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 13.776778999996964,
-        "queue_ms": 0.08545200000753539,
-        "tokenization_ms": 0.01579000000617725,
-        "inference_ms": 13.53451199999256,
+        "total_ms": 16.568403999997372,
+        "queue_ms": 1.7165460000114763,
+        "tokenization_ms": 0.015039999993859965,
+        "inference_ms": 14.707634999993502,
         "postprocessing_ms": null
       }
     },
@@ -14511,10 +14511,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 15.401696000012066,
-        "queue_ms": 1.2821269999960805,
-        "tokenization_ms": 0.012940999994270896,
-        "inference_ms": 14.007446000007917,
+        "total_ms": 13.331344999997441,
+        "queue_ms": 0.0751510000043254,
+        "tokenization_ms": 0.014700000008360803,
+        "inference_ms": 13.140731000007122,
         "postprocessing_ms": null
       }
     },
@@ -15548,10 +15548,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 15.506578000000104,
-        "queue_ms": 1.9601469999912524,
-        "tokenization_ms": 0.024569999993673264,
-        "inference_ms": 13.383468000000676,
+        "total_ms": 16.56818399999338,
+        "queue_ms": 2.246248000005835,
+        "tokenization_ms": 0.019860999998400075,
+        "inference_ms": 14.177333999995767,
         "postprocessing_ms": null
       }
     },
@@ -16585,10 +16585,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 14.709695000007628,
-        "queue_ms": 1.273686000004659,
-        "tokenization_ms": 0.024280999994630292,
-        "inference_ms": 13.28520500000252,
+        "total_ms": 14.217074000001162,
+        "queue_ms": 0.11038200000257348,
+        "tokenization_ms": 0.019610999999031264,
+        "inference_ms": 13.970078999989255,
         "postprocessing_ms": null
       }
     },
@@ -17622,10 +17622,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 13.38560800000721,
-        "queue_ms": 0.0802529999930357,
-        "tokenization_ms": 0.016279999996982042,
-        "inference_ms": 13.118409000000497,
+        "total_ms": 14.765936000003421,
+        "queue_ms": 1.2184260000083214,
+        "tokenization_ms": 0.02100100000745897,
+        "inference_ms": 13.391925999997056,
         "postprocessing_ms": null
       }
     },
@@ -18659,10 +18659,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 15.616872000009607,
-        "queue_ms": 1.4590130000016188,
-        "tokenization_ms": 0.015789999991966397,
-        "inference_ms": 14.029645999997342,
+        "total_ms": 16.744657000003826,
+        "queue_ms": 0.11244200000248838,
+        "tokenization_ms": 0.017149999990806464,
+        "inference_ms": 16.198735999992664,
         "postprocessing_ms": null
       }
     },
@@ -19696,10 +19696,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 14.749927000011098,
-        "queue_ms": 1.8767140000051086,
-        "tokenization_ms": 0.02200000000129876,
-        "inference_ms": 12.711897999992061,
+        "total_ms": 16.376660000005927,
+        "queue_ms": 1.5239920000027496,
+        "tokenization_ms": 0.01594000001148288,
+        "inference_ms": 14.71642499998893,
         "postprocessing_ms": null
       }
     }

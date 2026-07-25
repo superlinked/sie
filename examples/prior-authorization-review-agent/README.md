@@ -17,7 +17,7 @@ treatment recommendation, or prospective payment decision.
 
 | Step | Model | Output |
 |---|---|---|
-| Parse the CMS excerpt | `docling` | Markdown |
+| Parse the CMS excerpt | `docling-project/docling` | Markdown |
 | Retrieve candidate passages | `BAAI/bge-m3` | Dense vectors and cosine ranking |
 | Put the controlling passages first | `Qwen/Qwen3-Reranker-4B` | Ranked source evidence |
 | Extract named requirement and case spans | `urchade/gliner_multi-v2.1` | Source spans with offsets and scores |
@@ -71,7 +71,7 @@ runs/<run-id>/manifest.json                    endpoint, model IDs, source hash,
 runs/<run-id>/raw/parse.json                   complete Docling response
 runs/<run-id>/raw/retrieve.json                embeddings and cosine ranking
 runs/<run-id>/raw/rerank.json                  complete reranker response
-runs/<run-id>/raw/entities.json                complete GLiNER span response
+runs/<run-id>/raw/entities.json                combined GLiNER entity spans
 runs/<run-id>/raw/gliner2-requirements.json    GLiNER2 requirement spans
 runs/<run-id>/raw/gliner2-submission.json      GLiNER2 submission spans
 runs/<run-id>/raw/gliner2-outcome.json         GLiNER2 outcome spans

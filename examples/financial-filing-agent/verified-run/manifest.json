@@ -1,10 +1,10 @@
 {
-  "created_at": "2026-07-25T01:09:13.322108+00:00",
+  "created_at": "2026-07-25T02:28:01.848776+00:00",
   "endpoint": "http://127.0.0.1:8080",
-  "sie_server_commit": "9d6ca6b00f788b6ab19f8d6dc9506e1b31dad2f0",
-  "run_command": "Modal exact-source reference examples against public SIE v0.6.23",
+  "sie_server_commit": "4b5ea9ccd5d5fc07c56edfea790080b05e17f0d2",
+  "run_command": "Modal exact-source reference examples against public SIE main at 4b5ea9c",
   "models": {
-    "parse": "docling",
+    "parse": "docling-project/docling",
     "retrieve": "BAAI/bge-m3",
     "rerank": "Qwen/Qwen3-Reranker-4B",
     "entities": "urchade/gliner_multi-v2.1",
@@ -24,16 +24,12 @@
       "sha256": "f5c9c672f35a5e98a5f0ef54a4b42ef4c89c4b1777cc0723c833880a462c3a82"
     },
     {
-      "path": "raw/entities-figure-0.json",
-      "sha256": "40e89dae7cdbb1d9fabb52f489be8a035d72b75d53ff62501fbb74e4a4a71155"
+      "path": "raw/entities-original-10q.json",
+      "sha256": "d7db84b21d2f86a0b1d3f80c30091de9f0557910d147d27e85689a6c79be353c"
     },
     {
-      "path": "raw/entities-figure-1.json",
-      "sha256": "c61936491a8adf442e36af0ad68790792d9fadb440b65bf3757ab72e7ab9dbfe"
-    },
-    {
-      "path": "raw/entities-figure-2.json",
-      "sha256": "ae8f0f86de51efd33aa722530791bf1dff1b1c8b19a054736b5f091cdf91c769"
+      "path": "raw/entities-restated-10ka.json",
+      "sha256": "815e9b289837a1eefcc72bd08c23c11ce6e6533398a533ba5540d57743aedb68"
     },
     {
       "path": "raw/entities-status.json",
@@ -44,12 +40,20 @@
       "sha256": "0c07ce92df4e183c7a4cf4f567b06474d0f1245b37326b09b894a159f4ff54c3"
     },
     {
-      "path": "raw/gliner2-figures.json",
+      "path": "raw/gliner2-original-10q.json",
+      "sha256": "02535822a2e1f0a061e43253b993a296a76444d1198b2ee25379df91e7f4e512"
+    },
+    {
+      "path": "raw/gliner2-restated-10ka.json",
       "sha256": "23c3e88506769d17e34cdb1ad654d99212623f8f7fd6f49f11086fac5a68a820"
     },
     {
       "path": "raw/gliner2-status.json",
       "sha256": "8a25edf9c397dc00b7dd11a454ceaebfc70c3f94d6d44fd7f6d85b05be78bac5"
+    },
+    {
+      "path": "raw/mapped.json",
+      "sha256": "756f36efddf2dc875f60e0b5a9c7dd1eceb901234c9b5ba7493c2bd24028a6e9"
     },
     {
       "path": "raw/parse.json",
@@ -61,11 +65,7 @@
     },
     {
       "path": "raw/retrieve.json",
-      "sha256": "3e5709c4c44226dc81de094dfad57b8c6c9f8cc1a3ab3e28b65537c020e2af09"
-    },
-    {
-      "path": "raw/mapped.json",
-      "sha256": "b90b1605c7d9fc0caaf9968d038c8e20fee008cfff7088a0ac67c34c4e54b568"
+      "sha256": "e98ce5792654f8b68bd3b93789ae75cb4b24482bc1162ba9b9dba6147198482b"
     },
     {
       "path": "evaluation.json",
@@ -76,59 +76,63 @@
     {
       "stage": "parse",
       "model": "docling",
-      "latency_ms": 35224.8
+      "configured_model": "docling-project/docling",
+      "latency_ms": 35300.6
     },
     {
       "stage": "retrieve",
       "model": "BAAI/bge-m3",
-      "latency_ms": 11593.1
+      "latency_ms": 11543.0
     },
     {
       "stage": "rerank",
       "model": "Qwen/Qwen3-Reranker-4B",
-      "latency_ms": 15855.1
+      "latency_ms": 16574.0
     },
     {
-      "stage": "entities_figure_0",
+      "stage": "entities_original_10q",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 11269.9
+      "latency_ms": 11186.1
     },
     {
-      "stage": "entities_figure_1",
+      "stage": "entities_restated_10ka",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 188.5
-    },
-    {
-      "stage": "entities_figure_2",
-      "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 135.8
+      "latency_ms": 183.8
     },
     {
       "stage": "entities_status",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 389.5
+      "latency_ms": 130.7
     },
     {
-      "stage": "gliner2_figures",
+      "stage": "gliner2_original_10q",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 10151.2
+      "latency_ms": 10638.7
+    },
+    {
+      "stage": "gliner2_restated_10ka",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 62.0
     },
     {
       "stage": "gliner2_status",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 55.8
+      "latency_ms": 50.3
     }
   ],
   "pipeline": [
     "parse",
     "retrieve",
     "rerank",
-    "entities_figures",
+    "entities_original_10q",
+    "entities_restated_10ka",
     "entities_status",
-    "gliner2_figures",
+    "gliner2_original_10q",
+    "gliner2_restated_10ka",
     "gliner2_status",
-    "deterministic_table_mapping",
+    "source_specific_table_mapping",
+    "cross_filing_value_check",
     "deterministic_validation"
   ],
-  "decision_boundary": "The review fails closed unless GLiNER recovers every source span, GLiNER2 recovers all four table values and the filing-status span, and reranked evidence retains Pathward's exact life-of-portfolio caveat."
+  "decision_boundary": "The review fails closed unless GLiNER and GLiNER2 recover source spans from both filing tables, the original Form 10-Q values match the Form 10-K/A's previously reported column, and reranked evidence retains the filing-status span and Pathward's exact life-of-portfolio caveat."
 }

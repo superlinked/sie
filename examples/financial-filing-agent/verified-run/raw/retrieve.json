@@ -1029,10 +1029,10 @@
     ],
     "model": "BAAI/bge-m3",
     "timing": {
-      "total_ms": 937.0059759999947,
-      "queue_ms": 0.1452540000030922,
-      "tokenization_ms": 0.026640000001521003,
-      "inference_ms": 936.2960560000033,
+      "total_ms": 861.367357000006,
+      "queue_ms": 0.2196720000000596,
+      "tokenization_ms": 0.03230199999393335,
+      "inference_ms": 860.4978090000088,
       "postprocessing_ms": null
     }
   },
@@ -2067,10 +2067,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 556.7862970000022,
-        "queue_ms": 1.7896180000036566,
-        "tokenization_ms": 0.0231910000110247,
-        "inference_ms": 554.7265719999928,
+        "total_ms": 577.1929359999888,
+        "queue_ms": 1.3034309999966354,
+        "tokenization_ms": 0.027122000005874725,
+        "inference_ms": 575.6982549999918,
         "postprocessing_ms": null
       }
     },
@@ -3104,10 +3104,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 16.84824699999865,
-        "queue_ms": 0.18571500000064134,
-        "tokenization_ms": 0.02793099999109927,
-        "inference_ms": 16.466085000004682,
+        "total_ms": 19.72872899999345,
+        "queue_ms": 1.676742000000786,
+        "tokenization_ms": 0.026200999997172403,
+        "inference_ms": 17.882537999994952,
         "postprocessing_ms": null
       }
     },
@@ -4141,10 +4141,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 20.749530000003347,
-        "queue_ms": 1.7184959999951843,
-        "tokenization_ms": 0.013690000002952729,
-        "inference_ms": 18.919160999999463,
+        "total_ms": 21.886456999993698,
+        "queue_ms": 1.8019080000044596,
+        "tokenization_ms": 0.02770199999702072,
+        "inference_ms": 19.888257999994607,
         "postprocessing_ms": null
       }
     },
@@ -5178,10 +5178,10 @@
       ],
       "model": "BAAI/bge-m3",
       "timing": {
-        "total_ms": 39.238209000004076,
-        "queue_ms": 1.8395780000020068,
-        "tokenization_ms": 0.011530000008974639,
-        "inference_ms": 37.198184999994055,
+        "total_ms": 38.36914800000102,
+        "queue_ms": 2.0695329999966816,
+        "tokenization_ms": 0.0238610000025119,
+        "inference_ms": 36.12417499999765,
         "postprocessing_ms": null
       }
     }

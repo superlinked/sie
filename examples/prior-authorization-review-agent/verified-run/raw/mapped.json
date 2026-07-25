@@ -6,10 +6,10 @@
     "written_order_requirement_text": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS codes L1832 and L1851.",
     "face_to_face_window_text": "Conduct the face-to-face encounter within the 6 months before prescribing the item.",
     "hcpcs_code": "L1851",
-    "submitted_order": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
-    "submitted_medical_record": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
-    "submitted_proof_of_delivery": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
-    "documented_face_to_face_age": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
+    "submitted_order": "Standard written order with correct HCPCS coding",
+    "submitted_medical_record": "Treating practitioner's medical record that has adequate medical necessity information",
+    "submitted_proof_of_delivery": "Proof of delivery with face-to-face encounter 7 months ago",
+    "documented_face_to_face_age": "Proof of delivery with face-to-face encounter 7 months ago",
     "missing_documentation": "The doctor didn't document the face-to-face encounter within 6 months of proof of delivery.",
     "review_conclusion": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.",
     "payment_action": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment."
@@ -43,36 +43,36 @@
     "submitted_order": {
       "group": "submission",
       "chunk_id": "chunk-5",
-      "source_sha256": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8"
+      "source_sha256": "c1865491ea7917e6f48951997f384e73385781a08a63e07eaafd42c4afda2718"
     },
     "submitted_medical_record": {
       "group": "submission",
-      "chunk_id": "chunk-5",
-      "source_sha256": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8"
+      "chunk_id": "chunk-6",
+      "source_sha256": "25ad16851d4271981f91a66ae07a096b13f8d2ea8982523c55cf2ffb6c61c355"
     },
     "submitted_proof_of_delivery": {
       "group": "submission",
-      "chunk_id": "chunk-5",
-      "source_sha256": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8"
+      "chunk_id": "chunk-7",
+      "source_sha256": "02ea6561a2f2593960d9b67bc0c32a73dde6d1ea65bb32c91a77c33169335ed7"
     },
     "documented_face_to_face_age": {
       "group": "submission",
-      "chunk_id": "chunk-5",
-      "source_sha256": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8"
+      "chunk_id": "chunk-7",
+      "source_sha256": "02ea6561a2f2593960d9b67bc0c32a73dde6d1ea65bb32c91a77c33169335ed7"
     },
     "missing_documentation": {
       "group": "outcome",
-      "chunk_id": "chunk-7",
+      "chunk_id": "chunk-9",
       "source_sha256": "fb6503169e482f7076387a6f06abf2e86cb4382d03e2190ab67e5d244a3adce2"
     },
     "review_conclusion": {
       "group": "outcome",
-      "chunk_id": "chunk-8",
+      "chunk_id": "chunk-10",
       "source_sha256": "0ddc7dda57a2fcbf6b01a6f411888c1fa23404bc6d8a5c8c0f5b3276f025b89d"
     },
     "payment_action": {
       "group": "outcome",
-      "chunk_id": "chunk-8",
+      "chunk_id": "chunk-10",
       "source_sha256": "0ddc7dda57a2fcbf6b01a6f411888c1fa23404bc6d8a5c8c0f5b3276f025b89d"
     }
   }

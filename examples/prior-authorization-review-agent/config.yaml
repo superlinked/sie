@@ -4,7 +4,7 @@ cluster:
   provision_timeout_s: 900
 
 models:
-  parse: "docling"
+  parse: "docling-project/docling"
   retrieve: "BAAI/bge-m3"
   rerank: "Qwen/Qwen3-Reranker-4B"
   entities: "urchade/gliner_multi-v2.1"

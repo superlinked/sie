@@ -1,0 +1,77 @@
+{
+  "recorded_at": "2026-07-25T01:37:51Z",
+  "endpoint": "http://127.0.0.1:8080",
+  "sie_server_commit": "9d6ca6b00f788b6ab19f8d6dc9506e1b31dad2f0",
+  "sdk_method": "SIEClient.extract",
+  "model": "fastino/gliner2-large-v1",
+  "item": {
+    "id": "ranked-ntsb-alerts-evidence",
+    "text": "At 7:37 p.m. , at the Sebring HBD, the reading for the L1 bearing was only 38°F above ambient -not high enough to trigger an alert. The R1 bearing measured 20°F above ambient. But the L1 bearing was hotter.\n\nAt 8:13 p.m. , at the Salem HBD, the reading for the L1 bearing was 103°F above ambient . This reading was high enough to trigger a noncritical alert to the Wayside Help Desk ( see box ), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing ( right ). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted.\n\nAbout 8:52 p.m ., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253°F above ambient at the L1 bearing; bearing R1 remained at 20°F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab.",
+    "text_sha256": "84da68886b475468d2c5f96ae754fc5231e458f9d2352c6ed164e11f6409949f",
+    "source_artifact": "verified-run/raw/retrieve.json",
+    "source_chunk_ids": [
+      "chunk-11",
+      "chunk-12",
+      "chunk-13"
+    ],
+    "join_separator": "\n\n"
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "sebring_source_phrase": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Exact source phrase stating whether the Sebring reading triggered an alert"
+      },
+      "salem_alert_source_phrase": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Exact source phrase naming the alert level at Salem"
+      },
+      "salem_recipient_source_text": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Exact source phrase naming who received the Salem alert"
+      },
+      "salem_crew_source_text": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Exact source phrase stating whether the Salem alert went to the train crew"
+      },
+      "salem_camera_source_text": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Exact source phrase describing what the Salem camera showed near the bearing"
+      },
+      "east_palestine_alarm_source_text": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Exact source phrase naming the East Palestine alarm and where it was broadcast"
+      }
+    },
+    "required": [
+      "sebring_source_phrase",
+      "salem_alert_source_phrase",
+      "salem_recipient_source_text",
+      "salem_crew_source_text",
+      "salem_camera_source_text",
+      "east_palestine_alarm_source_text"
+    ],
+    "additionalProperties": false
+  },
+  "wait_for_capacity": true,
+  "provision_timeout_s": 900
+}

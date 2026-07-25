@@ -3,33 +3,49 @@
     {
       "text": "L1851",
       "label": "procedure code",
-      "score": 0.99365234375,
+      "score": 0.978515625,
       "start": 31,
       "end": 36,
       "bbox": null
     },
     {
-      "text": "Treating practitioner's medical record",
-      "label": "submitted document",
-      "score": 0.52099609375,
-      "start": 400,
-      "end": 438,
+      "text": "HCPCS coding",
+      "label": "standard written order",
+      "score": 0.6884765625,
+      "start": 385,
+      "end": 397,
+      "bbox": null
+    },
+    {
+      "text": "practitioner's medical record",
+      "label": "medical record",
+      "score": 0.65869140625,
+      "start": 408,
+      "end": 437,
       "bbox": null
     },
     {
       "text": "Proof of delivery",
-      "label": "submitted document",
-      "score": 0.69677734375,
-      "start": 489,
-      "end": 506,
+      "label": "proof of delivery",
+      "score": 0.7314453125,
+      "start": 487,
+      "end": 504,
+      "bbox": null
+    },
+    {
+      "text": "face-to-face encounter",
+      "label": "proof of delivery",
+      "score": 0.62646484375,
+      "start": 510,
+      "end": 532,
       "bbox": null
     },
     {
       "text": "7 months ago",
       "label": "time period",
-      "score": 0.9892578125,
-      "start": 535,
-      "end": 547,
+      "score": 0.9765625,
+      "start": 533,
+      "end": 545,
       "bbox": null
     }
   ],

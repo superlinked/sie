@@ -118,7 +118,7 @@ GROUP_FIELDS: dict[str, tuple[str, ...]] = {
 }
 GLINER2_GROUP_LABELS = {
     "requirements": ["administrative requirement", "time requirement", "procedure code"],
-    "submission": ["procedure code", "submitted document", "time period"],
+    "submission": ["procedure code", "standard written order", "medical record", "proof of delivery", "time period"],
     "outcome": ["missing documentation", "claim result", "payment action", "organization", "time period"],
 }
 GLINER2_REQUIRED_SPANS = {
@@ -134,6 +134,16 @@ def load_config() -> dict[str, Any]:
     config["cluster"]["url"] = os.getenv("SIE_CLUSTER_URL", config["cluster"]["url"])
     config["cluster"]["api_key"] = os.getenv("SIE_API_KEY", config["cluster"]["api_key"])
     return config
+
+
+def _runtime_model_id(config: dict[str, Any], key: str) -> str:
+    model = str(config["models"][key])
+    cluster_url = str(config["cluster"]["url"]).casefold()
+    if model == "docling-project/docling" and cluster_url.startswith(
+        ("http://localhost:", "http://127.0.0.1:", "http://[::1]:")
+    ):
+        return "docling"
+    return model
 
 
 def sha256(path: Path) -> str:
@@ -189,8 +199,12 @@ def _chunks(markdown: str) -> list[str]:
             flush()
             chunks.append(line)
             continue
+        if line.startswith(("-", "*", "+")):
+            flush()
+            chunks.append(line)
+            continue
         current.append(line)
-        if not line.startswith(("-", "*")) and line.endswith((".", ":", "?", "!")):
+        if line.endswith((".", ":", "?", "!")):
             flush()
     flush()
     chunks = [chunk for chunk in chunks if len(chunk) > 24]
@@ -202,17 +216,19 @@ def _chunks(markdown: str) -> list[str]:
 def _require_fields(data: dict[str, Any], required: tuple[str, ...], stage: str) -> None:
     missing = sorted(set(required) - set(data))
     if missing:
-        raise RuntimeError(f"GLiNER2 {stage} output omitted required fields: {missing}")
+        raise RuntimeError(f"Mapped {stage} evidence omitted required fields: {missing}")
 
 
 def _source_fragments(text: str) -> list[str]:
     fragments = [text.strip()]
     for raw_line in text.splitlines():
-        line = re.sub(r"^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)", "", raw_line.strip()).strip()
-        if not line:
-            continue
-        fragments.append(line)
-        fragments.extend(part.strip() for part in re.split(r"(?<=[.!?])\s+(?=[A-Z])", line) if part.strip())
+        inline_bullets = re.split(r"\s+(?=[-*+]\s+[A-Z])", raw_line.strip())
+        for raw_fragment in inline_bullets:
+            line = re.sub(r"^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)", "", raw_fragment).strip()
+            if not line:
+                continue
+            fragments.append(line)
+            fragments.extend(part.strip() for part in re.split(r"(?<=[.!?])\s+(?=[A-Z])", line) if part.strip())
     return list(dict.fromkeys(fragments))
 
 
@@ -328,7 +344,7 @@ def build_review(
 
     code = str(requirements["hcpcs_code"]).strip().upper()
     if code != "L1851":
-        raise RuntimeError(f"Structured output returned the wrong HCPCS code: {code!r}")
+        raise RuntimeError(f"Mapped evidence returned the wrong HCPCS code: {code!r}")
     _require_tokens(
         str(requirements["authorization_requirement_text"]),
         ("prior authorization",),
@@ -354,9 +370,9 @@ def build_review(
         "documented_face_to_face_age",
     )
     if required_months != 6:
-        raise RuntimeError(f"Structured output returned the wrong face-to-face window: {required_months}")
+        raise RuntimeError(f"Mapped evidence returned the wrong face-to-face window: {required_months}")
     if observed_months != 7:
-        raise RuntimeError(f"Structured output returned the wrong encounter age: {observed_months}")
+        raise RuntimeError(f"Mapped evidence returned the wrong encounter age: {observed_months}")
 
     _require_tokens(str(submission["submitted_order"]), ("standard written order", "hcpcs"), "submitted_order")
     _require_tokens(
@@ -441,6 +457,7 @@ def _extract_gliner2_group(
 
 def run(run_id: str) -> Path:
     config = load_config()
+    parse_model = _runtime_model_id(config, "parse")
     run_dir = RUNS_DIR / run_id
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=False)
@@ -450,7 +467,7 @@ def run(run_id: str) -> Path:
     with SIEClient(config["cluster"]["url"], api_key=config["cluster"]["api_key"] or None, timeout_s=900) as client:
         started = time.perf_counter()
         parsed = client.extract(
-            config["models"]["parse"],
+            parse_model,
             Item(id="cms-l1851-published-example", document=DOCUMENT_PATH),
             options={"profile": "default"},
             wait_for_capacity=True,
@@ -459,7 +476,8 @@ def run(run_id: str) -> Path:
         calls.append(
             {
                 "stage": "parse",
-                "model": config["models"]["parse"],
+                "model": parse_model,
+                "configured_model": config["models"]["parse"],
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             }
         )

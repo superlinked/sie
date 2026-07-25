@@ -12,24 +12,25 @@ or misconduct, and it does not make an investment recommendation.
 
 | Step | Model | Output |
 |---|---|---|
-| Parse the source packet | `docling` | Markdown with source headings |
+| Parse the source packet | `docling-project/docling` | Markdown with source headings |
 | Retrieve candidate passages | `BAAI/bge-m3` | Dense vectors and cosine ranking |
 | Rerank against the exact question | `Qwen/Qwen3-Reranker-4B` | Ordered evidence with scores |
 | Verify the cited spans | `urchade/gliner_multi-v2.1` | Exact source spans |
 | Recover exact source spans | `fastino/gliner2-large-v1` | Table values, period, company and reliance-status entities |
 
-Each stage consumes the prior stage. The result fails closed if the span model
-or either entity model omits a required source span. Docling's table coordinates
-map the original and restated columns after both entity models recover the values. The company caveat is retained
-verbatim only when the reranked evidence contains its exact source sentence.
-Ordinary Python code validates the extracted values against the cited packet
-and calculates the difference with decimal arithmetic.
+Each stage consumes the prior stage. The result fails closed if either entity
+model omits a required source span. The original values come from the original
+Form 10-Q table. The restated values come from the Form 10-K/A table, and the
+pipeline checks that its “As Previously Reported” column matches the Form 10-Q.
+The company caveat is retained verbatim only when the reranked evidence contains
+its exact source sentence. Ordinary Python code calculates the difference with
+decimal arithmetic.
 
 ## Verified result
 
-The recorded component calls ran through the public SIE server on an NVIDIA L4
-on July 24, 2026. The restated passage ranked first for the question about the
-restated Q3 FY2023 figure.
+The recorded component calls ran through the public SIE server on an NVIDIA L4.
+The restated passage ranked first for the question about the restated Q3 FY2023
+figure.
 
 ```text
 Net income attributable to parent   $45.096M -> $36.080M
@@ -65,7 +66,7 @@ runs/<run-id>/manifest.json       endpoint, model IDs, fixture hashes, latency
 runs/<run-id>/raw/parse.json      complete Docling response
 runs/<run-id>/raw/retrieve.json   embeddings and cosine ranking
 runs/<run-id>/raw/rerank.json     complete reranker response
-runs/<run-id>/raw/entities.json   complete span response
+runs/<run-id>/raw/entities.json   combined entity spans
 runs/<run-id>/raw/gliner2-*.json raw GLiNER2 source-span responses
 runs/<run-id>/raw/mapped.json     validated record mapped from Docling table coordinates
 runs/<run-id>/parsed.md           parsed packet used downstream
@@ -73,8 +74,8 @@ runs/<run-id>/review.json         source-versioned result and calculated delta
 runs/<run-id>/evaluation.json     deterministic checks
 ```
 
-`verified-run/` contains the saved July 24 evidence used to design the example.
-It is not a latency benchmark. The first request included model provisioning.
+`verified-run/` contains the saved evidence used to design the example. It is
+not a latency benchmark. The first request included model provisioning.
 
 See [fixtures/SOURCES.md](fixtures/SOURCES.md) for accession numbers, URLs, and
 source checksums.

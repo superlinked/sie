@@ -21,6 +21,10 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT / "runs"
 DOCUMENT_PATH = ROOT / "fixtures" / "east-palestine-bearing-spread.pdf"
 CONFIG_PATH = ROOT / "config.yaml"
+SCHEMA_PROBE_PATHS = (
+    ROOT / "fixtures" / "output-schema-probe-request.json",
+    ROOT / "fixtures" / "output-schema-probe-response.json",
+)
 console = Console()
 
 MAPPED_FIELDS = (
@@ -81,6 +85,16 @@ def load_config() -> dict[str, Any]:
     config["cluster"]["url"] = os.getenv("SIE_CLUSTER_URL", config["cluster"]["url"])
     config["cluster"]["api_key"] = os.getenv("SIE_API_KEY", config["cluster"]["api_key"])
     return config
+
+
+def _runtime_model_id(config: dict[str, Any], key: str) -> str:
+    model = str(config["models"][key])
+    cluster_url = str(config["cluster"]["url"]).casefold()
+    if model == "docling-project/docling" and cluster_url.startswith(
+        ("http://localhost:", "http://127.0.0.1:", "http://[::1]:")
+    ):
+        return "docling"
+    return model
 
 
 def sha256(path: Path) -> str:
@@ -365,7 +379,7 @@ def _require_fields(data: dict[str, Any]) -> None:
     required = set(MAPPED_FIELDS)
     missing = sorted(required - set(data))
     if missing:
-        raise RuntimeError(f"GLiNER2 omitted required fields: {missing}")
+        raise RuntimeError(f"Mapped source evidence omitted required fields: {missing}")
 
 
 def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str, Any]:
@@ -466,6 +480,7 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
 
 def run(run_id: str) -> Path:
     config = load_config()
+    parse_model = _runtime_model_id(config, "parse")
     run_dir = RUNS_DIR / run_id
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=False)
@@ -475,7 +490,7 @@ def run(run_id: str) -> Path:
     with SIEClient(config["cluster"]["url"], api_key=config["cluster"]["api_key"] or None, timeout_s=900) as client:
         started = time.perf_counter()
         parsed = client.extract(
-            config["models"]["parse"],
+            parse_model,
             Item(id="ntsb-east-palestine-bearing-spread", document=DOCUMENT_PATH),
             options={"profile": "default"},
             wait_for_capacity=True,
@@ -484,7 +499,8 @@ def run(run_id: str) -> Path:
         calls.append(
             {
                 "stage": "parse",
-                "model": config["models"]["parse"],
+                "model": parse_model,
+                "configured_model": config["models"]["parse"],
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             }
         )
@@ -688,6 +704,9 @@ def run(run_id: str) -> Path:
         "run_command": os.getenv("SIE_RUN_COMMAND"),
         "models": config["models"],
         "fixture": {"path": str(DOCUMENT_PATH.relative_to(ROOT)), "sha256": sha256(DOCUMENT_PATH)},
+        "diagnostic_fixtures": [
+            {"path": str(path.relative_to(ROOT)), "sha256": sha256(path)} for path in SCHEMA_PROBE_PATHS
+        ],
         "artifacts": [{"path": str(path.relative_to(run_dir)), "sha256": sha256(path)} for path in artifact_paths],
         "source_document": {
             "url": "https://www.ntsb.gov/investigations/AccidentReports/Reports/SPC2406.pdf",

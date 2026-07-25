@@ -1,14 +1,5 @@
 {
-  "entities": [
-    {
-      "text": "6 months",
-      "label": "time period",
-      "score": 0.8623046875,
-      "start": 61,
-      "end": 69,
-      "bbox": null
-    }
-  ],
+  "entities": [],
   "relations": [],
   "classifications": [],
   "objects": [],

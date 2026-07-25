@@ -1,10 +1,10 @@
 {
-  "created_at": "2026-07-25T01:57:04.772656+00:00",
+  "created_at": "2026-07-25T02:35:45.228957+00:00",
   "endpoint": "http://127.0.0.1:8080",
-  "sie_server_commit": "9d6ca6b00f788b6ab19f8d6dc9506e1b31dad2f0",
-  "run_command": "Modal exact-source reference examples against public SIE v0.6.23",
+  "sie_server_commit": "4b5ea9ccd5d5fc07c56edfea790080b05e17f0d2",
+  "run_command": "Modal exact-source reference examples against public SIE main at 4b5ea9c",
   "models": {
-    "parse": "docling",
+    "parse": "docling-project/docling",
     "retrieve": "BAAI/bge-m3",
     "rerank": "Qwen/Qwen3-Reranker-4B",
     "entities": "urchade/gliner_multi-v2.1",
@@ -14,6 +14,16 @@
     "path": "fixtures/east-palestine-bearing-spread.pdf",
     "sha256": "0556a971978198a493acda277dfdfd75a837be4ba5c626d6f03565cb17cee8ca"
   },
+  "diagnostic_fixtures": [
+    {
+      "path": "fixtures/output-schema-probe-request.json",
+      "sha256": "d7678dd861df33f19e264af3253f5fe0a540db855c3ac31fcece8d2ccdf20907"
+    },
+    {
+      "path": "fixtures/output-schema-probe-response.json",
+      "sha256": "b68bfdcdda685b5474dbdc3a926f2327e6515a552fe6031a31d2d41c9ee71a3a"
+    }
+  ],
   "artifacts": [
     {
       "path": "parsed.md",
@@ -73,7 +83,7 @@
     },
     {
       "path": "raw/parse.json",
-      "sha256": "eabb098c0e71e728e4ea51eba391b26170ba13f3f6119e8b203d5ef8e5954eaf"
+      "sha256": "818a458d3611298b32e2593a9f67825f6429fb12421c94524fa7b14626abb871"
     },
     {
       "path": "raw/rerank.json",
@@ -81,7 +91,7 @@
     },
     {
       "path": "raw/retrieve.json",
-      "sha256": "08fb16121af62a7bd0ccc2ce4e177060ac10a0c246c1818e84f3f1c21734e4c4"
+      "sha256": "3e4080ca59359cd7374616c3c0590510dc0d6e0ca21bd3cf9e77c61c1a7fdbfe"
     },
     {
       "path": "evaluation.json",
@@ -97,42 +107,43 @@
     {
       "stage": "parse",
       "model": "docling",
-      "latency_ms": 40591.8
+      "configured_model": "docling-project/docling",
+      "latency_ms": 3064.6
     },
     {
       "stage": "retrieve",
       "model": "BAAI/bge-m3",
-      "latency_ms": 11940.7
+      "latency_ms": 355.0
     },
     {
       "stage": "rerank",
       "model": "Qwen/Qwen3-Reranker-4B",
-      "latency_ms": 17072.3
+      "latency_ms": 546.8
     },
     {
       "stage": "entities_detector_0",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 11282.8
+      "latency_ms": 33.4
     },
     {
       "stage": "entities_detector_1",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 197.8
+      "latency_ms": 31.1
     },
     {
       "stage": "entities_detector_2",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 129.1
+      "latency_ms": 29.6
     },
     {
       "stage": "entities_outcome",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 368.4
+      "latency_ms": 35.0
     },
     {
       "stage": "gliner2_sebring",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 10099.7,
+      "latency_ms": 47.5,
       "source_chunk_ids": [
         "chunk-11"
       ],
@@ -141,7 +152,7 @@
     {
       "stage": "gliner2_salem",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 58.5,
+      "latency_ms": 50.0,
       "source_chunk_ids": [
         "chunk-12"
       ],
@@ -150,7 +161,7 @@
     {
       "stage": "gliner2_east_palestine",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 49.5,
+      "latency_ms": 48.7,
       "source_chunk_ids": [
         "chunk-13"
       ],
@@ -159,7 +170,7 @@
     {
       "stage": "gliner2_cause",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 45.6,
+      "latency_ms": 44.9,
       "source_chunk_ids": [
         "chunk-1"
       ],
@@ -168,7 +179,7 @@
     {
       "stage": "gliner2_engineer",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 49.8,
+      "latency_ms": 47.8,
       "source_chunk_ids": [
         "chunk-14"
       ],
@@ -177,7 +188,7 @@
     {
       "stage": "gliner2_derailment",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 56.0,
+      "latency_ms": 44.9,
       "source_chunk_ids": [
         "chunk-15"
       ],

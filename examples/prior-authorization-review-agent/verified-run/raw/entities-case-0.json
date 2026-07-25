@@ -1,14 +1,5 @@
 {
-  "entities": [
-    {
-      "text": "7 months ago",
-      "label": "time period",
-      "score": 0.65869140625,
-      "start": 188,
-      "end": 200,
-      "bbox": null
-    }
-  ],
+  "entities": [],
   "relations": [],
   "classifications": [],
   "objects": [],

@@ -1,0 +1,89 @@
+{
+  "entities": [
+    {
+      "text": "2023",
+      "label": "reporting period",
+      "score": 0.59130859375,
+      "start": 104,
+      "end": 108,
+      "bbox": null
+    },
+    {
+      "text": "2022",
+      "label": "reporting period",
+      "score": 0.63720703125,
+      "start": 192,
+      "end": 196,
+      "bbox": null
+    },
+    {
+      "text": "$45,096",
+      "label": "net income",
+      "score": 0.9970703125,
+      "start": 349,
+      "end": 356,
+      "bbox": null
+    },
+    {
+      "text": "$22,391",
+      "label": "net income",
+      "score": 0.99365234375,
+      "start": 359,
+      "end": 366,
+      "bbox": null
+    },
+    {
+      "text": "$127,709",
+      "label": "net income",
+      "score": 0.9951171875,
+      "start": 369,
+      "end": 377,
+      "bbox": null
+    },
+    {
+      "text": "$132,966",
+      "label": "net income",
+      "score": 0.99609375,
+      "start": 380,
+      "end": 388,
+      "bbox": null
+    },
+    {
+      "text": "$1.68",
+      "label": "diluted EPS",
+      "score": 0.9921875,
+      "start": 443,
+      "end": 448,
+      "bbox": null
+    },
+    {
+      "text": "$0.76",
+      "label": "diluted EPS",
+      "score": 0.99169921875,
+      "start": 453,
+      "end": 458,
+      "bbox": null
+    },
+    {
+      "text": "$4.62",
+      "label": "diluted EPS",
+      "score": 0.98681640625,
+      "start": 463,
+      "end": 468,
+      "bbox": null
+    },
+    {
+      "text": "$4.44",
+      "label": "diluted EPS",
+      "score": 0.984375,
+      "start": 474,
+      "end": 479,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-original-10q-table-evidence",
+  "model": "fastino/gliner2-large-v1"
+}

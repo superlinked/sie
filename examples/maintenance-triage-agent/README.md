@@ -19,7 +19,7 @@ cause, recommend an operational response, or write to a control system.
 
 | Step | Model | Output |
 |---|---|---|
-| Parse the illustrated PDF spread | `docling` | Markdown from the original page layout |
+| Parse the illustrated PDF spread | `docling-project/docling` | Markdown from the original page layout |
 | Retrieve detector and outcome passages | `BAAI/bge-m3` | Dense vectors and cosine ranking |
 | Rerank against the sequence question | `Qwen/Qwen3-Reranker-4B` | Ordered source evidence with scores |
 | Verify locations, times, alerts, the bearing, and railcar count | `urchade/gliner_multi-v2.1` | Exact source spans |
@@ -32,10 +32,11 @@ detector readings, alert recipient, camera observation, railcar count, or
 bearing-failure span.
 
 Ordinary code then maps exact text from the ranked NTSB paragraphs. It does not
-ask GLiNER2 for a JSON schema. A recorded schema probe returned three empty
-required fields, so structured output is unsupported for this example. The
-complete response is preserved in
-[`fixtures/unsupported-output-schema-response.json`](fixtures/unsupported-output-schema-response.json).
+ask GLiNER2 for a JSON schema. One recorded schema probe returned three empty
+required fields for this input. Its exact
+[request](fixtures/output-schema-probe-request.json) and unedited
+[response](fixtures/output-schema-probe-response.json) are preserved. That
+single result is diagnostic evidence, not a general model capability claim.
 
 Python performs only transparent calculations: `103 - 38 = 65`,
 `253 - 103 = 150`, and `253 - 38 = 215`. It also converts the NTSB's “hopper
@@ -62,7 +63,7 @@ runs/<run-id>/manifest.json                  endpoint, model IDs, source hash, l
 runs/<run-id>/raw/parse.json                 complete Docling response
 runs/<run-id>/raw/retrieve.json              embeddings and cosine ranking
 runs/<run-id>/raw/rerank.json                complete reranker response
-runs/<run-id>/raw/entities.json              complete GLiNER response
+runs/<run-id>/raw/entities.json              combined GLiNER entity spans
 runs/<run-id>/raw/gliner2-sebring.json       GLiNER2 Sebring spans
 runs/<run-id>/raw/gliner2-salem.json         GLiNER2 Salem spans
 runs/<run-id>/raw/gliner2-east-palestine.json GLiNER2 East Palestine spans

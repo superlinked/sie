@@ -3,7 +3,15 @@ import json
 from pathlib import Path
 
 from financial_filing.evaluate import evaluate_review
-from financial_filing.review import _chunks, _require_entity_evidence, build_review
+from financial_filing.review import (
+    _chunks,
+    _original_table_source_value,
+    _require_entity_evidence,
+    _require_matching_source_values,
+    _runtime_model_id,
+    _table_source_values,
+    build_review,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -16,6 +24,13 @@ def test_fixture_preserves_the_sec_table_rows_and_item_402_sentences() -> None:
     assert "<td>$1.34</td>" in source
     assert "should no longer be relied upon because of errors identified" in source
     assert "does not impact net income over the life of the portfolio" in source
+
+
+def test_public_docling_id_translates_only_for_a_direct_local_server() -> None:
+    local = {"cluster": {"url": "http://127.0.0.1:8080"}, "models": {"parse": "docling-project/docling"}}
+    cloud = {"cluster": {"url": "https://api.superlinked.com"}, "models": {"parse": "docling-project/docling"}}
+    assert _runtime_model_id(local, "parse") == "docling"
+    assert _runtime_model_id(cloud, "parse") == "docling-project/docling"
 
 
 def structured_data() -> dict[str, str]:
@@ -137,6 +152,33 @@ was $36,080 and diluted EPS was $1.34.
             "Restated net income was $36,080 and diluted EPS was $1.34."
         ),
     ]
+
+
+def test_original_values_are_read_from_the_original_filing_and_cross_checked() -> None:
+    original = (
+        "## Original Form 10-Q | Net income attributable to parent | $45,096 | $22,391 | | Diluted | $1.68 | $0.76 |"
+    )
+    restated = (
+        "## Restated Form 10-K/A "
+        "| Net income attributable to parent | $45,096 | $(9,016) | | $36,080 | "
+        "| Diluted | $1.68 | | | $1.34 |"
+    )
+    original_income = _original_table_source_value(original, "Net income attributable to parent")
+    original_eps = _original_table_source_value(original, "Diluted")
+    previously_reported_income, restated_income = _table_source_values(restated, "Net income attributable to parent")
+    previously_reported_eps, restated_eps = _table_source_values(restated, "Diluted")
+    _require_matching_source_values(original_income, previously_reported_income, "net income")
+    _require_matching_source_values(original_eps, previously_reported_eps, "diluted EPS")
+    assert (original_income, restated_income, original_eps, restated_eps) == ("$45,096", "$36,080", "$1.68", "$1.34")
+
+
+def test_cross_filing_check_rejects_a_mismatched_previously_reported_value() -> None:
+    try:
+        _require_matching_source_values("$45,096", "$45,097", "net income")
+    except RuntimeError as exc:
+        assert "values disagree" in str(exc)
+    else:
+        raise AssertionError("Accepted a previously reported value that differs from the original Form 10-Q")
 
 
 def test_verified_manifest_hashes() -> None:

@@ -44,7 +44,7 @@
     {
       "name": "ranked-source-evidence",
       "passed": true,
-      "detail": "['chunk-8', 'chunk-5', 'chunk-3', 'chunk-4', 'chunk-7', 'chunk-2', 'chunk-6', 'chunk-0', 'chunk-1']"
+      "detail": "['chunk-10', 'chunk-3', 'chunk-9', 'chunk-4', 'chunk-2', 'chunk-8', 'chunk-5', 'chunk-7', 'chunk-0', 'chunk-1', 'chunk-6']"
     },
     {
       "name": "no-new-coverage-or-medical-decision",

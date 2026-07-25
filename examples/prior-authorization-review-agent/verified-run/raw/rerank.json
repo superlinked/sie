@@ -2,18 +2,18 @@
   "model": "Qwen/Qwen3-Reranker-4B",
   "scores": [
     {
-      "item_id": "chunk-8",
+      "item_id": "chunk-10",
       "score": 0.9765625,
       "rank": 0
     },
     {
-      "item_id": "chunk-5",
-      "score": 0.91796875,
+      "item_id": "chunk-3",
+      "score": 0.8671875,
       "rank": 1
     },
     {
-      "item_id": "chunk-3",
-      "score": 0.859375,
+      "item_id": "chunk-9",
+      "score": 0.6796875,
       "rank": 2
     },
     {
@@ -22,33 +22,43 @@
       "rank": 3
     },
     {
-      "item_id": "chunk-7",
-      "score": 0.62109375,
+      "item_id": "chunk-2",
+      "score": 0.59375,
       "rank": 4
     },
     {
-      "item_id": "chunk-2",
-      "score": 0.5625,
+      "item_id": "chunk-8",
+      "score": 0.173828125,
       "rank": 5
     },
     {
-      "item_id": "chunk-6",
-      "score": 0.181640625,
+      "item_id": "chunk-5",
+      "score": 0.1005859375,
       "rank": 6
     },
     {
-      "item_id": "chunk-0",
-      "score": 0.00494384765625,
+      "item_id": "chunk-7",
+      "score": 0.0419921875,
       "rank": 7
     },
     {
-      "item_id": "chunk-1",
-      "score": 0.0025634765625,
+      "item_id": "chunk-0",
+      "score": 0.004364013671875,
       "rank": 8
+    },
+    {
+      "item_id": "chunk-1",
+      "score": 0.0023956298828125,
+      "rank": 9
+    },
+    {
+      "item_id": "chunk-6",
+      "score": 0.0012054443359375,
+      "rank": 10
     }
   ],
   "query_id": "cms-l1851-query",
   "usage": {
-    "input_tokens": 1226
+    "input_tokens": 1434
   }
 }

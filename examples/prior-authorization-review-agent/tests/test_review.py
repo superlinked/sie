@@ -14,6 +14,8 @@ from prior_authorization.review import (
     _chunks,
     _group_source_scope,
     _require_gliner2_group_evidence,
+    _runtime_model_id,
+    _source_fragments,
     _source_scope,
     build_review,
 )
@@ -40,6 +42,49 @@ payment.
         "### What Happens Next for the Published CMS Claim?",
         "The review contractor completes the claim, and the MAC recoups payment.",
     ]
+
+
+def test_public_docling_id_translates_only_for_a_direct_local_server() -> None:
+    local = {"cluster": {"url": "http://localhost:8080"}, "models": {"parse": "docling-project/docling"}}
+    cloud = {"cluster": {"url": "https://api.superlinked.com"}, "models": {"parse": "docling-project/docling"}}
+    assert _runtime_model_id(local, "parse") == "docling"
+    assert _runtime_model_id(cloud, "parse") == "docling-project/docling"
+
+
+def test_docling_bullets_stay_as_distinct_submission_chunks() -> None:
+    markdown = """### Documentation submitted
+
+- Standard written order with correct HCPCS coding
+- Treating practitioner's medical record that has adequate medical necessity information
+- Proof of delivery with face-to-face encounter 7 months ago
+"""
+    assert _chunks(markdown) == [
+        "### Documentation submitted",
+        "- Standard written order with correct HCPCS coding",
+        "- Treating practitioner's medical record that has adequate medical necessity information",
+        "- Proof of delivery with face-to-face encounter 7 months ago",
+    ]
+
+
+def test_joined_docling_bullets_map_to_distinct_source_fragments() -> None:
+    joined = (
+        "- Standard written order with correct HCPCS coding "
+        "- Treating practitioner's medical record that has adequate medical necessity information "
+        "- Proof of delivery with face-to-face encounter 7 months ago"
+    )
+    assert _source_fragments(joined)[1:] == [
+        "Standard written order with correct HCPCS coding",
+        "Treating practitioner's medical record that has adequate medical necessity information",
+        "Proof of delivery with face-to-face encounter 7 months ago",
+    ]
+    evidence = [{"chunk_id": "chunk-5", "rank": 1, "score": 0.9, "text": joined}]
+    assert _source_scope(evidence, "submitted_order")["text"] == "Standard written order with correct HCPCS coding"
+    assert _source_scope(evidence, "submitted_medical_record")["text"] == (
+        "Treating practitioner's medical record that has adequate medical necessity information"
+    )
+    assert _source_scope(evidence, "submitted_proof_of_delivery")["text"] == (
+        "Proof of delivery with face-to-face encounter 7 months ago"
+    )
 
 
 def requirements_data() -> dict[str, str]:

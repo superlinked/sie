@@ -26,49 +26,15 @@ console = Console()
 
 FIGURE_ENTITY_LABELS = ["company", "reporting period", "filing", "money amount"]
 STATUS_ENTITY_LABELS = ["company", "filing", "reliance status"]
-OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "company": {"type": "string", "description": "Company named in the source packet"},
-        "period": {"type": "string", "description": "Reporting period shared by the original and restated figures"},
-        "original_net_income": {
-            "type": "string",
-            "description": (
-                "Net income attributable to parent for the three months ended "
-                "June 30, 2023, exactly as written in the original Form 10-Q table"
-            ),
-        },
-        "restated_net_income": {
-            "type": "string",
-            "description": (
-                "As Restated net income attributable to parent for the three months "
-                "ended June 30, 2023, exactly as written in the Form 10-K/A table"
-            ),
-        },
-        "original_diluted_eps": {
-            "type": "string",
-            "description": "Diluted EPS exactly as written under Source ID 2023-10q",
-        },
-        "restated_diluted_eps": {
-            "type": "string",
-            "description": "Diluted EPS exactly as written under Source ID 2025-10ka",
-        },
-        "reliance_status": {
-            "type": "string",
-            "description": "Status of the affected prior filings under Source ID 2025-8k-item-4-02",
-        },
-    },
-    "required": [
-        "company",
-        "period",
-        "original_net_income",
-        "restated_net_income",
-        "original_diluted_eps",
-        "restated_diluted_eps",
-        "reliance_status",
-    ],
-    "additionalProperties": False,
-}
+REQUIRED_FIELDS = (
+    "company",
+    "period",
+    "original_net_income",
+    "restated_net_income",
+    "original_diluted_eps",
+    "restated_diluted_eps",
+    "reliance_status",
+)
 GLINER2_FIGURE_LABELS = [
     "reporting period",
     "previously reported net income",
@@ -76,6 +42,7 @@ GLINER2_FIGURE_LABELS = [
     "previously reported diluted EPS",
     "as restated diluted EPS",
 ]
+GLINER2_ORIGINAL_FIGURE_LABELS = ["reporting period", "net income", "diluted EPS"]
 GLINER2_STATUS_LABELS = ["company", "prior filing reliance status"]
 CAVEAT_SOURCE_TEXT = (
     "The change from net to gross basis presentation does not impact net income "
@@ -90,6 +57,16 @@ def load_config() -> dict[str, Any]:
     config["cluster"]["url"] = os.getenv("SIE_CLUSTER_URL", config["cluster"]["url"])
     config["cluster"]["api_key"] = os.getenv("SIE_API_KEY", config["cluster"]["api_key"])
     return config
+
+
+def _runtime_model_id(config: dict[str, Any], key: str) -> str:
+    model = str(config["models"][key])
+    cluster_url = str(config["cluster"]["url"]).casefold()
+    if model == "docling-project/docling" and cluster_url.startswith(
+        ("http://localhost:", "http://127.0.0.1:", "http://[::1]:")
+    ):
+        return "docling"
+    return model
 
 
 def sha256(path: Path) -> str:
@@ -241,6 +218,27 @@ def _table_source_values(text: str, row_label: str) -> tuple[str, str]:
     return original, restated
 
 
+def _original_table_source_value(text: str, row_label: str) -> str:
+    marker = f"| {row_label}"
+    start = text.casefold().find(marker.casefold())
+    if start < 0:
+        raise RuntimeError(f"The reranked original Form 10-Q omitted the {row_label} row")
+    cells = [cell.strip() for cell in text[start:].split("|")]
+    if len(cells) < 3 or cells[1].casefold() != row_label.casefold():
+        raise RuntimeError(f"Docling returned an invalid original Form 10-Q {row_label} row")
+    value = cells[2]
+    if not value:
+        raise RuntimeError(f"Docling omitted the original Form 10-Q {row_label} value")
+    return value
+
+
+def _require_matching_source_values(original: str, previously_reported: str, stage: str) -> None:
+    if _normalize_source_text(original) != _normalize_source_text(previously_reported):
+        raise RuntimeError(
+            f"The original Form 10-Q and the Form 10-K/A 'As Previously Reported' {stage} values disagree"
+        )
+
+
 def _entity_span(result: dict[str, Any], label: str, tokens: tuple[str, ...], stage: str) -> str:
     matches = [
         str(entity.get("text", "")).strip()
@@ -261,11 +259,19 @@ def _require_gliner2_figure_spans(result: dict[str, Any]) -> None:
         raise RuntimeError(f"GLiNER2 omitted required filing table spans: {missing}")
 
 
+def _require_gliner2_original_figure_spans(result: dict[str, Any]) -> None:
+    observed = _normalize_source_text(" ".join(str(entity.get("text", "")) for entity in result.get("entities", [])))
+    required = ("$45,096", "$1.68")
+    missing = [span for span in required if span not in observed]
+    if missing:
+        raise RuntimeError(f"GLiNER2 omitted required original Form 10-Q spans: {missing}")
+
+
 def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str, Any]:
     _require_ranked_evidence(ranked)
-    missing = sorted(set(OUTPUT_SCHEMA["required"]) - set(data))
+    missing = sorted(set(REQUIRED_FIELDS) - set(data))
     if missing:
-        raise RuntimeError(f"GLiNER2 omitted required fields: {missing}")
+        raise RuntimeError(f"Mapped source evidence omitted required fields: {missing}")
     original_income = _millions_from_thousands(str(data["original_net_income"]))
     restated_income = _millions_from_thousands(str(data["restated_net_income"]))
     original_eps = _number(str(data["original_diluted_eps"]))
@@ -283,13 +289,13 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
         "restated_eps": restated_eps,
     }
     if observed != expected:
-        raise RuntimeError(f"Structured values do not match the cited source packet: {observed}")
+        raise RuntimeError(f"Mapped values do not match the cited source packet: {observed}")
     period = str(data["period"])
     if "june 30, 2023" not in period.casefold():
-        raise RuntimeError("Structured period does not match the source table")
+        raise RuntimeError("Mapped period does not match the source table")
     reliance = str(data["reliance_status"])
     if "no longer" not in reliance.casefold() or "relied" not in reliance.casefold():
-        raise RuntimeError("Structured reliance status does not identify the superseded source")
+        raise RuntimeError("Mapped reliance status does not identify the superseded source")
     ranked_text = " ".join(str(row["text"]).strip() for row in ranked)
     if CAVEAT_SOURCE_TEXT.casefold() not in ranked_text.casefold():
         raise RuntimeError("Reranked source evidence omitted Pathward's life-of-portfolio caveat")
@@ -326,6 +332,7 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
 
 def run(run_id: str) -> Path:
     config = load_config()
+    parse_model = _runtime_model_id(config, "parse")
     run_dir = RUNS_DIR / run_id
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=False)
@@ -335,7 +342,7 @@ def run(run_id: str) -> Path:
     with SIEClient(config["cluster"]["url"], api_key=config["cluster"]["api_key"] or None, timeout_s=900) as client:
         started = time.perf_counter()
         parsed = client.extract(
-            config["models"]["parse"],
+            parse_model,
             Item(id="pathward-source-packet", document=DOCUMENT_PATH),
             options={"profile": "default"},
             wait_for_capacity=True,
@@ -344,7 +351,8 @@ def run(run_id: str) -> Path:
         calls.append(
             {
                 "stage": "parse",
-                "model": config["models"]["parse"],
+                "model": parse_model,
+                "configured_model": config["models"]["parse"],
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             }
         )
@@ -415,11 +423,8 @@ def run(run_id: str) -> Path:
             }
         )
         _write_json(raw_dir / "rerank.json", rerank_raw)
-        figure_rows = _select_evidence_rows(
-            ranked,
-            ("pathward financial source excerpts", "original form 10-q", "restated form 10-k/a"),
-            "filing figures",
-        )
+        original_table_text = _single_source_row(ranked, "original form 10-q", "original Form 10-Q extraction")
+        restated_table_text = _single_source_row(ranked, "restated form 10-k/a", "restated Form 10-K/A extraction")
         status_rows = _select_evidence_rows(ranked, ("item 4.02 form 8-k",), "filing status")
         status_text = "\n\n".join(row["text"] for row in status_rows)
         status_model_text = _select_source_sentences(
@@ -430,8 +435,8 @@ def run(run_id: str) -> Path:
 
         entity_outputs: list[dict[str, Any]] = []
         entity_inputs = [
-            (f"entities_figure_{index}", str(row["text"]), FIGURE_ENTITY_LABELS)
-            for index, row in enumerate(figure_rows)
+            ("entities_original_10q", original_table_text, FIGURE_ENTITY_LABELS),
+            ("entities_restated_10ka", restated_table_text, FIGURE_ENTITY_LABELS),
         ]
         entity_inputs.append(("entities_status", status_model_text, STATUS_ENTITY_LABELS))
         for stage, text, labels in entity_inputs:
@@ -459,9 +464,26 @@ def run(run_id: str) -> Path:
         _write_json(raw_dir / "entities.json", entities)
         _require_entity_evidence(entities)
 
-        restated_table_text = _single_source_row(ranked, "restated form 10-k/a", "restated table extraction")
         started = time.perf_counter()
-        gliner2_figures = client.extract(
+        gliner2_original = client.extract(
+            config["models"]["extract"],
+            Item(id="ranked-original-10q-table-evidence", text=original_table_text),
+            labels=GLINER2_ORIGINAL_FIGURE_LABELS,
+            wait_for_capacity=True,
+            provision_timeout_s=timeout,
+        )
+        calls.append(
+            {
+                "stage": "gliner2_original_10q",
+                "model": config["models"]["extract"],
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+        )
+        _write_json(raw_dir / "gliner2-original-10q.json", gliner2_original)
+        _require_gliner2_original_figure_spans(gliner2_original)
+
+        started = time.perf_counter()
+        gliner2_restated = client.extract(
             config["models"]["extract"],
             Item(id="ranked-restated-table-evidence", text=restated_table_text),
             labels=GLINER2_FIGURE_LABELS,
@@ -470,13 +492,13 @@ def run(run_id: str) -> Path:
         )
         calls.append(
             {
-                "stage": "gliner2_figures",
+                "stage": "gliner2_restated_10ka",
                 "model": config["models"]["extract"],
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             }
         )
-        _write_json(raw_dir / "gliner2-figures.json", gliner2_figures)
-        _require_gliner2_figure_spans(gliner2_figures)
+        _write_json(raw_dir / "gliner2-restated-10ka.json", gliner2_restated)
+        _require_gliner2_figure_spans(gliner2_restated)
 
         started = time.perf_counter()
         gliner2_status = client.extract(
@@ -495,14 +517,18 @@ def run(run_id: str) -> Path:
         )
         _write_json(raw_dir / "gliner2-status.json", gliner2_status)
 
-        original_income, restated_income = _table_source_values(
+        original_income = _original_table_source_value(original_table_text, "Net income attributable to parent")
+        original_eps = _original_table_source_value(original_table_text, "Diluted")
+        previously_reported_income, restated_income = _table_source_values(
             restated_table_text, "Net income attributable to parent"
         )
-        original_eps, restated_eps = _table_source_values(restated_table_text, "Diluted")
+        previously_reported_eps, restated_eps = _table_source_values(restated_table_text, "Diluted")
+        _require_matching_source_values(original_income, previously_reported_income, "net income")
+        _require_matching_source_values(original_eps, previously_reported_eps, "diluted EPS")
         structured_data = {
             "company": " ".join(_entity_span(gliner2_status, "company", ("pathward financial",), "company").split()),
             "period": _entity_span(
-                gliner2_figures,
+                gliner2_restated,
                 "reporting period",
                 ("june 30, 2023",),
                 "reporting period",
@@ -520,8 +546,14 @@ def run(run_id: str) -> Path:
         }
         structured = {
             "model": config["models"]["extract"],
-            "method": "Docling table coordinates validated against GLiNER2 source spans",
+            "method": "Source-specific Docling table coordinates validated against source-specific GLiNER2 spans",
             "data": structured_data,
+            "source_fields": {
+                "original_net_income": {"source_id": "2023-10q", "value": original_income},
+                "original_diluted_eps": {"source_id": "2023-10q", "value": original_eps},
+                "restated_net_income": {"source_id": "2025-10ka", "value": restated_income},
+                "restated_diluted_eps": {"source_id": "2025-10ka", "value": restated_eps},
+            },
         }
         _write_json(raw_dir / "mapped.json", structured)
         review = build_review(dict(structured.get("data", {})), ranked)
@@ -541,17 +573,20 @@ def run(run_id: str) -> Path:
             "parse",
             "retrieve",
             "rerank",
-            "entities_figures",
+            "entities_original_10q",
+            "entities_restated_10ka",
             "entities_status",
-            "gliner2_figures",
+            "gliner2_original_10q",
+            "gliner2_restated_10ka",
             "gliner2_status",
-            "deterministic_table_mapping",
+            "source_specific_table_mapping",
+            "cross_filing_value_check",
             "deterministic_validation",
         ],
         "decision_boundary": (
-            "The review fails closed unless GLiNER recovers every source span, "
-            "GLiNER2 recovers all four table values and the filing-status span, and reranked evidence retains "
-            "Pathward's exact life-of-portfolio caveat."
+            "The review fails closed unless GLiNER and GLiNER2 recover source spans from both filing tables, "
+            "the original Form 10-Q values match the Form 10-K/A's previously reported column, and reranked "
+            "evidence retains the filing-status span and Pathward's exact life-of-portfolio caveat."
         ),
     }
     _write_json(run_dir / "manifest.json", manifest)

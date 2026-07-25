@@ -7,9 +7,9 @@
   "documented_face_to_face_age_months": 7,
   "overdue_by_months": 1,
   "submitted_documentation": {
-    "order": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
-    "medical_record": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
-    "proof_of_delivery": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago"
+    "order": "Standard written order with correct HCPCS coding",
+    "medical_record": "Treating practitioner's medical record that has adequate medical necessity information",
+    "proof_of_delivery": "Proof of delivery with face-to-face encounter 7 months ago"
   },
   "missing_documentation": [
     "face-to-face encounter within 6 months of proof of delivery"
@@ -24,22 +24,22 @@
   },
   "ranked_source_evidence": [
     {
-      "chunk_id": "chunk-8",
+      "chunk_id": "chunk-10",
       "rank": 0,
       "score": 0.9765625,
       "text": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment."
     },
     {
-      "chunk_id": "chunk-5",
+      "chunk_id": "chunk-3",
       "rank": 1,
-      "score": 0.91796875,
-      "text": "- Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago"
+      "score": 0.8671875,
+      "text": "## Example of Improper Payments Due to Insufficient Documentation for Lower Limb Orthoses"
     },
     {
-      "chunk_id": "chunk-3",
+      "chunk_id": "chunk-9",
       "rank": 2,
-      "score": 0.859375,
-      "text": "## Example of Improper Payments Due to Insufficient Documentation for Lower Limb Orthoses"
+      "score": 0.6796875,
+      "text": "The doctor didn't document the face-to-face encounter within 6 months of proof of delivery."
     },
     {
       "chunk_id": "chunk-4",
@@ -48,34 +48,46 @@
       "text": "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable flexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without varus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review contractor's request:"
     },
     {
-      "chunk_id": "chunk-7",
-      "rank": 4,
-      "score": 0.62109375,
-      "text": "The doctor didn't document the face-to-face encounter within 6 months of proof of delivery."
-    },
-    {
       "chunk_id": "chunk-2",
-      "rank": 5,
-      "score": 0.5625,
+      "rank": 4,
+      "score": 0.59375,
       "text": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS codes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before prescribing the item."
     },
     {
-      "chunk_id": "chunk-6",
-      "rank": 6,
-      "score": 0.181640625,
+      "chunk_id": "chunk-8",
+      "rank": 5,
+      "score": 0.173828125,
       "text": "### What Documentation Was Missing?"
     },
     {
-      "chunk_id": "chunk-0",
+      "chunk_id": "chunk-5",
+      "rank": 6,
+      "score": 0.1005859375,
+      "text": "- Standard written order with correct HCPCS coding"
+    },
+    {
+      "chunk_id": "chunk-7",
       "rank": 7,
-      "score": 0.00494384765625,
+      "score": 0.0419921875,
+      "text": "- Proof of delivery with face-to-face encounter 7 months ago"
+    },
+    {
+      "chunk_id": "chunk-0",
+      "rank": 8,
+      "score": 0.004364013671875,
       "text": "https://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/lower-limb-orthoses Page Last Modified: 02/11/2026 04:18 PM"
     },
     {
       "chunk_id": "chunk-1",
-      "rank": 8,
-      "score": 0.0025634765625,
+      "rank": 9,
+      "score": 0.0023956298828125,
       "text": "## Billing &amp; Coding Criteria"
+    },
+    {
+      "chunk_id": "chunk-6",
+      "rank": 10,
+      "score": 0.0012054443359375,
+      "text": "- Treating practitioner's medical record that has adequate medical necessity information"
     }
   ],
   "published_example": true,
