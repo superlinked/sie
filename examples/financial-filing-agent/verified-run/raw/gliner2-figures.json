@@ -1,0 +1,97 @@
+{
+  "entities": [
+    {
+      "text": "Three Months Ended June 30, 2023",
+      "label": "reporting period",
+      "score": 0.6220703125,
+      "start": 79,
+      "end": 111,
+      "bbox": null
+    },
+    {
+      "text": "$45,096",
+      "label": "previously reported net income",
+      "score": 0.6103515625,
+      "start": 704,
+      "end": 711,
+      "bbox": null
+    },
+    {
+      "text": "$45,096",
+      "label": "as restated net income",
+      "score": 0.57080078125,
+      "start": 704,
+      "end": 711,
+      "bbox": null
+    },
+    {
+      "text": "$36,080",
+      "label": "previously reported net income",
+      "score": 0.7138671875,
+      "start": 797,
+      "end": 804,
+      "bbox": null
+    },
+    {
+      "text": "$36,080",
+      "label": "as restated net income",
+      "score": 0.74462890625,
+      "start": 797,
+      "end": 804,
+      "bbox": null
+    },
+    {
+      "text": "$127,709",
+      "label": "as restated net income",
+      "score": 0.68310546875,
+      "start": 813,
+      "end": 821,
+      "bbox": null
+    },
+    {
+      "text": "$117,988",
+      "label": "as restated net income",
+      "score": 0.70703125,
+      "start": 906,
+      "end": 914,
+      "bbox": null
+    },
+    {
+      "text": "$1.68",
+      "label": "previously reported diluted EPS",
+      "score": 0.89599609375,
+      "start": 974,
+      "end": 979,
+      "bbox": null
+    },
+    {
+      "text": "$1.34",
+      "label": "previously reported diluted EPS",
+      "score": 0.85986328125,
+      "start": 1067,
+      "end": 1072,
+      "bbox": null
+    },
+    {
+      "text": "$4.62",
+      "label": "as restated diluted EPS",
+      "score": 0.67919921875,
+      "start": 1083,
+      "end": 1088,
+      "bbox": null
+    },
+    {
+      "text": "$4.27",
+      "label": "as restated diluted EPS",
+      "score": 0.798828125,
+      "start": 1176,
+      "end": 1181,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-restated-table-evidence",
+  "model": "fastino/gliner2-large-v1"
+}

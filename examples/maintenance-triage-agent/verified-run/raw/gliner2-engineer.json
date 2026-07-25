@@ -1,0 +1,33 @@
+{
+  "entities": [
+    {
+      "text": "stop the train",
+      "label": "operator action",
+      "score": 0.58251953125,
+      "start": 68,
+      "end": 82,
+      "bbox": null
+    },
+    {
+      "text": "slow the train",
+      "label": "operator action",
+      "score": 0.6806640625,
+      "start": 167,
+      "end": 181,
+      "bbox": null
+    },
+    {
+      "text": "8:54 p.m.",
+      "label": "event time",
+      "score": 0.99853515625,
+      "start": 189,
+      "end": 198,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-ntsb-engineer-evidence",
+  "model": "fastino/gliner2-large-v1"
+}

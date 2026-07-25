@@ -1,0 +1,45 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "name": "route",
+      "passed": true,
+      "detail": "superseded_figure"
+    },
+    {
+      "name": "net-income-delta",
+      "passed": true,
+      "detail": "{'value_millions': -9.016, 'diluted_eps': -0.34, 'percent': -20.0}"
+    },
+    {
+      "name": "eps-delta",
+      "passed": true,
+      "detail": "{'value_millions': -9.016, 'diluted_eps': -0.34, 'percent': -20.0}"
+    },
+    {
+      "name": "percent-delta",
+      "passed": true,
+      "detail": "{'value_millions': -9.016, 'diluted_eps': -0.34, 'percent': -20.0}"
+    },
+    {
+      "name": "source-lineage",
+      "passed": true,
+      "detail": "['2023-10q', '2025-8k-item-4-02', '2025-10ka']"
+    },
+    {
+      "name": "caveat-preserved",
+      "passed": true,
+      "detail": "The change from net to gross basis presentation does not impact net income over the life of the portfolio, but changes the timing of when elements of the programs are recognized for accounting purposes."
+    },
+    {
+      "name": "ranked-source-evidence",
+      "passed": true,
+      "detail": "['chunk-1', 'chunk-0', 'chunk-3', 'chunk-2']"
+    },
+    {
+      "name": "unsafe-claims-excluded",
+      "passed": true,
+      "detail": "fraud, investment recommendation, misconduct"
+    }
+  ]
+}

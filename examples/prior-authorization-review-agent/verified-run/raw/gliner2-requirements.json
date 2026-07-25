@@ -1,0 +1,57 @@
+{
+  "entities": [
+    {
+      "text": "prior authorization",
+      "label": "administrative requirement",
+      "score": 0.97314453125,
+      "start": 11,
+      "end": 30,
+      "bbox": null
+    },
+    {
+      "text": "written order",
+      "label": "administrative requirement",
+      "score": 0.92724609375,
+      "start": 62,
+      "end": 75,
+      "bbox": null
+    },
+    {
+      "text": "HCPCS codes L1832",
+      "label": "procedure code",
+      "score": 0.82421875,
+      "start": 98,
+      "end": 115,
+      "bbox": null
+    },
+    {
+      "text": "L1851",
+      "label": "procedure code",
+      "score": 0.72802734375,
+      "start": 120,
+      "end": 125,
+      "bbox": null
+    },
+    {
+      "text": "face-to-face encounter",
+      "label": "administrative requirement",
+      "score": 0.9580078125,
+      "start": 140,
+      "end": 162,
+      "bbox": null
+    },
+    {
+      "text": "6 months",
+      "label": "time requirement",
+      "score": 0.86474609375,
+      "start": 174,
+      "end": 182,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "cms-l1851-requirements",
+  "model": "fastino/gliner2-large-v1"
+}

@@ -1,0 +1,154 @@
+{
+  "route": "read_only_detector_trend_review",
+  "source": "NTSB Illustrated Digest SPC-24-06, printed pages 4\u20135",
+  "bearing": "L1",
+  "detector_readings": [
+    {
+      "location": "Sebring",
+      "time": "7:37 p.m.",
+      "degrees_f_above_ambient": 38,
+      "alert": "none"
+    },
+    {
+      "location": "Salem",
+      "time": "8:13 p.m.",
+      "degrees_f_above_ambient": 103,
+      "alert": "noncritical alert to the Wayside Help Desk, not the crew",
+      "camera_observation": "fire near the bearing"
+    },
+    {
+      "location": "East Palestine",
+      "time": "about 8:52 p.m.",
+      "degrees_f_above_ambient": 253,
+      "alert": "critical alarm broadcast in the locomotive cab"
+    }
+  ],
+  "trend": {
+    "successive_increases_degrees_f": [
+      65,
+      150
+    ],
+    "total_increase_degrees_f": 215,
+    "sebring_to_salem_minutes": 36,
+    "salem_to_east_palestine_minutes": 39
+  },
+  "engineer_action": "began slowing before 8:54 p.m.",
+  "derailment": {
+    "total_cars": 38,
+    "statement": "the hopper car and 37 others derailed as emergency braking activated"
+  },
+  "ntsb_cause_statement": "The East Palestine derailment began when an overheated bearing burned off the accident hopper car.",
+  "ranked_source_evidence": [
+    {
+      "chunk_id": "chunk-12",
+      "rank": 0,
+      "score": 0.94921875,
+      "text": "At 8:13 p.m. , at the Salem HBD, the reading for the L1 bearing was 103\u00b0F above ambient . This reading was high enough to trigger a noncritical alert to the Wayside Help Desk ( see box ), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing ( right ). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted."
+    },
+    {
+      "chunk_id": "chunk-1",
+      "rank": 1,
+      "score": 0.9375,
+      "text": "The East Palestine derailment began when an overheated bearing burned off the accident hopper car. Here is what you need to know about bearings, hot bearing detectors (HBDs), and what happened when the accident hopper car passed over the final three HBDs of the journey in the Ohio towns of Sebring, Salem, and East Palestine."
+    },
+    {
+      "chunk_id": "chunk-11",
+      "rank": 2,
+      "score": 0.91015625,
+      "text": "At 7:37 p.m. , at the Sebring HBD, the reading for the L1 bearing was only 38\u00b0F above ambient -not high enough to trigger an alert. The R1 bearing measured 20\u00b0F above ambient. But the L1 bearing was hotter."
+    },
+    {
+      "chunk_id": "chunk-4",
+      "rank": 3,
+      "score": 0.90625,
+      "text": "Bearings can go from below-alarm temperature to seized in less than a minute. In this accident, however, fire was first photographed near the L1 bearing by a surveillance camera in Salem, Ohio (right), 39 minutes before the train derailed in East Palestine."
+    },
+    {
+      "chunk_id": "chunk-13",
+      "rank": 4,
+      "score": 0.8359375,
+      "text": "About 8:52 p.m ., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253\u00b0F above ambient at the L1 bearing; bearing R1 remained at 20\u00b0F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab."
+    },
+    {
+      "chunk_id": "chunk-8",
+      "rank": 5,
+      "score": 0.46875,
+      "text": "1. HBDs (D) measure the temperature on the outside of the bearing cup. When a bearing heats up inside, it may take 30-60 minutes for the HBD to sense it from the outside. The HBD in Salem measured a temperature of only 103\u00b0 above ambient, despite the fact that the bearing was on fire. So, it generated an alert to the Wayside Help Desk, not an alarm to the train crew."
+    },
+    {
+      "chunk_id": "chunk-9",
+      "rank": 6,
+      "score": 0.37890625,
+      "text": "2. By the time the alarm sounded at the East Palestine HBD, the journal was worn down to a cone, and it was too late. The hopper car and 37 others derailed as the train's emergency braking system activated."
+    },
+    {
+      "chunk_id": "chunk-17",
+      "rank": 7,
+      "score": 0.08447265625,
+      "text": "In the East Palestine derailment, the alarm was received by the lead locomotive radio and broadcast over the in-cab speakers: ' Critical alarm, critical alarm, critical alarm. Norfolk Southern milepost 49.8, track 1 hotbox, axle 101, south rail. '"
+    },
+    {
+      "chunk_id": "chunk-7",
+      "rank": 8,
+      "score": 0.033203125,
+      "text": "## The undetected hot bearing burns off"
+    },
+    {
+      "chunk_id": "chunk-0",
+      "rank": 9,
+      "score": 0.0274658203125,
+      "text": "## When the bearing failed"
+    },
+    {
+      "chunk_id": "chunk-16",
+      "rank": 10,
+      "score": 0.013427734375,
+      "text": "The Wayside Help Desk in Atlanta, Georgia, monitors alerts from NS's HBDs. Critical alarms broadcast straight to the train crew. For noncritical alerts, the analyst monitors the train over HBDs it crosses later, paying attention to temperature trends. The single analyst on duty did not notice the Salem noncritical alert, as he dealt with higher-priority alerts. But if he did notice the alert, that would not have prevented the derailment. The analyst said that if he had seen the Salem HBD alert in real time, he would have followed NS rules and watched for alerts from HBDs it went over later. The next HBD the accident train went over was in East Palestine."
+    },
+    {
+      "chunk_id": "chunk-3",
+      "rank": 11,
+      "score": 0.01043701171875,
+      "text": "Overheated wheel bearings are the most common mechanical or electrical cause of rail accidents. Because overheated bearings are so dangerous, railroad tracks are equipped with HBDs, devices located along the track that measure the bearing's temperature relative to the ambient temperature (D) . Ambient temperature means the temperature outside. For example, the ambient temperature at Sebring, Ohio, was measured by a thermometer at the nearby signal bungalow."
+    },
+    {
+      "chunk_id": "chunk-5",
+      "rank": 12,
+      "score": 0.0086669921875,
+      "text": "The bearing that caused the accident hopper car to derail was its L1 bearing, which is on the right side of the car, facing the direction of travel."
+    },
+    {
+      "chunk_id": "chunk-10",
+      "rank": 13,
+      "score": 0.007171630859375,
+      "text": "## On fire but not 'critical'"
+    },
+    {
+      "chunk_id": "chunk-15",
+      "rank": 14,
+      "score": 0.006744384765625,
+      "text": "But it was too late; the hopper car and 37 others derailed as the train's emergency braking system activated."
+    },
+    {
+      "chunk_id": "chunk-2",
+      "rank": 15,
+      "score": 0.0005035400390625,
+      "text": "A bearing (A) fits around the end of a railcar axle. The part of the axle extending into the bearing is called the journal (B) . The bearing's roller components allow the journal to turn within the bearing with little friction. However, when a bearing fails, the resulting friction can be catastrophic. In East Palestine, the journal's cylindrical shape was worn down to a cone (C) . ( See box below .)"
+    },
+    {
+      "chunk_id": "chunk-14",
+      "rank": 16,
+      "score": 0.0003452301025390625,
+      "text": "Under NS rules, if a train's crew hears a critical alarm, they must stop the train right away and inspect the wheelset that triggered the alarm. The engineer began to slow the train before 8:54 p.m."
+    },
+    {
+      "chunk_id": "chunk-6",
+      "rank": 17,
+      "score": 1.150369644165039e-05,
+      "text": "Railcar axles are numbered starting from the end of the railcar with the brake wheel (the 'B end'). When the B end is in the front of the car (when it faces the direction of travel) the 'left-side' wheels and bearings are on the right."
+    }
+  ],
+  "new_causal_inferences": [],
+  "control_writes": [],
+  "safety_boundary": "Read-only reconstruction of the NTSB's published detector sequence."
+}

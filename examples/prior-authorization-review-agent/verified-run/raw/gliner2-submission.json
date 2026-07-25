@@ -1,0 +1,41 @@
+{
+  "entities": [
+    {
+      "text": "L1851",
+      "label": "procedure code",
+      "score": 0.99365234375,
+      "start": 31,
+      "end": 36,
+      "bbox": null
+    },
+    {
+      "text": "Treating practitioner's medical record",
+      "label": "submitted document",
+      "score": 0.52099609375,
+      "start": 400,
+      "end": 438,
+      "bbox": null
+    },
+    {
+      "text": "Proof of delivery",
+      "label": "submitted document",
+      "score": 0.69677734375,
+      "start": 489,
+      "end": 506,
+      "bbox": null
+    },
+    {
+      "text": "7 months ago",
+      "label": "time period",
+      "score": 0.9892578125,
+      "start": 535,
+      "end": 547,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "cms-l1851-submission",
+  "model": "fastino/gliner2-large-v1"
+}

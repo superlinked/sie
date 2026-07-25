@@ -1,0 +1,16 @@
+cluster:
+  url: "http://localhost:8080"
+  api_key: ""
+  provision_timeout_s: 900
+
+models:
+  parse: "docling"
+  retrieve: "BAAI/bge-m3"
+  rerank: "Qwen/Qwen3-Reranker-4B"
+  entities: "urchade/gliner_multi-v2.1"
+  extract: "fastino/gliner2-large-v1"
+
+review:
+  query: "For CMS's published L1851 example, what was required, what was submitted, what timing gap caused insufficient documentation, and what payment action followed?"
+  candidate_chunks: 12
+  top_k: 12

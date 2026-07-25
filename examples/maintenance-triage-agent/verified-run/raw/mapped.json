@@ -1,0 +1,97 @@
+{
+  "method": "Exact ranked NTSB fragments validated against GLiNER2 source spans",
+  "data": {
+    "bearing": "L1",
+    "sebring_time": "7:37 p.m.",
+    "sebring_temperature": "38\u00b0F above ambient",
+    "salem_time": "8:13 p.m.",
+    "salem_temperature": "103\u00b0F above ambient",
+    "east_palestine_temperature": "253\u00b0F above ambient",
+    "sebring_alert_status_text": "not high enough to trigger an alert",
+    "salem_alert_level_text": "noncritical alert",
+    "salem_alert_recipient_text": "Wayside Help Desk",
+    "salem_crew_notification_text": "not to the crew",
+    "salem_camera_observation_text": "fire near the bearing",
+    "east_palestine_alert_text": "critical alarm, which was broadcast in the locomotive cab",
+    "engineer_action": "The engineer began to slow the train before 8:54 p.m.",
+    "derailment_statement": "The hopper car and 37 others derailed as the train's emergency braking system activated",
+    "cause_statement": "The East Palestine derailment began when an overheated bearing burned off the accident hopper car."
+  },
+  "source_scopes": {
+    "bearing": {
+      "stage": "sebring",
+      "chunk_id": "chunk-11",
+      "source_sha256": "152e2342c0b6d57c1cc619bda3976958dc467e1f83964fe8c055d313ccea502d"
+    },
+    "sebring_time": {
+      "stage": "sebring",
+      "chunk_id": "chunk-11",
+      "source_sha256": "152e2342c0b6d57c1cc619bda3976958dc467e1f83964fe8c055d313ccea502d"
+    },
+    "sebring_temperature": {
+      "stage": "sebring",
+      "chunk_id": "chunk-11",
+      "source_sha256": "152e2342c0b6d57c1cc619bda3976958dc467e1f83964fe8c055d313ccea502d"
+    },
+    "sebring_alert_status_text": {
+      "stage": "sebring",
+      "chunk_id": "chunk-11",
+      "source_sha256": "152e2342c0b6d57c1cc619bda3976958dc467e1f83964fe8c055d313ccea502d"
+    },
+    "salem_time": {
+      "stage": "salem",
+      "chunk_id": "chunk-12",
+      "source_sha256": "864d80e2d7aec89dcbdca6e30ef034f32f7be9f733c667394f6119e414496eac"
+    },
+    "salem_temperature": {
+      "stage": "salem",
+      "chunk_id": "chunk-12",
+      "source_sha256": "864d80e2d7aec89dcbdca6e30ef034f32f7be9f733c667394f6119e414496eac"
+    },
+    "salem_alert_level_text": {
+      "stage": "salem",
+      "chunk_id": "chunk-12",
+      "source_sha256": "864d80e2d7aec89dcbdca6e30ef034f32f7be9f733c667394f6119e414496eac"
+    },
+    "salem_alert_recipient_text": {
+      "stage": "salem",
+      "chunk_id": "chunk-12",
+      "source_sha256": "864d80e2d7aec89dcbdca6e30ef034f32f7be9f733c667394f6119e414496eac"
+    },
+    "salem_crew_notification_text": {
+      "stage": "salem",
+      "chunk_id": "chunk-12",
+      "source_sha256": "864d80e2d7aec89dcbdca6e30ef034f32f7be9f733c667394f6119e414496eac"
+    },
+    "salem_camera_observation_text": {
+      "stage": "salem",
+      "chunk_id": "chunk-12",
+      "source_sha256": "864d80e2d7aec89dcbdca6e30ef034f32f7be9f733c667394f6119e414496eac"
+    },
+    "east_palestine_temperature": {
+      "stage": "east_palestine",
+      "chunk_id": "chunk-13",
+      "source_sha256": "e78d51724d0ebbce9b68971491aff2b20d24bf0e2dca2f0c86a963e87c89c825"
+    },
+    "east_palestine_alert_text": {
+      "stage": "east_palestine",
+      "chunk_id": "chunk-13",
+      "source_sha256": "e78d51724d0ebbce9b68971491aff2b20d24bf0e2dca2f0c86a963e87c89c825"
+    },
+    "engineer_action": {
+      "stage": "outcome",
+      "chunk_id": "chunk-1,chunk-9,chunk-14,chunk-15",
+      "source_sha256": "94a34efc3a9681e9c70502a0aa96853d143bacb2bee3bf38d4ec4992c926c77a"
+    },
+    "derailment_statement": {
+      "stage": "outcome",
+      "chunk_id": "chunk-1,chunk-9,chunk-14,chunk-15",
+      "source_sha256": "94a34efc3a9681e9c70502a0aa96853d143bacb2bee3bf38d4ec4992c926c77a"
+    },
+    "cause_statement": {
+      "stage": "outcome",
+      "chunk_id": "chunk-1,chunk-9,chunk-14,chunk-15",
+      "source_sha256": "94a34efc3a9681e9c70502a0aa96853d143bacb2bee3bf38d4ec4992c926c77a"
+    }
+  }
+}

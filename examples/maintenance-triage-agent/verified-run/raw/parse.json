@@ -1,0 +1,2513 @@
+{
+  "entities": [],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ntsb-east-palestine-bearing-spread",
+  "data": {
+    "text": "When the bearing failed\n\nThe East Palestine derailment began when an overheated bearing burned off the accident hopper car. Here is what you need to know about bearings, hot bearing detectors (HBDs), and what happened when the accident hopper car passed over the final three HBDs of the journey in the Ohio towns of Sebring, Salem, and East Palestine.\n\nAll about bearings\n\nBearings 101\n\nA bearing (A) fits around the end of a railcar axle. The part of the axle extending into the bearing is called the journal (B) . The bearing's roller components allow the journal to turn within the bearing with little friction. However, when a bearing fails, the resulting friction can be catastrophic. In East Palestine, the journal's cylindrical shape was worn down to a cone (C) . ( See box below .)\n\nHot bearing detectors\n\nOverheated wheel bearings are the most common mechanical or electrical cause of rail accidents. Because overheated bearings are so dangerous, railroad tracks are equipped with HBDs, devices located along the track that measure the bearing's temperature relative to the ambient temperature (D) . Ambient temperature means the temperature outside. For example, the ambient temperature at Sebring, Ohio, was measured by a thermometer at the nearby signal bungalow.\n\nBearings can go from below-alarm temperature to seized in less than a minute. In this accident, however, fire was first photographed near the L1 bearing by a surveillance camera in Salem, Ohio (right), 39 minutes before the train derailed in East Palestine.\n\nThe L1 bearing\n\nThe bearing that caused the accident hopper car to derail was its L1 bearing, which is on the right side of the car, facing the direction of travel.\n\nRailcar axles are numbered starting from the end of the railcar with the brake wheel (the 'B end'). When the B end is in the front of the car (when it faces the direction of travel) the 'left-side' wheels and bearings are on the right.\n\nThe undetected hot bearing burns off\n\n1. HBDs (D) measure the temperature on the outside of the bearing cup. When a bearing heats up inside, it may take 30-60 minutes for the HBD to sense it from the outside. The HBD in Salem measured a temperature of only 103\u00b0 above ambient, despite the fact that the bearing was on fire. So, it generated an alert to the Wayside Help Desk, not an alarm to the train crew.\n\n2. By the time the alarm sounded at the East Palestine HBD, the journal was worn down to a cone, and it was too late. The hopper car and 37 others derailed as the train's emergency braking system activated.\n\nOn fire but not 'critical'\n\nSebring\n\nAt 7:37 p.m. , at the Sebring HBD, the reading for the L1 bearing was only 38\u00b0F above ambient -not high enough to trigger an alert. The R1 bearing measured 20\u00b0F above ambient. But the L1 bearing was hotter.\n\nSalem\n\nAt 8:13 p.m. , at the Salem HBD, the reading for the L1 bearing was 103\u00b0F above ambient . This reading was high enough to trigger a noncritical alert to the Wayside Help Desk ( see box ), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing ( right ). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted.\n\nEast Palestine\n\nAbout 8:52 p.m ., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253\u00b0F above ambient at the L1 bearing; bearing R1 remained at 20\u00b0F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab.\n\nUnder NS rules, if a train's crew hears a critical alarm, they must stop the train right away and inspect the wheelset that triggered the alarm. The engineer began to slow the train before 8:54 p.m.\n\nBut it was too late; the hopper car and 37 others derailed as the train's emergency braking system activated.\n\nThe Wayside Help Desk\n\nThe Wayside Help Desk in Atlanta, Georgia, monitors alerts from NS's HBDs. Critical alarms broadcast straight to the train crew. For noncritical alerts, the analyst monitors the train over HBDs it crosses later, paying attention to temperature trends. The single analyst on duty did not notice the Salem noncritical alert, as he dealt with higher-priority alerts. But if he did notice the alert, that would not have prevented the derailment. The analyst said that if he had seen the Salem HBD alert in real time, he would have followed NS rules and watched for alerts from HBDs it went over later. The next HBD the accident train went over was in East Palestine.\n\nIn the East Palestine derailment, the alarm was received by the lead locomotive radio and broadcast over the in-cab speakers: ' Critical alarm, critical alarm, critical alarm. Norfolk Southern milepost 49.8, track 1 hotbox, axle 101, south rail. '",
+    "markdown": "## When the bearing failed\n\nThe East Palestine derailment began when an overheated bearing burned off the accident hopper car. Here is what you need to know about bearings, hot bearing detectors (HBDs), and what happened when the accident hopper car passed over the final three HBDs of the journey in the Ohio towns of Sebring, Salem, and East Palestine.\n\n## All about bearings\n\n## Bearings 101\n\nA bearing (A) fits around the end of a railcar axle. The part of the axle extending into the bearing is called the journal (B) . The bearing's roller components allow the journal to turn within the bearing with little friction. However, when a bearing fails, the resulting friction can be catastrophic. In East Palestine, the journal's cylindrical shape was worn down to a cone (C) . ( See box below .)\n\n## Hot bearing detectors\n\nOverheated wheel bearings are the most common mechanical or electrical cause of rail accidents. Because overheated bearings are so dangerous, railroad tracks are equipped with HBDs, devices located along the track that measure the bearing's temperature relative to the ambient temperature (D) . Ambient temperature means the temperature outside. For example, the ambient temperature at Sebring, Ohio, was measured by a thermometer at the nearby signal bungalow.\n\nBearings can go from below-alarm temperature to seized in less than a minute. In this accident, however, fire was first photographed near the L1 bearing by a surveillance camera in Salem, Ohio (right), 39 minutes before the train derailed in East Palestine.\n\n## The L1 bearing\n\nThe bearing that caused the accident hopper car to derail was its L1 bearing, which is on the right side of the car, facing the direction of travel.\n\nRailcar axles are numbered starting from the end of the railcar with the brake wheel (the 'B end'). When the B end is in the front of the car (when it faces the direction of travel) the 'left-side' wheels and bearings are on the right.\n\n<!-- image -->\n\n## The undetected hot bearing burns off\n\n1. HBDs (D) measure the temperature on the outside of the bearing cup. When a bearing heats up inside, it may take 30-60 minutes for the HBD to sense it from the outside. The HBD in Salem measured a temperature of only 103\u00b0 above ambient, despite the fact that the bearing was on fire. So, it generated an alert to the Wayside Help Desk, not an alarm to the train crew.\n\n2. By the time the alarm sounded at the East Palestine HBD, the journal was worn down to a cone, and it was too late. The hopper car and 37 others derailed as the train's emergency braking system activated.\n\n<!-- image -->\n\n## On fire but not 'critical'\n\n## Sebring\n\nAt 7:37 p.m. , at the Sebring HBD, the reading for the L1 bearing was only 38\u00b0F above ambient -not high enough to trigger an alert. The R1 bearing measured 20\u00b0F above ambient. But the L1 bearing was hotter.\n\n## Salem\n\nAt 8:13 p.m. , at the Salem HBD, the reading for the L1 bearing was 103\u00b0F above ambient . This reading was high enough to trigger a noncritical alert to the Wayside Help Desk ( see box ), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing ( right ). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted.\n\n## East Palestine\n\nAbout 8:52 p.m ., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253\u00b0F above ambient at the L1 bearing; bearing R1 remained at 20\u00b0F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab.\n\nUnder NS rules, if a train's crew hears a critical alarm, they must stop the train right away and inspect the wheelset that triggered the alarm. The engineer began to slow the train before 8:54 p.m.\n\nBut it was too late; the hopper car and 37 others derailed as the train's emergency braking system activated.\n\n<!-- image -->\n\n<!-- image -->\n\n<!-- image -->\n\n## The Wayside Help Desk\n\nThe Wayside Help Desk in Atlanta, Georgia, monitors alerts from NS's HBDs. Critical alarms broadcast straight to the train crew. For noncritical alerts, the analyst monitors the train over HBDs it crosses later, paying attention to temperature trends. The single analyst on duty did not notice the Salem noncritical alert, as he dealt with higher-priority alerts. But if he did notice the alert, that would not have prevented the derailment. The analyst said that if he had seen the Salem HBD alert in real time, he would have followed NS rules and watched for alerts from HBDs it went over later. The next HBD the accident train went over was in East Palestine.\n\nIn the East Palestine derailment, the alarm was received by the lead locomotive radio and broadcast over the in-cab speakers: ' Critical alarm, critical alarm, critical alarm. Norfolk Southern milepost 49.8, track 1 hotbox, axle 101, south rail. '\n\n<!-- image -->",
+    "document": {
+      "schema_name": "DoclingDocument",
+      "version": "1.10.0",
+      "name": "document",
+      "origin": {
+        "mimetype": "application/pdf",
+        "binary_hash": 17308852665820571850,
+        "filename": "document.pdf"
+      },
+      "furniture": {
+        "self_ref": "#/furniture",
+        "children": [],
+        "content_layer": "furniture",
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "body": {
+        "self_ref": "#/body",
+        "children": [
+          {
+            "$ref": "#/texts/0"
+          },
+          {
+            "$ref": "#/texts/1"
+          },
+          {
+            "$ref": "#/texts/2"
+          },
+          {
+            "$ref": "#/texts/3"
+          },
+          {
+            "$ref": "#/texts/4"
+          },
+          {
+            "$ref": "#/texts/5"
+          },
+          {
+            "$ref": "#/texts/6"
+          },
+          {
+            "$ref": "#/texts/7"
+          },
+          {
+            "$ref": "#/texts/8"
+          },
+          {
+            "$ref": "#/texts/9"
+          },
+          {
+            "$ref": "#/texts/10"
+          },
+          {
+            "$ref": "#/pictures/0"
+          },
+          {
+            "$ref": "#/texts/15"
+          },
+          {
+            "$ref": "#/texts/16"
+          },
+          {
+            "$ref": "#/texts/17"
+          },
+          {
+            "$ref": "#/pictures/1"
+          },
+          {
+            "$ref": "#/texts/25"
+          },
+          {
+            "$ref": "#/texts/26"
+          },
+          {
+            "$ref": "#/texts/27"
+          },
+          {
+            "$ref": "#/texts/28"
+          },
+          {
+            "$ref": "#/texts/29"
+          },
+          {
+            "$ref": "#/texts/30"
+          },
+          {
+            "$ref": "#/texts/31"
+          },
+          {
+            "$ref": "#/texts/32"
+          },
+          {
+            "$ref": "#/texts/33"
+          },
+          {
+            "$ref": "#/pictures/2"
+          },
+          {
+            "$ref": "#/pictures/3"
+          },
+          {
+            "$ref": "#/pictures/4"
+          },
+          {
+            "$ref": "#/texts/68"
+          },
+          {
+            "$ref": "#/texts/69"
+          },
+          {
+            "$ref": "#/texts/70"
+          },
+          {
+            "$ref": "#/pictures/5"
+          },
+          {
+            "$ref": "#/texts/71"
+          },
+          {
+            "$ref": "#/texts/72"
+          },
+          {
+            "$ref": "#/texts/73"
+          },
+          {
+            "$ref": "#/texts/74"
+          }
+        ],
+        "content_layer": "body",
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "groups": [],
+      "texts": [
+        {
+          "self_ref": "#/texts/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 46.8,
+                "t": 564.4200000000001,
+                "r": 259.82,
+                "b": 546.4611206896552,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                23
+              ]
+            }
+          ],
+          "orig": "When the bearing failed",
+          "text": "When the bearing failed",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/1",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 46.8,
+                "t": 536.769,
+                "r": 384.38100000000094,
+                "b": 492.6875043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                326
+              ]
+            }
+          ],
+          "orig": "The East Palestine derailment began when an overheated bearing burned off the accident hopper car. Here is what you need to know about bearings, hot bearing detectors (HBDs), and what happened when the accident hopper car passed over the final three HBDs of the journey in the Ohio towns of Sebring, Salem, and East Palestine.",
+          "text": "The East Palestine derailment began when an overheated bearing burned off the accident hopper car. Here is what you need to know about bearings, hot bearing detectors (HBDs), and what happened when the accident hopper car passed over the final three HBDs of the journey in the Ohio towns of Sebring, Salem, and East Palestine."
+        },
+        {
+          "self_ref": "#/texts/2",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 46.8,
+                "t": 479.535,
+                "r": 169.46999999999997,
+                "b": 466.0658405172414,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                18
+              ]
+            }
+          ],
+          "orig": "All about bearings",
+          "text": "All about bearings",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/3",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 46.8,
+                "t": 454.269,
+                "r": 100.449,
+                "b": 446.1875043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                12
+              ]
+            }
+          ],
+          "orig": "Bearings 101",
+          "text": "Bearings 101",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/4",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 46.8,
+                "t": 437.769,
+                "r": 387.6777000000003,
+                "b": 381.6875043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                402
+              ]
+            }
+          ],
+          "orig": "A bearing (A) fits around the end of a railcar axle. The part of the axle extending into the bearing is called the journal (B) . The bearing's roller components allow the journal to turn within the bearing with little friction. However, when a bearing fails, the resulting friction can be catastrophic. In East Palestine, the journal's cylindrical shape was worn down to a cone (C) . ( See box below .)",
+          "text": "A bearing (A) fits around the end of a railcar axle. The part of the axle extending into the bearing is called the journal (B) . The bearing's roller components allow the journal to turn within the bearing with little friction. However, when a bearing fails, the resulting friction can be catastrophic. In East Palestine, the journal's cylindrical shape was worn down to a cone (C) . ( See box below .)"
+        },
+        {
+          "self_ref": "#/texts/5",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 46.8,
+                "t": 373.269,
+                "r": 134.8146,
+                "b": 365.1875043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                21
+              ]
+            }
+          ],
+          "orig": "Hot bearing detectors",
+          "text": "Hot bearing detectors",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/6",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 46.8,
+                "t": 356.769,
+                "r": 380.7522000000002,
+                "b": 288.6875043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                461
+              ]
+            }
+          ],
+          "orig": "Overheated wheel bearings are the most common mechanical or electrical cause of rail accidents. Because overheated bearings are so dangerous, railroad tracks are equipped with HBDs, devices located along the track that measure the bearing's temperature relative to the ambient temperature (D) . Ambient temperature means the temperature outside. For example, the ambient temperature at Sebring, Ohio, was measured by a thermometer at the nearby signal bungalow.",
+          "text": "Overheated wheel bearings are the most common mechanical or electrical cause of rail accidents. Because overheated bearings are so dangerous, railroad tracks are equipped with HBDs, devices located along the track that measure the bearing's temperature relative to the ambient temperature (D) . Ambient temperature means the temperature outside. For example, the ambient temperature at Sebring, Ohio, was measured by a thermometer at the nearby signal bungalow."
+        },
+        {
+          "self_ref": "#/texts/7",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 405.0,
+                "t": 536.769,
+                "r": 747.4463999999987,
+                "b": 504.6875043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                257
+              ]
+            }
+          ],
+          "orig": "Bearings can go from below-alarm temperature to seized in less than a minute. In this accident, however, fire was first photographed near the L1 bearing by a surveillance camera in Salem, Ohio (right), 39 minutes before the train derailed in East Palestine.",
+          "text": "Bearings can go from below-alarm temperature to seized in less than a minute. In this accident, however, fire was first photographed near the L1 bearing by a surveillance camera in Salem, Ohio (right), 39 minutes before the train derailed in East Palestine."
+        },
+        {
+          "self_ref": "#/texts/8",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 405.0,
+                "t": 491.769,
+                "r": 465.6150000000001,
+                "b": 483.6875043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                14
+              ]
+            }
+          ],
+          "orig": "The L1 bearing",
+          "text": "The L1 bearing",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/9",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 405.0,
+                "t": 475.269,
+                "r": 545.7308,
+                "b": 419.1875043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                148
+              ]
+            }
+          ],
+          "orig": "The bearing that caused the accident hopper car to derail was its L1 bearing, which is on the right side of the car, facing the direction of travel.",
+          "text": "The bearing that caused the accident hopper car to derail was its L1 bearing, which is on the right side of the car, facing the direction of travel."
+        },
+        {
+          "self_ref": "#/texts/10",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 405.0,
+                "t": 410.769,
+                "r": 548.5022999999999,
+                "b": 330.6875043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                235
+              ]
+            }
+          ],
+          "orig": "Railcar axles are numbered starting from the end of the railcar with the brake wheel (the 'B end'). When the B end is in the front of the car (when it faces the direction of travel) the 'left-side' wheels and bearings are on the right.",
+          "text": "Railcar axles are numbered starting from the end of the railcar with the brake wheel (the 'B end'). When the B end is in the front of the car (when it faces the direction of travel) the 'left-side' wheels and bearings are on the right."
+        },
+        {
+          "self_ref": "#/texts/11",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 686.3698,
+                "t": 375.2054468,
+                "r": 713.4175756000001,
+                "b": 365.23934631551725,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                6
+              ]
+            }
+          ],
+          "orig": "Axle 1",
+          "text": "Axle 1"
+        },
+        {
+          "self_ref": "#/texts/12",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 624.2781,
+                "t": 375.2054468,
+                "r": 651.3258756,
+                "b": 365.23934631551725,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                6
+              ]
+            }
+          ],
+          "orig": "Axle 2",
+          "text": "Axle 2"
+        },
+        {
+          "self_ref": "#/texts/13",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 695.1237,
+                "t": 330.3484468,
+                "r": 705.612066,
+                "b": 320.3823463155172,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                2
+              ]
+            }
+          ],
+          "orig": "L1",
+          "text": "L1"
+        },
+        {
+          "self_ref": "#/texts/14",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 593.0918,
+                "t": 488.4558,
+                "r": 667.5128000000003,
+                "b": 480.3743043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                19
+              ]
+            }
+          ],
+          "orig": "Direction of travel",
+          "text": "Direction of travel",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/15",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 58.32,
+                "t": 263.6853,
+                "r": 314.595,
+                "b": 250.21614051724134,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                36
+              ]
+            }
+          ],
+          "orig": "The undetected hot bearing burns off",
+          "text": "The undetected hot bearing burns off",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/16",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 58.32,
+                "t": 238.2726,
+                "r": 235.04399999999987,
+                "b": 131.19110431034483,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                369
+              ]
+            }
+          ],
+          "orig": "1. HBDs (D) measure the temperature on the outside of the bearing cup. When a bearing heats up inside, it may take 30-60 minutes for the HBD to sense it from the outside. The HBD in Salem measured a temperature of only 103\u00b0 above ambient, despite the fact that the bearing was on fire. So, it generated an alert to the Wayside Help Desk, not an alarm to the train crew.",
+          "text": "1. HBDs (D) measure the temperature on the outside of the bearing cup. When a bearing heats up inside, it may take 30-60 minutes for the HBD to sense it from the outside. The HBD in Salem measured a temperature of only 103\u00b0 above ambient, despite the fact that the bearing was on fire. So, it generated an alert to the Wayside Help Desk, not an alarm to the train crew."
+        },
+        {
+          "self_ref": "#/texts/17",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 58.32,
+                "t": 123.77260000000001,
+                "r": 232.73099999999982,
+                "b": 60.691104310344826,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                206
+              ]
+            }
+          ],
+          "orig": "2. By the time the alarm sounded at the East Palestine HBD, the journal was worn down to a cone, and it was too late. The hopper car and 37 others derailed as the train's emergency braking system activated.",
+          "text": "2. By the time the alarm sounded at the East Palestine HBD, the journal was worn down to a cone, and it was too late. The hopper car and 37 others derailed as the train's emergency braking system activated."
+        },
+        {
+          "self_ref": "#/texts/18",
+          "parent": {
+            "$ref": "#/pictures/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 672.4547,
+                "t": 208.7127292,
+                "r": 690.1383808,
+                "b": 199.44846171896552,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                4
+              ]
+            }
+          ],
+          "orig": "Axle",
+          "text": "Axle"
+        },
+        {
+          "self_ref": "#/texts/19",
+          "parent": {
+            "$ref": "#/pictures/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 564.619,
+                "t": 79.17139999999995,
+                "r": 572.419,
+                "b": 68.39607241379304,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                1
+              ]
+            }
+          ],
+          "orig": "D",
+          "text": "D"
+        },
+        {
+          "self_ref": "#/texts/20",
+          "parent": {
+            "$ref": "#/pictures/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 493.468,
+                "t": 206.67275240000004,
+                "r": 509.2169176,
+                "b": 198.42208406724137,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                4
+              ]
+            }
+          ],
+          "orig": "Axle",
+          "text": "Axle"
+        },
+        {
+          "self_ref": "#/texts/21",
+          "parent": {
+            "$ref": "#/pictures/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 493.468,
+                "t": 102.58355240000003,
+                "r": 509.2169176,
+                "b": 94.33288406724137,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                4
+              ]
+            }
+          ],
+          "orig": "Axle",
+          "text": "Axle"
+        },
+        {
+          "self_ref": "#/texts/22",
+          "parent": {
+            "$ref": "#/pictures/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 360.686,
+                "t": 233.1465,
+                "r": 368.342,
+                "b": 222.3711724137931,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                1
+              ]
+            }
+          ],
+          "orig": "B",
+          "text": "B"
+        },
+        {
+          "self_ref": "#/texts/23",
+          "parent": {
+            "$ref": "#/pictures/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 292.76,
+                "t": 233.1465,
+                "r": 300.836,
+                "b": 222.3711724137931,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                1
+              ]
+            }
+          ],
+          "orig": "A",
+          "text": "A"
+        },
+        {
+          "self_ref": "#/texts/24",
+          "parent": {
+            "$ref": "#/pictures/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 328.9302,
+                "t": 145.08720000000005,
+                "r": 336.7782,
+                "b": 134.31187241379314,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                1
+              ]
+            }
+          ],
+          "orig": "C",
+          "text": "C"
+        },
+        {
+          "self_ref": "#/texts/25",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 839.4709,
+                "t": 535.6673,
+                "r": 997.5229000000005,
+                "b": 522.1981405172414,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                26
+              ]
+            }
+          ],
+          "orig": "On fire but not 'critical'",
+          "text": "On fire but not 'critical'",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/26",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 838.8,
+                "t": 511.2363,
+                "r": 870.1199999999999,
+                "b": 503.15480431034484,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "Sebring",
+          "text": "Sebring",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/27",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 838.8,
+                "t": 494.7363,
+                "r": 1048.473899999999,
+                "b": 450.65480431034484,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                206
+              ]
+            }
+          ],
+          "orig": "At 7:37 p.m. , at the Sebring HBD, the reading for the L1 bearing was only 38\u00b0F above ambient -not high enough to trigger an alert. The R1 bearing measured 20\u00b0F above ambient. But the L1 bearing was hotter.",
+          "text": "At 7:37 p.m. , at the Sebring HBD, the reading for the L1 bearing was only 38\u00b0F above ambient -not high enough to trigger an alert. The R1 bearing measured 20\u00b0F above ambient. But the L1 bearing was hotter."
+        },
+        {
+          "self_ref": "#/texts/28",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 838.8,
+                "t": 440.9763,
+                "r": 864.2069999999999,
+                "b": 432.8948043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                5
+              ]
+            }
+          ],
+          "orig": "Salem",
+          "text": "Salem",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/29",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 838.8,
+                "t": 424.4763,
+                "r": 1060.3187999999984,
+                "b": 344.3948043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                385
+              ]
+            }
+          ],
+          "orig": "At 8:13 p.m. , at the Salem HBD, the reading for the L1 bearing was 103\u00b0F above ambient . This reading was high enough to trigger a noncritical alert to the Wayside Help Desk ( see box ), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing ( right ). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted.",
+          "text": "At 8:13 p.m. , at the Salem HBD, the reading for the L1 bearing was 103\u00b0F above ambient . This reading was high enough to trigger a noncritical alert to the Wayside Help Desk ( see box ), but not to the crew. A surveillance camera picture from Salem showed fire near the bearing ( right ). Surveillance cameras in Sebring also captured images of the train, and no anomalies were noted."
+        },
+        {
+          "self_ref": "#/texts/30",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 838.8,
+                "t": 334.7163,
+                "r": 896.3945999999999,
+                "b": 326.6348043103448,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                14
+              ]
+            }
+          ],
+          "orig": "East Palestine",
+          "text": "East Palestine",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/31",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 838.8,
+                "t": 318.2163,
+                "r": 1059.4389999999994,
+                "b": 250.13490431034484,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                296
+              ]
+            }
+          ],
+          "orig": "About 8:52 p.m ., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253\u00b0F above ambient at the L1 bearing; bearing R1 remained at 20\u00b0F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab.",
+          "text": "About 8:52 p.m ., the train went over the East Palestine HBD. Less than a minute later, the HBD recorded a temperature of 253\u00b0F above ambient at the L1 bearing; bearing R1 remained at 20\u00b0F above ambient. The HBD immediately transmitted a critical alarm, which was broadcast in the locomotive cab."
+        },
+        {
+          "self_ref": "#/texts/32",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 838.8,
+                "t": 241.71640000000002,
+                "r": 1058.4899999999977,
+                "b": 197.63490431034484,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                198
+              ]
+            }
+          ],
+          "orig": "Under NS rules, if a train's crew hears a critical alarm, they must stop the train right away and inspect the wheelset that triggered the alarm. The engineer began to slow the train before 8:54 p.m.",
+          "text": "Under NS rules, if a train's crew hears a critical alarm, they must stop the train right away and inspect the wheelset that triggered the alarm. The engineer began to slow the train before 8:54 p.m."
+        },
+        {
+          "self_ref": "#/texts/33",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 838.8,
+                "t": 189.21640000000002,
+                "r": 1059.8229000000015,
+                "b": 169.13490431034484,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                109
+              ]
+            }
+          ],
+          "orig": "But it was too late; the hopper car and 37 others derailed as the train's emergency braking system activated.",
+          "text": "But it was too late; the hopper car and 37 others derailed as the train's emergency braking system activated."
+        },
+        {
+          "self_ref": "#/texts/34",
+          "parent": {
+            "$ref": "#/pictures/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 833.9872,
+                "t": 133.88260000000002,
+                "r": 868.7184,
+                "b": 126.69904827586208,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                8
+              ]
+            }
+          ],
+          "orig": "Exemplar",
+          "text": "Exemplar"
+        },
+        {
+          "self_ref": "#/texts/35",
+          "parent": {
+            "$ref": "#/pictures/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 830.1044,
+                "t": 123.88260000000002,
+                "r": 871.6004000000001,
+                "b": 116.69904827586208,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                11
+              ]
+            }
+          ],
+          "orig": "hot bearing",
+          "text": "hot bearing"
+        },
+        {
+          "self_ref": "#/texts/36",
+          "parent": {
+            "$ref": "#/pictures/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 829.4618,
+                "t": 113.88260000000002,
+                "r": 860.4681999999999,
+                "b": 106.69904827586208,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                8
+              ]
+            }
+          ],
+          "orig": "detector",
+          "text": "detector"
+        },
+        {
+          "self_ref": "#/texts/37",
+          "parent": {
+            "$ref": "#/pictures/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 860.4735,
+                "t": 113.88260000000002,
+                "r": 871.3054999999999,
+                "b": 106.69904827586208,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                3
+              ]
+            }
+          ],
+          "orig": "(D)",
+          "text": "(D)"
+        },
+        {
+          "self_ref": "#/texts/38",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1103.283,
+                "t": 459.9460169,
+                "r": 1132.6282367999997,
+                "b": 451.13907228060344,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "Sebring",
+          "text": "Sebring"
+        },
+        {
+          "self_ref": "#/texts/39",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1221.517,
+                "t": 437.8684169,
+                "r": 1245.5365470999998,
+                "b": 429.0614722806034,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                5
+              ]
+            }
+          ],
+          "orig": "Salem",
+          "text": "Salem"
+        },
+        {
+          "self_ref": "#/texts/40",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1429.238,
+                "t": 377.7558169,
+                "r": 1484.3319166699998,
+                "b": 368.94887228060344,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                14
+              ]
+            }
+          ],
+          "orig": "East Palestine",
+          "text": "East Palestine"
+        },
+        {
+          "self_ref": "#/texts/41",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1348.1992890000001,
+                "t": 530.5634069000001,
+                "r": 1403.0269928239652,
+                "b": 523.5108815633621,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                19
+              ]
+            }
+          ],
+          "orig": "Direction of travel",
+          "text": "Direction of travel"
+        },
+        {
+          "self_ref": "#/texts/42",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1128.258,
+                "t": 522.8016169,
+                "r": 1145.2943223,
+                "b": 513.9946722806035,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                3
+              ]
+            }
+          ],
+          "orig": "HBD",
+          "text": "HBD"
+        },
+        {
+          "self_ref": "#/texts/43",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1120.676,
+                "t": 511.0321169,
+                "r": 1152.8851436,
+                "b": 502.22517228060343,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "MP 79.8",
+          "text": "MP 79.8"
+        },
+        {
+          "self_ref": "#/texts/44",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1117.959,
+                "t": 497.3011169,
+                "r": 1155.5919123000003,
+                "b": 488.49417228060344,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                9
+              ]
+            }
+          ],
+          "orig": "7:37 p.m.",
+          "text": "7:37 p.m."
+        },
+        {
+          "self_ref": "#/texts/45",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1256.737,
+                "t": 522.8016169,
+                "r": 1273.7733223,
+                "b": 513.9946722806035,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                3
+              ]
+            }
+          ],
+          "orig": "HBD",
+          "text": "HBD"
+        },
+        {
+          "self_ref": "#/texts/46",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1246.733,
+                "t": 511.0321169,
+                "r": 1283.7872462,
+                "b": 502.22517228060343,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                8
+              ]
+            }
+          ],
+          "orig": "MP 69.01",
+          "text": "MP 69.01"
+        },
+        {
+          "self_ref": "#/texts/47",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1246.439,
+                "t": 497.3011169,
+                "r": 1284.0719123000003,
+                "b": 488.49417228060344,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                9
+              ]
+            }
+          ],
+          "orig": "8:13 p.m.",
+          "text": "8:13 p.m."
+        },
+        {
+          "self_ref": "#/texts/48",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1481.912,
+                "t": 522.8016169,
+                "r": 1498.9483223,
+                "b": 513.9946722806035,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                3
+              ]
+            }
+          ],
+          "orig": "HBD",
+          "text": "HBD"
+        },
+        {
+          "self_ref": "#/texts/49",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1471.908,
+                "t": 511.0321169,
+                "r": 1508.9622462,
+                "b": 502.22517228060343,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                8
+              ]
+            }
+          ],
+          "orig": "MP 49.81",
+          "text": "MP 49.81"
+        },
+        {
+          "self_ref": "#/texts/50",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1471.614,
+                "t": 497.3011169,
+                "r": 1509.2469123000003,
+                "b": 488.49417228060344,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                9
+              ]
+            }
+          ],
+          "orig": "8:52 p.m.",
+          "text": "8:52 p.m."
+        },
+        {
+          "self_ref": "#/texts/51",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1103.283,
+                "t": 418.4676169,
+                "r": 1147.2606428099998,
+                "b": 409.6606722806034,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                10
+              ]
+            }
+          ],
+          "orig": "38\u00b0F above",
+          "text": "38\u00b0F above"
+        },
+        {
+          "self_ref": "#/texts/52",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1103.283,
+                "t": 407.6789169,
+                "r": 1135.0409802,
+                "b": 398.8719722806034,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "ambient",
+          "text": "ambient"
+        },
+        {
+          "self_ref": "#/texts/53",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1219.693,
+                "t": 409.9422169,
+                "r": 1268.62755547,
+                "b": 401.13527228060343,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                11
+              ]
+            }
+          ],
+          "orig": "103\u00b0F above",
+          "text": "103\u00b0F above"
+        },
+        {
+          "self_ref": "#/texts/54",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1219.693,
+                "t": 398.1727169,
+                "r": 1251.4509802,
+                "b": 389.36577228060344,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "ambient",
+          "text": "ambient"
+        },
+        {
+          "self_ref": "#/texts/55",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1435.721,
+                "t": 361.1577169,
+                "r": 1484.65555547,
+                "b": 352.35077228060345,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                11
+              ]
+            }
+          ],
+          "orig": "253\u00b0F above",
+          "text": "253\u00b0F above"
+        },
+        {
+          "self_ref": "#/texts/56",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1435.721,
+                "t": 350.3690169,
+                "r": 1467.4789802,
+                "b": 341.56207228060345,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "ambient",
+          "text": "ambient"
+        },
+        {
+          "self_ref": "#/texts/57",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1336.495,
+                "t": 417.0137169,
+                "r": 1382.5725142,
+                "b": 408.20677228060345,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                10
+              ]
+            }
+          ],
+          "orig": "Columbiana",
+          "text": "Columbiana"
+        },
+        {
+          "self_ref": "#/texts/58",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1420.784,
+                "t": 433.0398169,
+                "r": 1478.4426825199994,
+                "b": 424.23287228060343,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                13
+              ]
+            }
+          ],
+          "orig": "New Waterford",
+          "text": "New Waterford"
+        },
+        {
+          "self_ref": "#/texts/59",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1506.9052806999998,
+                "t": 448.5140896,
+                "r": 1513.9508184366377,
+                "b": 407.7761,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                12
+              ]
+            }
+          ],
+          "orig": "Pennsylvania",
+          "text": "Pennsylvania"
+        },
+        {
+          "self_ref": "#/texts/60",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1494.5372806999999,
+                "t": 436.9147345,
+                "r": 1501.5828184366378,
+                "b": 422.6737,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                4
+              ]
+            }
+          ],
+          "orig": "Ohio",
+          "text": "Ohio"
+        },
+        {
+          "self_ref": "#/texts/61",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1115.13,
+                "t": 340.56681929999996,
+                "r": 1128.5079415,
+                "b": 333.52128156336204,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                4
+              ]
+            }
+          ],
+          "orig": "5 mi",
+          "text": "5 mi"
+        },
+        {
+          "self_ref": "#/texts/62",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1179.771,
+                "t": 509.0503193,
+                "r": 1224.1755655899995,
+                "b": 502.0047815633621,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                14
+              ]
+            }
+          ],
+          "orig": "10 miles apart",
+          "text": "10 miles apart"
+        },
+        {
+          "self_ref": "#/texts/63",
+          "parent": {
+            "$ref": "#/pictures/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1356.878,
+                "t": 509.0503193,
+                "r": 1401.2825655899994,
+                "b": 502.0047815633621,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                14
+              ]
+            }
+          ],
+          "orig": "20 miles apart",
+          "text": "20 miles apart"
+        },
+        {
+          "self_ref": "#/texts/64",
+          "parent": {
+            "$ref": "#/pictures/4"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1082.88,
+                "t": 248.1653,
+                "r": 1105.4640000000002,
+                "b": 240.98174827586206,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                5
+              ]
+            }
+          ],
+          "orig": "Salem",
+          "text": "Salem"
+        },
+        {
+          "self_ref": "#/texts/65",
+          "parent": {
+            "$ref": "#/pictures/4"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1190.88,
+                "t": 248.1653,
+                "r": 1233.84,
+                "b": 240.98174827586206,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                10
+              ]
+            }
+          ],
+          "orig": "Columbiana",
+          "text": "Columbiana"
+        },
+        {
+          "self_ref": "#/texts/66",
+          "parent": {
+            "$ref": "#/pictures/4"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1307.4,
+                "t": 248.1653,
+                "r": 1361.1616,
+                "b": 240.98174827586206,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                13
+              ]
+            }
+          ],
+          "orig": "New Waterford",
+          "text": "New Waterford"
+        },
+        {
+          "self_ref": "#/texts/67",
+          "parent": {
+            "$ref": "#/pictures/4"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1412.64,
+                "t": 248.1653,
+                "r": 1463.8352,
+                "b": 240.98174827586206,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                14
+              ]
+            }
+          ],
+          "orig": "East Palestine",
+          "text": "East Palestine"
+        },
+        {
+          "self_ref": "#/texts/68",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1096.8,
+                "t": 205.0697,
+                "r": 1224.1044000000002,
+                "b": 194.2943724137931,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                21
+              ]
+            }
+          ],
+          "orig": "The Wayside Help Desk",
+          "text": "The Wayside Help Desk",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/69",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1096.8,
+                "t": 182.2867,
+                "r": 1491.8910000000046,
+                "b": 104.30520431034483,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                662
+              ]
+            }
+          ],
+          "orig": "The Wayside Help Desk in Atlanta, Georgia, monitors alerts from NS's HBDs. Critical alarms broadcast straight to the train crew. For noncritical alerts, the analyst monitors the train over HBDs it crosses later, paying attention to temperature trends. The single analyst on duty did not notice the Salem noncritical alert, as he dealt with higher-priority alerts. But if he did notice the alert, that would not have prevented the derailment. The analyst said that if he had seen the Salem HBD alert in real time, he would have followed NS rules and watched for alerts from HBDs it went over later. The next HBD the accident train went over was in East Palestine.",
+          "text": "The Wayside Help Desk in Atlanta, Georgia, monitors alerts from NS's HBDs. Critical alarms broadcast straight to the train crew. For noncritical alerts, the analyst monitors the train over HBDs it crosses later, paying attention to temperature trends. The single analyst on duty did not notice the Salem noncritical alert, as he dealt with higher-priority alerts. But if he did notice the alert, that would not have prevented the derailment. The analyst said that if he had seen the Salem HBD alert in real time, he would have followed NS rules and watched for alerts from HBDs it went over later. The next HBD the accident train went over was in East Palestine."
+        },
+        {
+          "self_ref": "#/texts/70",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1096.8,
+                "t": 91.73670000000004,
+                "r": 1455.1457999999986,
+                "b": 60.35520431034479,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                247
+              ]
+            }
+          ],
+          "orig": "In the East Palestine derailment, the alarm was received by the lead locomotive radio and broadcast over the in-cab speakers: ' Critical alarm, critical alarm, critical alarm. Norfolk Southern milepost 49.8, track 1 hotbox, axle 101, south rail. '",
+          "text": "In the East Palestine derailment, the alarm was received by the lead locomotive radio and broadcast over the in-cab speakers: ' Critical alarm, critical alarm, critical alarm. Norfolk Southern milepost 49.8, track 1 hotbox, axle 101, south rail. '"
+        },
+        {
+          "self_ref": "#/texts/71",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "label": "page_footer",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 46.8,
+                "t": 26.423999999999978,
+                "r": 213.3315000000001,
+                "b": 18.342504310344793,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                42
+              ]
+            }
+          ],
+          "orig": "4  \u00b7  National Transportation Safety Board",
+          "text": "4  \u00b7  National Transportation Safety Board"
+        },
+        {
+          "self_ref": "#/texts/72",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "label": "page_footer",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 348.576,
+                "t": 26.423999999999978,
+                "r": 744.9720000000019,
+                "b": 18.342504310344793,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                74
+              ]
+            }
+          ],
+          "orig": "EAST PALESTINE TRAIN DERAILMENT AND SUBSEQUENT HAZARDOUS MATERIALS RELEASE",
+          "text": "EAST PALESTINE TRAIN DERAILMENT AND SUBSEQUENT HAZARDOUS MATERIALS RELEASE"
+        },
+        {
+          "self_ref": "#/texts/73",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "label": "page_footer",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 838.9583,
+                "t": 26.423999999999978,
+                "r": 932.2163000000008,
+                "b": 18.342504310344793,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                18
+              ]
+            }
+          ],
+          "orig": "ILLUSTRATED DIGEST",
+          "text": "ILLUSTRATED DIGEST"
+        },
+        {
+          "self_ref": "#/texts/74",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "label": "page_footer",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1370.665,
+                "t": 26.423999999999978,
+                "r": 1537.1911,
+                "b": 18.342504310344793,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                42
+              ]
+            }
+          ],
+          "orig": "National Transportation Safety Board  \u00b7  5",
+          "text": "National Transportation Safety Board  \u00b7  5"
+        }
+      ],
+      "pictures": [
+        {
+          "self_ref": "#/pictures/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/11"
+            },
+            {
+              "$ref": "#/texts/12"
+            },
+            {
+              "$ref": "#/texts/13"
+            },
+            {
+              "$ref": "#/texts/14"
+            }
+          ],
+          "content_layer": "body",
+          "label": "picture",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 558.9230346679688,
+                "t": 490.6369934082031,
+                "r": 744.6873779296875,
+                "b": 301.337890625,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                0
+              ]
+            }
+          ],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "annotations": []
+        },
+        {
+          "self_ref": "#/pictures/1",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/18"
+            },
+            {
+              "$ref": "#/texts/19"
+            },
+            {
+              "$ref": "#/texts/20"
+            },
+            {
+              "$ref": "#/texts/21"
+            },
+            {
+              "$ref": "#/texts/22"
+            },
+            {
+              "$ref": "#/texts/23"
+            },
+            {
+              "$ref": "#/texts/24"
+            }
+          ],
+          "content_layer": "body",
+          "label": "picture",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 236.49574279785156,
+                "t": 279.51861572265625,
+                "r": 742.8088989257812,
+                "b": 47.2584228515625,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                0
+              ]
+            }
+          ],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "annotations": []
+        },
+        {
+          "self_ref": "#/pictures/2",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/34"
+            },
+            {
+              "$ref": "#/texts/35"
+            },
+            {
+              "$ref": "#/texts/36"
+            },
+            {
+              "$ref": "#/texts/37"
+            }
+          ],
+          "content_layer": "body",
+          "label": "picture",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 820.1348266601562,
+                "t": 161.46041870117188,
+                "r": 1060.77978515625,
+                "b": 46.255859375,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                0
+              ]
+            }
+          ],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "annotations": []
+        },
+        {
+          "self_ref": "#/pictures/3",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/38"
+            },
+            {
+              "$ref": "#/texts/39"
+            },
+            {
+              "$ref": "#/texts/40"
+            },
+            {
+              "$ref": "#/texts/41"
+            },
+            {
+              "$ref": "#/texts/42"
+            },
+            {
+              "$ref": "#/texts/43"
+            },
+            {
+              "$ref": "#/texts/44"
+            },
+            {
+              "$ref": "#/texts/45"
+            },
+            {
+              "$ref": "#/texts/46"
+            },
+            {
+              "$ref": "#/texts/47"
+            },
+            {
+              "$ref": "#/texts/48"
+            },
+            {
+              "$ref": "#/texts/49"
+            },
+            {
+              "$ref": "#/texts/50"
+            },
+            {
+              "$ref": "#/texts/51"
+            },
+            {
+              "$ref": "#/texts/52"
+            },
+            {
+              "$ref": "#/texts/53"
+            },
+            {
+              "$ref": "#/texts/54"
+            },
+            {
+              "$ref": "#/texts/55"
+            },
+            {
+              "$ref": "#/texts/56"
+            },
+            {
+              "$ref": "#/texts/57"
+            },
+            {
+              "$ref": "#/texts/58"
+            },
+            {
+              "$ref": "#/texts/59"
+            },
+            {
+              "$ref": "#/texts/60"
+            },
+            {
+              "$ref": "#/texts/61"
+            },
+            {
+              "$ref": "#/texts/62"
+            },
+            {
+              "$ref": "#/texts/63"
+            }
+          ],
+          "content_layer": "body",
+          "label": "picture",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1073.9110107421875,
+                "t": 537.2559280395508,
+                "r": 1536.05029296875,
+                "b": 320.59002685546875,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                0
+              ]
+            }
+          ],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "annotations": []
+        },
+        {
+          "self_ref": "#/pictures/4",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/64"
+            },
+            {
+              "$ref": "#/texts/65"
+            },
+            {
+              "$ref": "#/texts/66"
+            },
+            {
+              "$ref": "#/texts/67"
+            }
+          ],
+          "content_layer": "body",
+          "label": "picture",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1076.4559326171875,
+                "t": 315.590087890625,
+                "r": 1537.940185546875,
+                "b": 235.01904296875,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                0
+              ]
+            }
+          ],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "annotations": []
+        },
+        {
+          "self_ref": "#/pictures/5",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "picture",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 1474.556884765625,
+                "t": 110.49172973632812,
+                "r": 1544.78369140625,
+                "b": 42.13079833984375,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                0
+              ]
+            }
+          ],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "annotations": []
+        }
+      ],
+      "tables": [],
+      "key_value_items": [],
+      "form_items": [],
+      "pages": {
+        "1": {
+          "size": {
+            "width": 1584.0,
+            "height": 612.0
+          },
+          "page_no": 1
+        }
+      }
+    }
+  },
+  "model": "docling"
+}

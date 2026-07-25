@@ -1,0 +1,53 @@
+# Pathward Financial source excerpts
+
+## Original Form 10-Q
+
+Accession 0000907471-23-000090. Filed August 8, 2023.
+
+Three Months Ended June 30, 2023
+
+| (Dollars in thousands, except per share data)   | 2023    | 2022    | 2023     | 2022     |
+|-------------------------------------------------|---------|---------|----------|----------|
+| Net income attributable to parent               | $45,096 | $22,391 | $127,709 | $132,966 |
+| Diluted                                         | $1.68   | $0.76   | $4.62    | $4.44    |
+
+## Item 4.02 Form 8-K
+
+Accession 0000907471-25-000071. Filed June 26, 2025.
+
+On June 26, 2025, the Audit Committee (the "Audit Committee") of the Board of Directors of Pathward Financial,
+
+Inc. ("Pathward Financial" or the "Company"), after discussion with management and the Company's independent
+
+registered public accounting firm, Crowe LLP, concluded that the Company's audited consolidated financial
+
+statements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year
+
+period ended September 30, 2024 contained in its Annual Reports on Form 10-K, and its unaudited consolidated
+
+financial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31,
+
+2024, 2023, and 2022, and June 30, 2024, 2023, and 2022 contained in its Quarterly Reports on Form 10-Q
+
+(collectively, the "Affected Periods") should no longer be relied upon because of errors identified in such
+
+financial statements, as described below. Similarly, any financial information in the Company's prior earnings
+
+releases, press releases, shareholder communications, investor presentations or other communications that
+
+relates to the Affected Periods or the fiscal quarter ended March 31, 2025 should no longer be relied upon.
+
+The change from net to gross basis presentation does not impact net income over the life of the portfolio, but
+
+changes the timing of when elements of the programs are recognized for accounting purposes.
+
+## Restated Form 10-K/A
+
+Accession 0000907471-25-000083. Filed August 29, 2025.
+
+Three Months Ended June 30, 2023
+
+| (Dollars in thousands, except per share data)   | As Previously Reported on Form 10-Q   | Restatement Adjustment   | Restatement Reference   | As Restated   | As Previously Reported on Form 10-Q   | Restatement Adjustment   | Restatement Reference   | As Restated   |
+|-------------------------------------------------|---------------------------------------|--------------------------|-------------------------|---------------|---------------------------------------|--------------------------|-------------------------|---------------|
+| Net income attributable to parent               | $45,096                               | $(9,016)                 |                         | $36,080       | $127,709                              | $(9,721)                 |                         | $117,988      |
+| Diluted                                         | $1.68                                 |                          |                         | $1.34         | $4.62                                 |                          |                         | $4.27         |

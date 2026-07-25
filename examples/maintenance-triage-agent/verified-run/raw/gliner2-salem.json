@@ -1,0 +1,81 @@
+{
+  "entities": [
+    {
+      "text": "8:13 p.m.",
+      "label": "event time",
+      "score": 0.99853515625,
+      "start": 3,
+      "end": 12,
+      "bbox": null
+    },
+    {
+      "text": "Salem HBD",
+      "label": "location",
+      "score": 0.98193359375,
+      "start": 22,
+      "end": 31,
+      "bbox": null
+    },
+    {
+      "text": "L1 bearing",
+      "label": "bearing",
+      "score": 0.935546875,
+      "start": 53,
+      "end": 63,
+      "bbox": null
+    },
+    {
+      "text": "103\u00b0F",
+      "label": "degrees above ambient",
+      "score": 0.9970703125,
+      "start": 68,
+      "end": 73,
+      "bbox": null
+    },
+    {
+      "text": "noncritical",
+      "label": "alert status",
+      "score": 0.880859375,
+      "start": 132,
+      "end": 143,
+      "bbox": null
+    },
+    {
+      "text": "Wayside Help Desk",
+      "label": "alert recipient",
+      "score": 0.98876953125,
+      "start": 157,
+      "end": 174,
+      "bbox": null
+    },
+    {
+      "text": "Salem",
+      "label": "location",
+      "score": 0.91162109375,
+      "start": 244,
+      "end": 249,
+      "bbox": null
+    },
+    {
+      "text": "fire near the bearing",
+      "label": "camera observation",
+      "score": 0.5859375,
+      "start": 257,
+      "end": 278,
+      "bbox": null
+    },
+    {
+      "text": "Sebring",
+      "label": "location",
+      "score": 0.98388671875,
+      "start": 314,
+      "end": 321,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-ntsb-salem-evidence",
+  "model": "fastino/gliner2-large-v1"
+}

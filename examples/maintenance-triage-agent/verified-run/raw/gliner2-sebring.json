@@ -1,0 +1,57 @@
+{
+  "entities": [
+    {
+      "text": "7:37 p.m.",
+      "label": "event time",
+      "score": 0.99609375,
+      "start": 3,
+      "end": 12,
+      "bbox": null
+    },
+    {
+      "text": "Sebring HBD",
+      "label": "location",
+      "score": 0.9990234375,
+      "start": 22,
+      "end": 33,
+      "bbox": null
+    },
+    {
+      "text": "38\u00b0F",
+      "label": "degrees above ambient",
+      "score": 0.99609375,
+      "start": 75,
+      "end": 79,
+      "bbox": null
+    },
+    {
+      "text": "R1 bearing",
+      "label": "bearing",
+      "score": 0.9990234375,
+      "start": 136,
+      "end": 146,
+      "bbox": null
+    },
+    {
+      "text": "20\u00b0F",
+      "label": "degrees above ambient",
+      "score": 0.99169921875,
+      "start": 156,
+      "end": 160,
+      "bbox": null
+    },
+    {
+      "text": "L1 bearing",
+      "label": "bearing",
+      "score": 1.0,
+      "start": 184,
+      "end": 194,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-ntsb-sebring-evidence",
+  "model": "fastino/gliner2-large-v1"
+}

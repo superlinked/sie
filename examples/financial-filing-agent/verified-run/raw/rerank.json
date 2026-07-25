@@ -1,0 +1,29 @@
+{
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "scores": [
+    {
+      "item_id": "chunk-1",
+      "score": 0.97265625,
+      "rank": 0
+    },
+    {
+      "item_id": "chunk-0",
+      "score": 0.96484375,
+      "rank": 1
+    },
+    {
+      "item_id": "chunk-3",
+      "score": 0.9609375,
+      "rank": 2
+    },
+    {
+      "item_id": "chunk-2",
+      "score": 0.65234375,
+      "rank": 3
+    }
+  ],
+  "query_id": "filing-query",
+  "usage": {
+    "input_tokens": 1261
+  }
+}

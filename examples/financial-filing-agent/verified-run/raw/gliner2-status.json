@@ -1,0 +1,33 @@
+{
+  "entities": [
+    {
+      "text": "Pathward Financial, Inc.",
+      "label": "company",
+      "score": 0.97607421875,
+      "start": 166,
+      "end": 190,
+      "bbox": null
+    },
+    {
+      "text": "Crowe LLP",
+      "label": "company",
+      "score": 0.9228515625,
+      "start": 330,
+      "end": 339,
+      "bbox": null
+    },
+    {
+      "text": "no longer be relied upon",
+      "label": "prior filing reliance status",
+      "score": 0.7890625,
+      "start": 884,
+      "end": 908,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-filing-status-evidence",
+  "model": "fastino/gliner2-large-v1"
+}

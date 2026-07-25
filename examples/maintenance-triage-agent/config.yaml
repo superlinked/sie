@@ -1,0 +1,18 @@
+cluster:
+  url: "http://localhost:8080"
+  api_key: ""
+  provision_timeout_s: 900
+
+models:
+  parse: "docling"
+  retrieve: "BAAI/bge-m3"
+  rerank: "Qwen/Qwen3-Reranker-4B"
+  entities: "urchade/gliner_multi-v2.1"
+  extract: "fastino/gliner2-large-v1"
+
+review:
+  query: >-
+    How did the L1 bearing temperature and alert status change across Sebring,
+    Salem, and East Palestine, and what did the NTSB report happened next?
+  candidate_chunks: 18
+  top_k: 18

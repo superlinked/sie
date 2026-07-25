@@ -1,0 +1,79 @@
+{
+  "method": "Exact ranked CMS fragments validated against GLiNER2 source spans",
+  "data": {
+    "authorization_requirement_text": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS codes L1832 and L1851.",
+    "face_to_face_requirement_text": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS codes L1832 and L1851.",
+    "written_order_requirement_text": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS codes L1832 and L1851.",
+    "face_to_face_window_text": "Conduct the face-to-face encounter within the 6 months before prescribing the item.",
+    "hcpcs_code": "L1851",
+    "submitted_order": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
+    "submitted_medical_record": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
+    "submitted_proof_of_delivery": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
+    "documented_face_to_face_age": "Standard written order with correct HCPCS coding - Treating practitioner's medical record that has adequate medical necessity information - Proof of delivery with face-to-face encounter 7 months ago",
+    "missing_documentation": "The doctor didn't document the face-to-face encounter within 6 months of proof of delivery.",
+    "review_conclusion": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.",
+    "payment_action": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment."
+  },
+  "source_scopes": {
+    "authorization_requirement_text": {
+      "group": "requirements",
+      "chunk_id": "chunk-2",
+      "source_sha256": "cadcff3f63a5a778d6202dbb1714b06ef62dde0c6922626758a63bce6a795971"
+    },
+    "face_to_face_requirement_text": {
+      "group": "requirements",
+      "chunk_id": "chunk-2",
+      "source_sha256": "cadcff3f63a5a778d6202dbb1714b06ef62dde0c6922626758a63bce6a795971"
+    },
+    "written_order_requirement_text": {
+      "group": "requirements",
+      "chunk_id": "chunk-2",
+      "source_sha256": "cadcff3f63a5a778d6202dbb1714b06ef62dde0c6922626758a63bce6a795971"
+    },
+    "face_to_face_window_text": {
+      "group": "requirements",
+      "chunk_id": "chunk-2",
+      "source_sha256": "19a4544d06404af9e8a66fb0446b572bc8a96330edf46a179f3a28388671dbfa"
+    },
+    "hcpcs_code": {
+      "group": "submission",
+      "chunk_id": "chunk-4",
+      "source_sha256": "9a893928eede6acd46e1f8029609142962206042b4ceb88d901e159e1518e3bf"
+    },
+    "submitted_order": {
+      "group": "submission",
+      "chunk_id": "chunk-5",
+      "source_sha256": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8"
+    },
+    "submitted_medical_record": {
+      "group": "submission",
+      "chunk_id": "chunk-5",
+      "source_sha256": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8"
+    },
+    "submitted_proof_of_delivery": {
+      "group": "submission",
+      "chunk_id": "chunk-5",
+      "source_sha256": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8"
+    },
+    "documented_face_to_face_age": {
+      "group": "submission",
+      "chunk_id": "chunk-5",
+      "source_sha256": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8"
+    },
+    "missing_documentation": {
+      "group": "outcome",
+      "chunk_id": "chunk-7",
+      "source_sha256": "fb6503169e482f7076387a6f06abf2e86cb4382d03e2190ab67e5d244a3adce2"
+    },
+    "review_conclusion": {
+      "group": "outcome",
+      "chunk_id": "chunk-8",
+      "source_sha256": "0ddc7dda57a2fcbf6b01a6f411888c1fa23404bc6d8a5c8c0f5b3276f025b89d"
+    },
+    "payment_action": {
+      "group": "outcome",
+      "chunk_id": "chunk-8",
+      "source_sha256": "0ddc7dda57a2fcbf6b01a6f411888c1fa23404bc6d8a5c8c0f5b3276f025b89d"
+    }
+  }
+}

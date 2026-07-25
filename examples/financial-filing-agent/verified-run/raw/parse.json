@@ -1,0 +1,1554 @@
+{
+  "entities": [],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "pathward-source-packet",
+  "data": {
+    "text": "Pathward Financial source excerpts\n\nOriginal Form 10-Q\n\nAccession 0000907471-23-000090. Filed August 8, 2023.\n\nThree Months Ended June 30, 2023\n\n| (Dollars in thousands, except per share data)   | 2023    | 2022    | 2023     | 2022     |\n|-------------------------------------------------|---------|---------|----------|----------|\n| Net income attributable to parent               | $45,096 | $22,391 | $127,709 | $132,966 |\n| Diluted                                         | $1.68   | $0.76   | $4.62    | $4.44    |\n\nItem 4.02 Form 8-K\n\nAccession 0000907471-25-000071. Filed June 26, 2025.\n\nOn June 26, 2025, the Audit Committee (the \"Audit Committee\") of the Board of Directors of Pathward Financial,\n\nInc. (\"Pathward Financial\" or the \"Company\"), after discussion with management and the Company's independent\n\nregistered public accounting firm, Crowe LLP, concluded that the Company's audited consolidated financial\n\nstatements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year\n\nperiod ended September 30, 2024 contained in its Annual Reports on Form 10-K, and its unaudited consolidated\n\nfinancial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31,\n\n2024, 2023, and 2022, and June 30, 2024, 2023, and 2022 contained in its Quarterly Reports on Form 10-Q\n\n(collectively, the \"Affected Periods\") should no longer be relied upon because of errors identified in such\n\nfinancial statements, as described below. Similarly, any financial information in the Company's prior earnings\n\nreleases, press releases, shareholder communications, investor presentations or other communications that\n\nrelates to the Affected Periods or the fiscal quarter ended March 31, 2025 should no longer be relied upon.\n\nThe change from net to gross basis presentation does not impact net income over the life of the portfolio, but\n\nchanges the timing of when elements of the programs are recognized for accounting purposes.\n\nRestated Form 10-K/A\n\nAccession 0000907471-25-000083. Filed August 29, 2025.\n\nThree Months Ended June 30, 2023\n\n| (Dollars in thousands, except per share data)   | As Previously Reported on Form 10-Q   | Restatement Adjustment   | Restatement Reference   | As Restated   | As Previously Reported on Form 10-Q   | Restatement Adjustment   | Restatement Reference   | As Restated   |\n|-------------------------------------------------|---------------------------------------|--------------------------|-------------------------|---------------|---------------------------------------|--------------------------|-------------------------|---------------|\n| Net income attributable to parent               | $45,096                               | $(9,016)                 |                         | $36,080       | $127,709                              | $(9,721)                 |                         | $117,988      |\n| Diluted                                         | $1.68                                 |                          |                         | $1.34         | $4.62                                 |                          |                         | $4.27         |",
+    "markdown": "# Pathward Financial source excerpts\n\n## Original Form 10-Q\n\nAccession 0000907471-23-000090. Filed August 8, 2023.\n\nThree Months Ended June 30, 2023\n\n| (Dollars in thousands, except per share data)   | 2023    | 2022    | 2023     | 2022     |\n|-------------------------------------------------|---------|---------|----------|----------|\n| Net income attributable to parent               | $45,096 | $22,391 | $127,709 | $132,966 |\n| Diluted                                         | $1.68   | $0.76   | $4.62    | $4.44    |\n\n## Item 4.02 Form 8-K\n\nAccession 0000907471-25-000071. Filed June 26, 2025.\n\nOn June 26, 2025, the Audit Committee (the \"Audit Committee\") of the Board of Directors of Pathward Financial,\n\nInc. (\"Pathward Financial\" or the \"Company\"), after discussion with management and the Company's independent\n\nregistered public accounting firm, Crowe LLP, concluded that the Company's audited consolidated financial\n\nstatements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year\n\nperiod ended September 30, 2024 contained in its Annual Reports on Form 10-K, and its unaudited consolidated\n\nfinancial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31,\n\n2024, 2023, and 2022, and June 30, 2024, 2023, and 2022 contained in its Quarterly Reports on Form 10-Q\n\n(collectively, the \"Affected Periods\") should no longer be relied upon because of errors identified in such\n\nfinancial statements, as described below. Similarly, any financial information in the Company's prior earnings\n\nreleases, press releases, shareholder communications, investor presentations or other communications that\n\nrelates to the Affected Periods or the fiscal quarter ended March 31, 2025 should no longer be relied upon.\n\nThe change from net to gross basis presentation does not impact net income over the life of the portfolio, but\n\nchanges the timing of when elements of the programs are recognized for accounting purposes.\n\n## Restated Form 10-K/A\n\nAccession 0000907471-25-000083. Filed August 29, 2025.\n\nThree Months Ended June 30, 2023\n\n| (Dollars in thousands, except per share data)   | As Previously Reported on Form 10-Q   | Restatement Adjustment   | Restatement Reference   | As Restated   | As Previously Reported on Form 10-Q   | Restatement Adjustment   | Restatement Reference   | As Restated   |\n|-------------------------------------------------|---------------------------------------|--------------------------|-------------------------|---------------|---------------------------------------|--------------------------|-------------------------|---------------|\n| Net income attributable to parent               | $45,096                               | $(9,016)                 |                         | $36,080       | $127,709                              | $(9,721)                 |                         | $117,988      |\n| Diluted                                         | $1.68                                 |                          |                         | $1.34         | $4.62                                 |                          |                         | $4.27         |",
+    "document": {
+      "schema_name": "DoclingDocument",
+      "version": "1.10.0",
+      "name": "document",
+      "origin": {
+        "mimetype": "text/html",
+        "binary_hash": 293974493265904618,
+        "filename": "document.html"
+      },
+      "furniture": {
+        "self_ref": "#/furniture",
+        "children": [],
+        "content_layer": "furniture",
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "body": {
+        "self_ref": "#/body",
+        "children": [
+          {
+            "$ref": "#/texts/0"
+          },
+          {
+            "$ref": "#/texts/1"
+          }
+        ],
+        "content_layer": "body",
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "groups": [],
+      "texts": [
+        {
+          "self_ref": "#/texts/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "label": "title",
+          "prov": [],
+          "orig": "Pathward Financial source excerpts",
+          "text": "Pathward Financial source excerpts"
+        },
+        {
+          "self_ref": "#/texts/1",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/2"
+            },
+            {
+              "$ref": "#/texts/5"
+            },
+            {
+              "$ref": "#/texts/20"
+            }
+          ],
+          "content_layer": "body",
+          "label": "title",
+          "prov": [],
+          "orig": "Pathward Financial source excerpts",
+          "text": "Pathward Financial source excerpts"
+        },
+        {
+          "self_ref": "#/texts/2",
+          "parent": {
+            "$ref": "#/texts/1"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/3"
+            },
+            {
+              "$ref": "#/texts/4"
+            },
+            {
+              "$ref": "#/tables/0"
+            }
+          ],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [],
+          "orig": "Original Form 10-Q",
+          "text": "Original Form 10-Q",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/3",
+          "parent": {
+            "$ref": "#/texts/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "Accession 0000907471-23-000090. Filed August 8, 2023.",
+          "text": "Accession 0000907471-23-000090. Filed August 8, 2023."
+        },
+        {
+          "self_ref": "#/texts/4",
+          "parent": {
+            "$ref": "#/texts/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "Three Months Ended June 30, 2023",
+          "text": "Three Months Ended June 30, 2023"
+        },
+        {
+          "self_ref": "#/texts/5",
+          "parent": {
+            "$ref": "#/texts/1"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/6"
+            },
+            {
+              "$ref": "#/texts/7"
+            },
+            {
+              "$ref": "#/texts/8"
+            },
+            {
+              "$ref": "#/texts/9"
+            },
+            {
+              "$ref": "#/texts/10"
+            },
+            {
+              "$ref": "#/texts/11"
+            },
+            {
+              "$ref": "#/texts/12"
+            },
+            {
+              "$ref": "#/texts/13"
+            },
+            {
+              "$ref": "#/texts/14"
+            },
+            {
+              "$ref": "#/texts/15"
+            },
+            {
+              "$ref": "#/texts/16"
+            },
+            {
+              "$ref": "#/texts/17"
+            },
+            {
+              "$ref": "#/texts/18"
+            },
+            {
+              "$ref": "#/texts/19"
+            }
+          ],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [],
+          "orig": "Item 4.02 Form 8-K",
+          "text": "Item 4.02 Form 8-K",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/6",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "Accession 0000907471-25-000071. Filed June 26, 2025.",
+          "text": "Accession 0000907471-25-000071. Filed June 26, 2025."
+        },
+        {
+          "self_ref": "#/texts/7",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "On June 26, 2025, the Audit Committee (the \"Audit Committee\") of the Board of Directors of Pathward Financial,",
+          "text": "On June 26, 2025, the Audit Committee (the \"Audit Committee\") of the Board of Directors of Pathward Financial,"
+        },
+        {
+          "self_ref": "#/texts/8",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "Inc. (\"Pathward Financial\" or the \"Company\"), after discussion with management and the Company's independent",
+          "text": "Inc. (\"Pathward Financial\" or the \"Company\"), after discussion with management and the Company's independent"
+        },
+        {
+          "self_ref": "#/texts/9",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "registered public accounting firm, Crowe LLP, concluded that the Company's audited consolidated financial",
+          "text": "registered public accounting firm, Crowe LLP, concluded that the Company's audited consolidated financial"
+        },
+        {
+          "self_ref": "#/texts/10",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "statements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year",
+          "text": "statements as of the fiscal years ended September 30, 2024 and 2023, and for each year in the three fiscal year"
+        },
+        {
+          "self_ref": "#/texts/11",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "period ended September 30, 2024 contained in its Annual Reports on Form 10-K, and its unaudited consolidated",
+          "text": "period ended September 30, 2024 contained in its Annual Reports on Form 10-K, and its unaudited consolidated"
+        },
+        {
+          "self_ref": "#/texts/12",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "financial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31,",
+          "text": "financial statements as of and for the interim periods ended December 31, 2024, 2023, 2022, and 2021, March 31,"
+        },
+        {
+          "self_ref": "#/texts/13",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "2024, 2023, and 2022, and June 30, 2024, 2023, and 2022 contained in its Quarterly Reports on Form 10-Q",
+          "text": "2024, 2023, and 2022, and June 30, 2024, 2023, and 2022 contained in its Quarterly Reports on Form 10-Q"
+        },
+        {
+          "self_ref": "#/texts/14",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "(collectively, the \"Affected Periods\") should no longer be relied upon because of errors identified in such",
+          "text": "(collectively, the \"Affected Periods\") should no longer be relied upon because of errors identified in such"
+        },
+        {
+          "self_ref": "#/texts/15",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "financial statements, as described below. Similarly, any financial information in the Company's prior earnings",
+          "text": "financial statements, as described below. Similarly, any financial information in the Company's prior earnings"
+        },
+        {
+          "self_ref": "#/texts/16",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "releases, press releases, shareholder communications, investor presentations or other communications that",
+          "text": "releases, press releases, shareholder communications, investor presentations or other communications that"
+        },
+        {
+          "self_ref": "#/texts/17",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "relates to the Affected Periods or the fiscal quarter ended March 31, 2025 should no longer be relied upon.",
+          "text": "relates to the Affected Periods or the fiscal quarter ended March 31, 2025 should no longer be relied upon."
+        },
+        {
+          "self_ref": "#/texts/18",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "The change from net to gross basis presentation does not impact net income over the life of the portfolio, but",
+          "text": "The change from net to gross basis presentation does not impact net income over the life of the portfolio, but"
+        },
+        {
+          "self_ref": "#/texts/19",
+          "parent": {
+            "$ref": "#/texts/5"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "changes the timing of when elements of the programs are recognized for accounting purposes.",
+          "text": "changes the timing of when elements of the programs are recognized for accounting purposes."
+        },
+        {
+          "self_ref": "#/texts/20",
+          "parent": {
+            "$ref": "#/texts/1"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/21"
+            },
+            {
+              "$ref": "#/texts/22"
+            },
+            {
+              "$ref": "#/tables/1"
+            }
+          ],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [],
+          "orig": "Restated Form 10-K/A",
+          "text": "Restated Form 10-K/A",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/21",
+          "parent": {
+            "$ref": "#/texts/20"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "Accession 0000907471-25-000083. Filed August 29, 2025.",
+          "text": "Accession 0000907471-25-000083. Filed August 29, 2025."
+        },
+        {
+          "self_ref": "#/texts/22",
+          "parent": {
+            "$ref": "#/texts/20"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "Three Months Ended June 30, 2023",
+          "text": "Three Months Ended June 30, 2023"
+        }
+      ],
+      "pictures": [],
+      "tables": [
+        {
+          "self_ref": "#/tables/0",
+          "parent": {
+            "$ref": "#/texts/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "table",
+          "prov": [],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "data": {
+            "table_cells": [
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 0,
+                "end_col_offset_idx": 1,
+                "text": "(Dollars in thousands, except per share data)",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 1,
+                "end_col_offset_idx": 2,
+                "text": "2023",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 2,
+                "end_col_offset_idx": 3,
+                "text": "2022",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 3,
+                "end_col_offset_idx": 4,
+                "text": "2023",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 4,
+                "end_col_offset_idx": 5,
+                "text": "2022",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 0,
+                "end_col_offset_idx": 1,
+                "text": "Net income attributable to parent",
+                "column_header": false,
+                "row_header": true,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 1,
+                "end_col_offset_idx": 2,
+                "text": "$45,096",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 2,
+                "end_col_offset_idx": 3,
+                "text": "$22,391",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 3,
+                "end_col_offset_idx": 4,
+                "text": "$127,709",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 4,
+                "end_col_offset_idx": 5,
+                "text": "$132,966",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 0,
+                "end_col_offset_idx": 1,
+                "text": "Diluted",
+                "column_header": false,
+                "row_header": true,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 1,
+                "end_col_offset_idx": 2,
+                "text": "$1.68",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 2,
+                "end_col_offset_idx": 3,
+                "text": "$0.76",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 3,
+                "end_col_offset_idx": 4,
+                "text": "$4.62",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 4,
+                "end_col_offset_idx": 5,
+                "text": "$4.44",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              }
+            ],
+            "num_rows": 3,
+            "num_cols": 5,
+            "orientation": "rot_0",
+            "grid": [
+              [
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 0,
+                  "end_col_offset_idx": 1,
+                  "text": "(Dollars in thousands, except per share data)",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 1,
+                  "end_col_offset_idx": 2,
+                  "text": "2023",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 2,
+                  "end_col_offset_idx": 3,
+                  "text": "2022",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 3,
+                  "end_col_offset_idx": 4,
+                  "text": "2023",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 4,
+                  "end_col_offset_idx": 5,
+                  "text": "2022",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                }
+              ],
+              [
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 0,
+                  "end_col_offset_idx": 1,
+                  "text": "Net income attributable to parent",
+                  "column_header": false,
+                  "row_header": true,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 1,
+                  "end_col_offset_idx": 2,
+                  "text": "$45,096",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 2,
+                  "end_col_offset_idx": 3,
+                  "text": "$22,391",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 3,
+                  "end_col_offset_idx": 4,
+                  "text": "$127,709",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 4,
+                  "end_col_offset_idx": 5,
+                  "text": "$132,966",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                }
+              ],
+              [
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 0,
+                  "end_col_offset_idx": 1,
+                  "text": "Diluted",
+                  "column_header": false,
+                  "row_header": true,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 1,
+                  "end_col_offset_idx": 2,
+                  "text": "$1.68",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 2,
+                  "end_col_offset_idx": 3,
+                  "text": "$0.76",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 3,
+                  "end_col_offset_idx": 4,
+                  "text": "$4.62",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 4,
+                  "end_col_offset_idx": 5,
+                  "text": "$4.44",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                }
+              ]
+            ]
+          },
+          "annotations": []
+        },
+        {
+          "self_ref": "#/tables/1",
+          "parent": {
+            "$ref": "#/texts/20"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "table",
+          "prov": [],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "data": {
+            "table_cells": [
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 0,
+                "end_col_offset_idx": 1,
+                "text": "(Dollars in thousands, except per share data)",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 1,
+                "end_col_offset_idx": 2,
+                "text": "As Previously Reported on Form 10-Q",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 2,
+                "end_col_offset_idx": 3,
+                "text": "Restatement Adjustment",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 3,
+                "end_col_offset_idx": 4,
+                "text": "Restatement Reference",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 4,
+                "end_col_offset_idx": 5,
+                "text": "As Restated",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 5,
+                "end_col_offset_idx": 6,
+                "text": "As Previously Reported on Form 10-Q",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 6,
+                "end_col_offset_idx": 7,
+                "text": "Restatement Adjustment",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 7,
+                "end_col_offset_idx": 8,
+                "text": "Restatement Reference",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 0,
+                "end_row_offset_idx": 1,
+                "start_col_offset_idx": 8,
+                "end_col_offset_idx": 9,
+                "text": "As Restated",
+                "column_header": true,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 0,
+                "end_col_offset_idx": 1,
+                "text": "Net income attributable to parent",
+                "column_header": false,
+                "row_header": true,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 1,
+                "end_col_offset_idx": 2,
+                "text": "$45,096",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 2,
+                "end_col_offset_idx": 3,
+                "text": "$(9,016)",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 3,
+                "end_col_offset_idx": 4,
+                "text": "",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 4,
+                "end_col_offset_idx": 5,
+                "text": "$36,080",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 5,
+                "end_col_offset_idx": 6,
+                "text": "$127,709",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 6,
+                "end_col_offset_idx": 7,
+                "text": "$(9,721)",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 7,
+                "end_col_offset_idx": 8,
+                "text": "",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 1,
+                "end_row_offset_idx": 2,
+                "start_col_offset_idx": 8,
+                "end_col_offset_idx": 9,
+                "text": "$117,988",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 0,
+                "end_col_offset_idx": 1,
+                "text": "Diluted",
+                "column_header": false,
+                "row_header": true,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 1,
+                "end_col_offset_idx": 2,
+                "text": "$1.68",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 2,
+                "end_col_offset_idx": 3,
+                "text": "",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 3,
+                "end_col_offset_idx": 4,
+                "text": "",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 4,
+                "end_col_offset_idx": 5,
+                "text": "$1.34",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 5,
+                "end_col_offset_idx": 6,
+                "text": "$4.62",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 6,
+                "end_col_offset_idx": 7,
+                "text": "",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 7,
+                "end_col_offset_idx": 8,
+                "text": "",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              },
+              {
+                "row_span": 1,
+                "col_span": 1,
+                "start_row_offset_idx": 2,
+                "end_row_offset_idx": 3,
+                "start_col_offset_idx": 8,
+                "end_col_offset_idx": 9,
+                "text": "$4.27",
+                "column_header": false,
+                "row_header": false,
+                "row_section": false,
+                "fillable": false
+              }
+            ],
+            "num_rows": 3,
+            "num_cols": 9,
+            "orientation": "rot_0",
+            "grid": [
+              [
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 0,
+                  "end_col_offset_idx": 1,
+                  "text": "(Dollars in thousands, except per share data)",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 1,
+                  "end_col_offset_idx": 2,
+                  "text": "As Previously Reported on Form 10-Q",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 2,
+                  "end_col_offset_idx": 3,
+                  "text": "Restatement Adjustment",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 3,
+                  "end_col_offset_idx": 4,
+                  "text": "Restatement Reference",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 4,
+                  "end_col_offset_idx": 5,
+                  "text": "As Restated",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 5,
+                  "end_col_offset_idx": 6,
+                  "text": "As Previously Reported on Form 10-Q",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 6,
+                  "end_col_offset_idx": 7,
+                  "text": "Restatement Adjustment",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 7,
+                  "end_col_offset_idx": 8,
+                  "text": "Restatement Reference",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1,
+                  "start_col_offset_idx": 8,
+                  "end_col_offset_idx": 9,
+                  "text": "As Restated",
+                  "column_header": true,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                }
+              ],
+              [
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 0,
+                  "end_col_offset_idx": 1,
+                  "text": "Net income attributable to parent",
+                  "column_header": false,
+                  "row_header": true,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 1,
+                  "end_col_offset_idx": 2,
+                  "text": "$45,096",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 2,
+                  "end_col_offset_idx": 3,
+                  "text": "$(9,016)",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 3,
+                  "end_col_offset_idx": 4,
+                  "text": "",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 4,
+                  "end_col_offset_idx": 5,
+                  "text": "$36,080",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 5,
+                  "end_col_offset_idx": 6,
+                  "text": "$127,709",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 6,
+                  "end_col_offset_idx": 7,
+                  "text": "$(9,721)",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 7,
+                  "end_col_offset_idx": 8,
+                  "text": "",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 1,
+                  "end_row_offset_idx": 2,
+                  "start_col_offset_idx": 8,
+                  "end_col_offset_idx": 9,
+                  "text": "$117,988",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                }
+              ],
+              [
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 0,
+                  "end_col_offset_idx": 1,
+                  "text": "Diluted",
+                  "column_header": false,
+                  "row_header": true,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 1,
+                  "end_col_offset_idx": 2,
+                  "text": "$1.68",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 2,
+                  "end_col_offset_idx": 3,
+                  "text": "",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 3,
+                  "end_col_offset_idx": 4,
+                  "text": "",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 4,
+                  "end_col_offset_idx": 5,
+                  "text": "$1.34",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 5,
+                  "end_col_offset_idx": 6,
+                  "text": "$4.62",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 6,
+                  "end_col_offset_idx": 7,
+                  "text": "",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 7,
+                  "end_col_offset_idx": 8,
+                  "text": "",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                },
+                {
+                  "row_span": 1,
+                  "col_span": 1,
+                  "start_row_offset_idx": 2,
+                  "end_row_offset_idx": 3,
+                  "start_col_offset_idx": 8,
+                  "end_col_offset_idx": 9,
+                  "text": "$4.27",
+                  "column_header": false,
+                  "row_header": false,
+                  "row_section": false,
+                  "fillable": false
+                }
+              ]
+            ]
+          },
+          "annotations": []
+        }
+      ],
+      "key_value_items": [],
+      "form_items": [],
+      "pages": {}
+    }
+  },
+  "model": "docling"
+}

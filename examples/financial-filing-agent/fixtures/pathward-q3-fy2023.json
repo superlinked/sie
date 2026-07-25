@@ -1,0 +1,30 @@
+{
+  "company": "Pathward Financial, Inc.",
+  "period": "Q3 FY2023",
+  "facts": {
+    "original_net_income_millions": "45.096",
+    "restated_net_income_millions": "36.080",
+    "original_diluted_eps": "1.68",
+    "restated_diluted_eps": "1.34"
+  },
+  "company_caveat": "Pathward expects the timing and presentation change to leave the life-of-portfolio net-income profile unchanged.",
+  "passages": [
+    {
+      "id": "2023-10q",
+      "text": "The original Q3 FY2023 Form 10-Q reported net income attributable to the parent of $45.096 million and diluted EPS of $1.68."
+    },
+    {
+      "id": "2025-10ka",
+      "text": "The restated filing reports Q3 FY2023 net income attributable to the parent of $36.080 million and diluted EPS of $1.34."
+    },
+    {
+      "id": "2025-8k-item-4-02",
+      "text": "Pathward said affected prior filings and communications should no longer be relied upon."
+    },
+    {
+      "id": "2025-company-caveat",
+      "text": "Pathward expects the change in timing and presentation to leave the life-of-portfolio net-income profile unchanged."
+    }
+  ],
+  "extraction_text": "Pathward Financial's original Q3 FY2023 Form 10-Q reported net income attributable to the parent of $45.096 million and diluted EPS of $1.68. The restated Form 10-K/A reports $36.080 million and $1.34 for the same quarter. The affected prior filings should no longer be relied upon. Pathward expects the timing and presentation change to leave the life-of-portfolio net-income profile unchanged."
+}

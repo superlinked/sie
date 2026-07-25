@@ -1,0 +1,65 @@
+{
+  "entities": [
+    {
+      "text": "8:52 p.m .",
+      "label": "event time",
+      "score": 0.748046875,
+      "start": 6,
+      "end": 16,
+      "bbox": null
+    },
+    {
+      "text": "East Palestine",
+      "label": "location",
+      "score": 0.50537109375,
+      "start": 42,
+      "end": 56,
+      "bbox": null
+    },
+    {
+      "text": "Less than a minute later",
+      "label": "event time",
+      "score": 0.685546875,
+      "start": 62,
+      "end": 86,
+      "bbox": null
+    },
+    {
+      "text": "L1 bearing",
+      "label": "bearing",
+      "score": 0.90283203125,
+      "start": 149,
+      "end": 159,
+      "bbox": null
+    },
+    {
+      "text": "bearing R1",
+      "label": "bearing",
+      "score": 0.83544921875,
+      "start": 161,
+      "end": 171,
+      "bbox": null
+    },
+    {
+      "text": "critical alarm",
+      "label": "alert",
+      "score": 0.72998046875,
+      "start": 238,
+      "end": 252,
+      "bbox": null
+    },
+    {
+      "text": "locomotive cab",
+      "label": "location",
+      "score": 0.552734375,
+      "start": 281,
+      "end": 295,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ntsb-detector-2",
+  "model": "urchade/gliner_multi-v2.1"
+}

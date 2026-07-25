@@ -1,0 +1,45 @@
+{
+  "model": "urchade/gliner_multi-v2.1",
+  "entities": [
+    {
+      "text": "prior authorization",
+      "label": "administrative requirement",
+      "score": 0.560546875,
+      "start": 11,
+      "end": 30,
+      "bbox": null
+    },
+    {
+      "text": "L1832",
+      "label": "procedure code",
+      "score": 0.7470703125,
+      "start": 110,
+      "end": 115,
+      "bbox": null
+    },
+    {
+      "text": "L1851",
+      "label": "procedure code",
+      "score": 0.80517578125,
+      "start": 120,
+      "end": 125,
+      "bbox": null
+    },
+    {
+      "text": "7 months ago",
+      "label": "time period",
+      "score": 0.65869140625,
+      "start": 188,
+      "end": 200,
+      "bbox": null
+    },
+    {
+      "text": "6 months",
+      "label": "time period",
+      "score": 0.8623046875,
+      "start": 61,
+      "end": 69,
+      "bbox": null
+    }
+  ]
+}

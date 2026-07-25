@@ -1,0 +1,57 @@
+{
+  "entities": [
+    {
+      "text": "Pathward Financial",
+      "label": "company",
+      "score": 0.8701171875,
+      "start": 2,
+      "end": 20,
+      "bbox": null
+    },
+    {
+      "text": "Company",
+      "label": "company",
+      "score": 0.876953125,
+      "start": 30,
+      "end": 37,
+      "bbox": null
+    },
+    {
+      "text": "Company",
+      "label": "company",
+      "score": 0.8974609375,
+      "start": 82,
+      "end": 89,
+      "bbox": null
+    },
+    {
+      "text": "Company",
+      "label": "company",
+      "score": 0.916015625,
+      "start": 169,
+      "end": 176,
+      "bbox": null
+    },
+    {
+      "text": "Annual Reports on Form 10-K",
+      "label": "filing",
+      "score": 0.86279296875,
+      "start": 371,
+      "end": 398,
+      "bbox": null
+    },
+    {
+      "text": "Quarterly Reports on Form 10-Q",
+      "label": "filing",
+      "score": 0.76904296875,
+      "start": 616,
+      "end": 646,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "entities_status",
+  "model": "urchade/gliner_multi-v2.1"
+}

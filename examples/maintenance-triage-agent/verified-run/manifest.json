@@ -1,0 +1,199 @@
+{
+  "created_at": "2026-07-25T01:57:04.772656+00:00",
+  "endpoint": "http://127.0.0.1:8080",
+  "sie_server_commit": "9d6ca6b00f788b6ab19f8d6dc9506e1b31dad2f0",
+  "run_command": "Modal exact-source reference examples against public SIE v0.6.23",
+  "models": {
+    "parse": "docling",
+    "retrieve": "BAAI/bge-m3",
+    "rerank": "Qwen/Qwen3-Reranker-4B",
+    "entities": "urchade/gliner_multi-v2.1",
+    "extract": "fastino/gliner2-large-v1"
+  },
+  "fixture": {
+    "path": "fixtures/east-palestine-bearing-spread.pdf",
+    "sha256": "0556a971978198a493acda277dfdfd75a837be4ba5c626d6f03565cb17cee8ca"
+  },
+  "artifacts": [
+    {
+      "path": "parsed.md",
+      "sha256": "893da4e76591881139272f831fae3a73f47d2998d8881abb16d6b7ae88a6e9b3"
+    },
+    {
+      "path": "review.json",
+      "sha256": "8b1acca32d3b2ef97ff17493a7df4240f92305eb486f55fcd86c2b51a2561753"
+    },
+    {
+      "path": "raw/entities-detector-0.json",
+      "sha256": "d2ed1eadc8c1bfb8ef13d1862616b8f80405ff90e07432692b999f47e88e05f6"
+    },
+    {
+      "path": "raw/entities-detector-1.json",
+      "sha256": "dc1929adbfdbe184963bf232f568b6c9621b0996cebe096c9b138e140bab5f67"
+    },
+    {
+      "path": "raw/entities-detector-2.json",
+      "sha256": "02f407aea2f62358fcc2de29e941bea74c945508f73b98e8742d27e81cda7dee"
+    },
+    {
+      "path": "raw/entities-outcome.json",
+      "sha256": "987d419d16fe1c82ff6f7707b9126ad56bc39e73904c481c6f9df2b084602dba"
+    },
+    {
+      "path": "raw/entities.json",
+      "sha256": "007960f40bb6065f6abf37c6840ae02deea02db34af5b19825ae7c4bd9f9cef5"
+    },
+    {
+      "path": "raw/gliner2-cause.json",
+      "sha256": "8d2dffca0c06aa5545f2546f3910085ba3e29a7e8c060ae5e2663f597b03e1b5"
+    },
+    {
+      "path": "raw/gliner2-derailment.json",
+      "sha256": "35d2b38b46435e46d332c0d0b4cf8de99b3c61173641006e02093f0b4669ddc1"
+    },
+    {
+      "path": "raw/gliner2-east-palestine.json",
+      "sha256": "3768f34af5ad52fc5f74635fa7e1a61902926a7b72ee873582faee2f03330692"
+    },
+    {
+      "path": "raw/gliner2-engineer.json",
+      "sha256": "3ff4b858a3741c48b9ee86e89b62a8461b36d14d5663eb9f0bef3aa618a04651"
+    },
+    {
+      "path": "raw/gliner2-salem.json",
+      "sha256": "1e3b58562aa8e10091b0dc5ca96c13c768cd6b1767e71dc2dff2bbf959a64ebf"
+    },
+    {
+      "path": "raw/gliner2-sebring.json",
+      "sha256": "6f27fbd04af070d6dde9905bb94d15d766116a288fee15520698d87d8bc9933a"
+    },
+    {
+      "path": "raw/mapped.json",
+      "sha256": "16658df2e9fc8b99fdb4db07fb5db1bacb93bb94d167e7a60bee5100fbbbd12f"
+    },
+    {
+      "path": "raw/parse.json",
+      "sha256": "eabb098c0e71e728e4ea51eba391b26170ba13f3f6119e8b203d5ef8e5954eaf"
+    },
+    {
+      "path": "raw/rerank.json",
+      "sha256": "e4a55306508d2af18eb6739064f7c94da52368a37b88e6fd665e62f12a5bcd58"
+    },
+    {
+      "path": "raw/retrieve.json",
+      "sha256": "08fb16121af62a7bd0ccc2ce4e177060ac10a0c246c1818e84f3f1c21734e4c4"
+    },
+    {
+      "path": "evaluation.json",
+      "sha256": "b4366233704be690691323f833d1fa08ae65c367919ad45f3e4d0c9fe3e17390"
+    }
+  ],
+  "source_document": {
+    "url": "https://www.ntsb.gov/investigations/AccidentReports/Reports/SPC2406.pdf",
+    "source_page_index": 2,
+    "printed_pages": "4\u20135"
+  },
+  "calls": [
+    {
+      "stage": "parse",
+      "model": "docling",
+      "latency_ms": 40591.8
+    },
+    {
+      "stage": "retrieve",
+      "model": "BAAI/bge-m3",
+      "latency_ms": 11940.7
+    },
+    {
+      "stage": "rerank",
+      "model": "Qwen/Qwen3-Reranker-4B",
+      "latency_ms": 17072.3
+    },
+    {
+      "stage": "entities_detector_0",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 11282.8
+    },
+    {
+      "stage": "entities_detector_1",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 197.8
+    },
+    {
+      "stage": "entities_detector_2",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 129.1
+    },
+    {
+      "stage": "entities_outcome",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 368.4
+    },
+    {
+      "stage": "gliner2_sebring",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 10099.7,
+      "source_chunk_ids": [
+        "chunk-11"
+      ],
+      "source_sha256": "152e2342c0b6d57c1cc619bda3976958dc467e1f83964fe8c055d313ccea502d"
+    },
+    {
+      "stage": "gliner2_salem",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 58.5,
+      "source_chunk_ids": [
+        "chunk-12"
+      ],
+      "source_sha256": "864d80e2d7aec89dcbdca6e30ef034f32f7be9f733c667394f6119e414496eac"
+    },
+    {
+      "stage": "gliner2_east_palestine",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 49.5,
+      "source_chunk_ids": [
+        "chunk-13"
+      ],
+      "source_sha256": "e78d51724d0ebbce9b68971491aff2b20d24bf0e2dca2f0c86a963e87c89c825"
+    },
+    {
+      "stage": "gliner2_cause",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 45.6,
+      "source_chunk_ids": [
+        "chunk-1"
+      ],
+      "source_sha256": "06acd274b771b3c61e4c7ebe8e7da561c28a58ac5963d85f503855e78d0b23df"
+    },
+    {
+      "stage": "gliner2_engineer",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 49.8,
+      "source_chunk_ids": [
+        "chunk-14"
+      ],
+      "source_sha256": "5c9b6299b2cb7ebb678aa0be97d6d2ab6fe7a4aa83b7752efc48d4e6db375d04"
+    },
+    {
+      "stage": "gliner2_derailment",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 56.0,
+      "source_chunk_ids": [
+        "chunk-15"
+      ],
+      "source_sha256": "54654ec0a72f7663349720e7124882792a6a36f8ece85a0e481db09348ff5026"
+    }
+  ],
+  "pipeline": [
+    "parse",
+    "retrieve",
+    "rerank",
+    "entities_detector_sections",
+    "entities_outcome",
+    "gliner2_detector_sections",
+    "gliner2_outcome_sections",
+    "deterministic_source_mapping",
+    "deterministic_validation"
+  ],
+  "decision_boundary": "The review reconstructs the NTSB's published detector sequence. It makes no new causal determination and performs no control write."
+}

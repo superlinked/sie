@@ -1,0 +1,205 @@
+{
+  "model": "urchade/gliner_multi-v2.1",
+  "entities": [
+    {
+      "text": "Original Form 10-Q Accession 0000907471-23-000090",
+      "label": "filing",
+      "score": 0.75634765625,
+      "start": 3,
+      "end": 52,
+      "bbox": null
+    },
+    {
+      "text": "Three Months Ended June 30, 2023",
+      "label": "reporting period",
+      "score": 0.541015625,
+      "start": 76,
+      "end": 108,
+      "bbox": null
+    },
+    {
+      "text": "2023    | 2022",
+      "label": "reporting period",
+      "score": 0.52978515625,
+      "start": 161,
+      "end": 175,
+      "bbox": null
+    },
+    {
+      "text": "$45,096",
+      "label": "money amount",
+      "score": 0.91259765625,
+      "start": 349,
+      "end": 356,
+      "bbox": null
+    },
+    {
+      "text": "$22,391",
+      "label": "money amount",
+      "score": 0.8896484375,
+      "start": 359,
+      "end": 366,
+      "bbox": null
+    },
+    {
+      "text": "$127,709",
+      "label": "money amount",
+      "score": 0.9140625,
+      "start": 369,
+      "end": 377,
+      "bbox": null
+    },
+    {
+      "text": "$132,966",
+      "label": "money amount",
+      "score": 0.93310546875,
+      "start": 380,
+      "end": 388,
+      "bbox": null
+    },
+    {
+      "text": "$1.68",
+      "label": "money amount",
+      "score": 0.79150390625,
+      "start": 443,
+      "end": 448,
+      "bbox": null
+    },
+    {
+      "text": "$0.76",
+      "label": "money amount",
+      "score": 0.6875,
+      "start": 453,
+      "end": 458,
+      "bbox": null
+    },
+    {
+      "text": "$4.62",
+      "label": "money amount",
+      "score": 0.765625,
+      "start": 463,
+      "end": 468,
+      "bbox": null
+    },
+    {
+      "text": "$4.44",
+      "label": "money amount",
+      "score": 0.732421875,
+      "start": 474,
+      "end": 479,
+      "bbox": null
+    },
+    {
+      "text": "Three Months Ended June 30, 2023",
+      "label": "reporting period",
+      "score": 0.7412109375,
+      "start": 79,
+      "end": 111,
+      "bbox": null
+    },
+    {
+      "text": "Dollars in thousands",
+      "label": "money amount",
+      "score": 0.6806640625,
+      "start": 115,
+      "end": 135,
+      "bbox": null
+    },
+    {
+      "text": "$45,096",
+      "label": "money amount",
+      "score": 0.83642578125,
+      "start": 704,
+      "end": 711,
+      "bbox": null
+    },
+    {
+      "text": "$(9,016)",
+      "label": "money amount",
+      "score": 0.6572265625,
+      "start": 744,
+      "end": 752,
+      "bbox": null
+    },
+    {
+      "text": "$36,080",
+      "label": "money amount",
+      "score": 0.82421875,
+      "start": 797,
+      "end": 804,
+      "bbox": null
+    },
+    {
+      "text": "$127,709",
+      "label": "money amount",
+      "score": 0.8466796875,
+      "start": 813,
+      "end": 821,
+      "bbox": null
+    },
+    {
+      "text": "$(9,721)",
+      "label": "money amount",
+      "score": 0.6708984375,
+      "start": 853,
+      "end": 861,
+      "bbox": null
+    },
+    {
+      "text": "$117,988",
+      "label": "money amount",
+      "score": 0.84912109375,
+      "start": 906,
+      "end": 914,
+      "bbox": null
+    },
+    {
+      "text": "Pathward Financial",
+      "label": "company",
+      "score": 0.8701171875,
+      "start": 2,
+      "end": 20,
+      "bbox": null
+    },
+    {
+      "text": "Company",
+      "label": "company",
+      "score": 0.876953125,
+      "start": 30,
+      "end": 37,
+      "bbox": null
+    },
+    {
+      "text": "Company",
+      "label": "company",
+      "score": 0.8974609375,
+      "start": 82,
+      "end": 89,
+      "bbox": null
+    },
+    {
+      "text": "Company",
+      "label": "company",
+      "score": 0.916015625,
+      "start": 169,
+      "end": 176,
+      "bbox": null
+    },
+    {
+      "text": "Annual Reports on Form 10-K",
+      "label": "filing",
+      "score": 0.86279296875,
+      "start": 371,
+      "end": 398,
+      "bbox": null
+    },
+    {
+      "text": "Quarterly Reports on Form 10-Q",
+      "label": "filing",
+      "score": 0.76904296875,
+      "start": 616,
+      "end": 646,
+      "bbox": null
+    }
+  ]
+}

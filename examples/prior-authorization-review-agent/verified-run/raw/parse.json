@@ -1,0 +1,405 @@
+{
+  "entities": [],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "cms-l1851-published-example",
+  "data": {
+    "text": "Lower Limb Orthoses\n\nSource:\n\nhttps://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/lower-limb-orthoses\n\nPage Last Modified: 02/11/2026 04:18 PM\n\nBilling & Coding Criteria\n\nWe require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS\n\ncodes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before prescribing the item.\n\nExample of Improper Payments Due to Insufficient Documentation for Lower Limb Orthoses\n\nA supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable\n\nflexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without\n\nvarus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review\n\ncontractor's request:\n\n- Standard written order with correct HCPCS coding\n- Treating practitioner's medical record that has adequate medical necessity information\n- Proof of delivery with face-to-face encounter 7 months ago\n\nWhat Documentation Was Missing?\n\nThe doctor didn't document the face-to-face encounter within 6 months of proof of delivery.\n\nWhat Happens Next?\n\nThe review contractor completes the claim as an insufficient documentation error, and the MAC recoups\n\npayment.",
+    "markdown": "# Lower Limb Orthoses\n\nSource:\n\nhttps://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/lower-limb-orthoses\n\nPage Last Modified: 02/11/2026 04:18 PM\n\n## Billing &amp; Coding Criteria\n\nWe require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS\n\ncodes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before prescribing the item.\n\n## Example of Improper Payments Due to Insufficient Documentation for Lower Limb Orthoses\n\nA supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable\n\nflexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without\n\nvarus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review\n\ncontractor's request:\n\n- Standard written order with correct HCPCS coding\n- Treating practitioner's medical record that has adequate medical necessity information\n- Proof of delivery with face-to-face encounter 7 months ago\n\n### What Documentation Was Missing?\n\nThe doctor didn't document the face-to-face encounter within 6 months of proof of delivery.\n\n### What Happens Next?\n\nThe review contractor completes the claim as an insufficient documentation error, and the MAC recoups\n\npayment.",
+    "document": {
+      "schema_name": "DoclingDocument",
+      "version": "1.10.0",
+      "name": "document",
+      "origin": {
+        "mimetype": "text/html",
+        "binary_hash": 3202530953731100561,
+        "filename": "document.html"
+      },
+      "furniture": {
+        "self_ref": "#/furniture",
+        "children": [],
+        "content_layer": "furniture",
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "body": {
+        "self_ref": "#/body",
+        "children": [
+          {
+            "$ref": "#/texts/0"
+          },
+          {
+            "$ref": "#/texts/1"
+          },
+          {
+            "$ref": "#/texts/2"
+          }
+        ],
+        "content_layer": "body",
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "groups": [
+        {
+          "self_ref": "#/groups/0",
+          "parent": {
+            "$ref": "#/texts/9"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/14"
+            },
+            {
+              "$ref": "#/texts/15"
+            },
+            {
+              "$ref": "#/texts/16"
+            }
+          ],
+          "content_layer": "body",
+          "name": "list",
+          "label": "list"
+        }
+      ],
+      "texts": [
+        {
+          "self_ref": "#/texts/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "label": "title",
+          "prov": [],
+          "orig": "Lower Limb Orthoses | CMS",
+          "text": "Lower Limb Orthoses | CMS"
+        },
+        {
+          "self_ref": "#/texts/1",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "label": "text",
+          "prov": [],
+          "orig": "Centers for Medicare & Medicaid Services",
+          "text": "Centers for Medicare & Medicaid Services"
+        },
+        {
+          "self_ref": "#/texts/2",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/3"
+            },
+            {
+              "$ref": "#/texts/4"
+            },
+            {
+              "$ref": "#/texts/5"
+            },
+            {
+              "$ref": "#/texts/6"
+            },
+            {
+              "$ref": "#/texts/9"
+            }
+          ],
+          "content_layer": "body",
+          "label": "title",
+          "prov": [],
+          "orig": "Lower Limb Orthoses",
+          "text": "Lower Limb Orthoses"
+        },
+        {
+          "self_ref": "#/texts/3",
+          "parent": {
+            "$ref": "#/texts/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "Source:",
+          "text": "Source:"
+        },
+        {
+          "self_ref": "#/texts/4",
+          "parent": {
+            "$ref": "#/texts/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "https://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/lower-limb-orthoses",
+          "text": "https://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/lower-limb-orthoses"
+        },
+        {
+          "self_ref": "#/texts/5",
+          "parent": {
+            "$ref": "#/texts/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "Page Last Modified: 02/11/2026 04:18 PM",
+          "text": "Page Last Modified: 02/11/2026 04:18 PM"
+        },
+        {
+          "self_ref": "#/texts/6",
+          "parent": {
+            "$ref": "#/texts/2"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/7"
+            },
+            {
+              "$ref": "#/texts/8"
+            }
+          ],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [],
+          "orig": "Billing & Coding Criteria",
+          "text": "Billing & Coding Criteria",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/7",
+          "parent": {
+            "$ref": "#/texts/6"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS",
+          "text": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS"
+        },
+        {
+          "self_ref": "#/texts/8",
+          "parent": {
+            "$ref": "#/texts/6"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "codes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before prescribing the item.",
+          "text": "codes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before prescribing the item."
+        },
+        {
+          "self_ref": "#/texts/9",
+          "parent": {
+            "$ref": "#/texts/2"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/10"
+            },
+            {
+              "$ref": "#/texts/11"
+            },
+            {
+              "$ref": "#/texts/12"
+            },
+            {
+              "$ref": "#/texts/13"
+            },
+            {
+              "$ref": "#/groups/0"
+            },
+            {
+              "$ref": "#/texts/17"
+            },
+            {
+              "$ref": "#/texts/19"
+            }
+          ],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [],
+          "orig": "Example of Improper Payments Due to Insufficient Documentation for Lower Limb Orthoses",
+          "text": "Example of Improper Payments Due to Insufficient Documentation for Lower Limb Orthoses",
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/10",
+          "parent": {
+            "$ref": "#/texts/9"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable",
+          "text": "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable"
+        },
+        {
+          "self_ref": "#/texts/11",
+          "parent": {
+            "$ref": "#/texts/9"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "flexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without",
+          "text": "flexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without"
+        },
+        {
+          "self_ref": "#/texts/12",
+          "parent": {
+            "$ref": "#/texts/9"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "varus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review",
+          "text": "varus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review"
+        },
+        {
+          "self_ref": "#/texts/13",
+          "parent": {
+            "$ref": "#/texts/9"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "contractor's request:",
+          "text": "contractor's request:"
+        },
+        {
+          "self_ref": "#/texts/14",
+          "parent": {
+            "$ref": "#/groups/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "list_item",
+          "prov": [],
+          "orig": "Standard written order with correct HCPCS coding",
+          "text": "Standard written order with correct HCPCS coding",
+          "enumerated": false,
+          "marker": ""
+        },
+        {
+          "self_ref": "#/texts/15",
+          "parent": {
+            "$ref": "#/groups/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "list_item",
+          "prov": [],
+          "orig": "Treating practitioner\u2019s medical record that has adequate medical necessity information",
+          "text": "Treating practitioner's medical record that has adequate medical necessity information",
+          "enumerated": false,
+          "marker": ""
+        },
+        {
+          "self_ref": "#/texts/16",
+          "parent": {
+            "$ref": "#/groups/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "list_item",
+          "prov": [],
+          "orig": "Proof of delivery with face-to-face encounter 7 months ago",
+          "text": "Proof of delivery with face-to-face encounter 7 months ago",
+          "enumerated": false,
+          "marker": ""
+        },
+        {
+          "self_ref": "#/texts/17",
+          "parent": {
+            "$ref": "#/texts/9"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/18"
+            }
+          ],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [],
+          "orig": "What Documentation Was Missing?",
+          "text": "What Documentation Was Missing?",
+          "level": 2
+        },
+        {
+          "self_ref": "#/texts/18",
+          "parent": {
+            "$ref": "#/texts/17"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "The doctor didn't document the face-to-face encounter within 6 months of proof of delivery.",
+          "text": "The doctor didn't document the face-to-face encounter within 6 months of proof of delivery."
+        },
+        {
+          "self_ref": "#/texts/19",
+          "parent": {
+            "$ref": "#/texts/9"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/20"
+            },
+            {
+              "$ref": "#/texts/21"
+            }
+          ],
+          "content_layer": "body",
+          "label": "section_header",
+          "prov": [],
+          "orig": "What Happens Next?",
+          "text": "What Happens Next?",
+          "level": 2
+        },
+        {
+          "self_ref": "#/texts/20",
+          "parent": {
+            "$ref": "#/texts/19"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups",
+          "text": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups"
+        },
+        {
+          "self_ref": "#/texts/21",
+          "parent": {
+            "$ref": "#/texts/19"
+          },
+          "children": [],
+          "content_layer": "body",
+          "label": "text",
+          "prov": [],
+          "orig": "payment.",
+          "text": "payment."
+        }
+      ],
+      "pictures": [],
+      "tables": [],
+      "key_value_items": [],
+      "form_items": [],
+      "pages": {}
+    }
+  },
+  "model": "docling"
+}

@@ -1,0 +1,25 @@
+{
+  "entities": [
+    {
+      "text": "hopper car",
+      "label": "derailed railcars",
+      "score": 0.99462890625,
+      "start": 25,
+      "end": 35,
+      "bbox": null
+    },
+    {
+      "text": "37 others",
+      "label": "derailed railcars",
+      "score": 0.9921875,
+      "start": 40,
+      "end": 49,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-ntsb-derailment-evidence",
+  "model": "fastino/gliner2-large-v1"
+}

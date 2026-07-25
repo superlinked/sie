@@ -1,0 +1,17 @@
+{
+  "entities": [
+    {
+      "text": "overheated bearing",
+      "label": "bearing failure",
+      "score": 0.8525390625,
+      "start": 44,
+      "end": 62,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-ntsb-cause-evidence",
+  "model": "fastino/gliner2-large-v1"
+}

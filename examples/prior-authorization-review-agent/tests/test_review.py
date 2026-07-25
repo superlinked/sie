@@ -1,0 +1,317 @@
+import hashlib
+import json
+from pathlib import Path
+
+from prior_authorization.evaluate import evaluate_review, evaluate_run
+from prior_authorization.review import (
+    FIELD_SPECS,
+    GLINER2_GROUP_LABELS,
+    GLINER2_REQUIRED_SPANS,
+    GROUP_FIELDS,
+    OUTCOME_FIELDS,
+    REQUIREMENT_FIELDS,
+    SUBMISSION_FIELDS,
+    _chunks,
+    _group_source_scope,
+    _require_gliner2_group_evidence,
+    _source_scope,
+    build_review,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_docling_line_wraps_stay_in_complete_cms_statements() -> None:
+    markdown = """## Billing and Coding Criteria for Lower Limb Orthoses
+
+We require prior authorization for HCPCS
+
+codes L1832 and L1851.
+
+    ### What Happens Next for the Published CMS Claim?
+
+The review contractor completes the claim, and the MAC recoups
+
+payment.
+"""
+    assert _chunks(markdown) == [
+        "## Billing and Coding Criteria for Lower Limb Orthoses",
+        "We require prior authorization for HCPCS codes L1832 and L1851.",
+        "### What Happens Next for the Published CMS Claim?",
+        "The review contractor completes the claim, and the MAC recoups payment.",
+    ]
+
+
+def requirements_data() -> dict[str, str]:
+    return {
+        "hcpcs_code": "L1851",
+        "authorization_requirement_text": "prior authorization is required",
+        "face_to_face_requirement_text": "a face-to-face encounter is required",
+        "written_order_requirement_text": "written order prior to delivery is required",
+        "face_to_face_window_text": "within the 6 months before prescribing the item",
+    }
+
+
+def submission_data() -> dict[str, str]:
+    return {
+        "submitted_order": "Standard written order with correct HCPCS coding",
+        "submitted_medical_record": (
+            "Treating practitioner's medical record that has adequate medical necessity information"
+        ),
+        "submitted_proof_of_delivery": "Proof of delivery with face-to-face encounter 7 months ago",
+        "documented_face_to_face_age": "7 months ago",
+    }
+
+
+def outcome_data() -> dict[str, str]:
+    return {
+        "missing_documentation": (
+            "The doctor didn't document the face-to-face encounter within 6 months of proof of delivery."
+        ),
+        "review_conclusion": "The review contractor completes the claim as an insufficient documentation error.",
+        "payment_action": "The MAC recoups payment.",
+    }
+
+
+def ranked_evidence() -> list[dict[str, object]]:
+    return [
+        {
+            "chunk_id": "chunk-0",
+            "rank": 1,
+            "score": 0.99,
+            "text": (
+                "We require prior authorization, a face-to-face encounter, and written order prior to delivery for "
+                "HCPCS codes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before "
+                "prescribing the item."
+            ),
+        },
+        {
+            "chunk_id": "chunk-1",
+            "rank": 2,
+            "score": 0.98,
+            "text": (
+                "A supplier bills the claim for L1851 and submits a standard written order with correct HCPCS coding, "
+                "a treating practitioner's medical record with adequate medical necessity information, and proof of "
+                "delivery with face-to-face encounter 7 months ago. The review contractor completes the claim as an "
+                "insufficient documentation error, and the MAC recoups payment."
+            ),
+        },
+    ]
+
+
+def source_scope_evidence() -> list[dict[str, object]]:
+    return [
+        {
+            "chunk_id": "chunk-0",
+            "rank": 1,
+            "score": 0.99,
+            "text": (
+                "We require prior authorization, a face-to-face encounter, and written order prior to delivery for "
+                "HCPCS codes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before "
+                "prescribing the item."
+            ),
+        },
+        {
+            "chunk_id": "chunk-1",
+            "rank": 2,
+            "score": 0.98,
+            "text": (
+                "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with "
+                "adjustable flexion and extension joint) and submits the following documentation."
+            ),
+        },
+        {
+            "chunk_id": "chunk-2",
+            "rank": 3,
+            "score": 0.97,
+            "text": (
+                "- Standard written order with correct HCPCS coding\n"
+                "- Treating practitioner's medical record that has adequate medical necessity information\n"
+                "- Proof of delivery with face-to-face encounter 7 months ago"
+            ),
+        },
+        {
+            "chunk_id": "chunk-3",
+            "rank": 4,
+            "score": 0.96,
+            "text": "The doctor didn’t document the face-to-face encounter within 6 months of proof of delivery.",
+        },
+        {
+            "chunk_id": "chunk-4",
+            "rank": 5,
+            "score": 0.95,
+            "text": (
+                "The review contractor completes the claim as an insufficient documentation error, and the MAC "
+                "recoups payment."
+            ),
+        },
+    ]
+
+
+def build_valid_review() -> dict[str, object]:
+    return build_review(requirements_data(), submission_data(), outcome_data(), ranked_evidence())
+
+
+def test_gliner2_groups_cover_every_canonical_field() -> None:
+    canonical_fields = set(REQUIREMENT_FIELDS) | set(SUBMISSION_FIELDS) | set(OUTCOME_FIELDS)
+    assert set(FIELD_SPECS) == canonical_fields
+    mapped_fields = {field for fields in GROUP_FIELDS.values() for field in fields}
+    assert mapped_fields == canonical_fields
+    assert set(GLINER2_GROUP_LABELS) == set(GROUP_FIELDS)
+    assert set(GLINER2_REQUIRED_SPANS) == set(GROUP_FIELDS)
+
+
+def test_each_field_gets_the_smallest_exact_ranked_source_scope() -> None:
+    evidence = source_scope_evidence()
+    scopes = {field: _source_scope(evidence, field) for field in FIELD_SPECS}
+    assert scopes["face_to_face_window_text"]["text"] == (
+        "Conduct the face-to-face encounter within the 6 months before prescribing the item."
+    )
+    assert scopes["submitted_order"]["text"] == "Standard written order with correct HCPCS coding"
+    assert scopes["documented_face_to_face_age"]["text"] == (
+        "Proof of delivery with face-to-face encounter 7 months ago"
+    )
+    assert scopes["payment_action"]["chunk_id"] == "chunk-4"
+
+
+def test_group_inputs_deduplicate_the_smallest_exact_field_scopes() -> None:
+    evidence = source_scope_evidence()
+    requirements = _group_source_scope(evidence, "requirements")
+    submission = _group_source_scope(evidence, "submission")
+    outcome = _group_source_scope(evidence, "outcome")
+    assert len(requirements["text"].split("\n\n")) == 2
+    assert len(submission["text"].split("\n\n")) == 4
+    assert len(outcome["text"].split("\n\n")) == 2
+    assert requirements["chunk_ids"] == ["chunk-0"]
+    assert submission["chunk_ids"] == ["chunk-1", "chunk-2"]
+    assert outcome["chunk_ids"] == ["chunk-3", "chunk-4"]
+
+
+def test_gliner2_evidence_gate_accepts_required_exact_spans() -> None:
+    response = {
+        "entities": [
+            {"text": "prior authorization"},
+            {"text": "a face-to-face encounter"},
+            {"text": "written order prior to delivery"},
+            {"text": "within the 6 months before prescribing the item"},
+        ]
+    }
+    _require_gliner2_group_evidence(response, "requirements")
+
+
+def test_gliner2_evidence_gate_rejects_a_missing_required_span() -> None:
+    response = {
+        "entities": [
+            {"text": "within 6 months"},
+            {"text": "insufficient documentation error"},
+            {"text": "the MAC recoups"},
+        ]
+    }
+    try:
+        _require_gliner2_group_evidence(response, "outcome")
+    except RuntimeError as exc:
+        assert "payment" in str(exc)
+    else:
+        raise AssertionError("Accepted GLiNER2 evidence without the payment span")
+
+
+def test_fixture_preserves_the_published_cms_case() -> None:
+    source = (ROOT / "fixtures" / "cms-l1851-insufficient-documentation.html").read_text(encoding="utf-8")
+    assert "Proof of delivery with face-to-face encounter 7 months ago" in source
+    assert "The doctor didn’t document the face-to-face encounter within 6 months of proof of delivery." in source
+    assert "The review contractor completes the claim as an insufficient documentation error" in source
+    assert "the MAC recoups" in source
+
+
+def test_reproduces_cms_route_and_one_month_gap() -> None:
+    review = build_valid_review()
+    assert review["route"] == "insufficient_documentation"
+    assert review["hcpcs_code"] == "L1851"
+    assert review["required_face_to_face_within_months"] == 6
+    assert review["documented_face_to_face_age_months"] == 7
+    assert review["overdue_by_months"] == 1
+    assert review["payment_action"] == "MAC recoups payment"
+
+
+def test_review_stays_inside_published_example_boundary() -> None:
+    review = build_valid_review()
+    assert review["coverage_decision"] is None
+    assert review["medical_decision"] is None
+    assert all(check.passed for check in evaluate_review(review))
+
+
+def test_evaluator_records_its_artifact_in_the_manifest(tmp_path: Path) -> None:
+    (tmp_path / "review.json").write_text(json.dumps(build_valid_review()), encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "artifacts": [
+                    {"path": "review.json", "sha256": "preserved"},
+                    {"path": "evaluation.json", "sha256": "stale"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert evaluate_run(tmp_path) is True
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert [entry["path"] for entry in manifest["artifacts"]] == ["evaluation.json", "review.json"]
+    evaluation = tmp_path / "evaluation.json"
+    assert manifest["artifacts"][0]["sha256"] == hashlib.sha256(evaluation.read_bytes()).hexdigest()
+    assert manifest["artifacts"][1]["sha256"] == "preserved"
+
+
+def test_fails_closed_when_required_window_changes() -> None:
+    requirements = requirements_data()
+    requirements["face_to_face_window_text"] = "within 8 months"
+    try:
+        build_review(requirements, submission_data(), outcome_data(), ranked_evidence())
+    except RuntimeError as exc:
+        assert "wrong face-to-face window" in str(exc)
+    else:
+        raise AssertionError("build_review accepted a requirement that conflicts with the CMS source")
+
+
+def test_fails_closed_when_gliner2_omits_a_field() -> None:
+    outcome = outcome_data()
+    del outcome["payment_action"]
+    try:
+        build_review(requirements_data(), submission_data(), outcome, ranked_evidence())
+    except RuntimeError as exc:
+        assert "omitted required fields" in str(exc)
+    else:
+        raise AssertionError("build_review accepted an incomplete GLiNER2 outcome")
+
+
+def test_fails_closed_without_ranked_payment_action() -> None:
+    evidence = ranked_evidence()
+    evidence[1]["text"] = str(evidence[1]["text"]).replace("and the MAC recoups payment.", "")
+    try:
+        build_review(requirements_data(), submission_data(), outcome_data(), evidence)
+    except RuntimeError as exc:
+        assert "mac recoups payment" in str(exc)
+    else:
+        raise AssertionError("build_review accepted ranked evidence without the published payment action")
+
+
+def test_fails_closed_when_submission_age_is_not_seven_months() -> None:
+    submission = submission_data()
+    submission["documented_face_to_face_age"] = "5 months ago"
+    try:
+        build_review(requirements_data(), submission, outcome_data(), ranked_evidence())
+    except RuntimeError as exc:
+        assert "wrong encounter age" in str(exc)
+    else:
+        raise AssertionError("build_review accepted a timing observation that conflicts with the CMS source")
+
+
+def test_verified_manifest_hashes() -> None:
+    manifest_path = ROOT / "verified-run" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    fixture = manifest["fixture"]
+    assert hashlib.sha256((ROOT / fixture["path"]).read_bytes()).hexdigest() == fixture["sha256"]
+    for entry in manifest["artifacts"]:
+        artifact = manifest_path.parent / entry["path"]
+        assert hashlib.sha256(artifact.read_bytes()).hexdigest() == entry["sha256"]

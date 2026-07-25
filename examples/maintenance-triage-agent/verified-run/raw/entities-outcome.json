@@ -1,0 +1,89 @@
+{
+  "entities": [
+    {
+      "text": "East Palestine",
+      "label": "location",
+      "score": 0.966796875,
+      "start": 4,
+      "end": 18,
+      "bbox": null
+    },
+    {
+      "text": "overheated bearing",
+      "label": "bearing",
+      "score": 0.5107421875,
+      "start": 44,
+      "end": 62,
+      "bbox": null
+    },
+    {
+      "text": "Ohio",
+      "label": "location",
+      "score": 0.52783203125,
+      "start": 277,
+      "end": 281,
+      "bbox": null
+    },
+    {
+      "text": "Sebring",
+      "label": "location",
+      "score": 0.9091796875,
+      "start": 291,
+      "end": 298,
+      "bbox": null
+    },
+    {
+      "text": "Salem",
+      "label": "location",
+      "score": 0.94384765625,
+      "start": 300,
+      "end": 305,
+      "bbox": null
+    },
+    {
+      "text": "East Palestine",
+      "label": "location",
+      "score": 0.97607421875,
+      "start": 311,
+      "end": 325,
+      "bbox": null
+    },
+    {
+      "text": "East Palestine",
+      "label": "location",
+      "score": 0.96826171875,
+      "start": 368,
+      "end": 382,
+      "bbox": null
+    },
+    {
+      "text": "37 others",
+      "label": "railcar count",
+      "score": 0.72119140625,
+      "start": 465,
+      "end": 474,
+      "bbox": null
+    },
+    {
+      "text": "8:54 p.m.",
+      "label": "event time",
+      "score": 0.8271484375,
+      "start": 725,
+      "end": 734,
+      "bbox": null
+    },
+    {
+      "text": "37 others",
+      "label": "railcar count",
+      "score": 0.70068359375,
+      "start": 776,
+      "end": 785,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ntsb-outcome",
+  "model": "urchade/gliner_multi-v2.1"
+}

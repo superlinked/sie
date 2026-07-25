@@ -1,0 +1,13 @@
+{
+  "model": "fastino/gliner2-large-v1",
+  "method": "Docling table coordinates validated against GLiNER2 source spans",
+  "data": {
+    "company": "Pathward Financial, Inc.",
+    "period": "Three Months Ended June 30, 2023",
+    "original_net_income": "$45,096",
+    "restated_net_income": "$36,080",
+    "original_diluted_eps": "$1.68",
+    "restated_diluted_eps": "$1.34",
+    "reliance_status": "no longer be relied upon"
+  }
+}

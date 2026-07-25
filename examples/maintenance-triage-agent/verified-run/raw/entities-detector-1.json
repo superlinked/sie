@@ -1,0 +1,57 @@
+{
+  "entities": [
+    {
+      "text": "8:13 p.m.",
+      "label": "event time",
+      "score": 0.8671875,
+      "start": 3,
+      "end": 12,
+      "bbox": null
+    },
+    {
+      "text": "Salem",
+      "label": "location",
+      "score": 0.69873046875,
+      "start": 22,
+      "end": 27,
+      "bbox": null
+    },
+    {
+      "text": "L1 bearing",
+      "label": "bearing",
+      "score": 0.96728515625,
+      "start": 53,
+      "end": 63,
+      "bbox": null
+    },
+    {
+      "text": "noncritical alert",
+      "label": "alert",
+      "score": 0.6435546875,
+      "start": 132,
+      "end": 149,
+      "bbox": null
+    },
+    {
+      "text": "Salem",
+      "label": "location",
+      "score": 0.66845703125,
+      "start": 244,
+      "end": 249,
+      "bbox": null
+    },
+    {
+      "text": "Sebring",
+      "label": "location",
+      "score": 0.638671875,
+      "start": 314,
+      "end": 321,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ntsb-detector-1",
+  "model": "urchade/gliner_multi-v2.1"
+}

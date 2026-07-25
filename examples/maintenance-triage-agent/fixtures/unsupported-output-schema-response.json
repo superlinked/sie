@@ -1,0 +1,22 @@
+{
+  "entities": [],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-ntsb-alerts-evidence",
+  "data": {
+    "sebring_source_phrase": [],
+    "salem_alert_source_phrase": [],
+    "salem_recipient_source_text": [
+      "Wayside Help Desk"
+    ],
+    "salem_crew_source_text": [
+      "not to the crew"
+    ],
+    "salem_camera_source_text": [
+      "fire near the bearing"
+    ],
+    "east_palestine_alarm_source_text": []
+  },
+  "model": "fastino/gliner2-large-v1"
+}

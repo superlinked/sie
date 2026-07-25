@@ -1,0 +1,65 @@
+{
+  "entities": [
+    {
+      "text": "doctor",
+      "label": "organization",
+      "score": 0.5498046875,
+      "start": 4,
+      "end": 10,
+      "bbox": null
+    },
+    {
+      "text": "face-to-face encounter",
+      "label": "missing documentation",
+      "score": 0.92626953125,
+      "start": 31,
+      "end": 53,
+      "bbox": null
+    },
+    {
+      "text": "6 months",
+      "label": "time period",
+      "score": 0.99267578125,
+      "start": 61,
+      "end": 69,
+      "bbox": null
+    },
+    {
+      "text": "review contractor",
+      "label": "organization",
+      "score": 0.85546875,
+      "start": 97,
+      "end": 114,
+      "bbox": null
+    },
+    {
+      "text": "insufficient documentation error",
+      "label": "claim result",
+      "score": 0.92919921875,
+      "start": 141,
+      "end": 173,
+      "bbox": null
+    },
+    {
+      "text": "MAC",
+      "label": "organization",
+      "score": 0.97216796875,
+      "start": 183,
+      "end": 186,
+      "bbox": null
+    },
+    {
+      "text": "recoups payment",
+      "label": "payment action",
+      "score": 0.9326171875,
+      "start": 187,
+      "end": 202,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "cms-l1851-outcome",
+  "model": "fastino/gliner2-large-v1"
+}

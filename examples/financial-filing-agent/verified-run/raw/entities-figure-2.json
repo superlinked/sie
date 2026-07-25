@@ -1,0 +1,73 @@
+{
+  "entities": [
+    {
+      "text": "Three Months Ended June 30, 2023",
+      "label": "reporting period",
+      "score": 0.7412109375,
+      "start": 79,
+      "end": 111,
+      "bbox": null
+    },
+    {
+      "text": "Dollars in thousands",
+      "label": "money amount",
+      "score": 0.6806640625,
+      "start": 115,
+      "end": 135,
+      "bbox": null
+    },
+    {
+      "text": "$45,096",
+      "label": "money amount",
+      "score": 0.83642578125,
+      "start": 704,
+      "end": 711,
+      "bbox": null
+    },
+    {
+      "text": "$(9,016)",
+      "label": "money amount",
+      "score": 0.6572265625,
+      "start": 744,
+      "end": 752,
+      "bbox": null
+    },
+    {
+      "text": "$36,080",
+      "label": "money amount",
+      "score": 0.82421875,
+      "start": 797,
+      "end": 804,
+      "bbox": null
+    },
+    {
+      "text": "$127,709",
+      "label": "money amount",
+      "score": 0.8466796875,
+      "start": 813,
+      "end": 821,
+      "bbox": null
+    },
+    {
+      "text": "$(9,721)",
+      "label": "money amount",
+      "score": 0.6708984375,
+      "start": 853,
+      "end": 861,
+      "bbox": null
+    },
+    {
+      "text": "$117,988",
+      "label": "money amount",
+      "score": 0.84912109375,
+      "start": 906,
+      "end": 914,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "entities_figure_2",
+  "model": "urchade/gliner_multi-v2.1"
+}

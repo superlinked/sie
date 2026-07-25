@@ -1,0 +1,97 @@
+{
+  "entities": [
+    {
+      "text": "Original Form 10-Q Accession 0000907471-23-000090",
+      "label": "filing",
+      "score": 0.75634765625,
+      "start": 3,
+      "end": 52,
+      "bbox": null
+    },
+    {
+      "text": "Three Months Ended June 30, 2023",
+      "label": "reporting period",
+      "score": 0.541015625,
+      "start": 76,
+      "end": 108,
+      "bbox": null
+    },
+    {
+      "text": "2023    | 2022",
+      "label": "reporting period",
+      "score": 0.52978515625,
+      "start": 161,
+      "end": 175,
+      "bbox": null
+    },
+    {
+      "text": "$45,096",
+      "label": "money amount",
+      "score": 0.91259765625,
+      "start": 349,
+      "end": 356,
+      "bbox": null
+    },
+    {
+      "text": "$22,391",
+      "label": "money amount",
+      "score": 0.8896484375,
+      "start": 359,
+      "end": 366,
+      "bbox": null
+    },
+    {
+      "text": "$127,709",
+      "label": "money amount",
+      "score": 0.9140625,
+      "start": 369,
+      "end": 377,
+      "bbox": null
+    },
+    {
+      "text": "$132,966",
+      "label": "money amount",
+      "score": 0.93310546875,
+      "start": 380,
+      "end": 388,
+      "bbox": null
+    },
+    {
+      "text": "$1.68",
+      "label": "money amount",
+      "score": 0.79150390625,
+      "start": 443,
+      "end": 448,
+      "bbox": null
+    },
+    {
+      "text": "$0.76",
+      "label": "money amount",
+      "score": 0.6875,
+      "start": 453,
+      "end": 458,
+      "bbox": null
+    },
+    {
+      "text": "$4.62",
+      "label": "money amount",
+      "score": 0.765625,
+      "start": 463,
+      "end": 468,
+      "bbox": null
+    },
+    {
+      "text": "$4.44",
+      "label": "money amount",
+      "score": 0.732421875,
+      "start": 474,
+      "end": 479,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "entities_figure_1",
+  "model": "urchade/gliner_multi-v2.1"
+}

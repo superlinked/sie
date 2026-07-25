@@ -1,0 +1,134 @@
+{
+  "created_at": "2026-07-25T01:09:13.322108+00:00",
+  "endpoint": "http://127.0.0.1:8080",
+  "sie_server_commit": "9d6ca6b00f788b6ab19f8d6dc9506e1b31dad2f0",
+  "run_command": "Modal exact-source reference examples against public SIE v0.6.23",
+  "models": {
+    "parse": "docling",
+    "retrieve": "BAAI/bge-m3",
+    "rerank": "Qwen/Qwen3-Reranker-4B",
+    "entities": "urchade/gliner_multi-v2.1",
+    "extract": "fastino/gliner2-large-v1"
+  },
+  "fixture": {
+    "path": "fixtures/pathward-filing-packet.html",
+    "sha256": "6232258157eb1881e8c1bbd479958ae13ea63281a21569e20414683e7c23c3ea"
+  },
+  "artifacts": [
+    {
+      "path": "parsed.md",
+      "sha256": "8b77782d26ad4316b1ebda9466057eb653759313c82cd97714cb86117d791601"
+    },
+    {
+      "path": "review.json",
+      "sha256": "f5c9c672f35a5e98a5f0ef54a4b42ef4c89c4b1777cc0723c833880a462c3a82"
+    },
+    {
+      "path": "raw/entities-figure-0.json",
+      "sha256": "40e89dae7cdbb1d9fabb52f489be8a035d72b75d53ff62501fbb74e4a4a71155"
+    },
+    {
+      "path": "raw/entities-figure-1.json",
+      "sha256": "c61936491a8adf442e36af0ad68790792d9fadb440b65bf3757ab72e7ab9dbfe"
+    },
+    {
+      "path": "raw/entities-figure-2.json",
+      "sha256": "ae8f0f86de51efd33aa722530791bf1dff1b1c8b19a054736b5f091cdf91c769"
+    },
+    {
+      "path": "raw/entities-status.json",
+      "sha256": "4dc6569dcc77d12e373e7b89a21676bced7849bf1abefee92399e0835599e115"
+    },
+    {
+      "path": "raw/entities.json",
+      "sha256": "0c07ce92df4e183c7a4cf4f567b06474d0f1245b37326b09b894a159f4ff54c3"
+    },
+    {
+      "path": "raw/gliner2-figures.json",
+      "sha256": "23c3e88506769d17e34cdb1ad654d99212623f8f7fd6f49f11086fac5a68a820"
+    },
+    {
+      "path": "raw/gliner2-status.json",
+      "sha256": "8a25edf9c397dc00b7dd11a454ceaebfc70c3f94d6d44fd7f6d85b05be78bac5"
+    },
+    {
+      "path": "raw/parse.json",
+      "sha256": "9f0e6109b074439f331ff97bf2aceaae4b4566db9553c8f7779673acb53414e2"
+    },
+    {
+      "path": "raw/rerank.json",
+      "sha256": "1d8bb7655c90ee6a6342ce05ccd4d15e9e497ac70e58ed761faba7f6431c1e78"
+    },
+    {
+      "path": "raw/retrieve.json",
+      "sha256": "3e5709c4c44226dc81de094dfad57b8c6c9f8cc1a3ab3e28b65537c020e2af09"
+    },
+    {
+      "path": "raw/mapped.json",
+      "sha256": "b90b1605c7d9fc0caaf9968d038c8e20fee008cfff7088a0ac67c34c4e54b568"
+    },
+    {
+      "path": "evaluation.json",
+      "sha256": "6d9a68a668af31b301a66f7d6a0c261e090c879a5ecec7eb55bfb7b3bea0bc26"
+    }
+  ],
+  "calls": [
+    {
+      "stage": "parse",
+      "model": "docling",
+      "latency_ms": 35224.8
+    },
+    {
+      "stage": "retrieve",
+      "model": "BAAI/bge-m3",
+      "latency_ms": 11593.1
+    },
+    {
+      "stage": "rerank",
+      "model": "Qwen/Qwen3-Reranker-4B",
+      "latency_ms": 15855.1
+    },
+    {
+      "stage": "entities_figure_0",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 11269.9
+    },
+    {
+      "stage": "entities_figure_1",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 188.5
+    },
+    {
+      "stage": "entities_figure_2",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 135.8
+    },
+    {
+      "stage": "entities_status",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 389.5
+    },
+    {
+      "stage": "gliner2_figures",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 10151.2
+    },
+    {
+      "stage": "gliner2_status",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 55.8
+    }
+  ],
+  "pipeline": [
+    "parse",
+    "retrieve",
+    "rerank",
+    "entities_figures",
+    "entities_status",
+    "gliner2_figures",
+    "gliner2_status",
+    "deterministic_table_mapping",
+    "deterministic_validation"
+  ],
+  "decision_boundary": "The review fails closed unless GLiNER recovers every source span, GLiNER2 recovers all four table values and the filing-status span, and reranked evidence retains Pathward's exact life-of-portfolio caveat."
+}

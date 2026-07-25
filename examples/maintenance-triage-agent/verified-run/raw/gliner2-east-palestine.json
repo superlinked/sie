@@ -1,0 +1,81 @@
+{
+  "entities": [
+    {
+      "text": "8:52 p.m .",
+      "label": "event time",
+      "score": 0.9775390625,
+      "start": 6,
+      "end": 16,
+      "bbox": null
+    },
+    {
+      "text": "East Palestine HBD",
+      "label": "location",
+      "score": 0.9140625,
+      "start": 42,
+      "end": 60,
+      "bbox": null
+    },
+    {
+      "text": "253\u00b0F",
+      "label": "degrees above ambient",
+      "score": 0.99609375,
+      "start": 122,
+      "end": 127,
+      "bbox": null
+    },
+    {
+      "text": "L1",
+      "label": "bearing",
+      "score": 0.8515625,
+      "start": 149,
+      "end": 151,
+      "bbox": null
+    },
+    {
+      "text": "R1",
+      "label": "bearing",
+      "score": 0.9619140625,
+      "start": 169,
+      "end": 171,
+      "bbox": null
+    },
+    {
+      "text": "20\u00b0F",
+      "label": "degrees above ambient",
+      "score": 0.9814453125,
+      "start": 184,
+      "end": 188,
+      "bbox": null
+    },
+    {
+      "text": "critical alarm",
+      "label": "alert status",
+      "score": 0.935546875,
+      "start": 238,
+      "end": 252,
+      "bbox": null
+    },
+    {
+      "text": "locomotive cab",
+      "label": "location",
+      "score": 0.67724609375,
+      "start": 281,
+      "end": 295,
+      "bbox": null
+    },
+    {
+      "text": "locomotive cab",
+      "label": "alert recipient",
+      "score": 0.7412109375,
+      "start": 281,
+      "end": 295,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "ranked-ntsb-east_palestine-evidence",
+  "model": "fastino/gliner2-large-v1"
+}

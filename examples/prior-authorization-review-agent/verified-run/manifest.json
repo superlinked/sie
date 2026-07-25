@@ -1,0 +1,182 @@
+{
+  "created_at": "2026-07-25T01:39:43.566624+00:00",
+  "endpoint": "http://127.0.0.1:8080",
+  "sie_server_commit": "9d6ca6b00f788b6ab19f8d6dc9506e1b31dad2f0",
+  "run_command": "Modal exact-source reference examples against public SIE v0.6.23",
+  "models": {
+    "parse": "docling",
+    "retrieve": "BAAI/bge-m3",
+    "rerank": "Qwen/Qwen3-Reranker-4B",
+    "entities": "urchade/gliner_multi-v2.1",
+    "extract": "fastino/gliner2-large-v1"
+  },
+  "fixture": {
+    "path": "fixtures/cms-l1851-insufficient-documentation.html",
+    "sha256": "aec2408ff0e00b9960bf9e7879a7213942d32e8980da801a2c71acef4755cf91"
+  },
+  "artifacts": [
+    {
+      "path": "evaluation.json",
+      "sha256": "60cb304088b607d523e65869b0d26f0857047e88b26a0a7e16ffe533162eb140"
+    },
+    {
+      "path": "parsed.md",
+      "sha256": "918cd788c0e8736afa5d6a2745fd09617738260ad7b1c2321539a1c36529adb4"
+    },
+    {
+      "path": "raw/entities-case-0.json",
+      "sha256": "2d34fd2a3f40c2fc66b049cebac0a0c0cec0f3d1b52704ee30a9c29d6b8dee32"
+    },
+    {
+      "path": "raw/entities-case-1.json",
+      "sha256": "ba6f330822c661afc008a519ee7b7143b926a395fd4629024dced4e0fd9eb3a7"
+    },
+    {
+      "path": "raw/entities-case-2.json",
+      "sha256": "33719a1bd11ea8fa3620da4c996ca3c1a9a0997cb9b3da1c58240c8baef39701"
+    },
+    {
+      "path": "raw/entities-requirement-0.json",
+      "sha256": "0c4ba08af8b389a288b44621514d81c0eb858070ee65a7a8c23a71a884f7a1b2"
+    },
+    {
+      "path": "raw/entities.json",
+      "sha256": "90d61b0f44354436a4d26808bd6c51859ddea955a548805610c4ce061179b0bf"
+    },
+    {
+      "path": "raw/gliner2-outcome.json",
+      "sha256": "c9ec5d4ff68870786a01c63c06146881433e2f3c62a952e4d013d27655e5003f"
+    },
+    {
+      "path": "raw/gliner2-requirements.json",
+      "sha256": "809de1f98b358d9b6a6d094ef6e9754b32bfa28d94a8d7c2ae3312368754d3f2"
+    },
+    {
+      "path": "raw/gliner2-submission.json",
+      "sha256": "2140926de19e83de5af7eedcafb6e66409fffa0dbfda6833c52d17c3add27f6f"
+    },
+    {
+      "path": "raw/parse.json",
+      "sha256": "9fc49a18e11c8ad7bfbff26dbafbdeee4dfa09901d8986c0655121c6e8fb315f"
+    },
+    {
+      "path": "raw/rerank.json",
+      "sha256": "63106f37217c6a18255cd57fda578bf97ac85f5282c13415566efa68d99e6902"
+    },
+    {
+      "path": "raw/retrieve.json",
+      "sha256": "4b570ecb95ecc5bae65749845c2c298b57266c61ee38ad09f2e163a174b105ca"
+    },
+    {
+      "path": "raw/mapped.json",
+      "sha256": "f7b9a17fc71ef7b4da2fd6f69d28ebc8d95d230d6940497e295d59cfa61b6241"
+    },
+    {
+      "path": "review.json",
+      "sha256": "1748473e07578fec153cd374241714a381422bcf28cf556a94aaae27a9da0adc"
+    }
+  ],
+  "source": {
+    "publisher": "Centers for Medicare & Medicaid Services",
+    "title": "Lower Limb Orthoses",
+    "url": "https://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/lower-limb-orthoses",
+    "page_last_modified": "2026-02-11"
+  },
+  "calls": [
+    {
+      "stage": "parse",
+      "model": "docling",
+      "latency_ms": 35788.1
+    },
+    {
+      "stage": "retrieve",
+      "model": "BAAI/bge-m3",
+      "latency_ms": 11538.5
+    },
+    {
+      "stage": "rerank",
+      "model": "Qwen/Qwen3-Reranker-4B",
+      "latency_ms": 15771.7
+    },
+    {
+      "stage": "entities_requirement_0",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 11297.9
+    },
+    {
+      "stage": "entities_case_0",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 186.8
+    },
+    {
+      "stage": "entities_case_1",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 119.5
+    },
+    {
+      "stage": "entities_case_2",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 379.7
+    },
+    {
+      "stage": "gliner2_requirements",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 10114.5,
+      "source_chunk_ids": [
+        "chunk-2"
+      ],
+      "source_sha256": "265596236fcf3915a13ad19f5dd77510f4dfbc4420e247a53c27264b8c01deba",
+      "source_fragment_sha256": {
+        "authorization_requirement_text": "cadcff3f63a5a778d6202dbb1714b06ef62dde0c6922626758a63bce6a795971",
+        "face_to_face_requirement_text": "cadcff3f63a5a778d6202dbb1714b06ef62dde0c6922626758a63bce6a795971",
+        "written_order_requirement_text": "cadcff3f63a5a778d6202dbb1714b06ef62dde0c6922626758a63bce6a795971",
+        "face_to_face_window_text": "19a4544d06404af9e8a66fb0446b572bc8a96330edf46a179f3a28388671dbfa"
+      }
+    },
+    {
+      "stage": "gliner2_submission",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 56.4,
+      "source_chunk_ids": [
+        "chunk-4",
+        "chunk-5"
+      ],
+      "source_sha256": "87cf4d7120204c24a7100cb6c3d42e1de0f2bd02a54bfb10f83a5ae6ca92fa29",
+      "source_fragment_sha256": {
+        "hcpcs_code": "9a893928eede6acd46e1f8029609142962206042b4ceb88d901e159e1518e3bf",
+        "submitted_order": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8",
+        "submitted_medical_record": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8",
+        "submitted_proof_of_delivery": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8",
+        "documented_face_to_face_age": "001425cf1be3084c6dc10bff25c2c4b92881ba0496c60f287e2b7d59461d1bf8"
+      }
+    },
+    {
+      "stage": "gliner2_outcome",
+      "model": "fastino/gliner2-large-v1",
+      "latency_ms": 49.0,
+      "source_chunk_ids": [
+        "chunk-7",
+        "chunk-8"
+      ],
+      "source_sha256": "f91fe9b5ccf451ef886f1014dde5f3fd5eb24996a862de9f22ce3023b14e324f",
+      "source_fragment_sha256": {
+        "missing_documentation": "fb6503169e482f7076387a6f06abf2e86cb4382d03e2190ab67e5d244a3adce2",
+        "review_conclusion": "0ddc7dda57a2fcbf6b01a6f411888c1fa23404bc6d8a5c8c0f5b3276f025b89d",
+        "payment_action": "0ddc7dda57a2fcbf6b01a6f411888c1fa23404bc6d8a5c8c0f5b3276f025b89d"
+      }
+    }
+  ],
+  "pipeline": [
+    "parse",
+    "retrieve",
+    "rerank",
+    "entities_requirements",
+    "entities_case",
+    "gliner2_requirements",
+    "gliner2_submission",
+    "gliner2_outcome",
+    "deterministic_source_mapping",
+    "deterministic_validation"
+  ],
+  "decision_boundary": "This run reproduces one example published by CMS. It does not make a coverage, medical-necessity, diagnosis, treatment, or prospective payment decision."
+}
