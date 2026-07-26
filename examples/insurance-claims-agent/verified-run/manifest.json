@@ -1,0 +1,24 @@
+{
+  "run_id": "verified-20260726b",
+  "run_at": "2026-07-26T19:15:16.513930+00:00",
+  "public_record": true,
+  "endpoints": {
+    "cluster": "http://localhost:8080",
+    "generation": "http://127.0.0.1:8081"
+  },
+  "models": {
+    "parse": "docling",
+    "extract": "fastino/gliner2-large-v1",
+    "rerank": "BAAI/bge-reranker-v2-m3",
+    "review": "Qwen/Qwen3.5-4B:no-spec"
+  },
+  "timings_ms": {
+    "parse_appeal_decision_ms": 45521.1,
+    "parse_policy_ms": 16451.1,
+    "extract_claim_facts_ms": 12234.6,
+    "rerank_policy_ms": 6310.6,
+    "synthesize_review_ms": 151737.2
+  },
+  "source_manifest": "source-manifest.json",
+  "review": "review.json"
+}

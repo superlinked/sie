@@ -34,6 +34,9 @@ The evaluator checks facts stated in FEMA's published decision:
 
 The model summarizes a completed public appeal. It does not decide a live claim.
 
+The [`verified-run`](verified-run/) directory records a July 26, 2026 run in
+which all ten factual checks passed.
+
 ## Run it
 
 ```bash
