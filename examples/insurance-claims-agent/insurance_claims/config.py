@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,9 +11,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 SOURCE_DIR = DATA_DIR / "sources"
-PACKET_DIR = DATA_DIR / "claim-packet"
 RUNS_DIR = ROOT / "runs"
-FIXTURES_DIR = ROOT / "fixtures"
 
 
 @dataclass(frozen=True)
@@ -31,7 +28,6 @@ class ModelsConfig:
     parse: str
     extract: str
     rerank: str
-    vision: str
     review: str
 
 
@@ -91,7 +87,6 @@ def load_config() -> AppConfig:
         parse=os.environ.get("SIE_PARSE_MODEL", model_raw["parse"]),
         extract=os.environ.get("SIE_EXTRACT_MODEL", model_raw["extract"]),
         rerank=os.environ.get("SIE_RERANK_MODEL", model_raw["rerank"]),
-        vision=os.environ.get("SIE_VISION_MODEL", model_raw["vision"]),
         review=os.environ.get("SIE_REVIEW_MODEL", model_raw["review"]),
     )
     retrieval_raw = raw["retrieval"]
@@ -111,12 +106,6 @@ def load_config() -> AppConfig:
         ),
         sources=tuple(Source(**row) for row in raw["sources"]),
     )
-
-
-def load_claim() -> dict[str, Any]:
-    return json.loads((FIXTURES_DIR / "claim.json").read_text(encoding="utf-8"))
-
-
 def source_by_slug(config: AppConfig, slug: str) -> Source:
     for source in config.sources:
         if source.slug == slug:

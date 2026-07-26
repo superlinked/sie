@@ -1,37 +1,25 @@
 # Source and data notes
 
-The example combines public government documents, a public-domain photograph,
-and an explicitly fictional claim.
+The example uses two public FEMA documents. Both are U.S. federal government
+works. Their inclusion does not imply FEMA or DHS endorsement.
 
-## FEMA NFIP Proof of Loss
+## FEMA Flood Insurance Appeal Decision B8
 
-- File: https://www.fema.gov/sites/default/files/2020-07/FEMA-Form_086-0-09_proof-of-loss.pdf
-- Form: FEMA Form 086-0-09 (04/17)
-- Use: the example fills the official form with fictional claim data
+- File: https://www.floodsmart.gov/sites/default/files/media/document/2022-12/B8_Direct%20Physical%20Loss_Proof%20of%20Loss_Overturn.pdf
+- Source page: https://www.floodsmart.gov/flood-claim-memos/appeal-issue/direct-physical-loss/proof-loss
+- Published record: FEMA Flood Insurance Appeal Decision B8
+- Use: the claim record, amounts, policy issue, analysis, and conclusion
+- Privacy: FEMA published the decision without the policyholder's identity or
+  property address
 - Rights: U.S. federal government work under 17 U.S.C. § 105
-- Reproducibility: the exact government PDF is bundled as a fallback because
-  FEMA may reject requests from datacenter IP addresses
+- Reproducibility: the exact PDF is bundled because government sites may reject
+  requests from datacenter IP addresses
 
 ## Standard Flood Insurance Policy, Dwelling Form
 
 - File: https://www.fema.gov/sites/default/files/documents/fema_F-122-Dwelling-SFIP_2021.pdf
-- Use: policy retrieval and cited claim-review findings
+- Source page: https://www.fema.gov/flood-insurance/find-form/underwriting
+- Use: retrieval of the policy terms governing non-owned debris removal
 - Rights: U.S. federal government work under 17 U.S.C. § 105
-- Reproducibility: the exact government PDF is bundled as a fallback because
-  FEMA may reject requests from datacenter IP addresses
-
-## Flooded house interior photograph
-
-- File page: https://commons.wikimedia.org/wiki/File:Flooded_house_interior.jpg
-- Author: U.S. Fish and Wildlife Service
-- Use: visual inspection of the submitted damage photograph
-- Rights: public domain U.S. federal government work
-- Reproducibility: the exact photograph is bundled as a fallback for Wikimedia
-  rate limits
-
-## Fictional claim
-
-`claim.json` and `claim-note.txt` contain no real policyholder information.
-`prepare-claim` fills the FEMA form and produces the attached estimate. The
-deliberate evidence issues are an unsigned proof of loss and a $400 difference
-between the form and the estimate.
+- Reproducibility: the exact PDF is bundled because FEMA may reject requests
+  from datacenter IP addresses
