@@ -39,7 +39,12 @@
     {
       "name": "price-support",
       "passed": true,
-      "detail": "Additional evidence that the contractor's estimated dollar amount is limited strictly to the covered scope of work (labor and equipment under the building). The $3,564 per cubic yard quote requires validation against other estimates. | Verify documentation in the file for previous claims filed on May 20, 2019, May 29, 2019, and June 11, 2019, to ensure no payment overlap occurred for debris removal from the same area before the July 2019 event."
+      "detail": "Additional evidence that the contractor's estimated dollar amount is limited strictly to the covered scope of work (labor and equipment under the building). The $3,564 per cubic yard quote requires validation against other estimates."
+    },
+    {
+      "name": "prior-claim-overlap",
+      "passed": true,
+      "detail": "Verify documentation in the file for previous claims filed on May 20, 2019, May 29, 2019, and June 11, 2019, to ensure no payment overlap occurred for debris removal from the same area before the July 2019 event."
     },
     {
       "name": "finding-categories",

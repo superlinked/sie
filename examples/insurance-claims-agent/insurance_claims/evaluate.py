@@ -75,9 +75,13 @@ def evaluate_review(review: dict[str, Any]) -> list[Check]:
         ),
         Check(
             "price-support",
-            ("estimate" in evidence or "contractor" in evidence)
-            and ("previous" in overlap or "prior" in overlap),
-            f"{decision.get('evidence_needed')} | {decision.get('prior_claim_check')}",
+            "estimate" in evidence or "contractor" in evidence,
+            str(decision.get("evidence_needed")),
+        ),
+        Check(
+            "prior-claim-overlap",
+            "previous" in overlap or "prior" in overlap,
+            str(decision.get("prior_claim_check")),
         ),
         Check(
             "finding-categories",

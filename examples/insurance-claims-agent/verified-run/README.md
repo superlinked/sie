@@ -13,9 +13,9 @@ The run used `docling`, `fastino/gliner2-large-v1`,
 `BAAI/bge-reranker-v2-m3`, and `Qwen/Qwen3.5-4B:no-spec`.
 
 `manifest.json` records the models and timings. `source-manifest.json` pins the
-publisher URLs and SHA-256 hashes. The other files preserve the extracted
-facts, reranked policy passages, structured review, raw reranker response, and
-deterministic evaluation.
+publisher URLs and SHA-256 hashes. `markdown/` and `raw/` preserve every parsed
+document and model response. The other files keep the extracted facts, reranked
+policy passages, structured review, and deterministic evaluation.
 
-The source PDFs are downloaded from FEMA at run time. They are not copied into
-this repository.
+The example also includes the two downloaded FEMA PDFs, so the verified run can
+be reproduced if a publisher URL changes.
