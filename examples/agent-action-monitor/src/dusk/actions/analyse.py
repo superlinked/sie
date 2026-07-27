@@ -79,6 +79,13 @@ class AnalysisResult:
         blast_radius: Coarse impact estimate, ``"low"``, ``"medium"`` or
             ``"high"``.
         predicted_next: What an attacker would likely do next.
+        repeat_offense_contribution: The slice of ``score`` contributed by
+            the repeat-offense signal alone (0.0 when there was no matching
+            prior offense). Lets a caller ask "would this still be refused
+            without its own repeat-offense history?" -- used to decide
+            whether a refusal should be recorded as a new offense at all,
+            so a refusal caused only by the repeat boost doesn't re-record
+            itself with a fresh timestamp and defeat its own decay.
     """
 
     agent_id: str
@@ -90,6 +97,7 @@ class AnalysisResult:
     mitre_atlas: str = ""
     blast_radius: str = "low"
     predicted_next: str = ""
+    repeat_offense_contribution: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable representation of the result."""
@@ -103,6 +111,7 @@ class AnalysisResult:
             "mitre_atlas": self.mitre_atlas,
             "blast_radius": self.blast_radius,
             "predicted_next": self.predicted_next,
+            "repeat_offense_contribution": round(self.repeat_offense_contribution, 4),
         }
 
 
@@ -376,6 +385,7 @@ def analyse(
         mitre_atlas=_ATLAS,
         blast_radius=blast,
         predicted_next=_predicted_next(action),
+        repeat_offense_contribution=repeat_score if repeat_reason else 0.0,
     )
     logger.debug(
         "analysed agent=%s action_type=%s score=%.2f blast=%s",

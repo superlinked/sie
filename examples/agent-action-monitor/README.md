@@ -45,25 +45,47 @@ target (`mock-prod`), and the agent harness (`agent-demo`) -- all on one
 internal network, no external egress beyond `sie`'s one-time model-weight
 download, no API keys required.
 
-The first `up` cold-starts up to three CPU models in `sie` (encode, score,
-extract) on demand, not necessarily all at once -- each gate request only
-provisions the primitives it actually calls. Every SIE call is bounded to a
-short provisioning timeout (1.5s): a cold or at-capacity model falls back
-to the deterministic path in about a second rather than blocking the gate,
-so a slow or memory-constrained first `sie` startup degrades individual
-request latency, it doesn't hang them. Allocate at least 8 GB to Docker
-Desktop for `sie` to load its models promptly in the background; under
-that, model loading itself takes longer (competing for memory), but
-`/v1/gate` keeps responding throughout.
+The first `up` downloads roughly 5.7 GB of model weights into the
+`sie-hf-cache` volume (the three models in "Model lineup" below), and the
+warmed-up `sie` container itself runs at around 7 GB RSS. That download and
+initial load has to finish inside the `sie` image's own baked-in healthcheck
+window (about 150s of retries) before Docker marks it healthy and lets
+`dusk-gate` and `n8n` start (`depends_on: condition: service_healthy` in
+compose.yml) -- on a slow connection, or with too little memory allocated to
+Docker Desktop, that first `up` can time out with `sie` stuck `unhealthy`
+rather than just running slow. Re-running `docker compose up` picks up the
+partially-downloaded cache and finishes faster. On Apple Silicon, `sie`'s
+image is amd64-only and runs emulated (`platform: linux/amd64` in
+compose.yml), which adds meaningfully to both the download-to-ready time and
+steady-state latency versus a native amd64 host.
+
+Allocate at least 8 GB to Docker Desktop. Once `sie` is healthy, cold
+individual models are a separate, much smaller concern: each gate request
+only provisions the primitives it actually calls, and every SIE call is
+bounded to a short provisioning timeout (1.5s) -- a cold or at-capacity
+model falls back to the deterministic path in about a second rather than
+blocking the gate, so a model that hasn't been hit yet degrades individual
+request latency, it doesn't hang them.
 
 Without Docker, run the pieces directly. The base install (`pip install -e .`)
 works on Python 3.11+; the `sie` extra (real SIE encode/score/extract, rather
 than the deterministic n-gram fallback) requires **Python 3.12+**, since
 `sie-sdk` itself does -- see the Dockerfile, which uses `python:3.12-slim` for
-exactly this reason:
+exactly this reason. `agent-demo/` and `mock-prod/` are separate install
+targets with their own `requirements.txt` (that's what their own Dockerfiles
+install, on top of the base `dusk` package) -- the base install alone is not
+enough to run `agent-demo/run_scenario.py`, which needs `requests` (and
+`boto3` if you flip on real Bedrock):
 
 ```bash
-# optional: start from the documented SIE settings
+# base package (the gate)
+pip install -e .
+
+# agent-demo and mock-prod are separate install targets, each with their
+# own requirements.txt -- the base install above doesn't cover either
+pip install -r agent-demo/requirements.txt -r mock-prod/requirements.txt
+
+# optional: start from the documented SIE/Bedrock settings
 cp .env.example .env
 
 # terminal 1: the gate
@@ -122,10 +144,14 @@ to turn it on.
 
 Every verdict fires `decision` and `report`; refused verdicts also fire
 `alert` (`src/dusk/trace/n8n_client.py`). The `n8n` container has these
-three webhooks active from startup (`n8n/dusk-webhooks.json`, baked into
-the image, not imported by hand) -- each just responds immediately, no
-external service involved. Watch them land in the executions list at
-`http://localhost:5678`.
+three webhooks active from startup (`n8n/dusk-webhooks.json`, imported and
+published via the n8n CLI in `n8n/docker-entrypoint.sh`, not imported by
+hand, and unaffected by the UI's own owner-account setup since the CLI
+talks to n8n's database directly) -- each just responds immediately, no
+external service involved. Visiting `http://localhost:5678` in a browser
+prompts for a one-time local owner account (n8n's own UI, not something
+this stack sets up); the executions list showing the three webhooks firing
+is on the other side of that.
 
 ## Sample data
 
@@ -183,12 +209,17 @@ record time, capped at 200 entries so lookup cost stays O(1) regardless of
 how long the gate has been running -- see `src/dusk/api.py`), not
 hardcoded. This has also been validated against Superlinked's hosted SIE
 cluster directly, not just assumed: `sie_encode` returns a genuine
-1024-dimension `bge-m3` vector, precision/recall on the labelled fixture is
-unchanged with SIE live versus the deterministic-only baseline (1.0/1.0
-either way), and at least one attack's reasons carry a real SIE-sourced
-marker confirming the primitives are actually contributing a signal over
-the network. See `docs/sie-primitives.md` for exactly where each primitive
-is wired in.
+1024-dimension `bge-m3` vector, and one attack in the live benchmark
+(`generate_actions.sie_only_attacks`) is deliberately constructed to evade
+every deterministic check -- its deterministic-only score lands under
+`gate_block_threshold` by design, so only a SIE signal can refuse it.
+Scoring it with real SIE calls versus with them forced off shows the score
+lands on opposite sides of the block threshold, not just that a reason
+string happens to mention SIE: disabling SIE visibly drops recall on that
+attack from 1.0 to 0.0, while precision across the full fixture (including
+held-out negatives never folded into the baseline) is unaffected either
+way. See `docs/sie-primitives.md` for exactly where each primitive is wired
+in and the full benchmark methodology.
 
 ## Why SIE specifically
 
@@ -279,9 +310,11 @@ complete local flow:
   dependent on any AI model at runtime.
 - SIE's rerank pass only reorders a small shortlist of candidates already
   retrieved by cosine similarity, not the full decision history.
-- The extract model's privileged-term detection is zero-shot and has only
-  been evaluated against the same synthetic fixtures used elsewhere, not an
-  adversarial corpus designed to evade it specifically.
+- The extract model's privileged-term detection is zero-shot. It has been
+  shown to catch one deliberately evasive term ("superuser", scored with
+  and without SIE in `test_disabling_sie_lets_the_evasive_attack_slip_through`),
+  not evaluated against a broader adversarial corpus designed to evade it
+  systematically.
 - Latency numbers are from a single 20-request-per-level trial against a
   shared tester cluster; enough to confirm the shape, not a high-confidence
   p95 at every level. See `docs/gate-latency-notes.md`.

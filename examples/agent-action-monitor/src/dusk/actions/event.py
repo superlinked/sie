@@ -61,12 +61,16 @@ class AgentAction:
         """Validate the event, raising ValueError on invalid input.
 
         Raises:
-            ValueError: If ``agent_id`` or ``target`` is empty, ``timestamp``
-                is not timezone-aware, ``action_type`` is not a known verb, or
-                ``change`` is not a mapping. Values are never silently coerced.
+            ValueError: If ``agent_id`` or ``target`` is empty or contains
+                control characters (which could forge lines in a log that
+                cites it verbatim), ``timestamp`` is not timezone-aware,
+                ``action_type`` is not a known verb, or ``change`` is not a
+                mapping. Values are never silently coerced.
         """
         if not isinstance(self.agent_id, str) or not self.agent_id.strip():
             raise ValueError("agent_id must be a non-empty string")
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in self.agent_id):
+            raise ValueError("agent_id must not contain control characters")
         if not isinstance(self.target, str) or not self.target.strip():
             raise ValueError("target must be a non-empty string")
         if not isinstance(self.timestamp, datetime):

@@ -6,6 +6,8 @@ import hashlib
 import logging
 import math
 import os
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +21,56 @@ DEFAULT_EXTRACT_LABELS = ["role", "privilege", "resource", "segment", "port"]
 
 #: Per-call provisioning bound; one gate request can make several sequential SIE calls.
 _PROVISION_TIMEOUT_S = 1.5
+
+#: A single gate request can make up to five sequential SIE calls (extract,
+#: rerank novelty, encode + rerank for similar_decision_ids, encode to
+#: record). provision_timeout_s only bounds a cold/at-capacity model; a
+#: *half-up* SIE (reachable, but slow to answer) can still let each call run
+#: close to the full client timeout, stalling one request for several times
+#: sie_timeout_ms. This in-process circuit breaker stops that multiplying
+#: effect: after a few consecutive failures, every SIE call is skipped
+#: outright (straight to the deterministic/n-gram fallback) for a cooldown
+#: window, instead of paying the client timeout again on every call.
+_CIRCUIT_FAILURE_THRESHOLD = 3
+_CIRCUIT_COOLDOWN_S = 30.0
+
+_circuit_lock = threading.Lock()
+_consecutive_sie_failures = 0
+_circuit_open_until = 0.0
+
+
+def _circuit_is_open() -> bool:
+    with _circuit_lock:
+        return time.monotonic() < _circuit_open_until
+
+
+def _record_sie_success() -> None:
+    global _consecutive_sie_failures, _circuit_open_until
+    with _circuit_lock:
+        _consecutive_sie_failures = 0
+        _circuit_open_until = 0.0
+
+
+def _record_sie_failure() -> None:
+    global _consecutive_sie_failures, _circuit_open_until
+    with _circuit_lock:
+        _consecutive_sie_failures += 1
+        if _consecutive_sie_failures >= _CIRCUIT_FAILURE_THRESHOLD:
+            _circuit_open_until = time.monotonic() + _CIRCUIT_COOLDOWN_S
+            logger.warning(
+                "SIE circuit opened after %d consecutive failures; skipping SIE "
+                "calls for %.0fs",
+                _consecutive_sie_failures,
+                _CIRCUIT_COOLDOWN_S,
+            )
+
+
+def reset_sie_circuit() -> None:
+    """Close the circuit and clear its failure count. Test-only hook."""
+    global _consecutive_sie_failures, _circuit_open_until
+    with _circuit_lock:
+        _consecutive_sie_failures = 0
+        _circuit_open_until = 0.0
 
 
 def _sigmoid(x: float) -> float:
@@ -73,6 +125,8 @@ def _sie_client(config: Config) -> Any | None:  # noqa: ANN401
 def sie_encode(text: str, config: Config | None = None) -> list[float] | None:
     """encode: text -> dense vector via SIE. Returns None to trigger the n-gram fallback."""
     cfg = config or get_config()
+    if _circuit_is_open():
+        return None
     client = _sie_client(cfg)
     if client is None:
         return None
@@ -87,8 +141,10 @@ def sie_encode(text: str, config: Config | None = None) -> list[float] | None:
             provision_timeout_s=_PROVISION_TIMEOUT_S,
         )
         dense = result["dense"] if isinstance(result, dict) else getattr(result, "dense", None)
+        _record_sie_success()
         return [float(v) for v in dense] if dense is not None else None
     except Exception as exc:  # noqa: BLE001
+        _record_sie_failure()
         logger.warning("SIE encode failed: %s", exc)
         return None
 
@@ -105,6 +161,8 @@ def sie_score(
     if not candidates:
         return None
     cfg = config or get_config()
+    if _circuit_is_open():
+        return None
     client = _sie_client(cfg)
     if client is None:
         return None
@@ -121,11 +179,13 @@ def sie_score(
             provision_timeout_s=_PROVISION_TIMEOUT_S,
         )
         entries = result["scores"] if isinstance(result, dict) else getattr(result, "scores", None)
+        _record_sie_success()
         if not entries:
             return None
         score_by_id = {str(e["item_id"]): _sigmoid(float(e["score"])) for e in entries}
         return [score_by_id.get(str(i), 0.0) for i in range(len(candidates))]
     except Exception as exc:  # noqa: BLE001
+        _record_sie_failure()
         logger.warning("SIE score failed: %s", exc)
         return None
 
@@ -141,6 +201,8 @@ def sie_extract(
     every hit as equally privileged.
     """
     cfg = config or get_config()
+    if _circuit_is_open():
+        return []
     client = _sie_client(cfg)
     if client is None:
         return []
@@ -158,6 +220,7 @@ def sie_extract(
         entities = (
             result["entities"] if isinstance(result, dict) else getattr(result, "entities", None)
         )
+        _record_sie_success()
         if not entities:
             return []
         extracted: list[ExtractedTerm] = []
@@ -182,6 +245,7 @@ def sie_extract(
                 )
         return extracted
     except Exception as exc:  # noqa: BLE001
+        _record_sie_failure()
         logger.warning("SIE extract failed: %s", exc)
         return []
 

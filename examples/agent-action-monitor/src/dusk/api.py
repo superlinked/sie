@@ -49,7 +49,7 @@ def _load_gate_engine() -> ActionGate:
         try:
             known_good = ingest_file(baseline_path, baseline_source)
             gate_engine.learn(known_good)
-        except (FileNotFoundError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             _baseline_load_error = str(exc)
             logger.error(
                 "gate baseline could not be loaded from %s: %s -- every agent will read as "
@@ -220,7 +220,11 @@ def health() -> object:
 
 
 def run() -> None:
-    port = int(os.getenv("FLASK_PORT", "5000"))
+    # 8000 everywhere -- Dockerfile, compose.yml, harness.py's default
+    # DUSK_GATE_URL, and every README example all assume the gate listens
+    # on 8000; a bare `python -m dusk.api` outside Docker (where the
+    # Dockerfile's own ENV FLASK_PORT=8000 doesn't apply) must match that.
+    port = int(os.getenv("FLASK_PORT", "8000"))
     host = os.getenv("FLASK_HOST", "127.0.0.1")
     app.run(host=host, port=port)
 

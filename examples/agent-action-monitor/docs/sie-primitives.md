@@ -61,22 +61,33 @@ start behavior.
 
 `tests/test_sie_live_benchmark.py` skips until `DUSK_SIE_ENDPOINT` and, for
 authenticated deployments, `SIE_API_KEY` point at a reachable cluster. Run
-against Superlinked's hosted tester endpoint, both checks pass:
+against Superlinked's hosted tester endpoint, all checks pass:
 
 - `sie_encode` returns a real 1024-dimension dense vector from `BAAI/bge-m3`
   (confirming the model actually loaded and served, not just that the
   endpoint answered).
-- Precision and recall on the labelled fixture stay at 1.0/1.0, matching the
-  deterministic-only baseline exactly -- no regression from enabling SIE.
-- At least one attack's `reasons` carries a real `SIE rerank` or
-  `SIE extract` marker, confirming the primitives are actually contributing
-  a signal over the network, not a no-op that happens to still pass.
+- Precision and recall stay at 1.0/1.0 on a fixture that adds two things the
+  earlier version of this benchmark didn't have: held-out negatives (legitimate
+  actions never folded into the baseline, not the training set replayed as
+  its own test) and an attack (`generate_actions.sie_only_attacks`)
+  constructed so its deterministic-only score lands under
+  `gate_block_threshold` -- it reuses a known action type and target class,
+  and its new tokens/values are deliberately kept outside the static
+  sensitive frozenset. Nothing but a SIE signal can refuse it.
+- `test_disabling_sie_lets_the_evasive_attack_slip_through` scores that one
+  attack twice: once with real SIE calls, once with `sie_extract`/`sie_score`
+  forced off. It asserts the without-SIE score lands *below*
+  `gate_block_threshold` and the with-SIE score lands *at or above* it --
+  i.e. disabling SIE visibly drops recall on this attack from 1.0 to 0.0,
+  not just that a reason string happens to mention SIE.
 - The full test suite passes unchanged with live SIE enabled, confirming
   nothing depends on the deterministic fallback path being taken. The exact
   test count is intentionally omitted because it changes as coverage grows.
 
 This is evidence that SIE is load-bearing here ("removing SIE degrades the
-result"), not just a claim.
+result"), not just a claim -- and specifically, not evidence that rests on a
+fixture where every attack was already deterministically catchable, which
+was the gap in the version of this benchmark reviewed earlier.
 
 ## Known limits
 
@@ -98,8 +109,9 @@ result"), not just a claim.
 - The live decision history behind `similar_decision_ids` is in-memory and
   capped at 200 entries per gate process -- a demo-scale audit trail, not a
   durable store. It resets on restart and is not shared across replicas.
-- `sie_extract`'s privileged-term detection is zero-shot: it has not been
-  evaluated against an adversarial corpus designed to evade GLiNER
-  specifically, only against the same synthetic fixtures used elsewhere.
-  The 0.5 confidence floor is a reasonable default, not an empirically
-  tuned threshold.
+- `sie_extract`'s privileged-term detection is zero-shot: it has been shown
+  to catch one deliberately evasive term ("superuser", via
+  `generate_actions.sie_only_attacks`), not evaluated against a broader
+  adversarial corpus designed to evade GLiNER systematically. The 0.5
+  confidence floor is a reasonable default, not an empirically tuned
+  threshold.

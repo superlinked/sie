@@ -119,7 +119,18 @@ class ActionGate:
         else:
             verdict = ALLOW
         gate_verdict = GateVerdict(verdict=verdict, analysis=result)
-        if gate_verdict.refused and self.offense_memory is not None:
+        # A refusal caused only by the repeat-offense boost (base score below
+        # the block threshold on its own) is recorded already, via the prior
+        # offense it matched -- recording it again would give it a fresh
+        # timestamp and defeat that prior offense's own decay, letting one
+        # real offense snowball into an indefinite chain of self-renewing
+        # refusals under watch mode.
+        base_score = result.score - result.repeat_offense_contribution
+        if (
+            gate_verdict.refused
+            and self.offense_memory is not None
+            and base_score >= self.config.gate_block_threshold
+        ):
             features = action_features(action)
             self.offense_memory.record(
                 trace_id=gate_verdict.trace_id,

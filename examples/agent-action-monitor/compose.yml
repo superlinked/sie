@@ -2,6 +2,10 @@
 # up` runs it keyless. Watch mode is the default; DUSK_ENFORCE switches to
 # enforce. Not egress-blocked (sie needs one-time model-weight downloads on
 # cold start); nothing here makes an outbound call while serving a request.
+# Docker Compose auto-loads a `.env` file next to this one for the ${VAR}
+# interpolation below -- `cp .env.example .env` before `docker compose up`
+# if you're overriding anything; the defaults (empty SIE_API_KEY, no AWS
+# creds) keep the stack keyless exactly as before.
 
 services:
   dusk-gate:
@@ -21,6 +25,9 @@ services:
       DUSK_N8N_REPORT_URL: "http://n8n:5678/webhook/dusk-report"
       DUSK_N8N_DECISION_URL: "http://n8n:5678/webhook/dusk-decision"
       DUSK_OFFENSE_MEMORY_PATH: "/app/state/dusk-offense-memory.json"
+      # Empty by default (self-hosted sie needs no key); set SIE_API_KEY in
+      # .env only for an authenticated hosted endpoint.
+      SIE_API_KEY: "${SIE_API_KEY:-}"
     volumes:
       - ./sample-data:/app/sample-data:ro
       - offense-memory:/app/state
@@ -45,7 +52,10 @@ services:
       context: ./n8n # bakes in the three DUSK webhooks, active from startup -- no manual import
     environment:
       N8N_SECURE_COOKIE: "false"
-      N8N_USER_MANAGEMENT_DISABLED: "true" # keyless: no owner-account setup step blocking startup
+      # No external call is made while serving a request (see header), but
+      # n8n's own anonymous diagnostics ping n8n.io by default; turn that off
+      # so that claim holds for the n8n container too.
+      N8N_DIAGNOSTICS_ENABLED: "false"
     networks: [internal]
     ports: ["5678:5678"] # open the n8n UI to inspect the executions list
 
@@ -66,11 +76,19 @@ services:
       USE_REAL_BEDROCK: "false"
       DUSK_GATE_URL: "http://dusk-gate:8000/v1/gate"
       MOCK_PROD_URL: "http://mock-prod:9000/apply"
+      # Empty by default (mock-Bedrock path ignores them); required in .env
+      # only when USE_REAL_BEDROCK=true. AWS_SESSION_TOKEN is for temporary
+      # credentials (SSO/assumed-role) and is fine left empty otherwise.
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
     depends_on:
       dusk-gate: { condition: service_healthy }
       mock-prod: { condition: service_healthy }
     networks: [internal]
-    # mock-Bedrock by default (keyless); USE_REAL_BEDROCK=true for real Bedrock.
+    # mock-Bedrock by default (keyless); USE_REAL_BEDROCK=true for real
+    # Bedrock, needs the AWS_* vars above set in .env (see .env.example).
 
 networks:
   internal:

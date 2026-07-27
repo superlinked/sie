@@ -17,6 +17,18 @@ logger = logging.getLogger("dusk.actions.offense_memory")
 #: Retention limits bound both memory use and the persisted file.
 _MAX_OFFENSES_PER_AGENT = 50
 _MAX_TRACKED_AGENTS = 500
+#: Per-record token bounds. The count caps above bound the number of
+#: records, not their size -- an adversarial target with thousands of
+#: unique tokens would otherwise let a single record's bytes dwarf the
+#: caps' intent. Applied at write time, before a record is ever stored.
+_MAX_TOKENS_PER_OFFENSE = 32
+_MAX_TOKEN_LENGTH = 64
+#: Hard ceiling on the total in-memory/persisted payload size. The count
+#: caps bound records and agents but not bytes; this backstops both against
+#: a target crafted to sit just under the per-record token bounds while
+#: still being unusually large, and against rotating agent IDs producing
+#: many small agents that individually undercut _MAX_TRACKED_AGENTS.
+_MAX_TOTAL_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -43,6 +55,17 @@ class OffenseRecord:
     tokens: tuple[str, ...]
     verdict: str
     timestamp: datetime
+
+    def __post_init__(self) -> None:
+        """Validate the record, raising ValueError on invalid input.
+
+        Raises:
+            ValueError: If ``timestamp`` is not timezone-aware. A naive
+                timestamp would later crash every decay calculation for this
+                agent (aware minus naive datetimes cannot be subtracted).
+        """
+        if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe representation."""
@@ -77,6 +100,11 @@ class _AgentOffenses:
     records: list[OffenseRecord] = field(default_factory=list)
 
 
+def _record_size(entry: OffenseRecord) -> int:
+    """Approximate on-disk/in-memory footprint of one record, in bytes."""
+    return len(json.dumps(entry.to_dict()))
+
+
 class OffenseMemory:
     """Thread-safe offense store with coalesced, single-writer persistence.
 
@@ -96,6 +124,7 @@ class OffenseMemory:
         self._storage_path = Path(storage_path) if storage_path else None
         self._lock = threading.Lock()
         self._by_agent: OrderedDict[str, _AgentOffenses] = OrderedDict()
+        self._total_bytes = 0
         if self._storage_path is not None:
             self._load(self._storage_path)
         self._executor: ThreadPoolExecutor | None = None
@@ -114,9 +143,24 @@ class OffenseMemory:
         else:
             self._by_agent.move_to_end(agent_id)
         while len(self._by_agent) > _MAX_TRACKED_AGENTS:
-            evicted_id, _ = self._by_agent.popitem(last=False)
+            evicted_id, evicted = self._by_agent.popitem(last=False)
+            self._total_bytes -= sum(_record_size(r) for r in evicted.records)
             logger.info("Evicted offense memory for agent %s (tracked-agent cap)", evicted_id)
         return offenses
+
+    def _enforce_byte_budget(self) -> None:
+        """Evict the oldest agents until the total payload is back under budget.
+
+        The count caps (per-agent and tracked-agent) bound how many records
+        and agents exist, not their size -- an adversarial target with many
+        unique tokens, or enough distinct agent IDs to each stay just under
+        the tracked-agent cap, can still inflate total bytes well past what
+        those caps imply. Lock required.
+        """
+        while self._total_bytes > _MAX_TOTAL_BYTES and self._by_agent:
+            evicted_id, evicted = self._by_agent.popitem(last=False)
+            self._total_bytes -= sum(_record_size(r) for r in evicted.records)
+            logger.warning("Evicted offense memory for agent %s (byte-budget cap)", evicted_id)
 
     def _load(self, storage_path: Path) -> None:
         if not storage_path.exists():
@@ -151,6 +195,10 @@ class OffenseMemory:
                 self._by_agent[agent_id] = _AgentOffenses(records=capped)
         while len(self._by_agent) > _MAX_TRACKED_AGENTS:
             self._by_agent.popitem(last=False)
+        self._total_bytes = sum(
+            _record_size(r) for offenses in self._by_agent.values() for r in offenses.records
+        )
+        self._enforce_byte_budget()
         logger.info(
             "Loaded offense memory for %d agent(s) from %s",
             len(self._by_agent),
@@ -232,20 +280,27 @@ class OffenseMemory:
         verdict: str,
     ) -> None:
         """Record a refused verdict for ``agent_id`` and schedule a write."""
+        bounded_tokens = tuple(
+            t[:_MAX_TOKEN_LENGTH] for t in sorted(tokens)[:_MAX_TOKENS_PER_OFFENSE]
+        )
         entry = OffenseRecord(
             trace_id=trace_id,
             agent_id=agent_id,
             action_type=action_type,
             target_class=target_class,
-            tokens=tuple(sorted(tokens)),
+            tokens=bounded_tokens,
             verdict=verdict,
             timestamp=datetime.now(UTC),
         )
         with self._lock:
             offenses = self._touch(agent_id)
             offenses.records.append(entry)
+            self._total_bytes += _record_size(entry)
             if len(offenses.records) > _MAX_OFFENSES_PER_AGENT:
-                del offenses.records[: len(offenses.records) - _MAX_OFFENSES_PER_AGENT]
+                overflow = offenses.records[: len(offenses.records) - _MAX_OFFENSES_PER_AGENT]
+                del offenses.records[: len(overflow)]
+                self._total_bytes -= sum(_record_size(r) for r in overflow)
+            self._enforce_byte_budget()
             self._schedule_persist()
 
     def offenses_for(self, agent_id: str) -> list[OffenseRecord]:
@@ -258,4 +313,5 @@ class OffenseMemory:
         """Wipe all recorded offenses. Test-only / operator reset hook."""
         with self._lock:
             self._by_agent.clear()
+            self._total_bytes = 0
             self._schedule_persist()
