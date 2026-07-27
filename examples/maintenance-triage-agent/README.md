@@ -19,7 +19,7 @@ cause, recommend an operational response, or write to a control system.
 
 | Step | Model | Output |
 |---|---|---|
-| Parse the illustrated PDF spread | `docling-project/docling` | Markdown from the original page layout |
+| Parse the illustrated PDF spread | `docling` | Markdown from the original page layout |
 | Retrieve detector and outcome passages | `BAAI/bge-m3` | Dense vectors and cosine ranking |
 | Rerank against the sequence question | `Qwen/Qwen3-Reranker-4B` | Ordered source evidence with scores |
 | Verify locations, times, alerts, the bearing, and railcar count | `urchade/gliner_multi-v2.1` | Exact source spans |
@@ -75,6 +75,10 @@ runs/<run-id>/parsed.md                      parsed NTSB spread used downstream
 runs/<run-id>/review.json                    detector trend and explicit boundary
 runs/<run-id>/evaluation.json                deterministic checks
 ```
+
+The verified manifest preserves the upstream-style Docling name configured
+during acquisition and the canonical `docling` ID that SIE actually served.
+New runs use the canonical ID directly.
 
 See [fixtures/SOURCES.md](fixtures/SOURCES.md) for the original NTSB URL,
 extraction method, and checksums.

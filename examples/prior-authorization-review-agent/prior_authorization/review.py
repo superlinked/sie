@@ -136,16 +136,6 @@ def load_config() -> dict[str, Any]:
     return config
 
 
-def _runtime_model_id(config: dict[str, Any], key: str) -> str:
-    model = str(config["models"][key])
-    cluster_url = str(config["cluster"]["url"]).casefold()
-    if model == "docling-project/docling" and cluster_url.startswith(
-        ("http://localhost:", "http://127.0.0.1:", "http://[::1]:")
-    ):
-        return "docling"
-    return model
-
-
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -457,7 +447,7 @@ def _extract_gliner2_group(
 
 def run(run_id: str) -> Path:
     config = load_config()
-    parse_model = _runtime_model_id(config, "parse")
+    parse_model = str(config["models"]["parse"])
     run_dir = RUNS_DIR / run_id
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=False)

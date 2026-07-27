@@ -14,10 +14,10 @@ from prior_authorization.review import (
     _chunks,
     _group_source_scope,
     _require_gliner2_group_evidence,
-    _runtime_model_id,
     _source_fragments,
     _source_scope,
     build_review,
+    load_config,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,11 +44,8 @@ payment.
     ]
 
 
-def test_public_docling_id_translates_only_for_a_direct_local_server() -> None:
-    local = {"cluster": {"url": "http://localhost:8080"}, "models": {"parse": "docling-project/docling"}}
-    cloud = {"cluster": {"url": "https://api.superlinked.com"}, "models": {"parse": "docling-project/docling"}}
-    assert _runtime_model_id(local, "parse") == "docling"
-    assert _runtime_model_id(cloud, "parse") == "docling-project/docling"
+def test_config_uses_canonical_docling_id() -> None:
+    assert load_config()["models"]["parse"] == "docling"
 
 
 def test_docling_bullets_stay_as_distinct_submission_chunks() -> None:

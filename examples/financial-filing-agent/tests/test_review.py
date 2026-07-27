@@ -8,9 +8,9 @@ from financial_filing.review import (
     _original_table_source_value,
     _require_entity_evidence,
     _require_matching_source_values,
-    _runtime_model_id,
     _table_source_values,
     build_review,
+    load_config,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,11 +26,8 @@ def test_fixture_preserves_the_sec_table_rows_and_item_402_sentences() -> None:
     assert "does not impact net income over the life of the portfolio" in source
 
 
-def test_public_docling_id_translates_only_for_a_direct_local_server() -> None:
-    local = {"cluster": {"url": "http://127.0.0.1:8080"}, "models": {"parse": "docling-project/docling"}}
-    cloud = {"cluster": {"url": "https://api.superlinked.com"}, "models": {"parse": "docling-project/docling"}}
-    assert _runtime_model_id(local, "parse") == "docling"
-    assert _runtime_model_id(cloud, "parse") == "docling-project/docling"
+def test_config_uses_canonical_docling_id() -> None:
+    assert load_config()["models"]["parse"] == "docling"
 
 
 def structured_data() -> dict[str, str]:

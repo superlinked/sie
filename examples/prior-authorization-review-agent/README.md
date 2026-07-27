@@ -17,7 +17,7 @@ treatment recommendation, or prospective payment decision.
 
 | Step | Model | Output |
 |---|---|---|
-| Parse the CMS excerpt | `docling-project/docling` | Markdown |
+| Parse the CMS excerpt | `docling` | Markdown |
 | Retrieve candidate passages | `BAAI/bge-m3` | Dense vectors and cosine ranking |
 | Put the controlling passages first | `Qwen/Qwen3-Reranker-4B` | Ranked source evidence |
 | Extract named requirement and case spans | `urchade/gliner_multi-v2.1` | Source spans with offsets and scores |
@@ -84,5 +84,8 @@ runs/<run-id>/evaluation.json                  source, arithmetic, and boundary 
 The manifest records `SIE_SERVER_COMMIT` and `SIE_RUN_COMMAND` when they are
 present in the environment. Recorded latency includes model provisioning and is
 not a performance claim.
+The verified manifest preserves the upstream-style Docling name configured
+during acquisition and the canonical `docling` ID that SIE actually served.
+New runs use the canonical ID directly.
 
 [cms-source]: https://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/lower-limb-orthoses

@@ -12,7 +12,7 @@ or misconduct, and it does not make an investment recommendation.
 
 | Step | Model | Output |
 |---|---|---|
-| Parse the source packet | `docling-project/docling` | Markdown with source headings |
+| Parse the source packet | `docling` | Markdown with source headings |
 | Retrieve candidate passages | `BAAI/bge-m3` | Dense vectors and cosine ranking |
 | Rerank against the exact question | `Qwen/Qwen3-Reranker-4B` | Ordered evidence with scores |
 | Verify the cited spans | `urchade/gliner_multi-v2.1` | Exact source spans |
@@ -76,6 +76,9 @@ runs/<run-id>/evaluation.json     deterministic checks
 
 `verified-run/` contains the saved evidence used to design the example. It is
 not a latency benchmark. The first request included model provisioning.
+Its manifest preserves the upstream-style Docling name configured during
+acquisition and the canonical `docling` ID that SIE actually served. New runs
+use the canonical ID directly.
 
 See [fixtures/SOURCES.md](fixtures/SOURCES.md) for accession numbers, URLs, and
 source checksums.

@@ -7,8 +7,8 @@ from maintenance_triage.review import (
     _map_exact_source_fields,
     _require_entity_evidence,
     _require_gliner2_evidence,
-    _runtime_model_id,
     build_review,
+    load_config,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,11 +21,8 @@ def test_fixture_is_the_exact_ntsb_page_spread() -> None:
     )
 
 
-def test_public_docling_id_translates_only_for_a_direct_local_server() -> None:
-    local = {"cluster": {"url": "http://[::1]:8080"}, "models": {"parse": "docling-project/docling"}}
-    cloud = {"cluster": {"url": "https://api.superlinked.com"}, "models": {"parse": "docling-project/docling"}}
-    assert _runtime_model_id(local, "parse") == "docling"
-    assert _runtime_model_id(cloud, "parse") == "docling-project/docling"
+def test_config_uses_canonical_docling_id() -> None:
+    assert load_config()["models"]["parse"] == "docling"
 
 
 def structured_data() -> dict[str, str]:
