@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-
 ROOT = Path(__file__).resolve().parent
 CASES_PATH = ROOT / "data" / "cases.json"
 SOURCES_PATH = ROOT / "data" / "sources.json"
@@ -187,8 +186,7 @@ def validate_response(
     missing_anchors = [check for check in anchor_checks if not check["passed"]]
     if missing_anchors:
         missing = ", ".join(
-            f"{anchor['text']!r} ({anchor['label']} at {anchor['start']}:{anchor['end']})"
-            for anchor in missing_anchors
+            f"{anchor['text']!r} ({anchor['label']} at {anchor['start']}:{anchor['end']})" for anchor in missing_anchors
         )
         raise ValueError(f"{case_id}: missing required anchors: {missing}")
     return {

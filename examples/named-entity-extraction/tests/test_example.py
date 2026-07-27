@@ -6,10 +6,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-import run  # noqa: E402
+import run
 
 
 def strings(value: Any):
@@ -69,18 +68,14 @@ class NamedEntityExampleTests(unittest.TestCase):
     def test_empty_response_fails_required_anchor_check(self) -> None:
         cases, _ = run.load_and_verify_inputs()
         case_id = "scotus_two_contracts"
-        response = run.read_json(
-            ROOT / "verified-run" / "raw" / "supreme-court-caption.json"
-        )
+        response = run.read_json(ROOT / "verified-run" / "raw" / "supreme-court-caption.json")
         response["entities"] = []
         with self.assertRaisesRegex(ValueError, "missing required anchors"):
             run.validate_response(case_id, cases["cases"][case_id], response)
 
     def test_cms_false_positive_is_preserved_but_not_required(self) -> None:
         cases, _ = run.load_and_verify_inputs()
-        response = run.read_json(
-            ROOT / "verified-run" / "raw" / "cms-orthosis-documentation.json"
-        )
+        response = run.read_json(ROOT / "verified-run" / "raw" / "cms-orthosis-documentation.json")
         false_positive = {
             "text": "proof of delivery",
             "label": "missing documentation",
@@ -95,10 +90,7 @@ class NamedEntityExampleTests(unittest.TestCase):
         )
         self.assertNotIn(
             tuple(false_positive[field] for field in run.ANCHOR_FIELDS),
-            {
-                run.anchor_key(anchor)
-                for anchor in cases["cases"]["cms_lower_limb_orthosis"]["required_anchors"]
-            },
+            {run.anchor_key(anchor) for anchor in cases["cases"]["cms_lower_limb_orthosis"]["required_anchors"]},
         )
 
     def test_manifest_pins_every_artifact(self) -> None:
@@ -120,13 +112,14 @@ class NamedEntityExampleTests(unittest.TestCase):
 
     def test_metadata_has_no_temporary_filesystem_paths(self) -> None:
         forbidden = ("/Users/", "/root/", "/tmp/", "reference-batch", "/v4/")
-        for path in ROOT.rglob("*.json"):
-            value = json.loads(path.read_text(encoding="utf-8"))
-            for text in strings(value):
-                self.assertFalse(
-                    any(marker in text for marker in forbidden),
-                    f"{path}: {text}",
-                )
+        for directory in (ROOT / "data", ROOT / "verified-run"):
+            for path in directory.rglob("*.json"):
+                value = json.loads(path.read_text(encoding="utf-8"))
+                for text in strings(value):
+                    self.assertFalse(
+                        any(marker in text for marker in forbidden),
+                        f"{path}: {text}",
+                    )
 
 
 if __name__ == "__main__":

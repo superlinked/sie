@@ -6,10 +6,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-import run  # noqa: E402
+import run
 
 
 def strings(value: Any):
@@ -66,10 +65,7 @@ class MultimodalSearchExampleTests(unittest.TestCase):
             manifest["inputs"]["sources_sha256"],
             run.sha256_file(run.SOURCES_PATH),
         )
-        expected_images = {
-            f"data/{image['file']}"
-            for image in run.load_and_verify_sources()["images"]
-        }
+        expected_images = {f"data/{image['file']}" for image in run.load_and_verify_sources()["images"]}
         self.assertEqual(set(manifest["inputs"]["image_files"]), expected_images)
         for relative, digest in manifest["inputs"]["image_files"].items():
             self.assertEqual(digest, run.sha256_file(ROOT / relative))
@@ -86,13 +82,14 @@ class MultimodalSearchExampleTests(unittest.TestCase):
 
     def test_metadata_has_no_temporary_filesystem_paths(self) -> None:
         forbidden = ("/Users/", "/root/", "/tmp/", "reference-batch", "/v4/")
-        for path in ROOT.rglob("*.json"):
-            value = json.loads(path.read_text(encoding="utf-8"))
-            for text in strings(value):
-                self.assertFalse(
-                    any(marker in text for marker in forbidden),
-                    f"{path}: {text}",
-                )
+        for directory in (ROOT / "data", ROOT / "verified-run"):
+            for path in directory.rglob("*.json"):
+                value = json.loads(path.read_text(encoding="utf-8"))
+                for text in strings(value):
+                    self.assertFalse(
+                        any(marker in text for marker in forbidden),
+                        f"{path}: {text}",
+                    )
 
 
 if __name__ == "__main__":

@@ -6,10 +6,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-import run  # noqa: E402
+import run
 
 
 def strings(value: Any):
@@ -77,13 +76,14 @@ class RerankExampleTests(unittest.TestCase):
 
     def test_metadata_has_no_temporary_filesystem_paths(self) -> None:
         forbidden = ("/Users/", "/root/", "/tmp/", "reference-batch", "/v4/")
-        for path in ROOT.rglob("*.json"):
-            value = json.loads(path.read_text(encoding="utf-8"))
-            for text in strings(value):
-                self.assertFalse(
-                    any(marker in text for marker in forbidden),
-                    f"{path}: {text}",
-                )
+        for directory in (ROOT / "data", ROOT / "verified-run"):
+            for path in directory.rglob("*.json"):
+                value = json.loads(path.read_text(encoding="utf-8"))
+                for text in strings(value):
+                    self.assertFalse(
+                        any(marker in text for marker in forbidden),
+                        f"{path}: {text}",
+                    )
 
 
 if __name__ == "__main__":

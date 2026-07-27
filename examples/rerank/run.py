@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parent
 CASES_PATH = ROOT / "data" / "cases.json"
 SOURCES_PATH = ROOT / "data" / "sources.json"
