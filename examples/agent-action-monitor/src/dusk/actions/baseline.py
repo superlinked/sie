@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import Any
 
 from dusk.actions.event import AgentAction
@@ -32,8 +33,15 @@ def target_class(target: str) -> str:
 
 
 def target_tokens(target: str) -> set[str]:
-    """Return the set of lowercase word tokens in a target identifier, capped at _MAX_TOKENS."""
-    return set(_TOKEN_RE.findall(target.lower())[:_MAX_TOKENS])
+    """Return the set of lowercase word tokens in a target identifier, capped at _MAX_TOKENS.
+
+    Uses ``finditer`` + ``islice`` rather than ``findall()[:_MAX_TOKENS]`` --
+    ``findall`` would materialize every match before the slice ever runs, so
+    a repetitive target could still force an unbounded match list even
+    though only the first _MAX_TOKENS ever reach the returned set.
+    """
+    matches = islice(_TOKEN_RE.finditer(target.lower()), _MAX_TOKENS)
+    return {m.group(0) for m in matches}
 
 
 def _flatten_scalars(
@@ -46,17 +54,27 @@ def _flatten_scalars(
     """Collect nested scalar values, bounded by recursion depth and node count.
 
     ``budget`` is a shared single-element counter (a list so recursive calls
-    mutate the same cell) decremented once per node visited; traversal stops
-    once it hits zero, independent of how deep or wide the payload is.
+    mutate the same cell) decremented once per node visited, including
+    depth-rejected ones -- otherwise a wide container sitting right at the
+    depth boundary could be fully scanned without ever touching the budget.
+    Traversal stops once the budget hits zero: both the recursive calls
+    return immediately, and the loops below break rather than continuing to
+    enumerate a large dict/list whose items would each be a wasted no-op call.
     """
-    if _depth > 10 or budget[0] <= 0:
+    if budget[0] <= 0:
         return
     budget[0] -= 1
+    if _depth > 10:
+        return
     if isinstance(payload, dict):
         for value in payload.values():
+            if budget[0] <= 0:
+                break
             _flatten_scalars(value, values, budget, _depth=_depth + 1)
     elif isinstance(payload, list):
         for value in payload:
+            if budget[0] <= 0:
+                break
             _flatten_scalars(value, values, budget, _depth=_depth + 1)
     elif isinstance(payload, (str, int, float, bool)):
         values.add(str(payload).lower())
