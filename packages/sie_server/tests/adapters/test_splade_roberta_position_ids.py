@@ -14,9 +14,12 @@ lives in ``test_splade_packed_parity.py`` and is GPU-gated.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import torch
 from sie_server.adapters._flash_pack import build_position_ids
-from sie_server.adapters.splade_flash import SPLADEFlashAdapter
+from sie_server.adapters.splade_flash.adapter import SPLADEFlashAdapter
+from sie_server.types.inputs import Item
 
 
 def _cu_seqlens(seq_lengths: list[int]) -> torch.Tensor:
@@ -99,3 +102,28 @@ def test_adapter_build_position_ids_distilbert_is_zero_based() -> None:
 
     expected = torch.tensor([0, 1, 0, 1, 2, 3, 4])
     assert torch.equal(got, expected)
+
+
+def test_runtime_max_sequence_length_is_honored_and_clamped() -> None:
+    adapter = SPLADEFlashAdapter("stub-bert", max_seq_length=512)
+    adapter._model = MagicMock()
+    adapter._tokenizer = MagicMock()
+    adapter._device = "cpu"
+
+    for use_flash, method_name in ((False, "_encode_native"), (True, "_encode_flash")):
+        adapter._use_flash = use_flash
+        for requested, expected in ((128, 128), (1024, 512), (None, 512), (True, 512)):
+            options = {} if requested is None else {"max_seq_length": requested}
+            with patch.object(adapter, method_name, return_value=([MagicMock()], [1])) as encode_method:
+                adapter.encode([Item(text="hello")], ["sparse"], options=options)
+            encode_method.assert_called_once_with(["hello"], max_length=expected)
+
+    adapter._idf = MagicMock()
+    with patch.object(adapter, "_encode_query_idf", return_value=MagicMock()) as encode_query_idf:
+        adapter.encode(
+            [Item(text="hello")],
+            ["sparse"],
+            is_query=True,
+            options={"max_seq_length": 1024},
+        )
+    encode_query_idf.assert_called_once_with(["hello"], True, max_length=512)

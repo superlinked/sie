@@ -16,9 +16,8 @@
 //!
 //! Attempt-ID rule: the first chunk observed for a ``request_id``
 //! latches the ``current_attempt_id``. Chunks bearing any other
-//! ``attempt_id`` are dropped silently and counted by
-//! ``sie_gateway_generation_stale_attempt_chunks_total``. Pool-republish
-//! driven attempt bumping lands with the routing rollout.
+//! ``attempt_id`` are dropped silently. Pool-republish driven attempt
+//! bumping lands with the routing rollout.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -27,7 +26,9 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, oneshot, Notify};
 
-use crate::metrics;
+use crate::observability::metrics::{
+    self as telemetry, GenerationEvent, GenerationEventOutcome, GenerationEventReason,
+};
 
 /// Broadcast channel capacity for the per-request SSE chunk tap.
 ///
@@ -96,10 +97,24 @@ pub struct ChunkEnvelope {
     /// reassemble per-candidate streams.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub choice_index: u32,
+    /// Worker-side execution proof added under the stable config barrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_bundle_config_hash: Option<String>,
+    /// Opaque worker-origin execution identity. Managed workers stamp every
+    /// chunk; older and self-host workers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_identity_sha256: Option<String>,
 }
 
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
+}
+
+pub(crate) fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 /// One candidate of a multi-candidate (`n > 1`) generation, produced
@@ -215,6 +230,8 @@ pub struct StreamOutcome {
     /// uses ``text`` / ``logprobs`` for the lone ``choices[0]``. When
     /// non-empty, the body builder emits one ``choices[]`` entry per element.
     pub candidates: Vec<CandidateData>,
+    pub executed_bundle_config_hash: Option<String>,
+    pub execution_identity_sha256: Option<String>,
 }
 
 /// Fully-assembled tool call ready to surface on the non-streaming
@@ -259,6 +276,14 @@ pub struct StreamCollector {
     pub published_at: Instant,
     pub first_chunk_at: Option<Instant>,
     pub last_chunk_at: Option<Instant>,
+    /// Last output-bearing (text or tool-call) chunk. Unlike
+    /// `last_chunk_at`, an empty terminal marker does not advance this clock;
+    /// it is the end of the checked-in TPOT measurement window.
+    last_output_at: Option<Instant>,
+    /// Output-bearing chunks in the current attempt. Used as the TPOT
+    /// denominator only when the worker did not provide authoritative token
+    /// usage.
+    output_event_count: u64,
     /// DISPATCH model id — the routed target (a ``:no-spec`` grammar
     /// variant when grammar routing fired, else the requested base).
     /// Kept for functional dispatch parity with ``PublishTarget.model``
@@ -324,6 +349,11 @@ pub struct StreamCollector {
     /// requested. Snapshotted/cleared by the attempt-generation machinery
     /// exactly like ``chunks``.
     logprobs: Vec<serde_json::Value>,
+    /// Worker-origin digest latched across every accepted chunk in the current
+    /// attempt. One absent, malformed, or mismatching chunk makes the attempt
+    /// non-attestable while preserving ordinary streaming compatibility.
+    execution_identity_sha256: Option<String>,
+    execution_identity_consistent: bool,
     /// Attempt id of the most recently abandoned attempt. Usually set by
     /// [`Self::bump_attempt_generation`] from the old ``current_attempt_id``;
     /// NAK-driven republish may also fill it from the NAK envelope when the
@@ -356,8 +386,12 @@ struct AttemptSnapshot {
     logprobs: Vec<serde_json::Value>,
     first_chunk_at: Option<Instant>,
     last_chunk_at: Option<Instant>,
+    last_output_at: Option<Instant>,
+    output_event_count: u64,
     current_attempt_id: Option<String>,
     last_applied_seq: Option<u32>,
+    execution_identity_sha256: Option<String>,
+    execution_identity_consistent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -367,6 +401,7 @@ pub struct TerminalMeta {
     pub ttft_ms: Option<f64>,
     pub error: Option<ChunkError>,
     pub candidates: Vec<CandidateData>,
+    pub executed_bundle_config_hash: Option<String>,
 }
 
 impl StreamCollector {
@@ -380,6 +415,8 @@ impl StreamCollector {
             published_at: Instant::now(),
             first_chunk_at: None,
             last_chunk_at: None,
+            last_output_at: None,
+            output_event_count: 0,
             display_model: model.clone(),
             model,
             pool,
@@ -391,6 +428,8 @@ impl StreamCollector {
             chunk_tap: None,
             tool_calls_by_index: BTreeMap::new(),
             logprobs: Vec::new(),
+            execution_identity_sha256: None,
+            execution_identity_consistent: true,
             abandoned_attempt_id: None,
             snapshot: None,
         }
@@ -443,8 +482,12 @@ impl StreamCollector {
             logprobs: std::mem::take(&mut self.logprobs),
             first_chunk_at: self.first_chunk_at,
             last_chunk_at: self.last_chunk_at,
+            last_output_at: self.last_output_at,
+            output_event_count: self.output_event_count,
             current_attempt_id: self.current_attempt_id.clone(),
             last_applied_seq: self.last_applied_seq,
+            execution_identity_sha256: self.execution_identity_sha256.clone(),
+            execution_identity_consistent: self.execution_identity_consistent,
         });
         // Record the abandoned attempt id so the ``None`` latch arm of
         // ``apply`` refuses to re-latch on a stale leftover chunk from
@@ -459,6 +502,10 @@ impl StreamCollector {
         // Reset TTFT timing so it measures from the *successful*
         // attempt, not the abandoned one.
         self.first_chunk_at = None;
+        self.last_output_at = None;
+        self.output_event_count = 0;
+        self.execution_identity_sha256 = None;
+        self.execution_identity_consistent = true;
         // ``chunks`` / ``tool_calls_by_index`` were already emptied by
         // the ``std::mem::take`` above. Dropping the partial text from
         // the abandoned attempt prevents a mid-stream republish
@@ -510,8 +557,12 @@ impl StreamCollector {
             self.logprobs = snap.logprobs;
             self.first_chunk_at = snap.first_chunk_at;
             self.last_chunk_at = snap.last_chunk_at;
+            self.last_output_at = snap.last_output_at;
+            self.output_event_count = snap.output_event_count;
             self.current_attempt_id = snap.current_attempt_id;
             self.last_applied_seq = snap.last_applied_seq;
+            self.execution_identity_sha256 = snap.execution_identity_sha256;
+            self.execution_identity_consistent = snap.execution_identity_consistent;
         } else {
             // Defensive: a rewind with no matching snapshot (should not
             // happen — every rewind follows a bump). Fall back to the
@@ -521,6 +572,10 @@ impl StreamCollector {
             self.last_applied_seq = None;
             self.first_chunk_at = None;
             self.last_chunk_at = None;
+            self.last_output_at = None;
+            self.output_event_count = 0;
+            self.execution_identity_sha256 = None;
+            self.execution_identity_consistent = true;
         }
         // The abandoned-id guard is meaningless once we have rewound
         // back onto the prior attempt: clear it so the restored
@@ -543,36 +598,30 @@ impl StreamCollector {
         // successfully — reject those here too instead of letting them
         // corrupt the aggregated outcome.
         if chunk.kind != "chunk" {
-            metrics::GENERATION_INVALID_CHUNKS
-                .with_label_values(&[
-                    &metrics::sanitize_model_label(self.display_model.as_str()),
-                    &metrics::sanitize_label(self.pool.as_str()),
-                    "kind",
-                ])
-                .inc();
+            telemetry::record_generation_event(
+                GenerationEvent::Chunk,
+                GenerationEventReason::InvalidKind,
+                GenerationEventOutcome::Rejected,
+            );
             return ChunkApplied::Stale;
         }
         if let Some(t) = chunk.ttft_ms {
             if !t.is_finite() {
-                metrics::GENERATION_INVALID_CHUNKS
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(self.display_model.as_str()),
-                        &metrics::sanitize_label(self.pool.as_str()),
-                        "ttft_nan",
-                    ])
-                    .inc();
+                telemetry::record_generation_event(
+                    GenerationEvent::Chunk,
+                    GenerationEventReason::NonFiniteTtft,
+                    GenerationEventOutcome::Rejected,
+                );
                 return ChunkApplied::Stale;
             }
         }
         if let Some(reason) = chunk.finish_reason.as_ref() {
             if !is_known_finish_reason(reason) {
-                metrics::GENERATION_INVALID_CHUNKS
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(self.display_model.as_str()),
-                        &metrics::sanitize_label(self.pool.as_str()),
-                        "finish_reason",
-                    ])
-                    .inc();
+                telemetry::record_generation_event(
+                    GenerationEvent::Chunk,
+                    GenerationEventReason::InvalidFinishReason,
+                    GenerationEventOutcome::Rejected,
+                );
                 return ChunkApplied::Stale;
             }
         }
@@ -588,12 +637,11 @@ impl StreamCollector {
                 // waiting for a genuinely-new attempt id. uuid4 attempt
                 // ids are never reused, so this match is unambiguous.
                 if self.abandoned_attempt_id.as_deref() == Some(chunk.attempt_id.as_str()) {
-                    metrics::GENERATION_STALE_ATTEMPT_CHUNKS
-                        .with_label_values(&[
-                            &metrics::sanitize_model_label(self.display_model.as_str()),
-                            &metrics::sanitize_label(self.pool.as_str()),
-                        ])
-                        .inc();
+                    telemetry::record_generation_event(
+                        GenerationEvent::Chunk,
+                        GenerationEventReason::StaleAttempt,
+                        GenerationEventOutcome::Dropped,
+                    );
                     return ChunkApplied::Stale;
                 }
                 self.current_attempt_id = Some(chunk.attempt_id.clone());
@@ -604,12 +652,11 @@ impl StreamCollector {
                 self.abandoned_attempt_id = None;
             }
             Some(current) if current != &chunk.attempt_id => {
-                metrics::GENERATION_STALE_ATTEMPT_CHUNKS
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(self.display_model.as_str()),
-                        &metrics::sanitize_label(self.pool.as_str()),
-                    ])
-                    .inc();
+                telemetry::record_generation_event(
+                    GenerationEvent::Chunk,
+                    GenerationEventReason::StaleAttempt,
+                    GenerationEventOutcome::Dropped,
+                );
                 return ChunkApplied::Stale;
             }
             _ => {}
@@ -636,12 +683,11 @@ impl StreamCollector {
         if !chunk.done {
             if let Some(last) = self.last_applied_seq {
                 if chunk.seq <= last {
-                    metrics::GENERATION_STALE_ATTEMPT_CHUNKS
-                        .with_label_values(&[
-                            &metrics::sanitize_model_label(self.display_model.as_str()),
-                            &metrics::sanitize_label(self.pool.as_str()),
-                        ])
-                        .inc();
+                    telemetry::record_generation_event(
+                        GenerationEvent::Chunk,
+                        GenerationEventReason::Duplicate,
+                        GenerationEventOutcome::Dropped,
+                    );
                     return ChunkApplied::Duplicate;
                 }
                 // H6: a gap in the per-attempt ``seq`` means a required
@@ -654,17 +700,33 @@ impl StreamCollector {
                 // the caller (handle_chunk) drops the collector and
                 // surfaces the error to the client.
                 if chunk.seq > last + 1 {
-                    metrics::GENERATION_SEQ_GAP_CHUNKS
-                        .with_label_values(&[
-                            &metrics::sanitize_model_label(self.display_model.as_str()),
-                            &metrics::sanitize_label(self.pool.as_str()),
-                        ])
-                        .inc();
+                    telemetry::record_generation_event(
+                        GenerationEvent::Chunk,
+                        GenerationEventReason::SequenceGap,
+                        GenerationEventOutcome::Rejected,
+                    );
                     return ChunkApplied::SeqGap;
                 }
             }
         }
         self.last_applied_seq = Some(chunk.seq);
+
+        match chunk.execution_identity_sha256.as_ref() {
+            Some(value) if is_lower_sha256(value) && self.execution_identity_consistent => {
+                if let Some(current) = self.execution_identity_sha256.as_ref() {
+                    if current != value {
+                        self.execution_identity_consistent = false;
+                        self.execution_identity_sha256 = None;
+                    }
+                } else {
+                    self.execution_identity_sha256 = Some(value.clone());
+                }
+            }
+            _ => {
+                self.execution_identity_consistent = false;
+                self.execution_identity_sha256 = None;
+            }
+        }
 
         let now = Instant::now();
         // Arm ``first_chunk_at`` on the first applied chunk that carries
@@ -675,10 +737,17 @@ impl StreamCollector {
         // (it gates its inter-chunk timer on ``first_at.is_some()``)
         // throughout an active tool-call stream. Matches the SSE
         // driver's ``first_seen`` semantics.
-        if (!chunk.text_delta.is_empty() || chunk.tool_calls.is_some())
-            && self.first_chunk_at.is_none()
-        {
-            self.first_chunk_at = Some(now);
+        let has_output = !chunk.text_delta.is_empty()
+            || chunk
+                .tool_calls
+                .as_ref()
+                .is_some_and(|tool_calls| !tool_calls.is_empty());
+        if has_output {
+            if self.first_chunk_at.is_none() {
+                self.first_chunk_at = Some(now);
+            }
+            self.last_output_at = Some(now);
+            self.output_event_count = self.output_event_count.saturating_add(1);
         }
         self.last_chunk_at = Some(now);
 
@@ -747,6 +816,7 @@ impl StreamCollector {
                 ttft_ms: chunk.ttft_ms,
                 error: chunk.error,
                 candidates: chunk.candidates,
+                executed_bundle_config_hash: chunk.executed_bundle_config_hash,
             });
             return ChunkApplied::Terminal;
         }
@@ -773,14 +843,17 @@ impl StreamCollector {
                 .map(|t| (t - self.published_at).as_secs_f64() * 1000.0)
         });
 
-        let tpot_ms = match (self.first_chunk_at, self.last_chunk_at) {
+        let tpot_ms = match (self.first_chunk_at, self.last_output_at) {
             (Some(first), Some(last)) if last > first => {
                 let completion = meta
                     .usage
                     .as_ref()
-                    .map(|u| u.completion_tokens.max(1) as f64)
-                    .unwrap_or(1.0);
-                Some(((last - first).as_secs_f64() * 1000.0) / completion)
+                    .and_then(|usage| {
+                        (usage.completion_tokens > 0).then_some(u64::from(usage.completion_tokens))
+                    })
+                    .unwrap_or(self.output_event_count);
+                (completion > 0)
+                    .then(|| ((last - first).as_secs_f64() * 1000.0) / completion as f64)
             }
             _ => None,
         };
@@ -808,6 +881,11 @@ impl StreamCollector {
             tool_calls,
             logprobs,
             candidates: meta.candidates.clone(),
+            executed_bundle_config_hash: meta.executed_bundle_config_hash.clone(),
+            execution_identity_sha256: self
+                .execution_identity_consistent
+                .then(|| self.execution_identity_sha256.clone())
+                .flatten(),
         })
     }
 }
@@ -895,6 +973,8 @@ mod tests {
             logprobs: None,
             candidates: Vec::new(),
             choice_index: 0,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         }
     }
 
@@ -956,94 +1036,6 @@ mod tests {
         );
     }
 
-    /// #1324: collector chunk-metric labels must surface the DISPLAY
-    /// (requested base) model, never the ``:no-spec`` dispatch variant a
-    /// grammar request is routed to. Sets ``display_model`` != ``model``
-    /// and checks the invalid-chunk and stale-attempt counters advance on
-    /// the display series while the dispatch series stays flat.
-    #[test]
-    fn test_chunk_metrics_label_with_display_model_not_dispatch_variant() {
-        let dispatch = "acme/grammar-model:no-spec";
-        let display = "acme/grammar-model";
-        let pool = "grammar_label_test_pool";
-
-        // ── invalid-kind chunk → GENERATION_INVALID_CHUNKS[.., "kind"] ──
-        let invalid_display_before = metrics::GENERATION_INVALID_CHUNKS
-            .with_label_values(&[display, pool, "kind"])
-            .get();
-        let invalid_dispatch_before = metrics::GENERATION_INVALID_CHUNKS
-            .with_label_values(&[dispatch, pool, "kind"])
-            .get();
-
-        let (tx, _rx) = oneshot::channel();
-        let mut c = StreamCollector::new(tx, dispatch.to_string(), pool.to_string());
-        c.display_model = display.to_string();
-        let mut bad = _make_chunk("att-A", 0, "x", false);
-        bad.kind = "garbage".to_string();
-        assert_eq!(c.apply(bad), ChunkApplied::Stale);
-
-        assert!(
-            (metrics::GENERATION_INVALID_CHUNKS
-                .with_label_values(&[display, pool, "kind"])
-                .get()
-                - invalid_display_before
-                - 1.0)
-                .abs()
-                < f64::EPSILON,
-            "display series should increment"
-        );
-        assert!(
-            (metrics::GENERATION_INVALID_CHUNKS
-                .with_label_values(&[dispatch, pool, "kind"])
-                .get()
-                - invalid_dispatch_before)
-                .abs()
-                < f64::EPSILON,
-            "dispatch (:no-spec) series must NOT be labelled"
-        );
-
-        // ── stale-attempt chunk → GENERATION_STALE_ATTEMPT_CHUNKS ──
-        let stale_display_before = metrics::GENERATION_STALE_ATTEMPT_CHUNKS
-            .with_label_values(&[display, pool])
-            .get();
-        let stale_dispatch_before = metrics::GENERATION_STALE_ATTEMPT_CHUNKS
-            .with_label_values(&[dispatch, pool])
-            .get();
-
-        let (tx2, _rx2) = oneshot::channel();
-        let mut c2 = StreamCollector::new(tx2, dispatch.to_string(), pool.to_string());
-        c2.display_model = display.to_string();
-        // Latch attempt "att-A", then feed a chunk from a different attempt.
-        assert_eq!(
-            c2.apply(_make_chunk("att-A", 0, "hi", false)),
-            ChunkApplied::Delta
-        );
-        assert_eq!(
-            c2.apply(_make_chunk("att-B", 1, "x", false)),
-            ChunkApplied::Stale
-        );
-
-        assert!(
-            (metrics::GENERATION_STALE_ATTEMPT_CHUNKS
-                .with_label_values(&[display, pool])
-                .get()
-                - stale_display_before
-                - 1.0)
-                .abs()
-                < f64::EPSILON,
-            "display series should increment"
-        );
-        assert!(
-            (metrics::GENERATION_STALE_ATTEMPT_CHUNKS
-                .with_label_values(&[dispatch, pool])
-                .get()
-                - stale_dispatch_before)
-                .abs()
-                < f64::EPSILON,
-            "dispatch (:no-spec) series must NOT be labelled"
-        );
-    }
-
     /// Per-chunk logprobs accumulate across the stream and surface as the
     /// aggregated ``StreamOutcome.logprobs`` (the non-streaming body's
     /// ``choices[0].logprobs.content``).
@@ -1085,6 +1077,56 @@ mod tests {
         assert!(c.build_outcome().expect("terminal").logprobs.is_none());
     }
 
+    #[test]
+    fn test_collector_requires_execution_identity_on_every_chunk() {
+        let identity = "a".repeat(64);
+        let (tx, _rx) = oneshot::channel();
+        let mut consistent = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        let mut delta = _make_chunk("att-A", 0, "Hi", false);
+        delta.execution_identity_sha256 = Some(identity.clone());
+        let mut terminal = _make_chunk("att-A", 1, "", true);
+        terminal.execution_identity_sha256 = Some(identity.clone());
+        assert_eq!(consistent.apply(delta), ChunkApplied::Delta);
+        assert_eq!(consistent.apply(terminal), ChunkApplied::Terminal);
+        assert_eq!(
+            consistent
+                .build_outcome()
+                .expect("terminal")
+                .execution_identity_sha256
+                .as_deref(),
+            Some(identity.as_str())
+        );
+
+        let (tx, _rx) = oneshot::channel();
+        let mut mismatching = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        let mut delta = _make_chunk("att-B", 0, "Hi", false);
+        delta.execution_identity_sha256 = Some(identity);
+        let mut terminal = _make_chunk("att-B", 1, "", true);
+        terminal.execution_identity_sha256 = Some("b".repeat(64));
+        assert_eq!(mismatching.apply(delta), ChunkApplied::Delta);
+        assert_eq!(mismatching.apply(terminal), ChunkApplied::Terminal);
+        assert!(mismatching
+            .build_outcome()
+            .expect("terminal")
+            .execution_identity_sha256
+            .is_none());
+
+        let (tx, _rx) = oneshot::channel();
+        let mut missing = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        let mut delta = _make_chunk("att-C", 0, "Hi", false);
+        delta.execution_identity_sha256 = Some("c".repeat(64));
+        assert_eq!(missing.apply(delta), ChunkApplied::Delta);
+        assert_eq!(
+            missing.apply(_make_chunk("att-C", 1, "", true)),
+            ChunkApplied::Terminal
+        );
+        assert!(missing
+            .build_outcome()
+            .expect("terminal")
+            .execution_identity_sha256
+            .is_none());
+    }
+
     /// ``ChunkEnvelope`` round-trips a ``logprobs`` field over the wire
     /// (msgpack), so the gateway decodes what the worker encodes.
     #[test]
@@ -1122,6 +1164,47 @@ mod tests {
         assert_eq!(outcome.finish_reason, "stop");
         assert_eq!(outcome.attempt_id, "att-A");
         assert_eq!(outcome.usage.as_ref().unwrap().completion_tokens, 3);
+    }
+
+    #[test]
+    fn test_tpot_uses_authoritative_tokens_then_observed_output_fallback() {
+        let (tx, _rx) = oneshot::channel();
+        let mut collector = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        collector.apply(_make_chunk("att-A", 0, "one", false));
+        collector.apply(_make_chunk("att-A", 1, "two", false));
+        collector.apply(_make_chunk("att-A", 2, "", true));
+
+        let first = Instant::now();
+        collector.first_chunk_at = Some(first);
+        collector.last_output_at = Some(first + std::time::Duration::from_millis(400));
+        collector.output_event_count = 2;
+        collector.final_meta.as_mut().expect("terminal").usage = Some(UsageBlock {
+            prompt_tokens: 1,
+            completion_tokens: 4,
+            total_tokens: 5,
+        });
+        let authoritative = collector.build_outcome().expect("terminal");
+        assert!((authoritative.tpot_ms.expect("TPOT") - 100.0).abs() < f64::EPSILON);
+
+        collector.final_meta.as_mut().expect("terminal").usage = None;
+        let fallback = collector.build_outcome().expect("terminal");
+        assert!((fallback.tpot_ms.expect("TPOT") - 200.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_single_output_event_has_no_measurable_tpot() {
+        let (tx, _rx) = oneshot::channel();
+        let mut collector = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        collector.apply(_make_chunk("att-A", 0, "only", false));
+        collector.apply(_make_chunk("att-A", 1, "", true));
+
+        assert_eq!(collector.output_event_count, 1);
+        assert_eq!(collector.first_chunk_at, collector.last_output_at);
+        assert!(collector
+            .build_outcome()
+            .expect("terminal")
+            .tpot_ms
+            .is_none());
     }
 
     #[test]
@@ -1338,13 +1421,22 @@ mod tests {
     fn test_bump_attempt_generation_clears_per_attempt_state() {
         let (tx, _rx) = oneshot::channel();
         let mut collector = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        let identity = "a".repeat(64);
         // First attempt latches and accumulates partial text.
-        collector.apply(_make_chunk("att-A", 0, "abandoned-", false));
-        collector.apply(_make_chunk("att-A", 1, "text", false));
+        let mut first = _make_chunk("att-A", 0, "abandoned-", false);
+        first.execution_identity_sha256 = Some(identity.clone());
+        let mut second = _make_chunk("att-A", 1, "text", false);
+        second.execution_identity_sha256 = Some(identity.clone());
+        collector.apply(first);
+        collector.apply(second);
         assert_eq!(collector.current_attempt_id.as_deref(), Some("att-A"));
         assert_eq!(collector.chunks.len(), 2);
         assert!(collector.first_chunk_at.is_some());
         assert!(collector.last_chunk_at.is_some());
+        assert_eq!(
+            collector.execution_identity_sha256.as_deref(),
+            Some(identity.as_str())
+        );
 
         // Bump generation — routing-review Mi1: chunks/last_chunk_at
         // must clear so a mid-stream republish doesn't surface a
@@ -1355,6 +1447,8 @@ mod tests {
         assert!(collector.first_chunk_at.is_none());
         assert!(collector.last_chunk_at.is_none());
         assert!(collector.chunks.is_empty());
+        assert!(collector.execution_identity_sha256.is_none());
+        assert!(collector.execution_identity_consistent);
 
         // Fresh attempt re-latches cleanly and a terminal chunk
         // builds an outcome containing only the new text.
@@ -1434,7 +1528,10 @@ mod tests {
     fn test_rewind_restores_chunks_dropped_by_bump() {
         let (tx, _rx) = oneshot::channel();
         let mut c = StreamCollector::new(tx, "m".to_string(), "p".to_string());
-        c.apply(_make_chunk("att-A", 0, "partial", false));
+        let identity = "a".repeat(64);
+        let mut partial = _make_chunk("att-A", 0, "partial", false);
+        partial.execution_identity_sha256 = Some(identity.clone());
+        c.apply(partial);
         c.bump_attempt_generation();
         c.rewind_attempt_generation();
         assert_eq!(c.chunks.len(), 1); // restored
@@ -1443,6 +1540,11 @@ mod tests {
         assert_eq!(c.last_applied_seq, Some(0));
         assert!(c.first_chunk_at.is_some());
         assert!(c.last_chunk_at.is_some());
+        assert_eq!(
+            c.execution_identity_sha256.as_deref(),
+            Some(identity.as_str())
+        );
+        assert!(c.execution_identity_consistent);
     }
 
     #[test]

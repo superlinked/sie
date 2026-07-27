@@ -9,6 +9,11 @@
 # The published image is ghcr.io/superlinked/sie-server-sidecar; the runtime
 # binary inside the image is /sie-server-sidecar.
 #
+# The build runs at the Cargo workspace root (#2339): the root
+# Cargo.toml/Cargo.lock plus every member's manifest+sources must be present
+# for cargo to load the workspace, and the binary is selected with
+# `-p sie-server-sidecar`.
+#
 # The only Cargo feature today is `cloud-storage` (S3/GCS payload modes),
 # which is the default for `ARG FEATURES` below. CI can override with
 # `--build-arg FEATURES=` if you want a leaner build with no remote
@@ -30,8 +35,11 @@ RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
 FROM chef AS planner
-COPY packages/sie_server_sidecar/Cargo.toml packages/sie_server_sidecar/Cargo.lock ./
-COPY packages/sie_server_sidecar/src/ src/
+COPY Cargo.toml Cargo.lock ./
+COPY packages/sie_audio_prep/ packages/sie_audio_prep/
+COPY packages/sie_gateway/ packages/sie_gateway/
+COPY packages/sie_server_sidecar/ packages/sie_server_sidecar/
+COPY packages/sie_telemetry/ packages/sie_telemetry/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # =============================================================================
@@ -44,8 +52,8 @@ ARG FEATURES
 #   * `pkg-config + libssl-dev` - in case any transitive dep uses OpenSSL
 #     (async-nats itself uses rustls, but staying safe for feature toggles).
 #   * `ca-certificates` - cargo needs these when the network cache misses.
-#   * `build-essential` - gcc/cmake/make for `onig_sys` (tokenizers) and
-#     `safetensors`. These crates ship C sources and STATICALLY link them
+#   * `build-essential + cmake` - native builds for bundled Opus, `onig_sys`
+#     (tokenizers), and `safetensors`. These crates STATICALLY link C sources
 #     so the distroless runtime image can stay minimal.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -53,6 +61,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libssl-dev \
         ca-certificates \
         build-essential \
+        cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Force `onig_sys` to statically link the bundled Oniguruma instead of
@@ -67,16 +76,20 @@ COPY --from=planner /build/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo chef cook --release \
+        --package sie-server-sidecar \
         --features "${FEATURES}" \
         --recipe-path recipe.json
 
 # Restore real source.
 #
-# `cargo chef cook` mutates the crate into dependency-only stubs. Re-copy
-# the real manifest and source before `cargo build` so the final image gets
+# `cargo chef cook` mutates the workspace into dependency-only stubs. Re-copy
+# the real manifests and sources before `cargo build` so the final image gets
 # `sie-server-sidecar`, not a cache-warming placeholder binary.
-COPY packages/sie_server_sidecar/Cargo.toml packages/sie_server_sidecar/Cargo.lock ./
-COPY packages/sie_server_sidecar/src/ src/
+COPY Cargo.toml Cargo.lock ./
+COPY packages/sie_audio_prep/ packages/sie_audio_prep/
+COPY packages/sie_gateway/ packages/sie_gateway/
+COPY packages/sie_server_sidecar/ packages/sie_server_sidecar/
+COPY packages/sie_telemetry/ packages/sie_telemetry/
 
 # Real build.
 #
@@ -85,7 +98,7 @@ COPY packages/sie_server_sidecar/src/ src/
 # reaches the runtime image.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --locked --release --bin sie-server-sidecar --features "${FEATURES}" \
+    cargo build --locked --release --package sie-server-sidecar --bin sie-server-sidecar --features "${FEATURES}" \
     && ls -lh target/release/sie-server-sidecar \
     && test "$(wc -c < target/release/sie-server-sidecar)" -gt 5000000 \
     && cp target/release/sie-server-sidecar /usr/local/bin/sie-server-sidecar
@@ -101,14 +114,13 @@ COPY --from=builder /usr/local/bin/sie-server-sidecar /sie-server-sidecar
 
 # Opinionated defaults; override via env in the Pod spec / Helm chart.
 #
-# * SIE_WORKER_METRICS_PORT - Prometheus scrape port (matches the clap arg
-#                             name; default 9095).
+# * SIE_WORKER_PROBE_PORT   - liveness/readiness probe port (default 9095).
 # * SIE_IPC_SOCKET_PATH     - Unix socket to the Python sie-server process. The Helm
 #                             chart mounts a shared emptyDir at /var/run/sie.
 # * RUST_LOG                - structured log level; OTel set at deploy time.
 # * SIE_NATS_URL            - required, no default; must be set by the
 #                             Pod / Helm chart.
-ENV SIE_WORKER_METRICS_PORT=9095 \
+ENV SIE_WORKER_PROBE_PORT=9095 \
     SIE_IPC_SOCKET_PATH=/var/run/sie/ipc.sock \
     RUST_LOG=info
 

@@ -14,7 +14,7 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: bfloat16
-    adapter_path: sie_server.adapters.qwen2_flash_cross_encoder:Qwen2FlashCrossEncoderAdapter
+    adapter_path: sie_server.adapters.qwen2_flash_cross_encoder.adapter:Qwen2FlashCrossEncoderAdapter
     adapter_options:
       loadtime: {}
       runtime: {}

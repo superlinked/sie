@@ -1,0 +1,86 @@
+## The Fake Engine catalog entry (#1836): ONE model, every supported surface
+# (encode + score + generate via the combined FakeAdapter), with profiles for
+# the different cases. Non-default profiles are addressable as
+# `sie-fake:<profile>` through the loader's variant expansion; each variant is
+# a separate registry model with its own adapter instance, footprint, and
+# fault spec.
+#
+# Profile inventory:
+#   default    — all surfaces, 128 MiB declared footprint, no faults.
+#   small-a    — 64 MiB fixture for eviction/pressure scenarios.
+#   small-b    — second 64 MiB fixture (cross-model races need two).
+#   slow-load  — load holds the MODEL_LOADING window for 5 s.
+#   oom-3rd    — the 3rd dispatch raises an OOM the real is_oom_error
+#                classifier recognizes; the recovery ladder retries.
+#
+# Note: adapter_options replacement is all-or-nothing per profile (non-empty
+# child loadtime REPLACES the parent's), so every profile repeats the full
+# loadtime block. fault_key duplicates the addressable model id by necessity:
+# loadtime options are the only channel into the adapter constructor, and
+# SIE_FAKE_FAULTS env overrides key on it.
+sie_id: sie-fake
+package_backed: true
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 384
+    sparse: null
+    multivector: null
+  score: {}
+  extract: null
+  generate:
+    context_length: 8192
+    max_output_tokens: 1024
+    capabilities:
+      streaming: true
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.fake.adapter:FakeAdapter
+    # Synthetic admission budget — the fake has no real KV cache; this is the
+    # per-worker admission ceiling exercised by orchestration tests.
+    kv_budget_tokens: 8192
+    adapter_options:
+      loadtime:
+        memory_footprint_bytes: 134217728
+        fault_key: sie-fake
+      runtime: {}
+  small-a:
+    extends: default
+    adapter_options:
+      loadtime:
+        memory_footprint_bytes: 67108864
+        fault_key: sie-fake:small-a
+      runtime: {}
+  small-b:
+    extends: default
+    adapter_options:
+      loadtime:
+        memory_footprint_bytes: 67108864
+        fault_key: sie-fake:small-b
+      runtime: {}
+  slow-load:
+    extends: default
+    adapter_options:
+      loadtime:
+        memory_footprint_bytes: 67108864
+        fault_key: sie-fake:slow-load
+        faults:
+          slow_load_s: 5.0
+      runtime: {}
+  oom-3rd:
+    extends: default
+    adapter_options:
+      loadtime:
+        memory_footprint_bytes: 67108864
+        fault_key: sie-fake:oom-3rd
+        faults:
+          oom_on_dispatch: 3
+      runtime: {}

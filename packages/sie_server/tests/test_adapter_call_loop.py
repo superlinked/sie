@@ -13,10 +13,12 @@ the actual adapter forward pass (that's ``test_queue_executor*.py``).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from sie_server import adapter_call_loop
 from sie_server.adapter_call_loop import (
     RUN_BATCH_INVALID_ITEM,
     RUN_BATCH_MIXED_OP,
@@ -24,6 +26,8 @@ from sie_server.adapter_call_loop import (
     handle_run_batch,
 )
 from sie_server.ipc_types import (
+    BatchedF16MultivectorItem,
+    BatchedF16MultivectorOutput,
     BatchOutcome,
     EncodeBatchItem,
     ExtractBatchItem,
@@ -31,6 +35,7 @@ from sie_server.ipc_types import (
     RunBatchItem,
     RunBatchRequest,
     ScoreBatchItem,
+    UnitCounts,
 )
 
 # --------------------------------------------------------------------
@@ -88,6 +93,7 @@ def _mk_request(
     batch_id: int = 1,
     lora_key: str = "",
     total_cost: int = 0,
+    accepts_batched_f16_multivectors: bool = False,
 ) -> RunBatchRequest:
     return RunBatchRequest(
         model_id=model_id,
@@ -95,6 +101,7 @@ def _mk_request(
         lora_key=lora_key,
         total_cost=total_cost,
         items=list(items),
+        accepts_batched_f16_multivectors=accepts_batched_f16_multivectors,
     )
 
 
@@ -146,6 +153,37 @@ async def test_encode_batch_dispatches_to_process_encode() -> None:
 
 
 @pytest.mark.asyncio
+async def test_encode_batch_preserves_batched_f16_transport_capability() -> None:
+    f16_batch = BatchedF16MultivectorOutput(
+        values_f16=b"\x00<\x00@",
+        items=[
+            BatchedF16MultivectorItem(
+                work_item_id="w0",
+                byte_offset=0,
+                byte_len=4,
+                num_tokens=1,
+                token_dims=2,
+            )
+        ],
+    )
+    expected = BatchOutcome(
+        outcomes=[_ok_outcome(0)],
+        batched_f16_multivectors=[f16_batch],
+    )
+    exe = _mock_executor(encode=expected)
+    req = _mk_request(
+        RunBatchItem(op="encode", encode=_mk_encode(0)),
+        accepts_batched_f16_multivectors=True,
+    )
+
+    result = await handle_run_batch(exe, req)
+
+    inner = exe.process_encode_batch.call_args.args[0]
+    assert inner.accepts_batched_f16_multivectors is True
+    assert result.batched_f16_multivectors == [f16_batch]
+
+
+@pytest.mark.asyncio
 async def test_score_batch_dispatches_to_process_score() -> None:
     expected = BatchOutcome(outcomes=[_ok_outcome(0)])
     exe = _mock_executor(score=expected)
@@ -169,6 +207,78 @@ async def test_extract_batch_dispatches_to_process_extract() -> None:
 
     assert result.outcomes == expected.outcomes
     exe.process_extract_batch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_batch_records_engine_metrics_without_sidecar_owned_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = BatchOutcome(
+        outcomes=[
+            ItemOutcome(
+                work_item_id="w0",
+                request_id="r0",
+                item_index=0,
+                disposition="publish_and_ack",
+                result_msgpack=b"\x80",
+                inference_ms=20.0,
+                tokenization_ms=3.0,
+                postprocessing_ms=2.0,
+                units=UnitCounts(input_tokens=11, images=1),
+            )
+        ]
+    )
+    calls: list[dict[str, Any]] = []
+    telemetry = SimpleNamespace(item_completed=lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(adapter_call_loop, "worker_telemetry", lambda: telemetry)
+    monkeypatch.setattr(adapter_call_loop, "worker_telemetry_enabled", lambda: True)
+    item = _mk_encode(0)
+    item.profile_id = "default"
+    result = await handle_run_batch(
+        _mock_executor(encode=expected),
+        _mk_request(RunBatchItem(op="encode", encode=item)),
+    )
+
+    assert result == expected
+    assert len(calls) == 1
+    assert calls[0]["operation"] == "encode"
+    assert calls[0]["outcome"] == "success"
+    assert calls[0]["model"] == "test/model"
+    assert calls[0]["profile"] == "default"
+    assert calls[0]["inference_s"] == pytest.approx(0.02)
+    assert calls[0]["tokenization_s"] == pytest.approx(0.003)
+    assert calls[0]["postprocessing_s"] == pytest.approx(0.002)
+    assert calls[0]["units"] == {"input_tokens": 11, "images": 1}
+    # The Rust sidecar owns queue/batch metrics and identity/error fields never
+    # cross this engine metric seam.
+    forbidden = {
+        "queue_s",
+        "batch_size",
+        "batch_cost",
+        "request_id",
+        "work_item_id",
+        "error",
+        "error_code",
+    }
+    assert forbidden.isdisjoint(calls[0])
+
+
+@pytest.mark.asyncio
+async def test_run_batch_skips_telemetry_timer_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = BatchOutcome(outcomes=[_ok_outcome(0)])
+    monkeypatch.setattr(adapter_call_loop, "worker_telemetry_enabled", lambda: False)
+
+    def unexpected_timer() -> float:
+        raise AssertionError("disabled telemetry must not sample its completion timer")
+
+    monkeypatch.setattr(adapter_call_loop.time, "perf_counter", unexpected_timer)
+
+    result = await handle_run_batch(
+        _mock_executor(encode=expected),
+        _mk_request(RunBatchItem(op="encode", encode=_mk_encode(0))),
+    )
+
+    assert result == expected
 
 
 # --------------------------------------------------------------------

@@ -25,7 +25,7 @@ profiles:
         pooling: mean
         normalize: true
         query_template: 'Instruct: {instruction}\nQuery: {text}'
-        instruction: 'Given a web search query, retrieve relevant passages that answer the query'
+        default_instruction: 'Given a web search query, retrieve relevant passages that answer the query'
         doc_template: '{text}'
   candle:
     extends: default
@@ -35,5 +35,5 @@ profiles:
         pooling: mean
         normalize: true
         query_template: 'Instruct: {instruction}\nQuery: {text}'
-        instruction: 'Given a web search query, retrieve relevant passages that answer the query'
+        default_instruction: 'Given a web search query, retrieve relevant passages that answer the query'
         doc_template: '{text}'

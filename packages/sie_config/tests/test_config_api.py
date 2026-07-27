@@ -118,6 +118,183 @@ class TestConfigAPIModels:
         assert resp.status_code == 200
         assert "application/x-yaml" in resp.headers["content-type"]
 
+    def test_delete_api_model_is_idempotent_and_bumps_epoch_once(self) -> None:
+        yaml_body = (
+            "sie_id: api/model\n"
+            "profiles:\n"
+            "  default:\n"
+            "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
+        )
+        assert self.client.put("/v1/configs/models/api/model", content=yaml_body).status_code == 200
+        assert self.client.get("/v1/configs/epoch").json()["epoch"] == 1
+        export = self.client.get("/v1/configs/export").json()
+        api_entry = next(entry for entry in export["models"] if entry["model_id"] == "api/model")
+        assert api_entry["source"] == "api"
+
+        deleted = self.client.delete(
+            "/v1/configs/models/api/model",
+            headers={"Idempotency-Key": "delete-api-model"},
+        )
+        replay = self.client.delete(
+            "/v1/configs/models/api/model",
+            headers={"Idempotency-Key": "delete-api-model"},
+        )
+        no_op = self.client.delete("/v1/configs/models/api/model")
+
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+        assert deleted.json()["distribution"] == "epoch_export"
+        assert replay.json() == deleted.json()
+        assert no_op.json()["unchanged"] is True
+        assert self.client.get("/v1/configs/epoch").json()["epoch"] == 2
+        assert self.client.get("/v1/configs/models/api/model").status_code == 404
+
+    def test_delete_api_override_restores_filesystem_baseline(self) -> None:
+        replacement = (
+            "sie_id: test/model\n"
+            "pool: customer\n"
+            "profiles:\n"
+            "  default:\n"
+            "    adapter_path: sie_server.adapters.bert_flash:Override\n"
+        )
+        assert self.client.put("/v1/configs/models/test/model", content=replacement).status_code == 200
+
+        deleted = self.client.delete("/v1/configs/models/test/model")
+
+        assert deleted.status_code == 200
+        assert deleted.json()["fallback"] == "filesystem"
+        restored = yaml.safe_load(self.client.get("/v1/configs/models/test/model").text)
+        assert "pool" not in restored
+        assert restored["profiles"]["default"]["adapter_path"].endswith(":BertFlashAdapter")
+        export = self.client.get("/v1/configs/export").json()
+        restored_entry = next(entry for entry in export["models"] if entry["model_id"] == "test/model")
+        assert restored_entry["source"] == "filesystem"
+
+    def test_delete_persists_before_registry_mutation(self, monkeypatch) -> None:
+        yaml_body = (
+            "sie_id: api/ordered\n"
+            "profiles:\n"
+            "  default:\n"
+            "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
+        )
+        assert self.client.put("/v1/configs/models/api/ordered", content=yaml_body).status_code == 200
+        registry = self.app.state.model_registry
+        original_remove = registry.remove_model_config
+
+        def assert_store_already_deleted(model_id: str, **kwargs):
+            assert self.app.state.config_store.read_model(model_id) is None
+            return original_remove(model_id, **kwargs)
+
+        monkeypatch.setattr(registry, "remove_model_config", assert_store_already_deleted)
+
+        response = self.client.delete("/v1/configs/models/api/ordered")
+        assert response.status_code == 200
+
+    def test_delete_requires_durable_store(self) -> None:
+        app = _create_test_app(self._bundles, self._models)
+        client = TestClient(app)
+
+        response = client.delete("/v1/configs/models/test/model")
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["error"] == "config_store_required"
+
+    def test_delete_requires_admin_token_when_configured(self, monkeypatch) -> None:
+        yaml_body = (
+            "sie_id: api/secured\n"
+            "profiles:\n"
+            "  default:\n"
+            "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
+        )
+        assert self.client.put("/v1/configs/models/api/secured", content=yaml_body).status_code == 200
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "admin-secret")
+
+        missing = self.client.delete("/v1/configs/models/api/secured")
+        wrong = self.client.delete(
+            "/v1/configs/models/api/secured",
+            headers={"Authorization": "Bearer inference-token"},
+        )
+        accepted = self.client.delete(
+            "/v1/configs/models/api/secured",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+
+        assert missing.status_code == 401
+        assert wrong.status_code == 403
+        assert accepted.status_code == 200
+        assert accepted.json()["deleted"] is True
+
+    def test_delete_store_failure_leaves_registry_and_epoch_unchanged(self, monkeypatch) -> None:
+        yaml_body = (
+            "sie_id: api/store-failure\n"
+            "profiles:\n"
+            "  default:\n"
+            "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
+        )
+        assert self.client.put("/v1/configs/models/api/store-failure", content=yaml_body).status_code == 200
+        before_epoch = self.client.get("/v1/configs/epoch").json()["epoch"]
+
+        def fail_delete(_model_id: str) -> bool:
+            raise OSError("storage unavailable")
+
+        monkeypatch.setattr(
+            self.app.state.config_store,
+            "delete_model",
+            fail_delete,
+        )
+        client = TestClient(self.app, raise_server_exceptions=False)
+
+        response = client.delete("/v1/configs/models/api/store-failure")
+
+        assert response.status_code == 500
+        assert self.client.get("/v1/configs/models/api/store-failure").status_code == 200
+        assert self.client.get("/v1/configs/epoch").json()["epoch"] == before_epoch
+
+    def test_delete_invalid_filesystem_fallback_does_not_delete_override(self) -> None:
+        replacement = (
+            "sie_id: test/model\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:Override\n"
+        )
+        assert self.client.put("/v1/configs/models/test/model", content=replacement).status_code == 200
+        (self._models / "test__model.yaml").write_text("not: [valid")
+
+        response = self.client.delete("/v1/configs/models/test/model")
+
+        assert response.status_code == 500
+        assert response.json()["detail"]["error"] == "filesystem_fallback_invalid"
+        assert self.app.state.config_store.read_model("test/model") == replacement
+        live = yaml.safe_load(self.client.get("/v1/configs/models/test/model").text)
+        assert live["profiles"]["default"]["adapter_path"].endswith(":Override")
+
+    def test_delete_idempotency_key_cannot_cross_model_paths(self) -> None:
+        body_template = (
+            "sie_id: {model_id}\n"
+            "profiles:\n"
+            "  default:\n"
+            "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
+        )
+        for model_id in ("api/first", "api/second"):
+            assert (
+                self.client.put(
+                    f"/v1/configs/models/{model_id}",
+                    content=body_template.format(model_id=model_id),
+                ).status_code
+                == 200
+            )
+
+        first = self.client.delete(
+            "/v1/configs/models/api/first",
+            headers={"Idempotency-Key": "shared-delete-key"},
+        )
+        second = self.client.delete(
+            "/v1/configs/models/api/second",
+            headers={"Idempotency-Key": "shared-delete-key"},
+        )
+
+        assert first.status_code == 200
+        assert second.status_code == 422
+        assert second.json()["detail"]["error"] == "idempotency_mismatch"
+        assert self.client.get("/v1/configs/models/api/second").status_code == 200
+
     def test_add_model_success(self) -> None:
         yaml_body = "sie_id: new/model\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n    max_batch_tokens: 8192\n"
         resp = self.client.post(
@@ -270,6 +447,50 @@ class TestConfigAPIModels:
         models = resp.json()["models"]
         api_model = next(m for m in models if m["model_id"] == "api/model")
         assert api_model["source"] == "api"
+
+    @pytest.mark.parametrize("sie_id", ["org-42/foo:v2", "org-42/bar@3", "org-42/baz:v2@3"])
+    def test_variant_and_version_ids_round_trip_add_get_delete(self, sie_id: str) -> None:
+        """#1841: a ':variant'/'@N' served id must round-trip add -> get -> DELETE.
+
+        A custom-model NAME may carry a ':variant' and/or '@N' version suffix
+        (control_plane advertises exactly this in its MODEL_EXISTS 409), so the
+        served id `<slug>/<name>` reaches this write-path validator on both the
+        register append AND the DPA erase tombstone. When `_MODEL_ID_PATTERN`
+        rejected ':' and '@', the tombstone 400'd and the erase wedged forever.
+        """
+        yaml_body = (
+            f"sie_id: {sie_id}\n"
+            "profiles:\n"
+            "  default:\n"
+            "    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter\n"
+            "    max_batch_tokens: 8192\n"
+        )
+        add = self.client.post("/v1/configs/models", content=yaml_body, headers={"Content-Type": "application/x-yaml"})
+        assert add.status_code == 201, add.text
+        assert add.json()["model_id"] == sie_id
+
+        got = self.client.get(f"/v1/configs/models/{sie_id}")
+        assert got.status_code == 200, got.text
+
+        # The ':'/'@' chars are ordinary POSIX filename chars — '/' still maps to
+        # '__' and they stay inside the models dir (no traversal, no separator).
+        expected = self._store / "models" / (sie_id.replace("/", "__") + ".yaml")
+        assert expected.exists(), f"expected on-disk artifact {expected} missing"
+        assert expected.parent == (self._store / "models")
+
+        deleted = self.client.delete(f"/v1/configs/models/{sie_id}")
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["deleted"] is True
+
+    def test_variant_id_still_rejects_traversal_and_status_suffix(self) -> None:
+        """Widening the id grammar for ':'/'@' must not defeat the safety guards."""
+        for bad in ("org-42/foo:../secret", "org-42/foo:v2/status", "org-42/..@3"):
+            resp = self.client.post(
+                "/v1/configs/models",
+                content=f"sie_id: {bad}\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.bert_flash:A\n    max_batch_tokens: 1\n",
+                headers={"Content-Type": "application/x-yaml"},
+            )
+            assert resp.status_code == 400, f"{bad!r} should be rejected, got {resp.status_code}"
 
 
 class TestConfigAPIBundles:

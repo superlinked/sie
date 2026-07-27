@@ -43,6 +43,17 @@ fn max_deliver() -> i64 {
         .unwrap_or(DEFAULT_MAX_DELIVER)
 }
 
+/// The larger of the durable work lifetime and configured retry envelope is the
+/// active-worker expiry horizon; the bounded state may evict the oldest entry
+/// sooner. Core NATS cancellation remains best-effort: a worker that starts or
+/// reconnects after the signal must still rely on payload cleanup/deadline
+/// enforcement.
+pub(crate) fn work_cancel_tombstone_ttl() -> Duration {
+    Duration::from_secs(
+        stream_max_age_secs().max(ACK_WAIT_SECS.saturating_mul(max_deliver() as u64)),
+    )
+}
+
 /// Env-overridable stream `max_age`, wired to the worker-sidecar by
 /// Helm as `SIE_STREAM_MAX_AGE_S` (default 1800). Should be >
 /// `max_deliver * ack_wait` so messages remain inspectable after DLQ.
@@ -732,7 +743,7 @@ mod tests {
             pool_admission_check_interval_ms: 5_000,
             pool_admission_pause_ms: 1_000,
             pool_admission_stale_after_ms: 30_000,
-            metrics_port: 9095,
+            probe_port: 9095,
             worker_id: "w".into(),
             ping_interval_ms: 2000,
             ready_stale_mult: 3,

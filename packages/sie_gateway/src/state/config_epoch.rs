@@ -26,7 +26,9 @@ pub struct ConfigEpoch {
 
 impl ConfigEpoch {
     pub fn new() -> Self {
-        Self::default()
+        let epoch = Self::default();
+        crate::observability::metrics::set_config_applied_epoch(0);
+        epoch
     }
 
     /// Current best-known epoch. `0` means "never bootstrapped / no deltas
@@ -37,8 +39,7 @@ impl ConfigEpoch {
 
     /// Set the epoch to `value` iff `value` is strictly greater than the
     /// current value. Returns `true` if the value moved forward. On a
-    /// successful forward move, mirrors the new value into the
-    /// `sie_gateway_config_epoch` Prometheus gauge.
+    /// successful forward move.
     pub fn set_max(&self, value: u64) -> bool {
         let mut current = self.inner.load(Ordering::Relaxed);
         loop {
@@ -52,10 +53,7 @@ impl ConfigEpoch {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    // Mirror into Prometheus gauge. Use `i64` cast: the
-                    // epoch is a small monotonic counter; overflow past
-                    // `i64::MAX` would take centuries of writes.
-                    crate::metrics::CONFIG_EPOCH.set(value as i64);
+                    crate::observability::metrics::set_config_applied_epoch(value);
                     return true;
                 }
                 Err(observed) => current = observed,
@@ -69,12 +67,10 @@ impl ConfigEpoch {
     /// control plane (specifically: `state::config_poller` observed
     /// `remote < local` against `sie-config`). The caller is expected
     /// to follow this with a full export fetch so the registry and the
-    /// counter land on the same snapshot. Also mirrored to the
-    /// `sie_gateway_config_epoch` gauge so the exported value matches
-    /// reality.
+    /// counter land on the same snapshot.
     pub fn force_set(&self, value: u64) {
         self.inner.store(value, Ordering::Relaxed);
-        crate::metrics::CONFIG_EPOCH.set(value as i64);
+        crate::observability::metrics::set_config_applied_epoch(value);
     }
 }
 

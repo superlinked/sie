@@ -1,5 +1,6 @@
 sie_id: TomoroAI/tomoro-colqwen3-embed-4b
 hf_id: TomoroAI/tomoro-colqwen3-embed-4b
+hf_revision: bf790bd8780b098b86453444632a184bb770be1a
 inputs:
   text: true
   image: true

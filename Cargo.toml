@@ -1,0 +1,27 @@
+# Virtual workspace over the PUBLIC Rust crates (#2339): one lockfile, one
+# `cargo deny` sweep, one dependency-resolution surface for the crates that
+# sync to the OSS `sie` repo (INF13 allowlist). The workspace boundary is
+# deliberately the public/proprietary boundary, so the root Cargo.toml,
+# Cargo.lock, and deny.toml sync verbatim and the public repo is a complete,
+# buildable workspace.
+#
+# Deliberately NOT members (each keeps its own Cargo.lock):
+# - packages/sie_cloud/gateway — proprietary managed composition crate,
+#   excluded from the public sync; consumes sie_gateway/sie_audio_prep as
+#   plain path deps, exactly as before this workspace existed.
+# - packages/sie_server_rust — its vendored candle CUDA forks (vendor/*) are
+#   path deps that cargo would auto-promote to members (exclude does not
+#   override that for path deps, rust-lang/cargo#6745), and as members they
+#   would break every `cargo <cmd> --workspace` run on non-CUDA machines.
+[workspace]
+resolver = "2"
+members = [
+    "packages/sie_audio_prep",
+    "packages/sie_gateway",
+    "packages/sie_server_sidecar",
+    "packages/sie_telemetry",
+]
+exclude = [
+    "packages/sie_cloud/gateway",
+    "packages/sie_server_rust",
+]

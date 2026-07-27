@@ -76,6 +76,7 @@ pub mod openai_type {
 /// human-readable ``message`` is for display only.
 pub mod openai_code {
     pub const UNSUPPORTED_FIELD: &str = "unsupported_field";
+    pub const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
     pub const MODEL_NOT_FOUND: &str = "model_not_found";
     pub const CONTEXT_EXCEEDED: &str = "context_exceeded";
     pub const TRANSPORT_FAILURE: &str = "transport_failure";
@@ -133,9 +134,10 @@ pub fn json_openai_error(
 pub fn openai_error_from_detail_code(code: &str) -> (&'static str, &'static str) {
     match code {
         // 400 / 413 — caller-fixable input problems.
-        "INVALID_REQUEST" | "PAYLOAD_TOO_LARGE" => {
+        "INVALID_REQUEST" | "INVALID_INPUT" | "INPUT_TOO_LONG" => {
             (openai_type::INVALID_REQUEST, openai_code::INVALID_REQUEST)
         }
+        "PAYLOAD_TOO_LARGE" => (openai_type::INVALID_REQUEST, openai_code::PAYLOAD_TOO_LARGE),
         // 404 — model id not routable.
         "MODEL_NOT_FOUND" => (openai_type::INVALID_REQUEST, openai_code::MODEL_NOT_FOUND),
         // 409 / 400 — bundle override conflicts with model routing; pool/bundle
@@ -209,10 +211,12 @@ mod tests {
                 "invalid_request_error",
                 "invalid_request",
             ),
+            ("INVALID_INPUT", "invalid_request_error", "invalid_request"),
+            ("INPUT_TOO_LONG", "invalid_request_error", "invalid_request"),
             (
                 code::PAYLOAD_TOO_LARGE,
                 "invalid_request_error",
-                "invalid_request",
+                "payload_too_large",
             ),
             (
                 code::MODEL_NOT_FOUND,

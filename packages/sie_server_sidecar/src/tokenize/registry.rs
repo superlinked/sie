@@ -169,16 +169,18 @@ impl TokenizerRegistry {
     /// * `Ok(true)`  — entry was newly inserted (first time we've
     ///   seen this `model_id` with a tokenizer_path).
     /// * `Ok(false)` — entry already present, descriptor has no
-    ///   `tokenizer_path`, or the descriptor's tokenizer hash matches
-    ///   the cached one (idempotent re-handshake).
+    ///   `tokenizer_path`, or the descriptor's tokenizer identity and
+    ///   effective configuration match the cached entry (idempotent
+    ///   re-handshake).
     /// * `Err(_)`    — descriptor named a path that fails to load
     ///   (file missing, bad JSON, ...). The caller should log and
     ///   continue: the model just falls back to Python tokenisation.
     ///
-    /// If the existing entry has a different `tokenizer_id` than the
-    /// descriptor, we replace it — the adapter is the source of
-    /// truth, and a hot-reload of the model's tokeniser must be
-    /// reflected here.
+    /// If the existing entry differs in `tokenizer_id`, effective
+    /// `max_seq_len`, or default templates, we replace it — the adapter is the
+    /// source of truth, and a hot-reload of tokeniser configuration must be
+    /// reflected here. Missing or zero descriptor caps normalize to
+    /// [`DEFAULT_MAX_SEQ_LEN`] before this identity comparison.
     pub fn register_from_descriptor(
         &self,
         model_id: &str,
@@ -191,31 +193,28 @@ impl TokenizerRegistry {
             return Ok(false);
         }
 
+        let max_seq_len = descriptor_max_seq_len(descriptor.max_seq_len);
+
         // Idempotent: if we already loaded a tokeniser for this model
-        // and the declared id + templates match, do nothing. Saves the
+        // and the declared id + effective cap + templates match, do nothing. Saves the
         // cost of re-reading + re-hashing on every batch's
-        // ensure_ready call. Templates are part of the equality check
-        // so a YAML-driven template edit hot-reloads on the next
-        // handshake without restarting the sidecar.
+        // ensure_ready call. The cap and templates are part of the equality
+        // check so YAML-driven edits hot-reload on the next handshake without
+        // restarting the sidecar.
         if let Some(existing) = self.get(model_id) {
-            if let Some(decl_id) = descriptor.tokenizer_id.as_deref() {
-                let templates_match = existing.default_query_template.as_deref()
+            let config_matches = existing.max_seq_len == max_seq_len
+                && existing.default_query_template.as_deref()
                     == descriptor.default_query_template.as_deref()
-                    && existing.default_doc_template.as_deref()
-                        == descriptor.default_doc_template.as_deref();
-                if existing.tokenizer_id() == decl_id && templates_match {
+                && existing.default_doc_template.as_deref()
+                    == descriptor.default_doc_template.as_deref();
+            if let Some(decl_id) = descriptor.tokenizer_id.as_deref() {
+                if existing.tokenizer_id() == decl_id && config_matches {
                     return Ok(false);
                 }
-            } else {
+            } else if config_matches {
                 return Ok(false);
             }
         }
-
-        let max_seq_len = descriptor
-            .max_seq_len
-            .map(|v| v as usize)
-            .filter(|&v| v > 0)
-            .unwrap_or(DEFAULT_MAX_SEQ_LEN);
 
         let path = PathBuf::from(path_str);
         let entry = load_entry_with_templates(
@@ -260,6 +259,13 @@ impl TokenizerRegistry {
         guard.insert(model_id.to_string(), entry);
         Ok(newly_inserted)
     }
+}
+
+fn descriptor_max_seq_len(max_seq_len: Option<u32>) -> usize {
+    max_seq_len
+        .map(|value| value as usize)
+        .filter(|&value| value > 0)
+        .unwrap_or(DEFAULT_MAX_SEQ_LEN)
 }
 
 impl Default for TokenizerRegistry {
@@ -395,6 +401,42 @@ mod tests {
         assert!(!reg
             .register_from_descriptor("test-model", &descriptor)
             .unwrap());
+    }
+
+    #[test]
+    fn register_from_descriptor_replaces_entry_when_max_seq_len_changes() {
+        let dir = TempDir::new().unwrap();
+        let path = write_tiny_tokenizer(&dir);
+        let reg = TokenizerRegistry::empty();
+
+        let mut descriptor = ModelDescriptor {
+            tokenizer_path: Some(path.display().to_string()),
+            tokenizer_id: None,
+            max_seq_len: Some(4),
+            ..Default::default()
+        };
+        assert!(reg
+            .register_from_descriptor("test-model", &descriptor)
+            .unwrap());
+        let loaded_id = reg.get("test-model").unwrap().tokenizer_id().to_string();
+
+        descriptor.tokenizer_id = Some(loaded_id);
+        descriptor.max_seq_len = Some(2);
+        assert!(!reg
+            .register_from_descriptor("test-model", &descriptor)
+            .unwrap());
+
+        let entry = reg.get("test-model").unwrap();
+        assert_eq!(entry.max_seq_len(), 2);
+        let out = entry.tokenize(&["hello world hello world"]).unwrap();
+        assert_eq!(out.input_ids[0].len(), 2);
+    }
+
+    #[test]
+    fn descriptor_max_seq_len_normalizes_missing_and_zero_to_default() {
+        assert_eq!(descriptor_max_seq_len(None), DEFAULT_MAX_SEQ_LEN);
+        assert_eq!(descriptor_max_seq_len(Some(0)), DEFAULT_MAX_SEQ_LEN);
+        assert_eq!(descriptor_max_seq_len(Some(64)), 64);
     }
 
     #[test]

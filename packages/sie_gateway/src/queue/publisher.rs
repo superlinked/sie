@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use async_nats::jetstream;
 use dashmap::{DashMap, DashSet};
-use futures_util::future::try_join_all;
+use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, info, warn};
 use utoipa::ToSchema;
@@ -14,14 +16,42 @@ use utoipa::ToSchema;
 use rmp::decode::read_str_from_slice;
 use rmp::Marker;
 
+use super::dispatch::{DispatchDurability, PendingDispatchKind};
+use super::identity::canonical_work_item_id;
 use super::payload_store::PayloadStore;
 use super::streaming::{
     ChunkApplied, ChunkEnvelope, ChunkError, NakEnvelope, StreamCollector, StreamOutcome,
 };
 use crate::endpoint::InferenceEndpoint;
-use crate::metrics;
+use crate::observability::metrics::{
+    self as telemetry, QueueEvent, QueueEventOutcome, QueuePublishObservation, QueuePublishOutcome,
+};
 
 const PAYLOAD_OFFLOAD_THRESHOLD: usize = 1_024 * 1_024; // 1 MB
+/// Public queue request contract. This is deliberately much larger than the
+/// worker's internal coalescing window while bounding per-request result/ACK
+/// state under the gateway's 16 MiB body limit.
+pub(crate) const MAX_QUEUE_REQUEST_ITEMS: usize = 4_096;
+/// Bound simultaneous JetStream sends without serializing large valid batches.
+const MAX_CONCURRENT_INITIAL_PUBLISHES: usize = 64;
+const PUBLISH_ACK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(6);
+
+const RESULT_CHUNK_KIND: &str = "result_chunk_v1";
+const MAX_RESULT_CHUNK_ITEM_BYTES: usize = 16 * 1_024 * 1_024;
+const MAX_RESULT_CHUNKS_PER_ITEM: u32 = 64;
+const MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST: usize = 64 * 1_024 * 1_024;
+/// One eighth of the gateway's 2 GiB container limit. This leaves 1.75 GiB
+/// for normal request/response buffers, JSON expansion, NATS, and allocator
+/// headroom even when result chunk traffic is at its reservation ceiling.
+const MAX_RESULT_CHUNK_RESERVED_BYTES_GLOBAL: usize = 256 * 1_024 * 1_024;
+/// Reserve for partial fragments, the contiguous reassembly/decode copy, and
+/// the decoded `WorkResult` retained until every item in the request arrives.
+const RESULT_CHUNK_COPY_RESERVATION_MULTIPLIER: usize = 3;
+/// Covers the chunk vector, strings, digest, and allocator metadata, including
+/// adversarial tiny transfers whose payload alone would not cover bookkeeping.
+const RESULT_CHUNK_TRANSFER_OVERHEAD_BYTES: usize = 4 * 1_024;
+const MAX_RETIRED_RESULT_CHUNK_DIGESTS: usize = 8;
+const MAX_RETIRED_RESULT_CHUNK_LAYOUTS: usize = 8;
 
 // H9 — first-chunk-fallback rate limit defaults.
 //
@@ -369,13 +399,11 @@ pub struct GenerateParams {
     /// observability can label requests by parallelism intent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
-    /// OpenAI ``seed`` — sampler determinism hint. Best-effort:
-    /// kernel non-determinism, batching order, and KV-cache reuse all
-    /// defeat exact reproducibility. Forwarded to the worker which
-    /// sets it on the SGLang ``sampling_params``. Absent → SGLang's
-    /// own (non-deterministic) default. Gateway-validated as a u64.
+    /// OpenAI ``seed`` — signed 64-bit per-request sampling seed. Forwarded
+    /// unchanged; the active generation adapter owns its reproducibility
+    /// semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<u64>,
+    pub seed: Option<i64>,
     /// OpenAI ``logit_bias`` — per-token additive bias on the
     /// sampler. Keys are token-id strings (OpenAI's wire shape), values
     /// are floats in ``[-100.0, 100.0]``. Gateway clamps the map size
@@ -471,6 +499,11 @@ struct WorkItemRef<'a> {
     pub router_id: &'a str,
     pub reply_subject: &'a str,
     pub timestamp: f64,
+    /// Rolling-upgrade negotiation for `result_chunk_v1` specifically. Older
+    /// workers ignore this unknown map field; workers must keep publishing the
+    /// legacy one-shot ``WorkResult`` unless it is true. A future chunk version
+    /// requires a new capability field rather than reusing this boolean.
+    pub accepts_result_chunks: bool,
     /// W3C Trace Context. Skipped on serialisation when `None`,
     /// preserving the compact pre-observability wire shape when no
     /// trace context is present.
@@ -609,6 +642,7 @@ pub struct WorkResult {
     /// Authoritative billable-unit counts emitted by the worker engine
     /// (`sie_server.ipc_types.UnitCounts`): `input_tokens` is the real
     /// tokenizer count taken post-tokenization, never an estimate.
+    /// `audio_ms` carries exact accepted-audio duration.
     /// `#[serde(default)]` keeps the wire backward-compatible — workers
     /// that don't emit it (and array-encoded legacy results) decode to
     /// `None`. Consumed by metering edges (e.g. the managed gateway's
@@ -617,6 +651,34 @@ pub struct WorkResult {
     pub units: Option<UnitCounts>,
     #[serde(default)]
     pub worker_direct: bool,
+    /// Bundle hash held stable by the worker's shared execution barrier for
+    /// this result. Missing on legacy workers and error-only results.
+    #[serde(default)]
+    pub executed_bundle_config_hash: Option<String>,
+    /// Opaque worker-origin digest for one immutable managed deployment and
+    /// observed resource shape. Optional for rolling/self-host compatibility.
+    #[serde(default)]
+    pub execution_identity_sha256: Option<String>,
+}
+
+/// One bounded fragment of a named-msgpack encoded [`WorkResult`].
+///
+/// This envelope is deliberately distinguished before trying to deserialize a
+/// permissive ``WorkResult``: many ``WorkResult`` fields have serde defaults,
+/// so a chunk map could otherwise be mistaken for a terminal failure result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ResultChunkV1 {
+    kind: String,
+    work_item_id: String,
+    request_id: String,
+    item_index: u32,
+    #[serde(with = "serde_bytes")]
+    transfer_digest: Vec<u8>,
+    chunk_index: u32,
+    chunk_count: u32,
+    total_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    payload: Vec<u8>,
 }
 
 /// Typed unit counts on the result path (see [`WorkResult::units`]).
@@ -630,6 +692,13 @@ pub struct UnitCounts {
     pub pages: Option<u64>,
     #[serde(default)]
     pub images: Option<u64>,
+    /// Exact duration of accepted audio input in integer milliseconds.
+    #[serde(default)]
+    pub audio_ms: Option<u64>,
+    /// Exact number of successfully scored query-document pairs. Appended to
+    /// preserve the legacy positional MessagePack field order.
+    #[serde(default)]
+    pub pairs: Option<u64>,
 }
 
 struct CachedStreamInfo {
@@ -728,6 +797,9 @@ pub struct WorkPublisher {
     /// don't fail-open during the initial monitor interval.
     stream_info_cache: DashMap<String, CachedStreamInfo>,
     pending_results: DashMap<String, ResultCollector>,
+    /// Process-wide result-chunk reservation pool shared by every pending
+    /// request owned by this publisher.
+    result_chunk_budget: Arc<ResultChunkBudget>,
     /// Streaming aggregator. Keyed on ``request_id`` like
     /// ``pending_results`` but holds the per-chunk state for one
     /// generation request. Populated by ``publish_generate_streaming``
@@ -765,20 +837,609 @@ pub struct WorkPublisher {
     fallback_burst: f64,
 }
 
+/// Owns a pending collector while `publish_work` may still yield during
+/// offload and JetStream publication. If that future is dropped before it can
+/// hand ownership to the HTTP guard, this guard wins the same atomic removal
+/// race and starts cooperative cancellation/resource cleanup.
+struct PendingPublishGuard {
+    publisher: Arc<WorkPublisher>,
+    request_id: String,
+    armed: bool,
+}
+
+impl PendingPublishGuard {
+    fn new(publisher: Arc<WorkPublisher>, request_id: String) -> Self {
+        Self {
+            publisher,
+            request_id,
+            armed: true,
+        }
+    }
+
+    fn defuse(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingPublishGuard {
+    fn drop(&mut self) {
+        if !self.armed || !self.publisher.drop_pending_result(&self.request_id) {
+            return;
+        }
+        let publisher = Arc::clone(&self.publisher);
+        let request_id = self.request_id.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    publisher.finish_abandoned_work(&request_id).await;
+                });
+            }
+            Err(_) => {
+                debug!(
+                    request_id = %request_id,
+                    "runtime unavailable while abandoning interrupted publish"
+                );
+            }
+        }
+    }
+}
+
 struct ResultCollector {
     _total_items: u32,
     results: Vec<Option<WorkResult>>,
+    /// Partial named-msgpack ``WorkResult`` transfers keyed by work item id.
+    /// Their lifetime is exactly the pending request lifetime: removing this
+    /// collector on completion, timeout, or publish failure drops every buffer.
+    result_chunk_transfers: BTreeMap<String, PartialResultTransfer>,
+    /// Actual payload bytes still held as partial fragments.
+    result_chunk_buffered_bytes: usize,
+    /// Conservative reservations stay held after an accepted item completes
+    /// because its decoded `WorkResult` remains in `results` until the whole
+    /// request completes. A completed result rejected by first-result or
+    /// direct-fallback semantics releases its reservation immediately. [`Drop`]
+    /// releases the remaining request reservation on every terminal path.
+    result_chunk_reserved_bytes: usize,
+    result_chunk_reserved_limit: usize,
+    result_chunk_budget: Arc<ResultChunkBudget>,
     sender: Option<oneshot::Sender<Vec<WorkResult>>>,
     deadline: Instant,
     operation: String,
-    published_at: Instant,
-    pool_label: String,
-    model_label: String,
     pool_fallback_subject: Option<String>,
     direct_fallback_worker_id: Option<String>,
     direct_fallback_republished_indices: BTreeSet<usize>,
     direct_fallback_payloads: Vec<Option<Vec<u8>>>,
     direct_fallback_republished: bool,
+}
+
+#[derive(Debug)]
+struct PartialResultTransfer {
+    request_id: String,
+    item_index: u32,
+    transfer_digest: [u8; 32],
+    chunk_count: u32,
+    total_bytes: usize,
+    chunks: Vec<Option<Vec<u8>>>,
+    buffered_bytes: usize,
+    reservation_bytes: usize,
+    /// Recently superseded retry digests. This bounded tombstone set stops a
+    /// delayed old chunk (including chunk zero) from flipping the active
+    /// transfer back to an abandoned attempt.
+    retired_digests: Vec<[u8; 32]>,
+    /// Superseded chunk counts for the active digest. For a given digest,
+    /// total length, and chunk count the layout is canonical; retaining old
+    /// counts lets delayed fragments from a same-digest chunk-zero restart be
+    /// ignored instead of mixed into the replacement.
+    retired_chunk_counts: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct ResultChunkBudget {
+    reserved_bytes: AtomicUsize,
+    limit: usize,
+}
+
+static RESULT_CHUNK_BUDGET: LazyLock<Arc<ResultChunkBudget>> = LazyLock::new(|| {
+    Arc::new(ResultChunkBudget::new(
+        MAX_RESULT_CHUNK_RESERVED_BYTES_GLOBAL,
+    ))
+});
+
+impl ResultChunkBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            reserved_bytes: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    fn try_reserve(&self, bytes: usize) -> bool {
+        let mut current = self.reserved_bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(bytes) else {
+                return false;
+            };
+            if next > self.limit {
+                return false;
+            }
+            match self.reserved_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    telemetry::record_queue_result_chunk_reservation_change(
+                        telemetry::QueueResultChunkReservationChange::Reserved(bytes),
+                    );
+                    return true;
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn release(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let mut current = self.reserved_bytes.load(Ordering::Acquire);
+        loop {
+            debug_assert!(current >= bytes, "result chunk reservation underflow");
+            let released = current.min(bytes);
+            let next = current - released;
+            match self.reserved_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    telemetry::record_queue_result_chunk_reservation_change(
+                        telemetry::QueueResultChunkReservationChange::Released(released),
+                    );
+                    return;
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn current(&self) -> usize {
+        self.reserved_bytes.load(Ordering::Acquire)
+    }
+}
+
+fn result_chunk_reservation_bytes(total_bytes: usize) -> Option<usize> {
+    total_bytes
+        .checked_mul(RESULT_CHUNK_COPY_RESERVATION_MULTIPLIER)
+        .and_then(|bytes| bytes.checked_add(RESULT_CHUNK_TRANSFER_OVERHEAD_BYTES))
+}
+
+impl ResultCollector {
+    fn reserve_result_chunk_transfer(
+        &mut self,
+        total_bytes: usize,
+    ) -> Result<usize, ResultChunkReject> {
+        let reservation_bytes =
+            result_chunk_reservation_bytes(total_bytes).ok_or(ResultChunkReject::AggregateSize)?;
+        let request_total = self
+            .result_chunk_reserved_bytes
+            .checked_add(reservation_bytes)
+            .ok_or(ResultChunkReject::AggregateSize)?;
+        if request_total > self.result_chunk_reserved_limit {
+            return Err(ResultChunkReject::AggregateSize);
+        }
+        if !self.result_chunk_budget.try_reserve(reservation_bytes) {
+            return Err(ResultChunkReject::GlobalBudget);
+        }
+        self.result_chunk_reserved_bytes = request_total;
+        Ok(reservation_bytes)
+    }
+
+    fn release_result_chunk_reservation(&mut self, bytes: usize) {
+        self.result_chunk_reserved_bytes = self.result_chunk_reserved_bytes.saturating_sub(bytes);
+        self.result_chunk_budget.release(bytes);
+    }
+}
+
+impl Drop for ResultCollector {
+    fn drop(&mut self) {
+        self.result_chunk_budget
+            .release(self.result_chunk_reserved_bytes);
+        self.result_chunk_reserved_bytes = 0;
+    }
+}
+
+#[derive(Debug)]
+struct CompletedResultTransfer {
+    work_item_id: String,
+    request_id: String,
+    item_index: u32,
+    encoded_work_result: Vec<u8>,
+    reservation_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultChunkReject {
+    Kind,
+    Identity,
+    Digest,
+    ChunkCount,
+    ChunkIndex,
+    ItemSize,
+    PayloadSize,
+    AggregateSize,
+    GlobalBudget,
+    MetadataConflict,
+    DuplicateConflict,
+    TotalMismatch,
+    DigestMismatch,
+    Decode,
+}
+
+impl ResultChunkReject {
+    fn metric_label(self) -> &'static str {
+        match self {
+            Self::Kind => "kind",
+            Self::Identity => "identity",
+            Self::Digest => "digest",
+            Self::ChunkCount => "chunk_count",
+            Self::ChunkIndex => "chunk_index",
+            Self::ItemSize => "item_size",
+            Self::PayloadSize => "payload_size",
+            Self::AggregateSize => "aggregate_size",
+            Self::GlobalBudget => "global_budget",
+            Self::MetadataConflict => "metadata_conflict",
+            Self::DuplicateConflict => "duplicate_conflict",
+            Self::TotalMismatch => "total_mismatch",
+            Self::DigestMismatch => "digest_mismatch",
+            Self::Decode => "decode",
+        }
+    }
+
+    fn telemetry_reason(self) -> telemetry::QueueResultChunkRejectionReason {
+        match self {
+            Self::Kind => telemetry::QueueResultChunkRejectionReason::Kind,
+            Self::Identity => telemetry::QueueResultChunkRejectionReason::Identity,
+            Self::Digest => telemetry::QueueResultChunkRejectionReason::Digest,
+            Self::ChunkCount => telemetry::QueueResultChunkRejectionReason::ChunkCount,
+            Self::ChunkIndex => telemetry::QueueResultChunkRejectionReason::ChunkIndex,
+            Self::ItemSize => telemetry::QueueResultChunkRejectionReason::ItemSize,
+            Self::PayloadSize => telemetry::QueueResultChunkRejectionReason::PayloadSize,
+            Self::AggregateSize => telemetry::QueueResultChunkRejectionReason::AggregateSize,
+            Self::GlobalBudget => telemetry::QueueResultChunkRejectionReason::GlobalBudget,
+            Self::MetadataConflict => telemetry::QueueResultChunkRejectionReason::MetadataConflict,
+            Self::DuplicateConflict => {
+                telemetry::QueueResultChunkRejectionReason::DuplicateConflict
+            }
+            Self::TotalMismatch => telemetry::QueueResultChunkRejectionReason::TotalMismatch,
+            Self::DigestMismatch => telemetry::QueueResultChunkRejectionReason::DigestMismatch,
+            Self::Decode => telemetry::QueueResultChunkRejectionReason::Decode,
+        }
+    }
+}
+
+impl std::fmt::Display for ResultChunkReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.metric_label())
+    }
+}
+
+#[derive(Debug)]
+enum ResultChunkStatus {
+    Buffered,
+    Duplicate,
+    StaleRetry,
+    Complete(CompletedResultTransfer),
+}
+
+#[derive(Debug)]
+struct ResultChunkApply {
+    status: ResultChunkStatus,
+    retry_replaced: bool,
+}
+
+fn apply_result_chunk(
+    collector: &mut ResultCollector,
+    chunk: ResultChunkV1,
+) -> Result<ResultChunkApply, ResultChunkReject> {
+    if chunk.kind != RESULT_CHUNK_KIND {
+        return Err(ResultChunkReject::Kind);
+    }
+    if chunk.request_id.is_empty() || chunk.work_item_id.is_empty() {
+        return Err(ResultChunkReject::Identity);
+    }
+    let item_index = chunk.item_index as usize;
+    if item_index >= collector.results.len()
+        || chunk.work_item_id != canonical_work_item_id(&chunk.request_id, chunk.item_index)
+    {
+        return Err(ResultChunkReject::Identity);
+    }
+    let transfer_digest: [u8; 32] = chunk
+        .transfer_digest
+        .as_slice()
+        .try_into()
+        .map_err(|_| ResultChunkReject::Digest)?;
+    if chunk.chunk_count == 0 || chunk.chunk_count > MAX_RESULT_CHUNKS_PER_ITEM {
+        return Err(ResultChunkReject::ChunkCount);
+    }
+    if chunk.chunk_index >= chunk.chunk_count {
+        return Err(ResultChunkReject::ChunkIndex);
+    }
+    if chunk.total_bytes == 0 || chunk.total_bytes > MAX_RESULT_CHUNK_ITEM_BYTES as u64 {
+        return Err(ResultChunkReject::ItemSize);
+    }
+    let total_bytes = chunk.total_bytes as usize;
+    if chunk.payload.len() > total_bytes {
+        return Err(ResultChunkReject::PayloadSize);
+    }
+
+    // A legacy full result may have won while chunk fragments were in flight.
+    // Keep first-result semantics and avoid allocating state for late chunks.
+    if collector.results[item_index].is_some() {
+        return Ok(ResultChunkApply {
+            status: ResultChunkStatus::Duplicate,
+            retry_replaced: false,
+        });
+    }
+
+    // A worker retry may have a new digest, or may retry the same encoded
+    // bytes with a different canonical chunk count. Fragments from abandoned
+    // attempts must never mix with the active transfer.
+    let mut replacement_retired_digests = Vec::new();
+    let mut replacement_retired_chunk_counts = Vec::new();
+    let mut replacement_reservation_bytes = None;
+    let mut retry_replaced = false;
+    let differing_digest = collector
+        .result_chunk_transfers
+        .get(&chunk.work_item_id)
+        .is_some_and(|partial| partial.transfer_digest != transfer_digest);
+    if differing_digest {
+        let current = collector
+            .result_chunk_transfers
+            .get(&chunk.work_item_id)
+            .ok_or(ResultChunkReject::MetadataConflict)?;
+        // Sidecars publish a retry in order. A non-zero fragment with an
+        // unknown digest is therefore a delayed/stale fragment, not authority
+        // to discard the active transfer. Likewise, tombstoned digests can
+        // never become active again even if their delayed chunk zero arrives.
+        if chunk.chunk_index != 0 || current.retired_digests.contains(&transfer_digest) {
+            return Ok(ResultChunkApply {
+                status: ResultChunkStatus::StaleRetry,
+                retry_replaced: false,
+            });
+        }
+        let stale = collector
+            .result_chunk_transfers
+            .remove(&chunk.work_item_id)
+            .ok_or(ResultChunkReject::MetadataConflict)?;
+        collector.result_chunk_buffered_bytes = collector
+            .result_chunk_buffered_bytes
+            .saturating_sub(stale.buffered_bytes);
+        collector.release_result_chunk_reservation(stale.reservation_bytes);
+        replacement_retired_digests = stale.retired_digests;
+        if replacement_retired_digests.len() == MAX_RETIRED_RESULT_CHUNK_DIGESTS {
+            replacement_retired_digests.remove(0);
+        }
+        replacement_retired_digests.push(stale.transfer_digest);
+        retry_replaced = true;
+    } else if let Some(current) = collector.result_chunk_transfers.get(&chunk.work_item_id) {
+        if current.total_bytes != total_bytes {
+            // Equal SHA-256 digests identify equal encoded bytes, so their
+            // declared length cannot legitimately change.
+            return Err(ResultChunkReject::MetadataConflict);
+        }
+        if current.chunk_count != chunk.chunk_count {
+            if current.retired_chunk_counts.contains(&chunk.chunk_count) {
+                return Ok(ResultChunkApply {
+                    status: ResultChunkStatus::StaleRetry,
+                    retry_replaced: false,
+                });
+            }
+            // Chunk zero is the only authoritative restart marker. Unknown
+            // non-zero layouts fail closed; delayed known layouts are handled
+            // by the tombstone check above.
+            if chunk.chunk_index != 0 {
+                return Err(ResultChunkReject::MetadataConflict);
+            }
+            let stale = collector
+                .result_chunk_transfers
+                .remove(&chunk.work_item_id)
+                .ok_or(ResultChunkReject::MetadataConflict)?;
+            collector.result_chunk_buffered_bytes = collector
+                .result_chunk_buffered_bytes
+                .saturating_sub(stale.buffered_bytes);
+            replacement_retired_digests = stale.retired_digests;
+            replacement_retired_chunk_counts = stale.retired_chunk_counts;
+            if replacement_retired_chunk_counts.len() == MAX_RETIRED_RESULT_CHUNK_LAYOUTS {
+                replacement_retired_chunk_counts.remove(0);
+            }
+            replacement_retired_chunk_counts.push(stale.chunk_count);
+            // Same bytes have the same conservative reservation. Transfer it
+            // to the replacement state without briefly releasing the global
+            // budget and racing another request for the capacity.
+            replacement_reservation_bytes = Some(stale.reservation_bytes);
+            retry_replaced = true;
+        }
+    }
+
+    let chunk_index = chunk.chunk_index as usize;
+    if let Some(partial) = collector
+        .result_chunk_transfers
+        .get_mut(&chunk.work_item_id)
+    {
+        if partial.request_id != chunk.request_id
+            || partial.item_index != chunk.item_index
+            || partial.chunk_count != chunk.chunk_count
+            || partial.total_bytes != total_bytes
+        {
+            return Err(ResultChunkReject::MetadataConflict);
+        }
+        if let Some(existing) = &partial.chunks[chunk_index] {
+            return if existing == &chunk.payload {
+                Ok(ResultChunkApply {
+                    status: ResultChunkStatus::Duplicate,
+                    retry_replaced,
+                })
+            } else {
+                Err(ResultChunkReject::DuplicateConflict)
+            };
+        }
+        let new_transfer_bytes = partial
+            .buffered_bytes
+            .checked_add(chunk.payload.len())
+            .ok_or(ResultChunkReject::PayloadSize)?;
+        if new_transfer_bytes > partial.total_bytes {
+            return Err(ResultChunkReject::PayloadSize);
+        }
+        let new_request_bytes = collector
+            .result_chunk_buffered_bytes
+            .checked_add(chunk.payload.len())
+            .ok_or(ResultChunkReject::AggregateSize)?;
+        partial.chunks[chunk_index] = Some(chunk.payload);
+        partial.buffered_bytes = new_transfer_bytes;
+        collector.result_chunk_buffered_bytes = new_request_bytes;
+    } else {
+        let reservation_bytes = match replacement_reservation_bytes {
+            Some(bytes) => bytes,
+            None => collector.reserve_result_chunk_transfer(total_bytes)?,
+        };
+        let new_request_bytes = collector
+            .result_chunk_buffered_bytes
+            .checked_add(chunk.payload.len())
+            .ok_or(ResultChunkReject::AggregateSize)?;
+        let mut chunks = vec![None; chunk.chunk_count as usize];
+        let payload_len = chunk.payload.len();
+        chunks[chunk_index] = Some(chunk.payload);
+        collector.result_chunk_transfers.insert(
+            chunk.work_item_id.clone(),
+            PartialResultTransfer {
+                request_id: chunk.request_id,
+                item_index: chunk.item_index,
+                transfer_digest,
+                chunk_count: chunk.chunk_count,
+                total_bytes,
+                chunks,
+                buffered_bytes: payload_len,
+                reservation_bytes,
+                retired_digests: replacement_retired_digests,
+                retired_chunk_counts: replacement_retired_chunk_counts,
+            },
+        );
+        collector.result_chunk_buffered_bytes = new_request_bytes;
+    }
+
+    let complete = collector
+        .result_chunk_transfers
+        .get(&chunk.work_item_id)
+        .is_some_and(|partial| partial.chunks.iter().all(Option::is_some));
+    if !complete {
+        return Ok(ResultChunkApply {
+            status: ResultChunkStatus::Buffered,
+            retry_replaced,
+        });
+    }
+
+    let partial = collector
+        .result_chunk_transfers
+        .remove(&chunk.work_item_id)
+        .ok_or(ResultChunkReject::MetadataConflict)?;
+    collector.result_chunk_buffered_bytes = collector
+        .result_chunk_buffered_bytes
+        .saturating_sub(partial.buffered_bytes);
+    if partial.buffered_bytes != partial.total_bytes {
+        return Err(ResultChunkReject::TotalMismatch);
+    }
+
+    let mut encoded_work_result = Vec::with_capacity(partial.total_bytes);
+    let mut transfer_hasher = Sha256::new();
+    for payload in partial.chunks {
+        let payload = payload.ok_or(ResultChunkReject::TotalMismatch)?;
+        transfer_hasher.update(&payload);
+        encoded_work_result.extend_from_slice(&payload);
+    }
+    if encoded_work_result.len() != partial.total_bytes {
+        return Err(ResultChunkReject::TotalMismatch);
+    }
+    let actual_digest = transfer_hasher.finalize();
+    if actual_digest[..] != partial.transfer_digest {
+        return Err(ResultChunkReject::DigestMismatch);
+    }
+
+    Ok(ResultChunkApply {
+        status: ResultChunkStatus::Complete(CompletedResultTransfer {
+            work_item_id: chunk.work_item_id,
+            request_id: partial.request_id,
+            item_index: partial.item_index,
+            encoded_work_result,
+            reservation_bytes: partial.reservation_bytes,
+        }),
+        retry_replaced,
+    })
+}
+
+fn decode_completed_result(
+    completed: CompletedResultTransfer,
+) -> Result<WorkResult, ResultChunkReject> {
+    let result: WorkResult = rmp_serde::from_slice(&completed.encoded_work_result)
+        .map_err(|_| ResultChunkReject::Decode)?;
+    if result.work_item_id != completed.work_item_id
+        || result.request_id != completed.request_id
+        || result.item_index != completed.item_index
+    {
+        return Err(ResultChunkReject::Identity);
+    }
+    Ok(result)
+}
+
+fn drop_result_chunk_transfer(collector: &mut ResultCollector, work_item_id: &str) {
+    if let Some(partial) = collector.result_chunk_transfers.remove(work_item_id) {
+        collector.result_chunk_buffered_bytes = collector
+            .result_chunk_buffered_bytes
+            .saturating_sub(partial.buffered_bytes);
+        collector.release_result_chunk_reservation(partial.reservation_bytes);
+    }
+}
+
+fn drop_pending_result_collector(
+    pending: &DashMap<String, ResultCollector>,
+    request_id: &str,
+) -> bool {
+    pending.remove(request_id).is_some()
+}
+
+fn fail_pending_result_chunk_request(
+    pending_results: &DashMap<String, ResultCollector>,
+    request_id: &str,
+) -> Option<()> {
+    let (_, mut collector) = pending_results.remove(request_id)?;
+    let results = (0..collector.results.len())
+        .map(|item_index| WorkResult {
+            work_item_id: canonical_work_item_id(request_id, item_index as u32),
+            request_id: request_id.to_string(),
+            item_index: item_index as u32,
+            success: false,
+            result_msgpack: Vec::new(),
+            error: Some("Worker result transport validation failed".to_string()),
+            error_code: Some("transport_failure".to_string()),
+            inference_ms: None,
+            queue_ms: None,
+            processing_ms: None,
+            worker_id: None,
+            tokenization_ms: None,
+            postprocessing_ms: None,
+            payload_fetch_ms: None,
+            units: None,
+            worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
+        })
+        .collect();
+    if let Some(sender) = collector.sender.take() {
+        let _ = sender.send(results);
+    }
+    Some(())
 }
 
 struct PublishedWorkItem {
@@ -840,6 +1501,18 @@ fn store_result_if_missing(
     StoreResultOutcome::Stored
 }
 
+fn store_result_with_completed_chunk_reservation(
+    collector: &mut ResultCollector,
+    result: WorkResult,
+    reservation_bytes: usize,
+) -> StoreResultOutcome {
+    let outcome = store_result_if_missing(collector, result);
+    if outcome != StoreResultOutcome::Stored {
+        collector.release_result_chunk_reservation(reservation_bytes);
+    }
+    outcome
+}
+
 fn mark_direct_fallback_republished_indices(
     collector: &mut ResultCollector,
     indices: impl IntoIterator<Item = usize>,
@@ -868,19 +1541,95 @@ async fn await_batch_direct_fallback_acks(
     request_id: &str,
     acks: Vec<jetstream::context::PublishAckFuture>,
 ) -> bool {
-    let mut all_acked = true;
-    for ack in acks {
-        if let Err(e) = ack.await {
-            warn!(
-                request_id = %request_id,
-                error = %e,
-                "JetStream ack failed for batch direct fallback"
-            );
-            metrics::QUEUE_ACK_FAILURES.inc();
-            all_acked = false;
+    await_publish_acks(request_id, "batch direct fallback", acks)
+        .await
+        .is_ok()
+}
+
+async fn await_publish_acks(
+    request_id: &str,
+    context: &'static str,
+    acks: Vec<jetstream::context::PublishAckFuture>,
+) -> Result<(), String> {
+    let mut first_error = None;
+    let mut acknowledgements: FuturesUnordered<_> = acks
+        .into_iter()
+        .map(|ack| async move { ack.await })
+        .collect();
+    let deadline = tokio::time::Instant::now() + PUBLISH_ACK_COMPLETION_TIMEOUT;
+    while !acknowledgements.is_empty() {
+        match tokio::time::timeout_at(deadline, acknowledgements.next()).await {
+            Ok(Some(Ok(_))) => {
+                telemetry::record_queue_event(QueueEvent::PublishAck, QueueEventOutcome::Success)
+            }
+            Ok(Some(Err(error))) => {
+                telemetry::record_queue_event(QueueEvent::PublishAck, QueueEventOutcome::AckError);
+                warn!(
+                    request_id = %request_id,
+                    error = %error,
+                    context,
+                    "JetStream publish acknowledgement failed"
+                );
+                first_error.get_or_insert_with(|| error.to_string());
+            }
+            Ok(None) => break,
+            Err(_) => {
+                let unresolved = acknowledgements.len();
+                for _ in 0..unresolved {
+                    telemetry::record_queue_event(
+                        QueueEvent::PublishAck,
+                        QueueEventOutcome::AckError,
+                    );
+                }
+                warn!(
+                    request_id = %request_id,
+                    context,
+                    unresolved,
+                    timeout_ms = PUBLISH_ACK_COMPLETION_TIMEOUT.as_millis(),
+                    "JetStream publish acknowledgement monitor timed out"
+                );
+                first_error.get_or_insert_with(|| {
+                    format!(
+                        "{unresolved} acknowledgements exceeded {} ms",
+                        PUBLISH_ACK_COMPLETION_TIMEOUT.as_millis()
+                    )
+                });
+                break;
+            }
         }
     }
-    all_acked
+
+    match first_error {
+        Some(error) => Err(format!("{context} acknowledgement failed: {error}")),
+        None => Ok(()),
+    }
+}
+
+fn monitor_publish_acks(
+    request_id: String,
+    context: &'static str,
+    acks: Vec<jetstream::context::PublishAckFuture>,
+) -> DispatchDurability {
+    DispatchDurability::from_future(
+        async move { await_publish_acks(&request_id, context, acks).await },
+    )
+}
+
+pub(crate) fn initial_publish_ack_count(endpoint: &str, request_items: usize) -> usize {
+    if endpoint == "score" || endpoint == "generate" {
+        return 1;
+    }
+    request_items
+}
+
+pub(crate) fn validate_queue_request_item_count(request_items: usize) -> Result<(), String> {
+    if request_items <= MAX_QUEUE_REQUEST_ITEMS {
+        Ok(())
+    } else {
+        Err(format!(
+            "Queue request contains {request_items} items; the maximum is {MAX_QUEUE_REQUEST_ITEMS}"
+        ))
+    }
 }
 
 fn stream_name(pool: &str) -> String {
@@ -1453,6 +2202,7 @@ impl WorkPublisher {
             ensured_streams: DashMap::new(),
             stream_info_cache: DashMap::new(),
             pending_results: DashMap::new(),
+            result_chunk_budget: Arc::clone(&RESULT_CHUNK_BUDGET),
             pending_streams: DashMap::new(),
             offloaded_streams: DashSet::new(),
             offloaded_payload_keys: DashMap::new(),
@@ -1685,7 +2435,7 @@ impl WorkPublisher {
     /// Decompose a request into work items and publish to JetStream.
     #[allow(clippy::too_many_arguments)]
     pub async fn publish_work(
-        &self,
+        self: &Arc<Self>,
         target: PublishTarget,
         admission_pool: &str,
         endpoint: &str,
@@ -1694,8 +2444,68 @@ impl WorkPublisher {
         bundle_config_hash: &str,
         items: Vec<rmpv::Value>,
         params: &WorkParams,
-    ) -> Result<(String, oneshot::Receiver<Vec<WorkResult>>), String> {
-        let start = Instant::now();
+    ) -> Result<
+        (
+            String,
+            oneshot::Receiver<Vec<WorkResult>>,
+            DispatchDurability,
+        ),
+        String,
+    > {
+        let started = Instant::now();
+        let item_count = if endpoint == "score" || endpoint == "generate" {
+            1
+        } else {
+            u32::try_from(items.len()).unwrap_or(u32::MAX)
+        };
+        let result = self
+            .publish_work_inner(
+                target,
+                admission_pool,
+                endpoint,
+                model,
+                engine,
+                bundle_config_hash,
+                items,
+                params,
+                started,
+            )
+            .await;
+        let outcome = result
+            .as_ref()
+            .map(|_| QueuePublishOutcome::Submitted)
+            .unwrap_or_else(|error| QueuePublishOutcome::from_error(error));
+        telemetry::record_queue_publish(QueuePublishObservation {
+            operation: endpoint,
+            outcome,
+            duration: started.elapsed(),
+            items: item_count,
+        });
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_work_inner(
+        self: &Arc<Self>,
+        target: PublishTarget,
+        admission_pool: &str,
+        endpoint: &str,
+        model: &str,
+        engine: &str,
+        bundle_config_hash: &str,
+        items: Vec<rmpv::Value>,
+        params: &WorkParams,
+        started: Instant,
+    ) -> Result<
+        (
+            String,
+            oneshot::Receiver<Vec<WorkResult>>,
+            DispatchDurability,
+        ),
+        String,
+    > {
+        validate_queue_request_item_count(items.len())?;
+        let ack_count = initial_publish_ack_count(endpoint, items.len());
         let pool = target.pool().to_string();
         let gpu = target.machine_profile().to_string();
 
@@ -1743,12 +2553,14 @@ impl WorkPublisher {
             ResultCollector {
                 _total_items: total_items,
                 results: vec![None; total_items as usize],
+                result_chunk_transfers: BTreeMap::new(),
+                result_chunk_buffered_bytes: 0,
+                result_chunk_reserved_bytes: 0,
+                result_chunk_reserved_limit: MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST,
+                result_chunk_budget: Arc::clone(&self.result_chunk_budget),
                 sender: Some(tx),
                 deadline: Instant::now() + self.result_timeout,
                 operation: endpoint.to_string(),
-                published_at: Instant::now(),
-                pool_label: pool.clone(),
-                model_label: model.to_string(),
                 pool_fallback_subject,
                 direct_fallback_worker_id,
                 direct_fallback_republished_indices: BTreeSet::new(),
@@ -1756,6 +2568,7 @@ impl WorkPublisher {
                 direct_fallback_republished: false,
             },
         );
+        let mut publish_guard = PendingPublishGuard::new(Arc::clone(self), request_id.clone());
 
         // Build and publish all work items, collecting ack futures for parallel await.
         let timestamp = std::time::SystemTime::now()
@@ -1791,8 +2604,8 @@ impl WorkPublisher {
             tracestate: tracestate.as_deref(),
         });
 
-        // Running publishes concurrently via `try_join_all` means
-        // a late-failing item can race ahead of earlier successes —
+        // Bounded concurrent publishes mean a late-failing item can race
+        // ahead of earlier successes —
         // so on any error we have to unwind the collector entry
         // and whatever payloads the successful siblings already
         // wrote to the offload store, otherwise both leak until
@@ -1827,39 +2640,28 @@ impl WorkPublisher {
                             let fallback_indices: Vec<usize> =
                                 items.iter().map(|item| item.index).collect();
                             let fallback_acks = take_ack_futures(&mut items);
-                            let fallback_confirmed =
-                                await_batch_direct_fallback_acks(&request_id, fallback_acks).await;
-                            if fallback_confirmed {
-                                if let Some(mut entry) = self.pending_results.get_mut(&request_id) {
-                                    mark_direct_fallback_confirmed(
-                                        entry.value_mut(),
-                                        fallback_indices,
-                                    );
-                                }
-                                if let Some(worker_id) =
-                                    direct_publish_fallback_worker_id.as_deref()
-                                {
-                                    self.publish_batch_direct_cancel(worker_id, &request_id)
-                                        .await;
-                                }
-                            } else {
-                                warn!(
-                                    request_id = %request_id,
-                                    "skipping batch direct-dispatch cancel because pool fallback was not durably acked"
-                                );
+                            if let Err(ack_error) = await_publish_acks(
+                                &request_id,
+                                "initial pool fallback publish",
+                                fallback_acks,
+                            )
+                            .await
+                            {
+                                self.pending_results.remove(&request_id);
+                                self.cleanup_offloaded_payloads(&request_id).await;
+                                self.cleanup_offloaded_generate(&request_id).await;
+                                return Err(format!("{e}; {ack_error}"));
                             }
-                            metrics::ROUTING_FALLBACK_TOTAL
-                                .with_label_values(&[
-                                    &metrics::sanitize_model_label(model),
-                                    &metrics::sanitize_label(&pool),
-                                    "batch_direct_publish_error",
-                                ])
-                                .inc();
+                            if let Some(mut entry) = self.pending_results.get_mut(&request_id) {
+                                mark_direct_fallback_confirmed(entry.value_mut(), fallback_indices);
+                            }
+                            if let Some(worker_id) = direct_publish_fallback_worker_id.as_deref() {
+                                self.publish_batch_direct_cancel(worker_id, &request_id)
+                                    .await;
+                            }
                             items
                         }
                         Err(fallback_err) => {
-                            self.pending_results.remove(&request_id);
-                            self.cleanup_offloaded_payloads(&request_id).await;
                             return Err(format!(
                                 "{}; pool fallback publish failed: {}",
                                 e, fallback_err
@@ -1867,13 +2669,11 @@ impl WorkPublisher {
                         }
                     }
                 } else {
-                    self.pending_results.remove(&request_id);
-                    self.cleanup_offloaded_payloads(&request_id).await;
                     return Err(e);
                 }
             }
         };
-        let mut ack_futures = Vec::with_capacity(published_items.len());
+        let mut ack_futures = Vec::with_capacity(ack_count);
         let should_cache_direct_fallback = self
             .pending_results
             .get(&request_id)
@@ -1893,30 +2693,13 @@ impl WorkPublisher {
             }
         }
 
-        // Fire-and-forget: spawn background task to monitor acks.
-        // The request handler proceeds immediately to wait for inbox results.
-        // JetStream acks confirm durability but our streams are ephemeral
-        // (memory + configured max_age) — clients retry on timeout if
-        // messages are lost.
-        if !ack_futures.is_empty() {
-            tokio::spawn(async move {
-                for ack in ack_futures {
-                    if let Err(e) = ack.await {
-                        warn!(error = %e, "JetStream ack failed (message may be lost)");
-                        metrics::QUEUE_ACK_FAILURES.inc();
-                    }
-                }
-            });
-        }
+        // Do not add a broker round trip to the request path. The handler
+        // receives a transport-neutral completion and clears pending demand
+        // only after this detached monitor confirms every durable ACK.
+        let durability =
+            monitor_publish_acks(request_id.clone(), "initial work publish", ack_futures);
 
-        let elapsed = start.elapsed();
-        metrics::QUEUE_PUBLISH_SECONDS
-            .with_label_values(&[endpoint])
-            .observe(elapsed.as_secs_f64());
-        metrics::QUEUE_ITEMS_PUBLISHED
-            .with_label_values(&[endpoint])
-            .observe(total_items as f64);
-
+        let elapsed = started.elapsed();
         debug!(
             request_id = %request_id,
             items = total_items,
@@ -1927,7 +2710,9 @@ impl WorkPublisher {
             "published work items"
         );
 
-        Ok((request_id, rx))
+        // The HTTP abandonment guard owns cancellation after this handoff.
+        publish_guard.defuse();
+        Ok((request_id, rx, durability))
     }
 
     async fn publish_batch_items(
@@ -1964,20 +2749,36 @@ impl WorkPublisher {
             // used to serialize on `.await` now overlap their network
             // round trips. Each future in the set borrows `shared` +
             // owns its per-item `rmpv::Value`.
-            let publishes = items.into_iter().enumerate().map(|(index, item_value)| {
-                let subject = subject.to_string();
-                let shared = Arc::clone(&shared);
-                async move {
-                    self.publish_single(shared.as_ref(), total_items, index, item_value, &subject)
+            let publishes = futures_util::stream::iter(items.into_iter().enumerate().map(
+                |(index, item_value)| {
+                    let subject = subject.to_string();
+                    let shared = Arc::clone(&shared);
+                    async move {
+                        self.publish_single(
+                            shared.as_ref(),
+                            total_items,
+                            index,
+                            item_value,
+                            &subject,
+                        )
                         .await
                         .map(|(ack, encoded)| PublishedWorkItem {
                             index,
                             ack: Some(ack),
                             encoded,
                         })
-                }
-            });
-            try_join_all(publishes).await
+                    }
+                },
+            ));
+            let mut publishes = publishes.buffer_unordered(MAX_CONCURRENT_INITIAL_PUBLISHES);
+            let mut published = Vec::with_capacity(total_items as usize);
+            while let Some(item) = publishes.next().await {
+                published.push(item?);
+            }
+            // Completion order is intentionally unordered; restore request
+            // order for deterministic fallback caching and diagnostics.
+            published.sort_unstable_by_key(|item| item.index);
+            Ok(published)
         }
     }
 
@@ -1991,7 +2792,7 @@ impl WorkPublisher {
         request_id: &str,
         reason: &'static str,
     ) -> Result<bool, String> {
-        let (subject, direct_worker_id, payloads, operation, pool, model) = {
+        let (subject, direct_worker_id, payloads, operation) = {
             let Some(mut entry) = self.pending_results.get_mut(request_id) else {
                 return Ok(false);
             };
@@ -2001,9 +2802,7 @@ impl WorkPublisher {
                 return Ok(false);
             };
             let operation = entry.operation.clone();
-            let pool = entry.pool_label.clone();
-            let model = entry.model_label.clone();
-            (subject, direct_worker_id, payloads, operation, pool, model)
+            (subject, direct_worker_id, payloads, operation)
         };
 
         let fallback_indices: Vec<usize> = payloads.iter().map(|(index, _)| *index).collect();
@@ -2038,13 +2837,6 @@ impl WorkPublisher {
             );
         }
 
-        metrics::ROUTING_FALLBACK_TOTAL
-            .with_label_values(&[
-                &metrics::sanitize_model_label(&model),
-                &metrics::sanitize_label(&pool),
-                reason,
-            ])
-            .inc();
         info!(
             request_id = %request_id,
             operation = %operation,
@@ -2087,7 +2879,7 @@ impl WorkPublisher {
             .as_ref()
             .ok_or_else(|| "score request missing query item".to_string())?;
 
-        let work_item_id = format!("{}.0", shared.request_id);
+        let work_item_id = canonical_work_item_id(shared.request_id, 0);
         let ref_item = WorkItemRef {
             work_item_id: &work_item_id,
             request_id: shared.request_id,
@@ -2118,6 +2910,7 @@ impl WorkPublisher {
             router_id: shared.router_id,
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
+            accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
         };
@@ -2147,8 +2940,13 @@ impl WorkPublisher {
             // for cleanup.
             record_offloaded_payload_key(&self.offloaded_payload_keys, shared.request_id, &ref_key);
             if let Err(e) = self.payload_store.put(&ref_key, &score_payload).await {
+                telemetry::record_queue_event(QueueEvent::PayloadOffload, QueueEventOutcome::Error);
                 warn!(error = %e, "failed to offload score payload, sending inline");
             } else {
+                telemetry::record_queue_event(
+                    QueueEvent::PayloadOffload,
+                    QueueEventOutcome::Success,
+                );
                 let offloaded = WorkItemRef {
                     query_item: None,
                     query_payload_ref: Some(&ref_key),
@@ -2157,7 +2955,6 @@ impl WorkPublisher {
                 };
                 encoded = rmp_serde::to_vec_named(&offloaded)
                     .map_err(|e| format!("msgpack encode offloaded score: {}", e))?;
-                metrics::QUEUE_PAYLOAD_OFFLOADS.inc();
             }
         }
 
@@ -2197,6 +2994,49 @@ impl WorkPublisher {
             String,
             oneshot::Receiver<StreamOutcome>,
             std::sync::Arc<tokio::sync::Notify>,
+            DispatchDurability,
+        ),
+        String,
+    > {
+        let started = Instant::now();
+        let result = self
+            .publish_generate_streaming_inner(
+                target,
+                display_model,
+                engine,
+                bundle_config_hash,
+                params,
+                admission_pool,
+            )
+            .await;
+        let outcome = result
+            .as_ref()
+            .map(|_| QueuePublishOutcome::Submitted)
+            .unwrap_or_else(|error| QueuePublishOutcome::from_error(error));
+        telemetry::record_queue_publish(QueuePublishObservation {
+            operation: "generate",
+            outcome,
+            duration: started.elapsed(),
+            items: 1,
+        });
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_generate_streaming_inner(
+        &self,
+        target: PublishTarget,
+        display_model: &str,
+        engine: &str,
+        bundle_config_hash: &str,
+        params: &WorkParams,
+        admission_pool: &str,
+    ) -> Result<
+        (
+            String,
+            oneshot::Receiver<StreamOutcome>,
+            std::sync::Arc<tokio::sync::Notify>,
+            DispatchDurability,
         ),
         String,
     > {
@@ -2256,7 +3096,6 @@ impl WorkPublisher {
             tracestate: tracestate.as_deref(),
         };
 
-        let publish_started = Instant::now();
         let (ack, encoded) = match self.publish_generate(&shared, &subject).await {
             Ok(pair) => pair,
             Err(e) => {
@@ -2271,22 +3110,10 @@ impl WorkPublisher {
             entry.encoded_payload = Some(encoded);
         }
 
-        // Fire-and-forget ack monitoring, matching the encode/score path.
-        tokio::spawn(async move {
-            if let Err(e) = ack.await {
-                warn!(error = %e, "JetStream ack failed for generate (message may be lost)");
-                metrics::QUEUE_ACK_FAILURES.inc();
-            }
-        });
+        let durability =
+            monitor_publish_acks(request_id.clone(), "initial generate publish", vec![ack]);
 
-        metrics::QUEUE_PUBLISH_SECONDS
-            .with_label_values(&["generate"])
-            .observe(publish_started.elapsed().as_secs_f64());
-        metrics::QUEUE_ITEMS_PUBLISHED
-            .with_label_values(&["generate"])
-            .observe(1.0);
-
-        Ok((request_id, rx, activity))
+        Ok((request_id, rx, activity, durability))
     }
 
     /// Streaming-SSE variant of [`Self::publish_generate_streaming`].
@@ -2313,6 +3140,49 @@ impl WorkPublisher {
             String,
             oneshot::Receiver<StreamOutcome>,
             broadcast::Receiver<ChunkEnvelope>,
+            DispatchDurability,
+        ),
+        String,
+    > {
+        let started = Instant::now();
+        let result = self
+            .publish_generate_streaming_sse_inner(
+                target,
+                display_model,
+                engine,
+                bundle_config_hash,
+                params,
+                admission_pool,
+            )
+            .await;
+        let outcome = result
+            .as_ref()
+            .map(|_| QueuePublishOutcome::Submitted)
+            .unwrap_or_else(|error| QueuePublishOutcome::from_error(error));
+        telemetry::record_queue_publish(QueuePublishObservation {
+            operation: "generate",
+            outcome,
+            duration: started.elapsed(),
+            items: 1,
+        });
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_generate_streaming_sse_inner(
+        &self,
+        target: PublishTarget,
+        display_model: &str,
+        engine: &str,
+        bundle_config_hash: &str,
+        params: &WorkParams,
+        admission_pool: &str,
+    ) -> Result<
+        (
+            String,
+            oneshot::Receiver<StreamOutcome>,
+            broadcast::Receiver<ChunkEnvelope>,
+            DispatchDurability,
         ),
         String,
     > {
@@ -2367,7 +3237,6 @@ impl WorkPublisher {
             tracestate: tracestate.as_deref(),
         };
 
-        let publish_started = Instant::now();
         let (ack, encoded) = match self.publish_generate(&shared, &subject).await {
             Ok(pair) => pair,
             Err(e) => {
@@ -2378,21 +3247,36 @@ impl WorkPublisher {
         if let Some(mut entry) = self.pending_streams.get_mut(&request_id) {
             entry.encoded_payload = Some(encoded);
         }
-        tokio::spawn(async move {
-            if let Err(e) = ack.await {
-                warn!(error = %e, "JetStream ack failed for generate-sse (message may be lost)");
-                metrics::QUEUE_ACK_FAILURES.inc();
-            }
-        });
+        let durability = monitor_publish_acks(
+            request_id.clone(),
+            "initial generate-sse publish",
+            vec![ack],
+        );
 
-        metrics::QUEUE_PUBLISH_SECONDS
-            .with_label_values(&["generate"])
-            .observe(publish_started.elapsed().as_secs_f64());
-        metrics::QUEUE_ITEMS_PUBLISHED
-            .with_label_values(&["generate"])
-            .observe(1.0);
+        Ok((request_id, rx, chunk_rx, durability))
+    }
 
-        Ok((request_id, rx, chunk_rx))
+    /// Remove a non-streaming collector immediately when its HTTP waiter is
+    /// gone. The atomic DashMap remove is the terminal ownership boundary:
+    /// completion, timeout, and disconnect can race, but only one path can
+    /// take the sender and release the result-chunk reservation.
+    pub fn drop_pending_result(&self, request_id: &str) -> bool {
+        let removed = drop_pending_result_collector(&self.pending_results, request_id);
+        if removed {
+            debug!(
+                request_id = %request_id,
+                "dropped abandoned non-streaming result collector"
+            );
+        }
+        removed
+    }
+
+    /// Finish request abandonment after the collector has been removed.
+    /// Signal workers before deleting offloaded input so a queued delivery can
+    /// observe the tombstone instead of repeatedly fetching a missing blob.
+    pub async fn finish_abandoned_work(&self, request_id: &str) {
+        self.publish_work_cancel(request_id).await;
+        self.cleanup_offloaded_payloads(request_id).await;
     }
 
     /// Forcibly drop a streaming collector — used by the HTTP handler
@@ -2400,6 +3284,25 @@ impl WorkPublisher {
     /// subscriber stops accumulating chunks that nobody will read.
     pub fn drop_pending_stream(&self, request_id: &str) {
         self.pending_streams.remove(request_id);
+    }
+
+    /// Tear down collector and payload state after the initial JetStream
+    /// publish was submitted but its durable ACK later failed.
+    ///
+    /// Removal happens before the awaited object-store deletes, so request
+    /// state stops accumulating even if cleanup needs the periodic retry
+    /// backstop. Both cleanup helpers are idempotent and exact-key scoped.
+    pub async fn abort_pending_dispatch(&self, request_id: &str, kind: PendingDispatchKind) {
+        match kind {
+            PendingDispatchKind::Result => {
+                self.pending_results.remove(request_id);
+            }
+            PendingDispatchKind::Stream => {
+                self.pending_streams.remove(request_id);
+            }
+        }
+        self.cleanup_offloaded_payloads(request_id).await;
+        self.cleanup_offloaded_generate(request_id).await;
     }
 
     pub fn pending_generation_snapshot(&self) -> PendingGenerationSnapshot {
@@ -2451,6 +3354,8 @@ impl WorkPublisher {
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         if let Some(sender) = collector.sender.take() {
             if sender.send(outcome).is_err() {
@@ -2476,6 +3381,26 @@ impl WorkPublisher {
         let subject = format!("cancel.{}.{}", self.router_id, request_id);
         if let Err(e) = client.publish(subject, Vec::new().into()).await {
             warn!(error = %e, request_id = %request_id, "failed to publish cancel signal");
+        }
+    }
+
+    /// Best-effort request-wide cancellation for abandoned non-streaming
+    /// encode/score/extract work. Every sidecar records this Core NATS signal
+    /// as a bounded tombstone and ACK-drops matching pool or direct deliveries
+    /// before costly preparation. Static inference already inside IPC is not
+    /// preempted; its late result cannot re-enter the removed collector.
+    async fn publish_work_cancel(&self, request_id: &str) {
+        let client_opt = { self.nats_client.read().await.clone() };
+        let Some(client) = client_opt else {
+            return;
+        };
+        let subject = format!("work_cancel.{}.{}", self.router_id, request_id);
+        if let Err(e) = client.publish(subject, Vec::new().into()).await {
+            warn!(
+                error = %e,
+                request_id = %request_id,
+                "failed to publish non-streaming work cancel signal"
+            );
         }
     }
 
@@ -2505,9 +3430,9 @@ impl WorkPublisher {
         }
     }
 
-    /// Returns ``true`` iff the streaming collector for ``request_id``
-    /// has already observed at least one chunk — used to label
-    /// cancellation metrics (`before_first_chunk` vs `mid_stream`).
+    /// Returns `true` iff the streaming collector for `request_id` has
+    /// observed at least one chunk. Cancellation telemetry uses this to
+    /// distinguish abandonment before the first chunk from mid-stream exits.
     pub fn stream_observed_first_chunk(&self, request_id: &str) -> bool {
         self.pending_streams
             .get(request_id)
@@ -2542,7 +3467,7 @@ impl WorkPublisher {
             return Err("generate request missing 'prompt' / 'max_new_tokens'".to_string());
         }
 
-        let work_item_id = format!("{}.0", shared.request_id);
+        let work_item_id = canonical_work_item_id(shared.request_id, 0);
         let mut ref_item = WorkItemRef {
             work_item_id: &work_item_id,
             request_id: shared.request_id,
@@ -2573,6 +3498,7 @@ impl WorkPublisher {
             router_id: shared.router_id,
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
+            accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
         };
@@ -2597,14 +3523,18 @@ impl WorkPublisher {
                 .map_err(|e| format!("msgpack encode offloaded generate: {}", e))?;
             offload_key = format!("{}_0.bin", shared.request_id);
             if let Err(e) = self.payload_store.put(&offload_key, &gen_blob).await {
+                telemetry::record_queue_event(QueueEvent::PayloadOffload, QueueEventOutcome::Error);
                 warn!(error = %e, "failed to offload generate payload, sending inline");
             } else {
+                telemetry::record_queue_event(
+                    QueueEvent::PayloadOffload,
+                    QueueEventOutcome::Success,
+                );
                 ref_item.generate = None;
                 ref_item.payload_ref = Some(&offload_key);
                 encoded = rmp_serde::to_vec_named(&ref_item)
                     .map_err(|e| format!("msgpack encode offloaded generate item: {}", e))?;
                 self.offloaded_streams.insert(shared.request_id.to_string());
-                metrics::QUEUE_PAYLOAD_OFFLOADS.inc();
             }
         }
 
@@ -2635,7 +3565,8 @@ impl WorkPublisher {
     ///
     /// Returns `Ok(true)` if the item was republished, `Ok(false)` if
     /// nothing was done (no collector, no cached payload, or already
-    /// republished), and `Err` only on a NATS publish failure.
+    /// republished), and `Err` when the publish or its bounded JetStream
+    /// acknowledgement fails.
     ///
     /// Thin wrapper over [`Self::republish_to_pool_outcome`] that keeps
     /// the historical `bool` contract for callers (the first-chunk-timeout
@@ -2645,8 +3576,8 @@ impl WorkPublisher {
     /// `Ok(false)` for backward compatibility; callers that need to
     /// distinguish "refused / rate-limited" from "nothing to do"
     /// should call [`Self::republish_to_pool_status`] instead. The
-    /// metric `sie_gateway_generation_fallback_refused_total` records
-    /// the rate-limit case independently of either contract.
+    /// canonical request telemetry records the rate-limit outcome independently
+    /// of either return contract; the collector derives backend-specific names.
     pub async fn republish_to_pool(
         &self,
         request_id: &str,
@@ -2702,7 +3633,7 @@ impl WorkPublisher {
         // the encoded bytes + the pool subject, bump the attempt
         // generation. We drop the entry lock before awaiting the
         // JetStream publish to avoid holding the DashMap shard.
-        let (subject, payload, generation, display_model, pool) = {
+        let (subject, payload, generation) = {
             let Some(mut entry) = self.pending_streams.get_mut(request_id) else {
                 return Ok(RepublishOutcome::NotPossible);
             };
@@ -2728,13 +3659,6 @@ impl WorkPublisher {
             if reason == "first_chunk_timeout"
                 && !self.try_take_fallback_token(entry.model.as_str(), entry.pool.as_str())
             {
-                metrics::GENERATION_FALLBACK_REFUSED_TOTAL
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(entry.display_model.as_str()),
-                        &metrics::sanitize_label(entry.pool.as_str()),
-                        "rate_limited",
-                    ])
-                    .inc();
                 return Ok(RepublishOutcome::RateLimited);
             }
             entry.republished = true;
@@ -2742,13 +3666,7 @@ impl WorkPublisher {
             if let Some(attempt_id) = abandoned_attempt_id {
                 entry.record_abandoned_attempt_id(attempt_id);
             }
-            (
-                subject,
-                payload,
-                gen,
-                entry.display_model.clone(),
-                entry.pool.clone(),
-            )
+            (subject, payload, gen)
         };
 
         info!(
@@ -2780,23 +3698,18 @@ impl WorkPublisher {
             .await
         {
             Ok(ack) => {
-                metrics::ROUTING_FALLBACK_TOTAL
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(display_model.as_str()),
-                        &metrics::sanitize_label(pool.as_str()),
-                        reason,
-                    ])
-                    .inc();
-                // Drive the ack to completion in the background; failure
-                // here just becomes a delivery loss surfaced by the
-                // existing inter-chunk timeout.
-                tokio::spawn(async move {
-                    if let Err(e) = ack.await {
-                        warn!(error = %e, "JetStream ack failed for republish");
-                        metrics::QUEUE_ACK_FAILURES.inc();
+                // A fallback is not durable merely because Core NATS accepted
+                // the send. Recovery paths are infrequent, so await the same
+                // bounded JetStream ACK contract used by initial dispatch and
+                // report a prompt failure instead of waiting for a later
+                // first/inter-chunk timeout.
+                match await_publish_acks(request_id, "pool republish", vec![ack]).await {
+                    Ok(()) => Ok(RepublishOutcome::Republished),
+                    Err(error) => {
+                        self.rollback_republish_attempt(request_id, generation);
+                        Err(error)
                     }
-                });
-                Ok(RepublishOutcome::Republished)
+                }
             }
             Err(e) => {
                 // Roll back the `republished`/`attempt_generation`
@@ -2806,11 +3719,20 @@ impl WorkPublisher {
                 // hit the `entry.republished` short-circuit at the top
                 // and return `AlreadyRepublished`, but the worker never
                 // received anything to begin with.
-                if let Some(mut entry) = self.pending_streams.get_mut(request_id) {
-                    entry.republished = false;
-                    entry.rewind_attempt_generation();
-                }
+                self.rollback_republish_attempt(request_id, generation);
                 Err(format!("republish to pool failed: {}", e))
+            }
+        }
+    }
+
+    fn rollback_republish_attempt(&self, request_id: &str, generation: u64) {
+        if let Some(mut entry) = self.pending_streams.get_mut(request_id) {
+            // Only undo the attempt we initiated. This protects future code
+            // from rewinding a newer generation if another recovery action is
+            // ever allowed while an ACK is outstanding.
+            if entry.republished && entry.attempt_generation == generation {
+                entry.republished = false;
+                entry.rewind_attempt_generation();
             }
         }
     }
@@ -2826,11 +3748,12 @@ impl WorkPublisher {
         item_value: rmpv::Value,
         subject: &str,
     ) -> Result<(jetstream::context::PublishAckFuture, Vec<u8>), String> {
-        let work_item_id = format!("{}.{}", shared.request_id, index);
+        let item_index = index as u32;
+        let work_item_id = canonical_work_item_id(shared.request_id, item_index);
         let mut ref_item = WorkItemRef {
             work_item_id: &work_item_id,
             request_id: shared.request_id,
-            item_index: index as u32,
+            item_index,
             total_items,
             operation: shared.endpoint,
             model_id: shared.model,
@@ -2857,6 +3780,7 @@ impl WorkPublisher {
             router_id: shared.router_id,
             reply_subject: shared.reply_subject,
             timestamp: shared.timestamp,
+            accepts_result_chunks: true,
             traceparent: shared.traceparent,
             tracestate: shared.tracestate,
         };
@@ -2875,8 +3799,8 @@ impl WorkPublisher {
                 .map_err(|e| format!("msgpack encode offloaded item: {}", e))?;
             offload_key = format!("{}_{}.bin", shared.request_id, index);
             // Track the request as offloaded BEFORE the store write: this future
-            // can be dropped mid-`put` when a sibling item's publish fails under
-            // `try_join_all`, yet the object-store write may still have landed.
+            // can be dropped mid-`put` when a concurrent sibling publish fails,
+            // yet the object-store write may still have landed.
             // Recording the id first keeps the blob eligible for cleanup on the
             // error/timeout unwind (issue #1471 review).
             record_offloaded_payload_key(
@@ -2885,13 +3809,17 @@ impl WorkPublisher {
                 &offload_key,
             );
             if let Err(e) = self.payload_store.put(&offload_key, &item_msgpack).await {
+                telemetry::record_queue_event(QueueEvent::PayloadOffload, QueueEventOutcome::Error);
                 warn!(error = %e, "failed to offload payload, sending inline");
             } else {
+                telemetry::record_queue_event(
+                    QueueEvent::PayloadOffload,
+                    QueueEventOutcome::Success,
+                );
                 ref_item.item = None;
                 ref_item.payload_ref = Some(&offload_key);
                 encoded = rmp_serde::to_vec_named(&ref_item)
                     .map_err(|e| format!("msgpack encode offloaded: {}", e))?;
-                metrics::QUEUE_PAYLOAD_OFFLOADS.inc();
             }
         }
 
@@ -2903,9 +3831,116 @@ impl WorkPublisher {
         Ok((ack, encoded))
     }
 
+    /// Fail a non-streaming request immediately after a malformed or
+    /// over-budget result transfer. The message is intentionally static: wire
+    /// bytes and attacker-controlled metadata never cross the public error
+    /// boundary. Replacing every item with the same typed failure prevents a
+    /// partial-success response from silently hiding a corrupt item.
+    async fn fail_result_chunk_request(&self, request_id: &str) {
+        let Some(()) = fail_pending_result_chunk_request(&self.pending_results, request_id) else {
+            return;
+        };
+        // Removing the collector drops all partial transfer buffers. Keep the
+        // HTTP handler as the one result-wait telemetry authority, while the
+        // transport still cancels queued work and releases retained payloads.
+        self.finish_abandoned_work(request_id).await;
+    }
+
+    async fn handle_result_chunk(&self, chunk: ResultChunkV1) {
+        let request_id = chunk.request_id.clone();
+        let work_item_id = chunk.work_item_id.clone();
+        telemetry::record_queue_result_chunk_received(Some(chunk.payload.len()));
+
+        let applied = {
+            let mut entry = match self.pending_results.get_mut(&request_id) {
+                Some(entry) => entry,
+                None => {
+                    debug!(request_id = %request_id, "result chunk for unknown request");
+                    return;
+                }
+            };
+            apply_result_chunk(entry.value_mut(), chunk)
+        };
+
+        let applied = match applied {
+            Ok(applied) => applied,
+            Err(reason) => {
+                telemetry::record_queue_result_chunk_rejection(reason.telemetry_reason());
+                warn!(
+                    request_id = %request_id,
+                    work_item_id = %work_item_id,
+                    reason = reason.metric_label(),
+                    "rejecting invalid result chunk transfer"
+                );
+                self.fail_result_chunk_request(&request_id).await;
+                return;
+            }
+        };
+
+        if applied.retry_replaced {
+            telemetry::record_queue_result_chunk_event(
+                telemetry::QueueResultChunkEvent::RetryReplacement,
+            );
+        }
+        match applied.status {
+            ResultChunkStatus::Buffered => {}
+            ResultChunkStatus::Duplicate => {
+                telemetry::record_queue_result_chunk_event(
+                    telemetry::QueueResultChunkEvent::Duplicate,
+                );
+                debug!(
+                    request_id = %request_id,
+                    work_item_id = %work_item_id,
+                    "accepted byte-identical duplicate result chunk"
+                );
+            }
+            ResultChunkStatus::StaleRetry => {
+                telemetry::record_queue_result_chunk_event(
+                    telemetry::QueueResultChunkEvent::StaleRetry,
+                );
+                debug!(
+                    request_id = %request_id,
+                    work_item_id = %work_item_id,
+                    "ignored stale result chunk retry fragment"
+                );
+            }
+            ResultChunkStatus::Complete(completed) => {
+                let reservation_bytes = completed.reservation_bytes;
+                match decode_completed_result(completed) {
+                    Ok(result) => {
+                        telemetry::record_queue_result_chunk_event(
+                            telemetry::QueueResultChunkEvent::TransferCompleted,
+                        );
+                        self.handle_result_with_chunk_reservation(result, reservation_bytes)
+                            .await;
+                    }
+                    Err(reason) => {
+                        telemetry::record_queue_result_chunk_rejection(reason.telemetry_reason());
+                        warn!(
+                            request_id = %request_id,
+                            work_item_id = %work_item_id,
+                            reason = reason.metric_label(),
+                            "rejecting reconstructed result transfer"
+                        );
+                        self.fail_result_chunk_request(&request_id).await;
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle an incoming result message (called from inbox subscription).
     pub async fn handle_result(&self, result: WorkResult) {
+        self.handle_result_with_chunk_reservation(result, 0).await;
+    }
+
+    async fn handle_result_with_chunk_reservation(
+        &self,
+        result: WorkResult,
+        completed_reservation_bytes: usize,
+    ) {
         let request_id = result.request_id.clone();
+        let work_item_id = result.work_item_id.clone();
         let item_index = result.item_index;
 
         // Insert result into collector (per-key lock via DashMap)
@@ -2918,8 +3953,16 @@ impl WorkPublisher {
                 }
             };
             let collector = entry.value_mut();
-            match store_result_if_missing(collector, result) {
-                StoreResultOutcome::Stored => {}
+            match store_result_with_completed_chunk_reservation(
+                collector,
+                result,
+                completed_reservation_bytes,
+            ) {
+                StoreResultOutcome::Stored => {
+                    // A legacy one-shot result may win a rolling-upgrade race
+                    // after some fragments arrived. Release those bytes now.
+                    drop_result_chunk_transfer(collector, &work_item_id);
+                }
                 StoreResultOutcome::Duplicate => {
                     debug!(
                         request_id = %request_id,
@@ -2950,18 +3993,12 @@ impl WorkPublisher {
         if all_done {
             // Remove atomically — only one thread can win this remove
             if let Some((_, mut collector)) = self.pending_results.remove(&request_id) {
-                let operation = collector.operation.clone();
-                let wait_secs = collector.published_at.elapsed().as_secs_f64();
                 let results: Vec<WorkResult> =
                     collector.results.drain(..).map(|r| r.unwrap()).collect();
 
                 if let Some(sender) = collector.sender.take() {
                     let _ = sender.send(results);
                 }
-
-                metrics::QUEUE_RESULT_WAIT
-                    .with_label_values(&[&operation])
-                    .observe(wait_secs);
 
                 self.cleanup_offloaded_payloads(&request_id).await;
             }
@@ -3010,7 +4047,8 @@ impl WorkPublisher {
         while let Some(msg) = subscriber.next().await {
             // Fast-path: extract request_id without full deserialization.
             // DashMap contains_key is lock-free.
-            if let Some(request_id) = extract_request_id_fast(&msg.payload) {
+            let request_id_hint = extract_request_id_fast(&msg.payload);
+            if let Some(request_id) = request_id_hint {
                 if !self.pending_results.contains_key(request_id)
                     && !self.pending_streams.contains_key(request_id)
                 {
@@ -3018,7 +4056,6 @@ impl WorkPublisher {
                         request_id = %request_id,
                         "fast-path skip: result for unknown request"
                     );
-                    metrics::QUEUE_INBOX_SKIPS.inc();
                     continue;
                 }
             }
@@ -3039,7 +4076,24 @@ impl WorkPublisher {
                 }
             };
 
+            // Only the exact v1 discriminator enters the v1 decoder. This
+            // fails malformed exact-v1 envelopes closed while preserving
+            // forward compatibility for ordinary/future WorkResult fields
+            // such as `total_bytes`.
             match envelope_kind(&value) {
+                Some(RESULT_CHUNK_KIND) => match rmpv::ext::from_value::<ResultChunkV1>(value) {
+                    Ok(chunk) => self.handle_result_chunk(chunk).await,
+                    Err(e) => {
+                        telemetry::record_queue_result_chunk_received(None);
+                        telemetry::record_queue_result_chunk_rejection(
+                            telemetry::QueueResultChunkRejectionReason::Decode,
+                        );
+                        warn!(error = %e, "failed to decode result chunk envelope");
+                        if let Some(request_id) = request_id_hint {
+                            self.fail_result_chunk_request(request_id).await;
+                        }
+                    }
+                },
                 // Chunk envelopes feed the streaming aggregator.
                 Some("chunk") => match rmpv::ext::from_value::<ChunkEnvelope>(value) {
                     Ok(chunk) => self.handle_chunk(chunk).await,
@@ -3110,16 +4164,11 @@ impl WorkPublisher {
             abandoned_attempt.as_deref(),
             &nak.attempt_id,
         ) {
-            // Mirror the chunk-path stale-drop metric so an operator can see
-            // abandoned-attempt NAKs being dropped (#1601).
-            if let Some((_, _, model, pool)) = &collector_state {
-                metrics::GENERATION_STALE_ATTEMPT_NAKS
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(model),
-                        &metrics::sanitize_label(pool),
-                    ])
-                    .inc();
-            }
+            telemetry::record_generation_event(
+                telemetry::GenerationEvent::Nak,
+                telemetry::GenerationEventReason::StaleAttempt,
+                telemetry::GenerationEventOutcome::Dropped,
+            );
             debug!(
                 request_id = %nak.request_id,
                 nak_attempt_id = %nak.attempt_id,
@@ -3172,20 +4221,20 @@ impl WorkPublisher {
                 // current attempt has latched, we can classify the NAK
                 // precisely and keep the immediate 429 for a live attempt
                 // that really NAKs after fallback.
-                let Some((decision, display_model, pool)) = self
-                    .pending_streams
-                    .get_mut(&nak.request_id)
-                    .map(|mut entry| {
-                        let decision = already_republished_nak_decision(
-                            entry.current_attempt_id.as_deref(),
-                            entry.abandoned_attempt_id.as_deref(),
-                            &nak.attempt_id,
-                        );
-                        if matches!(decision, AlreadyRepublishedNakDecision::WaitForSuccessor) {
-                            entry.record_abandoned_attempt_id(&nak.attempt_id);
-                        }
-                        (decision, entry.display_model.clone(), entry.pool.clone())
-                    })
+                let Some(decision) =
+                    self.pending_streams
+                        .get_mut(&nak.request_id)
+                        .map(|mut entry| {
+                            let decision = already_republished_nak_decision(
+                                entry.current_attempt_id.as_deref(),
+                                entry.abandoned_attempt_id.as_deref(),
+                                &nak.attempt_id,
+                            );
+                            if matches!(decision, AlreadyRepublishedNakDecision::WaitForSuccessor) {
+                                entry.record_abandoned_attempt_id(&nak.attempt_id);
+                            }
+                            decision
+                        })
                 else {
                     debug!(
                         request_id = %nak.request_id,
@@ -3196,12 +4245,11 @@ impl WorkPublisher {
                 };
                 match decision {
                     AlreadyRepublishedNakDecision::DropStale => {
-                        metrics::GENERATION_STALE_ATTEMPT_NAKS
-                            .with_label_values(&[
-                                &metrics::sanitize_model_label(&display_model),
-                                &metrics::sanitize_label(&pool),
-                            ])
-                            .inc();
+                        telemetry::record_generation_event(
+                            telemetry::GenerationEvent::Nak,
+                            telemetry::GenerationEventReason::StaleAttempt,
+                            telemetry::GenerationEventOutcome::Dropped,
+                        );
                         debug!(
                             request_id = %nak.request_id,
                             nak_attempt_id = %nak.attempt_id,
@@ -3220,13 +4268,6 @@ impl WorkPublisher {
                     }
                     AlreadyRepublishedNakDecision::Fail => {}
                 }
-                metrics::RATE_LIMIT_TOTAL
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(&display_model),
-                        &metrics::sanitize_label(&pool),
-                        "kv_pool_saturated",
-                    ])
-                    .inc();
                 warn!(
                     request_id = %nak.request_id,
                     reason = %nak.reason,
@@ -3267,23 +4308,6 @@ impl WorkPublisher {
                 // ``rate_limit_exceeded`` outcome so the HTTP handler
                 // returns 429 + Retry-After immediately instead of
                 // waiting out the first-chunk timeout.
-                // Fall back to ``unknown`` labels rather than the
-                // empty string when the entry was already torn down by
-                // a concurrent terminal — avoids polluting the metric
-                // with empty label series that don't render in
-                // dashboards.
-                let (display_model, pool) = self
-                    .pending_streams
-                    .get(&nak.request_id)
-                    .map(|e| (e.value().display_model.clone(), e.value().pool.clone()))
-                    .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-                metrics::RATE_LIMIT_TOTAL
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(&display_model),
-                        &metrics::sanitize_label(&pool),
-                        "kv_pool_saturated",
-                    ])
-                    .inc();
                 warn!(
                     error = %e,
                     request_id = %nak.request_id,
@@ -3317,8 +4341,31 @@ impl WorkPublisher {
         match applied {
             ChunkApplied::Terminal => {
                 if let Some((_, mut collector)) = self.pending_streams.remove(&request_id) {
-                    let wait_secs = collector.published_at.elapsed().as_secs_f64();
                     let outcome = collector.build_outcome();
+                    // This remove-on-terminal branch is the single completion
+                    // authority shared by native generate, chat, completions,
+                    // responses, and SSE. Record performance here—not in the
+                    // HTTP surface handlers—so one worker terminal can never
+                    // double-emit TTFT, TPOT, or token accounting.
+                    if let Some(completed) = outcome.as_ref().filter(|completed| {
+                        completed.error.is_none()
+                            && !matches!(completed.finish_reason.as_str(), "cancelled" | "error")
+                    }) {
+                        telemetry::record_generation_completion(
+                            telemetry::GenerationCompletionObservation {
+                                ttft_ms: completed.ttft_ms,
+                                tpot_ms: completed.tpot_ms,
+                                prompt_tokens: completed
+                                    .usage
+                                    .as_ref()
+                                    .map(|usage| u64::from(usage.prompt_tokens)),
+                                completion_tokens: completed
+                                    .usage
+                                    .as_ref()
+                                    .map(|usage| u64::from(usage.completion_tokens)),
+                            },
+                        );
+                    }
                     if let (Some(sender), Some(outcome)) = (collector.sender.take(), outcome) {
                         if sender.send(outcome).is_err() {
                             debug!(
@@ -3327,9 +4374,6 @@ impl WorkPublisher {
                             );
                         }
                     }
-                    metrics::QUEUE_RESULT_WAIT
-                        .with_label_values(&["generate"])
-                        .observe(wait_secs);
                     // Stream finished — drop any offloaded generate blob now
                     // (the periodic reconcile is only the failure-path backstop).
                     self.cleanup_offloaded_generate(&request_id).await;
@@ -3411,19 +4455,20 @@ impl WorkPublisher {
             .collect();
 
         for key in &expired {
-            if let Some((_, mut collector)) = self.pending_results.remove(key) {
+            if let Some((_, collector)) = self.pending_results.remove(key) {
                 warn!(request_id = %key, "result collector timed out");
-                let results: Vec<WorkResult> = collector.results.drain(..).flatten().collect();
-                if let Some(sender) = collector.sender.take() {
-                    if sender.send(results).is_err() {
-                        debug!(
-                            request_id = %key,
-                            "expired-result receiver dropped (client likely disconnected)"
-                        );
-                    }
-                }
+                // Expiry is abandonment, never successful partial completion.
+                // Dropping the sender makes the handler's receiver resolve as
+                // closed; publishing the tombstone here makes this sweep an
+                // equal owner in the race with the handler timeout/drop guard.
+                drop(collector);
+                self.finish_abandoned_work(key).await;
+            } else {
+                // The handler or inbox completion won the collector-removal
+                // race. Exact-key cleanup is idempotent and remains a useful
+                // retry for a prior object-store delete failure.
+                self.cleanup_offloaded_payloads(key).await;
             }
-            self.cleanup_offloaded_payloads(key).await;
         }
 
         // Reconcile offloaded generate blobs: any tracked request whose stream
@@ -3488,7 +4533,6 @@ impl WorkPublisher {
         for key in expired {
             if let Some((_, mut collector)) = self.pending_streams.remove(&key) {
                 warn!(request_id = %key, "stream collector timed out");
-                let wait_secs = collector.published_at.elapsed().as_secs_f64();
                 let outcome = collector.build_outcome().unwrap_or_else(|| StreamOutcome {
                     text: String::new(),
                     finish_reason: "error".to_string(),
@@ -3503,6 +4547,8 @@ impl WorkPublisher {
                     tool_calls: None,
                     logprobs: None,
                     candidates: Vec::new(),
+                    executed_bundle_config_hash: None,
+                    execution_identity_sha256: None,
                 });
                 if let Some(sender) = collector.sender.take() {
                     if sender.send(outcome).is_err() {
@@ -3512,9 +4558,6 @@ impl WorkPublisher {
                         );
                     }
                 }
-                metrics::QUEUE_RESULT_WAIT
-                    .with_label_values(&["generate"])
-                    .observe(wait_secs);
                 // Drop any offloaded blob for this shutdown-dropped stream. The
                 // periodic reconcile filters against ``pending_streams``, so an
                 // entry removed here would otherwise be missed at shutdown.
@@ -3568,27 +4611,36 @@ async fn cleanup_offloaded_payloads_inner(
     offloaded: &DashMap<String, BTreeSet<String>>,
     request_id: &str,
 ) {
-    let Some((_, keys)) = offloaded.remove(request_id) else {
+    // Snapshot the current keys without removing their tracking entry. The
+    // payload-store delete is an await point and this future is deliberately
+    // bounded by callers; removing everything up front would make a timeout
+    // cancellation forget the current and unvisited keys permanently.
+    let Some(keys) = offloaded
+        .get(request_id)
+        .map(|entry| entry.iter().cloned().collect::<Vec<_>>())
+    else {
         return;
     };
 
-    let mut failed = BTreeSet::new();
     for key in keys {
-        if let Err(e) = payload_store.delete(&key).await {
-            warn!(
-                key = %key,
-                error = %e,
-                "failed to remove offloaded payload; will retry on next reconcile"
-            );
-            failed.insert(key);
+        match payload_store.delete(&key).await {
+            Ok(()) => {
+                // Retire only the key whose delete completed. Everything else
+                // remains discoverable if this future is cancelled at the next
+                // await, and a concurrently-recorded sibling is preserved.
+                if let Some(mut tracked) = offloaded.get_mut(request_id) {
+                    tracked.remove(&key);
+                }
+                offloaded.remove_if(request_id, |_, tracked| tracked.is_empty());
+            }
+            Err(e) => {
+                warn!(
+                    key = %key,
+                    error = %e,
+                    "failed to remove offloaded payload; will retry on next reconcile"
+                );
+            }
         }
-    }
-
-    if !failed.is_empty() {
-        offloaded
-            .entry(request_id.to_string())
-            .or_default()
-            .extend(failed);
     }
 }
 
@@ -3623,6 +4675,46 @@ pub fn encode_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_counts_decodes_legacy_positional_array_without_field_shift() {
+        let legacy = rmp_serde::to_vec(&(Some(11_u64), Some(2_u64), Some(3_u64), Some(4_000_u64)))
+            .expect("legacy positional units");
+        let decoded: UnitCounts = rmp_serde::from_slice(&legacy).expect("additive decode");
+
+        assert_eq!(decoded.input_tokens, Some(11));
+        assert_eq!(decoded.pages, Some(2));
+        assert_eq!(decoded.images, Some(3));
+        assert_eq!(decoded.audio_ms, Some(4_000));
+        assert_eq!(decoded.pairs, None);
+    }
+
+    #[test]
+    fn initial_durability_completion_preserves_the_existing_batch_contract() {
+        assert_eq!(initial_publish_ack_count("encode", 0), 0);
+        assert_eq!(initial_publish_ack_count("encode", 4_096), 4_096);
+        assert_eq!(
+            initial_publish_ack_count("score", usize::MAX),
+            1,
+            "score folds candidates into one published work item"
+        );
+        assert_eq!(
+            initial_publish_ack_count("generate", usize::MAX),
+            1,
+            "generation publishes one work item"
+        );
+    }
+
+    #[test]
+    fn queue_request_item_limit_is_an_explicit_api_contract() {
+        assert!(validate_queue_request_item_count(MAX_QUEUE_REQUEST_ITEMS).is_ok());
+        assert_eq!(
+            validate_queue_request_item_count(MAX_QUEUE_REQUEST_ITEMS + 1),
+            Err(format!(
+                "Queue request contains 4097 items; the maximum is {MAX_QUEUE_REQUEST_ITEMS}"
+            )),
+        );
+    }
 
     // --- issue #1471: payload-store cleanup guard ---
     use async_trait::async_trait;
@@ -3806,6 +4898,57 @@ mod tests {
         assert!(!offloaded.contains_key("req-fail"));
     }
 
+    struct BlockingSecondDeleteStore {
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl PayloadStore for BlockingSecondDeleteStore {
+        async fn put(&self, _key: &str, _data: &[u8]) -> Result<String, String> {
+            Ok(String::new())
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), String> {
+            self.deleted.lock().unwrap().push(key.to_string());
+            if key.ends_with("_1.bin") {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
+    }
+
+    // Failure cleanup is bounded by the dispatch-durability monitor. If that
+    // timeout cancels this future between object-store deletes, the completed
+    // key may retire but the current and unvisited keys must remain tracked for
+    // the periodic reconcile instead of leaking permanently.
+    #[tokio::test]
+    async fn cleanup_offloaded_payloads_is_cancellation_safe() {
+        let store = BlockingSecondDeleteStore {
+            deleted: std::sync::Mutex::new(Vec::new()),
+        };
+        let offloaded: DashMap<String, BTreeSet<String>> = DashMap::new();
+        record_offloaded_payload_key(&offloaded, "req-cancel", "req-cancel_0.bin");
+        record_offloaded_payload_key(&offloaded, "req-cancel", "req-cancel_1.bin");
+        record_offloaded_payload_key(&offloaded, "req-cancel", "req-cancel_2.bin");
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            cleanup_offloaded_payloads_inner(&store, &offloaded, "req-cancel"),
+        )
+        .await;
+        assert!(result.is_err(), "second delete must keep cleanup pending");
+
+        let retained = offloaded.get("req-cancel").expect("retry keys retained");
+        assert_eq!(
+            retained.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                "req-cancel_1.bin".to_string(),
+                "req-cancel_2.bin".to_string(),
+            ],
+            "the in-flight and unvisited deletes must survive cancellation",
+        );
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct WorkItem {
         pub work_item_id: String,
@@ -3857,6 +5000,8 @@ mod tests {
         pub reply_subject: String,
         #[serde(default)]
         pub timestamp: f64,
+        #[serde(default)]
+        pub accepts_result_chunks: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub traceparent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3899,6 +5044,666 @@ mod tests {
         );
     }
 
+    fn result_collector(
+        total_items: usize,
+    ) -> (ResultCollector, oneshot::Receiver<Vec<WorkResult>>) {
+        result_collector_with_budget(
+            total_items,
+            Arc::new(ResultChunkBudget::new(
+                MAX_RESULT_CHUNK_RESERVED_BYTES_GLOBAL,
+            )),
+            MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST,
+        )
+    }
+
+    fn result_collector_with_budget(
+        total_items: usize,
+        result_chunk_budget: Arc<ResultChunkBudget>,
+        result_chunk_reserved_limit: usize,
+    ) -> (ResultCollector, oneshot::Receiver<Vec<WorkResult>>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            ResultCollector {
+                _total_items: total_items as u32,
+                results: vec![None; total_items],
+                result_chunk_transfers: BTreeMap::new(),
+                result_chunk_buffered_bytes: 0,
+                result_chunk_reserved_bytes: 0,
+                result_chunk_reserved_limit,
+                result_chunk_budget,
+                sender: Some(tx),
+                deadline: Instant::now() + Duration::from_secs(30),
+                operation: "encode".to_string(),
+                pool_fallback_subject: None,
+                direct_fallback_worker_id: None,
+                direct_fallback_republished_indices: BTreeSet::new(),
+                direct_fallback_payloads: vec![None; total_items],
+                direct_fallback_republished: false,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn abandonment_has_one_removal_winner_and_releases_reservations() {
+        let budget = Arc::new(ResultChunkBudget::new(8192));
+        let (mut collector, mut rx) = result_collector_with_budget(1, Arc::clone(&budget), 8192);
+        let reserved = collector.reserve_result_chunk_transfer(64).unwrap();
+        collector.results[0] = Some(successful_result("req", 0, vec![1]));
+        assert!(reserved > 0);
+        let pending = Arc::new(DashMap::new());
+        pending.insert("req".to_string(), collector);
+        let wins = std::thread::scope(|scope| {
+            let first = scope.spawn(|| drop_pending_result_collector(&pending, "req"));
+            let second = scope.spawn(|| drop_pending_result_collector(&pending, "req"));
+            usize::from(first.join().unwrap()) + usize::from(second.join().unwrap())
+        });
+        assert_eq!(wins, 1);
+        assert!(!pending.contains_key("req"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        assert_eq!(budget.current(), 0);
+    }
+
+    fn successful_result(request_id: &str, item_index: u32, payload: Vec<u8>) -> WorkResult {
+        WorkResult {
+            work_item_id: canonical_work_item_id(request_id, item_index),
+            request_id: request_id.to_string(),
+            item_index,
+            success: true,
+            result_msgpack: payload,
+            error: None,
+            error_code: None,
+            inference_ms: Some(1.0),
+            queue_ms: None,
+            processing_ms: None,
+            worker_id: Some("worker-1".to_string()),
+            tokenization_ms: None,
+            postprocessing_ms: None,
+            payload_fetch_ms: None,
+            units: None,
+            worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
+        }
+    }
+
+    fn result_chunks(result: &WorkResult) -> Vec<ResultChunkV1> {
+        result_chunks_with_count(result, 3)
+    }
+
+    fn result_chunks_with_count(result: &WorkResult, chunk_count: u32) -> Vec<ResultChunkV1> {
+        let encoded = rmp_serde::to_vec_named(result).expect("encode WorkResult");
+        let digest = Sha256::digest(&encoded).to_vec();
+        (0..chunk_count)
+            .map(|chunk_index| {
+                let start = encoded.len() * chunk_index as usize / chunk_count as usize;
+                let end = encoded.len() * (chunk_index as usize + 1) / chunk_count as usize;
+                ResultChunkV1 {
+                    kind: RESULT_CHUNK_KIND.to_string(),
+                    work_item_id: result.work_item_id.clone(),
+                    request_id: result.request_id.clone(),
+                    item_index: result.item_index,
+                    transfer_digest: digest.clone(),
+                    chunk_index,
+                    chunk_count,
+                    total_bytes: encoded.len() as u64,
+                    payload: encoded[start..end].to_vec(),
+                }
+            })
+            .collect()
+    }
+
+    fn complete_chunked_transfer(
+        collector: &mut ResultCollector,
+        chunks: Vec<ResultChunkV1>,
+    ) -> CompletedResultTransfer {
+        for chunk in chunks {
+            let applied = apply_result_chunk(collector, chunk).expect("valid result chunk");
+            if let ResultChunkStatus::Complete(completed) = applied.status {
+                return completed;
+            }
+        }
+        panic!("all chunks must complete the result transfer");
+    }
+
+    fn complete_chunked_result(
+        collector: &mut ResultCollector,
+        chunks: Vec<ResultChunkV1>,
+    ) -> WorkResult {
+        decode_completed_result(complete_chunked_transfer(collector, chunks))
+            .expect("decode completed WorkResult")
+    }
+
+    fn assert_result_chunk_rejection_terminates(
+        mut collector: ResultCollector,
+        mut rx: oneshot::Receiver<Vec<WorkResult>>,
+        chunk: ResultChunkV1,
+        expected: ResultChunkReject,
+    ) {
+        let request_id = chunk.request_id.clone();
+        assert_eq!(
+            apply_result_chunk(&mut collector, chunk).unwrap_err(),
+            expected
+        );
+        let pending = DashMap::new();
+        pending.insert(request_id.clone(), collector);
+        assert!(fail_pending_result_chunk_request(&pending, &request_id).is_some());
+        let results = rx.try_recv().expect("terminal result sent immediately");
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|result| {
+            !result.success
+                && result.error.as_deref() == Some("Worker result transport validation failed")
+                && result.error_code.as_deref() == Some("transport_failure")
+        }));
+    }
+
+    #[test]
+    fn result_chunk_named_msgpack_uses_binary_digest_and_payload() {
+        let chunk = result_chunks(&successful_result("req", 0, vec![1, 2, 3])).remove(0);
+        let encoded = rmp_serde::to_vec_named(&chunk).expect("encode chunk");
+        let value: rmpv::Value = rmp_serde::from_slice(&encoded).expect("decode value");
+        assert_eq!(envelope_kind(&value), Some(RESULT_CHUNK_KIND));
+        let rmpv::Value::Map(fields) = &value else {
+            panic!("chunk must be a named map");
+        };
+        for field in ["transfer_digest", "payload"] {
+            let value = fields
+                .iter()
+                .find_map(|(key, value)| (key.as_str() == Some(field)).then_some(value))
+                .expect("binary field");
+            assert!(matches!(value, rmpv::Value::Binary(_)), "{field}");
+        }
+        let decoded: ResultChunkV1 = rmp_serde::from_slice(&encoded).expect("chunk round trip");
+        assert_eq!(decoded, chunk);
+    }
+
+    #[test]
+    fn malformed_exact_v1_is_not_accepted_as_a_work_result() {
+        let chunk = result_chunks(&successful_result("req", 0, vec![1])).remove(0);
+        let encoded = rmp_serde::to_vec_named(&chunk).unwrap();
+        let mut value: rmpv::Value = rmp_serde::from_slice(&encoded).unwrap();
+        let rmpv::Value::Map(fields) = &mut value else {
+            panic!("chunk must be a map");
+        };
+        fields.retain(|(key, _)| key.as_str() != Some("payload"));
+
+        assert_eq!(envelope_kind(&value), Some(RESULT_CHUNK_KIND));
+        assert!(rmpv::ext::from_value::<ResultChunkV1>(value).is_err());
+    }
+
+    #[test]
+    fn work_result_unknown_total_bytes_field_remains_forward_compatible() {
+        let expected = successful_result("req", 0, vec![1, 2, 3]);
+        let encoded = rmp_serde::to_vec_named(&expected).unwrap();
+        let mut value: rmpv::Value = rmp_serde::from_slice(&encoded).unwrap();
+        let rmpv::Value::Map(fields) = &mut value else {
+            panic!("named WorkResult must be a map");
+        };
+        fields.push((
+            rmpv::Value::String("total_bytes".into()),
+            rmpv::Value::from(123_u64),
+        ));
+
+        assert_eq!(envelope_kind(&value), None);
+        let decoded: WorkResult = rmpv::ext::from_value(value).unwrap();
+        assert_eq!(decoded.work_item_id, expected.work_item_id);
+        assert_eq!(decoded.result_msgpack, expected.result_msgpack);
+    }
+
+    #[test]
+    fn result_chunk_reassembles_out_of_order_and_decodes_legacy_work_result() {
+        let expected = successful_result("req", 0, vec![7, 8, 9]);
+        let chunks = result_chunks(&expected);
+        let (mut collector, _rx) = result_collector(1);
+
+        for index in [2, 0] {
+            let applied = apply_result_chunk(&mut collector, chunks[index].clone()).unwrap();
+            assert!(matches!(applied.status, ResultChunkStatus::Buffered));
+        }
+        let applied = apply_result_chunk(&mut collector, chunks[1].clone()).unwrap();
+        let ResultChunkStatus::Complete(completed) = applied.status else {
+            panic!("last missing chunk must complete the transfer");
+        };
+        let decoded = decode_completed_result(completed).expect("decode reconstructed result");
+        assert_eq!(decoded.work_item_id, expected.work_item_id);
+        assert_eq!(decoded.result_msgpack, expected.result_msgpack);
+        assert_eq!(collector.result_chunk_buffered_bytes, 0);
+        assert!(collector.result_chunk_transfers.is_empty());
+
+        // Rolling compatibility: a legacy one-shot WorkResult is not routed to
+        // the chunk decoder and remains directly deserializable.
+        let legacy = rmp_serde::to_vec_named(&expected).unwrap();
+        let value: rmpv::Value = rmp_serde::from_slice(&legacy).unwrap();
+        let decoded: WorkResult = rmpv::ext::from_value(value).unwrap();
+        assert_eq!(decoded.work_item_id, expected.work_item_id);
+    }
+
+    #[test]
+    fn result_chunk_duplicate_is_idempotent_but_conflict_is_rejected() {
+        let chunks = result_chunks(&successful_result("req", 0, vec![1]));
+        let (mut collector, _rx) = result_collector(1);
+        apply_result_chunk(&mut collector, chunks[0].clone()).unwrap();
+        let buffered = collector.result_chunk_buffered_bytes;
+
+        let duplicate = apply_result_chunk(&mut collector, chunks[0].clone()).unwrap();
+        assert!(matches!(duplicate.status, ResultChunkStatus::Duplicate));
+        assert_eq!(collector.result_chunk_buffered_bytes, buffered);
+
+        let mut conflicting = chunks[0].clone();
+        conflicting.payload[0] ^= 0xff;
+        assert_eq!(
+            apply_result_chunk(&mut collector, conflicting).unwrap_err(),
+            ResultChunkReject::DuplicateConflict
+        );
+        assert_eq!(collector.result_chunk_buffered_bytes, buffered);
+    }
+
+    #[test]
+    fn result_chunk_rejects_metadata_changes_and_replaces_new_digest_retry() {
+        let old = result_chunks(&successful_result("req", 0, vec![1]));
+        let replacement_result = successful_result("req", 0, vec![2, 3, 4]);
+        let replacement = result_chunks(&replacement_result);
+        let (mut collector, _rx) = result_collector(1);
+        apply_result_chunk(&mut collector, old[0].clone()).unwrap();
+
+        let mut changed_metadata = old[1].clone();
+        changed_metadata.total_bytes += 1;
+        assert_eq!(
+            apply_result_chunk(&mut collector, changed_metadata).unwrap_err(),
+            ResultChunkReject::MetadataConflict
+        );
+
+        let applied = apply_result_chunk(&mut collector, replacement[0].clone()).unwrap();
+        assert!(applied.retry_replaced);
+        assert_eq!(
+            collector.result_chunk_buffered_bytes,
+            replacement[0].payload.len()
+        );
+
+        let active_bytes = collector.result_chunk_buffered_bytes;
+        for delayed in [old[1].clone(), old[0].clone()] {
+            let ignored = apply_result_chunk(&mut collector, delayed).unwrap();
+            assert!(matches!(ignored.status, ResultChunkStatus::StaleRetry));
+            assert_eq!(collector.result_chunk_buffered_bytes, active_bytes);
+        }
+        let mut unknown_nonzero = replacement[1].clone();
+        unknown_nonzero.transfer_digest = vec![0x55; 32];
+        let ignored = apply_result_chunk(&mut collector, unknown_nonzero).unwrap();
+        assert!(matches!(ignored.status, ResultChunkStatus::StaleRetry));
+        assert_eq!(collector.result_chunk_buffered_bytes, active_bytes);
+
+        apply_result_chunk(&mut collector, replacement[2].clone()).unwrap();
+        let applied = apply_result_chunk(&mut collector, replacement[1].clone()).unwrap();
+        let ResultChunkStatus::Complete(completed) = applied.status else {
+            panic!("replacement transfer must complete");
+        };
+        let decoded = decode_completed_result(completed).unwrap();
+        assert_eq!(decoded.result_msgpack, replacement_result.result_msgpack);
+    }
+
+    #[test]
+    fn result_chunk_same_digest_chunk_zero_restarts_layout_without_mixing() {
+        let expected = successful_result("req", 0, vec![1, 2, 3, 4]);
+        let old_layout = result_chunks_with_count(&expected, 3);
+        let replacement_layout = result_chunks_with_count(&expected, 4);
+        let (mut collector, _rx) = result_collector(1);
+
+        apply_result_chunk(&mut collector, old_layout[0].clone()).unwrap();
+        let replaced = apply_result_chunk(&mut collector, replacement_layout[0].clone()).unwrap();
+        assert!(replaced.retry_replaced);
+
+        for delayed in [old_layout[1].clone(), old_layout[0].clone()] {
+            let ignored = apply_result_chunk(&mut collector, delayed).unwrap();
+            assert!(matches!(ignored.status, ResultChunkStatus::StaleRetry));
+        }
+
+        let decoded = complete_chunked_result(&mut collector, replacement_layout[1..].to_vec());
+        assert_eq!(decoded.result_msgpack, expected.result_msgpack);
+    }
+
+    #[test]
+    fn completed_chunked_items_remain_reserved_until_request_completion() {
+        let first = successful_result("req", 0, vec![1]);
+        let second = successful_result("req", 1, vec![2]);
+        let first_chunks = result_chunks(&first);
+        let second_chunks = result_chunks(&second);
+        let first_reservation =
+            result_chunk_reservation_bytes(first_chunks[0].total_bytes as usize).unwrap();
+        let second_reservation =
+            result_chunk_reservation_bytes(second_chunks[0].total_bytes as usize).unwrap();
+        let budget = Arc::new(ResultChunkBudget::new(
+            MAX_RESULT_CHUNK_RESERVED_BYTES_GLOBAL,
+        ));
+        let (mut collector, _rx) = result_collector_with_budget(
+            2,
+            Arc::clone(&budget),
+            first_reservation + second_reservation - 1,
+        );
+
+        let decoded = complete_chunked_result(&mut collector, first_chunks);
+        assert_eq!(
+            store_result_if_missing(&mut collector, decoded),
+            StoreResultOutcome::Stored
+        );
+        assert_eq!(collector.result_chunk_reserved_bytes, first_reservation);
+        assert_eq!(budget.current(), first_reservation);
+
+        assert_eq!(
+            apply_result_chunk(&mut collector, second_chunks[0].clone()).unwrap_err(),
+            ResultChunkReject::AggregateSize
+        );
+        assert_eq!(collector.result_chunk_reserved_bytes, first_reservation);
+        drop(collector);
+        assert_eq!(budget.current(), 0);
+    }
+
+    #[test]
+    fn completed_stale_direct_chunk_releases_reservation_for_replacement() {
+        let mut stale_direct = successful_result("req", 0, vec![1]);
+        stale_direct.worker_direct = true;
+        let replacement = successful_result("req", 0, vec![2]);
+        let stale_chunks = result_chunks(&stale_direct);
+        let replacement_chunks = result_chunks(&replacement);
+        let reservation =
+            result_chunk_reservation_bytes(stale_chunks[0].total_bytes as usize).unwrap();
+        assert_eq!(
+            reservation,
+            result_chunk_reservation_bytes(replacement_chunks[0].total_bytes as usize).unwrap()
+        );
+
+        let budget = Arc::new(ResultChunkBudget::new(reservation));
+        let (mut collector, _rx) =
+            result_collector_with_budget(1, Arc::clone(&budget), reservation);
+        mark_direct_fallback_republished_indices(&mut collector, [0]);
+
+        let completed = complete_chunked_transfer(&mut collector, stale_chunks);
+        assert_eq!(completed.reservation_bytes, reservation);
+        assert_eq!(collector.result_chunk_reserved_bytes, reservation);
+        assert_eq!(budget.current(), reservation);
+        let completed_reservation = completed.reservation_bytes;
+        let decoded = decode_completed_result(completed).unwrap();
+        assert_eq!(
+            store_result_with_completed_chunk_reservation(
+                &mut collector,
+                decoded,
+                completed_reservation,
+            ),
+            StoreResultOutcome::StaleDirectFallback
+        );
+        assert!(collector.results[0].is_none());
+        assert_eq!(collector.result_chunk_reserved_bytes, 0);
+        assert_eq!(budget.current(), 0);
+
+        let completed = complete_chunked_transfer(&mut collector, replacement_chunks);
+        assert_eq!(completed.reservation_bytes, reservation);
+        let completed_reservation = completed.reservation_bytes;
+        let decoded = decode_completed_result(completed).unwrap();
+        assert_eq!(
+            store_result_with_completed_chunk_reservation(
+                &mut collector,
+                decoded,
+                completed_reservation,
+            ),
+            StoreResultOutcome::Stored
+        );
+        assert_eq!(collector.result_chunk_reserved_bytes, reservation);
+        assert_eq!(budget.current(), reservation);
+        assert_eq!(
+            collector.results[0]
+                .as_ref()
+                .expect("replacement stored")
+                .result_msgpack,
+            replacement.result_msgpack
+        );
+
+        drop(collector);
+        assert_eq!(budget.current(), 0);
+    }
+
+    #[test]
+    fn gateway_wide_chunk_budget_rejects_then_raii_cleanup_restores_capacity() {
+        let first = successful_result("req-a", 0, vec![1]);
+        let second = successful_result("req-b", 0, vec![2]);
+        let first_chunks = result_chunks(&first);
+        let second_chunks = result_chunks(&second);
+        let reservation =
+            result_chunk_reservation_bytes(first_chunks[0].total_bytes as usize).unwrap();
+        assert_eq!(
+            reservation,
+            result_chunk_reservation_bytes(second_chunks[0].total_bytes as usize).unwrap()
+        );
+        let budget = Arc::new(ResultChunkBudget::new(reservation));
+        let (mut first_collector, _first_rx) = result_collector_with_budget(
+            1,
+            Arc::clone(&budget),
+            MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST,
+        );
+        let (mut second_collector, _second_rx) = result_collector_with_budget(
+            1,
+            Arc::clone(&budget),
+            MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST,
+        );
+
+        let decoded = complete_chunked_result(&mut first_collector, first_chunks);
+        assert_eq!(
+            store_result_if_missing(&mut first_collector, decoded),
+            StoreResultOutcome::Stored
+        );
+        assert_eq!(budget.current(), reservation);
+        assert_eq!(
+            apply_result_chunk(&mut second_collector, second_chunks[0].clone()).unwrap_err(),
+            ResultChunkReject::GlobalBudget
+        );
+
+        drop(first_collector);
+        assert_eq!(budget.current(), 0);
+        apply_result_chunk(&mut second_collector, second_chunks[0].clone()).unwrap();
+        assert_eq!(budget.current(), reservation);
+        drop(second_collector);
+        assert_eq!(budget.current(), 0);
+    }
+
+    #[test]
+    fn result_chunk_retired_retry_digests_are_bounded() {
+        let mut chunk = result_chunks(&successful_result("req", 0, vec![1]))[0].clone();
+        let (mut collector, _rx) = result_collector(1);
+        apply_result_chunk(&mut collector, chunk.clone()).unwrap();
+
+        for generation in 1..=(MAX_RETIRED_RESULT_CHUNK_DIGESTS + 4) {
+            chunk.transfer_digest = vec![generation as u8; 32];
+            let applied = apply_result_chunk(&mut collector, chunk.clone()).unwrap();
+            assert!(applied.retry_replaced);
+        }
+        let active = collector
+            .result_chunk_transfers
+            .get("req.0")
+            .expect("active transfer");
+        assert_eq!(
+            active.retired_digests.len(),
+            MAX_RETIRED_RESULT_CHUNK_DIGESTS
+        );
+        assert_eq!(
+            active.transfer_digest,
+            [(MAX_RETIRED_RESULT_CHUNK_DIGESTS + 4) as u8; 32]
+        );
+    }
+
+    #[test]
+    fn result_chunk_enforces_count_item_request_digest_and_length_limits() {
+        let valid = result_chunks(&successful_result("req", 0, vec![1]));
+
+        let (collector, rx) = result_collector(1);
+        let mut bad_kind = valid[0].clone();
+        bad_kind.kind = "result_chunk_v2".to_string();
+        assert_result_chunk_rejection_terminates(collector, rx, bad_kind, ResultChunkReject::Kind);
+
+        let (collector, rx) = result_collector(1);
+        let mut too_many = valid[0].clone();
+        too_many.chunk_count = MAX_RESULT_CHUNKS_PER_ITEM + 1;
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            too_many,
+            ResultChunkReject::ChunkCount,
+        );
+
+        let (collector, rx) = result_collector(1);
+        let mut bad_index = valid[0].clone();
+        bad_index.chunk_index = bad_index.chunk_count;
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            bad_index,
+            ResultChunkReject::ChunkIndex,
+        );
+
+        let (collector, rx) = result_collector(1);
+        let mut too_large = valid[0].clone();
+        too_large.total_bytes = MAX_RESULT_CHUNK_ITEM_BYTES as u64 + 1;
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            too_large,
+            ResultChunkReject::ItemSize,
+        );
+
+        let (collector, rx) = result_collector(1);
+        let mut oversized_payload = valid[0].clone();
+        oversized_payload.total_bytes = oversized_payload.payload.len() as u64 - 1;
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            oversized_payload,
+            ResultChunkReject::PayloadSize,
+        );
+
+        let reservation = result_chunk_reservation_bytes(valid[0].total_bytes as usize).unwrap();
+        let (collector, rx) = result_collector_with_budget(
+            1,
+            Arc::new(ResultChunkBudget::new(
+                MAX_RESULT_CHUNK_RESERVED_BYTES_GLOBAL,
+            )),
+            reservation - 1,
+        );
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            valid[0].clone(),
+            ResultChunkReject::AggregateSize,
+        );
+
+        let (collector, rx) = result_collector(1);
+        let mut bad_digest_shape = valid[0].clone();
+        bad_digest_shape.transfer_digest.pop();
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            bad_digest_shape,
+            ResultChunkReject::Digest,
+        );
+
+        let encoded = rmp_serde::to_vec_named(&successful_result("req", 0, vec![1])).unwrap();
+        let (collector, rx) = result_collector(1);
+        let bad_digest = ResultChunkV1 {
+            kind: RESULT_CHUNK_KIND.to_string(),
+            work_item_id: "req.0".to_string(),
+            request_id: "req".to_string(),
+            item_index: 0,
+            transfer_digest: vec![0; 32],
+            chunk_index: 0,
+            chunk_count: 1,
+            total_bytes: encoded.len() as u64,
+            payload: encoded.clone(),
+        };
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            bad_digest,
+            ResultChunkReject::DigestMismatch,
+        );
+
+        let (collector, rx) = result_collector(1);
+        let bad_length = ResultChunkV1 {
+            kind: RESULT_CHUNK_KIND.to_string(),
+            work_item_id: "req.0".to_string(),
+            request_id: "req".to_string(),
+            item_index: 0,
+            transfer_digest: Sha256::digest(&encoded).to_vec(),
+            chunk_index: 0,
+            chunk_count: 1,
+            total_bytes: encoded.len() as u64 + 1,
+            payload: encoded,
+        };
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            bad_length,
+            ResultChunkReject::TotalMismatch,
+        );
+
+        let conflict_chunks = result_chunks(&successful_result("req", 0, vec![9]));
+        let (mut collector, rx) = result_collector(1);
+        apply_result_chunk(&mut collector, conflict_chunks[0].clone()).unwrap();
+        let mut conflicting_duplicate = conflict_chunks[0].clone();
+        conflicting_duplicate.payload[0] ^= 0xff;
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            conflicting_duplicate,
+            ResultChunkReject::DuplicateConflict,
+        );
+
+        let (mut collector, rx) = result_collector(1);
+        apply_result_chunk(&mut collector, conflict_chunks[0].clone()).unwrap();
+        let mut conflicting_metadata = conflict_chunks[1].clone();
+        conflicting_metadata.total_bytes += 1;
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            conflicting_metadata,
+            ResultChunkReject::MetadataConflict,
+        );
+
+        // The inbox is an existing trusted-worker boundary: a malformed chunk
+        // that names a live request fails closed, but its attacker-controlled
+        // identity/detail is replaced by the static transport error above.
+        let (collector, rx) = result_collector(1);
+        let mut bad_identity = valid[0].clone();
+        bad_identity.work_item_id = "attacker-controlled".to_string();
+        assert_result_chunk_rejection_terminates(
+            collector,
+            rx,
+            bad_identity,
+            ResultChunkReject::Identity,
+        );
+    }
+
+    #[test]
+    fn invalid_result_chunk_completes_pending_request_with_safe_transport_failure() {
+        let pending = DashMap::new();
+        let (mut collector, mut rx) = result_collector(2);
+        // Prove partial buffers and already-completed items do not survive the
+        // terminal funnel or produce a partial-success response.
+        let chunks = result_chunks(&successful_result("req", 0, vec![1]));
+        apply_result_chunk(&mut collector, chunks[0].clone()).unwrap();
+        collector.results[1] = Some(successful_result("req", 1, vec![2]));
+        pending.insert("req".to_string(), collector);
+
+        let terminal = fail_pending_result_chunk_request(&pending, "req");
+        assert!(terminal.is_some());
+        assert!(!pending.contains_key("req"));
+        let results = rx.try_recv().expect("terminal result sent immediately");
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| !result.success));
+        assert!(results.iter().all(|result| {
+            result.error.as_deref() == Some("Worker result transport validation failed")
+                && result.error_code.as_deref() == Some("transport_failure")
+        }));
+    }
+
     #[test]
     fn test_direct_batch_fallback_payloads_only_include_missing_items_once() {
         let (tx, _rx) = oneshot::channel();
@@ -3923,15 +5728,21 @@ mod tests {
                     payload_fetch_ms: None,
                     units: None,
                     worker_direct: false,
+                    executed_bundle_config_hash: None,
+                    execution_identity_sha256: None,
                 }),
                 None,
             ],
+            result_chunk_transfers: BTreeMap::new(),
+            result_chunk_buffered_bytes: 0,
+            result_chunk_reserved_bytes: 0,
+            result_chunk_reserved_limit: MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST,
+            result_chunk_budget: Arc::new(ResultChunkBudget::new(
+                MAX_RESULT_CHUNK_RESERVED_BYTES_GLOBAL,
+            )),
             sender: Some(tx),
             deadline: Instant::now() + Duration::from_secs(30),
             operation: "encode".into(),
-            published_at: Instant::now(),
-            pool_label: "default".into(),
-            model_label: "BAAI/bge-m3".into(),
             pool_fallback_subject: Some("sie.work.default.l4.default.BAAI__bge-m3".into()),
             direct_fallback_worker_id: Some("worker-1".into()),
             direct_fallback_republished_indices: BTreeSet::new(),
@@ -3954,12 +5765,16 @@ mod tests {
         let mut collector = ResultCollector {
             _total_items: 1,
             results: vec![None],
+            result_chunk_transfers: BTreeMap::new(),
+            result_chunk_buffered_bytes: 0,
+            result_chunk_reserved_bytes: 0,
+            result_chunk_reserved_limit: MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST,
+            result_chunk_budget: Arc::new(ResultChunkBudget::new(
+                MAX_RESULT_CHUNK_RESERVED_BYTES_GLOBAL,
+            )),
             sender: Some(tx),
             deadline: Instant::now() + Duration::from_secs(30),
             operation: "encode".into(),
-            published_at: Instant::now(),
-            pool_label: "default".into(),
-            model_label: "BAAI/bge-m3".into(),
             pool_fallback_subject: None,
             direct_fallback_worker_id: None,
             direct_fallback_republished_indices: BTreeSet::new(),
@@ -3984,6 +5799,8 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let duplicate = WorkResult {
             result_msgpack: vec![2],
@@ -4010,12 +5827,16 @@ mod tests {
         let mut collector = ResultCollector {
             _total_items: 1,
             results: vec![None],
+            result_chunk_transfers: BTreeMap::new(),
+            result_chunk_buffered_bytes: 0,
+            result_chunk_reserved_bytes: 0,
+            result_chunk_reserved_limit: MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST,
+            result_chunk_budget: Arc::new(ResultChunkBudget::new(
+                MAX_RESULT_CHUNK_RESERVED_BYTES_GLOBAL,
+            )),
             sender: Some(tx),
             deadline: Instant::now() + Duration::from_secs(30),
             operation: "encode".into(),
-            published_at: Instant::now(),
-            pool_label: "default".into(),
-            model_label: "BAAI/bge-m3".into(),
             pool_fallback_subject: Some("sie.work.default.l4.default.BAAI__bge-m3".into()),
             direct_fallback_worker_id: Some("direct-worker".into()),
             direct_fallback_republished_indices: BTreeSet::from([0]),
@@ -4040,6 +5861,8 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: true,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let pool_result = WorkResult {
             result_msgpack: vec![2],
@@ -4243,6 +6066,7 @@ mod tests {
             router_id: "router-1".to_string(),
             reply_subject: "_INBOX.r1.req-1".to_string(),
             timestamp: 1700000000.0,
+            accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
         };
@@ -4272,6 +6096,7 @@ mod tests {
         assert_eq!(decoded.router_id, "router-1");
         assert_eq!(decoded.reply_subject, "_INBOX.r1.req-1");
         assert_eq!(decoded.engine, "pytorch");
+        assert!(decoded.accepts_result_chunks);
     }
 
     #[test]
@@ -4290,6 +6115,7 @@ mod tests {
         let decoded: WorkItem = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(decoded.engine, "");
         assert_eq!(decoded.operation, "encode");
+        assert!(!decoded.accepts_result_chunks);
     }
 
     /// Regression: `WorkItemRef` is the borrowed view we use on the
@@ -4332,6 +6158,7 @@ mod tests {
             router_id: "router-1".to_string(),
             reply_subject: "_INBOX.router-1.req-ref".to_string(),
             timestamp: 1_700_000_000.5,
+            accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
         };
@@ -4372,6 +6199,7 @@ mod tests {
             router_id: &owned.router_id,
             reply_subject: &owned.reply_subject,
             timestamp: owned.timestamp,
+            accepts_result_chunks: true,
             traceparent: owned.traceparent.as_deref(),
             tracestate: owned.tracestate.as_deref(),
         };
@@ -4407,8 +6235,16 @@ mod tests {
             tokenization_ms: None,
             postprocessing_ms: None,
             payload_fetch_ms: None,
-            units: None,
+            units: Some(UnitCounts {
+                input_tokens: None,
+                pairs: None,
+                pages: None,
+                images: None,
+                audio_ms: Some(1_001),
+            }),
             worker_direct: true,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
 
         let encoded = rmp_serde::to_vec(&result).unwrap();
@@ -4418,7 +6254,30 @@ mod tests {
         assert_eq!(decoded.item_index, 2);
         assert!(decoded.success);
         assert_eq!(decoded.result_msgpack, vec![5, 6, 7]);
+        assert_eq!(decoded.units.and_then(|units| units.audio_ms), Some(1_001));
         assert!(decoded.worker_direct);
+    }
+
+    #[test]
+    fn test_work_result_audio_ms_units_are_additive_and_unsigned() {
+        let encoded = rmp_serde::to_vec_named(&serde_json::json!({
+            "request_id": "req-audio",
+            "success": true,
+            "result_msgpack": [],
+            "units": {"audio_ms": 12_345},
+        }))
+        .unwrap();
+        let decoded: WorkResult = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.units.expect("units").audio_ms, Some(12_345));
+
+        let negative = rmp_serde::to_vec_named(&serde_json::json!({
+            "request_id": "req-audio",
+            "success": true,
+            "result_msgpack": [],
+            "units": {"audio_ms": -1},
+        }))
+        .unwrap();
+        assert!(rmp_serde::from_slice::<WorkResult>(&negative).is_err());
     }
 
     #[test]
@@ -4490,6 +6349,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r1.req-2".to_string(),
             timestamp: 0.0,
+            accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
         };
@@ -4563,6 +6423,8 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let encoded = rmp_serde::to_vec(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -4588,6 +6450,8 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let encoded = rmp_serde::to_vec_named(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -4630,6 +6494,8 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let encoded = rmp_serde::to_vec(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -4895,6 +6761,21 @@ mod tests {
         assert!(!keys.contains(&"messages"), "messages leaked: {keys:?}");
     }
 
+    #[test]
+    fn test_generate_params_preserves_negative_seed_on_msgpack_wire() {
+        let params = GenerateParams {
+            input: GenerateInput::Prompt {
+                prompt: "hi".to_string(),
+            },
+            max_new_tokens: 16,
+            seed: Some(-1),
+            ..Default::default()
+        };
+        let bytes = rmp_serde::to_vec_named(&params).unwrap();
+        let decoded: GenerateParams = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.seed, Some(-1));
+    }
+
     /// Routing-affinity fields appear on the wire when set; otherwise they
     /// are omitted entirely (``skip_serializing_if = "Option::is_none"``)
     /// so a prompt-only worker decoding the bytes still sees the same key
@@ -4931,6 +6812,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r.req-x".to_string(),
             timestamp: 1.0,
+            accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
         };
@@ -5080,6 +6962,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r.req-tp".to_string(),
             timestamp: 1.0,
+            accepts_result_chunks: true,
             traceparent: Some(tp.to_string()),
             tracestate: Some(ts.to_string()),
         };
@@ -5124,6 +7007,7 @@ mod tests {
             router_id: String::new(),
             reply_subject: "_INBOX.r.req-tp2".to_string(),
             timestamp: 1.0,
+            accepts_result_chunks: true,
             traceparent: None,
             tracestate: None,
         };
@@ -5425,14 +7309,14 @@ mod tests {
         let pool = format!("itpool{nanos}");
         let model = "BAAI__bge-m3";
 
-        let publisher = WorkPublisher::new(
+        let publisher = Arc::new(WorkPublisher::new(
             async_nats::jetstream::new(client.clone()),
             "it-router".to_string(),
             Arc::new(crate::queue::payload_store::DisabledPayloadStore),
             Duration::from_secs(5),
             1024,
             Duration::from_secs(300),
-        );
+        ));
 
         let target = PublishTarget::Pool {
             pool: pool.clone(),
@@ -5503,13 +7387,14 @@ mod tests {
         )])];
 
         // Mirror the handler: scope the inbound context over the publish.
-        let (_request_id, _rx) = publisher
+        let (_request_id, _rx, durability) = publisher
             .publish_work(
                 target, &pool, "encode", model, "pytorch", "", items, &params,
             )
             .with_context(cx)
             .await
             .expect("publish_work");
+        durability.wait().await.expect("durable publish ACK");
 
         let msg = tokio::time::timeout(Duration::from_secs(5), sub.next())
             .await

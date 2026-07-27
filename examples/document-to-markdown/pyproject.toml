@@ -1,0 +1,34 @@
+[project]
+name = "document-to-markdown"
+version = "0.1.0"
+description = "Convert difficult real PDFs to structured Markdown through one SIE extract call"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "sie-sdk>=0.6.23",
+]
+
+[project.scripts]
+fetch-documents = "document_to_markdown.fetch:main"
+convert-documents = "document_to_markdown.convert:main"
+eval-documents = "document_to_markdown.evaluate:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+    "ruff>=0.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

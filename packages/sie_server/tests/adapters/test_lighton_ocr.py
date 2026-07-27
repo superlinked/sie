@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 from sie_server.core.prepared import LightOnOCRPayload, PreparedItem
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidMediaError, Item
 
 if TYPE_CHECKING:
-    from sie_server.adapters.lighton_ocr import LightOnOCRAdapter
+    from sie_server.adapters.lighton_ocr.adapter import LightOnOCRAdapter
 
 
 class _FakeTextConfig:
@@ -77,7 +77,7 @@ class TestLightOnOCRAdapter:
     @pytest.fixture
     def adapter(self) -> LightOnOCRAdapter:
         """Create an adapter instance."""
-        from sie_server.adapters.lighton_ocr import LightOnOCRAdapter
+        from sie_server.adapters.lighton_ocr.adapter import LightOnOCRAdapter
 
         return LightOnOCRAdapter(
             "lightonai/LightOnOCR-2-1B",
@@ -89,6 +89,11 @@ class TestLightOnOCRAdapter:
         caps = adapter.capabilities
         assert caps.inputs == ["image"]
         assert caps.outputs == ["json"]
+
+    def test_page_metering_replaces_generic_image_units(self, adapter: LightOnOCRAdapter) -> None:
+        items = [Item(images=[{"data": b"page", "format": "png"}])]
+
+        assert adapter.count_input_images(items) is None
 
     def test_dims(self, adapter: LightOnOCRAdapter) -> None:
         """Adapter reports empty dimensions (extraction model)."""
@@ -110,6 +115,18 @@ class TestLightOnOCRAdapter:
         items = [Item(images=[ImageInput(data=b"fake", format="jpeg")])]
         with pytest.raises(RuntimeError, match="Model not loaded"):
             adapter.extract(items)
+
+    @pytest.mark.parametrize("images", [None, [], [{"data": b"one"}, {"data": b"two"}]])
+    def test_extract_rejects_non_single_image_arrays(
+        self,
+        adapter: LightOnOCRAdapter,
+        images: list[dict[str, bytes]] | None,
+    ) -> None:
+        adapter._model = _FakeModel()
+        adapter._processor = _FakeProcessor()
+
+        with pytest.raises(InvalidMediaError, match="exactly one image"):
+            adapter.extract([Item(images=images)])
 
     def test_build_messages_default(self, adapter: LightOnOCRAdapter) -> None:
         """Default messages have system and user roles with image."""
@@ -150,7 +167,7 @@ class TestLightOnOCRAdapter:
 
     def test_system_prompt_configurable(self) -> None:
         """Custom system_prompt is respected."""
-        from sie_server.adapters.lighton_ocr import LightOnOCRAdapter
+        from sie_server.adapters.lighton_ocr.adapter import LightOnOCRAdapter
 
         custom_prompt = "Extract all text from the image."
         adapter = LightOnOCRAdapter(
@@ -193,10 +210,11 @@ class TestLightOnOCRAdapter:
 
         # Results decoded per row, in original order.
         assert [ents[0]["text"] for ents in out.entities] == ["id501", "id502", "id503"]
+        assert out.pages == [1, 1, 1]
 
     def test_extract_preprocessed_respects_max_batch_images(self) -> None:
         """max_batch_images chunks a large batch into bounded sub-batches."""
-        from sie_server.adapters.lighton_ocr import LightOnOCRAdapter
+        from sie_server.adapters.lighton_ocr.adapter import LightOnOCRAdapter
 
         adapter = LightOnOCRAdapter("lightonai/LightOnOCR-2-1B", max_batch_images=2)
         adapter._model = _FakeModel()
@@ -216,7 +234,7 @@ class TestLightOnOCRAdapter:
 
     def test_extract_preprocessed_max_batch_one_is_serial(self) -> None:
         """max_batch_images=1 issues one generate() per item, preserving order."""
-        from sie_server.adapters.lighton_ocr import LightOnOCRAdapter
+        from sie_server.adapters.lighton_ocr.adapter import LightOnOCRAdapter
 
         adapter = LightOnOCRAdapter("lightonai/LightOnOCR-2-1B", max_batch_images=1)
         adapter._model = _FakeModel()

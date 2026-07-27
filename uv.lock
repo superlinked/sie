@@ -12,6 +12,7 @@ resolution-markers = [
 members = [
     "sie",
     "sie-admin",
+    "sie-audio-prep",
     "sie-bench",
     "sie-chroma",
     "sie-config",
@@ -277,6 +278,28 @@ wheels = [
 ]
 
 [[package]]
+name = "awscrt"
+version = "0.31.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/05/1697c67ad80be475d5deb8961182d10b4a93d29f1cf9f6fdea169bda88c3/awscrt-0.31.2.tar.gz", hash = "sha256:552555de1beff02d72a1f6d384cd49c5a7c283418310eae29d21bcb749c65792", size = 38169245 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/8a/c5f8b1a4a3dc37b6b1a2a663887ac2fe67b1e6c877f50e68aa0ac86b74be/awscrt-0.31.2-cp311-abi3-macosx_10_15_universal2.whl", hash = "sha256:49c003d7fe40002dc4e26500f6cc63c61b399d44b4e38e66b5065845d296d230", size = 3457136 },
+    { url = "https://files.pythonhosted.org/packages/e3/bd/bde40ce3ae7d5d08030ac59442b6121ce8b078651dfec87756ff9f7a4d4e/awscrt-0.31.2-cp311-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:ac9d662de99c2f1393011cde357d0c8730aef9df4eedf258505bdf6ff20a3c01", size = 3888743 },
+    { url = "https://files.pythonhosted.org/packages/1b/88/f4251a2028f0cafee9806060a8538e6b4909bb5136584ba4d219c6d5bf04/awscrt-0.31.2-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:8387e72f856b7a92f7d08ff9a1dfa6960d6e9ed39509c63c5905e240071af23e", size = 4175553 },
+    { url = "https://files.pythonhosted.org/packages/e2/e4/9aaaaed4016ec142cac0ff01f6a8f5c9bed0c5d3d2dfcc3a269e66dca6e6/awscrt-0.31.2-cp311-abi3-musllinux_1_1_aarch64.whl", hash = "sha256:43b3f774afd5dc2471d38490a16ed3e789814f120b9552c76920cb2fb812376f", size = 3792457 },
+    { url = "https://files.pythonhosted.org/packages/0e/94/3d8e8732854d7cf9a6468e3074c3d2151cea95699fa10cdda7df86d4e4e4/awscrt-0.31.2-cp311-abi3-musllinux_1_1_x86_64.whl", hash = "sha256:10d5541726b87246fbfeb4c70036373b7aba8b40f489e5ae886eabc09a68ef38", size = 4031362 },
+    { url = "https://files.pythonhosted.org/packages/bd/21/0d09bc1d1c193026322352f445271ae3f60ca62d8f048d6f07a000a1d869/awscrt-0.31.2-cp311-abi3-win32.whl", hash = "sha256:14e28cabf7857cfe6d82548821410c688e772a819dbf15d167359d7bc54cdb8d", size = 4027275 },
+    { url = "https://files.pythonhosted.org/packages/8a/d4/94075b06d37b80727738afd24548ac2a20ca6980822a3ce1265850e00b53/awscrt-0.31.2-cp311-abi3-win_amd64.whl", hash = "sha256:ebd98aaaf348334f72d3a38aed18c29b808fe978c295e7c6bc2e21deac5126c8", size = 4177352 },
+    { url = "https://files.pythonhosted.org/packages/95/eb/9ce53bd498050049ef88e9d074fac6bbe19301ba9593d6f7a834a2321a68/awscrt-0.31.2-cp313-abi3-macosx_10_15_universal2.whl", hash = "sha256:3eb623d0abfbbe5e6666b9c39780737b472766b0e01168296b048a27ef9d13e8", size = 3455722 },
+    { url = "https://files.pythonhosted.org/packages/9d/88/c9ceaa77cd0384c6f50cc1854fcf5dc0b1aa364349aeb18e1c2d1d6ffdd2/awscrt-0.31.2-cp313-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:03de99bd3077e1b3bbcd1eca9d06a735fdb8fd47b2af8b1d464d43ede00f125a", size = 3880501 },
+    { url = "https://files.pythonhosted.org/packages/98/ca/27858b8de6a1bbb4e4df035a272b6e80d214b83bc6d6998b286df82be1b5/awscrt-0.31.2-cp313-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:1a4adc5ff6eae8a46f5bca4ed70ad68d36f1e272e2fcd60afeef71b4d02afe06", size = 4170259 },
+    { url = "https://files.pythonhosted.org/packages/da/25/c0668247ac856ab6d033b7ac7ee3f4f32b6628a7900542b303eede4685e0/awscrt-0.31.2-cp313-abi3-musllinux_1_1_aarch64.whl", hash = "sha256:83d45c3ee9e1fe10c2d316b93402157199edb5d20b1584facf24f82981b55190", size = 3783744 },
+    { url = "https://files.pythonhosted.org/packages/91/52/3ac02206875947a7ed388ba176e7194f77a9a03430333584e63c8011d0c9/awscrt-0.31.2-cp313-abi3-musllinux_1_1_x86_64.whl", hash = "sha256:a1d1f3e07cdd926bbc9a3715826e5794217780e7a326c329bdbf453533d2141a", size = 4026326 },
+    { url = "https://files.pythonhosted.org/packages/80/16/6256dd1f1bb4172dde19d0b3e35f1fc4eec9c296f214246a7a6628ed03b4/awscrt-0.31.2-cp313-abi3-win32.whl", hash = "sha256:cf02b5db1181811f5e7c70e772986ef4a6577f722a6b3222842ae377df41d261", size = 4021950 },
+    { url = "https://files.pythonhosted.org/packages/62/cf/14a9357d992338cd05a6389c9f6c51a5fc1e1c5e421fe061bf528f15374c/awscrt-0.31.2-cp313-abi3-win_amd64.whl", hash = "sha256:4b459be11d9aba47d3cb37e10e97702eed2a2858aa381e2586f7f73d15d85bdf", size = 4172066 },
+]
+
+[[package]]
 name = "azure-core"
 version = "1.41.0"
 source = { registry = "https://pypi.org/simple" }
@@ -457,6 +480,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2b/9d/b3f617d011c42eb804d993103b8fa9acdce153e181a3042f58bfe33d7cb4/boto3-1.42.96-py3-none-any.whl", hash = "sha256:2f4566da2c209a98bdbfc874d813ef231c84ad24e4f815e9bc91de5f63351a24", size = 140557 },
 ]
 
+[package.optional-dependencies]
+crt = [
+    { name = "botocore", extra = ["crt"] },
+]
+
 [[package]]
 name = "botocore"
 version = "1.42.96"
@@ -469,6 +497,11 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/61/77/2c333622a1d47cf5bf73cdcab0cb6c92addafbef2ec05f81b9f75687d9e5/botocore-1.42.96.tar.gz", hash = "sha256:75b3b841ffacaa944f645196655a21ca777591dd8911e732bfb6614545af0250", size = 15263344 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/45/56/152c3a859ca1b9d77ed16deac3cf81682013677c68cf5715698781fc81bd/botocore-1.42.96-py3-none-any.whl", hash = "sha256:db2c3e2006628be6fde81a24124a6563c363d6982fb92728837cf174bad9d98a", size = 14945920 },
+]
+
+[package.optional-dependencies]
+crt = [
+    { name = "awscrt" },
 ]
 
 [[package]]
@@ -3272,7 +3305,7 @@ wheels = [
 
 [[package]]
 name = "modal"
-version = "1.4.2"
+version = "1.5.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -3284,15 +3317,14 @@ dependencies = [
     { name = "rich" },
     { name = "synchronicity" },
     { name = "toml" },
-    { name = "typer" },
     { name = "types-certifi" },
     { name = "types-toml" },
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/53/67/c84029cf5a0eaa366400d2cae3901c757a313349e7e1ccf4fc4644bf3cf8/modal-1.4.2.tar.gz", hash = "sha256:ab4e76a2c28fc0e0aebb616f11a2658051518d38cd241825af27fb34e2688b46", size = 699847 }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/e6/44f609084472d16a3acf7748c184e23d3009944eed5860e855aaafc61065/modal-1.5.2.tar.gz", hash = "sha256:ac0d2983ecccacb80c54385906404d75f37a3751f1374c750974cd7853c0008a", size = 818040 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bb/65/fa87a72b7bf150dbf9949e503b8a45e278789201ac3691b8af1cd861a7d6/modal-1.4.2-py3-none-any.whl", hash = "sha256:6993874476dfd51057e36c778dbd7aae58811802515532447336eced00c81e28", size = 802775 },
+    { url = "https://files.pythonhosted.org/packages/e3/fe/7e284d889eb3ea2c307e48828eccdd9a984beb2e096bce5577ef796592e9/modal-1.5.2-py3-none-any.whl", hash = "sha256:7508a44f8742c6f26be4d28da71f46092ef3bcc07d0f27cbd0ea8c9d6d9fc873", size = 932258 },
 ]
 
 [[package]]
@@ -3409,7 +3441,7 @@ wheels = [
 [[package]]
 name = "mteb"
 version = "2.7.5"
-source = { git = "https://github.com/superlinked/mteb.git?rev=main#0667a6b974fc4a0c15ebfdb0e1eba029698dff00" }
+source = { git = "https://github.com/superlinked/mteb.git?rev=main#f8075d1bae97a232edec786f4e664cecd54e8767" }
 dependencies = [
     { name = "datasets" },
     { name = "numpy" },
@@ -4472,15 +4504,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/79/45/b0847d88d6cfeb4413566738c8bbf1e1995fad3d42515327ff32cc1eb578/prettytable-3.17.0.tar.gz", hash = "sha256:59f2590776527f3c9e8cf9fe7b66dd215837cca96a9c39567414cbc632e8ddb0", size = 67892 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ee/8c/83087ebc47ab0396ce092363001fa37c17153119ee282700c0713a195853/prettytable-3.17.0-py3-none-any.whl", hash = "sha256:aad69b294ddbe3e1f95ef8886a060ed1666a0b83018bbf56295f6f226c43d287", size = 34433 },
-]
-
-[[package]]
-name = "prometheus-client"
-version = "0.25.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/1b/fb/d9aa83ffe43ce1f19e557c0971d04b90561b0cfd50762aafb01968285553/prometheus_client-0.25.0.tar.gz", hash = "sha256:5e373b75c31afb3c86f1a52fa1ad470c9aace18082d39ec0d2f918d11cc9ba28", size = 86035 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8d/9b/d4b1e644385499c8346fa9b622a3f030dce14cd6ef8a1871c221a17a67e7/prometheus_client-0.25.0-py3-none-any.whl", hash = "sha256:d5aec89e349a6ec230805d0df882f3807f74fd6c1a2fa86864e3c2279059fed1", size = 64154 },
 ]
 
 [[package]]
@@ -5703,7 +5726,7 @@ dev = [
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "kaleido", specifier = ">=1.3.0" },
     { name = "marimo", specifier = ">=0.23.9" },
-    { name = "modal", specifier = ">=0.73" },
+    { name = "modal", specifier = "==1.5.2" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "plotly", specifier = ">=6.1.1" },
     { name = "pre-commit", specifier = "~=4.0" },
@@ -5723,7 +5746,7 @@ dev = [
 
 [[package]]
 name = "sie-admin"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "packages/sie_admin" }
 dependencies = [
     { name = "httpx" },
@@ -5755,17 +5778,26 @@ requires-dist = [
 ]
 
 [[package]]
+name = "sie-audio-prep"
+version = "0.6.24"
+source = { editable = "packages/sie_audio_prep" }
+
+[[package]]
 name = "sie-bench"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "packages/sie_bench" }
 dependencies = [
     { name = "aiohttp" },
     { name = "anyio" },
+    { name = "boto3", extra = ["crt"] },
     { name = "docker" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "mteb" },
     { name = "nvidia-ml-py" },
+    { name = "packaging" },
     { name = "psutil" },
+    { name = "pyarrow" },
     { name = "pylate" },
     { name = "pypdfium2" },
     { name = "rapidfuzz" },
@@ -5811,10 +5843,12 @@ wandb = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "anyio", specifier = ">=4.0" },
+    { name = "boto3", extras = ["crt"], specifier = ">=1.41,<2" },
     { name = "docker", specifier = ">=7,<8" },
     { name = "fastembed", marker = "extra == 'all'", specifier = ">=0.4,<1" },
     { name = "fastembed", marker = "extra == 'fastembed'", specifier = ">=0.4,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "jsonschema", specifier = ">=4,<5" },
     { name = "mlflow", marker = "extra == 'all'", specifier = ">=2.10" },
     { name = "mlflow", marker = "extra == 'mlflow'", specifier = ">=2.10" },
     { name = "mlflow", marker = "extra == 'tracking'", specifier = ">=2.10" },
@@ -5822,7 +5856,9 @@ requires-dist = [
     { name = "nvidia-ml-py", specifier = ">=13.5,<14" },
     { name = "olmocr", extras = ["bench"], marker = "extra == 'all'", specifier = ">=0.4.27,<1" },
     { name = "olmocr", extras = ["bench"], marker = "extra == 'quality-ocr'", specifier = ">=0.4.27,<1" },
+    { name = "packaging", specifier = ">=24,<25" },
     { name = "psutil", specifier = ">=5" },
+    { name = "pyarrow", specifier = ">=14,<24" },
     { name = "pycocotools", marker = "extra == 'all'", specifier = ">=2.0" },
     { name = "pycocotools", marker = "extra == 'detection'", specifier = ">=2.0" },
     { name = "pylate", specifier = ">=1.0.0" },
@@ -5841,7 +5877,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-chroma"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "integrations/sie_chroma" }
 dependencies = [
     { name = "chromadb" },
@@ -5869,9 +5905,13 @@ source = { editable = "packages/sie_config" }
 dependencies = [
     { name = "fastapi" },
     { name = "nats-py" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
     { name = "orjson" },
-    { name = "prometheus-client" },
     { name = "pyyaml" },
+    { name = "requests" },
     { name = "rich" },
     { name = "sie-sdk", extra = ["storage"] },
     { name = "typer" },
@@ -5895,9 +5935,13 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "google-cloud-storage", marker = "extra == 'gcs'", specifier = ">=2.18,<3" },
     { name = "nats-py", specifier = ">=2.9,<3" },
+    { name = "opentelemetry-api", specifier = ">=1.28,<2" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.28,<2" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.28,<2" },
+    { name = "opentelemetry-sdk", specifier = ">=1.28,<2" },
     { name = "orjson", specifier = ">=3.10,<4" },
-    { name = "prometheus-client", specifier = ">=0.20,<1" },
     { name = "pyyaml", specifier = ">=6,<7" },
+    { name = "requests", specifier = ">=2.32,<3" },
     { name = "rich", specifier = ">=13,<14" },
     { name = "sie-sdk", extras = ["storage"], editable = "packages/sie_sdk" },
     { name = "typer", specifier = ">=0.14,<1" },
@@ -5913,7 +5957,7 @@ dev = [
 
 [[package]]
 name = "sie-crewai"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "integrations/sie_crewai" }
 dependencies = [
     { name = "crewai" },
@@ -5938,7 +5982,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-dspy"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "integrations/sie_dspy" }
 dependencies = [
     { name = "dspy" },
@@ -5963,7 +6007,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-haystack"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "integrations/sie_haystack" }
 dependencies = [
     { name = "haystack-ai" },
@@ -5990,7 +6034,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-lancedb"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "integrations/sie_lancedb" }
 dependencies = [
     { name = "lancedb" },
@@ -6017,7 +6061,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-langchain"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "integrations/sie_langchain" }
 dependencies = [
     { name = "langchain-core" },
@@ -6044,7 +6088,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-llamaindex"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "integrations/sie_llamaindex" }
 dependencies = [
     { name = "llama-index-core" },
@@ -6110,7 +6154,7 @@ dev = [
 
 [[package]]
 name = "sie-qdrant"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "integrations/sie_qdrant" }
 dependencies = [
     { name = "qdrant-client" },
@@ -6133,7 +6177,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-sdk"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "packages/sie_sdk" }
 dependencies = [
     { name = "aiohttp" },
@@ -6186,7 +6230,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-server"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "packages/sie_server" }
 dependencies = [
     { name = "blake3" },
@@ -6213,9 +6257,9 @@ dependencies = [
     { name = "packaging" },
     { name = "peft" },
     { name = "pillow" },
-    { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "rich" },
     { name = "safetensors" },
@@ -6280,9 +6324,9 @@ requires-dist = [
     { name = "packaging", specifier = ">=24,<25" },
     { name = "peft", specifier = ">=0.19,<1" },
     { name = "pillow", specifier = ">=12.2.0" },
-    { name = "prometheus-client", specifier = ">=0.21,<1" },
     { name = "pydantic", specifier = ">=2.9,<3" },
     { name = "pydantic-settings", specifier = ">=2.6,<3" },
+    { name = "python-multipart", specifier = ">=0.0.20,<1" },
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "rich", specifier = ">=13,<14" },
     { name = "safetensors", specifier = ">=0.4,<1" },
@@ -6324,7 +6368,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-weaviate"
-version = "0.6.19"
+version = "0.6.24"
 source = { editable = "integrations/sie_weaviate" }
 dependencies = [
     { name = "sie-sdk" },
@@ -6564,14 +6608,14 @@ wheels = [
 
 [[package]]
 name = "synchronicity"
-version = "0.12.2"
+version = "0.12.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/5e/50ea27817003665c7cc4f5bdad309f13d6329037f657848ee87fe06c3740/synchronicity-0.12.2.tar.gz", hash = "sha256:6fd605a5035d1ec74ce48fffaca80ea00345c84ca34223914e2436fb4f162ff9", size = 60018 }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/1c/f51dc54bbd302991026a53f9790735540e0e9e1184e9d5939f02446aa5bc/synchronicity-0.12.5.tar.gz", hash = "sha256:94d96b1d85698e3056b96a793b8c0949af6584e4a7d877fabdeb5385efe230aa", size = 60745 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/41/44/4f6ba4e2c171847e6f9a460213b196bbf26edea43d0e66889c7ccc55d368/synchronicity-0.12.2-py3-none-any.whl", hash = "sha256:9dbaca81fb7f2b57c6dea326e514e1c80e9ccfd9c9618515e84fa6091026273b", size = 41312 },
+    { url = "https://files.pythonhosted.org/packages/06/74/ad9b99520f70c0bc3318e582e359d360cfc0f7afd7bf368a7f24013cece7/synchronicity-0.12.5-py3-none-any.whl", hash = "sha256:fdbbb10d437bc08a6b0f814fc66fddd1b58ffed314533d42f1ab555801e781af", size = 41107 },
 ]
 
 [[package]]

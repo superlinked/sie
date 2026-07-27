@@ -16,7 +16,7 @@
 //!     (`sie_server._ipc_test_harness`) that returns a canned
 //!     `result_msgpack` without loading any model.
 //!   * Anything about the gateway publisher / collector.
-//!   * Production configuration of S3, metrics scraping, etc.
+//!   * Production configuration of S3 and other external services.
 //!
 //! External deps required: `nats-server` on `$PATH` and `uv` (for the
 //! Python harness). If either is missing the test is skipped so clean
@@ -30,8 +30,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 use sie_server_sidecar::subject::normalize_model_id;
-use sie_server_sidecar::work_types::{WorkItem, WorkResult};
+use sie_server_sidecar::work_types::{ResultChunkV1, WorkItem, WorkResult};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
@@ -50,6 +51,7 @@ fn text_item(text: impl Into<String>) -> rmpv::Value {
     msg_value(serde_json::json!({ "text": text }))
 }
 
+#[cfg(target_os = "linux")]
 fn document_item(data: Vec<u8>, format: &str) -> rmpv::Value {
     rmpv::Value::Map(vec![(
         rmpv::Value::from("document"),
@@ -78,6 +80,7 @@ fn msg_map_get<'a>(value: &'a rmpv::Value, key: &str) -> Option<&'a rmpv::Value>
         .map(|(_, v)| v)
 }
 
+#[cfg(target_os = "linux")]
 fn msg_as_bool(value: &rmpv::Value) -> Option<bool> {
     match value {
         rmpv::Value::Boolean(value) => Some(*value),
@@ -85,6 +88,7 @@ fn msg_as_bool(value: &rmpv::Value) -> Option<bool> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn msg_as_str(value: &rmpv::Value) -> Option<&str> {
     match value {
         rmpv::Value::String(value) => value.as_str(),
@@ -93,6 +97,7 @@ fn msg_as_str(value: &rmpv::Value) -> Option<&str> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn msg_as_u64(value: &rmpv::Value) -> Option<u64> {
     match value {
         rmpv::Value::Integer(value) => value.as_u64(),
@@ -107,6 +112,61 @@ async fn smoke_test_guard() -> OwnedSemaphorePermit {
         .acquire_owned()
         .await
         .expect("smoke test semaphore is open")
+}
+
+async fn receive_chunked_work_result(
+    sub: &mut async_nats::Subscriber,
+    expected_request_id: &str,
+) -> WorkResult {
+    let first = timeout(Duration::from_secs(30), sub.next())
+        .await
+        .expect("timed out waiting for first ResultChunkV1")
+        .expect("reply stream closed");
+    let first: ResultChunkV1 =
+        rmp_serde::from_slice(&first.payload).expect("decode first ResultChunkV1");
+    assert_eq!(first.kind, "result_chunk_v1");
+    assert_eq!(first.request_id, expected_request_id);
+    assert!(!first.work_item_id.is_empty());
+    assert!((1..=64).contains(&first.chunk_count));
+    assert!(first.chunk_index < first.chunk_count);
+    assert_eq!(first.transfer_digest.len(), 32);
+
+    let chunk_count = first.chunk_count as usize;
+    let total_bytes = first.total_bytes as usize;
+    let digest = first.transfer_digest.clone();
+    let work_item_id = first.work_item_id.clone();
+    let item_index = first.item_index;
+    let mut chunks = vec![None; chunk_count];
+    chunks[first.chunk_index as usize] = Some(first.payload);
+
+    while chunks.iter().any(Option::is_none) {
+        let message = timeout(Duration::from_secs(30), sub.next())
+            .await
+            .expect("timed out waiting for ResultChunkV1")
+            .expect("reply stream closed");
+        let chunk: ResultChunkV1 =
+            rmp_serde::from_slice(&message.payload).expect("decode ResultChunkV1");
+        assert_eq!(chunk.kind, "result_chunk_v1");
+        assert_eq!(chunk.request_id, expected_request_id);
+        assert_eq!(chunk.work_item_id, work_item_id);
+        assert_eq!(chunk.item_index, item_index);
+        assert_eq!(chunk.chunk_count as usize, chunk_count);
+        assert_eq!(chunk.total_bytes as usize, total_bytes);
+        assert_eq!(chunk.transfer_digest, digest);
+        let slot = chunks
+            .get_mut(chunk.chunk_index as usize)
+            .expect("chunk index within advertised count");
+        assert!(slot.is_none(), "duplicate chunk index");
+        *slot = Some(chunk.payload);
+    }
+
+    let mut encoded = Vec::with_capacity(total_bytes);
+    for chunk in chunks {
+        encoded.extend_from_slice(&chunk.expect("complete chunk set"));
+    }
+    assert_eq!(encoded.len(), total_bytes);
+    assert_eq!(&Sha256::digest(&encoded)[..], digest.as_slice());
+    rmp_serde::from_slice(&encoded).expect("decode reassembled WorkResult")
 }
 
 fn pool_work_subject(pool: &str, machine_profile: &str, bundle: &str, model_id: &str) -> String {
@@ -227,24 +287,6 @@ async fn wait_for_tcp(port: u16, budget: Duration) -> Result<(), String> {
     Err(format!("timeout waiting for 127.0.0.1:{port}"))
 }
 
-/// Raw HTTP/1.1 GET /metrics against the worker's Prometheus endpoint.
-/// A hand-rolled client avoids pulling reqwest into dev-deps for this
-/// single assertion.
-fn scrape_metrics(port: u16) -> std::io::Result<String> {
-    use std::io::{Read, Write};
-    let mut sock = TcpStream::connect(("127.0.0.1", port))?;
-    sock.set_read_timeout(Some(Duration::from_secs(5)))?;
-    sock.set_write_timeout(Some(Duration::from_secs(5)))?;
-    sock.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
-    let mut raw = String::new();
-    sock.read_to_string(&mut raw)?;
-    // Strip HTTP headers — body starts after the first blank line.
-    match raw.find("\r\n\r\n") {
-        Some(idx) => Ok(raw[idx + 4..].to_string()),
-        None => Ok(raw),
-    }
-}
-
 impl Drop for NatsHarness {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
@@ -361,8 +403,7 @@ impl PythonHarness {
 
     /// Like [`Self::start`] but injects a fixed `per_request_delay_ms`
     /// into every `process_*_batch` RPC on the Python side. Tests use
-    /// this to make concurrent in-flight RPCs observable on the
-    /// Prometheus `sie_worker_ipc_pool_inflight` gauge.
+    /// this to distinguish concurrent from serialized execution by latency.
     async fn start_with_delay_ms(socket_path: PathBuf, per_request_delay_ms: u64) -> Self {
         Self::start_with_extra_args(socket_path, per_request_delay_ms, Vec::new()).await
     }
@@ -541,7 +582,7 @@ impl WorkerHarness {
         ipc_socket: &std::path::Path,
         pool: &str,
         bundle: &str,
-        metrics_port: u16,
+        probe_port: u16,
         payload_store_url: Option<&str>,
     ) -> Self {
         Self::spawn_with_env(
@@ -549,7 +590,7 @@ impl WorkerHarness {
             ipc_socket,
             pool,
             bundle,
-            metrics_port,
+            probe_port,
             payload_store_url,
             &[],
         )
@@ -562,7 +603,7 @@ impl WorkerHarness {
         ipc_socket: &std::path::Path,
         pool: &str,
         bundle: &str,
-        metrics_port: u16,
+        probe_port: u16,
         payload_store_url: Option<&str>,
         extra_env: &[(&str, &str)],
     ) -> Self {
@@ -573,7 +614,7 @@ impl WorkerHarness {
             .env("SIE_MACHINE_PROFILE", pool)
             .env("SIE_BUNDLE", bundle)
             .env("SIE_IPC_SOCKET_PATH", ipc_socket)
-            .env("SIE_WORKER_METRICS_PORT", metrics_port.to_string())
+            .env("SIE_WORKER_PROBE_PORT", probe_port.to_string())
             .env("SIE_WORKER_ID", "smoke-worker")
             .env("SIE_WORKER_PING_INTERVAL_MS", "500")
             .env("RUST_LOG", "info,sie_server_sidecar=debug,async_nats=warn")
@@ -642,14 +683,14 @@ async fn smoke_encode_request_round_trips_through_rust_worker() {
     // 3. Start the worker-sidecar.
     let pool = "smoke";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, metrics_port, None);
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
 
-    // Wait until the worker metrics endpoint responds; this proves the binary
-    // started the NATS, IPC, and metrics stack.
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    // Wait until the worker probe endpoint responds; this proves the binary
+    // started the NATS, IPC, and probe stack.
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
 
     // Let the worker create the consumer before publishing. Without this the
     // publish could arrive before the stream exists.
@@ -705,6 +746,7 @@ async fn smoke_encode_request_round_trips_through_rust_worker() {
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "smoke-gw".into(),
+        accepts_result_chunks: true,
         reply_subject: reply_subject.clone(),
         traceparent: None,
         tracestate: None,
@@ -769,23 +811,64 @@ async fn smoke_encode_request_round_trips_through_rust_worker() {
         result.payload_fetch_ms,
     );
 
-    // Parity #2: the worker must expose Prometheus metrics that mirror
-    // Python's `sie_pull_loop_*` surface, so existing dashboards keep
-    // working. We just confirm the names show up after a successful
-    // encode cycle — exact counts live in the lib-side unit tests.
-    let body = scrape_metrics(metrics_port).expect("scrape /metrics");
-    for expected in [
-        "sie_pull_loop_items_fetched",
-        "sie_pull_loop_batch_process_seconds",
-        "sie_worker_messages_received_total",
-        "sie_worker_messages_acked_total",
-    ] {
-        assert!(
-            body.contains(expected),
-            "/metrics body missing expected metric {expected}:\n{body}"
-        );
-    }
+    // Production-boundary proof #1: force the Python response envelope above
+    // the 32 MiB legacy UDS frame limit. Receiving the sidecar's compact public
+    // error proves that the negotiated IPC chunks were reassembled and decoded;
+    // without IPC chunking the Rust client rejects the first physical frame and
+    // no WorkResult can be published.
+    let ipc_request_id = "smoke-ipc-chunk-1";
+    let mut ipc_oversized = work_item.clone();
+    ipc_oversized.request_id = ipc_request_id.into();
+    ipc_oversized.work_item_id = format!("{ipc_request_id}.0");
+    ipc_oversized.timestamp = now_s;
+    ipc_oversized.options = Some(serde_json::json!({
+        "ipc_test_result_bytes": 33 * 1024 * 1024,
+    }));
+    let payload = rmp_serde::to_vec_named(&ipc_oversized).expect("IPC-oversized WorkItem");
+    let _ = publish_jetstream_with_retry(&js, &subject, payload).await;
+    let reply = timeout(Duration::from_secs(60), sub.next())
+        .await
+        .expect("timed out waiting for IPC-chunked WorkResult")
+        .expect("reply stream closed");
+    let ipc_result: WorkResult =
+        rmp_serde::from_slice(&reply.payload).expect("decode IPC-chunked WorkResult");
+    assert_eq!(ipc_result.request_id, ipc_request_id);
+    assert!(!ipc_result.success);
+    assert_eq!(ipc_result.error_code.as_deref(), Some("PAYLOAD_TOO_LARGE"));
 
+    // Production-boundary proof #2: keep the logical result below the 16 MiB
+    // WorkResult cap but above the real NATS server's negotiated max_payload.
+    // The sidecar must publish actual ResultChunkV1 messages over NATS, which
+    // this test independently reassembles and verifies.
+    let nats_max_payload = client.max_payload();
+    let public_result_bytes = nats_max_payload.saturating_add(256 * 1024);
+    assert!(
+        public_result_bytes < 8 * 1024 * 1024,
+        "smoke NATS max_payload unexpectedly too large to exercise bounded chunking: {nats_max_payload}",
+    );
+    let nats_request_id = "smoke-nats-chunk-1";
+    let mut nats_oversized = work_item.clone();
+    nats_oversized.request_id = nats_request_id.into();
+    nats_oversized.work_item_id = format!("{nats_request_id}.0");
+    nats_oversized.timestamp = now_s;
+    nats_oversized.options = Some(serde_json::json!({
+        "ipc_test_result_bytes": public_result_bytes,
+    }));
+    let payload = rmp_serde::to_vec_named(&nats_oversized).expect("NATS-oversized WorkItem");
+    let _ = publish_jetstream_with_retry(&js, &subject, payload).await;
+    let nats_result = receive_chunked_work_result(&mut sub, nats_request_id).await;
+    assert!(
+        nats_result.success,
+        "chunked WorkResult should stay successful"
+    );
+    assert_eq!(nats_result.request_id, nats_request_id);
+    let canned: rmpv::Value =
+        rmp_serde::from_slice(&nats_result.result_msgpack).expect("decode binary canned result");
+    let test_blob = msg_map_get(&canned, "test_blob").expect("test_blob field");
+    let rmpv::Value::Binary(test_blob) = test_blob else {
+        panic!("test_blob must stay msgpack binary");
+    };
+    assert_eq!(test_blob.len(), public_result_bytes);
     // Drop everything in reverse order (workers/python/nats) via Drop impls.
     drop(_worker);
     drop(python);
@@ -817,11 +900,11 @@ async fn smoke_encode_direct_dispatch_round_trips_through_worker_stream() {
 
     let pool = "smoke-direct";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, metrics_port, None);
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -868,6 +951,191 @@ async fn smoke_encode_direct_dispatch_round_trips_through_worker_stream() {
     sleep(Duration::from_millis(200)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_cancel_is_namespaced_acks_before_ipc_and_excludes_generation() {
+    if skip_unless_tools_available() {
+        return;
+    }
+    let _guard = smoke_test_guard().await;
+
+    let nats = NatsHarness::start().await;
+    let generation_model = "Qwen/Qwen3-0.6B";
+    let sock = ShortSocket::new("ipc.sock");
+    let python = PythonHarness::start_with_extra_args(
+        sock.path.clone(),
+        1_500,
+        vec![
+            "--fake-generate-model".to_string(),
+            generation_model.to_string(),
+        ],
+    )
+    .await;
+
+    let pool = "smoke-cancel";
+    let bundle = "default";
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
+        .await
+        .expect("worker probe port");
+    sleep(Duration::from_millis(500)).await;
+
+    let client = async_nats::connect(&nats.url)
+        .await
+        .expect("client connect");
+    let js = async_nats::jetstream::new(client.clone());
+    let reply_subject = format!("_INBOX.smoke-cancel.{}", uuid::Uuid::new_v4());
+    let mut sub = client
+        .subscribe(reply_subject.clone())
+        .await
+        .expect("subscribe reply");
+    let encode_model = "BAAI/bge-m3";
+    let encode_subject = pool_work_subject(pool, pool, bundle, encode_model);
+
+    let namespace_request = "smoke-cancel-wrong-router";
+    client
+        .publish(
+            format!("work_cancel.other-gw.{namespace_request}"),
+            Vec::new().into(),
+        )
+        .await
+        .expect("publish wrong-router cancellation");
+    client
+        .flush()
+        .await
+        .expect("flush wrong-router cancellation");
+    sleep(Duration::from_millis(100)).await;
+    publish_work_item(
+        &js,
+        &encode_subject,
+        namespace_request,
+        encode_model,
+        "BAAI__bge-m3",
+        pool,
+        &reply_subject,
+    )
+    .await;
+    let reply = timeout(Duration::from_secs(10), sub.next())
+        .await
+        .expect("wrong-router cancellation must not suppress encode")
+        .expect("reply stream closed");
+    let result: WorkResult = rmp_serde::from_slice(&reply.payload).expect("decode WorkResult");
+    assert!(result.success);
+    assert_eq!(result.request_id, namespace_request);
+
+    let cancelled_request = "smoke-cancel-correct-router";
+    client
+        .publish(
+            format!("work_cancel.stress-gw.{cancelled_request}"),
+            Vec::new().into(),
+        )
+        .await
+        .expect("publish request cancellation");
+    client.flush().await.expect("flush request cancellation");
+    sleep(Duration::from_millis(100)).await;
+    let (stream_name, cancelled_sequence) = publish_work_item(
+        &js,
+        &encode_subject,
+        cancelled_request,
+        encode_model,
+        "BAAI__bge-m3",
+        pool,
+        &reply_subject,
+    )
+    .await;
+
+    // WorkQueue retention removes an item only after its consumer ACKs it.
+    // Poll the concrete published sequence instead of a telemetry backend:
+    // disappearance before the deliberately slow 1.5 s IPC response proves
+    // the cancellation tombstone ACK-dropped the encode at intake.
+    let stream = js
+        .get_stream(&stream_name)
+        .await
+        .expect("get cancellation work stream");
+    let ack_deadline = Instant::now() + Duration::from_secs(1);
+    let acknowledged_before_ipc = loop {
+        if stream.get_raw_message(cancelled_sequence).await.is_err() {
+            break true;
+        }
+        if Instant::now() >= ack_deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(25)).await;
+    };
+    assert!(
+        acknowledged_before_ipc,
+        "cancelled encode was not ACK-dropped before the 1.5s backend delay",
+    );
+    assert!(
+        timeout(Duration::from_millis(250), sub.next())
+            .await
+            .is_err(),
+        "cancelled encode unexpectedly published a result",
+    );
+
+    let generation_subject =
+        worker_work_subject(pool, pool, bundle, generation_model, "smoke-worker");
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let generation_work = WorkItem {
+        work_item_id: format!("{cancelled_request}.0"),
+        request_id: cancelled_request.into(),
+        item_index: 0,
+        total_items: 1,
+        operation: "generate".into(),
+        model_id: generation_model.into(),
+        profile_id: String::new(),
+        engine: String::new(),
+        pool_name: pool.into(),
+        admission_pool: String::new(),
+        machine_profile: pool.into(),
+        item: None,
+        payload_ref: None,
+        output_types: None,
+        instruction: None,
+        is_query: false,
+        options: None,
+        query_item: None,
+        query_payload_ref: None,
+        score_items: None,
+        labels: None,
+        output_schema: None,
+        generate: Some(serde_json::json!({
+            "prompt": "generation is not request-cancelled",
+            "max_new_tokens": 4,
+            "temperature": 0.0,
+            "top_p": 1.0,
+        })),
+        routing_key: None,
+        prompt_cache_key: None,
+        bundle_config_hash: String::new(),
+        router_id: "stress-gw".into(),
+        accepts_result_chunks: false,
+        reply_subject: reply_subject.clone(),
+        traceparent: None,
+        tracestate: None,
+        timestamp: now_s,
+    };
+    let payload = rmp_serde::to_vec_named(&generation_work).expect("encode generate WorkItem");
+    let _ = publish_jetstream_with_retry(&js, &generation_subject, payload).await;
+    let reply = timeout(Duration::from_secs(30), sub.next())
+        .await
+        .expect("generation sharing a request tombstone must still execute")
+        .expect("reply stream closed");
+    let body: serde_json::Value =
+        rmp_serde::from_slice(&reply.payload).expect("decode raw generate payload");
+    assert_eq!(body["smoke"], "generate");
+    assert_eq!(body["request_id"], cancelled_request);
+
+    drop(_worker);
+    drop(python);
+    drop(nats);
+    let _ = sock;
+    sleep(Duration::from_millis(200)).await;
+}
+
 /// End-to-end smoke test for generation direct-dispatch through the
 /// sidecar. The Python harness exposes one fake generation model and
 /// answers `ProcessGenerate` with the same event sequence a real
@@ -894,11 +1162,11 @@ async fn smoke_generate_direct_dispatch_round_trips_through_rust_worker() {
 
     let pool = "smoke-gen";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, metrics_port, None);
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -949,6 +1217,7 @@ async fn smoke_generate_direct_dispatch_round_trips_through_rust_worker() {
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "smoke-gw".into(),
+        accepts_result_chunks: false,
         reply_subject: reply_subject.clone(),
         traceparent: None,
         tracestate: None,
@@ -975,21 +1244,6 @@ async fn smoke_generate_direct_dispatch_round_trips_through_rust_worker() {
     assert_eq!(body["model_id"], model_id);
     assert_eq!(body["request_id"], request_id);
     assert_eq!(body["work_item_id"], format!("{request_id}.0"));
-
-    let mut acked = 0.0;
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        let metrics = scrape_metrics(metrics_port).expect("scrape /metrics");
-        acked = scrape_scalar(&metrics, "sie_worker_messages_acked_total").unwrap_or(0.0);
-        if acked >= 1.0 {
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    assert!(
-        acked >= 1.0,
-        "generate ProcessGenerate ACK event did not settle the JetStream message",
-    );
 
     drop(_worker);
     drop(python);
@@ -1023,12 +1277,12 @@ async fn smoke_generation_direct_dispatch_is_active_before_capability_reconcile(
 
     let pool = "smoke-gen-hot-add";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
+    let probe_port = find_free_tcp_port();
     let _worker =
-        WorkerHarness::spawn_with_env(&nats.url, &sock.path, pool, bundle, metrics_port, None, &[]);
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+        WorkerHarness::spawn_with_env(&nats.url, &sock.path, pool, bundle, probe_port, None, &[]);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -1079,6 +1333,7 @@ async fn smoke_generation_direct_dispatch_is_active_before_capability_reconcile(
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "smoke-gw".into(),
+        accepts_result_chunks: false,
         reply_subject: reply_subject.clone(),
         traceparent: None,
         tracestate: None,
@@ -1124,6 +1379,7 @@ async fn smoke_generation_direct_dispatch_is_active_before_capability_reconcile(
 ///   * The dispatcher feeds the decoded item into the Rust scheduler and
 ///     gets a successful `RunBatch` outcome back.
 ///   * `payload_fetch_ms` is populated (> 0) on the success path.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn smoke_payload_ref_request_round_trips_through_rust_worker() {
     if skip_unless_tools_available() {
@@ -1170,18 +1426,18 @@ async fn smoke_payload_ref_request_round_trips_through_rust_worker() {
     // 4. worker-sidecar wired to the payload store.
     let pool = "smoke";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
+    let probe_port = find_free_tcp_port();
     let _worker = WorkerHarness::spawn(
         &nats.url,
         &sock.path,
         pool,
         bundle,
-        metrics_port,
+        probe_port,
         Some(&payload_store_url),
     );
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     // 5. Publish a WorkItem with item=None and payload_ref set.
@@ -1228,6 +1484,7 @@ async fn smoke_payload_ref_request_round_trips_through_rust_worker() {
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "smoke-gw".into(),
+        accepts_result_chunks: false,
         reply_subject: reply_subject.clone(),
         traceparent: None,
         tracestate: None,
@@ -1289,6 +1546,7 @@ async fn smoke_payload_ref_request_round_trips_through_rust_worker() {
 
 /// Regression: document bytes must remain msgpack `bin` from the offloaded
 /// WorkItem payload through the Rust dispatcher and into the Python IPC item.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn smoke_extract_payload_ref_preserves_document_bytes_through_ipc() {
     if skip_unless_tools_available() {
@@ -1329,18 +1587,18 @@ async fn smoke_extract_payload_ref_preserves_document_bytes_through_ipc() {
 
     let pool = "smoke-doc";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
+    let probe_port = find_free_tcp_port();
     let _worker = WorkerHarness::spawn(
         &nats.url,
         &sock.path,
         pool,
         bundle,
-        metrics_port,
+        probe_port,
         Some(&payload_store_url),
     );
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -1386,6 +1644,7 @@ async fn smoke_extract_payload_ref_preserves_document_bytes_through_ipc() {
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "smoke-gw".into(),
+        accepts_result_chunks: false,
         reply_subject: reply_subject.clone(),
         traceparent: None,
         tracestate: None,
@@ -1472,32 +1731,12 @@ async fn smoke_extract_payload_ref_preserves_document_bytes_through_ipc() {
 //
 //   * a **burst** of N concurrent publishes resolves end-to-end in a wall
 //     clock comfortably below `ack_wait` (30 s), with **no redelivery
-//     count > 1** on any message (i.e. we never hit the stream-drop path);
-//   * the `sie_worker_nats_redelivery_total` counter stays at zero.
+//     count > 1** on any message (i.e. we never hit the stream-drop path).
 //
 // Both assertions were false before the long-lived-stream fix and are
 // true after it. This is effectively the cheapest stress test that would
 // have caught the production regression without the whole helm stack.
 // ---------------------------------------------------------------------------
-
-/// Scrape `sie_worker_nats_redelivery_total` from the worker's /metrics
-/// body. The counter is present unconditionally (emitted even at 0) by
-/// [`MetricsRegistry::new`], so a missing line is a test failure rather
-/// than "not enough load yet".
-fn redelivery_total(metrics_body: &str) -> u64 {
-    for line in metrics_body.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("sie_worker_nats_redelivery_total") {
-            let rest = rest.trim_start();
-            let val = rest.split_whitespace().next().unwrap_or("0");
-            return val.parse::<f64>().unwrap_or(0.0) as u64;
-        }
-    }
-    panic!("sie_worker_nats_redelivery_total missing from /metrics body:\n{metrics_body}");
-}
 
 async fn publish_jetstream_with_retry(
     js: &async_nats::jetstream::Context,
@@ -1535,7 +1774,7 @@ async fn publish_work_item(
     normalized: &str,
     pool: &str,
     reply_subject: &str,
-) {
+) -> (String, u64) {
     publish_work_item_with_admission_pool(
         js,
         subject,
@@ -1546,7 +1785,7 @@ async fn publish_work_item(
         "",
         reply_subject,
     )
-    .await;
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1559,7 +1798,7 @@ async fn publish_work_item_with_admission_pool(
     pool: &str,
     admission_pool: &str,
     reply_subject: &str,
-) {
+) -> (String, u64) {
     let _ = normalized; // subject is pre-built by caller
     let now_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1593,13 +1832,14 @@ async fn publish_work_item_with_admission_pool(
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "stress-gw".into(),
+        accepts_result_chunks: false,
         reply_subject: reply_subject.into(),
         traceparent: None,
         tracestate: None,
         timestamp: now_s,
     };
     let payload = rmp_serde::to_vec_named(&work_item).expect("encode WorkItem");
-    let _ = publish_jetstream_with_retry(js, subject, payload).await;
+    publish_jetstream_with_retry(js, subject, payload).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1618,13 +1858,13 @@ async fn pool_admission_pauses_until_gateway_assigns_worker() {
     let _python = PythonHarness::start(sock.path.clone()).await;
 
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
+    let probe_port = find_free_tcp_port();
     let _worker = WorkerHarness::spawn_with_env(
         &nats.url,
         &sock.path,
         pool,
         bundle,
-        metrics_port,
+        probe_port,
         None,
         &[
             ("SIE_GATEWAY_URL", gateway.url.as_str()),
@@ -1634,9 +1874,9 @@ async fn pool_admission_pauses_until_gateway_assigns_worker() {
             ("SIE_NAK_DELAY_S", "0.1"),
         ],
     );
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -1710,13 +1950,13 @@ async fn logical_pool_admission_naks_until_assigned_worker_serves_item() {
     let _python = PythonHarness::start(sock.path.clone()).await;
 
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
+    let probe_port = find_free_tcp_port();
     let _worker = WorkerHarness::spawn_with_env(
         &nats.url,
         &sock.path,
         physical_pool,
         bundle,
-        metrics_port,
+        probe_port,
         None,
         &[
             ("SIE_GATEWAY_URL", gateway.url.as_str()),
@@ -1726,9 +1966,9 @@ async fn logical_pool_admission_naks_until_assigned_worker_serves_item() {
             ("SIE_NAK_DELAY_S", "0.1"),
         ],
     );
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -1804,11 +2044,11 @@ async fn stress_concurrent_requests_do_not_stall_on_ack_wait() {
 
     let pool = "stress";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, metrics_port, None);
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -1885,17 +2125,6 @@ async fn stress_concurrent_requests_do_not_stall_on_ack_wait() {
         elapsed,
     );
 
-    // Metrics check: redelivery_total must stay at 0 because we never let
-    // messages sit past ack_wait.
-    let metrics = scrape_metrics(metrics_port).expect("scrape /metrics");
-    let redelivered = redelivery_total(&metrics);
-    assert_eq!(
-        redelivered, 0,
-        "sie_worker_nats_redelivery_total = {redelivered}, expected 0 \
-         (a non-zero value means the pull loop is letting messages sit \
-         past ack_wait, which is the regression we're guarding against)"
-    );
-
     drop(_worker);
     drop(python);
     drop(nats);
@@ -1924,11 +2153,11 @@ async fn stress_sustained_load_finishes_within_budget() {
 
     let pool = "stress-sustained";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, metrics_port, None);
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -1995,51 +2224,11 @@ async fn stress_sustained_load_finishes_within_budget() {
         BUDGET,
     );
 
-    let metrics = scrape_metrics(metrics_port).expect("scrape /metrics");
-    let redelivered = redelivery_total(&metrics);
-    // Under sustained load with a healthy worker we expect zero
-    // redeliveries; allow 1% headroom for scheduler noise.
-    assert!(
-        redelivered <= (TOTAL / 100) as u64,
-        "sie_worker_nats_redelivery_total = {redelivered}, over 1% of offered load",
-    );
-
     drop(_worker);
     drop(python);
     drop(nats);
     let _ = sock;
     sleep(Duration::from_millis(200)).await;
-}
-
-/// Scrape a single-series Prometheus gauge / counter value by metric name.
-/// Returns `None` if the line isn't present (e.g. label-variant unseen
-/// yet), in which case callers typically treat it as "zero observed".
-fn scrape_scalar(metrics_body: &str, name: &str) -> Option<f64> {
-    for line in metrics_body.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        let rest = match line.strip_prefix(name) {
-            Some(r) => r,
-            None => continue,
-        };
-        // Word-boundary guard — `foo` must not match `foo_extended`.
-        match rest.chars().next() {
-            Some(c) if c.is_whitespace() || c == '{' => {}
-            _ => continue,
-        }
-        let val = rest.split_whitespace().next_back().unwrap_or("nan");
-        return val.parse::<f64>().ok();
-    }
-    None
-}
-
-/// Scrape the total sample count of a Prometheus Histogram. Used to
-/// confirm that the pool-acquire path was actually exercised.
-fn histogram_count(metrics_body: &str, name: &str) -> u64 {
-    let needle = format!("{name}_count");
-    scrape_scalar(metrics_body, &needle).unwrap_or(0.0) as u64
 }
 
 /// Pool integration test. Drives a burst of requests across **multiple
@@ -2059,17 +2248,13 @@ fn histogram_count(metrics_body: &str, name: &str) -> u64 {
 ///   models, the dispatcher's `EnsureModelReady` + `RunBatch`
 ///   for each group become independent RPCs that the pool should run
 ///   in parallel.
-/// - Python-side delay (via `--per-request-delay-ms`) stretches each
-///   RPC long enough for Prometheus scrapes to catch a non-zero
-///   `sie_worker_ipc_pool_inflight` gauge mid-burst.
+/// - Python-side delay (via `--per-request-delay-ms`) makes serial and
+///   concurrent execution distinguishable by wall-clock time.
 ///
 /// Assertions:
-/// 1. `sie_worker_ipc_pool_size` matches the configured pool size.
-/// 2. All requests succeed.
-/// 3. The peak observed `sie_worker_ipc_pool_inflight` during the
-///    burst is `>= 2` — the regression guard for the single-mutex era.
-/// 4. End-to-end latency is under a budget that only holds if the
-///    model groups ran in parallel (vs. serialized).
+/// 1. All requests succeed.
+/// 2. End-to-end latency is under a budget that only holds if the model
+///    groups ran in parallel (vs. serialized).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pool_enables_concurrent_in_flight_ipc() {
     if skip_unless_tools_available() {
@@ -2104,69 +2289,29 @@ async fn pool_enables_concurrent_in_flight_ipc() {
 
     let pool = "pool-integ";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
+    let probe_port = find_free_tcp_port();
     let pool_size_str = POOL_SIZE.to_string();
     let _worker = WorkerHarness::spawn_with_env(
         &nats.url,
         &sock.path,
         pool,
         bundle,
-        metrics_port,
+        probe_port,
         None,
         &[
             ("SIE_IPC_POOL_SIZE", pool_size_str.as_str()),
             ("SIE_MAX_CONCURRENT_BATCHES", pool_size_str.as_str()),
         ],
     );
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
-
-    let pre = scrape_metrics(metrics_port).expect("initial scrape");
-    let observed_size = scrape_scalar(&pre, "sie_worker_ipc_pool_size")
-        .expect("sie_worker_ipc_pool_size gauge missing");
-    assert_eq!(
-        observed_size as usize, POOL_SIZE,
-        "configured SIE_IPC_POOL_SIZE did not propagate to the pool metric"
-    );
 
     let client = async_nats::connect(&nats.url)
         .await
         .expect("client connect");
     let js = async_nats::jetstream::new(client.clone());
-
-    // Poller: scrape the /metrics endpoint as fast as we reasonably
-    // can (10ms cadence) while the burst is in flight, tracking the
-    // peak inflight value seen.
-    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
-    let peak_inflight = Arc::new(AtomicI64::new(0));
-    let stop_poller = Arc::new(AtomicBool::new(false));
-    let peak_clone = Arc::clone(&peak_inflight);
-    let stop_clone = Arc::clone(&stop_poller);
-    let poller = tokio::spawn(async move {
-        while !stop_clone.load(AtomicOrdering::Relaxed) {
-            if let Ok(body) = scrape_metrics(metrics_port) {
-                if let Some(v) = scrape_scalar(&body, "sie_worker_ipc_pool_inflight") {
-                    let v = v as i64;
-                    let mut cur = peak_clone.load(AtomicOrdering::Relaxed);
-                    while v > cur
-                        && peak_clone
-                            .compare_exchange(
-                                cur,
-                                v,
-                                AtomicOrdering::Relaxed,
-                                AtomicOrdering::Relaxed,
-                            )
-                            .is_err()
-                    {
-                        cur = peak_clone.load(AtomicOrdering::Relaxed);
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    });
 
     // Fire 2 requests per model = 8 total requests across 4 groups.
     let mut join = tokio::task::JoinSet::new();
@@ -2218,20 +2363,7 @@ async fn pool_enables_concurrent_in_flight_ipc() {
     let elapsed = start.elapsed();
     assert_eq!(seen, total);
 
-    stop_poller.store(true, AtomicOrdering::Relaxed);
-    let _ = poller.await;
-
-    // --- Assertion 1: peak inflight observed > 1.
-    let peak = peak_inflight.load(AtomicOrdering::Relaxed);
-    assert!(
-        peak >= 2,
-        "peak sie_worker_ipc_pool_inflight = {peak}; expected >= 2 with \
-         {} distinct model groups in flight. inflight=1 throughout means \
-         the pool regressed to single-connection serialization.",
-        MODELS.len(),
-    );
-
-    // --- Assertion 2: latency budget — only meetable with parallel IPC.
+    // Latency budget — only meetable with parallel IPC.
     assert!(
         elapsed < BUDGET,
         "concurrent burst across {} model groups took {:?}; budget {:?}. \
@@ -2243,16 +2375,6 @@ async fn pool_enables_concurrent_in_flight_ipc() {
         MODELS.len(),
         PYTHON_DELAY_MS,
         Duration::from_millis((MODELS.len() as u64) * 2 * PYTHON_DELAY_MS),
-    );
-
-    // --- Assertion 3: the acquire histogram recorded samples.
-    let post = scrape_metrics(metrics_port).expect("post scrape");
-    let acquire_count = histogram_count(&post, "sie_worker_ipc_pool_acquire_wait_seconds");
-    assert!(
-        acquire_count >= MODELS.len() as u64,
-        "sie_worker_ipc_pool_acquire_wait_seconds_count = {acquire_count}; \
-         expected >= {} (one per model group's RunBatch RPC)",
-        MODELS.len(),
     );
 
     drop(_worker);
@@ -2331,13 +2453,13 @@ async fn smoke_prepared_tokens_round_trip_through_rust_worker() {
     let model_id = "tiny-prepared-tokens";
     let pool = "smoke-pt";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
+    let probe_port = find_free_tcp_port();
 
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, metrics_port, None);
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
 
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -2386,6 +2508,7 @@ async fn smoke_prepared_tokens_round_trip_through_rust_worker() {
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "smoke-gw".into(),
+        accepts_result_chunks: false,
         reply_subject: reply_subject.clone(),
         traceparent: None,
         tracestate: None,
@@ -2488,37 +2611,10 @@ async fn smoke_prepared_tokens_round_trip_through_rust_worker() {
 //   * concurrent-item coalescing into a single RunBatch (the whole
 //     reason the scheduler exists).
 //
-// We also scrape `/metrics` to assert the dispatcher's
-// `sie_worker_scheduler_enqueued_items_total{op=..}` counter actually
-// increments — that's the direct evidence the request went through the
-// scheduler path, not the legacy `process_*_batch` fallback.
+// Canonical queue and batch observations now leave through OTLP and are covered
+// by focused in-memory exporter tests. These smokes retain only functional
+// scheduler assertions and unrelated diagnostic checks.
 // ---------------------------------------------------------------------------
-
-/// Scrape a Prometheus counter value by metric name + exact label suffix.
-/// Returns 0.0 when the series isn't present (useful for before/after
-/// deltas where the first scrape may show the counter uninitialised).
-fn scrape_counter(body: &str, metric: &str, label_suffix: &str) -> f64 {
-    for line in body.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix(metric) else {
-            continue;
-        };
-        if !rest.starts_with(label_suffix) {
-            continue;
-        }
-        // After `metric{..labels..}` there's a space then the value.
-        let after_labels = match rest.find('}') {
-            Some(i) => &rest[i + 1..],
-            None => rest,
-        };
-        let val = after_labels.split_whitespace().next().unwrap_or("0");
-        return val.parse::<f64>().unwrap_or(0.0);
-    }
-    0.0
-}
 
 /// Publish a score WorkItem that carries an inline query + one score
 /// item (no payload_ref indirection). Mirrors `publish_work_item` but
@@ -2563,6 +2659,7 @@ async fn publish_score_work_item(
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "scheduler-smoke-gw".into(),
+        accepts_result_chunks: false,
         reply_subject: reply_subject.into(),
         traceparent: None,
         tracestate: None,
@@ -2614,6 +2711,7 @@ async fn publish_extract_work_item(
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "scheduler-smoke-gw".into(),
+        accepts_result_chunks: false,
         reply_subject: reply_subject.into(),
         traceparent: None,
         tracestate: None,
@@ -2623,16 +2721,8 @@ async fn publish_extract_work_item(
     let _ = publish_jetstream_with_retry(js, subject, payload).await;
 }
 
-/// Score: publish a score WorkItem, expect a reply, and assert the
-/// `sie_worker_scheduler_enqueued_items_total{op="score"}` counter
-/// stepped from 0 → 1. That's direct evidence the request went
-/// through `Dispatcher::enqueue_score_into_scheduler` (not the legacy
-/// `handle_score` path) and that the drain loop shipped the batch
-/// over `RunBatch`.
-///
-/// Regression guard: if anyone rewires the dispatcher so score bypasses
-/// the scheduler (or silently falls back to `process_score_batch`), the
-/// scheduler metric stays at 0 and this test fails loudly.
+/// Score: publish a score WorkItem and expect a successful reply through the
+/// scheduler's `RunBatch` path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn smoke_scheduler_routes_score_request_end_to_end() {
     if skip_unless_tools_available() {
@@ -2646,11 +2736,11 @@ async fn smoke_scheduler_routes_score_request_end_to_end() {
 
     let pool = "sched-score";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, metrics_port, None);
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -2682,22 +2772,6 @@ async fn smoke_scheduler_routes_score_request_end_to_end() {
     );
     assert_eq!(result.request_id, request_id);
 
-    // The scheduler counter is labelled `{model, op}`. The model label
-    // is the dispatcher's `model_label(model_id)` which for an
-    // unconfigured model collapses to the raw id.
-    let body = scrape_metrics(metrics_port).expect("scrape /metrics");
-    let enqueued = scrape_counter(
-        &body,
-        "sie_worker_scheduler_enqueued_items_total",
-        &format!("{{model=\"{model_id}\",operation=\"score\"}}"),
-    );
-    assert!(
-        enqueued >= 1.0,
-        "sie_worker_scheduler_enqueued_items_total for score must be >= 1 \
-         (actual: {enqueued}). A zero means score bypassed the Rust \
-         scheduler — check Dispatcher::enqueue_score_into_scheduler."
-    );
-
     drop(_worker);
     drop(python);
     drop(nats);
@@ -2721,11 +2795,11 @@ async fn smoke_scheduler_routes_extract_request_end_to_end() {
 
     let pool = "sched-extract";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, metrics_port, None);
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -2757,19 +2831,6 @@ async fn smoke_scheduler_routes_extract_request_end_to_end() {
     );
     assert_eq!(result.request_id, request_id);
 
-    let body = scrape_metrics(metrics_port).expect("scrape /metrics");
-    let enqueued = scrape_counter(
-        &body,
-        "sie_worker_scheduler_enqueued_items_total",
-        &format!("{{model=\"{model_id}\",operation=\"extract\"}}"),
-    );
-    assert!(
-        enqueued >= 1.0,
-        "sie_worker_scheduler_enqueued_items_total for extract must be >= 1 \
-         (actual: {enqueued}). A zero means extract bypassed the Rust \
-         scheduler — check Dispatcher::enqueue_extract_into_scheduler."
-    );
-
     drop(_worker);
     drop(python);
     drop(nats);
@@ -2778,17 +2839,8 @@ async fn smoke_scheduler_routes_extract_request_end_to_end() {
 }
 
 /// Concurrent encodes: publish N items fast enough that several land in
-/// the scheduler's 15 ms coalesce window, then verify (a) every reply
-/// comes back successfully and (b) the scheduler counter records all
-/// N items. We can't cleanly assert "these were in a single RunBatch"
-/// from the outside without instrumenting Python, but the enqueue
-/// counter at least proves the items went through the scheduler and
-/// didn't fall through to the legacy per-op path.
-///
-/// Also scrapes `sie_pull_loop_batch_process_seconds{op="encode"}_count`
-/// — under the scheduler each drain-loop tick contributes one
-/// observation, so this stays > 0 after the test just like on the
-/// legacy path. Dashboards keyed off that histogram continue working.
+/// the scheduler's 15 ms coalesce window, then verify every reply comes back
+/// successfully through the scheduler's `RunBatch` path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn smoke_scheduler_coalesces_concurrent_encodes() {
     if skip_unless_tools_available() {
@@ -2805,11 +2857,11 @@ async fn smoke_scheduler_coalesces_concurrent_encodes() {
 
     let pool = "sched-burst";
     let bundle = "default";
-    let metrics_port = find_free_tcp_port();
-    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, metrics_port, None);
-    wait_for_tcp(metrics_port, Duration::from_secs(30))
+    let probe_port = find_free_tcp_port();
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
         .await
-        .expect("worker metrics port");
+        .expect("worker probe port");
     sleep(Duration::from_millis(500)).await;
 
     let client = async_nats::connect(&nats.url)
@@ -2865,71 +2917,6 @@ async fn smoke_scheduler_coalesces_concurrent_encodes() {
         seen += 1;
     }
     assert_eq!(seen, CONCURRENCY, "missing replies");
-
-    // The enqueue counter must reflect every item we submitted. It's
-    // incremented inside `enqueue_encode_into_scheduler` at enqueue
-    // time (not after the drain completes), so this runs no race
-    // against the drain loop finishing.
-    let body = scrape_metrics(metrics_port).expect("scrape /metrics");
-    let enqueued = scrape_counter(
-        &body,
-        "sie_worker_scheduler_enqueued_items_total",
-        &format!("{{model=\"{model_id}\",operation=\"encode\"}}"),
-    );
-    assert!(
-        enqueued >= CONCURRENCY as f64,
-        "sie_worker_scheduler_enqueued_items_total for encode should be \
-         >= {CONCURRENCY} (actual: {enqueued}). Missing samples mean \
-         items bypassed the Rust scheduler path.",
-    );
-
-    // `batch_items` is a histogram; the `_count` series tracks the
-    // number of observations. Each flushed batch is one observation,
-    // so at minimum we need a single sample (possibly more if the
-    // items landed across multiple 15 ms coalesce windows). The
-    // corresponding `_sum` must then be ≥ CONCURRENCY since every
-    // item contributes one to the size sum.
-    //
-    // Label order matters: the `prometheus` crate emits labels in
-    // alphabetical order (lora < model < operation), not in the
-    // registration order. Dashboards that hard-code label order
-    // against the registration tuple break; our scrape assertions
-    // need to match the on-the-wire order exactly.
-    let batch_items_count = scrape_counter(
-        &body,
-        "sie_worker_scheduler_batch_items_count",
-        &format!("{{lora=\"base\",model=\"{model_id}\",operation=\"encode\"}}"),
-    );
-    assert!(
-        batch_items_count >= 1.0,
-        "sie_worker_scheduler_batch_items_count must be >= 1 \
-         (actual: {batch_items_count}). A zero means the drain \
-         loop never ran or the histogram isn't being observed.",
-    );
-    let batch_items_sum = scrape_counter(
-        &body,
-        "sie_worker_scheduler_batch_items_sum",
-        &format!("{{lora=\"base\",model=\"{model_id}\",operation=\"encode\"}}"),
-    );
-    assert!(
-        batch_items_sum >= CONCURRENCY as f64,
-        "sie_worker_scheduler_batch_items_sum should be >= {CONCURRENCY} \
-         (actual: {batch_items_sum}). Every submitted item contributes \
-         1 to the histogram sum; smaller means items were dropped.",
-    );
-
-    // Live models_total gauge: after touching exactly one model, it
-    // should have incremented to at least 1. We don't assert
-    // equality because other scheduler tests running in the same
-    // harness do not share this worker (each test spawns its
-    // own), but we defensively use `>= 1` so the gauge isn't racy
-    // against any parallel test reuse.
-    let models_total = scrape_counter(&body, "sie_worker_scheduler_models_total", "");
-    assert!(
-        models_total >= 1.0,
-        "sie_worker_scheduler_models_total must be >= 1 (actual: {models_total}). \
-         The gauge should tick up on first-traffic scheduler creation.",
-    );
 
     drop(_worker);
     drop(python);

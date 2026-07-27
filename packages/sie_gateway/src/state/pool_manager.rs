@@ -116,6 +116,40 @@ pub struct PoolAdmissionStatus {
     pub assigned_count: usize,
 }
 
+/// Capacity-reconciler view of one logical pool. Deliberately excludes pinned
+/// models, GPU cap maps, timestamps, and persistence metadata so the
+/// five-second KEDA loop clones only the state that can affect capacity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapacityPoolSnapshot {
+    pub name: String,
+    pub queue_pool: String,
+    pub bundle: String,
+    pub machine_profiles: Vec<String>,
+    pub minimum_worker_count: u32,
+    pub state: PoolState,
+    pub assigned_workers: Vec<AssignedWorker>,
+}
+
+impl CapacityPoolSnapshot {
+    pub(crate) fn from_pool(pool: &Pool) -> Self {
+        Self {
+            name: pool.spec.name.clone(),
+            queue_pool: normalize_queue_pool(&pool.spec.queue_pool),
+            bundle: pool
+                .spec
+                .bundle
+                .as_deref()
+                .unwrap_or("default")
+                .trim()
+                .to_ascii_lowercase(),
+            machine_profiles: machine_profiles_for_pool(pool),
+            minimum_worker_count: pool.spec.minimum_worker_count,
+            state: pool.status.state,
+            assigned_workers: pool.status.assigned_workers.clone(),
+        }
+    }
+}
+
 pub struct PoolManager {
     pools: RwLock<HashMap<String, Pool>>,
     lease_duration_s: f64,
@@ -347,14 +381,8 @@ impl PoolManager {
                     existing.status.assigned_workers.clear();
                     existing.status.last_renewed = now;
                     info!(pool = %existing.spec.name, "updated static Helm queue pool");
-                    crate::metrics::POOL_EVENTS
-                        .with_label_values(&["updated"])
-                        .inc();
                 } else {
                     existing.status.last_renewed = now;
-                    crate::metrics::POOL_EVENTS
-                        .with_label_values(&["renewed"])
-                        .inc();
                 }
                 continue;
             }
@@ -373,9 +401,6 @@ impl PoolManager {
                 },
             );
             info!(pool = %name, "created static Helm queue pool");
-            crate::metrics::POOL_EVENTS
-                .with_label_values(&["created"])
-                .inc();
         }
         drop(pools);
 
@@ -524,7 +549,7 @@ impl PoolManager {
             }
 
             existing.status.last_renewed = now;
-            let event = if spec_changed {
+            if spec_changed {
                 existing.spec.bundle = bundle;
                 existing.spec.queue_pool = queue_pool.clone();
                 existing.spec.gpus = gpus;
@@ -534,10 +559,7 @@ impl PoolManager {
                 existing.spec.pinned_models = pinned_models.clone();
                 existing.status.state = PoolState::Pending;
                 existing.status.assigned_workers.clear();
-                "updated"
-            } else {
-                "renewed"
-            };
+            }
             let result = existing.clone();
             drop(pools); // release write lock before K8s call
 
@@ -557,9 +579,6 @@ impl PoolManager {
                 }
             }
 
-            crate::metrics::POOL_EVENTS
-                .with_label_values(&[event])
-                .inc();
             return Ok(result);
         }
 
@@ -585,9 +604,6 @@ impl PoolManager {
         pools.insert(name.clone(), pool.clone());
         drop(pools); // release write lock before K8s call
         info!(pool = %name, "created pool");
-        crate::metrics::POOL_EVENTS
-            .with_label_values(&["created"])
-            .inc();
 
         // Persist dynamic named pools to K8s. The default pool is synthetic
         // per gateway replica and is not a lease-owned runtime pool.
@@ -738,6 +754,15 @@ impl PoolManager {
         pools.values().cloned().collect()
     }
 
+    /// Clone only the fields required by the KEDA capacity reconciler.
+    pub async fn capacity_pools(&self) -> Vec<CapacityPoolSnapshot> {
+        let pools = self.pools.read().await;
+        pools
+            .values()
+            .map(CapacityPoolSnapshot::from_pool)
+            .collect()
+    }
+
     pub async fn delete_pool(&self, name: &str) -> Result<bool, PoolDeletionProtectedError> {
         if name.eq_ignore_ascii_case(DEFAULT_POOL_NAME) {
             return Err(PoolDeletionProtectedError::Default);
@@ -753,9 +778,6 @@ impl PoolManager {
 
         if removed {
             info!(pool = %key, "deleted pool");
-            crate::metrics::POOL_EVENTS
-                .with_label_values(&["deleted"])
-                .inc();
             if let Some(ref backend) = self.k8s_backend {
                 if let Err(e) = backend.delete_pool(&key).await {
                     warn!(error = %e, pool = %key, "failed to delete pool from K8s");
@@ -795,11 +817,6 @@ impl PoolManager {
             }
         }
 
-        if found_key.is_some() {
-            crate::metrics::POOL_EVENTS
-                .with_label_values(&["renewed"])
-                .inc();
-        }
         found_key.is_some()
     }
 
@@ -1091,9 +1108,6 @@ impl PoolManager {
                 }
             }
             info!(pool = %name, "cleaned up expired pool");
-            crate::metrics::POOL_EVENTS
-                .with_label_values(&["expired"])
-                .inc();
         }
 
         expired
@@ -1125,8 +1139,8 @@ fn known_queue_pool_from_names(static_pool_names: &HashSet<String>, name: &str) 
 /// Deduplicated, lowercased machine-profile set for a pool, taken from the
 /// union of `spec.gpus` (requirements) and `spec.gpu_caps` (admission caps).
 /// This is the same set `demand_profiles_for_pool` fans pending demand across;
-/// the warm-floor emitter keeps all of them so each lane gets its own
-/// `sie_gateway_pool_warm_floor` series.
+/// the warm-floor snapshot keeps all of them so each lane gets its own
+/// `sie.gateway.pool.warm_floor` series.
 pub(crate) fn machine_profiles_for_pool(pool: &Pool) -> Vec<String> {
     let mut profiles: Vec<String> = Vec::new();
     for profile in pool.spec.gpus.keys().chain(pool.spec.gpu_caps.keys()) {

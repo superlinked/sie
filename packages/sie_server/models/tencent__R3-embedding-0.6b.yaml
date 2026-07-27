@@ -1,0 +1,32 @@
+sie_id: tencent/R3-embedding-0.6b
+hf_id: tencent/R3-embedding-0.6b
+hf_revision: 9df7e112330d858f4fd0a9d1aa5e1def15d5d25a
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 1024
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 4096
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.qwen2_flash:Qwen2FlashAdapter
+    adapter_options:
+      loadtime:
+        causal: true
+      runtime:
+        pooling: last
+        normalize: true
+        query_template: |-
+          Instruct: {instruction}
+          Query: {text}
+        default_instruction: Given a user request, retrieve the agent skill that solves it.

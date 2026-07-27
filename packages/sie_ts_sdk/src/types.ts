@@ -32,6 +32,16 @@ export interface DocumentInput {
   format?: string;
 }
 
+/** Encoded audio bytes and optional decoder metadata. */
+export interface AudioInput {
+  /** Encoded audio bytes (WAV, MP3, FLAC, etc.) */
+  data: Uint8Array;
+  /** Audio container/codec format hint */
+  format?: string;
+  /** Source sample rate in Hz, when known */
+  sampleRate?: number;
+}
+
 /**
  * A single item to encode, score, or extract from.
  *
@@ -68,6 +78,12 @@ export interface Item {
   metadata?: Record<string, unknown>;
 }
 
+/** An item accepted by extract(), including optional encoded audio. */
+export interface ExtractItem extends Item {
+  /** Encoded audio for speech extraction, optionally with decoder metadata. */
+  audio?: AudioInput | Uint8Array;
+}
+
 /**
  * Sparse vector result with non-zero indices and values.
  * Used by SPLADE-type models.
@@ -89,6 +105,25 @@ export interface TimingInfo {
   inferenceMs?: number;
 }
 
+/** Authoritative units settled for one completed HTTP request. */
+export interface RequestUsage {
+  inputTokens?: number;
+  pairs?: number;
+  images?: number;
+  pages?: number;
+  outputTokens?: number;
+  audioMs?: number;
+}
+
+/** Optional gateway metadata from the successful terminal response. */
+export interface RequestMetadata {
+  id?: string;
+  /** Worker-origin immutable release/runtime identity digest. */
+  executionIdentitySha256?: string;
+  usage?: RequestUsage;
+  creditsDebited?: number;
+}
+
 /**
  * Result of encoding a single item.
  *
@@ -106,6 +141,8 @@ export interface EncodeResult {
   multivector?: Float32Array[];
   /** Server-side timing breakdown */
   timing?: TimingInfo;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 /**
@@ -181,6 +218,13 @@ export interface ScoreEntry {
   rank: number;
 }
 
+export interface ScoreUsage {
+  /** Post-truncation input tokens processed */
+  inputTokens: number;
+  /** Images processed across query-document pairs */
+  images?: number;
+}
+
 /**
  * Result of scoring items against a query.
  */
@@ -191,6 +235,10 @@ export interface ScoreResult {
   queryId?: string;
   /** Score entries, sorted by relevance (descending) */
   scores: ScoreEntry[];
+  /** Authoritative usage when emitted by the score adapter */
+  usage?: ScoreUsage;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 /**
@@ -247,6 +295,14 @@ export interface DetectedObject {
   bbox: number[];
 }
 
+/** Stable per-item extraction failure. */
+export interface ExtractItemError {
+  /** Stable extraction error code */
+  code: string;
+  /** Sanitized extraction error message */
+  message: string;
+}
+
 /**
  * Result of extraction for a single item.
  */
@@ -261,6 +317,12 @@ export interface ExtractResult {
   classifications: Classification[];
   /** List of detected objects */
   objects: DetectedObject[];
+  /** Additional structured extraction data */
+  data?: Record<string, unknown>;
+  /** Stable per-item failure when extraction did not complete */
+  error?: ExtractItemError;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 /**
@@ -330,8 +392,9 @@ export interface CreatePoolOptions {
   /** Optional bundle filter. When set, only workers running this bundle will be assigned to the pool. */
   bundle?: string;
   /**
-   * Per-pool warm floor (minimum machines kept warm). The gateway publishes
-   * it as `sie_gateway_pool_warm_floor` for KEDA. Defaults to 0 (scale to zero).
+   * Per-pool warm floor (minimum machines kept warm). The gateway emits
+   * canonical `sie.gateway.pool.warm_floor` telemetry; the collector exposes
+   * `sie_gateway_pool_warm_floor` to KEDA. Defaults to 0 (scale to zero).
    */
   minimumWorkerCount?: number;
   /**
@@ -468,6 +531,10 @@ export interface ModelStatus {
   queue_pending_items: number;
 }
 
+/**
+ * Worker status snapshot. Request-rate and latency telemetry is exported
+ * through the configured OTel destination instead of this message.
+ */
 export interface WorkerStatusMessage {
   timestamp: number;
   name: string;
@@ -479,8 +546,6 @@ export interface WorkerStatusMessage {
   server: ServerInfo;
   gpus: GPUMetrics[];
   models: ModelStatus[];
-  counters: Record<string, Record<string, number>>;
-  histograms: Record<string, Record<string, Record<string, unknown>>>;
 }
 
 export interface ClusterStatusMessage {
@@ -662,20 +727,94 @@ export interface GenerationUsage {
   totalTokens: number;
 }
 
+interface GrammarMetadata {
+  /** Optional schema/grammar label used by structured-output backends. */
+  label?: string | null;
+  /** Optional strictness hint for structured-output backends. */
+  strict?: boolean | null;
+}
+
+/** Constrain native generation to a JSON Schema. */
+export type JsonSchemaGrammar = GrammarMetadata & {
+  json_schema: Record<string, unknown>;
+  regex?: never;
+  ebnf?: never;
+};
+
+/** Constrain native generation to a regular expression. */
+export type RegexGrammar = GrammarMetadata & {
+  json_schema?: never;
+  regex: string;
+  ebnf?: never;
+};
+
+/** Constrain native generation to an EBNF grammar. */
+export type EbnfGrammar = GrammarMetadata & {
+  json_schema?: never;
+  regex?: never;
+  ebnf: string;
+};
+
+/** Native structured-output grammar. Exactly one grammar variant is set. */
+export type GenerateGrammar = JsonSchemaGrammar | RegexGrammar | EbnfGrammar;
+
 /** Options for the generate operation. */
 export interface GenerateOptions {
   /** Hard cap on output tokens. Required. */
   maxNewTokens: number;
+  /** Optional native image inputs rendered with the prompt for vision-capable models. */
+  images?: (ImageInput | ImageWireFormat)[];
   /** Sampling temperature. */
   temperature?: number;
   /** Nucleus sampling cutoff. */
   topP?: number;
   /** Optional list of stop strings. */
   stop?: string[];
+  /** OpenAI-compatible frequency penalty in [-2, 2]. */
+  frequencyPenalty?: number;
+  /** OpenAI-compatible presence penalty in [-2, 2]. */
+  presencePenalty?: number;
+  /**
+   * Native structured-output grammar.
+   *
+   * The broad record arm preserves the pre-existing SDK input contract for
+   * callers that keep valid grammar objects in `Record<string, unknown>`
+   * variables. The SDK still validates the exact three-arm shape at runtime.
+   */
+  grammar?: GenerateGrammar | Record<string, unknown>;
+  /**
+   * Optional per-request sampling seed. Must be a JavaScript safe integer
+   * (-(2^53 - 1) through 2^53 - 1) so JSON serialization preserves it exactly.
+   * Reproducibility depends on the active backend and deployment configuration.
+   */
+  seed?: number;
+  /** Token-id-to-bias map. */
+  logitBias?: Record<string, number>;
+  /** Stable request routing key. */
+  routingKey?: string;
+  /** Prompt cache affinity key. */
+  promptCacheKey?: string;
+  /** Opaque privacy-preserving safety identifier. */
+  safetyIdentifier?: string;
+  /** Served LoRA adapter name. */
+  loraAdapter?: string;
+  /**
+   * Governed generation runtime options forwarded as `options`. Typed native
+   * fields still win when both surfaces provide the same sampler control.
+   */
+  adapterOptions?: Record<string, unknown>;
   /** GPU type / pool spec, e.g. ``"l4"`` or ``"eval-bench/l4"``. */
   gpu?: string;
   /** Auto-retry under provisioning. */
   waitForCapacity?: boolean;
+}
+
+/** Options for streaming native generation. */
+export interface StreamGenerateOptions extends GenerateOptions {
+  /** Include per-token log probabilities in streamed chunks. */
+  logprobs?: boolean;
+  /** Number of alternate token log probabilities to return, in [0, 20]. */
+  topLogprobs?: number;
 }
 
 /** Aggregated generation result. */
@@ -694,6 +833,8 @@ export interface GenerateResult {
   ttftMs?: number;
   /** Average time per output token in milliseconds. */
   tpotMs?: number;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 // ---------------------------------------------------------------------------
@@ -846,6 +987,12 @@ export interface ChatCompletionRequest {
    * `[-100, 100]` and caps map size.
    */
   logit_bias?: Record<string, number>;
+  /**
+   * Optional per-request sampling seed. Must be a JavaScript safe integer
+   * (`-(2^53 - 1)` through `2^53 - 1`) so the caller's integer is represented
+   * exactly. The SDK throws `RangeError` before network I/O for invalid values.
+   * Reproducibility depends on the active backend and deployment configuration.
+   */
   seed?: number;
   /**
    * OpenAI's free-text end-user identifier. Accepted and logged at debug
@@ -893,6 +1040,8 @@ export interface ChatCompletion {
   system_fingerprint: string | null;
   choices: ChatChoice[];
   usage: ChatUsage;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 /** Incremental delta emitted on each streaming chunk. */
@@ -978,6 +1127,8 @@ export interface GenerateChunk {
   request_id: string;
   seq: number;
   text_delta: string;
+  /** Per-token log probabilities aligned with `text_delta`. */
+  logprobs?: Array<Record<string, unknown>>;
   done: boolean;
   finish_reason?: "stop" | "length" | "cancelled" | "error";
   usage?: ChatUsage;

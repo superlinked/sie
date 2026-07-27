@@ -13,7 +13,9 @@ Performance note (Dec 2025):
 
 from __future__ import annotations
 
+import math
 import re
+from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -265,8 +267,7 @@ class GLiClassAdapter(BaseAdapter):
         if self._pipeline is None:
             raise RuntimeError(ERR_NOT_LOADED)
 
-        if not labels:
-            raise ValueError(_ERR_REQUIRES_LABELS)
+        normalized_labels = self._validate_labels(labels)
 
         # Extract texts from all items (batch processing)
         texts = [self._extract_text(item) for item in items]
@@ -275,10 +276,11 @@ class GLiClassAdapter(BaseAdapter):
         # server-side as a post-filter so we always get all label scores from the
         # underlying pipeline regardless of caller preferences.
         opts = options or {}
-        effective_threshold = float(opts.get("threshold", self._threshold))
+        effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
 
         overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
-        texts = self._apply_overflow_policy(texts, labels, overflow_policy)
+        texts = self._apply_overflow_policy(texts, normalized_labels, overflow_policy)
+        input_token_counts = self._doc_input_token_counts(texts)
 
         # Run batch classification.
         # - threshold=0.0: never let the gliclass library drop labels for us
@@ -290,7 +292,7 @@ class GLiClassAdapter(BaseAdapter):
             with torch.inference_mode():
                 batch_results = self._pipeline(
                     texts,
-                    labels,
+                    normalized_labels,
                     threshold=0.0,
                     return_hierarchical=True,
                 )
@@ -331,7 +333,9 @@ class GLiClassAdapter(BaseAdapter):
             # returns a dict {label: score}. Anything else (e.g. None for an
             # empty input) yields no classifications rather than crashing.
             if isinstance(item_results, dict):
-                pairs: list[tuple[str, float]] = [(str(k), float(v)) for k, v in item_results.items()]
+                if set(item_results) != set(normalized_labels):
+                    raise ValueError("GLiClass returned classifications outside the requested label set")
+                pairs = [(label, self._validate_score(item_results[label])) for label in normalized_labels]
             else:
                 pairs = []
 
@@ -349,4 +353,62 @@ class GLiClassAdapter(BaseAdapter):
         return ExtractOutput(
             entities=[[] for _ in items],
             classifications=all_classifications,
+            input_token_counts=input_token_counts,
         )
+
+    @staticmethod
+    def _validate_labels(labels: list[str] | None) -> list[str]:
+        if not labels:
+            raise ValueError(_ERR_REQUIRES_LABELS)
+        if any(not isinstance(label, str) or not label.strip() for label in labels):
+            raise ValueError("GLiClass labels must be non-empty strings")
+        normalized = [label.strip() for label in labels]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("GLiClass labels must be unique")
+        return normalized
+
+    @staticmethod
+    def _validate_threshold(value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError("GLiClass threshold must be a finite number between 0 and 1")
+        try:
+            threshold = float(value)
+        except OverflowError as exc:
+            raise ValueError("GLiClass threshold must be a finite number between 0 and 1") from exc
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("GLiClass threshold must be a finite number between 0 and 1")
+        return threshold
+
+    @staticmethod
+    def _validate_score(value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError("GLiClass returned an invalid classification score")
+        try:
+            score = float(value)
+        except OverflowError as exc:
+            raise ValueError("GLiClass returned an invalid classification score") from exc
+        if not math.isfinite(score) or not 0.0 <= score <= 1.0:
+            raise ValueError("GLiClass returned an invalid classification score")
+        return score
+
+    def _doc_input_token_counts(self, texts: list[str]) -> list[int] | None:
+        """Count document-only model-tokenizer input units for billing.
+
+        GLiClass fuses the request's label schema with every document. The
+        label prompt is reusable request schema rather than billed content, so
+        this mirrors the GLiNER family contract and counts each post-policy
+        document with the model tokenizer, including its normal special tokens.
+        """
+        if self._tokenizer is None:
+            return None
+        try:
+            encoded = self._tokenizer(
+                texts,
+                add_special_tokens=True,
+                truncation=self._max_seq_length is not None,
+                max_length=self._max_seq_length,
+            )
+            counts = [len(input_ids) for input_ids in encoded["input_ids"]]
+        except Exception:  # noqa: BLE001 -- metering must not fail classification
+            return None
+        return counts if len(counts) == len(texts) else None

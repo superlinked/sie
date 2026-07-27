@@ -58,14 +58,10 @@ async def test_build_status_message_uses_queue_runtime_worker_id(
     registry.memory_manager.pressure_threshold_pct = 0.0
     registry._loaded = {}
 
-    # Stub the helpers the builder calls so we don't drag in GPU,
-    # prometheus, or model registry plumbing.
+    # Stub the helpers the builder calls so we don't drag in GPU or model
+    # registry plumbing.
     monkeypatch.setattr("sie_server.api.ws.get_gpu_metrics", list)
     monkeypatch.setattr("sie_server.api.ws.get_model_status", lambda r: [])
-    monkeypatch.setattr(
-        "sie_server.api.ws.collect_prometheus_metrics",
-        lambda: {"counters": {}, "histograms": {}},
-    )
     monkeypatch.setattr("sie_server.api.ws.compute_bundle_config_hash_cached", lambda r, b: "")
     monkeypatch.setattr("sie_server.api.ws.is_ready", lambda: True)
     monkeypatch.setattr("sie_server.api.ws.gpu_is_healthy_async", _gpu_healthy)
@@ -95,10 +91,6 @@ async def test_build_status_message_falls_back_to_env_without_queue_runtime(
     registry._loaded = {}
     monkeypatch.setattr("sie_server.api.ws.get_gpu_metrics", list)
     monkeypatch.setattr("sie_server.api.ws.get_model_status", lambda r: [])
-    monkeypatch.setattr(
-        "sie_server.api.ws.collect_prometheus_metrics",
-        lambda: {"counters": {}, "histograms": {}},
-    )
     monkeypatch.setattr("sie_server.api.ws.compute_bundle_config_hash_cached", lambda r, b: "")
     monkeypatch.setattr("sie_server.api.ws.is_ready", lambda: True)
     monkeypatch.setattr("sie_server.api.ws.gpu_is_healthy_async", _gpu_healthy)

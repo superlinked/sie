@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Literal
 
@@ -79,6 +80,11 @@ class StablebridgePrunerAdapter(ModelAdapter):
         **kwargs: Any,
     ) -> None:
         _ = kwargs
+        # extract() runs the reranker forward with output_hidden_states=True on
+        # XLM-RoBERTa, a transformers recorder-mechanism class (_can_record_outputs).
+        # The recorder's unlocked monkey-patch/restore of layer forwards leaks GPU
+        # memory to OOM under interleaved forwards; serialize them (#2144/#2204).
+        self._forward_lock = threading.Lock()
         self._model_name_or_path = str(model_name_or_path)
         self._pruning_head_path = pruning_head_path
         self._pruning_head_file = pruning_head_file
@@ -311,7 +317,7 @@ class StablebridgePrunerAdapter(ModelAdapter):
         pairs = [(query_text, doc_text) for doc_text in doc_texts]
         inputs = self._tokenize_pairs(pairs)
 
-        with torch.inference_mode():
+        with self._forward_lock, torch.inference_mode():
             outputs = self._model(**inputs, output_hidden_states=True)
             logits = outputs.logits.squeeze(-1)
             rerank_scores = torch.sigmoid(logits)

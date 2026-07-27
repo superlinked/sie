@@ -116,6 +116,16 @@ class StorageBackend(ABC):
             content: Text content to write.
         """
 
+    def delete_file(self, path: str) -> None:
+        """Delete one file/object.
+
+        The operation is idempotent: a missing target is already in the
+        requested state. Backends that support mutable storage should override
+        this method; the default refusal keeps existing third-party/test
+        backends source-compatible until they need deletion.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support file deletion")
+
     def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
         """Conditional write: write only if current content matches expected.
 
@@ -259,6 +269,10 @@ class LocalBackend(StorageBackend):
             except OSError:
                 pass
             raise
+
+    def delete_file(self, path: str) -> None:
+        """Delete one local file if it exists."""
+        Path(path).unlink(missing_ok=True)
 
     def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
         """Atomic CAS on local filesystem using file locking."""
@@ -499,6 +513,12 @@ class S3Backend(StorageBackend):
         client = self._get_client()
         bucket, key = self._parse_s3_url(path)
         client.put_object(Bucket=bucket, Key=key, Body=content.encode("utf-8"))
+
+    def delete_file(self, path: str) -> None:
+        """Delete one S3 object (missing objects are successful no-ops)."""
+        client = self._get_client()
+        bucket, key = self._parse_s3_url(path)
+        client.delete_object(Bucket=bucket, Key=key)
 
     def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
         """Conditional write to S3 using ETags for compare-and-swap.
@@ -768,6 +788,19 @@ class GCSBackend(StorageBackend):
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
         blob.upload_from_string(content, content_type="text/plain")
+
+    def delete_file(self, path: str) -> None:
+        """Delete one GCS object if it exists."""
+        from google.api_core.exceptions import NotFound
+
+        client = self._get_client()
+        bucket_name, blob_path = self._parse_gcs_url(path)
+        bucket = client.bucket(bucket_name)
+        try:
+            bucket.blob(blob_path).delete()
+        except NotFound:
+            # Missing objects are the successful no-op case for idempotent deletion.
+            pass
 
     def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
         """Conditional write to GCS using generation-based preconditions.
@@ -1102,6 +1135,21 @@ class AzureBlobBackend(StorageBackend):
         """Write text content to Azure Blob storage."""
         container_client, _, _, blob_path = self._get_container_client(path)
         container_client.get_blob_client(blob_path).upload_blob(content.encode("utf-8"), overwrite=True)
+
+    def delete_file(self, path: str) -> None:
+        """Delete one Azure blob if it exists."""
+        try:
+            from azure.core.exceptions import ResourceNotFoundError
+        except ImportError as e:
+            msg = "azure-core is required for Azure Blob deletion"
+            raise ImportError(msg) from e
+
+        container_client, _, _, blob_path = self._get_container_client(path)
+        try:
+            container_client.get_blob_client(blob_path).delete_blob()
+        except ResourceNotFoundError:
+            # Missing blobs are the successful no-op case for idempotent deletion.
+            pass
 
     def write_text_if_match(self, path: str, content: str, expected_content: str) -> bool:
         """Conditional write to Azure Blob storage using ETags for compare-and-swap."""

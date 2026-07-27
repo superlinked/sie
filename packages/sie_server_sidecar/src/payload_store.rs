@@ -6,27 +6,44 @@
 //!
 //! The ref format is:
 //!   - local: filesystem path under the worker's configured `base_dir`
-//!     (absolute paths are only accepted when they canonicalize inside
-//!     `base_dir`; relative paths are resolved against it). When no
-//!     `base_dir` is configured the reader is disabled for safety.
+//!     (absolute paths are only accepted when they are inside `base_dir`;
+//!     relative paths are resolved against it). When no `base_dir` is
+//!     configured the reader is disabled for safety.
 //!   - cloud: `s3://…` / `gs://…` / `abfs://…` / `abfss://…` URL
 //!     (handled when the `cloud-storage` feature is enabled)
 //!
-//! Security: we canonicalize the resolved path and reject anything that
-//! escapes `base_dir`. Without this, a compromised gateway could send a
-//! `payload_ref` like `/etc/passwd` or `../../secrets/key.bin` and read
-//! arbitrary files the worker process has access to.
+//! Security: on Linux, the configured directory is pinned as a file
+//! descriptor and refs are opened beneath it with `openat2`, without
+//! following symlinks. Only nonblocking regular-file reads are accepted.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
+#[cfg(target_os = "linux")]
+use std::path::Path;
 
 use async_trait::async_trait;
+#[cfg(target_os = "linux")]
+use rustix::fd::OwnedFd;
+#[cfg(target_os = "linux")]
+use rustix::fs::{FileType, Mode, OFlags, ResolveFlags};
 use thiserror::Error;
+#[cfg(target_os = "linux")]
+use tokio::io::AsyncReadExt;
+#[cfg(any(target_os = "linux", feature = "cloud-storage"))]
 use tracing::debug;
 
+use crate::observability::metrics::SidecarTelemetry;
+
+#[cfg(feature = "cloud-storage")]
+use futures_util::StreamExt;
 #[cfg(feature = "cloud-storage")]
 use object_store::ObjectStoreExt;
 
 const OBJECT_STORE_SCHEMES: &[&str] = &["s3://", "gs://", "abfs://", "abfss://"];
+#[cfg(any(target_os = "linux", feature = "cloud-storage"))]
+const MAX_PAYLOAD_BYTES: u64 = crate::prep::media::MAX_OFFLOADED_PAYLOAD_BYTES as u64;
 
 fn object_store_scheme(url: &str) -> Option<&'static str> {
     OBJECT_STORE_SCHEMES
@@ -41,6 +58,8 @@ pub enum PayloadError {
     Io(#[from] std::io::Error),
     #[error("invalid payload ref: {0}")]
     InvalidRef(String),
+    #[error("payload is too large ({actual} bytes); maximum is {max} bytes")]
+    TooLarge { actual: u64, max: u64 },
     #[error("unsupported payload scheme: {0}")]
     Unsupported(String),
     #[error("object store: {0}")]
@@ -52,86 +71,251 @@ pub trait PayloadStore: Send + Sync {
     async fn get(&self, payload_ref: &str) -> Result<Vec<u8>, PayloadError>;
 }
 
+/// Decorate the active payload store with one semantic OTel observation per
+/// fetch. Concrete stores remain telemetry-free and the facade retains the
+/// closed error vocabulary.
+pub fn with_telemetry(
+    inner: Arc<dyn PayloadStore>,
+    telemetry: SidecarTelemetry,
+) -> Arc<dyn PayloadStore> {
+    Arc::new(TelemetryPayloadStore { inner, telemetry })
+}
+
+struct TelemetryPayloadStore {
+    inner: Arc<dyn PayloadStore>,
+    telemetry: SidecarTelemetry,
+}
+
+#[async_trait]
+impl PayloadStore for TelemetryPayloadStore {
+    async fn get(&self, payload_ref: &str) -> Result<Vec<u8>, PayloadError> {
+        if !self.telemetry.is_enabled() {
+            return self.inner.get(payload_ref).await;
+        }
+        let started = Instant::now();
+        let result = self.inner.get(payload_ref).await;
+        match &result {
+            Ok(bytes) => self.telemetry.payload_fetch_completed(
+                "success",
+                "none",
+                started.elapsed(),
+                Some(bytes.len()),
+            ),
+            Err(error) => self.telemetry.payload_fetch_completed(
+                "error",
+                payload_error_reason(error),
+                started.elapsed(),
+                None,
+            ),
+        }
+        result
+    }
+}
+
+fn payload_error_reason(error: &PayloadError) -> &'static str {
+    match error {
+        PayloadError::Io(error) => match error.kind() {
+            std::io::ErrorKind::NotFound => "not_found",
+            std::io::ErrorKind::PermissionDenied => "permission_denied",
+            _ => "io",
+        },
+        PayloadError::InvalidRef(_) => "invalid_ref",
+        PayloadError::TooLarge { .. } => "too_large",
+        PayloadError::Unsupported(_) => "unsupported",
+        PayloadError::ObjectStore(_) => "object_store",
+    }
+}
+
 /// Local filesystem reader.
 ///
-/// * When `base_dir` is `Some`, `payload_ref` is resolved against it and
-///   the final (canonical) path MUST stay inside `base_dir`. Absolute refs
-///   are accepted only when they canonicalize under `base_dir`.
-/// * When `base_dir` is `None`, the store rejects all reads — this
-///   matches the gateway's refusal to publish payload_refs when the
-///   worker isn't configured with `SIE_PAYLOAD_STORE_URL`.
+/// * When `base_dir` is `Some`, `payload_ref` is opened relative to a pinned
+///   directory capability. Symlink traversal and non-regular files are rejected.
+/// * When `base_dir` is `None`, the store rejects all reads — this matches the
+///   gateway's refusal to publish payload refs without `SIE_PAYLOAD_STORE_URL`.
 pub struct LocalPayloadStore {
+    #[cfg(target_os = "linux")]
     base_dir: Option<PathBuf>,
+    #[cfg(target_os = "linux")]
+    base_dir_fd: Option<OwnedFd>,
+    #[cfg(target_os = "linux")]
+    base_open_error: Option<String>,
 }
 
 impl LocalPayloadStore {
     pub fn new(base_dir: Option<impl Into<PathBuf>>) -> Self {
-        Self {
-            base_dir: base_dir.map(Into::into),
+        let base_dir = base_dir.map(Into::into);
+        #[cfg(target_os = "linux")]
+        {
+            let Some(configured_base_dir) = base_dir else {
+                return Self {
+                    base_dir: None,
+                    base_dir_fd: None,
+                    base_open_error: None,
+                };
+            };
+            let configured_base_dir = if configured_base_dir.is_absolute() {
+                configured_base_dir
+            } else {
+                match std::env::current_dir() {
+                    Ok(current_dir) => current_dir.join(configured_base_dir),
+                    Err(error) => {
+                        return Self {
+                            base_dir: None,
+                            base_dir_fd: None,
+                            base_open_error: Some(format!(
+                                "failed to resolve local payload base directory: {error}"
+                            )),
+                        };
+                    }
+                }
+            };
+            match rustix::fs::open(
+                &configured_base_dir,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(base_dir_fd) => Self {
+                    base_dir: Some(configured_base_dir),
+                    base_dir_fd: Some(base_dir_fd),
+                    base_open_error: None,
+                },
+                Err(error) => Self {
+                    base_dir: Some(configured_base_dir),
+                    base_dir_fd: None,
+                    base_open_error: Some(format!(
+                        "failed to open local payload base directory: {error}"
+                    )),
+                },
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = base_dir;
+            Self {}
         }
     }
 
-    /// Resolve `payload_ref` to an absolute filesystem path that is
-    /// guaranteed to sit under `base_dir` (when configured).
-    ///
-    /// The caller is expected to treat the returned path as the _only_
-    /// safe target to read — do not re-interpret it or follow symlinks
-    /// at the application layer.
-    fn resolve(&self, payload_ref: &str) -> Result<PathBuf, PayloadError> {
+    #[cfg(target_os = "linux")]
+    fn relative_ref(&self, payload_ref: &str) -> Result<PathBuf, PayloadError> {
         if payload_ref.is_empty() {
             return Err(PayloadError::InvalidRef(payload_ref.to_string()));
         }
-        let Some(base) = &self.base_dir else {
+        let Some(base_dir) = &self.base_dir else {
             return Err(PayloadError::InvalidRef(format!(
                 "payload store not configured; cannot resolve {payload_ref}"
             )));
         };
-
-        let base_canon = base.canonicalize().map_err(|e| {
-            PayloadError::InvalidRef(format!(
-                "configured base_dir {} is not canonicalizable: {e}",
-                base.display()
-            ))
-        })?;
-
         let raw = Path::new(payload_ref);
-        let joined = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else {
-            base_canon.join(raw)
-        };
-
-        // We canonicalize the resolved path to eliminate `..`, symlinks,
-        // and case-insensitive tricks, then check that it still sits
-        // under the canonical base_dir. `canonicalize` requires the
-        // target to exist; preserve missing-file semantics as an IO
-        // NotFound rather than masking it as an invalid ref.
-        let full = joined.canonicalize().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PayloadError::Io(e)
-            } else {
+        let relative = if raw.is_absolute() {
+            raw.strip_prefix(base_dir).map_err(|_| {
                 PayloadError::InvalidRef(format!(
-                    "failed to canonicalize payload ref {payload_ref}: {e}"
+                    "payload ref {payload_ref} escapes base_dir {}",
+                    base_dir.display()
                 ))
+            })?
+        } else {
+            raw
+        };
+        let mut normalized = PathBuf::new();
+        for component in relative.components() {
+            match component {
+                std::path::Component::Normal(value) => normalized.push(value),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_) => {
+                    return Err(PayloadError::InvalidRef(format!(
+                        "payload ref {payload_ref} escapes base_dir {}",
+                        base_dir.display()
+                    )));
+                }
             }
-        })?;
-        if !full.starts_with(&base_canon) {
+        }
+        if normalized.as_os_str().is_empty() {
             return Err(PayloadError::InvalidRef(format!(
-                "payload ref {payload_ref} escapes base_dir {}",
-                base_canon.display()
+                "payload ref {payload_ref} does not identify a file"
             )));
         }
-        Ok(full)
+        Ok(normalized)
     }
 }
 
 #[async_trait]
 impl PayloadStore for LocalPayloadStore {
     async fn get(&self, payload_ref: &str) -> Result<Vec<u8>, PayloadError> {
-        let path = self.resolve(payload_ref)?;
-        let bytes = tokio::fs::read(&path).await?;
-        debug!(path = %path.display(), bytes = bytes.len(), "read local payload");
-        Ok(bytes)
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(error) = &self.base_open_error {
+                return Err(PayloadError::InvalidRef(error.clone()));
+            }
+            let relative = self.relative_ref(payload_ref)?;
+            let base_dir_fd = self.base_dir_fd.as_ref().ok_or_else(|| {
+                PayloadError::InvalidRef(
+                    "payload store not configured; cannot resolve payload ref".to_owned(),
+                )
+            })?;
+            let file_fd = rustix::fs::openat2(
+                base_dir_fd,
+                &relative,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+            )
+            .map_err(|error| match error {
+                rustix::io::Errno::NOSYS => PayloadError::Unsupported(
+                    "local payload store requires Linux openat2 support".to_owned(),
+                ),
+                rustix::io::Errno::NOENT => PayloadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "payload ref does not exist",
+                )),
+                rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR | rustix::io::Errno::XDEV => {
+                    PayloadError::InvalidRef("payload ref traverses a disallowed path".to_owned())
+                }
+                _ => PayloadError::Io(std::io::Error::from(error)),
+            })?;
+            let stat = rustix::fs::fstat(&file_fd)
+                .map_err(|error| PayloadError::Io(std::io::Error::from(error)))?;
+            if !FileType::from_raw_mode(stat.st_mode).is_file() {
+                return Err(PayloadError::InvalidRef(
+                    "payload ref does not identify a regular file".to_owned(),
+                ));
+            }
+            let size = u64::try_from(stat.st_size).map_err(|_| {
+                PayloadError::InvalidRef("payload file has an invalid size".to_owned())
+            })?;
+            if size > MAX_PAYLOAD_BYTES {
+                return Err(PayloadError::TooLarge {
+                    actual: size,
+                    max: MAX_PAYLOAD_BYTES,
+                });
+            }
+
+            let file = tokio::fs::File::from_std(std::fs::File::from(file_fd));
+            let mut bytes = Vec::with_capacity(size as usize);
+            file.take(MAX_PAYLOAD_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .await?;
+            if bytes.len() as u64 > MAX_PAYLOAD_BYTES {
+                return Err(PayloadError::TooLarge {
+                    actual: bytes.len() as u64,
+                    max: MAX_PAYLOAD_BYTES,
+                });
+            }
+            debug!(
+                path = %self.base_dir.as_ref().expect("base checked").join(relative).display(),
+                bytes = bytes.len(),
+                "read local payload"
+            );
+            Ok(bytes)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = payload_ref;
+            Err(PayloadError::Unsupported(
+                "local payload store requires Linux openat2".to_owned(),
+            ))
+        }
     }
 }
 
@@ -318,75 +502,32 @@ impl PayloadStore for ObjectPayloadStore {
             object_store::Error::NotFound { .. } => {
                 PayloadError::InvalidRef(format!("payload ref not found: {payload_ref}"))
             }
-            other => PayloadError::ObjectStore(format!("get payload {object_key}: {other}")),
+            other => PayloadError::ObjectStore(format!("read payload {object_key}: {other}")),
         })?;
-        let bytes = result
-            .bytes()
-            .await
-            .map_err(|e| PayloadError::ObjectStore(format!("read payload {object_key}: {e}")))?;
-        debug!(key = %object_key, bytes = bytes.len(), "read object-store payload");
-        Ok(bytes.to_vec())
-    }
-}
-
-/// Metrics-observing wrapper — counts fetches, broken-out errors, and
-/// records latency + payload size histograms. Kept separate from the
-/// concrete stores so the metrics registry dependency doesn't leak into
-/// their traits / tests.
-pub struct MeteredPayloadStore {
-    inner: std::sync::Arc<dyn PayloadStore>,
-    metrics: std::sync::Arc<crate::metrics::MetricsRegistry>,
-}
-
-impl MeteredPayloadStore {
-    pub fn new(
-        inner: std::sync::Arc<dyn PayloadStore>,
-        metrics: std::sync::Arc<crate::metrics::MetricsRegistry>,
-    ) -> Self {
-        Self { inner, metrics }
-    }
-}
-
-#[async_trait]
-impl PayloadStore for MeteredPayloadStore {
-    async fn get(&self, payload_ref: &str) -> Result<Vec<u8>, PayloadError> {
-        let start = std::time::Instant::now();
-        self.metrics.payload_fetch_total.inc();
-        let result = self.inner.get(payload_ref).await;
-        let elapsed = start.elapsed().as_secs_f64();
-        match &result {
-            Ok(bytes) => {
-                self.metrics
-                    .payload_fetch_seconds
-                    .with_label_values(&["ok"])
-                    .observe(elapsed);
-                self.metrics
-                    .payload_bytes
-                    .with_label_values(&["ok"])
-                    .observe(bytes.len() as f64);
-            }
-            Err(e) => {
-                let reason = match e {
-                    PayloadError::Io(io) => match io.kind() {
-                        std::io::ErrorKind::NotFound => "not_found",
-                        std::io::ErrorKind::PermissionDenied => "permission_denied",
-                        _ => "io",
-                    },
-                    PayloadError::InvalidRef(_) => "invalid_ref",
-                    PayloadError::Unsupported(_) => "unsupported",
-                    PayloadError::ObjectStore(_) => "object_store",
-                };
-                self.metrics
-                    .payload_fetch_errors_total
-                    .with_label_values(&[reason])
-                    .inc();
-                self.metrics
-                    .payload_fetch_seconds
-                    .with_label_values(&["error"])
-                    .observe(elapsed);
-            }
+        if result.meta.size > MAX_PAYLOAD_BYTES {
+            return Err(PayloadError::TooLarge {
+                actual: result.meta.size,
+                max: MAX_PAYLOAD_BYTES,
+            });
         }
-        result
+        let expected_size = result.meta.size;
+        let mut stream = result.into_stream();
+        let mut bytes = Vec::with_capacity(expected_size as usize);
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                PayloadError::ObjectStore(format!("read payload {object_key}: {e}"))
+            })?;
+            let actual = bytes.len() as u64 + chunk.len() as u64;
+            if actual > MAX_PAYLOAD_BYTES {
+                return Err(PayloadError::TooLarge {
+                    actual,
+                    max: MAX_PAYLOAD_BYTES,
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        debug!(key = %object_key, bytes = bytes.len(), "read object-store payload");
+        Ok(bytes)
     }
 }
 
@@ -448,8 +589,89 @@ mod tests {
     #[cfg(feature = "cloud-storage")]
     use object_store::ObjectStoreExt;
     #[cfg(feature = "cloud-storage")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(feature = "cloud-storage")]
     use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    #[cfg(feature = "cloud-storage")]
+    #[derive(Debug)]
+    struct CountingObjectStore {
+        inner: object_store::memory::InMemory,
+        get_calls: std::sync::Arc<AtomicUsize>,
+    }
+
+    #[cfg(feature = "cloud-storage")]
+    impl std::fmt::Display for CountingObjectStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("counting object store")
+        }
+    }
+
+    #[cfg(feature = "cloud-storage")]
+    #[async_trait]
+    impl object_store::ObjectStore for CountingObjectStore {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            options: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.get_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
 
     #[cfg(feature = "cloud-storage")]
     const AZURE_ENV_KEYS: &[&str] = &[
@@ -509,6 +731,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn local_get_absolute_path_inside_base_dir() {
         // Gateway writes absolute paths (e.g. /var/cache/sie/uuid.bin);
@@ -523,6 +746,7 @@ mod tests {
         assert_eq!(got, b"hello");
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn local_get_relative_with_base() {
         let dir = TempDir::new().unwrap();
@@ -534,6 +758,112 @@ mod tests {
         assert_eq!(got, b"world");
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn local_get_accepts_empty_and_exact_cap_payloads() {
+        let dir = TempDir::new().unwrap();
+        tokio::fs::write(dir.path().join("empty.bin"), [])
+            .await
+            .unwrap();
+        let exact_path = dir.path().join("exact.bin");
+        let exact_file = tokio::fs::File::create(&exact_path).await.unwrap();
+        exact_file.set_len(MAX_PAYLOAD_BYTES).await.unwrap();
+
+        let store = LocalPayloadStore::new(Some(dir.path().to_path_buf()));
+        assert!(store.get("empty.bin").await.unwrap().is_empty());
+        assert_eq!(
+            store.get("exact.bin").await.unwrap().len() as u64,
+            MAX_PAYLOAD_BYTES
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn local_get_rejects_final_and_intermediate_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        tokio::fs::create_dir_all(&base).await.unwrap();
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        tokio::fs::write(outside.join("secret.bin"), b"secret")
+            .await
+            .unwrap();
+        symlink(outside.join("secret.bin"), base.join("final-link.bin")).unwrap();
+        symlink(&outside, base.join("directory-link")).unwrap();
+
+        let store = LocalPayloadStore::new(Some(base));
+        for payload_ref in ["final-link.bin", "directory-link/secret.bin"] {
+            let error = store.get(payload_ref).await.unwrap_err();
+            assert!(
+                matches!(error, PayloadError::InvalidRef(_)),
+                "expected symlink ref {payload_ref} to be rejected, got {error:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn local_get_rejects_fifo_without_blocking() {
+        let dir = TempDir::new().unwrap();
+        let dir_fd = rustix::fs::open(
+            dir.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        rustix::fs::mkfifoat(&dir_fd, "payload.pipe", Mode::RUSR | Mode::WUSR).unwrap();
+
+        let store = LocalPayloadStore::new(Some(dir.path().to_path_buf()));
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), store.get("payload.pipe"))
+                .await
+                .expect("FIFO payload lookup must not block");
+        assert!(matches!(result, Err(PayloadError::InvalidRef(_))));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn local_get_uses_directory_pinned_at_initialization() {
+        let root = TempDir::new().unwrap();
+        let configured = root.path().join("payloads");
+        let pinned = root.path().join("pinned");
+        tokio::fs::create_dir(&configured).await.unwrap();
+        tokio::fs::write(configured.join("payload.bin"), b"original")
+            .await
+            .unwrap();
+        let store = LocalPayloadStore::new(Some(configured.clone()));
+
+        tokio::fs::rename(&configured, &pinned).await.unwrap();
+        tokio::fs::create_dir(&configured).await.unwrap();
+        tokio::fs::write(configured.join("payload.bin"), b"replacement")
+            .await
+            .unwrap();
+
+        assert_eq!(store.get("payload.bin").await.unwrap(), b"original");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn local_get_rejects_oversized_payload_before_reading() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("oversized.bin");
+        let file = tokio::fs::File::create(&path).await.unwrap();
+        file.set_len(MAX_PAYLOAD_BYTES + 1).await.unwrap();
+
+        let store = LocalPayloadStore::new(Some(dir.path().to_path_buf()));
+        let err = store.get("oversized.bin").await.unwrap_err();
+        assert!(matches!(
+            err,
+            PayloadError::TooLarge {
+                actual,
+                max: MAX_PAYLOAD_BYTES
+            } if actual == MAX_PAYLOAD_BYTES + 1
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn missing_ref_surfaces_not_found_io() {
         let dir = TempDir::new().unwrap();
@@ -545,6 +875,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn telemetry_error_reasons_are_closed_and_semantic() {
+        assert_eq!(
+            payload_error_reason(&PayloadError::Io(std::io::Error::from(
+                std::io::ErrorKind::NotFound
+            ))),
+            "not_found"
+        );
+        assert_eq!(
+            payload_error_reason(&PayloadError::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            ))),
+            "permission_denied"
+        );
+        assert_eq!(
+            payload_error_reason(&PayloadError::Io(std::io::Error::other("disk"))),
+            "io"
+        );
+        assert_eq!(
+            payload_error_reason(&PayloadError::InvalidRef("bad".into())),
+            "invalid_ref"
+        );
+        assert_eq!(
+            payload_error_reason(&PayloadError::TooLarge { actual: 2, max: 1 }),
+            "too_large"
+        );
+        assert_eq!(
+            payload_error_reason(&PayloadError::Unsupported("scheme".into())),
+            "unsupported"
+        );
+        assert_eq!(
+            payload_error_reason(&PayloadError::ObjectStore("remote".into())),
+            "object_store"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn local_get_without_base_dir_is_disabled() {
         // Safety: without a configured base_dir, the reader is disabled
@@ -554,12 +921,11 @@ mod tests {
         assert!(matches!(err, PayloadError::InvalidRef(_)));
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn absolute_ref_outside_base_dir_is_rejected() {
-        // Classic path-traversal: base_dir is a tempdir, attacker sends
-        // an absolute path pointing outside it (here: /tmp root, which
-        // exists on every macOS/Linux box). The canonical check must
-        // refuse.
+        // Classic path traversal: base_dir is a tempdir, and the attacker sends
+        // an absolute path outside it. The directory capability must refuse it.
         let base = TempDir::new().unwrap();
         let store = LocalPayloadStore::new(Some(base.path().to_path_buf()));
         let err = store.get("/etc/hosts").await.unwrap_err();
@@ -569,6 +935,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn relative_dotdot_ref_cannot_escape_base_dir() {
         // Same thing as a relative ref that tries to climb out.
@@ -588,6 +955,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn empty_ref_rejected() {
         let dir = TempDir::new().unwrap();
@@ -596,6 +964,7 @@ mod tests {
         assert!(matches!(err, PayloadError::InvalidRef(_)));
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn factory_none_yields_disabled_store() {
         let store = create_payload_store(None).await.unwrap();
@@ -603,6 +972,7 @@ mod tests {
         assert!(matches!(err, PayloadError::InvalidRef(_)));
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn factory_empty_url_yields_disabled_store() {
         // Treat `SIE_PAYLOAD_STORE_URL=` the same as unset, not as "the
@@ -613,6 +983,7 @@ mod tests {
         assert!(matches!(err, PayloadError::InvalidRef(_)));
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn factory_local_path_roundtrips() {
         let dir = TempDir::new().unwrap();
@@ -626,6 +997,7 @@ mod tests {
         assert_eq!(got, b"ok");
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn factory_file_scheme_is_stripped() {
         let dir = TempDir::new().unwrap();
@@ -636,6 +1008,17 @@ mod tests {
         let store = create_payload_store(Some(&url)).await.unwrap();
         let got = store.get("pay.bin").await.unwrap();
         assert_eq!(got, b"ok");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn local_store_fails_closed_without_openat2() {
+        let dir = TempDir::new().unwrap();
+        let store = LocalPayloadStore::new(Some(dir.path().to_path_buf()));
+        assert!(matches!(
+            store.get("payload.bin").await,
+            Err(PayloadError::Unsupported(_))
+        ));
     }
 
     #[cfg(feature = "cloud-storage")]
@@ -661,6 +1044,98 @@ mod tests {
         };
         let got = store.get("s3://bucket/payloads/pay.bin").await.unwrap();
         assert_eq!(got, b"cloud");
+    }
+
+    #[cfg(feature = "cloud-storage")]
+    #[tokio::test]
+    async fn object_store_get_accepts_empty_payload() {
+        use object_store::path::Path;
+        use object_store::PutPayload;
+
+        let memory = object_store::memory::InMemory::new();
+        memory
+            .put(
+                &Path::from("payloads/empty.bin"),
+                PutPayload::from(Vec::new()),
+            )
+            .await
+            .unwrap();
+        let store = ObjectPayloadStore {
+            store: Box::new(memory),
+            prefix: Path::from("payloads"),
+            url_prefix: "s3://bucket/payloads".into(),
+            scheme: "s3://",
+        };
+
+        assert!(store
+            .get("s3://bucket/payloads/empty.bin")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(feature = "cloud-storage")]
+    #[tokio::test]
+    async fn object_store_get_uses_one_request_at_exact_cap() {
+        use object_store::path::Path;
+        use object_store::PutPayload;
+
+        let memory = object_store::memory::InMemory::new();
+        memory
+            .put(
+                &Path::from("payloads/exact.bin"),
+                PutPayload::from(vec![0; MAX_PAYLOAD_BYTES as usize]),
+            )
+            .await
+            .unwrap();
+        let get_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let store = ObjectPayloadStore {
+            store: Box::new(CountingObjectStore {
+                inner: memory,
+                get_calls: get_calls.clone(),
+            }),
+            prefix: Path::from("payloads"),
+            url_prefix: "s3://bucket/payloads".into(),
+            scheme: "s3://",
+        };
+
+        assert_eq!(
+            store
+                .get("s3://bucket/payloads/exact.bin")
+                .await
+                .unwrap()
+                .len() as u64,
+            MAX_PAYLOAD_BYTES
+        );
+        assert_eq!(get_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(feature = "cloud-storage")]
+    #[tokio::test]
+    async fn object_store_get_rejects_oversized_payload_before_reading() {
+        use object_store::path::Path;
+        use object_store::PutPayload;
+
+        let memory = object_store::memory::InMemory::new();
+        memory
+            .put(
+                &Path::from("payloads/oversized.bin"),
+                PutPayload::from(vec![0; (MAX_PAYLOAD_BYTES + 1) as usize]),
+            )
+            .await
+            .unwrap();
+
+        let store = ObjectPayloadStore {
+            store: Box::new(memory),
+            prefix: Path::from("payloads"),
+            url_prefix: "s3://bucket/payloads".into(),
+            scheme: "s3://",
+        };
+        let err = store
+            .get("s3://bucket/payloads/oversized.bin")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PayloadError::TooLarge { .. }));
     }
 
     #[cfg(feature = "cloud-storage")]

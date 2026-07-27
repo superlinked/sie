@@ -3,13 +3,14 @@
 {{- range $poolName, $pool := .Values.workers.pools }}
 {{- if $pool.enabled }}
 {{- $platform := default $root.Values.workers.common.platform $pool.platform }}
-{{- $machineProfile := default $poolName $pool.machineProfile }}
 {{- $rs := $root.Values.workers.common.workerSidecar }}
 {{- $rsTag := default $root.Chart.AppVersion $rs.image.tag }}
 {{- $rsImage := printf "%s:%s" $rs.image.repository $rsTag }}
 {{- range $bundleName, $bundleCfg := $pool.bundles }}
 {{- if dig "enabled" true $bundleCfg }}
-{{- $bundle := $bundleName }}
+{{- $lane := include "sie-cluster.worker.lane" (dict "root" $root "poolName" $poolName "pool" $pool "bundleName" $bundleName) | fromJson }}
+{{- $machineProfile := $lane.machineProfile }}
+{{- $bundle := $lane.bundle }}
 {{- /* See worker-statefulset.yaml for the imageBundle rationale. */ -}}
 {{- $imageBundle := default $bundle $bundleCfg.imageBundle }}
 {{- /* Mirror the worker-statefulset bundle->platform guard so prepull never
@@ -35,22 +36,28 @@ metadata:
   labels:
     {{- include "sie-cluster.labels" $root | nindent 4 }}
     app.kubernetes.io/component: image-prepull
+    # Preserve the immutable selector published in v0.6.20. The physical
+    # queue is exposed separately for inventory and diagnostics.
     sie.superlinked.com/pool: {{ $poolName | quote }}
-    sie.superlinked.com/bundle: {{ $bundleName | quote }}
+    sie.superlinked.com/queue-pool: {{ $lane.queuePool | quote }}
+    sie.superlinked.com/machine-profile: {{ $machineProfile | quote }}
+    sie.superlinked.com/bundle: {{ $bundle | quote }}
 spec:
   selector:
     matchLabels:
       {{- include "sie-cluster.selectorLabels" $root | nindent 6 }}
       app.kubernetes.io/component: image-prepull
       sie.superlinked.com/pool: {{ $poolName | quote }}
-      sie.superlinked.com/bundle: {{ $bundleName | quote }}
+      sie.superlinked.com/bundle: {{ $bundle | quote }}
   template:
     metadata:
       labels:
         {{- include "sie-cluster.selectorLabels" $root | nindent 8 }}
         app.kubernetes.io/component: image-prepull
         sie.superlinked.com/pool: {{ $poolName | quote }}
-        sie.superlinked.com/bundle: {{ $bundleName | quote }}
+        sie.superlinked.com/queue-pool: {{ $lane.queuePool | quote }}
+        sie.superlinked.com/machine-profile: {{ $machineProfile | quote }}
+        sie.superlinked.com/bundle: {{ $bundle | quote }}
     spec:
       {{- include "sie-cluster.imagePullSecrets" $root | nindent 6 }}
       automountServiceAccountToken: false

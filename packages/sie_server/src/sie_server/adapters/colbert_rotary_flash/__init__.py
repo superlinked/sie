@@ -6,11 +6,17 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import torch
 from torch.nn import functional
 
+from sie_server.adapters._colbert_projection import load_standalone_colbert_projection
+from sie_server.adapters._colbert_utils import punctuation_token_ids
 from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
-from sie_server.adapters._utils import apply_rotary_pos_emb, grouped_score_pairs, validate_output_types
+from sie_server.adapters._utils import (
+    apply_rotary_pos_emb,
+    grouped_score_pairs,
+    validate_output_types,
+)
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput, ScoreOutput
 from sie_server.types.inputs import Item
@@ -33,18 +39,19 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """ColBERT adapter with RoPE and Flash Attention 2 variable-length sequences.
 
     This adapter eliminates padding waste by packing sequences and using
-    flash_attn_varlen_func. Supports models with Rotary Position Embeddings
-    and Matryoshka dimension truncation.
+    flash_attn_varlen_func. Supports models with Rotary Position Embeddings and
+    a trained standalone ColBERT projection.
 
     Works with jina-colbert-v2 architecture (XLM-RoBERTa with flash + RoPE).
     """
 
     fallback_adapter_path: ClassVar[str | None] = "colbert:ColBERTAdapter"
+    fallback_kwargs_overrides: ClassVar[dict[str, Any]] = {"require_standalone_projection": True}
 
     spec = AdapterSpec(
         inputs=("text",),
         outputs=("multivector", "score"),
-        unload_fields=("_model", "_tokenizer", "_expansion_token_id"),
+        unload_fields=("_model", "_tokenizer", "_linear", "_expansion_token_id"),
     )
 
     def __init__(
@@ -57,23 +64,27 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         query_max_length: int = 32,
         compute_precision: ComputePrecision = "bfloat16",
         skip_special_tokens: bool = True,
+        doc_punctuation_skiplist: bool = False,
         query_prefix: str = "",
         doc_prefix: str = "",
         query_expansion: bool = True,
         muvera_config: dict[str, Any] | None = None,
         revision: str | None = None,
+        code_revision: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
 
         Args:
             model_name_or_path: HuggingFace model ID or local path.
-            token_dim: Output dimension per token (Matryoshka truncation).
+            token_dim: Output dimension per token after the trained projection.
             normalize: Whether to L2-normalize token embeddings.
             max_seq_length: Maximum sequence length for documents.
             query_max_length: Maximum sequence length for queries.
             compute_precision: Compute precision (bfloat16 recommended).
             skip_special_tokens: Whether to exclude special tokens from output.
+            doc_punctuation_skiplist: Whether to remove punctuation token
+                embeddings from documents before MaxSim scoring.
             query_prefix: Prefix to prepend to queries.
             doc_prefix: Prefix to prepend to documents.
             query_expansion: Whether to pad queries with MASK tokens to query_max_length.
@@ -83,6 +94,8 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
                 num_simhash_projections, normalize. Used for FDE postprocessing.
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts.
+            code_revision: Optional HuggingFace revision/branch/commit SHA to pin
+                separately when the model executes code from another repository.
             **kwargs: Additional arguments (ignored).
         """
         _ = kwargs
@@ -94,16 +107,20 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._query_max_length = query_max_length
         self._compute_precision = compute_precision
         self._skip_special_tokens = skip_special_tokens
+        self._doc_punctuation_skiplist = doc_punctuation_skiplist
         self._query_prefix = query_prefix
         self._doc_prefix = doc_prefix
         self._query_expansion = query_expansion
         self._muvera_config = muvera_config
         self._revision = revision
+        self._code_revision = code_revision
 
         self._model: Any = None
         self._tokenizer: PreTrainedTokenizerFast | None = None
+        self._linear: torch.nn.Linear | None = None
         self._device: str | None = None
         self._expansion_token_id: int | None = None  # Set during load() if query_expansion
+        self._doc_skiplist_ids: set[int] = set()
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -132,6 +149,8 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         shared_kwargs: dict[str, Any] = {}
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
+        if self._code_revision is not None:
+            shared_kwargs["code_revision"] = self._code_revision
 
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_name_or_path,
@@ -157,6 +176,9 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         if self._doc_prefix_id:
             logger.info("Doc prefix '%s' resolved to token ID %d", self._doc_prefix.strip(), self._doc_prefix_id)
 
+        if self._doc_punctuation_skiplist:
+            self._doc_skiplist_ids = punctuation_token_ids(self._tokenizer)
+
         # Load model with eager attention - we handle flash attention manually
         self._model = AutoModel.from_pretrained(
             self._model_name_or_path,
@@ -168,8 +190,20 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._model.to(device)
         self._model.eval()
 
+        self._linear = load_standalone_colbert_projection(
+            self._model_name_or_path,
+            revision=self._revision,
+            device=device,
+            dtype=dtype,
+            expected_in_features=self._model.config.hidden_size,
+            expected_out_features=self._token_dim,
+            allow_bias=False,
+            required=True,
+        )
+        assert self._linear is not None
+
         logger.info(
-            "ColBERT rotary flash: hidden=%d, token_dim=%d (Matryoshka truncation)",
+            "ColBERT rotary flash: hidden=%d, token_dim=%d (trained projection)",
             self._model.config.hidden_size,
             self._token_dim,
         )
@@ -290,7 +324,17 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         validate_output_types(output_types, {"multivector"}, "ColBERTRotaryFlashAdapter")
         texts = self._extract_texts(items, instruction, is_query=is_query)
 
-        max_length = self._query_max_length if is_query else self._max_seq_length
+        opts = options or {}
+        if is_query:
+            max_length = self._coerce_runtime_max_length(
+                opts.get("query_max_length"),
+                self._query_max_length,
+            )
+        else:
+            max_length = self._coerce_runtime_max_length(
+                opts.get("max_seq_length"),
+                self._max_seq_length,
+            )
 
         # Determine if query expansion should be applied
         use_expansion = is_query and self._expansion_token_id is not None
@@ -299,34 +343,40 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         prefix_id = self._query_prefix_id if is_query else self._doc_prefix_id
 
         # Adjust max_length if we need to insert a prefix token
-        effective_max_length = max_length - 1 if prefix_id is not None else max_length
+        effective_max_length = max(1, max_length - 1) if prefix_id is not None else max_length
 
-        # For query expansion, pad to exact max_length using MASK tokens
-        if use_expansion:
-            original_pad_id = self._tokenizer.pad_token_id
-            self._tokenizer.pad_token_id = self._expansion_token_id
-            encodings = [
-                self._tokenizer(
-                    text,
-                    max_length=effective_max_length,
-                    padding="max_length",
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                for text in texts
-            ]
-            self._tokenizer.pad_token_id = original_pad_id
-        else:
-            # Tokenize each sequence individually (no padding)
-            encodings = [
-                self._tokenizer(
-                    text,
-                    max_length=effective_max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                for text in texts
-            ]
+        # Serialise tokenizer access against concurrent metering. Hugging Face
+        # fast tokenizers are not re-entrant, and the expansion path also
+        # mutates ``pad_token_id`` for the duration of tokenization.
+        with self._tokenizer_guard():
+            # For query expansion, pad to exact max_length using MASK tokens.
+            if use_expansion:
+                original_pad_id = self._tokenizer.pad_token_id
+                self._tokenizer.pad_token_id = self._expansion_token_id
+                try:
+                    encodings = [
+                        self._tokenizer(
+                            text,
+                            max_length=effective_max_length,
+                            padding="max_length",
+                            truncation=True,
+                            return_tensors="pt",
+                        )
+                        for text in texts
+                    ]
+                finally:
+                    self._tokenizer.pad_token_id = original_pad_id
+            else:
+                # Tokenize each sequence individually (no padding).
+                encodings = [
+                    self._tokenizer(
+                        text,
+                        max_length=effective_max_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    for text in texts
+                ]
 
         # Insert prefix token ID at position 1 (after [CLS]) for each encoding
         if prefix_id is not None:
@@ -358,16 +408,16 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             # Run transformer layers with flash attention and RoPE
             hidden = self._run_transformer_flash(hidden, cu_seqlens, max_seqlen, total_tokens, cos, sin)
 
-            # Matryoshka truncation: take first token_dim dimensions
-            hidden = hidden[:, : self._token_dim]
-
-            # L2 normalize
-            if self._normalize:
-                hidden = functional.normalize(hidden, p=2, dim=-1)
+            hidden = self._project_and_normalize(hidden)
 
             # Split back into per-item results
             multivectors = self._split_embeddings(
-                hidden, cu_seqlens, seq_lengths, input_ids_packed, keep_mask=use_expansion
+                hidden,
+                cu_seqlens,
+                seq_lengths,
+                input_ids_packed,
+                keep_mask=use_expansion,
+                is_query=is_query,
             )
 
         return EncodeOutput(
@@ -377,12 +427,22 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             multivector_token_dim=self._token_dim,
         )
 
+    def _project_and_normalize(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Apply the checkpoint's trained ColBERT head before normalization."""
+        if self._linear is None:
+            raise RuntimeError("ColBERT projection is not loaded")
+        projected = self._linear(hidden)
+        if self._normalize:
+            projected = functional.normalize(projected, p=2, dim=-1)
+        return projected
+
     def score(
         self,
         query: Item,
         items: list[Item],
         *,
         instruction: str | None = None,
+        options: dict[str, Any] | None = None,
     ) -> list[float]:
         """Score items against a query using MaxSim.
 
@@ -402,6 +462,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             output_types=["multivector"],
             instruction=instruction,
             is_query=True,
+            options=options,
         )
         query_vecs = query_output.multivector[0]
 
@@ -410,6 +471,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             items,
             output_types=["multivector"],
             is_query=False,
+            options=options,
         )
 
         # MaxSim over all documents in one padded, masked batched matmul.
@@ -425,15 +487,17 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         instruction: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> ScoreOutput:
-        """Score parallel (query, doc) pairs via per-query MaxSim grouping.
+        """Score parallel pairs while preserving encode-time runtime options."""
 
-        Encode-time runtime ``options`` (e.g. ``muvera``/``output_types``) are
-        irrelevant to ColBERT MaxSim and are accepted and ignored. ``score()`` on
-        this adapter does not take ``options``; ``grouped_score_pairs`` never threads
-        options into the score callable, so delegation is unaffected.
-        """
-        _ = options  # Encode-time options are irrelevant to MaxSim scoring.
-        return grouped_score_pairs(self.score, queries, docs, instruction=instruction)
+        def score_with_options(
+            query: Item,
+            items: list[Item],
+            *,
+            instruction: str | None = None,
+        ) -> list[float]:
+            return self.score(query, items, instruction=instruction, options=options)
+
+        return grouped_score_pairs(score_with_options, queries, docs, instruction=instruction)
 
     def _build_position_ids(self, cu_seqlens: torch.Tensor, num_seqs: int) -> torch.Tensor:
         """Build position IDs for packed sequences."""
@@ -575,6 +639,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         input_ids: torch.Tensor,
         *,
         keep_mask: bool = False,
+        is_query: bool = True,
     ) -> list[np.ndarray]:
         """Split packed embeddings back into per-item arrays.
 
@@ -584,6 +649,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             seq_lengths: List of sequence lengths.
             input_ids: Input token IDs.
             keep_mask: If True, keep MASK tokens (for query expansion).
+            is_query: Whether the embeddings belong to queries rather than documents.
         """
         results = []
         num_seqs = len(seq_lengths)
@@ -606,8 +672,11 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             if keep_mask and self._tokenizer.mask_token_id in special_ids:
                 special_ids.discard(self._tokenizer.mask_token_id)
 
+        if not is_query:
+            special_ids |= self._doc_skiplist_ids
+
         # Build a batched filter mask on GPU
-        if self._skip_special_tokens and special_ids:
+        if special_ids:
             filter_tensor = torch.tensor(sorted(special_ids), device=self._device)
             keep_mask_all = ~torch.isin(input_ids, filter_tensor)
         else:

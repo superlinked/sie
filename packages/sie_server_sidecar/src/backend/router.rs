@@ -23,7 +23,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
@@ -31,10 +30,9 @@ use tracing::{debug, warn};
 
 use crate::backend::{BackendError, InferenceBackend, SharedBackend};
 use crate::ipc_types::{
-    BatchOutcome, Disposition, EnsureModelReadyResponse, ProcessEncodeBatchRequest,
-    ProcessExtractBatchRequest, ProcessScoreBatchRequest, ReadinessState, RunBatchRequest,
+    BatchOutcome, EnsureModelReadyResponse, ProcessEncodeBatchRequest, ProcessExtractBatchRequest,
+    ProcessScoreBatchRequest, RunBatchRequest,
 };
-use crate::metrics::MetricsRegistry;
 
 /// Picks a backend per `model_id` and forwards calls to it.
 pub struct BackendRouter {
@@ -43,10 +41,6 @@ pub struct BackendRouter {
     /// `model_id -> index into backends`. Populated on first
     /// successful readiness check; avoids re-scanning on every batch.
     cache: RwLock<HashMap<String, usize>>,
-    /// Optional metrics sink. When set, dispatch records per-backend
-    /// histograms and counters; when unset (tests), dispatch is
-    /// effectively unchanged. Wired by `lib.rs::run`.
-    metrics: Option<Arc<MetricsRegistry>>,
 }
 
 impl BackendRouter {
@@ -58,22 +52,11 @@ impl BackendRouter {
     /// wrong, and silently accepting that just moves the error to
     /// runtime where it'd NAK every message.
     pub fn from_backends(backends: Vec<SharedBackend>) -> Arc<Self> {
-        Self::from_backends_with_metrics(backends, None)
-    }
-
-    /// Like [`BackendRouter::from_backends`], but also wires a
-    /// metrics registry so dispatch emits per-backend observability
-    /// metrics.
-    pub fn from_backends_with_metrics(
-        backends: Vec<SharedBackend>,
-        metrics: Option<Arc<MetricsRegistry>>,
-    ) -> Arc<Self> {
         assert!(
             !backends.is_empty(),
             "BackendRouter requires at least one backend"
         );
         Arc::new(Self {
-            metrics,
             backends,
             cache: RwLock::new(HashMap::new()),
         })
@@ -169,11 +152,6 @@ impl BackendRouter {
                 .await
             {
                 Ok(resp) => {
-                    if let Some(m) = &self.metrics {
-                        m.router_fallthrough_total
-                            .with_label_values(&[first_name, backend.name(), op_name])
-                            .inc();
-                    }
                     // NOTE: Do NOT promote this backend in the cache. The
                     // model cache is per-model, not per-(model, op). A
                     // common deployment has a native encoder serve
@@ -200,39 +178,7 @@ impl BackendRouter {
         backend: &SharedBackend,
         model_id: &str,
     ) -> Result<EnsureModelReadyResponse, BackendError> {
-        let start = Instant::now();
-        let result = backend.ensure_model_ready(model_id).await;
-        if let Some(m) = &self.metrics {
-            let elapsed = start.elapsed().as_secs_f64();
-            let outcome_label: &str = match &result {
-                Ok(resp) => match resp.state {
-                    ReadinessState::Ready => "ready",
-                    ReadinessState::LoadingStarted => "loading_started",
-                    ReadinessState::LoadingInProgress => "loading_in_progress",
-                    ReadinessState::RetryLater => "retry_later",
-                    ReadinessState::Failed => "failed",
-                },
-                Err(BackendError::UnsupportedModel(_)) => "unsupported",
-                Err(BackendError::Draining) => "draining",
-                Err(BackendError::Transient(_)) => "transient",
-                Err(BackendError::Inference(_)) => "inference",
-            };
-            let model_lbl = m.model_label(model_id);
-            m.backend_ensure_ready_seconds
-                .with_label_values(&[backend.name(), &model_lbl, outcome_label])
-                .observe(elapsed);
-            // Count loading transitions so operators can see "model loads"
-            // driven by the Python executor.
-            if matches!(
-                &result,
-                Ok(resp) if resp.state == ReadinessState::LoadingStarted
-            ) {
-                m.pull_model_loads_total
-                    .with_label_values(&[&model_lbl])
-                    .inc();
-            }
-        }
-        result
+        backend.ensure_model_ready(model_id).await
     }
 
     /// Invoke one backend and record the per-backend observability
@@ -241,66 +187,16 @@ impl BackendRouter {
     async fn call_instrumented<F, Fut>(
         &self,
         backend: SharedBackend,
-        model_id: &str,
-        op_name: &'static str,
-        batch_size: usize,
+        _model_id: &str,
+        _op_name: &'static str,
+        _batch_size: usize,
         call: &F,
     ) -> Result<BatchOutcome, BackendError>
     where
         F: Fn(SharedBackend) -> Fut,
         Fut: std::future::Future<Output = Result<BatchOutcome, BackendError>>,
     {
-        let backend_name = backend.name();
-        if let Some(m) = &self.metrics {
-            m.backend_batch_items
-                .with_label_values(&[backend_name, op_name])
-                .observe(batch_size as f64);
-        }
-        let start = Instant::now();
-        let result = call(backend).await;
-        let elapsed = start.elapsed().as_secs_f64();
-
-        if let Some(m) = &self.metrics {
-            let model_lbl = m.model_label(model_id);
-            let outcome_label: &str = match &result {
-                Ok(_) => "ok",
-                Err(BackendError::UnsupportedModel(_)) => "unsupported",
-                Err(BackendError::Draining) => "draining",
-                Err(BackendError::Transient(_)) => "transient",
-                Err(BackendError::Inference(_)) => "inference",
-            };
-            m.backend_process_seconds
-                .with_label_values(&[backend_name, op_name, &model_lbl, outcome_label])
-                .observe(elapsed);
-
-            if let Err(err) = &result {
-                let kind = match err {
-                    BackendError::UnsupportedModel(_) => "unsupported",
-                    BackendError::Draining => "draining",
-                    BackendError::Transient(_) => "transient",
-                    BackendError::Inference(_) => "inference",
-                };
-                m.backend_process_errors_total
-                    .with_label_values(&[backend_name, op_name, kind])
-                    .inc();
-            } else if let Ok(outcome) = &result {
-                // Count per-item dispositions; this is where the
-                // fanout of "publish success" vs "publish error"
-                // vs "ack-to-drop" becomes visible on the dashboard.
-                for item in &outcome.outcomes {
-                    let disp = match item.disposition {
-                        Disposition::PublishAndAck => "publish_and_ack",
-                        Disposition::PublishErrorAndAck => "publish_error_and_ack",
-                        Disposition::NakRetry => "nak_retry",
-                    };
-                    m.backend_item_outcomes_total
-                        .with_label_values(&[backend_name, op_name, disp])
-                        .inc();
-                }
-            }
-        }
-
-        result
+        call(backend).await
     }
 
     /// Total number of registered backends. Always `>= 1` —
@@ -600,7 +496,10 @@ mod tests {
             if let Some(err) = &self.process_err {
                 return Err(clone_err(err));
             }
-            Ok(BatchOutcome { outcomes: vec![] })
+            Ok(BatchOutcome {
+                outcomes: vec![],
+                batched_f16_multivectors: vec![],
+            })
         }
         async fn process_score_batch(
             &self,
@@ -610,7 +509,10 @@ mod tests {
             if let Some(err) = self.score_err.as_ref().or(self.process_err.as_ref()) {
                 return Err(clone_err(err));
             }
-            Ok(BatchOutcome { outcomes: vec![] })
+            Ok(BatchOutcome {
+                outcomes: vec![],
+                batched_f16_multivectors: vec![],
+            })
         }
         async fn process_extract_batch(
             &self,
@@ -620,7 +522,10 @@ mod tests {
             if let Some(err) = self.extract_err.as_ref().or(self.process_err.as_ref()) {
                 return Err(clone_err(err));
             }
-            Ok(BatchOutcome { outcomes: vec![] })
+            Ok(BatchOutcome {
+                outcomes: vec![],
+                batched_f16_multivectors: vec![],
+            })
         }
         async fn drain(&self, _deadline_ms: u64) {
             self.drain_calls.fetch_add(1, Ordering::SeqCst);
@@ -631,6 +536,7 @@ mod tests {
         ProcessEncodeBatchRequest {
             model_id: model.into(),
             items: vec![],
+            accepts_batched_f16_multivectors: false,
         }
     }
 

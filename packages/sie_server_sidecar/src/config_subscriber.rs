@@ -7,14 +7,14 @@
 //! worker-sidecar and forwards the validated YAML over IPC so the backend-local
 //! model registry changes in the process that serves inference.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_nats::Client;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{RwLock as AsyncRwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn};
@@ -23,17 +23,17 @@ use crate::backend::AdapterWorkerPool;
 use crate::health_publisher::{SharedBundleConfigHash, SharedLoadedModels};
 use crate::ipc_client::IpcError;
 use crate::ipc_types::{
-    ApplyModelConfigRequest, ReadinessState, ReplaceModelConfigsRequest,
-    ReplaceModelConfigsResponse,
+    ApplyModelConfigRequest, ReplaceModelConfigsRequest, ReplaceModelConfigsResponse,
 };
-use crate::metrics::MetricsRegistry;
+use crate::observability::metrics::SidecarTelemetry;
+#[cfg(test)]
+use crate::runtime_state::RuntimeState;
 use crate::shutdown::Shutdown;
 
 const SUBJECT_PREFIX: &str = "sie.config.models";
 pub const MAX_MODEL_CONFIG_BYTES: usize = 1_048_576;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
-const MAX_ACCEPTED_BUNDLE_HASHES: usize = 64;
 const DEFAULT_MODEL_POOL: &str = "default";
 
 /// Default publisher allowlist. Matches the gateway config subscriber.
@@ -44,24 +44,18 @@ pub struct ConfigApplyState {
     epoch: AtomicU64,
     bundle_config_hash: SharedBundleConfigHash,
     loaded_models: SharedLoadedModels,
-    accepted_bundle_config_hashes: RwLock<VecDeque<String>>,
-    /// Serializes worker config mutations from live NATS deltas and export
-    /// replay so an older snapshot cannot clobber a newer live apply.
-    apply_lock: Mutex<()>,
+    /// Config mutation is exclusive while inference takes a shared guard.
+    /// This binds each execution to one stable backend registry revision.
+    execution_barrier: AsyncRwLock<()>,
 }
 
 impl ConfigApplyState {
     pub fn new(initial_bundle_config_hash: String) -> Self {
-        let mut accepted_bundle_config_hashes = VecDeque::new();
-        if !initial_bundle_config_hash.is_empty() {
-            accepted_bundle_config_hashes.push_back(initial_bundle_config_hash.clone());
-        }
         Self {
             epoch: AtomicU64::new(0),
             bundle_config_hash: Arc::new(RwLock::new(initial_bundle_config_hash)),
             loaded_models: Arc::new(RwLock::new(Vec::new())),
-            accepted_bundle_config_hashes: RwLock::new(accepted_bundle_config_hashes),
-            apply_lock: Mutex::new(()),
+            execution_barrier: AsyncRwLock::new(()),
         }
     }
 
@@ -88,18 +82,15 @@ impl ConfigApplyState {
         if expected_hash.is_empty() {
             return true;
         }
-        if self.current_bundle_config_hash() == expected_hash {
-            return true;
-        }
-        self.accepted_bundle_config_hashes
-            .read()
-            .expect("accepted bundle config hashes lock poisoned")
-            .iter()
-            .any(|hash| hash == expected_hash)
+        self.current_bundle_config_hash() == expected_hash
     }
 
-    pub async fn lock_apply(&self) -> MutexGuard<'_, ()> {
-        self.apply_lock.lock().await
+    pub async fn lock_apply(&self) -> RwLockWriteGuard<'_, ()> {
+        self.execution_barrier.write().await
+    }
+
+    pub async fn lock_execution(&self) -> RwLockReadGuard<'_, ()> {
+        self.execution_barrier.read().await
     }
 
     pub fn set_epoch_max(&self, epoch: u64) -> bool {
@@ -121,7 +112,6 @@ impl ConfigApplyState {
     }
 
     pub fn set_bundle_hash(&self, hash: String) {
-        self.remember_bundle_hash(&hash);
         let mut guard = self
             .bundle_config_hash
             .write()
@@ -161,23 +151,6 @@ impl ConfigApplyState {
         }
         guard.push(model_id.to_string());
         guard.sort();
-    }
-
-    fn remember_bundle_hash(&self, hash: &str) {
-        if hash.is_empty() {
-            return;
-        }
-        let mut accepted = self
-            .accepted_bundle_config_hashes
-            .write()
-            .expect("accepted bundle config hashes lock poisoned");
-        if accepted.iter().any(|known| known == hash) {
-            return;
-        }
-        accepted.push_back(hash.to_string());
-        while accepted.len() > MAX_ACCEPTED_BUNDLE_HASHES {
-            accepted.pop_front();
-        }
     }
 
     fn mark_applied(&self, epoch: u64, bundle_config_hash: String) {
@@ -288,7 +261,7 @@ struct SubscriberRuntime {
     trusted_producers: Vec<String>,
     ipc: Arc<AdapterWorkerPool>,
     state: Arc<ConfigApplyState>,
-    metrics: Arc<MetricsRegistry>,
+    telemetry: SidecarTelemetry,
     shutdown: Arc<Shutdown>,
 }
 
@@ -353,24 +326,31 @@ fn notification_bundle_hash_for_pool(notification: &ConfigNotification, pool: &s
     }
 }
 
-pub(crate) fn advertised_bundle_hash(
+pub(crate) fn verified_applied_bundle_hash(
     control_plane_hash: Option<&str>,
     worker_applied_hash: &str,
-) -> String {
-    control_plane_hash
-        .unwrap_or(worker_applied_hash)
-        .to_string()
+) -> Option<String> {
+    match control_plane_hash.filter(|hash| !hash.is_empty()) {
+        Some(control_plane_hash) if control_plane_hash == worker_applied_hash => {
+            Some(control_plane_hash.to_string())
+        }
+        Some(_) => None,
+        None => Some(worker_applied_hash.to_string()),
+    }
 }
 
 fn notification_is_stale(epoch: u64, current_epoch: u64) -> bool {
     epoch < current_epoch || (epoch == current_epoch && epoch != 0)
 }
 
-fn record_delta(metrics: &MetricsRegistry, kind: &str, result: &str) {
-    metrics
-        .config_deltas_total
-        .with_label_values(&[kind, result])
-        .inc();
+fn record_delta(
+    telemetry: &SidecarTelemetry,
+    kind: &str,
+    result: &str,
+    applied_epoch: Option<u64>,
+) {
+    debug!(kind, result, "worker-config: notification outcome");
+    telemetry.config_apply("notification", kind, result, applied_epoch);
 }
 
 fn retryable_ipc_error(e: &IpcError) -> bool {
@@ -389,60 +369,6 @@ fn retryable_ipc_error(e: &IpcError) -> bool {
         IpcError::Timeout => true,
         _ => false,
     }
-}
-
-fn requires_eager_model_ready(bundle_id: &str) -> bool {
-    bundle_id.trim() == "candle"
-}
-
-async fn ensure_candle_model_ready_if_needed(
-    ipc: &Arc<AdapterWorkerPool>,
-    bundle_id: &str,
-    model_id: &str,
-    epoch: u64,
-) -> Result<(), IpcError> {
-    if !requires_eager_model_ready(bundle_id) {
-        return Ok(());
-    }
-
-    match ipc.ensure_model_ready_on_placed_child(model_id).await {
-        Ok(resp) if resp.state == ReadinessState::Ready => {
-            info!(
-                model = %model_id,
-                epoch,
-                "worker-config: Candle model ready after config apply"
-            );
-            Ok(())
-        }
-        Ok(resp) => {
-            warn!(
-                model = %model_id,
-                epoch,
-                state = ?resp.state,
-                "worker-config: Candle model not ready after config apply; retrying"
-            );
-            Err(IpcError::Timeout)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-async fn ensure_candle_models_ready_if_needed(
-    ipc: &Arc<AdapterWorkerPool>,
-    bundle_id: &str,
-    model_ids: &[String],
-    epoch: u64,
-) -> Result<Vec<String>, IpcError> {
-    if !requires_eager_model_ready(bundle_id) {
-        return Ok(model_ids.to_vec());
-    }
-
-    let mut ready_models = Vec::with_capacity(model_ids.len());
-    for model_id in model_ids {
-        ensure_candle_model_ready_if_needed(ipc, bundle_id, model_id, epoch).await?;
-        ready_models.push(model_id.clone());
-    }
-    Ok(ready_models)
 }
 
 fn next_retry_delay(current: Duration) -> Duration {
@@ -465,7 +391,7 @@ pub fn spawn(
     bundle: String,
     ipc: Arc<AdapterWorkerPool>,
     state: Arc<ConfigApplyState>,
-    metrics: Arc<MetricsRegistry>,
+    telemetry: SidecarTelemetry,
     shutdown: Arc<Shutdown>,
     options: ConfigSubscriberOptions,
 ) -> JoinHandle<()> {
@@ -484,7 +410,7 @@ pub fn spawn(
             trusted_producers: options.trusted_producers,
             ipc,
             state,
-            metrics,
+            telemetry,
             shutdown,
         };
 
@@ -553,7 +479,7 @@ pub fn spawn(
                             Ok(n) => n,
                             Err(e) => {
                                 warn!(subject = %subject, error = %e, "worker-config: invalid notification JSON");
-                                record_delta(&runtime.metrics, "unknown", "parse_error");
+                                record_delta(&runtime.telemetry, "unknown", "parse_error", None);
                                 continue;
                             }
                         };
@@ -576,43 +502,7 @@ pub(crate) async fn apply_via_ipc_with_retry(
     let mut attempt = 0_u64;
     loop {
         match ipc.apply_model_config(req.clone()).await {
-            Ok(resp) => {
-                match ensure_candle_model_ready_if_needed(&ipc, &req.bundle_id, model_id, epoch)
-                    .await
-                {
-                    Ok(()) => return Ok(Some(resp)),
-                    Err(e) if retryable_ipc_error(&e) && !shutdown.is_fired() => {
-                        attempt = attempt.saturating_add(1);
-                        if attempt == 1
-                            || attempt == 5
-                            || attempt == 30
-                            || attempt.is_multiple_of(120)
-                        {
-                            warn!(
-                                model = %model_id,
-                                epoch,
-                                attempt,
-                                retry_delay_ms = retry_delay.as_millis() as u64,
-                                error = %e,
-                                "worker-config: Candle model readiness still waiting after apply; retrying"
-                            );
-                        } else {
-                            debug!(
-                                model = %model_id,
-                                epoch,
-                                attempt,
-                                error = %e,
-                                "worker-config: Candle model readiness still waiting"
-                            );
-                        }
-                        if wait_retry_or_shutdown(&shutdown, retry_delay).await {
-                            return Ok(None);
-                        }
-                        retry_delay = next_retry_delay(retry_delay);
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
+            Ok(resp) => return Ok(Some(resp)),
             Err(e) if retryable_ipc_error(&e) && !shutdown.is_fired() => {
                 attempt = attempt.saturating_add(1);
                 if attempt == 1 || attempt == 5 || attempt == 30 || attempt.is_multiple_of(120) {
@@ -653,49 +543,7 @@ pub(crate) async fn replace_via_ipc_with_retry(
     let mut attempt = 0_u64;
     loop {
         match ipc.replace_model_configs(req.clone()).await {
-            Ok(mut resp) => {
-                match ensure_candle_models_ready_if_needed(
-                    &ipc,
-                    &req.bundle_id,
-                    &resp.applied_models,
-                    epoch,
-                )
-                .await
-                {
-                    Ok(ready_models) => {
-                        resp.applied_models = ready_models;
-                        return Ok(Some(resp));
-                    }
-                    Err(e) if retryable_ipc_error(&e) && !shutdown.is_fired() => {
-                        attempt = attempt.saturating_add(1);
-                        if attempt == 1
-                            || attempt == 5
-                            || attempt == 30
-                            || attempt.is_multiple_of(120)
-                        {
-                            warn!(
-                                epoch,
-                                attempt,
-                                retry_delay_ms = retry_delay.as_millis() as u64,
-                                error = %e,
-                                "worker-config: Candle model readiness still waiting after replace; retrying"
-                            );
-                        } else {
-                            debug!(
-                                epoch,
-                                attempt,
-                                error = %e,
-                                "worker-config: Candle model readiness still waiting after replace"
-                            );
-                        }
-                        if wait_retry_or_shutdown(&shutdown, retry_delay).await {
-                            return Ok(None);
-                        }
-                        retry_delay = next_retry_delay(retry_delay);
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
+            Ok(resp) => return Ok(Some(resp)),
             Err(e) if retryable_ipc_error(&e) && !shutdown.is_fired() => {
                 attempt = attempt.saturating_add(1);
                 if attempt == 1 || attempt == 5 || attempt == 30 || attempt.is_multiple_of(120) {
@@ -728,7 +576,6 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
     let bundle = runtime.bundle.as_str();
     let trusted_producers = runtime.trusted_producers.as_slice();
     let state = runtime.state.as_ref();
-    let metrics = runtime.metrics.as_ref();
     let kind = if notification.model_config.trim().is_empty() {
         "epoch_bump"
     } else {
@@ -743,7 +590,7 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
             model = %notification.model_id,
             "worker-config: rejecting notification from untrusted producer"
         );
-        record_delta(metrics, kind, "rejected_untrusted");
+        record_delta(&runtime.telemetry, kind, "rejected_untrusted", None);
         return;
     }
 
@@ -755,7 +602,7 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
             epoch = notification.epoch,
             "worker-config: rejecting notification for another bundle"
         );
-        record_delta(metrics, kind, "rejected_bundle");
+        record_delta(&runtime.telemetry, kind, "rejected_bundle", None);
         return;
     }
 
@@ -767,7 +614,7 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
             model = %notification.model_id,
             "worker-config: dropping stale notification"
         );
-        record_delta(metrics, kind, "stale");
+        record_delta(&runtime.telemetry, kind, "stale", None);
         return;
     }
 
@@ -781,12 +628,16 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
                 model = %notification.model_id,
                 "worker-config: dropping stale notification"
             );
-            record_delta(metrics, kind, "stale");
+            record_delta(&runtime.telemetry, kind, "stale", None);
             return;
         }
         state.set_epoch_max(notification.epoch);
-        metrics.config_epoch.set(notification.epoch as i64);
-        record_delta(metrics, kind, "applied");
+        record_delta(
+            &runtime.telemetry,
+            kind,
+            "applied",
+            Some(notification.epoch),
+        );
         return;
     }
 
@@ -800,7 +651,7 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
             model = %notification.model_id,
             "worker-config: skipping notification for another pool"
         );
-        record_delta(metrics, kind, "skipped_pool");
+        record_delta(&runtime.telemetry, kind, "skipped_pool", None);
         return;
     }
 
@@ -811,7 +662,7 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
             max_bytes = MAX_MODEL_CONFIG_BYTES,
             "worker-config: rejecting oversized model_config"
         );
-        record_delta(metrics, kind, "rejected_oversized");
+        record_delta(&runtime.telemetry, kind, "rejected_oversized", None);
         return;
     }
 
@@ -824,7 +675,7 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
             model = %notification.model_id,
             "worker-config: dropping stale notification"
         );
-        record_delta(metrics, kind, "stale");
+        record_delta(&runtime.telemetry, kind, "stale", None);
         return;
     }
 
@@ -857,7 +708,7 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
     {
         Ok(Some(r)) => r,
         Ok(None) => {
-            record_delta(metrics, kind, "shutdown");
+            record_delta(&runtime.telemetry, kind, "shutdown", None);
             return;
         }
         Err(e) => {
@@ -867,7 +718,7 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
                 error = %e,
                 "worker-config: worker config apply failed; epoch not advanced"
             );
-            record_delta(metrics, kind, "apply_error");
+            record_delta(&runtime.telemetry, kind, "apply_error", None);
             return;
         }
     };
@@ -878,41 +729,126 @@ async fn apply_notification(runtime: &SubscriberRuntime, notification: ConfigNot
             epoch = notification.epoch,
             "worker-config: worker config reported applied=false; epoch not advanced"
         );
-        record_delta(metrics, kind, "apply_rejected");
+        record_delta(&runtime.telemetry, kind, "apply_rejected", None);
         return;
     }
 
     let control_plane_hash =
         notification_bundle_hash_for_pool(&notification, runtime.pool.as_str());
-    let advertised_hash =
-        advertised_bundle_hash(Some(control_plane_hash.as_str()), &resp.bundle_config_hash);
-
-    if !control_plane_hash.is_empty()
-        && !resp.bundle_config_hash.is_empty()
-        && control_plane_hash != resp.bundle_config_hash
-    {
+    let Some(applied_hash) =
+        verified_applied_bundle_hash(Some(control_plane_hash.as_str()), &resp.bundle_config_hash)
+    else {
         warn!(
             model = %notification.model_id,
             epoch = notification.epoch,
-            advertised_hash = %control_plane_hash,
+            control_plane_hash = %control_plane_hash,
             applied_hash = %resp.bundle_config_hash,
-            "worker-config: worker config hash differs from control-plane hash; advertising control-plane hash"
+            "worker-config: worker config hash differs from control-plane hash; epoch and advertised state not advanced"
         );
-        record_delta(metrics, kind, "hash_mismatch");
-    } else {
-        record_delta(metrics, kind, "applied");
-    }
+        record_delta(&runtime.telemetry, kind, "hash_mismatch", None);
+        return;
+    };
 
-    state.mark_applied(notification.epoch, advertised_hash);
-    if requires_eager_model_ready(&notification.bundle_id) {
-        state.record_loaded_model(&notification.model_id);
-    }
-    metrics.config_epoch.set(notification.epoch as i64);
+    state.mark_applied(notification.epoch, applied_hash);
+    // Telemetry catalog overflow/mismatch is fail-open for serving and the
+    // facade emits at most one process-local warning before collapsing the
+    // affected pair to `other`. Activate it only after the trusted hash and
+    // advertised state have both committed.
+    runtime
+        .telemetry
+        .extend_catalog(&notification.model_id, &notification.profiles_added);
+    record_delta(
+        &runtime.telemetry,
+        kind,
+        "applied",
+        Some(notification.epoch),
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixListener;
+    use tokio::sync::Mutex;
+
+    fn notification(
+        producer_id: &str,
+        bundle_id: &str,
+        pool: Option<&str>,
+        model_id: &str,
+    ) -> ConfigNotification {
+        ConfigNotification {
+            producer_id: producer_id.to_string(),
+            bundle_id: bundle_id.to_string(),
+            epoch: 1,
+            bundle_config_hash: "hash-1".to_string(),
+            bundle_pool_config_hashes: HashMap::new(),
+            model_id: model_id.to_string(),
+            profiles_added: vec!["default".to_string()],
+            model_config: format!("sie_id: {model_id}\nprofiles:\n  default: {{}}\n"),
+            affected_bundles: vec![bundle_id.to_string()],
+            pool: pool.map(ToString::to_string),
+        }
+    }
+
+    fn spawn_conditional_apply_server(
+        listener: UnixListener,
+        models: Arc<Mutex<Vec<String>>>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _addr)) = listener.accept().await else {
+                    break;
+                };
+                let models = Arc::clone(&models);
+                tokio::spawn(async move {
+                    loop {
+                        let mut len_buf = [0_u8; 4];
+                        if stream.read_exact(&mut len_buf).await.is_err() {
+                            break;
+                        }
+                        let len = u32::from_be_bytes(len_buf) as usize;
+                        let mut frame = vec![0_u8; len];
+                        if stream.read_exact(&mut frame).await.is_err() {
+                            break;
+                        }
+                        let raw: serde_json::Value =
+                            rmp_serde::from_slice(&frame).expect("decode request envelope");
+                        let request_id = raw
+                            .get("request_id")
+                            .and_then(serde_json::Value::as_str)
+                            .expect("request id");
+                        let model_id = raw
+                            .get("body")
+                            .and_then(|body| body.get("model_id"))
+                            .and_then(serde_json::Value::as_str)
+                            .expect("model id")
+                            .to_string();
+                        models.lock().await.push(model_id.clone());
+
+                        let response = serde_json::json!({
+                            "version": crate::ipc_types::IPC_VERSION,
+                            "request_id": request_id,
+                            "ok": true,
+                            "body": {
+                                "applied": model_id != "failed/model",
+                                "bundle_config_hash": "hash-1",
+                                "config_version": 1_u64
+                            }
+                        });
+                        let bytes =
+                            rmp_serde::to_vec_named(&response).expect("encode response envelope");
+                        stream
+                            .write_all(&(bytes.len() as u32).to_be_bytes())
+                            .await
+                            .expect("write response length");
+                        stream.write_all(&bytes).await.expect("write response");
+                    }
+                });
+            }
+        })
+    }
 
     #[test]
     fn bundle_subject_requires_single_safe_token() {
@@ -987,13 +923,24 @@ mod tests {
     }
 
     #[test]
-    fn advertised_bundle_hash_prefers_control_plane_value() {
+    fn applied_bundle_hash_requires_control_plane_worker_agreement() {
         assert_eq!(
-            advertised_bundle_hash(Some("control-hash"), "worker-hash"),
-            "control-hash"
+            verified_applied_bundle_hash(Some("control-hash"), "control-hash").as_deref(),
+            Some("control-hash")
         );
-        assert_eq!(advertised_bundle_hash(Some(""), "worker-hash"), "");
-        assert_eq!(advertised_bundle_hash(None, "worker-hash"), "worker-hash");
+        assert_eq!(
+            verified_applied_bundle_hash(Some("control-hash"), "worker-hash"),
+            None
+        );
+        assert_eq!(verified_applied_bundle_hash(Some("control-hash"), ""), None);
+        assert_eq!(
+            verified_applied_bundle_hash(Some(""), "worker-hash").as_deref(),
+            Some("worker-hash")
+        );
+        assert_eq!(
+            verified_applied_bundle_hash(None, "worker-hash").as_deref(),
+            Some("worker-hash")
+        );
     }
 
     #[test]
@@ -1077,16 +1024,35 @@ mod tests {
     }
 
     #[test]
-    fn accepted_hash_history_keeps_inflight_work_processable() {
+    fn only_current_hash_is_accepted_after_config_advance() {
         let state = ConfigApplyState::new("h0".into());
         assert!(state.accepts_bundle_config_hash(""));
         assert!(state.accepts_bundle_config_hash("h0"));
         assert!(!state.accepts_bundle_config_hash("h1"));
 
         state.mark_applied(1, "h1".into());
-        assert!(state.accepts_bundle_config_hash("h0"));
+        assert!(!state.accepts_bundle_config_hash("h0"));
         assert!(state.accepts_bundle_config_hash("h1"));
         assert!(!state.accepts_bundle_config_hash("missing"));
+    }
+
+    #[tokio::test]
+    async fn config_write_waits_for_inflight_execution_guard() {
+        let state = Arc::new(ConfigApplyState::new("h0".into()));
+        let execution = state.lock_execution().await;
+        let writer_state = Arc::clone(&state);
+        let writer = tokio::spawn(async move {
+            let _write = writer_state.lock_apply().await;
+            writer_state.set_bundle_hash("h1".into());
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!writer.is_finished());
+        assert_eq!(state.current_bundle_config_hash(), "h0");
+
+        drop(execution);
+        writer.await.unwrap();
+        assert_eq!(state.current_bundle_config_hash(), "h1");
     }
 
     #[test]
@@ -1101,5 +1067,168 @@ mod tests {
         assert!(retryable_ipc_error(&IpcError::Timeout));
         assert!(!retryable_ipc_error(&server));
         assert!(!retryable_ipc_error(&version));
+    }
+
+    #[tokio::test]
+    async fn telemetry_catalog_expands_only_after_trusted_successful_apply() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("ipc.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind fake ipc socket");
+        let applied_models = Arc::new(Mutex::new(Vec::new()));
+        let server = spawn_conditional_apply_server(listener, Arc::clone(&applied_models));
+
+        let runtime_state = Arc::new(RuntimeState::new());
+        let telemetry = SidecarTelemetry::for_tests(&[]);
+        let runtime = SubscriberRuntime {
+            bundle: "default".to_string(),
+            pool: "default".to_string(),
+            trusted_producers: vec!["sie-config".to_string()],
+            ipc: AdapterWorkerPool::new(&[socket_path], 1, 1, 1, runtime_state),
+            state: Arc::new(ConfigApplyState::new(String::new())),
+            telemetry: telemetry.clone(),
+            shutdown: Arc::new(Shutdown::new()),
+        };
+
+        apply_notification(
+            &runtime,
+            notification("untrusted", "default", None, "untrusted/model"),
+        )
+        .await;
+        apply_notification(
+            &runtime,
+            notification("sie-config", "other", None, "wrong-bundle/model"),
+        )
+        .await;
+        apply_notification(
+            &runtime,
+            notification("sie-config", "default", Some("other"), "wrong-pool/model"),
+        )
+        .await;
+        apply_notification(
+            &runtime,
+            notification("sie-config", "default", None, "failed/model"),
+        )
+        .await;
+
+        assert_eq!(telemetry.allowed_model_count_for_tests(), 0);
+        assert!(!telemetry.profile_allowed_for_tests("default"));
+
+        apply_notification(
+            &runtime,
+            notification("sie-config", "default", None, "trusted/model"),
+        )
+        .await;
+
+        assert!(telemetry.model_allowed_for_tests("trusted/model"));
+        assert!(telemetry.profile_allowed_for_tests("default"));
+        assert!(!telemetry.model_allowed_for_tests("untrusted/model"));
+        assert!(!telemetry.model_allowed_for_tests("wrong-bundle/model"));
+        assert!(!telemetry.model_allowed_for_tests("wrong-pool/model"));
+        assert!(!telemetry.model_allowed_for_tests("failed/model"));
+        assert_eq!(
+            applied_models.lock().await.as_slice(),
+            ["failed/model", "trusted/model"],
+            "rejected notifications must not reach IPC"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn apply_via_ipc_does_not_eager_ensure_candle_model_ready() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("ipc.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind fake ipc socket");
+        let methods = Arc::new(Mutex::new(Vec::<String>::new()));
+        let server_methods = Arc::clone(&methods);
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _addr)) = listener.accept().await else {
+                    break;
+                };
+                let methods = Arc::clone(&server_methods);
+                tokio::spawn(async move {
+                    loop {
+                        let mut len_buf = [0_u8; 4];
+                        if stream.read_exact(&mut len_buf).await.is_err() {
+                            break;
+                        }
+                        let len = u32::from_be_bytes(len_buf) as usize;
+                        let mut frame = vec![0_u8; len];
+                        if stream.read_exact(&mut frame).await.is_err() {
+                            break;
+                        }
+                        let raw: serde_json::Value =
+                            rmp_serde::from_slice(&frame).expect("decode request envelope");
+                        let method = raw
+                            .get("method")
+                            .and_then(serde_json::Value::as_str)
+                            .expect("request method")
+                            .to_string();
+                        let request_id = raw
+                            .get("request_id")
+                            .and_then(serde_json::Value::as_str)
+                            .expect("request id")
+                            .to_string();
+                        methods.lock().await.push(method.clone());
+
+                        let body = match method.as_str() {
+                            crate::ipc_types::METHOD_APPLY_MODEL_CONFIG => serde_json::json!({
+                                "applied": true,
+                                "bundle_config_hash": "hash",
+                                "config_version": 1_u64
+                            }),
+                            crate::ipc_types::METHOD_ENSURE_MODEL_READY => serde_json::json!({
+                                "state": "ready",
+                                "batch_budget": 64_u32
+                            }),
+                            other => panic!("unexpected fake IPC method {other}"),
+                        };
+                        let response = serde_json::json!({
+                            "version": crate::ipc_types::IPC_VERSION,
+                            "request_id": request_id,
+                            "ok": true,
+                            "body": body
+                        });
+                        let bytes =
+                            rmp_serde::to_vec_named(&response).expect("encode response envelope");
+                        stream
+                            .write_all(&(bytes.len() as u32).to_be_bytes())
+                            .await
+                            .expect("write response length");
+                        stream.write_all(&bytes).await.expect("write response");
+                    }
+                });
+            }
+        });
+
+        let runtime_state = Arc::new(RuntimeState::new());
+        let ipc = AdapterWorkerPool::new(&[socket_path], 1, 1, 1, runtime_state);
+        let shutdown = Arc::new(Shutdown::new());
+        let resp = apply_via_ipc_with_retry(
+            ipc,
+            shutdown,
+            ApplyModelConfigRequest {
+                bundle_id: "candle".to_string(),
+                model_id: "topk-io/Iso-ModernColBERT".to_string(),
+                epoch: 7,
+                bundle_config_hash: "hash".to_string(),
+                profiles_added: vec!["candle".to_string()],
+                model_config: "sie_id: topk-io/Iso-ModernColBERT\n".to_string(),
+            },
+            "topk-io/Iso-ModernColBERT",
+            7,
+        )
+        .await
+        .expect("apply via ipc")
+        .expect("response");
+
+        assert!(resp.applied);
+        assert_eq!(
+            methods.lock().await.as_slice(),
+            [crate::ipc_types::METHOD_APPLY_MODEL_CONFIG],
+            "config apply must not trigger Candle eager model readiness"
+        );
+        server.abort();
     }
 }

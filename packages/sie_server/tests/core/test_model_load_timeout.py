@@ -3,8 +3,7 @@
 Covers:
 - ``_resolve_load_timeout`` precedence (kwarg > env > default).
 - ``ModelLoader._run_with_timeout`` happy path (no wait_for fires).
-- Timeout path: raises ``ModelLoadTimeoutError``, recreates executor,
-  increments the Prometheus counter.
+- Timeout path: raises ``ModelLoadTimeoutError`` and recreates executor.
 - ``classify_load_error`` buckets ``ModelLoadTimeoutError`` into
   ``LoadErrorClass.TIMEOUT`` with a non-permanent cooldown.
 - ``hf_env.set_hf_default_timeouts`` is non-clobbering.
@@ -20,10 +19,10 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
+from sie_server.config.model import AdapterOptions, EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.hf_env import set_hf_default_timeouts
 from sie_server.core.load_errors import (
     LoadErrorClass,
@@ -62,6 +61,32 @@ def _make_embedding_config(name: str = "t") -> ModelConfig:
             )
         },
     )
+
+
+def test_muvera_runtime_requires_registered_postprocessor() -> None:
+    loader = _make_loader()
+    config = ModelConfig(
+        sie_id="test/visual:muvera",
+        hf_id="test/visual",
+        tasks=Tasks(encode=EncodeTask(multivector=EmbeddingDim(dim=8))),
+        profiles={
+            "default": ProfileConfig(
+                adapter_path="sie_server.adapters.base:ModelAdapter",
+                max_batch_tokens=8,
+                adapter_options=AdapterOptions(
+                    runtime={
+                        "muvera": {},
+                        "output_types": ["dense"],
+                    }
+                ),
+            )
+        },
+    )
+    adapter = MagicMock()
+    adapter.get_postprocessors.return_value = None
+
+    with pytest.raises(ValueError, match=r"requests MUVERA.*did not register a 'muvera' postprocessor"):
+        loader._finish_load("test/visual:muvera", "cpu", adapter, config)
 
 
 class TestResolveLoadTimeout:
@@ -124,7 +149,7 @@ class TestRunWithTimeoutHappyPath:
 
 
 class TestRunWithTimeoutFires:
-    """Timeout path: error, metric, executor swap."""
+    """Timeout path: typed error and executor swap."""
 
     async def test_raises_model_load_timeout_error(self) -> None:
         loader = _make_loader(timeout_s=0.05)
@@ -163,21 +188,6 @@ class TestRunWithTimeoutFires:
         # Leaked thread cleanup: the orphaned executor is shut down so the
         # interpreter doesn't keep it alive past the test.
         original_executor.shutdown(wait=True)
-
-    async def test_increments_prometheus_counter(self) -> None:
-        from sie_server.observability.metrics import MODEL_LOAD_TIMEOUTS
-
-        loader = _make_loader(timeout_s=0.05)
-        before = MODEL_LOAD_TIMEOUTS.labels(model="metric-model", stage="load")._value.get()
-
-        def _hang() -> None:
-            time.sleep(2.0)
-
-        with pytest.raises(ModelLoadTimeoutError):
-            await loader._run_with_timeout(stage="load", name="metric-model", func=_hang, args=())
-
-        after = MODEL_LOAD_TIMEOUTS.labels(model="metric-model", stage="load")._value.get()
-        assert after == before + 1
 
 
 class TestClassification:
@@ -269,7 +279,7 @@ class TestRegistryIntegration:
     async def test_orphan_thread_does_not_corrupt_registry_state(self) -> None:
         """B1 regression: when ``_load_in_executor`` times out, the
         orphaned thread must NOT register pre/postprocessors or set
-        ``MODEL_LOADED=1`` on the registry/metrics for a model the
+        model residency on the registry/telemetry for a model the
         registry has marked failed.
 
         We simulate this by setting a tight timeout and an
@@ -279,10 +289,7 @@ class TestRegistryIntegration:
         so even if the orphan finishes ``adapter.load`` later, no
         registry mutation occurs from the leaked thread.
         """
-        from unittest.mock import MagicMock
-
         from sie_server.config.model import EmbeddingDim, EncodeTask, ProfileConfig, Tasks
-        from sie_server.observability.metrics import MODEL_LOADED
 
         loader = _make_loader(timeout_s=0.05)
 
@@ -314,20 +321,16 @@ class TestRegistryIntegration:
             },
         )()
 
-        before = MODEL_LOADED.labels(model="ghost", device="cpu")._value.get()
+        telemetry = MagicMock()
+        with patch("sie_server.core.model_loader.worker_telemetry", return_value=telemetry):
+            with pytest.raises(ModelLoadTimeoutError):
+                await loader._load_in_executor("ghost", "cpu", adapter, config)
 
-        with pytest.raises(ModelLoadTimeoutError):
-            await loader._load_in_executor("ghost", "cpu", adapter, config)
-
-        # Wait for the orphan thread to "complete" so we can assert it
-        # did NOT mutate registry state on its way out.
-        await asyncio.sleep(0.5)
+            # Wait for the orphan thread to "complete" so we can assert it
+            # did NOT mutate telemetry state on its way out.
+            await asyncio.sleep(0.5)
         assert load_finished, "test bug: orphan didn't reach the post-sleep marker"
-
-        after = MODEL_LOADED.labels(model="ghost", device="cpu")._value.get()
-        assert after == before, (
-            "orphan thread mutated MODEL_LOADED gauge — _finish_load must not run from the executor thread"
-        )
+        telemetry.model_residency_changed.assert_not_called()
 
     async def test_adapter_owned_timeout_load_runs_in_executor_without_generic_wait_for(self) -> None:
         """Subprocess-backed adapters own child cleanup and startup timeout.

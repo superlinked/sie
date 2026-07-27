@@ -25,22 +25,20 @@
 //! ## Fairness
 //!
 //! A batcher's head age is the arrival time of its oldest still-pending
-//! item. Each `BatcherEntry` tracks this as a lock-free
-//! [`AtomicU64`] (nanos since the scheduler's epoch; `0` means the
-//! batcher is empty). `pick_oldest` scans every entry with a single
-//! `Relaxed` load per entry; under the scheduler's expected O(tens) of
-//! entries this is cheaper than a mutex in every hot path.
+//! item. Each [`BatchFormer`] owns a lock-free head timestamp (nanos
+//! since the scheduler's epoch; `0` means empty) that it refreshes
+//! while holding the same lock as queue mutation. `pick_oldest` scans
+//! every entry with one atomic load, while submit/extract cannot race
+//! the head into an invisible-pending or stale-head state.
 //!
-//! The per-batcher head is set on the *first* submit and cleared only
-//! when an extract drains the queue to empty — mid-flush, it still
-//! reflects the original first-submit time. Python does the same;
-//! see `batcher.py::_extract_batch` "Reset timers if we've emptied
-//! the queue". This is the correct fairness primitive: "how long has
-//! the oldest item in this LoRA been waiting".
+//! Partial cost-sorted extracts refresh the timestamp to the oldest
+//! item that actually remains. That is the fairness primitive the
+//! scheduler needs: "how long has the oldest pending item in this
+//! LoRA been waiting". A hot key therefore cannot retain the timestamp
+//! of already-dispatched work and repeatedly jump ahead of a sibling.
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -54,7 +52,7 @@ use super::batch_former::{BatchFormer, FormattedBatch, HasCost};
 use super::trackers::BatchEfficiencyTracker;
 
 /// Snapshot returned by [`Scheduler::record_completion`] for the
-/// caller to feed into Prometheus / structured logs after a batch
+/// caller to inspect or report after a batch
 /// completes. Mirrors the post-step block in Python's
 /// `model_worker.py::_step_adaptive_controller` (~lines 752-765)
 /// where `ADAPTIVE_BATCH_WAIT`, `ADAPTIVE_BATCH_COST`,
@@ -62,12 +60,9 @@ use super::trackers::BatchEfficiencyTracker;
 /// `ADAPTIVE_STARVATION_STREAK`, and `ADAPTIVE_STARVATION_RESETS`
 /// are pushed.
 ///
-/// The dispatcher consumes this and emits the corresponding
-/// `sie_worker_scheduler_adaptive_*` Prometheus families. Returning
-/// the snapshot (rather than emitting metrics from inside the
-/// scheduler) keeps the scheduler module free of label-vocabulary
-/// concerns and keeps the Prometheus dependency boundary at the
-/// dispatcher seam.
+/// Returning the snapshot rather than exporting inside the scheduler keeps the
+/// controller independently testable and lets the canonical facade choose the
+/// declared observations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecordCompletionOutcome {
     /// New `max_batch_wait_ms` cap after the controller step.
@@ -88,8 +83,7 @@ pub struct RecordCompletionOutcome {
     /// Increase in `AdaptiveBatchController::starvation_resets()`
     /// since the previous `record_completion` call. Callers
     /// `inc_by` their starvation-reset counter by this delta — the
-    /// underlying counter is monotonic so a delta is the right
-    /// shape for a Prometheus `IntCounter`.
+    /// underlying counter is monotonic so a delta is the right shape.
     pub starvation_resets_delta: u32,
     /// Size of the batch whose completion drove this step. Echoed
     /// back so callers don't have to re-thread it through.
@@ -177,11 +171,6 @@ struct BatcherEntry<I: HasCost, T> {
     op: Op,
     lora: LoraKey,
     former: Arc<BatchFormer<I, T>>,
-    /// Nanos since [`Scheduler::epoch`]. `0` ⇒ batcher has no pending
-    /// items. Any nonzero value is the timestamp at which the first
-    /// *currently-pending* item was submitted — i.e. the arrival time
-    /// of this batcher's oldest waiter.
-    head_ns: AtomicU64,
 }
 
 /// The per-model scheduler.
@@ -204,10 +193,8 @@ pub struct Scheduler<I: HasCost, T> {
     /// batcher. [`Scheduler::consume_next`] uses this to wake its
     /// FCFS scan without polling.
     new_item: Notify,
-    /// Wall-clock origin for per-batcher `head_ns` atomics. Stored as
-    /// `Instant` (monotonic) so head-age comparisons are unaffected by
-    /// wall-clock jumps. `Arc`'d only because the struct is sometimes
-    /// cloned in tests; the field itself is `Copy`.
+    /// Monotonic origin shared by per-batcher FCFS head timestamps so
+    /// comparisons are unaffected by wall-clock jumps.
     epoch: Instant,
 }
 
@@ -252,6 +239,20 @@ where
         total
     }
 
+    /// Snapshot the pending item count for one routed `(op, lora)` batcher.
+    ///
+    /// The dispatcher uses this as a continuous-drain count budget. Arrivals
+    /// may still participate after cost sorting, but cannot increase the
+    /// number of items dispatched before the next FCFS selection.
+    pub async fn pending_count_same(&self, op: Op, lora: LoraKey) -> usize {
+        let key = Self::route_key(op, lora);
+        let entry = self.batchers.read().await.get(&key).cloned();
+        match entry {
+            Some(entry) => entry.former.pending_count().await,
+            None => 0,
+        }
+    }
+
     /// Sum of pending cost across every (op, lora) batcher.
     pub async fn total_pending_cost(&self) -> u64 {
         let map = self.batchers.read().await;
@@ -279,8 +280,8 @@ where
     pub async fn submit(&self, op: Op, lora: LoraKey, item: I, metadata: T) {
         let key = Self::route_key(op, lora);
         let entry = self.get_or_create(&key).await;
-        self.mark_head_on_first_submit(&entry);
         entry.former.submit(item, metadata).await;
+        self.new_item.notify_one();
     }
 
     /// Bulk submit under a single BatchFormer-lock. Use this for
@@ -291,8 +292,8 @@ where
         }
         let key = Self::route_key(op, lora);
         let entry = self.get_or_create(&key).await;
-        self.mark_head_on_first_submit(&entry);
         entry.former.submit_many(items).await;
+        self.new_item.notify_one();
     }
 
     // ---- Consume path ----
@@ -315,7 +316,6 @@ where
 
             if let Some(entry) = self.pick_oldest().await {
                 let batch = entry.former.get_batch(immediate).await;
-                self.maybe_clear_head(&entry).await;
                 return (entry.op, entry.lora.clone(), batch);
             }
             notified.await;
@@ -328,7 +328,6 @@ where
     pub async fn try_consume_next(&self) -> Option<(Op, LoraKey, FormattedBatch<I, T>)> {
         let entry = self.pick_oldest().await?;
         let batch = entry.former.try_get_batch().await?;
-        self.maybe_clear_head(&entry).await;
         Some((entry.op, entry.lora.clone(), batch))
     }
 
@@ -337,14 +336,31 @@ where
     /// when the batcher has no pending items (or doesn't exist).
     ///
     /// Matches the Python adapter process's `try_drain` call after each forward
-    /// pass. Expected usage: after consume_next returns a batch for
-    /// `(op, lora)`, loop on `try_drain_same(op, lora)` until it
-    /// returns `None`.
+    /// pass. Expected usage: after `consume_next` returns a batch for
+    /// `(op, lora)`, snapshot [`Self::pending_count_same`] and repeatedly call
+    /// [`Self::try_drain_same_up_to`] with the remaining snapshot budget.
     pub async fn try_drain_same(&self, op: Op, lora: LoraKey) -> Option<FormattedBatch<I, T>> {
+        self.try_drain_same_up_to(op, lora, usize::MAX).await
+    }
+
+    /// Drain at most `max_items` from one routed `(op, lora)` batcher.
+    ///
+    /// This is the bounded form used by the dispatch loop so arrivals during a
+    /// saturated wave cannot increase that wave's item count indefinitely.
+    /// After the wave, refreshed FCFS heads arbitrate any remaining work across
+    /// sibling LoRAs and operations. A zero budget is a no-op.
+    pub async fn try_drain_same_up_to(
+        &self,
+        op: Op,
+        lora: LoraKey,
+        max_items: usize,
+    ) -> Option<FormattedBatch<I, T>> {
+        if max_items == 0 {
+            return None;
+        }
         let key = Self::route_key(op, lora);
         let entry = self.batchers.read().await.get(&key).cloned()?;
-        let batch = entry.former.try_drain().await?;
-        self.maybe_clear_head(&entry).await;
+        let batch = entry.former.try_drain_up_to(max_items).await?;
         Some(batch)
     }
 
@@ -360,25 +376,26 @@ where
         ctrl.record_inference_sample(inference_ms);
     }
 
-    /// Record one item's total latency (queue + inference +
-    /// postprocess) — call **once per item** in a completed batch.
+    /// Record one request-ID occurrence's scheduler-local total latency
+    /// (batch wait + backend roundtrip).
     ///
     /// Mirrors Python's `_check_partial_results` block at
     /// `model_worker.py:1004` which calls
     /// `_latency_tracker.record(metadata.timing.total_ms)` for every
-    /// completed item. Per-item recording is mathematically critical
-    /// for the controller: feeding per-batch MAX values would bias
-    /// `observed_p50_ms` toward the per-item p99 of the underlying
-    /// distribution and drive `max_batch_wait_ms` to its floor under
-    /// concurrent load.
+    /// completed request inside one backend batch. The dispatcher deduplicates
+    /// by request ID within that batch; a request split across backend batches
+    /// contributes once in each. This avoids item-count weighting inside a
+    /// batch without feeding per-batch MAX values, which would bias
+    /// `observed_p50_ms` toward the underlying request tail and drive
+    /// `max_batch_wait_ms` to its floor under concurrent load.
     pub async fn record_latency_sample(&self, total_ms: f64) {
         self.latency.lock().await.record(total_ms);
     }
 
     /// Bulk variant of [`Self::record_latency_sample`] — pushes
     /// every value in `samples` under a single mutex acquire. Use
-    /// when the caller already has the per-item totals collected
-    /// (e.g. the dispatcher's per-item zip over `outcomes` x
+    /// when the caller already has the per-request totals collected
+    /// (e.g. the dispatcher's request-id-deduped zip over `outcomes` x
     /// `metadata`); avoids N lock acquires for typical batches of
     /// 16–32 items.
     pub async fn record_latency_samples(&self, samples: &[f64]) {
@@ -405,8 +422,8 @@ where
     /// (used by the efficiency tracker → fill_ratio knob). `batch_size`
     /// = item count (used by the starvation detector).
     ///
-    /// Returns a [`RecordCompletionOutcome`] for the caller to push
-    /// to Prometheus. Mirrors Python's `model_worker.py:752-765`.
+    /// Returns a [`RecordCompletionOutcome`] for the caller. Mirrors Python's
+    /// `model_worker.py:752-765`.
     pub async fn record_completion(
         &self,
         batch_cost: u64,
@@ -500,49 +517,17 @@ where
         let entry = Arc::new(BatcherEntry {
             op: key.0,
             lora: key.1.clone(),
-            former: Arc::new(BatchFormer::new(cfg)),
-            head_ns: AtomicU64::new(0),
+            former: Arc::new(BatchFormer::with_epoch(cfg, self.epoch)),
         });
         map.insert(key.clone(), Arc::clone(&entry));
         entry
-    }
-
-    /// Set `head_ns` to "now" if the entry was empty. If it was
-    /// already non-zero (i.e. this batcher already has pending items
-    /// from an earlier submit), leave the existing value alone —
-    /// Python keeps the original first-submit time across mid-flush
-    /// churn for fairness accounting.
-    fn mark_head_on_first_submit(&self, entry: &BatcherEntry<I, T>) {
-        let now_ns = self.epoch.elapsed().as_nanos() as u64;
-        // Ensure we never store 0 on a real submit — 0 is reserved
-        // for "empty". Instants that round to 0 ns are
-        // astronomically unlikely (would require submit in the
-        // first tick of the runtime's clock), but saturating_add
-        // here keeps the invariant airtight.
-        let ts = now_ns.saturating_add(1);
-        let _ = entry
-            .head_ns
-            .compare_exchange(0, ts, Ordering::AcqRel, Ordering::Relaxed);
-        // If the CAS fails, head_ns was already non-zero — keep
-        // the older timestamp. Also fire the ready-notify so the
-        // consumer's FCFS loop picks this up even on the first
-        // submit into a brand-new LoRA.
-        self.new_item.notify_one();
-    }
-
-    /// Zero `head_ns` iff the batcher has no pending items after an
-    /// extract. Leaves non-zero values alone otherwise.
-    async fn maybe_clear_head(&self, entry: &BatcherEntry<I, T>) {
-        if entry.former.pending_count().await == 0 {
-            entry.head_ns.store(0, Ordering::Release);
-        }
     }
 
     async fn pick_oldest(&self) -> Option<Arc<BatcherEntry<I, T>>> {
         let map = self.batchers.read().await;
         let mut best: Option<(u64, Arc<BatcherEntry<I, T>>)> = None;
         for entry in map.values() {
-            let head = entry.head_ns.load(Ordering::Acquire);
+            let head = entry.former.fcfs_head_ns();
             if head == 0 {
                 continue;
             }
@@ -853,7 +838,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn head_ns_clears_only_when_batcher_drains_to_empty() {
+    async fn fcfs_head_clears_only_when_batcher_drains_to_empty() {
         let s = Scheduler::<StubItem, u32>::builder()
             .config(BatchConfig {
                 max_batch_cost: 5, // small cap so extract leaves remainder
@@ -874,13 +859,13 @@ mod tests {
         assert_eq!(batch.size(), 1);
         assert_eq!(s.total_pending_count().await, 1, "one item must remain");
 
-        // The entry's head_ns must still be non-zero so FCFS keeps
+        // The entry's FCFS head must still be non-zero so FCFS keeps
         // honouring it on the next scan.
         let entry = {
             let map = s.batchers.read().await;
             Arc::clone(map.get(&(Op::Encode, LoraKey::base())).unwrap())
         };
-        let head = entry.head_ns.load(Ordering::Acquire);
+        let head = entry.former.fcfs_head_ns();
         assert_ne!(
             head, 0,
             "head_ns must stay non-zero while pending items remain"
@@ -889,7 +874,7 @@ mod tests {
         // Drain the rest; head should clear.
         let (_, _, _) = s.consume_next(true).await;
         assert_eq!(s.total_pending_count().await, 0);
-        let head = entry.head_ns.load(Ordering::Acquire);
+        let head = entry.former.fcfs_head_ns();
         assert_eq!(head, 0, "head_ns must clear when queue empties");
     }
 
@@ -944,6 +929,73 @@ mod tests {
             .expect("must drain pending tail");
         assert_eq!(drain.size(), 1);
         assert_eq!(drain.metadata[0], 2);
+    }
+
+    #[tokio::test]
+    async fn bounded_same_key_drain_returns_to_fcfs_for_later_arrivals() {
+        let s = Scheduler::<StubItem, u32>::builder()
+            .config(BatchConfig {
+                max_batch_cost: 1_000_000,
+                max_batch_requests: 2,
+                max_batch_wait_ms: 10_000.0,
+                coalesce_ms: 10_000.0,
+                coalesce_ratio: 1.0,
+            })
+            .build();
+        let base = LoraKey::base();
+        let sibling = LoraKey::from_name("sibling");
+
+        // Start a base-model wave and remove its primary item.
+        s.submit(Op::Encode, base.clone(), StubItem { cost: 1, idx: 0 }, 1)
+            .await;
+        let _ = s.consume_next(true).await;
+
+        // Base backlog accumulates first while its primary forward is active.
+        s.submit_many(
+            Op::Encode,
+            base.clone(),
+            vec![
+                (StubItem { cost: 1, idx: 1 }, 2),
+                (StubItem { cost: 1, idx: 2 }, 3),
+                (StubItem { cost: 1, idx: 3 }, 4),
+            ],
+        )
+        .await;
+        let drain_budget = s.pending_count_same(Op::Encode, base.clone()).await;
+        assert_eq!(drain_budget, 3);
+
+        // A sibling arrives after that backlog but before a newer base item.
+        // Once the bounded base drain removes its older cohort, the refreshed
+        // base head must not retain that cohort's timestamp and jump ahead of
+        // the sibling again.
+        tsleep(TDuration::from_millis(1)).await;
+        s.submit(
+            Op::Encode,
+            sibling.clone(),
+            StubItem { cost: 1, idx: 99 },
+            99,
+        )
+        .await;
+        tsleep(TDuration::from_millis(1)).await;
+        s.submit(Op::Encode, base.clone(), StubItem { cost: 1, idx: 4 }, 5)
+            .await;
+        let mut remaining = drain_budget;
+        let mut drained_batches = Vec::new();
+        while remaining > 0 {
+            let drained = s
+                .try_drain_same_up_to(Op::Encode, base.clone(), remaining)
+                .await
+                .expect("snapshot backlog should drain");
+            remaining -= drained.size();
+            drained_batches.push(drained.metadata);
+        }
+        assert_eq!(drained_batches, vec![vec![2, 3], vec![4]]);
+        assert_eq!(s.total_pending_count().await, 2);
+
+        let (_, selected_lora, selected) = s.consume_next(true).await;
+        assert_eq!(selected_lora, sibling);
+        assert_eq!(selected.metadata, vec![99]);
+        assert_eq!(s.total_pending_count().await, 1);
     }
 
     // ---- Adaptive controller wiring ----
@@ -1203,7 +1255,7 @@ mod tests {
         // After the step the scheduler's shared config snapshot
         // carries the same caps as the returned outcome — operators
         // reading `s.config()` after a completion see the same
-        // numbers Prometheus does.
+        // numbers returned by the controller step.
         let cfg = s.config().await;
         assert_eq!(cfg.max_batch_wait_ms, snap.new_wait_ms);
         assert_eq!(cfg.max_batch_cost, snap.new_batch_cost);

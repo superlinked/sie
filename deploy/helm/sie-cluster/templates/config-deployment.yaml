@@ -1,5 +1,8 @@
 {{- if .Values.config.enabled }}
 {{- include "sie-cluster.validateNats" . }}
+{{- if hasKey .Values.config.podAnnotations "checksum/otel-resource" -}}
+{{- fail "config.podAnnotations must not override chart-owned annotation checksum/otel-resource" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -48,10 +51,11 @@ spec:
         {{- /* Render selectorLabels last so user-supplied podLabels cannot
                override the Deployment selector contract. */ -}}
         {{- include "sie-cluster.config.selectorLabels" . | nindent 8 }}
-      {{- with .Values.config.podAnnotations }}
       annotations:
+        {{- with .Values.config.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
+        checksum/otel-resource: {{ include "sie-cluster.otel.resourceChecksum" . | quote }}
     spec:
       {{- include "sie-cluster.imagePullSecrets" . | nindent 6 }}
       serviceAccountName: {{ include "sie-cluster.serviceAccountName" . }}
@@ -100,6 +104,9 @@ spec:
               value: {{ .Values.config.configStore.mountPath | quote }}
             - name: SIE_CONFIG_RESTORE
               value: "true"
+            {{- end }}
+            {{- if eq (include "sie-cluster.otel.signalsEnabled" .) "true" }}
+            {{- include "sie-cluster.otel.env" (dict "root" . "serviceName" .Values.observability.otel.serviceName.config "instanceSuffix" "config") | nindent 12 }}
             {{- end }}
           startupProbe:
             httpGet:

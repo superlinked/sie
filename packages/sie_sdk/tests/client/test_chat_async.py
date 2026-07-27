@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sie_sdk import SIEAsyncClient
-from sie_sdk.client.errors import ServerError
+from sie_sdk.client.errors import RequestError, ServerError
 
 
 class _FakeRaw:
@@ -25,12 +25,12 @@ class _FakeRaw:
         status: int = 200,
         line_bytes: list[bytes] | None = None,
         headers: dict[str, str] | None = None,
-        body: dict[str, Any] | None = None,
+        body: Any | None = None,
     ) -> None:
         self.status = status
         self.headers = headers or {"content-type": "text/event-stream"}
         self._line_bytes = line_bytes or []
-        self._body = body or {}
+        self._body = {} if body is None else body
         # ``content`` async-iterates byte lines, mirroring aiohttp.StreamReader.
         self.content = self._aiter_bytes()
 
@@ -94,9 +94,25 @@ async def test_async_chat_completions_parses_and_sends_json() -> None:
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     }
     client = SIEAsyncClient("http://localhost:8080")
-    session = _patch_session(client, post_returns=_FakeRaw(status=200, body=payload))
+    session = _patch_session(
+        client,
+        post_returns=_FakeRaw(
+            status=200,
+            body=payload,
+            headers={
+                "x-sie-request-id": "req-chat",
+                "x-sie-units-output-tokens": "1",
+                "x-sie-credits-debited": "7",
+            },
+        ),
+    )
     out = await client.chat_completions("m", [{"role": "user", "content": "hi"}], max_completion_tokens=16)
     assert out["choices"][0]["message"]["content"] == "Hi"
+    assert out["request"] == {
+        "id": "req-chat",
+        "usage": {"output_tokens": 1},
+        "credits_debited": 7,
+    }
     call = session.post.call_args
     assert call.args[0] == "/v1/chat/completions"
     sent = json.loads(call.kwargs["data"].decode("utf-8"))
@@ -121,7 +137,14 @@ async def test_async_stream_chat_yields_chunks() -> None:
 
 @pytest.mark.asyncio
 async def test_async_stream_generate_yields_and_normalizes_path() -> None:
-    chunk0 = {"request_id": "r", "seq": 0, "text_delta": "He", "done": False}
+    token_logprobs = [{"token": "He", "logprob": -0.25, "top_logprobs": []}]
+    chunk0 = {
+        "request_id": "r",
+        "seq": 0,
+        "text_delta": "He",
+        "logprobs": token_logprobs,
+        "done": False,
+    }
     term = {
         "request_id": "r",
         "seq": 1,
@@ -132,10 +155,67 @@ async def test_async_stream_generate_yields_and_normalizes_path() -> None:
     }
     client = SIEAsyncClient("http://localhost:8080")
     session = _patch_session(client, post_returns=_FakeRaw(status=200, line_bytes=_sse_bytes(chunk0, term)))
-    out = [c async for c in client.stream_generate("Qwen/Qwen3-4B-Instruct", "hi", max_new_tokens=8)]
+    out = [
+        c
+        async for c in client.stream_generate(
+            "Qwen/Qwen3-4B-Instruct",
+            "hi",
+            max_new_tokens=8,
+            images=[{"data": b"\x89PNG\r\n\x1a\npayload", "format": "png"}],
+            frequency_penalty=0.25,
+            presence_penalty=-0.5,
+            grammar={"regex": "[a-z]+", "label": None, "strict": None},
+            seed=-3,
+            logit_bias={"123": 1.5},
+            logprobs=True,
+            top_logprobs=3,
+            routing_key="tenant-7",
+            prompt_cache_key="prompt-9",
+            safety_identifier="safety-3",
+            lora_adapter="sql-adapter",
+            extra_body={"prompt": "wrong", "max_new_tokens": 999, "stream": False},
+        )
+    ]
     assert "".join(c["text_delta"] for c in out) == "Hello"
+    assert out[0]["logprobs"] == token_logprobs
     assert out[-1]["done"] is True
     assert session.post.call_args.args[0] == "/v1/generate/Qwen__Qwen3-4B-Instruct"
+    sent = json.loads(session.post.call_args.kwargs["data"].decode("utf-8"))
+    assert sent == {
+        "prompt": "hi",
+        "max_new_tokens": 8,
+        "images": [{"data": "iVBORw0KGgpwYXlsb2Fk", "format": "png"}],
+        "stream": True,
+        "frequency_penalty": 0.25,
+        "presence_penalty": -0.5,
+        "grammar": {"regex": "[a-z]+", "label": None, "strict": None},
+        "seed": -3,
+        "logit_bias": {"123": 1.5},
+        "top_logprobs": 3,
+        "routing_key": "tenant-7",
+        "prompt_cache_key": "prompt-9",
+        "safety_identifier": "safety-3",
+        "lora_adapter": "sql-adapter",
+        "logprobs": True,
+    }
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_stream_generate_validates_extra_body_grammar_before_request() -> None:
+    client = SIEAsyncClient("http://localhost:8080")
+    session = _patch_session(client, post_returns=_FakeRaw())
+    with pytest.raises(ValueError, match="exactly one"):
+        _ = [
+            chunk
+            async for chunk in client.stream_generate(
+                "m",
+                "hi",
+                max_new_tokens=8,
+                extra_body={"grammar": {"regex": "x", "ebnf": 'root ::= "x"'}},
+            )
+        ]
+    session.post.assert_not_called()
     await client.close()
 
 
@@ -173,6 +253,58 @@ async def test_async_stream_chat_retries_503_provisioning_then_streams() -> None
     ]
     assert [c["choices"][0]["delta"].get("content") for c in out] == ["ok"]
     assert session.post.call_count == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_chat_completions_504_retains_terminal_request_metadata_without_retry() -> None:
+    timeout = _FakeRaw(
+        status=504,
+        headers={
+            "content-type": "application/json",
+            "x-sie-request-id": "req-async-chat-timeout",
+            "x-sie-units-output-tokens": "5",
+            "x-sie-credits-debited": "13",
+        },
+        body={"error": {"code": "GATEWAY_TIMEOUT", "message": "timed out"}},
+    )
+    client = SIEAsyncClient("http://localhost:8080")
+    session = _patch_session(client, post_returns=timeout)
+
+    with pytest.raises(ServerError) as excinfo:
+        await client.chat_completions("m", [{"role": "user", "content": "hi"}])
+
+    assert session.post.call_count == 1
+    assert excinfo.value.request == {
+        "id": "req-async-chat-timeout",
+        "usage": {"output_tokens": 5},
+        "credits_debited": 13,
+    }
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_chat_completions_non_dict_response_retains_request_metadata() -> None:
+    client = SIEAsyncClient("http://localhost:8080")
+    _patch_session(
+        client,
+        post_returns=_FakeRaw(
+            status=200,
+            headers={
+                "x-sie-request-id": "req-async-chat-malformed",
+                "x-sie-units-output-tokens": "3",
+                "x-sie-credits-debited": "8",
+            },
+            body=["not a dict"],
+        ),
+    )
+    with pytest.raises(RequestError) as excinfo:
+        await client.chat_completions("m", [{"role": "user", "content": "hi"}])
+    assert excinfo.value.request == {
+        "id": "req-async-chat-malformed",
+        "usage": {"output_tokens": 3},
+        "credits_debited": 8,
+    }
     await client.close()
 
 

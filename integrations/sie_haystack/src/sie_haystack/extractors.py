@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from haystack import component
+from sie_sdk.types import Item
 
 
 @dataclass
@@ -125,23 +126,40 @@ class SIEExtractor:
         self,
         text: str,
         labels: list[str] | None = None,
+        entities: list[Entity | dict[str, Any]] | None = None,
     ) -> dict[str, list]:
         """Extract structured information from text.
 
         Args:
             text: The text to extract from.
             labels: Override the configured labels for this call.
+            entities: Entity spans for relation extraction models such as GLiREL.
+                Each span uses character offsets with an exclusive ``end``.
 
         Returns:
             Dictionary with entities, relations, classifications, and objects.
         """
-        from sie_sdk.types import Item
-
         effective_labels = labels if labels is not None else self._labels
+        metadata = None
+        if entities is not None:
+            metadata = {
+                "entities": [
+                    dict(entity)
+                    if isinstance(entity, dict)
+                    else {
+                        "text": entity.text,
+                        "label": entity.label,
+                        "score": entity.score,
+                        "start": entity.start,
+                        "end": entity.end,
+                    }
+                    for entity in entities
+                ]
+            }
 
         result = self.client.extract(
             self._model,
-            Item(text=text),
+            Item(text=text, metadata=metadata),
             labels=effective_labels,
         )
 

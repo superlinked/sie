@@ -61,6 +61,25 @@ class TestSIEExtractor:
         call_kwargs = mock_sie_client.extract.call_args.kwargs
         assert call_kwargs.get("labels") == override_labels
 
+    def test_run_passes_entities_for_relation_extraction(self, mock_sie_client: object) -> None:
+        """Relation entity spans are forwarded through SIE item metadata."""
+        extractor = SIEExtractor(model="jackboyla/glirel-large-v0", labels=["ceo_of"])
+        extractor._client = mock_sie_client
+        entities = [
+            Entity(text="Tim Cook", label="PERSON", score=1.0, start=0, end=8),
+            Entity(text="Apple Inc.", label="ORG", score=1.0, start=23, end=33),
+        ]
+
+        extractor.run(text="Tim Cook is the CEO of Apple Inc.", entities=entities)
+
+        item = mock_sie_client.extract.call_args.args[1]
+        assert item["metadata"] == {
+            "entities": [
+                {"text": "Tim Cook", "label": "PERSON", "score": 1.0, "start": 0, "end": 8},
+                {"text": "Apple Inc.", "label": "ORG", "score": 1.0, "start": 23, "end": 33},
+            ]
+        }
+
     def test_custom_model(self, mock_sie_client: object) -> None:
         """Test using a custom model name."""
         extractor = SIEExtractor(model="custom/extraction-model")

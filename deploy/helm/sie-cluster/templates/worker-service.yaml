@@ -24,11 +24,5 @@ spec:
     {{- end }}
     {{- end }}
     {{- end }}
-    {{- if .Values.workers.common.workerSidecar.enabled }}
-    - name: worker-metrics
-      port: {{ .Values.workers.common.workerSidecar.metricsPort }}
-      targetPort: metrics
-      protocol: TCP
-    {{- end }}
   selector:
     {{- include "sie-cluster.worker.selectorLabels" . | nindent 4 }}

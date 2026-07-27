@@ -12,13 +12,59 @@ Memory management behavior:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Container
+from collections.abc import Callable, Container
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# Fake Engine (#1836/#1848): when set, every MemoryManager uses a synthetic
+# tracker instead of real device queries — total is the configured budget,
+# used is the sum of registered models' declared ``estimated_bytes``. This
+# makes pressure/eviction deterministic for the weightless fake adapters;
+# the real decision logic (``check_pressure`` / ``should_evict_for_load`` /
+# LRU) runs unmodified on top. Accepts plain bytes or a KiB/MiB/GiB/TiB
+# (or KB/MB/GB/TB, decimal) suffix, e.g. ``SIE_FAKE_MEMORY_BUDGET=32GiB``.
+SIE_FAKE_MEMORY_BUDGET_ENV = "SIE_FAKE_MEMORY_BUDGET"
+
+_SIZE_SUFFIXES: dict[str, int] = {
+    "KIB": 1024,
+    "MIB": 1024**2,
+    "GIB": 1024**3,
+    "TIB": 1024**4,
+    "KB": 1000,
+    "MB": 1000**2,
+    "GB": 1000**3,
+    "TB": 1000**4,
+}
+
+
+def parse_memory_budget(value: str) -> int:
+    """Parse a memory-budget string into bytes.
+
+    Accepts a plain integer byte count or a number with a binary
+    (``KiB``/``MiB``/``GiB``/``TiB``) or decimal (``KB``/``MB``/``GB``/``TB``)
+    suffix. Raises ``ValueError`` on anything else — a malformed budget is a
+    configuration error and must fail loudly at startup, not degrade to real
+    device queries.
+    """
+    text = value.strip()
+    upper = text.upper()
+    for suffix, multiplier in _SIZE_SUFFIXES.items():
+        if upper.endswith(suffix):
+            number = text[: -len(suffix)].strip()
+            try:
+                return int(float(number) * multiplier)
+            except ValueError:
+                break
+    try:
+        return int(text)
+    except ValueError:
+        msg = f"invalid {SIE_FAKE_MEMORY_BUDGET_ENV} value {value!r}: expected bytes or a KiB/MiB/GiB/TiB suffix"
+        raise ValueError(msg) from None
 
 
 @dataclass(slots=True)
@@ -27,7 +73,7 @@ class MemoryStats:
 
     used_bytes: int
     total_bytes: int
-    device_type: str  # "cuda", "mps", or "cpu"
+    device_type: str  # "cuda", "mps", "cpu", or "synthetic" (#1848 fake mode)
 
     @property
     def used_gb(self) -> float:
@@ -171,15 +217,67 @@ class CPUMemoryTracker(DeviceMemoryTracker):
             return MemoryStats(used_bytes=0, total_bytes=0, device_type="cpu")
 
 
-def create_memory_tracker(device: str) -> DeviceMemoryTracker:
+class SyntheticMemoryTracker(DeviceMemoryTracker):
+    """Deterministic tracker for the Fake Engine (#1848).
+
+    Reports ``total = configured budget`` and ``used = Σ declared
+    estimated_bytes of registered models`` (supplied via ``used_bytes_fn``
+    so the tracker stays stateless). No device or psutil query is ever
+    made, so pressure and eviction decisions become exact functions of
+    what the registry loaded — reproducible on any CI runner.
+    """
+
+    def __init__(self, total_bytes: int, used_bytes_fn: Callable[[], int]) -> None:
+        if total_bytes <= 0:
+            msg = f"synthetic memory budget must be positive, got {total_bytes}"
+            raise ValueError(msg)
+        self._total_bytes = total_bytes
+        self._used_bytes_fn = used_bytes_fn
+
+    def device_type(self) -> str:
+        return "synthetic"
+
+    def get_stats(self) -> MemoryStats:
+        return MemoryStats(
+            used_bytes=self._used_bytes_fn(),
+            total_bytes=self._total_bytes,
+            device_type="synthetic",
+        )
+
+
+def create_memory_tracker(
+    device: str,
+    *,
+    declared_used_bytes_fn: Callable[[], int] | None = None,
+) -> DeviceMemoryTracker:
     """Create the appropriate memory tracker for a device string.
+
+    Tracker selection lives here — including the Fake Engine synthetic mode —
+    so ``MemoryManager`` has a single construction path. When
+    ``SIE_FAKE_MEMORY_BUDGET`` is set AND the caller supplies
+    ``declared_used_bytes_fn`` (the MemoryManager's declared-footprint sum),
+    a :class:`SyntheticMemoryTracker` is returned instead of a device tracker.
+    A malformed budget raises here — configuration errors must fail loudly at
+    startup, not degrade to real device queries.
 
     Args:
         device: Device string (e.g., "cuda:0", "cuda", "mps", "cpu").
+        declared_used_bytes_fn: Source of "used bytes" for the synthetic mode.
 
     Returns:
         A DeviceMemoryTracker for the specified device.
     """
+    budget_raw = os.environ.get(SIE_FAKE_MEMORY_BUDGET_ENV)
+    if budget_raw is not None and declared_used_bytes_fn is not None:
+        budget = parse_memory_budget(budget_raw)
+        logger.info(
+            "Synthetic memory tracker active for device '%s': budget=%.2f GB (%s set)",
+            device,
+            budget / (1024**3),
+            SIE_FAKE_MEMORY_BUDGET_ENV,
+        )
+        return SyntheticMemoryTracker(budget, declared_used_bytes_fn)
+
     device_lower = device.lower()
 
     if device_lower.startswith("cuda"):
@@ -241,10 +339,16 @@ class MemoryManager:
         """
         self._device = device
         self._config = config or MemoryConfig()
-        self._tracker = create_memory_tracker(device)
         # OrderedDict maintains insertion order; we use it for LRU tracking
         # Most recently used models are moved to the end
         self._models: OrderedDict[str, ModelMemoryInfo] = OrderedDict()
+        # Single construction path: the factory owns tracker selection,
+        # including the Fake Engine synthetic mode (#1848).
+        self._tracker = create_memory_tracker(device, declared_used_bytes_fn=self._declared_used_bytes)
+
+    def _declared_used_bytes(self) -> int:
+        """Sum of registered models' declared footprints (synthetic mode)."""
+        return sum(info.estimated_bytes or 0 for info in self._models.values())
 
     @property
     def device(self) -> str:

@@ -29,6 +29,8 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.observability import worker_telemetry as worker_metrics
+from sie_server.processors import streaming as streaming_mod
 from sie_server.processors.streaming import StreamingProcessor
 
 
@@ -129,9 +131,41 @@ def _decode_chunks(nc_mock: AsyncMock) -> list[dict[str, Any]]:
     return chunks
 
 
+def _capture_worker_completion(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    telemetry = MagicMock()
+    monkeypatch.setattr(worker_metrics, "worker_telemetry_enabled", lambda: True)
+    monkeypatch.setattr(worker_metrics, "worker_telemetry", lambda: telemetry)
+    return telemetry
+
+
+def _assert_one_generation_completion(telemetry: MagicMock, *, outcome: str) -> None:
+    telemetry.item_completed.assert_called_once()
+    kwargs = telemetry.item_completed.call_args.kwargs
+    assert kwargs["operation"] == "generate"
+    assert kwargs["outcome"] == outcome
+    assert kwargs["model"] == "test/model"
+    assert kwargs["profile"] == "default"
+    assert kwargs["duration_s"] >= 0
+
+
 @pytest.mark.asyncio
-async def test_streaming_publishes_per_chunk_with_terminal() -> None:
+async def test_disabled_terminal_publication_skips_telemetry_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    nc = AsyncMock()
+    proc = StreamingProcessor(nc=nc, registry=_make_registry(_FakeGenAdapter([])), worker_id="w1")
+
+    def fail_decode(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("disabled completion path must not decode terminal payloads")
+
+    monkeypatch.setattr(streaming_mod.msgpack, "unpackb", fail_decode)
+    await proc._publish_terminal_envelope("_INBOX.test", b"opaque-terminal")
+
+    nc.publish.assert_awaited_once_with("_INBOX.test", b"opaque-terminal")
+
+
+@pytest.mark.asyncio
+async def test_streaming_publishes_per_chunk_with_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Three delta chunks + a terminal → at least one delta msg + one terminal."""
+    telemetry = _capture_worker_completion(monkeypatch)
     nc = AsyncMock()
     # Script: three short deltas across separate timestamps, then terminal.
     script = [
@@ -173,6 +207,7 @@ async def test_streaming_publishes_per_chunk_with_terminal() -> None:
     assert seqs == sorted(seqs)
     # ACK happened.
     msg.ack.assert_awaited()
+    _assert_one_generation_completion(telemetry, outcome="success")
 
 
 @pytest.mark.asyncio
@@ -225,8 +260,9 @@ async def test_two_pickups_yield_distinct_attempt_ids() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_event_emits_cancelled_terminal() -> None:
+async def test_cancel_event_emits_cancelled_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     """signal_cancel() mid-stream → final chunk has finish_reason=cancelled."""
+    telemetry = _capture_worker_completion(monkeypatch)
     nc = AsyncMock()
     hold = asyncio.Event()
     script = [
@@ -266,6 +302,7 @@ async def test_cancel_event_emits_cancelled_terminal() -> None:
     assert terminal["done"] is True
     assert terminal["finish_reason"] == "cancelled"
     msg.ack.assert_awaited()
+    _assert_one_generation_completion(telemetry, outcome="cancelled")
 
 
 @pytest.mark.asyncio
@@ -337,8 +374,9 @@ async def test_full_queue_at_finally_never_drops_terminal_chunk(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_publish_failures_emit_transport_failure_terminal() -> None:
+async def test_publish_failures_emit_transport_failure_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Publish failures leave the JetStream message unacked for redelivery."""
+    telemetry = _capture_worker_completion(monkeypatch)
     nc = AsyncMock()
     nc.publish.side_effect = RuntimeError("nats down")
 
@@ -355,6 +393,7 @@ async def test_publish_failures_emit_transport_failure_terminal() -> None:
     # The terminal chunk was not confirmed published, so the worker must not
     # ACK; JetStream redelivery is safer than losing a completed generation.
     msg.ack.assert_not_awaited()
+    telemetry.item_completed.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -403,8 +442,9 @@ async def test_heartbeat_calls_in_progress_during_slow_stream(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_iterator_raises_emits_error_terminal() -> None:
+async def test_iterator_raises_emits_error_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     """If the adapter iterator raises, we publish an error terminal and ACK."""
+    telemetry = _capture_worker_completion(monkeypatch)
     nc = AsyncMock()
 
     class _RaisingAdapter(GenerationAdapter):
@@ -435,6 +475,27 @@ async def test_iterator_raises_emits_error_terminal() -> None:
     assert terminal["finish_reason"] == "error"
     assert terminal["error"]["code"] == "inference_error"
     msg.ack.assert_awaited()
+    _assert_one_generation_completion(telemetry, outcome="error")
+
+
+@pytest.mark.asyncio
+async def test_retry_nak_is_not_a_completed_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A routing retry hands ownership off; the eventual attempt owns completion."""
+    telemetry = _capture_worker_completion(monkeypatch)
+    nc = AsyncMock()
+    registry = _make_registry(_FakeGenAdapter([]))
+    registry.is_loaded.return_value = False
+    registry.load_async = AsyncMock(side_effect=KeyError("not registered"))
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    msg = _make_msg(_make_work_item())
+
+    await proc.process(msg, "test/model")
+
+    envelope = _decode_chunks(nc)[0]
+    assert envelope["kind"] == "nak"
+    assert envelope["reason"] == "model_not_loaded"
+    msg.ack.assert_awaited_once()
+    telemetry.item_completed.assert_not_called()
 
 
 # ── chat-template rendering, context-exceeded, inert fields ─────────────
@@ -1211,6 +1272,58 @@ async def test_penalties_absent_when_not_provided() -> None:
 
 
 @pytest.mark.asyncio
+async def test_negative_seed_flows_through_to_adapter_unchanged() -> None:
+    """The signed gateway wire value must not be normalized to u64 in the worker."""
+    nc = AsyncMock()
+    adapter = _RecordingGenAdapter()
+    proc = StreamingProcessor(
+        nc=nc,
+        registry=_make_registry(adapter),
+        worker_id="w1",
+    )
+    wi = _make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "seed": -1})
+    await proc.process(_make_msg(wi), "test/model")
+
+    assert adapter.captured is not None, "adapter.generate was not invoked"
+    assert adapter.captured.get("seed") == -1
+
+
+@pytest.mark.parametrize("seed", [True, "1", 1.5])
+@pytest.mark.asyncio
+async def test_invalid_seed_is_not_forwarded_to_adapter(seed: object) -> None:
+    """Malformed internal work items cannot bypass the gateway's seed bounds."""
+    nc = AsyncMock()
+    adapter = _RecordingGenAdapter()
+    proc = StreamingProcessor(
+        nc=nc,
+        registry=_make_registry(adapter),
+        worker_id="w1",
+    )
+    wi = _make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "seed": seed})
+    await proc.process(_make_msg(wi), "test/model")
+
+    assert adapter.captured is not None, "adapter.generate was not invoked"
+    assert "seed" not in adapter.captured
+
+
+@pytest.mark.parametrize("invalid_seed", [1 << 63, (1 << 64) - 1])
+@pytest.mark.asyncio
+async def test_unsigned_seed_above_i64_is_not_forwarded(invalid_seed: int) -> None:
+    nc = AsyncMock()
+    adapter = _RecordingGenAdapter()
+    proc = StreamingProcessor(
+        nc=nc,
+        registry=_make_registry(adapter),
+        worker_id="w1",
+    )
+    wi = _make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "seed": invalid_seed})
+    await proc.process(_make_msg(wi), "test/model")
+
+    assert adapter.captured is not None, "adapter.generate was not invoked"
+    assert "seed" not in adapter.captured
+
+
+@pytest.mark.asyncio
 async def test_top_k_and_repetition_penalty_flow_through_to_adapter() -> None:
     """Worker receives ``top_k`` / ``repetition_penalty`` from the work
     envelope and forwards them as adapter ``generate`` kwargs. Guards
@@ -1428,10 +1541,11 @@ async def test_cancel_during_grammar_compile_window_is_honored(
 
 
 @pytest.mark.asyncio
-async def test_terminal_error_publish_failure_naks_not_acks() -> None:
+async def test_terminal_error_publish_failure_naks_not_acks(monkeypatch: pytest.MonkeyPatch) -> None:
     """When the terminal-error chunk fails to publish, the work item is
     NAKed (for redelivery), NOT ACKed (which would orphan the request).
     """
+    telemetry = _capture_worker_completion(monkeypatch)
     nc = AsyncMock()
     nc.publish.side_effect = RuntimeError("nats down")
     proc = StreamingProcessor(
@@ -1454,6 +1568,57 @@ async def test_terminal_error_publish_failure_naks_not_acks() -> None:
     # Publish failed → NAK for redelivery, no ACK.
     msg.nak.assert_awaited()
     msg.ack.assert_not_awaited()
+    telemetry.item_completed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pre_stream_error_terminal_records_one_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    telemetry = _capture_worker_completion(monkeypatch)
+    nc = AsyncMock()
+    proc = StreamingProcessor(
+        nc=nc,
+        registry=_make_registry(_FakeGenAdapter([])),
+        worker_id="w1",
+    )
+    wi = _make_work_item(
+        generate={
+            "prompt": "Hi",
+            "max_new_tokens": 8,
+            "grammar": {"kind": "cfg-future", "value": "..."},
+        }
+    )
+    msg = _make_msg(wi)
+
+    await proc.process(msg, "test/model")
+
+    terminal = _terminal_chunk(nc)
+    assert terminal["finish_reason"] == "error"
+    msg.ack.assert_awaited_once()
+    _assert_one_generation_completion(telemetry, outcome="error")
+
+
+@pytest.mark.asyncio
+async def test_external_completion_owner_suppresses_processor_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    telemetry = _capture_worker_completion(monkeypatch)
+    nc = AsyncMock()
+    proc = StreamingProcessor(
+        nc=nc,
+        registry=_make_registry(_FakeGenAdapter([])),
+        worker_id="w1",
+        record_worker_completion=False,
+    )
+    wi = _make_work_item(
+        generate={
+            "prompt": "Hi",
+            "max_new_tokens": 8,
+            "grammar": {"kind": "cfg-future", "value": "..."},
+        }
+    )
+
+    await proc.process(_make_msg(wi), "test/model")
+
+    assert _terminal_chunk(nc)["finish_reason"] == "error"
+    telemetry.item_completed.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1852,23 +2017,27 @@ async def test_grammar_malformed_payload_still_rejected_without_preflight(
     assert terminal["error"]["code"] == "invalid_request"
 
 
-def test_adr0002_metrics_register_without_error() -> None:
-    """ADR-0002 metrics: the new metric families exist with the expected
-    label sets and can be observed/incremented without raising.
+def test_generation_diagnostics_are_noop_until_meter_activation() -> None:
+    """Typed generation events remain harmless while telemetry is disabled."""
+    from sie_server.observability import worker_telemetry as obs_metrics
 
-    Exercises each label combination once to confirm the metric is
-    registered and the label arity matches the producer call sites.
-    """
-    from sie_server.observability import metrics as obs_metrics
-
-    obs_metrics.GRAMMAR_COMPILE_SECONDS_STRUCTURED_OUTPUT.labels(backend="outlines", mode="json_schema").observe(0.01)
-    obs_metrics.GRAMMAR_COMPILE_SECONDS_STRUCTURED_OUTPUT.labels(backend="xgrammar", mode="regex").observe(0.02)
-    obs_metrics.STRUCTURED_OUTPUT_TTFT_SECONDS.labels(backend="outlines", mode="json_schema").observe(0.1)
-    obs_metrics.STRUCTURED_OUTPUT_TTFT_SECONDS.labels(backend="llguidance", mode="ebnf").observe(0.2)
-    obs_metrics.GRAMMAR_CACHE_HITS_STRUCTURED_OUTPUT.labels(backend="outlines").inc()
-    obs_metrics.GRAMMAR_CACHE_MISSES_STRUCTURED_OUTPUT.labels(backend="outlines").inc()
-    obs_metrics.GRAMMAR_UNIQUE_SCHEMA_TOTAL.labels(backend="outlines", mode="json_schema").inc()
-    obs_metrics.GRAMMAR_UNIQUE_SCHEMA_TOTAL.labels(backend="unknown", mode="ebnf").inc()
+    telemetry = obs_metrics.worker_telemetry()
+    telemetry.grammar_requested(model="test/model", backend="outlines", grammar="json_schema")
+    telemetry.grammar_cache_lookup(
+        model="test/model",
+        backend="outlines",
+        grammar="json_schema",
+        phase="request",
+        result="miss",
+    )
+    telemetry.grammar_compile_completed(
+        model="test/model",
+        backend="outlines",
+        grammar="json_schema",
+        phase="request",
+        outcome="success",
+        duration_s=0.01,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2170,33 +2339,6 @@ async def test_tombstone_expires_after_ttl(monkeypatch: pytest.MonkeyPatch) -> N
     assert terminal["done"] is True
     assert terminal["finish_reason"] == "stop"
     msg.ack.assert_awaited()
-
-
-@pytest.mark.asyncio
-async def test_duplicate_execution_metric_increments_on_refusal() -> None:
-    """H9: tombstone hit at decode-start bumps the duplicate counter.
-
-    Reads the counter sample before and after to assert a +1 delta on the
-    ``(model, pool)`` labels carried by the work item.
-    """
-    from sie_server.observability import metrics as worker_metrics
-
-    nc = AsyncMock()
-    script = [GenerationChunk(text_delta="", done=True, finish_reason="stop")]
-    adapter = _FakeGenAdapter(script)
-    proc = StreamingProcessor(nc=nc, registry=_make_registry(adapter), worker_id="w1")
-
-    # Cancel before any decode → tombstone.
-    proc.signal_cancel("req-1")
-
-    before = worker_metrics.GENERATION_FALLBACK_DUPLICATE_TOTAL.labels(model="test/model", pool="default")._value.get()
-
-    msg = _make_msg(_make_work_item())
-    await proc.process(msg, "test/model")
-
-    after = worker_metrics.GENERATION_FALLBACK_DUPLICATE_TOTAL.labels(model="test/model", pool="default")._value.get()
-
-    assert after - before == 1.0, f"counter did not increment: before={before} after={after}"
 
 
 @pytest.mark.asyncio

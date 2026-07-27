@@ -1,0 +1,43 @@
+[package]
+name = "sie-telemetry"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shared OTLP transport, Modal proxy auth, resource identity, and W3C propagation plumbing for the SIE Rust crates (#2339). Signal *definitions* (metric names, views, cardinality limits) stay per-crate."
+
+[lib]
+name = "sie_telemetry"
+path = "src/lib.rs"
+
+[dependencies]
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+# Feature superset of the three consumers (trace+metrics over gRPC/tonic and
+# OTLP/HTTP protobuf, blocking rustls reqwest client — see the gateway's
+# manifest for the #1878 blocking-client rationale). The gateway-only `logs`
+# feature stays in the gateway manifest.
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "grpc-tonic",
+    "http-proto",
+    "trace",
+    "metrics",
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+    "tls-ring",
+] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+uuid = { version = "1", features = ["v4"] }
+
+# For the HTTP-header propagation extractor (gateway inbound boundary).
+http = { version = "1", optional = true }
+
+[features]
+default = []
+http-propagation = ["dep:http"]
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "testing"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.33"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -70,6 +70,11 @@ pub struct WorkItem {
     pub bundle_config_hash: String,
     #[serde(default)]
     pub router_id: String,
+    /// Result-transport capability negotiated by the gateway. Older
+    /// gateways omit this field and therefore retain the one-message
+    /// `WorkResult` / compact `PAYLOAD_TOO_LARGE` behavior.
+    #[serde(default)]
+    pub accepts_result_chunks: bool,
     pub reply_subject: String,
     #[serde(default)]
     pub traceparent: Option<String>,
@@ -116,6 +121,31 @@ pub struct WorkResult {
     pub units: Option<crate::ipc_types::UnitCounts>,
     #[serde(default)]
     pub worker_direct: bool,
+    /// Bundle hash held stable by the execution barrier while this item ran.
+    /// The gateway uses it as post-execution provenance evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_bundle_config_hash: Option<String>,
+}
+
+/// One bounded chunk of a serialized [`WorkResult`].
+///
+/// This is a named-msgpack envelope published only when the originating
+/// [`WorkItem`] explicitly negotiated chunk support. `payload` contains a
+/// byte slice of the *complete, already serialized* `WorkResult`; consumers
+/// must reassemble all chunks and verify `transfer_digest` before decoding it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResultChunkV1 {
+    pub kind: String,
+    pub work_item_id: String,
+    pub request_id: String,
+    pub item_index: u32,
+    #[serde(with = "serde_bytes")]
+    pub transfer_digest: Vec<u8>,
+    pub chunk_index: u32,
+    pub chunk_count: u32,
+    pub total_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    pub payload: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -156,6 +186,7 @@ mod tests {
             prompt_cache_key: None,
             bundle_config_hash: "abc".into(),
             router_id: "r1".into(),
+            accepts_result_chunks: false,
             reply_subject: "_INBOX.r1.req-1".into(),
             traceparent: None,
             tracestate: None,
@@ -188,6 +219,53 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&map).unwrap();
         let back: WorkItem = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back.request_id, "req-1");
+    }
+
+    #[test]
+    fn work_item_missing_result_chunk_capability_defaults_false() {
+        let mut map = serde_json::to_value(sample_work_item()).unwrap();
+        map.as_object_mut()
+            .expect("work item map")
+            .remove("accepts_result_chunks");
+
+        let bytes = rmp_serde::to_vec_named(&map).unwrap();
+        let back: WorkItem = rmp_serde::from_slice(&bytes).unwrap();
+
+        assert!(!back.accepts_result_chunks);
+    }
+
+    #[test]
+    fn result_chunk_roundtrip_uses_raw_byte_fields() {
+        let chunk = ResultChunkV1 {
+            kind: "result_chunk_v1".into(),
+            work_item_id: "req-1.0".into(),
+            request_id: "req-1".into(),
+            item_index: 0,
+            transfer_digest: vec![7; 32],
+            chunk_index: 1,
+            chunk_count: 3,
+            total_bytes: 1_234,
+            payload: vec![0, 1, 2, 255],
+        };
+
+        let bytes = rmp_serde::to_vec_named(&chunk).unwrap();
+        let back: ResultChunkV1 = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back, chunk);
+
+        let value: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
+        let rmpv::Value::Map(fields) = value else {
+            panic!("chunk must use a named msgpack map");
+        };
+        for field in ["transfer_digest", "payload"] {
+            let (_, value) = fields
+                .iter()
+                .find(|(key, _)| key.as_str() == Some(field))
+                .unwrap_or_else(|| panic!("missing {field}"));
+            assert!(
+                matches!(value, rmpv::Value::Binary(_)),
+                "{field} must be bin"
+            );
+        }
     }
 
     #[test]
@@ -261,6 +339,7 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: true,
+            executed_bundle_config_hash: None,
         };
         let bytes = rmp_serde::to_vec_named(&result).unwrap();
         let back: WorkResult = rmp_serde::from_slice(&bytes).unwrap();

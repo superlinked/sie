@@ -16,6 +16,7 @@ import type {
   DetectedObject,
   EncodeResult,
   Entity,
+  ExtractItemError,
   ExtractResult,
   FinishReason,
   GenerateResult,
@@ -269,10 +270,16 @@ interface WireScoreEntry {
   rank: number;
 }
 
+interface WireScoreUsage {
+  input_tokens: number;
+  images?: number;
+}
+
 interface WireScoreResult {
   model?: string;
   query_id?: string;
   scores: WireScoreEntry[];
+  usage?: WireScoreUsage;
 }
 
 interface WireEntity {
@@ -308,6 +315,8 @@ interface WireExtractResult {
   relations?: WireRelation[];
   classifications?: WireClassification[];
   objects?: WireDetectedObject[];
+  data?: Record<string, unknown>;
+  error?: { code: string; message: string };
 }
 
 /**
@@ -386,6 +395,12 @@ export function parseScoreResult(data: unknown): ScoreResult {
     model: wire.model,
     queryId: wire.query_id,
     scores: wire.scores.map(parseScoreEntry),
+    usage: wire.usage
+      ? {
+          inputTokens: wire.usage.input_tokens,
+          images: wire.usage.images,
+        }
+      : undefined,
   };
 }
 
@@ -400,6 +415,25 @@ function parseEntity(data: WireEntity): Entity {
     start: data.start,
     end: data.end,
     bbox: data.bbox,
+  };
+}
+
+function parseExtractItemError(data: unknown): ExtractItemError | undefined {
+  if (data === undefined || data === null) return undefined;
+  if (typeof data === "object" && !Array.isArray(data)) {
+    const error = data as Record<string, unknown>;
+    if (
+      typeof error.code === "string" &&
+      error.code.trim().length > 0 &&
+      typeof error.message === "string" &&
+      error.message.trim().length > 0
+    ) {
+      return { code: error.code, message: error.message };
+    }
+  }
+  return {
+    code: "INTERNAL_ERROR",
+    message: "Malformed extraction item error",
   };
 }
 
@@ -431,6 +465,8 @@ export function parseExtractResult(data: WireExtractResult): ExtractResult {
         bbox: o.bbox,
       }),
     ),
+    data: data.data,
+    error: parseExtractItemError(data.error),
   };
 }
 

@@ -92,7 +92,7 @@ class PreprocessorRegistry:
             tokenizer: HuggingFace tokenizer instance.
         """
         preprocessor = TextPreprocessor(tokenizer, model_name)
-        self._register(model_name, preprocessor)
+        self.register(model_name, preprocessor)
         logger.debug("Registered text preprocessor for %s", model_name)
 
     def register_image(
@@ -113,10 +113,10 @@ class PreprocessorRegistry:
         else:
             # Wrap HuggingFace processor in ImagePreprocessor
             preprocessor = ImagePreprocessor(processor, model_name)
-        self._register(model_name, preprocessor)
+        self.register(model_name, preprocessor)
         logger.debug("Registered image preprocessor for %s", model_name)
 
-    def _register(self, model_name: str, preprocessor: Preprocessor) -> None:
+    def register(self, model_name: str, preprocessor: Preprocessor) -> None:
         """Register a preprocessor for a model and modality.
 
         Args:
@@ -212,17 +212,20 @@ class PreprocessorRegistry:
             ValueError: If items contain unsupported modalities.
         """
         # Determine required modality based on items
+        has_audio = any(item.audio is not None for item in items)
         has_text = any(item.text is not None for item in items)
         has_images = any(item.images for item in items)  # Truthy if non-empty list
 
         # Select preprocessor based on content
-        # Priority: images > text (matching current adapter behavior for CLIP/SigLIP)
-        if has_images:
+        # Media takes precedence over text that may accompany it as context.
+        if has_audio:
+            modality = "audio"
+        elif has_images:
             modality = "image"
         elif has_text:
             modality = "text"
         else:
-            msg = "Items must have text or images"
+            msg = "Items must have audio, text, or images"
             raise ValueError(msg)
 
         preprocessor = self.get_preprocessor(model_name, modality)
@@ -279,15 +282,18 @@ class PreprocessorRegistry:
             PreparedBatch ready for batching and inference.
         """
         # Determine required modality based on items
+        has_audio = any(item.audio is not None for item in items)
         has_text = any(item.text is not None for item in items)
         has_images = any(item.images for item in items)  # Truthy if non-empty list
 
-        if has_images:
+        if has_audio:
+            modality = "audio"
+        elif has_images:
             modality = "image"
         elif has_text:
             modality = "text"
         else:
-            msg = "Items must have text or images"
+            msg = "Items must have audio, text, or images"
             raise ValueError(msg)
 
         preprocessor = self.get_preprocessor(model_name, modality)

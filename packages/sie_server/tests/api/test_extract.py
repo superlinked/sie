@@ -20,7 +20,7 @@ from sie_server.config.model import (
     Tasks,
 )
 from sie_server.core.extract_cost import build_extract_prepared_items, extract_item_cost
-from sie_server.core.inference_output import ExtractOutput
+from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
@@ -182,6 +182,32 @@ class TestExtractEndpoint:
         assert len(data["items"]) == 1
         assert "entities" in data["items"][0]
         assert "data" in data["items"][0]
+
+    def test_extract_item_error_is_preserved_in_local_response(
+        self,
+        client: TestClient,
+        mock_adapter: MagicMock,
+    ) -> None:
+        mock_adapter.extract.side_effect = None
+        mock_adapter.extract.return_value = ExtractOutput(
+            entities=[[]],
+            data=[{"partial": True}],
+            errors=[ExtractItemError(code="INFERENCE_ERROR", message="Document export failed")],
+            pages=[3],
+        )
+
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": "document placeholder"}], "params": {}},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["items"][0]["error"] == {
+            "code": "INFERENCE_ERROR",
+            "message": "Document export failed",
+        }
+        assert response.json()["items"][0]["data"] == {"partial": True}
 
     def test_extract_basic_msgpack(self, client: TestClient) -> None:
         """Basic extract request returns msgpack by default."""
@@ -633,6 +659,53 @@ class TestExtractErrorHandling:
         assert data["detail"]["code"] == "INFERENCE_ERROR"
 
 
+class TestExtractHandlerSchemaForwarding:
+    def _metadata(self, output_schema: dict[str, Any]) -> MagicMock:
+        metadata = MagicMock()
+        metadata.labels = None
+        metadata.output_schema = output_schema
+        metadata.instruction = None
+        metadata.options = None
+        return metadata
+
+    def test_output_schema_partitions_batches(self) -> None:
+        handler = ExtractHandler()
+        string_schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        list_schema = {
+            "type": "object",
+            "properties": {"names": {"type": "array", "items": {"type": "string"}}},
+        }
+        assert handler.make_config_key(self._metadata(string_schema)) != handler.make_config_key(
+            self._metadata(list_schema)
+        )
+
+    def test_empty_output_schema_does_not_batch_with_absent_schema(self) -> None:
+        handler = ExtractHandler()
+        absent = self._metadata({})
+        absent.output_schema = None
+
+        assert handler.make_config_key(self._metadata({})) != handler.make_config_key(absent)
+
+    def test_run_inference_forwards_original_output_schema(self) -> None:
+        handler = ExtractHandler()
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        metadata = self._metadata(schema)
+        adapter = MagicMock()
+        adapter.extract.return_value = ExtractOutput(entities=[[]], data=[{"name": "Ada"}])
+        items = [Item(text="Ada founded Acme")]
+
+        output = handler.run_inference(
+            adapter,
+            items,
+            handler.make_config_key(metadata),
+            None,
+            [metadata],
+        )
+
+        assert output.data == [{"name": "Ada"}]
+        assert adapter.extract.call_args.kwargs["output_schema"] is schema
+
+
 class TestFormatOutput:
     """Tests for ExtractHandler.format_output classification behavior."""
 
@@ -702,11 +775,18 @@ class TestFormatOutput:
 
 
 class TestExtractOutputData:
-    """Validation around the new ExtractOutput.data field."""
+    """Validation around aligned ExtractOutput data and error fields."""
 
     def test_data_length_must_match_batch_size(self) -> None:
         with pytest.raises(ValueError, match="data list length"):
             ExtractOutput(entities=[[], []], data=[{"a": 1}])
+
+    def test_error_length_must_match_batch_size(self) -> None:
+        with pytest.raises(ValueError, match="errors list length"):
+            ExtractOutput(
+                entities=[[], []],
+                errors=[ExtractItemError(code="INFERENCE_ERROR", message="failed")],
+            )
 
     def test_slice_output_threads_data(self) -> None:
         output = ExtractOutput(
@@ -715,6 +795,22 @@ class TestExtractOutputData:
         )
         sliced = ExtractHandler().slice_output(output, 1)
         assert sliced.data == [{"page": 1}]
+
+    def test_slice_assemble_and_format_threads_item_errors(self) -> None:
+        error = ExtractItemError(code="INFERENCE_ERROR", message="Document export failed")
+        output = ExtractOutput(entities=[[], []], data=[{"ok": True}, {}], errors=[None, error])
+
+        handler = ExtractHandler()
+        partials = {i: handler.slice_output(output, i) for i in range(2)}
+        assembled = handler.assemble_output(partials, batch_size=2)
+        formatted = handler.format_output(assembled)
+
+        assert assembled.errors == [None, error]
+        assert "error" not in formatted[0]
+        assert formatted[1]["error"] == {
+            "code": "INFERENCE_ERROR",
+            "message": "Document export failed",
+        }
 
     def test_assemble_output_reassembles_data(self) -> None:
         partials = {

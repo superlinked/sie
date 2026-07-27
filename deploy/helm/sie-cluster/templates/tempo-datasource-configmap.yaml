@@ -16,6 +16,6 @@ data:
         uid: tempo
         type: tempo
         access: proxy
-        url: http://tempo:3200
+        url: {{ include "sie-cluster.tempo.queryEndpoint" . }}
         isDefault: false
 {{- end }}

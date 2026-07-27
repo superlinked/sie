@@ -469,8 +469,10 @@
             ]
           },
           "seed": {
-            "description": "Best-effort determinism seed (i64 reinterpreted as u64). Plumbed to the worker as SGLang's `sampling_params.seed`. Non-integer values reject with 400 invalid_request.",
+            "description": "Optional signed 64-bit per-request sampling seed. Reproducibility is best effort, not guaranteed, and depends on the active generation backend and deployment configuration. Non-integer or out-of-range values reject with 400 invalid_request.",
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": [
               "integer",
               "null"
@@ -779,8 +781,10 @@
             "type": "string"
           },
           "seed": {
-            "description": "Best-effort determinism seed (i64 reinterpreted as u64). Non-integer values reject with 400 invalid_request.",
+            "description": "Optional signed 64-bit per-request sampling seed. Reproducibility is best effort, not guaranteed, and depends on the active generation backend and deployment configuration. Non-integer or out-of-range values reject with 400 invalid_request.",
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": [
               "integer",
               "null"
@@ -1067,6 +1071,7 @@
             "items": {
               "$ref": "#/components/schemas/ItemInput"
             },
+            "maxItems": 4096,
             "minItems": 1,
             "type": "array"
           },
@@ -1214,6 +1219,21 @@
         ],
         "type": "object"
       },
+      "ExtractItemError": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
       "ExtractParams": {
         "properties": {
           "instruction": {
@@ -1242,6 +1262,7 @@
             "items": {
               "$ref": "#/components/schemas/ItemInput"
             },
+            "maxItems": 4096,
             "minItems": 1,
             "type": "array"
           },
@@ -1291,6 +1312,16 @@
               "$ref": "#/components/schemas/Entity"
             },
             "type": "array"
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExtractItemError"
+              }
+            ]
           },
           "id": {
             "type": "string"
@@ -1391,8 +1422,91 @@
         ],
         "type": "object"
       },
+      "GenerateChunk": {
+        "description": "One JSON payload from a SIE-native generation SSE ``data:`` event.\nThe stream is terminated separately by the literal ``data: [DONE]``.",
+        "properties": {
+          "done": {
+            "type": "boolean"
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GenerateChunkError"
+              }
+            ]
+          },
+          "finish_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logprobs": {
+            "description": "Per-token log probabilities aligned with ``text_delta``. Present only\nwhen the streaming request set ``logprobs: true``.",
+            "items": {},
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "text_delta": {
+            "type": "string"
+          },
+          "ttft_ms": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GenerateUsage"
+              }
+            ]
+          }
+        },
+        "required": [
+          "request_id",
+          "seq",
+          "text_delta",
+          "done"
+        ],
+        "type": "object"
+      },
+      "GenerateChunkError": {
+        "description": "Error carried by a terminal SIE-native generation SSE event.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
       "GenerateRequest": {
-        "description": "SIE-native blocking text-generation request.",
+        "description": "SIE-native text-generation request. Set ``stream`` to true for SSE.",
         "properties": {
           "frequency_penalty": {
             "format": "double",
@@ -1404,10 +1518,54 @@
           "grammar": {
             "description": "Optional grammar object accepted by the gateway grammar validator."
           },
+          "images": {
+            "description": "Optional inline images paired with ``prompt``. When present, the worker\nrenders one user turn through the model's native chat template.",
+            "items": {
+              "$ref": "#/components/schemas/NativeGenerateImage"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "logit_bias": {
+            "additionalProperties": {
+              "format": "double",
+              "type": "number"
+            },
+            "description": "Per-token additive sampler bias. Keys are integer token ids encoded as\nstrings; values are finite numbers in ``[-100, 100]``. At most 1024\nentries are accepted.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "logprobs": {
+            "description": "Return per-token log probabilities on native SSE chunks. Native\nblocking responses reject this field because they have no logprob\nresponse member.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "lora_adapter": {
+            "description": "Served LoRA adapter name. The gateway validates it against the resolved\nmodel before queue dispatch.",
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "max_new_tokens": {
             "format": "int32",
             "minimum": 1,
             "type": "integer"
+          },
+          "options": {
+            "description": "Governed generation runtime options. Explicit top-level sampler fields\noverride matching values in ``default_sampling``."
           },
           "presence_penalty": {
             "format": "double",
@@ -1439,6 +1597,16 @@
               "null"
             ]
           },
+          "seed": {
+            "description": "Optional signed 64-bit per-request sampling seed. Reproducibility is best effort, not guaranteed, and depends on the active generation backend and deployment configuration. Non-integer or out-of-range values reject with 400 invalid_request.",
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "stop": {
             "description": "Stop sequences for the native generate surface.",
             "items": {
@@ -1449,10 +1617,27 @@
               "null"
             ]
           },
+          "stream": {
+            "description": "SSE streaming. When true, the 200 response uses `text/event-stream`; each `data:` event contains a SIE-native `GenerateChunk` JSON object and the stream terminates with `data: [DONE]`. Defaults to false. Non-boolean values reject with 400 invalid_request.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "temperature": {
             "format": "float",
             "type": [
               "number",
+              "null"
+            ]
+          },
+          "top_logprobs": {
+            "description": "Number of alternative tokens per position. Requires ``logprobs: true``\nand ``stream: true``.",
+            "format": "int32",
+            "maximum": 20,
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -1986,6 +2171,13 @@
             },
             "type": "object"
           },
+          "revision": {
+            "description": "Immutable model weights revision, when the catalog pins one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "state": {
             "type": "string"
           }
@@ -2088,6 +2280,31 @@
         ],
         "type": "object"
       },
+      "NativeGenerateImage": {
+        "description": "One inline image on the SIE-native generate surface.",
+        "properties": {
+          "data": {
+            "description": "Canonical standard-base64 encoded image bytes, at most 16 MiB decoded.\nRemote URLs are not accepted.",
+            "maxLength": 22369624,
+            "minLength": 1,
+            "type": "string"
+          },
+          "format": {
+            "description": "Short media-format hint such as ``png`` or ``jpeg``.",
+            "maxLength": 32,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9.+-]+$",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "OpenAIEmbeddingDataEntry": {
         "properties": {
           "embedding": {
@@ -2124,6 +2341,7 @@
             "items": {
               "type": "string"
             },
+            "maxItems": 4096,
             "type": "array"
           }
         ]
@@ -2266,6 +2484,208 @@
         },
         "required": [
           "error"
+        ],
+        "type": "object"
+      },
+      "OpenAITranscriptionRequest": {
+        "properties": {
+          "file": {
+            "format": "binary",
+            "type": "string"
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OpenAITranscriptionResponseFormat"
+              }
+            ]
+          },
+          "stream": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "temperature": {
+            "format": "double",
+            "maximum": 1,
+            "minimum": 0,
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "timestamp_granularities[]": {
+            "items": {
+              "$ref": "#/components/schemas/OpenAITranscriptionTimestampGranularity"
+            },
+            "maxItems": 2,
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file",
+          "model"
+        ],
+        "type": "object"
+      },
+      "OpenAITranscriptionResponse": {
+        "properties": {
+          "duration": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/OpenAITranscriptionSegment"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "task": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OpenAITranscriptionUsage"
+              }
+            ]
+          },
+          "words": {
+            "items": {
+              "$ref": "#/components/schemas/OpenAITranscriptionWord"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "OpenAITranscriptionResponseFormat": {
+        "enum": [
+          "json",
+          "text",
+          "srt",
+          "verbose_json",
+          "vtt"
+        ],
+        "type": "string"
+      },
+      "OpenAITranscriptionSegment": {
+        "properties": {
+          "end": {
+            "format": "double",
+            "type": "number"
+          },
+          "id": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "double",
+            "type": "number"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "start",
+          "end",
+          "text"
+        ],
+        "type": "object"
+      },
+      "OpenAITranscriptionTimestampGranularity": {
+        "enum": [
+          "word",
+          "segment"
+        ],
+        "type": "string"
+      },
+      "OpenAITranscriptionUsage": {
+        "properties": {
+          "seconds": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "seconds"
+        ],
+        "type": "object"
+      },
+      "OpenAITranscriptionWord": {
+        "properties": {
+          "end": {
+            "format": "double",
+            "type": "number"
+          },
+          "start": {
+            "format": "double",
+            "type": "number"
+          },
+          "word": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "word",
+          "start",
+          "end"
         ],
         "type": "object"
       },
@@ -2445,7 +2865,7 @@
             "type": "object"
           },
           "minimum_worker_count": {
-            "description": "Per-pool warm floor: the minimum number of machines the gateway keeps\nwarm (via KEDA) so the first request to the pool never hits a cold VM.\nThe gateway publishes it as `sie_gateway_pool_warm_floor` for KEDA.\nDefault 0 leaves scale-from-zero unchanged.",
+            "description": "Per-pool warm floor: the minimum number of machines the gateway keeps\nwarm (via KEDA) so the first request to the pool never hits a cold VM.\nThe gateway publishes it as `sie.gateway.pool.warm_floor`; the\ncollector translates it for KEDA's Prometheus query.\nDefault 0 leaves scale-from-zero unchanged.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -2543,6 +2963,218 @@
           "tail",
           "relation",
           "score"
+        ],
+        "type": "object"
+      },
+      "RerankDocument": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "RerankError": {
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "type": "object"
+      },
+      "RerankOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "max_seq_length": {
+            "description": "Positive request-time sequence-length cap, clamped to the model's\nconfigured ceiling. Reranker truncation preserves the instruction and\nquery and truncates candidate document tokens first.",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "profile": {
+            "description": "Named SIE model profile. Blank values are rejected.",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RerankRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "documents": {
+            "description": "One to 1,000 nonblank text candidates. Execution is internally batched\nwithin the selected model profile's max_batch_tokens limit.",
+            "items": {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          },
+          "model": {
+            "description": "SIE model id. Blank or whitespace-only values are rejected.",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RerankOptions",
+                "description": "SIE extension. Only profile and max_seq_length are accepted."
+              }
+            ]
+          },
+          "query": {
+            "description": "Text query. Blank or whitespace-only values are rejected.",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "return_documents": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "top_n": {
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model",
+          "query",
+          "documents"
+        ],
+        "type": "object"
+      },
+      "RerankResponse": {
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/RerankResult"
+            },
+            "type": "array"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/ScoreUsage"
+          }
+        },
+        "required": [
+          "model",
+          "results",
+          "usage"
+        ],
+        "type": "object"
+      },
+      "RerankResult": {
+        "properties": {
+          "document": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RerankDocument"
+              }
+            ]
+          },
+          "index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "relevance_score": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "index",
+          "relevance_score"
+        ],
+        "type": "object"
+      },
+      "RerankV2Request": {
+        "additionalProperties": false,
+        "properties": {
+          "documents": {
+            "description": "One to 1,000 nonblank text candidates. Execution is internally batched\nwithin the selected model profile's max_batch_tokens limit.",
+            "items": {
+              "minLength": 1,
+              "pattern": ".*\\S.*",
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          },
+          "max_tokens_per_doc": {
+            "description": "`max_tokens_per_doc` is not supported by this SIE compatibility subset; omit it or send null.",
+            "type": "null"
+          },
+          "model": {
+            "description": "SIE model id. Blank or whitespace-only values are rejected.",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RerankOptions",
+                "description": "SIE extension. Only profile and max_seq_length are accepted."
+              }
+            ]
+          },
+          "priority": {
+            "description": "`priority` is not supported by this SIE compatibility subset; omit it or send null.",
+            "type": "null"
+          },
+          "query": {
+            "description": "Text query. Blank or whitespace-only values are rejected.",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "type": "string"
+          },
+          "top_n": {
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model",
+          "query",
+          "documents"
         ],
         "type": "object"
       },
@@ -2738,8 +3370,10 @@
             "type": "string"
           },
           "seed": {
-            "description": "Best-effort determinism seed (i64 reinterpreted as u64). Non-integer values reject with 400 invalid_request.",
+            "description": "Optional signed 64-bit per-request sampling seed. Reproducibility is best effort, not guaranteed, and depends on the active generation backend and deployment configuration. Non-integer or out-of-range values reject with 400 invalid_request.",
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": [
               "integer",
               "null"
@@ -2812,6 +3446,7 @@
             "items": {
               "$ref": "#/components/schemas/ItemInput"
             },
+            "maxItems": 1000,
             "minItems": 1,
             "type": "array"
           },
@@ -2842,11 +3477,42 @@
               "$ref": "#/components/schemas/ScoreEntry"
             },
             "type": "array"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScoreUsage"
+              }
+            ]
           }
         },
         "required": [
           "model",
           "scores"
+        ],
+        "type": "object"
+      },
+      "ScoreUsage": {
+        "properties": {
+          "images": {
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens"
         ],
         "type": "object"
       },
@@ -3020,7 +3686,7 @@
       "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
     },
     "title": "SIE Gateway",
-    "version": "0.6.19"
+    "version": "0.6.24"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3141,46 +3807,6 @@
         ]
       }
     },
-    "/metrics": {
-      "get": {
-        "operationId": "metrics_handler",
-        "responses": {
-          "200": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "Prometheus metrics"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
-                }
-              }
-            },
-            "description": "Missing or invalid bearer token (inference token)"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
-                }
-              }
-            },
-            "description": "Gateway auth enabled but no tokens configured"
-          }
-        },
-        "tags": [
-          "observability"
-        ]
-      }
-    },
     "/openapi.json": {
       "get": {
         "operationId": "openapi_json",
@@ -3221,6 +3847,295 @@
         "security": [],
         "tags": [
           "health"
+        ]
+      }
+    },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "description": "OpenAI-compatible audio transcription backed by SIE native extract. The multipart upload is bounded at 24 MiB. json, text, srt, verbose_json, and vtt responses are supported; stream=true and diarized_json are rejected explicitly.",
+        "operationId": "proxy_openai_transcription",
+        "parameters": [
+          {
+            "description": "Preferred GPU or machine profile",
+            "in": "header",
+            "name": "X-SIE-MACHINE-PROFILE",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Explicit pool routing override",
+            "in": "header",
+            "name": "X-SIE-Pool",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Client SDK version for skew warnings",
+            "in": "header",
+            "name": "X-SIE-SDK-Version",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenAITranscriptionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAITranscriptionResponse"
+                }
+              }
+            },
+            "description": "OpenAI-compatible transcription response",
+            "headers": {
+              "X-Inference-Time": {
+                "description": "Worker-reported inference time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Payload-Fetch-Time": {
+                "description": "Worker-reported offloaded payload fetch time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Postprocessing-Time": {
+                "description": "Worker-reported postprocessing time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Publish-Time": {
+                "description": "Milliseconds spent publishing work to the queue",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Time": {
+                "description": "Worker-reported queue time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Wait-Time": {
+                "description": "Milliseconds spent waiting for worker results",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Request-Id": {
+                "description": "Gateway request id for queue-backed inference",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Worker": {
+                "description": "Logical queue worker tag that produced the response",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Tokenization-Time": {
+                "description": "Worker-reported tokenization time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid or unsupported field"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StandardApiError"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
+                }
+              }
+            },
+            "description": "Model not found"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
+                }
+              }
+            },
+            "description": "Multipart body or audio file too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/OpenAIErrorEnvelope"
+                    },
+                    {
+                      "$ref": "#/components/schemas/StandardApiError"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Malformed worker response or gateway internal error; gateway auth enabled but no tokens configured"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
+                }
+              }
+            },
+            "description": "Model load failed",
+            "headers": {
+              "X-SIE-Error-Code": {
+                "description": "SDK-stable gateway or worker error code",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Error-Version": {
+                "description": "Gateway package version associated with the error envelope",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
+                }
+              }
+            },
+            "description": "Provisioning, queue, loading, or capacity unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Suggested retry delay in seconds, when retryable",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Error-Code": {
+                "description": "SDK-stable gateway or worker error code",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
+                }
+              }
+            },
+            "description": "Result channel closed"
+          }
+        },
+        "tags": [
+          "inference"
         ]
       }
     },
@@ -3285,7 +4200,88 @@
                 }
               }
             },
-            "description": "Chat completion response"
+            "description": "Chat completion response",
+            "headers": {
+              "X-Inference-Time": {
+                "description": "Worker-reported inference time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Payload-Fetch-Time": {
+                "description": "Worker-reported offloaded payload fetch time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Postprocessing-Time": {
+                "description": "Worker-reported postprocessing time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Publish-Time": {
+                "description": "Milliseconds spent publishing work to the queue",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Time": {
+                "description": "Worker-reported queue time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Wait-Time": {
+                "description": "Milliseconds spent waiting for worker results",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Request-Id": {
+                "description": "Gateway request id for queue-backed inference",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Worker": {
+                "description": "Logical queue worker tag that produced the response",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Tokenization-Time": {
+                "description": "Worker-reported tokenization time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -3392,7 +4388,88 @@
         },
         "responses": {
           "200": {
-            "description": "Text completion response"
+            "description": "Text completion response",
+            "headers": {
+              "X-Inference-Time": {
+                "description": "Worker-reported inference time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Payload-Fetch-Time": {
+                "description": "Worker-reported offloaded payload fetch time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Postprocessing-Time": {
+                "description": "Worker-reported postprocessing time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Publish-Time": {
+                "description": "Milliseconds spent publishing work to the queue",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Time": {
+                "description": "Worker-reported queue time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Wait-Time": {
+                "description": "Milliseconds spent waiting for worker results",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Request-Id": {
+                "description": "Gateway request id for queue-backed inference",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Worker": {
+                "description": "Logical queue worker tag that produced the response",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Tokenization-Time": {
+                "description": "Worker-reported tokenization time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -3933,6 +5010,19 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
               "X-SIE-Request-Id": {
                 "description": "Gateway request id for queue-backed inference",
                 "schema": {
@@ -4258,6 +5348,19 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
               "X-SIE-Request-Id": {
                 "description": "Gateway request id for queue-backed inference",
                 "schema": {
@@ -4448,7 +5551,7 @@
     },
     "/v1/extract/{model}": {
       "post": {
-        "description": "Mixed-success batches return 200 with only successful items; the response carries no per-item error envelope. For per-item error visibility, send single-item batches.",
+        "description": "Successful extract work results may carry an aligned per-item error alongside partial data. Transport-level mixed failures retain generic batch behavior: the 200 response includes only successful work results.",
         "operationId": "proxy_extract",
         "parameters": [
           {
@@ -4580,6 +5683,19 @@
               },
               "X-Queue-Wait-Time": {
                 "description": "Milliseconds spent waiting for worker results",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
                 "schema": {
                   "type": "string"
                 }
@@ -4774,7 +5890,7 @@
     },
     "/v1/generate/{model}": {
       "post": {
-        "description": "Blocking text generation (walking-skeleton surface). The model path parameter must use the SIE-safe ID (e.g. ``Qwen__Qwen3-4B-Instruct``); HF-style slashes are rejected with 400.",
+        "description": "SIE-native generation with optional bounded inline images. Omit `stream` or set it to false for a blocking JSON response; set `stream: true` for SIE-native Server-Sent Events terminated by `data: [DONE]`. The model path parameter must use the SIE-safe ID (for example `Qwen__Qwen3-4B-Instruct`); HF-style slashes reject with 400.",
         "operationId": "proxy_generate",
         "parameters": [
           {
@@ -4840,9 +5956,18 @@
                 "schema": {
                   "$ref": "#/components/schemas/GenerateResponse"
                 }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "description": "SSE-framed text containing SIE-native `GenerateChunk` JSON in each `data:` event; the stream terminates with `data: [DONE]`.",
+                  "type": "string"
+                },
+                "x-sie-event-schema": {
+                  "$ref": "#/components/schemas/GenerateChunk"
+                }
               }
             },
-            "description": "Generated text response",
+            "description": "Generated text as blocking JSON, or SIE-native SSE `GenerateChunk` events when `stream: true`; SSE terminates with `data: [DONE]`.",
             "headers": {
               "X-Inference-Time": {
                 "description": "Worker-reported inference time in milliseconds",
@@ -4876,6 +6001,19 @@
               },
               "X-Queue-Wait-Time": {
                 "description": "Milliseconds spent waiting for worker results",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
                 "schema": {
                   "type": "string"
                 }
@@ -4942,6 +6080,16 @@
             },
             "description": "Model not found"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body too large"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4958,6 +6106,42 @@
               }
             },
             "description": "Worker emitted malformed response; gateway auth enabled but no tokens configured"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayModelLoadFailedResponse"
+                }
+              }
+            },
+            "description": "Terminal model load failure (MODEL_LOAD_FAILED)",
+            "headers": {
+              "X-SIE-Error-Code": {
+                "description": "SDK-stable gateway or worker error code",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Error-Version": {
+                "description": "Gateway package version associated with the error envelope",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -5465,6 +6649,172 @@
         ]
       }
     },
+    "/v1/rerank": {
+      "post": {
+        "description": "Cohere v1-compatible text-only subset over SIE's native score primitive. Supported request fields are model, query, string documents, top_n, return_documents, and the documented SIE options extension. Unknown or unsupported fields reject with 400. The adapter rejects partial native results and forwards only authoritative worker-emitted usage.",
+        "operationId": "proxy_rerank",
+        "parameters": [
+          {
+            "description": "Preferred GPU or machine profile",
+            "in": "header",
+            "name": "X-SIE-MACHINE-PROFILE",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Explicit pool routing override",
+            "in": "header",
+            "name": "X-SIE-Pool",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Client SDK version for skew warnings",
+            "in": "header",
+            "name": "X-SIE-SDK-Version",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerankRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankResponse"
+                }
+              }
+            },
+            "description": "Cohere v1-compatible subset response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Model not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Bundle override conflicts with model routing"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Request body too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/RerankError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/StandardApiError"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Malformed or partial native score result; gateway auth enabled but no tokens configured"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "MODEL_LOAD_FAILED"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Provisioning, model loading, or capacity exhausted"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Result channel closed"
+          }
+        },
+        "tags": [
+          "inference"
+        ]
+      }
+    },
     "/v1/responses": {
       "post": {
         "description": "OpenAI Responses API (MVP). Strict allow-list parser: unknown top-level fields reject with 400 `unsupported_field`. `input` is either a string prompt OR an array of `{role, content}` messages. Known-rejected fields: `tools`, `tool_choice`, `previous_response_id`, `reasoning`, `background`, `metadata`, `instructions` — each rejects with 400 `unsupported_field`. `stream: true` is rejected (Responses SSE is deferred). Multimodal image content parts reject with 400 `unsupported_field` on the array form.",
@@ -5481,7 +6831,88 @@
         },
         "responses": {
           "200": {
-            "description": "Response object"
+            "description": "Response object",
+            "headers": {
+              "X-Inference-Time": {
+                "description": "Worker-reported inference time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Payload-Fetch-Time": {
+                "description": "Worker-reported offloaded payload fetch time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Postprocessing-Time": {
+                "description": "Worker-reported postprocessing time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Publish-Time": {
+                "description": "Milliseconds spent publishing work to the queue",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Time": {
+                "description": "Worker-reported queue time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Wait-Time": {
+                "description": "Milliseconds spent waiting for worker results",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Request-Id": {
+                "description": "Gateway request id for queue-backed inference",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Worker": {
+                "description": "Logical queue worker tag that produced the response",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Tokenization-Time": {
+                "description": "Worker-reported tokenization time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -5711,6 +7142,19 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Immutable deployed bundle/config execution revision that handled the request, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
               "X-SIE-Request-Id": {
                 "description": "Gateway request id for queue-backed inference",
                 "schema": {
@@ -5897,6 +7341,172 @@
           "inference"
         ],
         "x-sie-axum-catch-all": "/v1/score/{*model}"
+      }
+    },
+    "/v2/rerank": {
+      "post": {
+        "description": "Cohere v2-compatible text-only subset over SIE's native score primitive. Supported request fields are model, query, string documents, top_n, and the documented SIE options extension. max_tokens_per_doc and priority must be omitted or null; unknown or unsupported fields reject with 400. The adapter rejects partial native results and forwards only authoritative worker-emitted usage.",
+        "operationId": "proxy_rerank_v2",
+        "parameters": [
+          {
+            "description": "Preferred GPU or machine profile",
+            "in": "header",
+            "name": "X-SIE-MACHINE-PROFILE",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Explicit pool routing override",
+            "in": "header",
+            "name": "X-SIE-Pool",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Client SDK version for skew warnings",
+            "in": "header",
+            "name": "X-SIE-SDK-Version",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerankV2Request"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankResponse"
+                }
+              }
+            },
+            "description": "Cohere v2-compatible subset response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Invalid or unsupported request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Model not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Bundle override conflicts with model routing"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Request body too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/RerankError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/StandardApiError"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Malformed or partial native score result; gateway auth enabled but no tokens configured"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "MODEL_LOAD_FAILED"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Provisioning, model loading, or capacity exhausted"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankError"
+                }
+              }
+            },
+            "description": "Result channel closed"
+          }
+        },
+        "tags": [
+          "inference"
+        ]
       }
     },
     "/ws/cluster-status": {

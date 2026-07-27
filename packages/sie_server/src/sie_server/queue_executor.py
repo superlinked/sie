@@ -13,11 +13,12 @@ import yaml
 
 from sie_server.api.ws import compute_bundle_config_hash_cached
 from sie_server.config.model import ModelConfig
+from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
 from sie_server.core.oom import is_oom_error
-from sie_server.core.prepared import ExtractPreparedItem
+from sie_server.core.prepared import AudioPayload, AudioPreparedItem, ExtractPreparedItem
 from sie_server.core.registry import ModelRegistry
-from sie_server.core.runtime_options import merge_runtime_options
-from sie_server.core.score_cost import build_score_prepared_items
+from sie_server.core.runtime_options import merge_runtime_options, merge_runtime_options_with_profile
+from sie_server.core.score_cost import build_score_prepared_items_timed
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers.extract import ExtractHandler
 from sie_server.core.worker.model_worker import PreformedExtractRequest, PreformedScoreRequest
@@ -45,8 +46,11 @@ from sie_server.ipc_types import (
     SparseOutput,
     UnitCounts,
 )
-from sie_server.observability.metrics import record_ipc_batch_shape
-from sie_server.types.inputs import InvalidMediaError, Item, decode_item
+from sie_server.observability.worker_telemetry import (
+    worker_telemetry,
+    worker_telemetry_enabled,
+)
+from sie_server.types.inputs import InvalidInputError, InvalidMediaError, Item, decode_item
 from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -66,6 +70,13 @@ logger = logging.getLogger(__name__)
 # do not "align" it to the HTTP enum or the gateway will fall through to its
 # generic arm with a mismatched code.
 _INFERENCE_ERROR_CODE: Final[str] = "inference_error"
+_CANONICAL_AUDIO_SAMPLE_RATE: Final[int] = 16_000
+_MAX_AUDIO_CHANNELS: Final[int] = 2
+_MIN_AUDIO_SAMPLE_RATE: Final[int] = 8_000
+_MAX_AUDIO_SAMPLE_RATE: Final[int] = 48_000
+_MAX_AUDIO_DURATION_MS: Final[int] = 12 * 60 * 1_000
+_MAX_AUDIO_CANONICAL_SAMPLES: Final[int] = _MAX_AUDIO_DURATION_MS * _CANONICAL_AUDIO_SAMPLE_RATE // 1_000 + 2_048
+_AUDIO_CONTAINERS: Final[frozenset[str]] = frozenset({"wav", "mp3", "flac", "ogg", "m4a", "webm"})
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +86,7 @@ _INFERENCE_ERROR_CODE: Final[str] = "inference_error"
 # Per-request safety rules in ``_maybe_dense_raw_output`` /
 # ``_maybe_sparse_raw_output`` / ``_maybe_multivector_raw_output`` emit
 # ``RawOutput`` only when the adapter's output is the exact (single-key,
-# float32, well-shaped) form Rust knows how to frame byte-identically;
+# supported-dtype, well-shaped) form Rust knows how to frame byte-identically;
 # everything else still falls back to the legacy
 # ``msgpack.packb(_wrap_encode_output(...))`` path.
 #
@@ -89,8 +100,8 @@ _INFERENCE_ERROR_CODE: Final[str] = "inference_error"
 #     ``SparseVector(indices=..., values=...)`` shape every in-tree
 #     sparse adapter produces). float16 values fall back.
 #   * Multivector: ONLY for a single ``multivector`` output key with
-#     a float32 ``[num_tokens, token_dims]`` ndarray. Bit-packed
-#     binary multivector (``shape[1] < mv_dim``) and float16 fall back.
+#     a float32/float16 ``[num_tokens, token_dims]`` ndarray. Bit-packed
+#     binary multivector (``shape[1] < mv_dim``) falls back.
 #   * Score: always eligible — Rust mirrors the Python sort + rank
 #     assignment byte-for-byte.
 #   * Multi-output items (e.g. dense + sparse in one response) always
@@ -328,7 +339,7 @@ def _maybe_multivector_raw_output(
     ``_wrap_encode_output``:
 
       * Single output key == ``multivector``.
-      * ``np.float32`` 2-D ``[num_tokens, token_dims]`` ndarray.
+      * ``np.float32`` or ``np.float16`` 2-D ``[num_tokens, token_dims]`` ndarray.
       * NOT bit-packed binary (``shape[1] < mv_dim`` with uint8
         dtype) — the binary path stays in Python for v1 because the
         Rust shaper does not know the ``"binary"`` dtype tag yet.
@@ -347,7 +358,7 @@ def _maybe_multivector_raw_output(
     arr = formatted.get("multivector")
     if not isinstance(arr, np.ndarray):
         return None
-    if arr.dtype != np.float32:
+    if arr.dtype not in (np.float32, np.float16):
         return None
     if arr.ndim != _MV_NDIM:
         return None
@@ -378,6 +389,7 @@ def _maybe_multivector_raw_output(
             values=arr.ravel(order="C").tolist(),
             num_tokens=num_tokens,
             token_dims=token_dims,
+            dtype=str(arr.dtype),
         ),
     )
 
@@ -579,12 +591,20 @@ class QueueExecutor:
         for model_id in invalidated:
             self.invalidate_model_descriptor(model_id)
         bundle_hash = compute_bundle_config_hash_cached(self._registry, req.bundle_id)
-        applied_models = sorted(self._registry.get_configs_snapshot(req.bundle_id))
+        applied_configs = self._registry.get_configs_snapshot(req.bundle_id)
+        applied_models = sorted(applied_configs)
+        applied_profiles = sorted(
+            {
+                variant_source[1] if (variant_source := config.synthetic_profile_variant_source) else "default"
+                for config in applied_configs.values()
+            }
+        )
         return ReplaceModelConfigsResponse(
             applied=True,
             bundle_config_hash=bundle_hash,
             config_version=int(getattr(self._registry, "_config_version", 0)),
             applied_models=applied_models,
+            applied_profiles=applied_profiles,
         )
 
     async def set_pinned_models(self, req: SetPinnedModelsRequest) -> SetPinnedModelsResponse:
@@ -805,6 +825,11 @@ class QueueExecutor:
     def _options_key(options: dict[str, Any] | None) -> bytes:
         return msgpack.packb(options, use_bin_type=True) if options else b""
 
+    @staticmethod
+    def _batch_profile(items: list[Any]) -> str:
+        profiles = {str(item.profile_id or "default") for item in items}
+        return profiles.pop() if len(profiles) == 1 else "other"
+
     @classmethod
     def _score_sub_group_sizes(cls, items: list[ScoreBatchItem]) -> list[int]:
         groups: dict[tuple[Any, ...], int] = {}
@@ -844,8 +869,6 @@ class QueueExecutor:
         ``instruction``, ``is_query``, or ``options`` — these cannot share a
         single ``EncodePipeline.run_encode()`` call.
         """
-        from sie_server.core.encode_pipeline import EncodePipeline  # noqa: PLC0415
-
         model_id = req.model_id
         items = req.items
 
@@ -865,7 +888,10 @@ class QueueExecutor:
         # actually reads; add more fields here if it grows.
         groups: dict[tuple, list[EncodeBatchItem]] = {}
         for bi in items:
-            output_types = tuple(bi.output_types or ["dense"])
+            # Preserve an explicit empty list so the shared output validator
+            # rejects it just like the HTTP ingress. Only an absent value
+            # receives the public dense default.
+            output_types = tuple(bi.output_types) if bi.output_types is not None else ("dense",)
             options_key = msgpack.packb(bi.options, use_bin_type=True) if bi.options else b""
             key = (
                 output_types,
@@ -877,18 +903,14 @@ class QueueExecutor:
             )
             groups.setdefault(key, []).append(bi)
 
-        # Record IPC-batch shape so operators can see the fragmentation
-        # ratio (items per IPC batch vs items per GPU forward pass).
-        # Emitted once per batch *after* grouping but *before* running
-        # any forward pass, so batches whose inference throws are still
-        # accounted for in the histogram. Model-eviction NAKs above
-        # are intentionally not recorded — no real work was attempted.
-        record_ipc_batch_shape(
-            model=model_id,
-            endpoint="encode",
-            total_items=len(items),
-            sub_group_sizes=[len(g) for g in groups.values()],
-        )
+        if worker_telemetry_enabled():
+            worker_telemetry().runtime_batch_dispatched(
+                operation="encode",
+                model=model_id,
+                profile=self._batch_profile(items),
+                total_items=len(items),
+                subgroup_sizes=(len(group) for group in groups.values()),
+            )
 
         for group_key, group in groups.items():
             (output_types_t, instruction, is_query, options_key, _profile_id, _bundle_hash) = group_key
@@ -937,31 +959,25 @@ class QueueExecutor:
                 # embedders silently lose their query template on the cluster
                 # path (#1489). An unknown profile name raises ValueError, which
                 # the surrounding except turns into per-item failures.
-                options = merge_runtime_options(config, options)
-                # Profile-default ``output_types`` parity with the OSS HTTP path
-                # (api.encode resolves ``profile > request > default``). The
-                # gateway forwards only the request-level output_types, so a
-                # profile whose runtime declares an output_types default (e.g.
-                # the ``bge-m3:sparse`` variant, whose promoted "default" profile
-                # carries ``output_types: [sparse]``) would otherwise be served
-                # dense-only here — the managed path silently dropped it. Reuse
-                # the merged profile runtime (same resolver, no duplicated
-                # precedence) and apply it exactly as api.encode does. The group
-                # key already folded request→``["dense"]``, so this is precisely
-                # ``profile or request or default``, keeping managed == OSS (P6.6).
-                profile_output_types = options.get("output_types")
-                if profile_output_types:
-                    output_types = list(profile_output_types)
+                request_options = options
+                options, selected_profile = merge_runtime_options_with_profile(config, request_options)
+                adapter_output_types, output_types = resolve_encode_output_types(
+                    config,
+                    output_types,
+                    selected_profile,
+                    options,
+                )
                 formatted_outputs, timing = await EncodePipeline.run_encode(
                     registry=self._registry,
                     model=model_id,
                     items=server_items,
-                    output_types=output_types,
+                    output_types=adapter_output_types,
                     instruction=instruction,
                     config=config,
                     is_query=is_query,
                     options=options,
                     prepared_tokens_per_item=prepared_tokens_per_item,
+                    response_output_types=output_types,
                     preformed_batch=True,
                 )
 
@@ -986,9 +1002,8 @@ class QueueExecutor:
                     # tokenizer counts recorded by the pipeline during
                     # tokenization (see ``RequestTiming.input_token_counts``).
                     # ``None`` (image path / char-count estimators) leaves
-                    # ``ItemOutcome.units`` unset — metering edges fall back
-                    # to their reserve estimate rather than bill an estimate
-                    # as a count.
+                    # ``ItemOutcome.units`` unset so downstream usage consumers
+                    # can reject missing evidence rather than consume estimates.
                     token_counts = timing.input_token_counts
                     if token_counts is not None and len(token_counts) != len(good_group):
                         token_counts = None  # misaligned — never mis-attribute counts
@@ -1073,7 +1088,7 @@ class QueueExecutor:
     # -- Score -------------------------------------------------------------
 
     async def process_score_batch(self, req: ProcessScoreBatchRequest) -> BatchOutcome:
-        """Run score work items from the sidecar IPC path.
+        """Run one caller-formed score batch from sidecar IPC or Modal-native execution.
 
         The worker-sidecar owns queue batching and scheduling. Python prepares
         each score work item and executes it through ModelWorker's pre-formed
@@ -1083,15 +1098,18 @@ class QueueExecutor:
         if not req.items:
             return BatchOutcome(outcomes=[])
 
-        record_ipc_batch_shape(
-            model=model_id,
-            endpoint="score",
-            total_items=len(req.items),
-            sub_group_sizes=self._score_sub_group_sizes(req.items),
-        )
+        if worker_telemetry_enabled():
+            worker_telemetry().runtime_batch_dispatched(
+                operation="score",
+                model=model_id,
+                profile=self._batch_profile(req.items),
+                total_items=len(req.items),
+                subgroup_sizes=self._score_sub_group_sizes(req.items),
+            )
 
         try:
             worker = await self._registry.start_worker(model_id)
+            config = self._registry.get_config(model_id)
         except (KeyError, RuntimeError) as e:
             logger.info("Model %s not available for score: %s — NAKing", model_id, e)
             return BatchOutcome(outcomes=[_nak_outcome(bi) for bi in req.items])
@@ -1102,18 +1120,11 @@ class QueueExecutor:
 
         for bi in req.items:
             try:
+                options = merge_runtime_options(config, bi.options)
                 query_item = decode_item(bi.query_item)
                 score_items = [decode_item(it) for it in bi.score_items]
 
-                timing = RequestTiming()
-                timing.start_tokenization()
-                # ``score_pair_cost`` here is the char-count BATCHING proxy
-                # only. Authoritative billable counts (§7.3) are the reranker's
-                # real per-pair tokenizer lengths, surfaced on the resulting
-                # ScoreOutput and summed into ``ItemOutcome.units`` in
-                # ``_score_success_outcome`` — never this proxy.
-                prepared_items = build_score_prepared_items(query_item, score_items)
-                timing.end_tokenization()
+                prepared_items, timing = build_score_prepared_items_timed(query_item, score_items)
 
                 requests.append(
                     PreformedScoreRequest(
@@ -1121,7 +1132,7 @@ class QueueExecutor:
                         query=query_item,
                         items=score_items,
                         instruction=bi.instruction,
-                        options=bi.options or {},
+                        options=options,
                         request_id=bi.request_id,
                         timing=timing,
                     )
@@ -1156,7 +1167,9 @@ class QueueExecutor:
                     else:
                         _backfill_score_units(score_adapter, bi, query_item, score_items, result)
                         outcomes[bi.work_item_id] = _score_success_outcome(
+                            score_adapter,
                             bi,
+                            query_item,
                             score_items,
                             result,
                         )
@@ -1166,20 +1179,23 @@ class QueueExecutor:
     # -- Extract -----------------------------------------------------------
 
     async def process_extract_batch(self, req: ProcessExtractBatchRequest) -> BatchOutcome:
-        """Run extract work items from the sidecar IPC path."""
+        """Run one caller-formed extract batch from sidecar IPC or Modal-native execution."""
         model_id = req.model_id
         if not req.items:
             return BatchOutcome(outcomes=[])
 
-        record_ipc_batch_shape(
-            model=model_id,
-            endpoint="extract",
-            total_items=len(req.items),
-            sub_group_sizes=self._extract_sub_group_sizes(req.items),
-        )
+        if worker_telemetry_enabled():
+            worker_telemetry().runtime_batch_dispatched(
+                operation="extract",
+                model=model_id,
+                profile=self._batch_profile(req.items),
+                total_items=len(req.items),
+                subgroup_sizes=self._extract_sub_group_sizes(req.items),
+            )
 
         try:
             worker = await self._registry.start_worker(model_id)
+            config = self._registry.get_config(model_id)
         except (KeyError, RuntimeError) as e:
             logger.info("Model %s not available for extract: %s — NAKing", model_id, e)
             return BatchOutcome(outcomes=[_nak_outcome(bi) for bi in req.items])
@@ -1201,21 +1217,34 @@ class QueueExecutor:
 
         for bi in req.items:
             try:
+                options = merge_runtime_options(config, bi.options)
                 server_item = decode_item(bi.item)
-
                 timing = RequestTiming()
                 timing.start_tokenization()
-                # ``char_count`` here is the BATCHING cost proxy only.
-                # Authoritative billable counts (§7.3) are the extractor's real
-                # per-doc tokenizer length, surfaced on the resulting
-                # ExtractOutput and stamped into ``ItemOutcome.units`` in
-                # ``_extract_success_outcome`` — never this proxy. (``pages``
-                # for future docling/OCR inputs stays a separate seam.)
-                char_count = len(server_item.text) if server_item.text else 0
-                prepared_items = [ExtractPreparedItem(cost=char_count, original_index=0)]
+                if bi.prepared_audio is not None:
+                    audio = bi.prepared_audio
+                    _validate_prepared_audio(audio)
+                    payload = AudioPayload(
+                        pcm_s16le=audio.pcm_s16le,
+                        sample_rate=audio.sample_rate,
+                        sample_count=audio.sample_count,
+                        duration_ms=audio.duration_ms,
+                        source_sample_rate=audio.source_sample_rate,
+                        source_sample_count=audio.source_sample_count,
+                        source_channels=audio.source_channels,
+                        container=audio.container,
+                    )
+                    prepared_items = [
+                        AudioPreparedItem(payload=payload, cost=payload.duration_cost_ms, original_index=0)
+                    ]
+                else:
+                    # Batching proxy only; authoritative text billing comes
+                    # from the adapter's real tokenizer count on ExtractOutput.
+                    char_count = len(server_item.text) if server_item.text else 0
+                    prepared_items = [ExtractPreparedItem(cost=char_count, original_index=0)]
                 timing.end_tokenization()
 
-                lora = self._extract_lora(bi.options)
+                lora = self._extract_lora(options)
                 grouped_requests.setdefault(lora, []).append(
                     PreformedExtractRequest(
                         prepared_items=prepared_items,
@@ -1223,7 +1252,7 @@ class QueueExecutor:
                         labels=bi.labels,
                         output_schema=bi.output_schema,
                         instruction=bi.instruction,
-                        options=bi.options or {},
+                        options=options,
                         request_id=bi.request_id,
                         timing=timing,
                     )
@@ -1251,6 +1280,39 @@ class QueueExecutor:
                         outcomes[bi.work_item_id] = _extract_success_outcome(extract_adapter, bi, server_item, result)
 
         return BatchOutcome(outcomes=[outcomes[bi.work_item_id] for bi in req.items])
+
+
+def _validate_prepared_audio(audio: Any) -> None:
+    if audio.sample_rate != _CANONICAL_AUDIO_SAMPLE_RATE:
+        msg = f"prepared audio sample_rate must be 16000, got {audio.sample_rate}"
+        raise ValueError(msg)
+    if not _MIN_AUDIO_SAMPLE_RATE <= audio.source_sample_rate <= _MAX_AUDIO_SAMPLE_RATE:
+        msg = "prepared audio source_sample_rate must be between 8000 and 48000"
+        raise ValueError(msg)
+    if not 1 <= audio.source_channels <= _MAX_AUDIO_CHANNELS:
+        msg = "prepared audio source_channels must be 1 or 2"
+        raise ValueError(msg)
+    if audio.container not in _AUDIO_CONTAINERS:
+        msg = f"prepared audio container is unsupported: {audio.container!r}"
+        raise ValueError(msg)
+    if audio.sample_count <= 0 or audio.source_sample_count <= 0 or audio.duration_ms <= 0:
+        msg = "prepared audio sample counts and duration_ms must be positive"
+        raise ValueError(msg)
+    if audio.duration_ms > _MAX_AUDIO_DURATION_MS:
+        msg = f"prepared audio duration_ms exceeds {_MAX_AUDIO_DURATION_MS}"
+        raise ValueError(msg)
+    if audio.sample_count > _MAX_AUDIO_CANONICAL_SAMPLES:
+        msg = "prepared audio canonical sample_count exceeds the bounded duration"
+        raise ValueError(msg)
+    if len(audio.pcm_s16le) != audio.sample_count * 2:
+        msg = "prepared audio PCM byte length does not match sample_count"
+        raise ValueError(msg)
+    expected_duration_ms = (
+        audio.source_sample_count * 1_000 + audio.source_sample_rate - 1
+    ) // audio.source_sample_rate
+    if audio.duration_ms != expected_duration_ms:
+        msg = "prepared audio duration_ms does not match source_sample_count"
+        raise ValueError(msg)
 
 
 def _per_item_image_counts(adapter: Any, items: list[Item], expected_len: int) -> list[int] | None:
@@ -1304,7 +1366,13 @@ def _with_images(units: UnitCounts | None, image_count: int | None) -> UnitCount
         return units
     if units is None:
         return UnitCounts(images=image_count)
-    return UnitCounts(input_tokens=units.input_tokens, pages=units.pages, images=image_count)
+    return UnitCounts(
+        input_tokens=units.input_tokens,
+        pairs=units.pairs,
+        pages=units.pages,
+        images=image_count,
+        audio_ms=units.audio_ms,
+    )
 
 
 def _with_pages(units: UnitCounts | None, page_count: int | None) -> UnitCounts | None:
@@ -1312,15 +1380,45 @@ def _with_pages(units: UnitCounts | None, page_count: int | None) -> UnitCounts 
     canonical parse/OCR dimension ("$ per 1k pages") — minting one when only
     pages are present.
 
-    ``page_count`` of ``None`` / ``<= 0`` is a no-op (never emits ``pages=0``)
-    so token/vision extract is unchanged. Preserves the token and image
-    dimensions so folds compose in any order.
+    ``None`` is a no-op; authoritative zero remains present so a parser that
+    failed before processing its first page releases the admission reserve.
+    Preserves the token and image dimensions so folds compose in any order.
     """
-    if page_count is None or page_count <= 0:
+    if page_count is None:
         return units
     if units is None:
         return UnitCounts(pages=page_count)
-    return UnitCounts(input_tokens=units.input_tokens, pages=page_count, images=units.images)
+    return UnitCounts(
+        input_tokens=units.input_tokens,
+        pairs=units.pairs,
+        pages=page_count,
+        images=units.images,
+        audio_ms=units.audio_ms,
+    )
+
+
+def _with_audio_ms(units: UnitCounts | None, audio_ms: int | None) -> UnitCounts | None:
+    """Fold an authoritative accepted-audio duration into ``UnitCounts``.
+
+    The duration is exact integer milliseconds produced by the media
+    preprocessing boundary, not a container-duration estimate. ``None`` means
+    the item is not audio; every supplied value must fit the unsigned wire
+    domain and be positive. Invalid values fail closed before a successful
+    result can leave the worker.
+    """
+    if audio_ms is None:
+        return units
+    if not isinstance(audio_ms, int) or isinstance(audio_ms, bool) or audio_ms <= 0 or audio_ms > (1 << 64) - 1:
+        raise ValueError("audio_ms must be a positive u64 integer")
+    if units is None:
+        return UnitCounts(audio_ms=audio_ms)
+    return UnitCounts(
+        input_tokens=units.input_tokens,
+        pairs=units.pairs,
+        pages=units.pages,
+        images=units.images,
+        audio_ms=audio_ms,
+    )
 
 
 def _page_total(pages: Any, expected_len: int) -> int | None:
@@ -1329,14 +1427,23 @@ def _page_total(pages: Any, expected_len: int) -> int | None:
 
     Returns ``None`` — leaving the pages dimension unset so the meter falls back
     to its reserve estimate — unless the list is well-formed (aligned 1:1 with
-    the item's outputs, non-negative ints) and sums to ``> 0``. A misaligned or
-    malformed list is dropped rather than mis-attributed.
+    the item's outputs and non-negative ints). A valid zero remains authoritative;
+    malformed data is dropped rather than mis-attributed.
     """
     if not isinstance(pages, list) or len(pages) != expected_len:
         return None
     if not all(isinstance(p, int) and not isinstance(p, bool) and p >= 0 for p in pages):
         return None
-    total = sum(pages)
+    return sum(pages)
+
+
+def _image_total(images: Any, expected_len: int) -> int | None:
+    """Sum authoritative per-pair image counts for one score work item."""
+    if not isinstance(images, list) or len(images) != expected_len:
+        return None
+    if not all(isinstance(image, int) and not isinstance(image, bool) and image >= 0 for image in images):
+        return None
+    total = sum(images)
     return total if total > 0 else None
 
 
@@ -1351,7 +1458,7 @@ def _units_from_token_counts(counts: Any, expected_len: int) -> UnitCounts | Non
     """
     if not isinstance(counts, list) or len(counts) != expected_len:
         return None
-    if not all(isinstance(c, int) and not isinstance(c, bool) for c in counts):
+    if not all(isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in counts):
         return None
     return UnitCounts(input_tokens=sum(int(c) for c in counts))
 
@@ -1392,8 +1499,40 @@ def _backfill_score_units(
         output.input_token_counts = counts
 
 
+def _per_pair_image_counts(
+    adapter: Any,
+    query_item: Item,
+    score_items: list[Item],
+    expected_len: int,
+    *,
+    instruction: str | None = None,
+) -> list[int] | None:
+    """Return exact adapter-owned image counts for scored query/doc pairs.
+
+    A vision reranker may consume only a subset of supplied images. Missing,
+    misaligned, or malformed evidence leaves the images dimension unset so a
+    count can never be attributed to the wrong pair. Metering must not fail an
+    otherwise successful inference.
+    """
+    if adapter is None:
+        return None
+    try:
+        counts = adapter.count_pair_input_images(query_item, score_items, instruction=instruction)
+    except Exception:  # noqa: BLE001 — metering must never fail inference
+        return None
+    if (
+        isinstance(counts, list)
+        and len(counts) == expected_len
+        and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
+    ):
+        return counts
+    return None
+
+
 def _score_success_outcome(
+    adapter: Any,
     bi: ScoreBatchItem,
+    query_item: Item,
     score_items: list[Item],
     worker_result: Any,
 ) -> ItemOutcome:
@@ -1406,12 +1545,37 @@ def _score_success_outcome(
     # pair, and the score handler carries those real per-pair counts on the
     # assembled ScoreOutput. Bill their sum — the total input tokens the model
     # processed for this query × N-docs work item — as $/1M input tokens
-    # (§7.1). ``None`` (char-proxy rerankers) leaves units unset → reserve
-    # fallback, never an estimate billed as a count.
+    # (§7.1). ``None`` (char-proxy rerankers) leaves units unset so downstream
+    # usage consumers can reject missing evidence rather than consume estimates.
     units = _units_from_token_counts(
         getattr(score_output, "input_token_counts", None),
         score_output.batch_size,
     )
+    units = _with_images(
+        units,
+        _image_total(getattr(score_output, "input_image_counts", None), score_output.batch_size),
+    )
+    # One successful score output contains exactly one result for each
+    # query-document pair the reranker processed. This cardinality is
+    # authoritative even when the adapter cannot surface tokenizer counts.
+    if units is None:
+        units = UnitCounts(pairs=score_output.batch_size)
+    else:
+        units = UnitCounts(
+            input_tokens=units.input_tokens,
+            pairs=score_output.batch_size,
+            pages=units.pages,
+            images=units.images,
+            audio_ms=units.audio_ms,
+        )
+    image_counts = _per_pair_image_counts(
+        adapter,
+        query_item,
+        score_items,
+        score_output.batch_size,
+        instruction=bi.instruction,
+    )
+    units = _with_images(units, sum(image_counts) if image_counts is not None else None)
 
     # Score output is always Rust-frameable: the Python and Rust
     # sort/rank paths produce byte-identical results (see the
@@ -1447,20 +1611,13 @@ def _extract_success_outcome(
     worker_result: Any,
 ) -> ItemOutcome:
     extract_output = worker_result.output
-    extraction_results = ExtractHandler.format_output(extract_output)
-    if not extraction_results:
-        # Adapter returned no results for a single-item request —
-        # surface as an error instead of silently publishing an
-        # empty object (which the client would parse as "success
-        # with no fields").
-        return _error_outcome(bi, "inference_error", "adapter returned no extraction results")
-    result_msgpack = msgpack.packb(extraction_results[0], use_bin_type=True)
 
     # Authoritative unit counts (§7.3): the extractor tokenizes the document
     # and the extract handler carries that real per-doc count on the assembled
     # ExtractOutput. Extract work items are single-doc, so ``batch_size == 1``;
-    # bill the count as $/1M input tokens (§7.1). ``None`` leaves units unset →
-    # reserve fallback, never an estimate billed as a count.
+    # bill the count as $/1M input tokens (§7.1). ``None`` leaves units unset so
+    # downstream usage consumers can reject missing evidence rather than use an
+    # estimate.
     units = _units_from_token_counts(
         getattr(extract_output, "input_token_counts", None),
         extract_output.batch_size,
@@ -1476,6 +1633,18 @@ def _extract_success_outcome(
     # text extract (GLiNER, single text doc, no images) is unchanged.
     image_counts = _per_item_image_counts(adapter, [server_item], 1)
     units = _with_images(units, image_counts[0] if image_counts is not None else None)
+    # ASR extract publishes the exact source-derived integer duration carried
+    # by the Rust audio boundary. It is already validated above and is never
+    # rounded to seconds or minutes.
+    if bi.prepared_audio is not None:
+        units = _with_audio_ms(units, bi.prepared_audio.duration_ms)
+
+    extraction_results = ExtractHandler.format_output(extract_output)
+    if not extraction_results:
+        # Adapter returned no results for a single-item request — surface an
+        # error instead of publishing an object the client reads as success.
+        return _error_outcome(bi, _INFERENCE_ERROR_CODE, "adapter returned no extraction results")
+    result_msgpack = msgpack.packb(extraction_results[0], use_bin_type=True)
 
     return ItemOutcome(
         work_item_id=bi.work_item_id,
@@ -1523,7 +1692,7 @@ def _inference_exception_outcome(
 ) -> ItemOutcome:
     if is_oom_error(exc):
         return _oom_nak_outcome(bi)
-    if isinstance(exc, (InvalidMediaError, msgspec.ValidationError)):
+    if isinstance(exc, (InvalidInputError, msgspec.ValidationError)):
         # A typed-decode failure (decode_item) or a media contract violation;
         # both surface as INVALID_INPUT (HTTP 400), matching the HTTP path.
         return _error_outcome(bi, ErrorCode.INVALID_INPUT.value, str(exc))

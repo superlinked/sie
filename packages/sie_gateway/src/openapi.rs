@@ -48,6 +48,9 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         crate::handlers::config_api::resolve_config,
         crate::handlers::proxy::proxy_encode,
         crate::handlers::proxy::proxy_openai_embeddings,
+        crate::handlers::audio::proxy_openai_transcription,
+        crate::handlers::proxy::proxy_rerank,
+        crate::handlers::proxy::proxy_rerank_v2,
         crate::handlers::proxy::proxy_score,
         crate::handlers::proxy::proxy_extract,
         crate::handlers::proxy::proxy_generate,
@@ -55,7 +58,6 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         crate::handlers::proxy::proxy_completions,
         crate::handlers::proxy::proxy_responses,
         crate::handlers::proxy::proxy_moderations,
-        crate::server::metrics_handler,
         docs_ui
     ),
     components(schemas(
@@ -88,6 +90,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         EncodeResponse,
         EncodeResult,
         Entity,
+        ExtractItemError,
         ExtractParams,
         ExtractRequest,
         ExtractResponse,
@@ -115,8 +118,15 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         OpenAIEmbeddingUsage,
         OpenAIEmbeddingVector,
         OpenAIEmbeddingsListResponse,
+        OpenAITranscriptionRequest,
+        OpenAITranscriptionResponse,
+        OpenAITranscriptionResponseFormat,
+        OpenAITranscriptionUsage,
+        NativeGenerateImage,
         GenerateRequest,
         GenerateResponse,
+        GenerateChunk,
+        GenerateChunkError,
         GenerateUsage,
         ChatCompletionRequest,
         ChatCompletionMessage,
@@ -138,6 +148,14 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ResolveModelNotFoundDetail,
         ResolveModelNotFoundResponse,
         ResolveConfigResponse,
+        RerankDocument,
+        RerankError,
+        RerankOptions,
+        RerankRequest,
+        RerankV2Request,
+        RerankResponse,
+        RerankResult,
+        ScoreUsage,
         ScoreEntry,
         crate::handlers::config_api::ResolveRequest,
         ScoreRequest,
@@ -313,12 +331,22 @@ fn apply_gateway_openapi_overrides(value: &mut Value) {
     }
 
     patch_chat_completion_schema(value);
+    patch_queue_request_batch_limits(value);
+    patch_rerank_schemas(value);
 
     let paths = value["paths"]
         .as_object_mut()
         .expect("OpenAPI paths should be an object");
 
-    for path in ["/healthz", "/readyz", "/openapi.json", "/docs"] {
+    // Auth-exempt paths get an empty per-operation `security` array: the
+    // shared probe pair plus the spec-documented doc routes (the Redoc JS
+    // asset is exempt in `middleware::auth` too but has no spec entry).
+    let auth_exempt_doc_paths = ["/openapi.json", "/docs"];
+    for path in crate::middleware::auth::PROBE_PATHS
+        .iter()
+        .copied()
+        .chain(auth_exempt_doc_paths)
+    {
         if let Some(operation) = paths
             .get_mut(path)
             .and_then(|path_item| path_item.get_mut("get"))
@@ -348,7 +376,50 @@ fn apply_gateway_openapi_overrides(value: &mut Value) {
     annotate_slash_bearing_path_parameters(paths);
 }
 
+fn patch_queue_request_batch_limits(value: &mut Value) {
+    let Some(schemas) = value
+        .get_mut("components")
+        .and_then(|components| components.get_mut("schemas"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let queue_maximum = json!(crate::queue::publisher::MAX_QUEUE_REQUEST_ITEMS);
+
+    for schema_name in ["EncodeRequest", "ExtractRequest"] {
+        if let Some(items) = schemas
+            .get_mut(schema_name)
+            .and_then(|schema| schema.get_mut("properties"))
+            .and_then(|properties| properties.get_mut("items"))
+        {
+            items["maxItems"] = queue_maximum.clone();
+        }
+    }
+
+    if let Some(items) = schemas
+        .get_mut("ScoreRequest")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(|properties| properties.get_mut("items"))
+    {
+        items["maxItems"] = json!(crate::handlers::proxy::MAX_SCORE_ITEMS);
+    }
+
+    if let Some(variants) = schemas
+        .get_mut("OpenAIEmbeddingInput")
+        .and_then(|schema| schema.get_mut("oneOf"))
+        .and_then(Value::as_array_mut)
+    {
+        for variant in variants {
+            if variant.get("type").and_then(Value::as_str) == Some("array") {
+                variant["maxItems"] = queue_maximum.clone();
+            }
+        }
+    }
+}
+
 fn patch_chat_completion_schema(value: &mut Value) {
+    patch_generate_request_schema(value);
+    patch_generate_path(value);
     patch_chat_request_schema(value);
     patch_chat_message_schema(value);
     patch_completions_request_schema(value);
@@ -356,6 +427,98 @@ fn patch_chat_completion_schema(value: &mut Value) {
     patch_chat_completion_paths(value);
     patch_completions_path(value);
     patch_responses_path(value);
+}
+
+fn patch_generate_request_schema(value: &mut Value) {
+    let Some(properties) = value
+        .get_mut("components")
+        .and_then(|components| components.get_mut("schemas"))
+        .and_then(|schemas| schemas.get_mut("GenerateRequest"))
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(|properties| properties.as_object_mut())
+    else {
+        return;
+    };
+    properties.insert(
+        "seed".to_string(),
+        json!({
+            "description": "Optional signed 64-bit per-request sampling seed. \
+                            Reproducibility is best effort, not guaranteed, and depends on the \
+                            active generation backend and deployment configuration. Non-integer \
+                            or out-of-range values reject with 400 invalid_request.",
+            "type": ["integer", "null"],
+            "format": "int64",
+            "minimum": i64::MIN,
+            "maximum": i64::MAX,
+        }),
+    );
+    properties.insert(
+        "stream".to_string(),
+        json!({
+            "description": "SSE streaming. When true, the 200 response uses `text/event-stream`; \
+                            each `data:` event contains a SIE-native `GenerateChunk` JSON object \
+                            and the stream terminates with `data: [DONE]`. Defaults to false. \
+                            Non-boolean values reject with 400 invalid_request.",
+            "type": ["boolean", "null"],
+        }),
+    );
+}
+
+fn patch_generate_path(value: &mut Value) {
+    let Some(post) = value
+        .get_mut("paths")
+        .and_then(|paths| paths.get_mut("/v1/generate/{model}"))
+        .and_then(|path_item| path_item.get_mut("post"))
+    else {
+        return;
+    };
+    let Some(post) = post.as_object_mut() else {
+        return;
+    };
+
+    post.insert(
+        "description".to_string(),
+        json!(
+            "SIE-native generation with optional bounded inline images. Omit `stream` or set it \
+             to false for a blocking JSON response; set `stream: true` for SIE-native \
+             Server-Sent Events terminated by \
+             `data: [DONE]`. The model path parameter must use the SIE-safe ID (for example \
+             `Qwen__Qwen3-4B-Instruct`); HF-style slashes reject with 400."
+        ),
+    );
+
+    let Some(response) = post
+        .get_mut("responses")
+        .and_then(|responses| responses.get_mut("200"))
+        .and_then(|response| response.as_object_mut())
+    else {
+        return;
+    };
+    response.insert(
+        "description".to_string(),
+        json!(
+            "Generated text as blocking JSON, or SIE-native SSE `GenerateChunk` events when \
+             `stream: true`; SSE terminates with `data: [DONE]`."
+        ),
+    );
+    let content = response
+        .entry("content".to_string())
+        .or_insert_with(|| json!({}));
+    let Some(content) = content.as_object_mut() else {
+        return;
+    };
+    content.insert(
+        "text/event-stream".to_string(),
+        json!({
+            "schema": {
+                "type": "string",
+                "description": "SSE-framed text containing SIE-native `GenerateChunk` JSON in each `data:` event; the stream terminates with `data: [DONE]`."
+            },
+             "x-sie-event-schema": {
+                 "$ref": "#/components/schemas/GenerateChunk"
+             },
+         }),
+    );
 }
 
 fn patch_chat_request_schema(value: &mut Value) {
@@ -467,15 +630,18 @@ fn patch_chat_request_schema(value: &mut Value) {
             "maximum": 2.0,
         }),
     );
-    // seed: i64 reinterpreted as u64; document as integer.
+    // seed: signed 64-bit integer, forwarded unchanged.
     properties.insert(
         "seed".to_string(),
         json!({
-            "description": "Best-effort determinism seed (i64 reinterpreted as u64). \
-                            Plumbed to the worker as SGLang's `sampling_params.seed`. \
-                            Non-integer values reject with 400 invalid_request.",
+            "description": "Optional signed 64-bit per-request sampling seed. \
+                            Reproducibility is best effort, not guaranteed, and depends on the \
+                            active generation backend and deployment configuration. Non-integer \
+                            or out-of-range values reject with 400 invalid_request.",
             "type": ["integer", "null"],
             "format": "int64",
+            "minimum": i64::MIN,
+            "maximum": i64::MAX,
         }),
     );
     // stream: boolean; per-choice streaming for n>1 is supported.
@@ -776,10 +942,14 @@ fn patch_completions_request_schema(value: &mut Value) {
     properties.insert(
         "seed".to_string(),
         json!({
-            "description": "Best-effort determinism seed (i64 reinterpreted as u64). \
-                            Non-integer values reject with 400 invalid_request.",
+            "description": "Optional signed 64-bit per-request sampling seed. \
+                            Reproducibility is best effort, not guaranteed, and depends on the \
+                            active generation backend and deployment configuration. Non-integer \
+                            or out-of-range values reject with 400 invalid_request.",
             "type": ["integer", "null"],
             "format": "int64",
+            "minimum": i64::MIN,
+            "maximum": i64::MAX,
         }),
     );
 }
@@ -858,10 +1028,14 @@ fn patch_responses_request_schema(value: &mut Value) {
     properties.insert(
         "seed".to_string(),
         json!({
-            "description": "Best-effort determinism seed (i64 reinterpreted as u64). \
-                            Non-integer values reject with 400 invalid_request.",
+            "description": "Optional signed 64-bit per-request sampling seed. \
+                            Reproducibility is best effort, not guaranteed, and depends on the \
+                            active generation backend and deployment configuration. Non-integer \
+                            or out-of-range values reject with 400 invalid_request.",
             "type": ["integer", "null"],
             "format": "int64",
+            "minimum": i64::MIN,
+            "maximum": i64::MAX,
         }),
     );
 }
@@ -1037,6 +1211,16 @@ fn header(description: &str) -> Value {
     })
 }
 
+fn sha256_header(description: &str) -> Value {
+    json!({
+        "description": description,
+        "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        }
+    })
+}
+
 fn merge_headers(response: &mut Value, headers: &Value) {
     let Some(response) = response.as_object_mut() else {
         return;
@@ -1058,6 +1242,12 @@ fn inject_inference_response_headers(paths: &mut serde_json::Map<String, Value>)
     let queue_success_headers = json!({
         "X-SIE-Version": header("Gateway package version that handled the request"),
         "X-SIE-Server-Version": header("Gateway-compatible server version advertised by this gateway"),
+        "X-SIE-Model-Revision": header(
+            "Immutable deployed bundle/config execution revision that handled the request, when available",
+        ),
+        "X-SIE-Execution-Identity-SHA256": sha256_header(
+            "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
+        ),
         "X-SIE-Request-Id": header("Gateway request id for queue-backed inference"),
         "X-SIE-Worker": header("Logical queue worker tag that produced the response"),
         "X-Queue-Publish-Time": header("Milliseconds spent publishing work to the queue"),
@@ -1086,6 +1276,7 @@ fn inject_inference_response_headers(paths: &mut serde_json::Map<String, Value>)
         "/v1/score/{model}",
         "/v1/extract/{model}",
         "/v1/generate/{model}",
+        "/v1/audio/transcriptions",
     ] {
         let Some(responses) = paths
             .get_mut(path)
@@ -1124,16 +1315,23 @@ fn inject_inference_response_headers(paths: &mut serde_json::Map<String, Value>)
     }
 
     for path in ["/v1/chat/completions", "/v1/completions", "/v1/responses"] {
-        let Some(response) = paths
+        let Some(responses) = paths
             .get_mut(path)
             .and_then(|path_item| path_item.get_mut("post"))
             .and_then(|post| post.get_mut("responses"))
             .and_then(|responses| responses.as_object_mut())
-            .and_then(|responses| responses.get_mut("503"))
         else {
             continue;
         };
-        merge_headers(response, &retryable_error_headers);
+        if let Some(response) = responses.get_mut("200") {
+            merge_headers(response, &queue_success_headers);
+        }
+        if let Some(response) = responses.get_mut("502") {
+            merge_headers(response, &terminal_error_headers);
+        }
+        if let Some(response) = responses.get_mut("503") {
+            merge_headers(response, &retryable_error_headers);
+        }
     }
 }
 
@@ -1309,6 +1507,56 @@ fn annotate_slash_bearing_path_parameters(paths: &mut serde_json::Map<String, Va
     }
 }
 
+fn patch_rerank_schemas(value: &mut Value) {
+    let Some(schemas) = value
+        .get_mut("components")
+        .and_then(|components| components.get_mut("schemas"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    for name in ["RerankRequest", "RerankV2Request"] {
+        let Some(properties) = schemas
+            .get_mut(name)
+            .and_then(|schema| schema.get_mut("properties"))
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        for field in ["model", "query"] {
+            properties[field]["minLength"] = json!(1);
+            properties[field]["pattern"] = json!(r".*\S.*");
+        }
+        properties["documents"]["items"]["minLength"] = json!(1);
+        properties["documents"]["items"]["pattern"] = json!(r".*\S.*");
+    }
+
+    if let Some(profile) = schemas
+        .get_mut("RerankOptions")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(|properties| properties.get_mut("profile"))
+    {
+        profile["minLength"] = json!(1);
+        profile["pattern"] = json!(r".*\S.*");
+    }
+
+    if let Some(properties) = schemas
+        .get_mut("RerankV2Request")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    {
+        for field in ["max_tokens_per_doc", "priority"] {
+            properties[field] = json!({
+                "type": "null",
+                "description": format!(
+                    "`{field}` is not supported by this SIE compatibility subset; omit it or send null."
+                )
+            });
+        }
+    }
+}
+
 pub fn write_openapi_json(path: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     match path {
         Some(path) => std::fs::write(path, OPENAPI_JSON.as_bytes())?,
@@ -1430,19 +1678,121 @@ pub struct OpenAIEmbeddingsListResponse {
     pub usage: OpenAIEmbeddingUsage,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAITranscriptionResponseFormat {
+    Json,
+    Text,
+    Srt,
+    VerboseJson,
+    Vtt,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAITranscriptionTimestampGranularity {
+    Word,
+    Segment,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct OpenAITranscriptionRequest {
+    #[schema(value_type = String, format = Binary)]
+    pub file: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<OpenAITranscriptionResponseFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 0, maximum = 1)]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    #[serde(
+        default,
+        rename = "timestamp_granularities[]",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(max_items = 2)]
+    pub timestamp_granularities: Option<Vec<OpenAITranscriptionTimestampGranularity>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct OpenAITranscriptionUsage {
+    #[serde(rename = "type")]
+    pub usage_type: String,
+    pub seconds: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct OpenAITranscriptionWord {
+    pub word: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct OpenAITranscriptionSegment {
+    pub id: u64,
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct OpenAITranscriptionResponse {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<OpenAITranscriptionUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<OpenAITranscriptionSegment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<OpenAITranscriptionWord>>,
+}
 // ── /v1/generate/{model} schemas ──────────────────────────────────
 
-/// SIE-native blocking text-generation request.
+/// One inline image on the SIE-native generate surface.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct NativeGenerateImage {
+    /// Canonical standard-base64 encoded image bytes, at most 16 MiB decoded.
+    /// Remote URLs are not accepted.
+    #[schema(min_length = 1, max_length = 22369624)]
+    pub data: String,
+    /// Short media-format hint such as ``png`` or ``jpeg``.
+    #[schema(min_length = 1, max_length = 32, pattern = "^[A-Za-z0-9.+-]+$")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+/// SIE-native text-generation request. Set ``stream`` to true for SSE.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GenerateRequest {
     #[schema(min_length = 1)]
     pub prompt: String,
+    /// Optional inline images paired with ``prompt``. When present, the worker
+    /// renders one user turn through the model's native chat template.
+    #[schema(min_items = 1, max_items = 16)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<NativeGenerateImage>>,
     #[schema(minimum = 1)]
     pub max_new_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    /// Governed generation runtime options. Explicit top-level sampler fields
+    /// override matching values in ``default_sampling``.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Value>,
     /// Stop sequences for the native generate surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
@@ -1450,6 +1800,29 @@ pub struct GenerateRequest {
     pub frequency_penalty: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f64>,
+    /// Optional signed 64-bit per-request sampling seed. Reproducibility is
+    /// best effort and depends on the active backend and deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// Per-token additive sampler bias. Keys are integer token ids encoded as
+    /// strings; values are finite numbers in ``[-100, 100]``. At most 1024
+    /// entries are accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logit_bias: Option<std::collections::BTreeMap<String, f64>>,
+    /// Return per-token log probabilities on native SSE chunks. Native
+    /// blocking responses reject this field because they have no logprob
+    /// response member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<bool>,
+    /// Number of alternative tokens per position. Requires ``logprobs: true``
+    /// and ``stream: true``.
+    #[schema(minimum = 0, maximum = 20)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u32>,
+    /// SSE streaming. Each ``data:`` event contains a SIE-native
+    /// ``GenerateChunk`` JSON object; the stream ends with ``data: [DONE]``.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
     /// Optional grammar object accepted by the gateway grammar validator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grammar: Option<Value>,
@@ -1457,6 +1830,11 @@ pub struct GenerateRequest {
     pub routing_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Served LoRA adapter name. The gateway validates it against the resolved
+    /// model before queue dispatch.
+    #[schema(min_length = 1)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_adapter: Option<String>,
     /// Sensitive PII - parsed and dropped, never logged or forwarded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_identifier: Option<String>,
@@ -1481,6 +1859,35 @@ pub struct GenerateResponse {
     pub ttft_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tpot_ms: Option<f64>,
+}
+
+/// Error carried by a terminal SIE-native generation SSE event.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GenerateChunkError {
+    pub code: String,
+    pub message: String,
+}
+
+/// One JSON payload from a SIE-native generation SSE ``data:`` event.
+/// The stream is terminated separately by the literal ``data: [DONE]``.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GenerateChunk {
+    pub request_id: String,
+    pub seq: u32,
+    pub text_delta: String,
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<GenerateUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<f64>,
+    /// Per-token log probabilities aligned with ``text_delta``. Present only
+    /// when the streaming request set ``logprobs: true``.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<Vec<Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<GenerateChunkError>,
 }
 
 // ── /v1/chat/completions schemas ──────────────────────────────────
@@ -1631,10 +2038,10 @@ pub struct ChatCompletionRequest {
     /// ``prompt_cache_key``.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_key: Option<String>,
-    /// Best-effort determinism seed (i64 reinterpreted as u64). Plumbed to
-    /// the worker as SGLang's ``sampling_params.seed``.
+    /// Optional signed 64-bit per-request sampling seed. Reproducibility is
+    /// best effort, not guaranteed, and backend/deployment-specific.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<u64>,
+    pub seed: Option<i64>,
     /// Return per-token logprobs. Boolean. When ``true``, the chosen
     /// token's logprob (and optionally a top-N list) rides on each
     /// ``choices[].logprobs`` entry.
@@ -1781,9 +2188,10 @@ pub struct CompletionsRequest {
     /// In ``[-2.0, 2.0]``; out-of-range or non-numeric values yield 400.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
-    /// Best-effort determinism seed (i64 reinterpreted as u64).
+    /// Optional signed 64-bit per-request sampling seed. Reproducibility is
+    /// best effort, not guaranteed, and backend/deployment-specific.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<u64>,
+    pub seed: Option<i64>,
     /// SSE streaming. ``true`` is supported; the response is a stream of
     /// ``text_completion`` events terminated by ``data: [DONE]``.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1831,9 +2239,10 @@ pub struct ResponsesRequest {
     /// Nucleus sampling. Finite number in ``(0, 1]``.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
-    /// Best-effort determinism seed (i64 reinterpreted as u64).
+    /// Optional signed 64-bit per-request sampling seed. Reproducibility is
+    /// best effort, not guaranteed, and backend/deployment-specific.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<u64>,
+    pub seed: Option<i64>,
     /// Accepted only as ``false`` (or absent). ``true`` rejects with 400
     /// ``unsupported_field`` (Responses SSE is deferred).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1981,6 +2390,8 @@ pub struct ModelInfoWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<serde_json::Value>,
     pub max_sequence_length: Option<u64>,
+    /// Immutable model weights revision, when the catalog pins one.
+    pub revision: Option<String>,
     pub profiles: std::collections::HashMap<String, ProfileInfoWire>,
     /// Advertised model capabilities. Consumers use this to discover
     /// which features the model supports before composing a request.
@@ -2255,12 +2666,102 @@ pub struct ExtractRequest {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ScoreRequest {
     pub query: ItemInput,
-    #[schema(min_items = 1)]
+    #[schema(min_items = 1, max_items = 1000)]
     pub items: Vec<ItemInput>,
     #[serde(default)]
     pub instruction: Option<String>,
     #[serde(default)]
     pub options: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RerankRequest {
+    /// SIE model id. Blank or whitespace-only values are rejected.
+    pub model: String,
+    /// Text query. Blank or whitespace-only values are rejected.
+    pub query: String,
+    /// One to 1,000 nonblank text candidates. Execution is internally batched
+    /// within the selected model profile's max_batch_tokens limit.
+    #[schema(min_items = 1, max_items = 1000)]
+    pub documents: Vec<String>,
+    #[serde(default)]
+    #[schema(minimum = 1)]
+    pub top_n: Option<usize>,
+    #[serde(default)]
+    pub return_documents: Option<bool>,
+    #[serde(default)]
+    /// SIE extension. Only profile and max_seq_length are accepted.
+    pub options: Option<RerankOptions>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RerankV2Request {
+    /// SIE model id. Blank or whitespace-only values are rejected.
+    pub model: String,
+    /// Text query. Blank or whitespace-only values are rejected.
+    pub query: String,
+    /// One to 1,000 nonblank text candidates. Execution is internally batched
+    /// within the selected model profile's max_batch_tokens limit.
+    #[schema(min_items = 1, max_items = 1000)]
+    pub documents: Vec<String>,
+    #[serde(default)]
+    #[schema(minimum = 1)]
+    pub top_n: Option<usize>,
+    #[serde(default)]
+    pub max_tokens_per_doc: Option<Value>,
+    #[serde(default)]
+    pub priority: Option<Value>,
+    #[serde(default)]
+    /// SIE extension. Only profile and max_seq_length are accepted.
+    pub options: Option<RerankOptions>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RerankOptions {
+    #[serde(default)]
+    /// Named SIE model profile. Blank values are rejected.
+    pub profile: Option<String>,
+    #[serde(default)]
+    /// Positive request-time sequence-length cap, clamped to the model's
+    /// configured ceiling. Reranker truncation preserves the instruction and
+    /// query and truncates candidate document tokens first.
+    #[schema(minimum = 1)]
+    pub max_seq_length: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RerankDocument {
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RerankResult {
+    pub index: usize,
+    pub relevance_score: f64,
+    #[serde(default)]
+    pub document: Option<RerankDocument>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ScoreUsage {
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub images: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RerankResponse {
+    pub model: String,
+    pub results: Vec<RerankResult>,
+    pub usage: ScoreUsage,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RerankError {
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2339,6 +2840,12 @@ pub struct Relation {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ExtractItemError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ExtractResult {
     pub id: String,
     #[serde(default)]
@@ -2349,6 +2856,8 @@ pub struct ExtractResult {
     pub classifications: Vec<Value>,
     #[serde(default)]
     pub data: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ExtractItemError>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2370,6 +2879,8 @@ pub struct ScoreResponse {
     #[serde(default)]
     pub query_id: Option<String>,
     pub scores: Vec<ScoreEntry>,
+    #[serde(default)]
+    pub usage: Option<ScoreUsage>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2388,6 +2899,59 @@ mod tests {
     fn openapi_document_has_gateway_metadata() {
         let doc = ApiDoc::openapi();
         assert_eq!(doc.info.title, "SIE Gateway");
+    }
+
+    #[test]
+    fn openapi_documents_rerank_compatibility_contract() {
+        let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
+        for (path, schema) in [
+            ("/v1/rerank", "RerankRequest"),
+            ("/v2/rerank", "RerankV2Request"),
+        ] {
+            let operation = &spec["paths"][path]["post"];
+            assert_eq!(
+                operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+                format!("#/components/schemas/{schema}")
+            );
+            assert_eq!(
+                operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/RerankResponse"
+            );
+            assert_eq!(
+                spec["components"]["schemas"][schema]["properties"]["documents"]["maxItems"],
+                1000
+            );
+            assert_eq!(
+                spec["components"]["schemas"][schema]["properties"]["documents"]["items"]
+                    ["pattern"],
+                r".*\S.*"
+            );
+            assert_eq!(
+                spec["components"]["schemas"][schema]["additionalProperties"],
+                false
+            );
+            assert_eq!(
+                spec["components"]["schemas"][schema]["properties"]["options"]["oneOf"][1]["$ref"],
+                "#/components/schemas/RerankOptions"
+            );
+            assert!(operation["description"]
+                .as_str()
+                .unwrap()
+                .contains("text-only subset"));
+        }
+        assert_eq!(
+            spec["components"]["schemas"]["RerankOptions"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["RerankOptions"]["properties"]["profile"]["pattern"],
+            r".*\S.*"
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["RerankV2Request"]["properties"]["priority"]["type"],
+            "null"
+        );
+        assert!(spec["components"]["schemas"]["ScoreResponse"]["properties"]["usage"].is_object());
     }
 
     #[tokio::test]
@@ -2532,6 +3096,40 @@ mod tests {
     }
 
     #[test]
+    fn openapi_json_documents_audio_timestamps() {
+        let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
+        let request = &spec["components"]["schemas"]["OpenAITranscriptionRequest"]["properties"]
+            ["timestamp_granularities[]"];
+        assert_eq!(request["maxItems"], json!(2));
+        assert_eq!(
+            request["items"]["$ref"],
+            "#/components/schemas/OpenAITranscriptionTimestampGranularity"
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["OpenAITranscriptionTimestampGranularity"]["enum"],
+            json!(["word", "segment"])
+        );
+
+        let response = &spec["components"]["schemas"]["OpenAITranscriptionResponse"]["properties"];
+        assert_eq!(
+            response["segments"]["items"]["$ref"],
+            "#/components/schemas/OpenAITranscriptionSegment"
+        );
+        assert_eq!(
+            response["words"]["items"]["$ref"],
+            "#/components/schemas/OpenAITranscriptionWord"
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["OpenAITranscriptionWord"]["required"],
+            json!(["word", "start", "end"])
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["OpenAITranscriptionSegment"]["required"],
+            json!(["id", "start", "end", "text"])
+        );
+    }
+
+    #[test]
     fn openapi_json_documents_generate_contract() {
         let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
         let generate = &spec["paths"]["/v1/generate/{model}"]["post"];
@@ -2544,9 +3142,83 @@ mod tests {
             generate["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/GenerateResponse"
         );
+        assert_eq!(
+            generate["responses"]["200"]["content"]["text/event-stream"]["schema"]["type"],
+            "string"
+        );
+        assert_eq!(
+            generate["responses"]["200"]["content"]["text/event-stream"]["x-sie-event-schema"]
+                ["$ref"],
+            "#/components/schemas/GenerateChunk"
+        );
+        assert!(generate["description"]
+            .as_str()
+            .unwrap()
+            .contains("stream: true"));
+        assert!(generate["responses"]["200"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("data: [DONE]"));
 
         let request = &spec["components"]["schemas"]["GenerateRequest"];
         assert_eq!(request["required"], json!(["prompt", "max_new_tokens"]));
+        assert_eq!(
+            request["properties"]["images"]["items"]["$ref"],
+            "#/components/schemas/NativeGenerateImage"
+        );
+        assert_eq!(request["properties"]["images"]["maxItems"], json!(16));
+        assert_eq!(
+            spec["components"]["schemas"]["NativeGenerateImage"]["required"],
+            json!(["data"])
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["NativeGenerateImage"]["properties"]["data"]["maxLength"],
+            json!(22_369_624)
+        );
+        let seed = &request["properties"]["seed"];
+        assert_eq!(seed["type"], json!(["integer", "null"]));
+        assert_eq!(seed["format"], "int64");
+        assert_eq!(seed["minimum"], i64::MIN);
+        assert_eq!(seed["maximum"], i64::MAX);
+        assert!(seed["description"]
+            .as_str()
+            .unwrap()
+            .contains("Reproducibility is best effort, not guaranteed"));
+        assert_eq!(
+            request["properties"]["stream"]["type"],
+            json!(["boolean", "null"])
+        );
+        assert!(request["properties"]["stream"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("text/event-stream"));
+        assert_eq!(
+            request["properties"]["logprobs"]["type"],
+            json!(["boolean", "null"])
+        );
+        assert_eq!(request["properties"]["top_logprobs"]["maximum"], 20);
+        assert_eq!(request["properties"]["lora_adapter"]["minLength"], 1);
+        for unsupported in ["n", "best_of", "stream_options"] {
+            assert!(request["properties"].get(unsupported).is_none());
+        }
+
+        let chunk = &spec["components"]["schemas"]["GenerateChunk"];
+        assert_eq!(
+            chunk["required"],
+            json!(["request_id", "seq", "text_delta", "done"])
+        );
+        assert_eq!(
+            chunk["properties"]["usage"]["oneOf"][1]["$ref"],
+            "#/components/schemas/GenerateUsage"
+        );
+        assert_eq!(
+            chunk["properties"]["error"]["oneOf"][1]["$ref"],
+            "#/components/schemas/GenerateChunkError"
+        );
+        assert_eq!(
+            chunk["properties"]["logprobs"]["type"],
+            json!(["array", "null"])
+        );
     }
 
     #[test]
@@ -2583,6 +3255,9 @@ mod tests {
             "/v1/pools",
             "/v1/configs/models",
             "/v1/configs/models/{id}/status",
+            "/v1/audio/transcriptions",
+            "/v1/rerank",
+            "/v2/rerank",
             "/v1/embeddings",
             "/v1/encode/{model}",
             "/v1/score/{model}",
@@ -2601,7 +3276,6 @@ mod tests {
             ("/healthz", &["get"][..]),
             ("/readyz", &["get"][..]),
             ("/health", &["get"][..]),
-            ("/metrics", &["get"][..]),
             ("/openapi.json", &["get"][..]),
             ("/docs", &["get"][..]),
             ("/v1/models", &["get"][..]),
@@ -2615,11 +3289,14 @@ mod tests {
             ("/v1/configs/bundles", &["get"][..]),
             ("/v1/configs/bundles/{id}", &["get"][..]),
             ("/v1/configs/resolve", &["post"][..]),
+            ("/v1/audio/transcriptions", &["post"][..]),
             ("/v1/embeddings", &["post"][..]),
             ("/v1/chat/completions", &["post"][..]),
             ("/v1/completions", &["post"][..]),
             ("/v1/responses", &["post"][..]),
             ("/v1/moderations", &["post"][..]),
+            ("/v1/rerank", &["post"][..]),
+            ("/v2/rerank", &["post"][..]),
             ("/ws/cluster-status", &["get"][..]),
             ("/v1/encode/{model}", &["post"][..]),
             ("/v1/score/{model}", &["post"][..]),
@@ -2649,6 +3326,7 @@ mod tests {
             "/v1/encode/{model}",
             "/v1/score/{model}",
             "/v1/extract/{model}",
+            "/v1/audio/transcriptions",
             "/v1/embeddings",
         ] {
             let parameters = spec["paths"][path]["post"]["parameters"]
@@ -2688,7 +3366,7 @@ mod tests {
         let generate = &spec["paths"]["/v1/generate/{model}"]["post"]["responses"]
             .as_object()
             .unwrap();
-        for status in ["200", "400", "404", "500", "503", "504"] {
+        for status in ["200", "400", "404", "413", "500", "502", "503", "504"] {
             assert!(
                 generate.contains_key(status),
                 "/v1/generate/{{model}} missing {status}"
@@ -2821,6 +3499,18 @@ mod tests {
                 responses["200"]["headers"].get("X-Queue-Time").is_some(),
                 "{path} missing documented queue timing header"
             );
+            assert!(
+                responses["200"]["headers"]
+                    .get("X-SIE-Model-Revision")
+                    .is_some(),
+                "{path} missing documented model revision header"
+            );
+            assert!(
+                responses["200"]["headers"]
+                    .get("X-SIE-Execution-Identity-SHA256")
+                    .is_some(),
+                "{path} missing documented worker execution identity header"
+            );
         }
 
         let pool_post = &spec["paths"]["/v1/pools"]["post"]["responses"];
@@ -2838,6 +3528,7 @@ mod tests {
             "/v1/score/{model}",
             "/v1/extract/{model}",
             "/v1/generate/{model}",
+            "/v1/audio/transcriptions",
             "/v1/embeddings",
             "/v1/chat/completions",
             "/v1/completions",
@@ -2880,6 +3571,23 @@ mod tests {
                 "/v1/embeddings 200 missing documented {name} header"
             );
         }
+        for path in ["/v1/chat/completions", "/v1/completions", "/v1/responses"] {
+            let headers = &spec["paths"][path]["post"]["responses"]["200"]["headers"];
+            for name in [
+                "X-SIE-Request-Id",
+                "X-SIE-Model-Revision",
+                "X-SIE-Execution-Identity-SHA256",
+            ] {
+                assert!(
+                    headers.get(name).is_some(),
+                    "{path} 200 missing documented {name} header"
+                );
+            }
+            assert_eq!(
+                headers["X-SIE-Execution-Identity-SHA256"]["schema"]["pattern"],
+                "^[0-9a-f]{64}$"
+            );
+        }
     }
 
     #[test]
@@ -2894,6 +3602,21 @@ mod tests {
                 "{schema} must not document gateway-only partial error envelope"
             );
         }
+
+        let extract_result = &spec["components"]["schemas"]["ExtractResult"];
+        assert_eq!(
+            extract_result["properties"]["error"]["oneOf"][1]["$ref"],
+            "#/components/schemas/ExtractItemError"
+        );
+        assert!(!extract_result["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "error"));
+        assert!(spec["paths"]["/v1/extract/{model}"]["post"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("aligned per-item error"));
 
         let model_param = &spec["paths"]["/v1/encode/{model}"]["post"]["parameters"][0];
         assert!(model_param.get("allowReserved").is_none());
@@ -2942,11 +3665,32 @@ mod tests {
             json!(["float", "base64"])
         );
 
-        for path in [
-            "/v1/encode/{model}",
-            "/v1/score/{model}",
-            "/v1/extract/{model}",
-        ] {
+        for schema in ["EncodeRequest", "ExtractRequest"] {
+            assert_eq!(
+                spec["components"]["schemas"][schema]["properties"]["items"]["maxItems"],
+                json!(crate::queue::publisher::MAX_QUEUE_REQUEST_ITEMS),
+                "{schema} must document the runtime queue-item limit",
+            );
+        }
+        assert_eq!(
+            spec["components"]["schemas"]["ScoreRequest"]["properties"]["items"]["maxItems"],
+            json!(crate::handlers::proxy::MAX_SCORE_ITEMS),
+            "ScoreRequest must document the stricter runtime score-item limit",
+        );
+        let embedding_input_variants = spec["components"]["schemas"]["OpenAIEmbeddingInput"]
+            ["oneOf"]
+            .as_array()
+            .expect("embedding input must be a union");
+        let embedding_array = embedding_input_variants
+            .iter()
+            .find(|variant| variant["type"] == "array")
+            .expect("embedding input must document the string-array form");
+        assert_eq!(
+            embedding_array["maxItems"],
+            json!(crate::queue::publisher::MAX_QUEUE_REQUEST_ITEMS),
+        );
+
+        for path in ["/v1/encode/{model}", "/v1/score/{model}"] {
             assert!(spec["paths"][path]["post"]["description"]
                 .as_str()
                 .unwrap()

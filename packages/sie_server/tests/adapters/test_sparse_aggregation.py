@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
 import torch
+from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters.gte_sparse_flash import GTESparseFlashAdapter
-from sie_server.adapters.splade_flash import SPLADEFlashAdapter
+from sie_server.adapters.splade_flash.adapter import SPLADEFlashAdapter
 from sie_server.core.inference_output import SparseVector
 
 
@@ -269,3 +276,198 @@ class TestInPlaceRelu:
         actual = torch.log1p(torch.log1p(torch.relu_(logits)))
 
         torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("compute_precision", "expected"),
+    [("float32", False), ("float16", True), ("bfloat16", True)],
+)
+def test_flash_path_requires_half_precision(
+    monkeypatch,
+    compute_precision: ComputePrecision,
+    expected: bool,
+) -> None:
+    tokenizer = SimpleNamespace(model_max_length=512)
+    model = SimpleNamespace(
+        bert=object(),
+        config=SimpleNamespace(
+            hidden_size=32,
+            max_position_embeddings=512,
+            position_embedding_type="absolute",
+            vocab_size=128,
+        ),
+        eval=MagicMock(),
+        to=MagicMock(),
+    )
+    adapter = SPLADEFlashAdapter("test-splade-model", compute_precision=compute_precision)
+    monkeypatch.setattr(adapter, "_try_load_idf_vector", lambda _tokenizer: None)
+    monkeypatch.setattr(
+        "sie_server.adapters.splade_flash.adapter._has_flash_attn",
+        lambda: True,
+    )
+    with (
+        patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer),
+        patch("transformers.AutoModelForMaskedLM.from_pretrained", return_value=model),
+    ):
+        adapter.load("cuda:0")
+
+    assert adapter._use_flash is expected
+
+
+@pytest.mark.parametrize("revision", [None, "main", "v1.0"])
+def test_remote_code_load_requires_immutable_revision(revision: str | None) -> None:
+    adapter = SPLADEFlashAdapter(
+        "remote-org/remote-model",
+        trust_remote_code=True,
+        revision=revision,
+    )
+
+    with pytest.raises(ValueError, match="immutable 40-character revision"):
+        adapter.load("cpu")
+
+
+@pytest.mark.parametrize(
+    ("model_path", "revision"),
+    [
+        ("remote-org/remote-model", "a" * 40),
+        (None, None),
+    ],
+    ids=["pinned-remote", "local-path"],
+)
+def test_remote_code_load_allows_pinned_remote_or_local_path(
+    tmp_path: Path,
+    model_path: str | None,
+    revision: str | None,
+) -> None:
+    resolved_path = model_path
+    if resolved_path is None:
+        local_path = tmp_path / "model"
+        local_path.mkdir()
+        resolved_path = str(local_path)
+
+    adapter = SPLADEFlashAdapter(
+        resolved_path,
+        trust_remote_code=True,
+        revision=revision,
+    )
+    with (
+        patch(
+            "transformers.AutoTokenizer.from_pretrained",
+            side_effect=RuntimeError("validated load reached"),
+        ),
+        pytest.raises(RuntimeError, match="validated load reached"),
+    ):
+        adapter.load("cpu")
+
+
+class _TokenizerWithAddedTokens:
+    vocab_size = 2
+
+    def __len__(self) -> int:
+        return 4
+
+    def get_vocab(self) -> dict[str, int]:
+        return {"base": 0, "added": 3, "out-of-range": 7}
+
+    def __call__(self, _texts: list[str], **_kwargs: Any) -> dict[str, list[list[int]]]:
+        return {"input_ids": [[0, 3, 7]]}
+
+
+def test_parse_idf_json_rejects_non_mapping_and_invalid_weights(tmp_path: Path) -> None:
+    artifact = tmp_path / "idf.json"
+    artifact.write_text(json.dumps(["not", "a", "mapping"]), encoding="utf-8")
+    assert SPLADEFlashAdapter._parse_idf_json(str(artifact)) is None
+
+    artifact.write_text(json.dumps({"valid": 1.0, "invalid": []}), encoding="utf-8")
+    assert SPLADEFlashAdapter._parse_idf_json(str(artifact)) is None
+
+
+@pytest.mark.parametrize("invalid_weight", [float("nan"), float("inf"), float("-inf")])
+def test_parse_idf_json_rejects_non_finite_weights(
+    tmp_path: Path,
+    invalid_weight: float,
+) -> None:
+    artifact = tmp_path / "idf.json"
+    artifact.write_text(json.dumps({"invalid": invalid_weight}), encoding="utf-8")
+
+    assert SPLADEFlashAdapter._parse_idf_json(str(artifact)) is None
+
+
+def test_malformed_query_weights_fall_back_to_idf_json(monkeypatch, tmp_path: Path) -> None:
+    query_weights = tmp_path / "query_token_weights.txt"
+    query_weights.write_text("base\t1.0\nmalformed-row\n", encoding="utf-8")
+    idf = tmp_path / "idf.json"
+    idf.write_text(json.dumps({"added": 2.0}), encoding="utf-8")
+    adapter = SPLADEFlashAdapter("test-splade-model")
+    artifacts = {
+        "query_token_weights.txt": str(query_weights),
+        "idf.json": str(idf),
+    }
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_repo_file",
+        lambda _path, filename, _revision: artifacts[filename],
+    )
+
+    vector = adapter._try_load_idf_vector(_TokenizerWithAddedTokens())
+
+    assert vector is not None
+    assert vector.tolist() == [0.0, 0.0, 0.0, 2.0]
+
+
+def test_unmapped_query_weights_fall_back_to_idf_json(monkeypatch, tmp_path: Path) -> None:
+    query_weights = tmp_path / "query_token_weights.txt"
+    query_weights.write_text("unknown\t1.0\n", encoding="utf-8")
+    idf = tmp_path / "idf.json"
+    idf.write_text(json.dumps({"added": 2.0}), encoding="utf-8")
+    adapter = SPLADEFlashAdapter("test-splade-model")
+    artifacts = {
+        "query_token_weights.txt": str(query_weights),
+        "idf.json": str(idf),
+    }
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_repo_file",
+        lambda _path, filename, _revision: artifacts[filename],
+    )
+
+    vector = adapter._try_load_idf_vector(_TokenizerWithAddedTokens())
+
+    assert vector is not None
+    assert vector.tolist() == [0.0, 0.0, 0.0, 2.0]
+
+
+def test_idf_vector_covers_added_tokens_and_ignores_out_of_range_ids(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "idf.json"
+    artifact.write_text(
+        json.dumps({"base": 1.0, "added": 2.0, "out-of-range": 3.0}),
+        encoding="utf-8",
+    )
+    adapter = SPLADEFlashAdapter("test-splade-model")
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_repo_file",
+        lambda _path, filename, _revision: str(artifact) if filename == "idf.json" else None,
+    )
+
+    vector = adapter._try_load_idf_vector(_TokenizerWithAddedTokens())
+
+    assert vector is not None
+    assert vector.tolist() == [1.0, 0.0, 0.0, 2.0]
+
+
+def test_query_idf_ignores_token_ids_outside_vector() -> None:
+    adapter = SPLADEFlashAdapter("test-splade-model")
+    adapter._model = object()
+    adapter._tokenizer = _TokenizerWithAddedTokens()
+    adapter._idf = torch.tensor([1.0, 0.0, 0.0, 2.0])
+
+    output = adapter._encode_query_idf(["query"], is_query=True)
+
+    assert output.sparse is not None
+    np.testing.assert_array_equal(output.sparse[0].indices, np.array([0, 3], dtype=np.int32))
+    np.testing.assert_array_equal(output.sparse[0].values, np.array([1.0, 2.0], dtype=np.float32))
+    assert output.extra == {"input_token_counts": [3]}

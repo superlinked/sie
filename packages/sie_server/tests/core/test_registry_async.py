@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
@@ -95,7 +95,7 @@ class TestAsyncLoading:
 
         assert invalidated == {"test-model"}
         assert registry._model_dirs["test-model"] == new_dir
-        registry._do_unload.assert_awaited_once_with("test-model")
+        registry._do_unload.assert_awaited_once_with("test-model", reason="config_change")
 
     async def test_load_async_basic(self, registry_with_model: ModelRegistry) -> None:
         """Test basic async loading."""
@@ -109,6 +109,69 @@ class TestAsyncLoading:
             assert adapter is mock_adapter
             assert registry_with_model.is_loaded("test-model")
             mock_adapter.load.assert_called_once_with("cpu")
+
+    async def test_load_async_records_managed_duration_outcome(self, registry_with_model: ModelRegistry) -> None:
+        telemetry = MagicMock()
+        with (
+            patch("sie_server.core.model_loader.load_adapter") as mock_load,
+            patch("sie_server.core.registry.worker_telemetry", return_value=telemetry),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.memory_footprint.return_value = 1000
+            mock_load.return_value = mock_adapter
+
+            await registry_with_model.load_async("test-model", "cpu")
+
+        telemetry.model_load_completed.assert_called_once()
+        kwargs = telemetry.model_load_completed.call_args.kwargs
+        assert kwargs["model"] == "test-model"
+        assert kwargs["duration_s"] >= 0
+        assert kwargs["outcome"] == "success"
+        assert kwargs["stage"] == "total"
+
+    async def test_failed_load_records_managed_error_outcome(self, registry_with_model: ModelRegistry) -> None:
+        telemetry = MagicMock()
+        with (
+            patch("sie_server.core.model_loader.load_adapter", side_effect=RuntimeError("load failed")),
+            patch("sie_server.core.registry.worker_telemetry", return_value=telemetry),
+            pytest.raises(RuntimeError, match="load failed"),
+        ):
+            await registry_with_model.load_async("test-model", "cpu")
+
+        telemetry.model_load_completed.assert_called_once()
+        kwargs = telemetry.model_load_completed.call_args.kwargs
+        assert kwargs["model"] == "test-model"
+        assert kwargs["duration_s"] >= 0
+        assert kwargs["outcome"] == "error"
+        assert kwargs["stage"] == "total"
+
+    async def test_lazy_load_and_registry_eviction_publish_managed_residency(
+        self,
+        registry_with_model: ModelRegistry,
+    ) -> None:
+        """The shared loader transition seam covers lazy load and every eviction.
+
+        All async eviction paths funnel through ``_do_unload`` and then
+        ``ModelLoader.unregister``, so this exercises the same authoritative
+        loaded/memory transitions used by idle, pressure and OOM eviction.
+        """
+        telemetry = MagicMock()
+        with (
+            patch("sie_server.core.model_loader.load_adapter") as mock_load,
+            patch("sie_server.core.model_loader.worker_telemetry", return_value=telemetry),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.memory_footprint.return_value = 1000
+            del mock_adapter.aclose_client
+            mock_load.return_value = mock_adapter
+
+            await registry_with_model.load_async("test-model", "cpu")
+            await registry_with_model._do_unload("test-model")
+
+        assert telemetry.model_residency_changed.call_args_list == [
+            call(model="test-model", loaded=True, memory_bytes=1000),
+            call(model="test-model", loaded=False, memory_bytes=0),
+        ]
 
     async def test_load_async_returns_existing_if_loaded(self, registry_with_model: ModelRegistry) -> None:
         """Second call to load_async returns existing model without reloading."""

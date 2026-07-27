@@ -1,7 +1,8 @@
 //! [`BatchFormer`] — async pending queue + flush loop.
 //!
-//! Ported from `sie_server/core/batcher.py::BatchFormer`. The port
-//! preserves every behavioural invariant of the Python implementation:
+//! Ported from `sie_server/core/batcher.py::BatchFormer`. The port preserves
+//! its batching/packing contract, with one intentional Rust queue-path
+//! divergence called out below:
 //!
 //! 1. **Flush triggers**: cost cap, count cap, `max_batch_wait_ms`
 //!    timeout since the *first* item, or the coalesce window
@@ -13,17 +14,20 @@
 //!    ascending before each extract; packing is greedy under the cost
 //!    and count caps. Remaining items stay in the queue for the next
 //!    extract, preserving FIFO-within-cost-bucket ordering.
-//! 4. **Timer reset**: once the queue empties, both `first_request_time`
-//!    and `last_submit_time` are cleared so the next submit starts a
-//!    fresh coalesce/timeout window.
+//! 4. **Timer refresh**: after a partial cost-sorted extract, first/last
+//!    timestamps are re-anchored to the requests that remain; once the queue
+//!    empties both are cleared so the next submit starts a fresh window.
 //!
-//! The async primitives differ from Python (Rust uses [`tokio::sync`]
-//! rather than asyncio), but the externally observable semantics are
-//! identical. The Python test suite in `tests/core/test_batcher.py` is
-//! the behavioural contract; every relevant case is ported below as
-//! `#[tokio::test]`.
+//! Python currently retains its original first/last timers after a partial
+//! extract and clears them only when empty. Rust re-anchors them to the actual
+//! remainder because the sidecar's cross-key FCFS selector reads that state:
+//! retaining a removed request's timestamp can repeatedly prioritize a hot key
+//! and can make a newer tail skip its own coalescing window. Packing, caps, and
+//! flush triggers otherwise follow the Python test contract. The async
+//! primitives differ as expected (`tokio::sync` rather than asyncio).
 
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify};
@@ -40,6 +44,13 @@ use super::batch_config::BatchConfig;
 pub trait HasCost {
     /// Batching cost — token count for text, 1 per image, etc.
     fn cost(&self) -> u64;
+
+    /// Optional non-adaptive safety ceiling for a batch containing this item.
+    /// Media payloads use this to bound the serialized IPC frame even when the
+    /// latency controller raises the model's normal cost target.
+    fn hard_batch_cost_cap(&self) -> Option<u64> {
+        None
+    }
 
     /// Original position within the originating request's item list.
     /// Used by the adapter-side output router to zip results back to
@@ -168,6 +179,12 @@ pub struct BatchFormer<I: HasCost, T> {
     /// consumer uses [`Notified::enable`] *inside* the lock to avoid
     /// missed notifications across the drop.
     ready: Notify,
+    /// Shared monotonic origin for the lock-free FCFS head timestamp.
+    epoch: Instant,
+    /// Nanos since `epoch` for the oldest currently-pending item; zero means
+    /// empty. Updated while `inner` is locked so queue mutation and FCFS
+    /// visibility cannot race.
+    fcfs_head_ns: AtomicU64,
     // Generic parameters are consumed by `inner` only; `PhantomData`
     // keeps the type system honest when `Inner` is refactored.
     _phantom: PhantomData<(I, T)>,
@@ -177,6 +194,12 @@ impl<I: HasCost, T> BatchFormer<I, T> {
     /// Construct a new batch former with the given caps. Use
     /// [`BatchConfig::default`] for Python-parity defaults.
     pub fn new(config: BatchConfig) -> Self {
+        Self::with_epoch(config, Instant::now())
+    }
+
+    /// Construct with a caller-owned monotonic epoch so FCFS head timestamps
+    /// are comparable across sibling batchers.
+    pub(crate) fn with_epoch(config: BatchConfig, epoch: Instant) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 pending: Vec::new(),
@@ -186,8 +209,15 @@ impl<I: HasCost, T> BatchFormer<I, T> {
                 config,
             }),
             ready: Notify::new(),
+            epoch,
+            fcfs_head_ns: AtomicU64::new(0),
             _phantom: PhantomData,
         }
+    }
+
+    /// Lock-free FCFS head snapshot. Zero means this batcher is empty.
+    pub(crate) fn fcfs_head_ns(&self) -> u64 {
+        self.fcfs_head_ns.load(Ordering::Acquire)
     }
 
     /// Current cap snapshot. Returned by value — the caller sees a
@@ -239,7 +269,11 @@ impl<I: HasCost, T> BatchFormer<I, T> {
     /// Enqueue a single item.
     pub async fn submit(&self, item: I, metadata: T) {
         let mut guard = self.inner.lock().await;
+        let was_empty = guard.pending.is_empty();
         let notify = append_item(&mut guard, item, metadata);
+        if was_empty {
+            self.refresh_fcfs_head(&guard);
+        }
         drop(guard);
         if notify {
             self.ready.notify_one();
@@ -254,9 +288,13 @@ impl<I: HasCost, T> BatchFormer<I, T> {
             return;
         }
         let mut guard = self.inner.lock().await;
+        let was_empty = guard.pending.is_empty();
         let mut notify = false;
         for (item, metadata) in items {
             notify |= append_item(&mut guard, item, metadata);
+        }
+        if was_empty {
+            self.refresh_fcfs_head(&guard);
         }
         drop(guard);
         if notify {
@@ -286,7 +324,9 @@ impl<I: HasCost, T> BatchFormer<I, T> {
             let wait = {
                 let mut guard = self.inner.lock().await;
                 if let Some(reason) = flush_reason(&guard, immediate) {
-                    return extract_batch(&mut guard, reason);
+                    let batch = extract_batch(&mut guard, reason);
+                    self.refresh_fcfs_head(&guard);
+                    return batch;
                 }
                 notified.as_mut().enable();
                 wait_timeout(&guard)
@@ -322,19 +362,59 @@ impl<I: HasCost, T> BatchFormer<I, T> {
     pub async fn try_get_batch(&self) -> Option<FormattedBatch<I, T>> {
         let mut guard = self.inner.lock().await;
         let reason = flush_reason(&guard, false)?;
-        Some(extract_batch(&mut guard, reason))
+        let batch = extract_batch(&mut guard, reason);
+        self.refresh_fcfs_head(&guard);
+        Some(batch)
     }
 
     /// Drain whatever is pending right now, bypassing the flush
     /// conditions. Matches Python's `try_drain` — the continuous
     /// batching tail called after each forward pass.
     pub async fn try_drain(&self) -> Option<FormattedBatch<I, T>> {
+        self.try_drain_up_to(usize::MAX).await
+    }
+
+    /// Drain at most `max_items`, bypassing flush conditions while still
+    /// honouring the configured cost/request caps.
+    ///
+    /// The scheduler drain loop uses this to bound one continuous-batching
+    /// wave to the backlog count observed when its first continuation slot
+    /// opens. Because packing cost-sorts all currently pending items, a newer
+    /// cheap item can participate ahead of an older expensive item; the count
+    /// budget bounds wave size but does not identify an exact request cohort.
+    pub async fn try_drain_up_to(&self, max_items: usize) -> Option<FormattedBatch<I, T>> {
+        if max_items == 0 {
+            return None;
+        }
         let mut guard = self.inner.lock().await;
         if guard.pending.is_empty() {
             None
         } else {
-            Some(extract_batch(&mut guard, FlushReason::Drain))
+            let batch = extract_batch_up_to(&mut guard, FlushReason::Drain, max_items);
+            self.refresh_fcfs_head(&guard);
+            Some(batch)
         }
+    }
+
+    /// Refresh the atomic FCFS head from the queue while `inner` is locked.
+    ///
+    /// [`extract_batch_up_to`] recomputes the timers from the actual remainder,
+    /// so `first_request_time` is also the FCFS head after every mutation.
+    fn refresh_fcfs_head(&self, inner: &Inner<I, T>) {
+        let head = inner
+            .first_request_time
+            .map(|instant| self.timestamp_ns(instant))
+            .unwrap_or(0);
+        self.fcfs_head_ns.store(head, Ordering::Release);
+    }
+
+    fn timestamp_ns(&self, instant: Instant) -> u64 {
+        let nanos = instant
+            .saturating_duration_since(self.epoch)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        // Zero is reserved for an empty batcher.
+        nanos.max(1)
     }
 }
 
@@ -390,14 +470,23 @@ fn should_yield_batch<I: HasCost, T>(inner: &Inner<I, T>) -> bool {
     flush_reason(inner, false).is_some()
 }
 
+fn effective_max_cost<I: HasCost, T>(inner: &Inner<I, T>) -> u64 {
+    inner
+        .pending
+        .iter()
+        .filter_map(|request| request.item.hard_batch_cost_cap())
+        .fold(inner.config.max_batch_cost, u64::min)
+}
+
 fn flush_reason<I: HasCost, T>(inner: &Inner<I, T>, immediate: bool) -> Option<FlushReason> {
     if inner.pending.is_empty() {
         return None;
     }
-    if inner.pending.len() == 1 && inner.total_cost > inner.config.max_batch_cost {
+    let max_cost = effective_max_cost(inner);
+    if inner.pending.len() == 1 && inner.total_cost > max_cost {
         return Some(FlushReason::SingleOversize);
     }
-    if inner.total_cost >= inner.config.max_batch_cost {
+    if inner.total_cost >= max_cost {
         return Some(FlushReason::CostCap);
     }
     if inner.pending.len() >= inner.config.max_batch_requests {
@@ -442,13 +531,22 @@ fn extract_batch<I: HasCost, T>(
     inner: &mut Inner<I, T>,
     flush_reason: FlushReason,
 ) -> FormattedBatch<I, T> {
+    extract_batch_up_to(inner, flush_reason, usize::MAX)
+}
+
+fn extract_batch_up_to<I: HasCost, T>(
+    inner: &mut Inner<I, T>,
+    flush_reason: FlushReason,
+    max_items: usize,
+) -> FormattedBatch<I, T> {
+    debug_assert!(max_items > 0, "zero-item drains are rejected by the caller");
     // Cost-sort pending before slicing — keeps each sub-batch's
     // items close in length, minimising padding waste on the adapter
     // side. Stable sort preserves FIFO order within equal-cost items
     // (matches Python's stable `list.sort`).
     inner.pending.sort_by_key(|r| r.item.cost());
 
-    let max_cost = inner.config.max_batch_cost;
+    let max_cost = effective_max_cost(inner);
     let max_requests = inner.config.max_batch_requests;
 
     // Greedy pack. Always take at least one item so a single large
@@ -456,6 +554,9 @@ fn extract_batch<I: HasCost, T>(
     let mut batch_cost: u64 = 0;
     let mut take_count: usize = 0;
     for req in &inner.pending {
+        if take_count >= max_items {
+            break;
+        }
         let c = req.item.cost();
         // Stop if taking this item would exceed the cost cap — but
         // only if we already have at least one item in the batch.
@@ -483,12 +584,19 @@ fn extract_batch<I: HasCost, T>(
         metadata.push(req.metadata);
     }
 
-    // Queue emptied → reset both timers so the next submit starts a
-    // fresh coalesce/timeout window.
-    if inner.pending.is_empty() {
-        inner.first_request_time = None;
-        inner.last_submit_time = None;
+    // Re-anchor both timers to the requests that actually remain. Cost-sorted
+    // extraction can remove the oldest or newest arrival from the middle of
+    // the original FIFO order; retaining either removed timestamp would make a
+    // newer tail flush prematurely or wait against the wrong coalesce window.
+    let mut first = None;
+    let mut last = None;
+    for request in &inner.pending {
+        let arrival = request.arrival_time;
+        first = Some(first.map_or(arrival, |current: Instant| current.min(arrival)));
+        last = Some(last.map_or(arrival, |current: Instant| current.max(arrival)));
     }
+    inner.first_request_time = first;
+    inner.last_submit_time = last;
 
     FormattedBatch {
         items,
@@ -530,6 +638,24 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct HardCapItem {
+        cost: u64,
+        cap: u64,
+    }
+
+    impl HasCost for HardCapItem {
+        fn cost(&self) -> u64 {
+            self.cost
+        }
+        fn hard_batch_cost_cap(&self) -> Option<u64> {
+            Some(self.cap)
+        }
+        fn original_index(&self) -> usize {
+            0
+        }
+    }
+
     #[tokio::test]
     async fn submit_and_drain_roundtrip() {
         let b = BatchFormer::<StubItem, u32>::new(BatchConfig::default());
@@ -544,6 +670,85 @@ mod tests {
         assert_eq!(batch.flush_reason, FlushReason::Drain);
         assert_eq!(b.pending_count().await, 0);
         assert_eq!(b.pending_cost().await, 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_drain_takes_only_snapshot_budget() {
+        let b = BatchFormer::<StubItem, usize>::new(BatchConfig {
+            max_batch_cost: 1_000_000,
+            max_batch_requests: 64,
+            ..BatchConfig::default()
+        });
+        for idx in 0..5 {
+            b.submit(StubItem::with_idx(1, idx), idx).await;
+        }
+
+        assert!(b.try_drain_up_to(0).await.is_none());
+        let first = b
+            .try_drain_up_to(2)
+            .await
+            .expect("bounded drain should return pending work");
+        assert_eq!(first.metadata, vec![0, 1]);
+        assert_eq!(first.size(), 2);
+        assert_eq!(b.pending_count().await, 3);
+
+        let second = b
+            .try_drain_up_to(2)
+            .await
+            .expect("second bounded drain should preserve the same cap");
+        assert_eq!(second.metadata, vec![2, 3]);
+        assert_eq!(b.pending_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn bounded_drain_caps_count_not_exact_arrival_cohort() {
+        let b = BatchFormer::<StubItem, usize>::new(BatchConfig {
+            max_batch_cost: 1_000_000,
+            max_batch_requests: 64,
+            ..BatchConfig::default()
+        });
+        b.submit(StubItem::with_idx(100, 0), 0).await;
+        let snapshot_budget = b.pending_count().await;
+        b.submit(StubItem::with_idx(1, 1), 1).await;
+
+        let drained = b
+            .try_drain_up_to(snapshot_budget)
+            .await
+            .expect("bounded drain should return one item");
+        assert_eq!(drained.metadata, vec![1], "packing remains cost-sorted");
+        assert_eq!(drained.size(), snapshot_budget);
+        assert_eq!(b.pending_count().await, 1);
+        assert_ne!(
+            b.fcfs_head_ns(),
+            0,
+            "the displaced older item remains visible to FCFS"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_extract_reanchors_timers_to_remaining_items() {
+        let b = BatchFormer::<StubItem, usize>::new(BatchConfig::default());
+        b.submit(StubItem::with_idx(1, 0), 0).await;
+        b.submit(StubItem::with_idx(1, 1), 1).await;
+        let expected_remaining_arrival = {
+            let guard = b.inner.lock().await;
+            guard.pending[1].arrival_time
+        };
+
+        let drained = b
+            .try_drain_up_to(1)
+            .await
+            .expect("oldest equal-cost item should drain first");
+        assert_eq!(drained.metadata, vec![0]);
+        let guard = b.inner.lock().await;
+        assert_eq!(guard.pending.len(), 1);
+        assert_eq!(guard.first_request_time, Some(expected_remaining_arrival));
+        assert_eq!(guard.last_submit_time, Some(expected_remaining_arrival));
+        assert_ne!(
+            b.fcfs_head_ns(),
+            0,
+            "the remaining item must stay visible to cross-key FCFS"
+        );
     }
 
     #[tokio::test]
@@ -563,6 +768,40 @@ mod tests {
         assert_eq!(batch.size(), 2);
         assert_eq!(batch.total_cost, 30);
         assert_eq!(batch.flush_reason, FlushReason::CostCap);
+    }
+
+    #[tokio::test]
+    async fn item_hard_cap_overrides_larger_adaptive_cost_cap() {
+        let cfg = BatchConfig {
+            max_batch_cost: 1_000_000,
+            max_batch_requests: 64,
+            max_batch_wait_ms: 10_000.0,
+            coalesce_ms: 10_000.0,
+            coalesce_ratio: 1.0,
+        };
+        let b = BatchFormer::<HardCapItem, u32>::new(cfg);
+        b.submit(
+            HardCapItem {
+                cost: 400_000,
+                cap: 720_000,
+            },
+            1,
+        )
+        .await;
+        b.submit(
+            HardCapItem {
+                cost: 400_000,
+                cap: 720_000,
+            },
+            2,
+        )
+        .await;
+
+        let batch = b.try_get_batch().await.expect("hard cap should trigger");
+        assert_eq!(batch.size(), 1);
+        assert_eq!(batch.total_cost, 400_000);
+        assert_eq!(batch.flush_reason, FlushReason::CostCap);
+        assert_eq!(b.pending_count().await, 1);
     }
 
     #[tokio::test]

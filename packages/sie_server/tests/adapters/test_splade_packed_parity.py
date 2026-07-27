@@ -23,7 +23,7 @@ import os
 import numpy as np
 import pytest
 import torch
-from sie_server.adapters.splade_flash import SPLADEFlashAdapter
+from sie_server.adapters.splade_flash.adapter import SPLADEFlashAdapter
 from sie_server.core.inference_output import SparseVector
 
 _HAS_CUDA = torch.cuda.is_available()
@@ -85,8 +85,11 @@ def test_guard_lifted_flash_path_active(adapter: SPLADEFlashAdapter) -> None:
 def test_single_item_parity(adapter: SPLADEFlashAdapter, i: int) -> None:
     """Each text alone: packed forward == padded forward."""
     dim = adapter._vocab_size
-    flash = adapter._encode_flash([_TEXTS[i]])[0]
-    native = adapter._encode_native([_TEXTS[i]])[0]
+    flash_outputs, flash_counts = adapter._encode_flash([_TEXTS[i]])
+    native_outputs, native_counts = adapter._encode_native([_TEXTS[i]])
+    assert flash_counts == native_counts
+    flash = flash_outputs[0]
+    native = native_outputs[0]
     cos = _cosine(_densify(flash, dim), _densify(native, dim))
     max_abs = float(np.max(np.abs(_densify(flash, dim) - _densify(native, dim))))
     print(
@@ -98,9 +101,10 @@ def test_single_item_parity(adapter: SPLADEFlashAdapter, i: int) -> None:
 def test_mixed_batch_parity(adapter: SPLADEFlashAdapter) -> None:
     """One packed batch of varied lengths: every item matches the padded path."""
     dim = adapter._vocab_size
-    flash = adapter._encode_flash(_TEXTS)
-    native = adapter._encode_native(_TEXTS)
+    flash, flash_counts = adapter._encode_flash(_TEXTS)
+    native, native_counts = adapter._encode_native(_TEXTS)
     assert len(flash) == len(native) == len(_TEXTS)
+    assert flash_counts == native_counts
     worst = 1.0
     for j, (f, n) in enumerate(zip(flash, native, strict=True)):
         cos = _cosine(_densify(f, dim), _densify(n, dim))

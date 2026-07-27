@@ -10,8 +10,9 @@ tasks:
   encode: null
   score: null
   extract: {}
+max_sequence_length: 16384
 profiles:
-  default:
+  transformers:
     max_batch_tokens: 16384
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.paddleocr_vl:PaddleOCRVLAdapter
@@ -19,6 +20,34 @@ profiles:
       loadtime:
         trust_remote_code: true
         default_task: ocr
+      runtime:
+        task: ocr
+        max_new_tokens: 4096
+        num_beams: 1
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
+    adapter_options:
+      loadtime:
+        trust_remote_code: true
+        mem_fraction_static: 0.85
+        served_model_name: PaddlePaddle/PaddleOCR-VL-1.5
+        max_concurrent_requests: 16
+        processor_use_fast: false
+        extra_launch_args:
+          - --disable-fast-image-processor
+        default_task: ocr
+        task_prompts:
+          ocr: "OCR:"
+          table: "Table Recognition:"
+          formula: "Formula Recognition:"
+          chart: "Chart Recognition:"
+          spotting: "Spotting:"
+          seal: "Seal Recognition:"
+        task_labels:
+          spotting: spotting
+          seal: seal
       runtime:
         task: ocr
         max_new_tokens: 4096

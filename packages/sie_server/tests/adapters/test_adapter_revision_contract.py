@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import sie_server.adapters as adapters_pkg
+import torch
 from sie_server.adapters.base import ModelAdapter
 
 # Shared/abstract bases that are never instantiated as concrete adapters. The
@@ -126,7 +127,7 @@ class TestRevisionReachesFromPretrained:
         assert "revision" not in mock_mdl.from_pretrained.call_args.kwargs
 
     def test_siglip_transformers_backend_forwards_revision(self) -> None:
-        from sie_server.adapters.siglip import SiglipAdapter
+        from sie_server.adapters.siglip.adapter import SiglipAdapter
 
         adapter = SiglipAdapter("google/siglip-so400m-patch14-384", revision="cafef00d")
         assert adapter._revision == "cafef00d"
@@ -163,6 +164,94 @@ class TestRevisionReachesFromPretrained:
 
         assert mock_tok.from_pretrained.call_args.kwargs["revision"] == "0ff1ce"
         assert mock_mdl.from_pretrained.call_args.kwargs["revision"] == "0ff1ce"
+
+    def test_rotary_colbert_forwards_model_and_code_revisions(self) -> None:
+        """External trusted code is pinned independently from model artifacts."""
+        from sie_server.adapters.colbert_rotary_flash import ColBERTRotaryFlashAdapter
+
+        adapter = ColBERTRotaryFlashAdapter(
+            "jinaai/jina-colbert-v2",
+            revision="model-sha",
+            code_revision="code-sha",
+        )
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.mask_token_id = None
+        mock_tokenizer.vocab = {}
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 1024
+        projection = torch.nn.Linear(1024, 128, bias=False)
+        with (
+            patch("transformers.AutoTokenizer") as mock_tok,
+            patch("transformers.AutoModel") as mock_mdl,
+            patch(
+                "sie_server.adapters.colbert_rotary_flash.load_standalone_colbert_projection",
+                return_value=projection,
+            ) as mock_projection,
+        ):
+            mock_tok.from_pretrained.return_value = mock_tokenizer
+            mock_mdl.from_pretrained.return_value = mock_model
+            adapter.load("cuda:0")
+
+        expected = {"revision": "model-sha", "code_revision": "code-sha"}
+        for loader in (mock_tok, mock_mdl):
+            kwargs = loader.from_pretrained.call_args.kwargs
+            assert {key: kwargs[key] for key in expected} == expected
+        mock_projection.assert_called_once_with(
+            "jinaai/jina-colbert-v2",
+            revision="model-sha",
+            device="cuda:0",
+            dtype=torch.bfloat16,
+            expected_in_features=1024,
+            expected_out_features=128,
+            allow_bias=False,
+            required=True,
+        )
+
+    def test_rotary_colbert_fallback_preserves_model_and_code_revisions(self) -> None:
+        """CPU fallback must pin both weights and trusted external code."""
+        from sie_server.adapters.colbert import ColBERTAdapter
+        from sie_server.adapters.colbert_rotary_flash import ColBERTRotaryFlashAdapter
+
+        with patch("sie_server.core.inference.is_flash_attention_available", return_value=False):
+            adapter = ColBERTRotaryFlashAdapter.create_for_device(
+                "cpu",
+                model_name_or_path="jinaai/jina-colbert-v2",
+                revision="model-sha",
+                code_revision="code-sha",
+            )
+
+        assert isinstance(adapter, ColBERTAdapter)
+        assert adapter._revision == "model-sha"
+        assert adapter._code_revision == "code-sha"
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.mask_token_id = None
+        mock_tokenizer.vocab = {}
+        mock_config = MagicMock()
+        mock_config.hidden_size = 1024
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 1024
+        mock_model.named_modules.return_value = []
+        projection = torch.nn.Linear(1024, 128, bias=False)
+        with (
+            patch("transformers.AutoTokenizer") as mock_tok,
+            patch("transformers.AutoConfig") as mock_cfg,
+            patch("transformers.AutoModel") as mock_mdl,
+            patch("sie_server.adapters.colbert.load_pylate_dense_chain", return_value=None),
+            patch(
+                "sie_server.adapters.colbert.load_standalone_colbert_projection",
+                return_value=projection,
+            ),
+        ):
+            mock_tok.from_pretrained.return_value = mock_tokenizer
+            mock_cfg.from_pretrained.return_value = mock_config
+            mock_mdl.from_pretrained.return_value = mock_model
+            adapter.load("cpu")
+
+        expected = {"revision": "model-sha", "code_revision": "code-sha"}
+        for loader in (mock_tok, mock_cfg, mock_mdl):
+            kwargs = loader.from_pretrained.call_args.kwargs
+            assert {key: kwargs[key] for key in expected} == expected
 
     def test_colsmol_pins_lora_repo_only_not_base(self) -> None:
         """ColSmol pins the LoRA-repo loads but never the separate base-checkpoint repo.

@@ -16,7 +16,7 @@ import msgspec
 import pytest
 from sie_server.ipc_types import EncodeBatchItem
 from sie_server.queue_executor import _inference_exception_outcome
-from sie_server.types.inputs import InvalidMediaError, decode_item, media_bytes
+from sie_server.types.inputs import InvalidInputError, InvalidMediaError, decode_item, media_bytes
 from sie_server.types.responses import ErrorCode
 
 
@@ -99,5 +99,10 @@ class TestInvalidInputMapping:
 
     def test_invalid_media_maps_to_invalid_input(self) -> None:
         outcome = _inference_exception_outcome(_bi(), InvalidMediaError("bad media"))
+        assert outcome.disposition == "publish_error_and_ack"
+        assert outcome.error_code == ErrorCode.INVALID_INPUT.value
+
+    def test_typed_adapter_input_error_maps_to_invalid_input(self) -> None:
+        outcome = _inference_exception_outcome(_bi(), InvalidInputError("blank candidate"))
         assert outcome.disposition == "publish_error_and_ack"
         assert outcome.error_code == ErrorCode.INVALID_INPUT.value

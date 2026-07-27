@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -271,3 +274,59 @@ class TestExtractWithMocks:
         assert len(entities) == 3
         labels = {e["label"] for e in entities[1:]}
         assert labels == {"highlight", "pruned"}
+
+    def test_concurrent_forwards_serialize(self) -> None:
+        """extract()'s output_hidden_states=True forward (XLM-RoBERTa, a
+        transformers recorder class) must be serialized by _forward_lock so
+        concurrent forwards cannot race the recorder patch/restore (#2144/#2204).
+        """
+        adapter = StablebridgePrunerAdapter()
+        adapter._device = "cpu"
+        seq_len = 6
+        input_ids = torch.tensor([[1, 100, 2, 2, 200, 201]])
+        attention_mask = torch.ones((1, seq_len), dtype=torch.long)
+
+        def tok_fn(*args: Any, **kwargs: Any) -> Any:
+            if "padding" in kwargs:
+
+                class _Out(dict):
+                    def to(self, _: Any) -> _Out:
+                        return self
+
+                out = _Out()
+                out["input_ids"] = input_ids
+                out["attention_mask"] = attention_mask
+                return out
+            return {"offset_mapping": [(0, 5), (10, 15)]}
+
+        tokenizer = MagicMock(side_effect=tok_fn)
+        tokenizer.pad_token_id, tokenizer.sep_token_id = 0, 2
+        tokenizer.cls_token_id, tokenizer.bos_token_id = 1, 1
+        adapter._tokenizer = tokenizer
+
+        class _FakeOutput:
+            def __init__(self, logits: torch.Tensor, hidden: torch.Tensor) -> None:
+                self.logits = logits
+                self.hidden_states = (hidden,)
+
+        counter_guard = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def model_call(**kwargs: Any) -> _FakeOutput:
+            nonlocal active, max_active
+            with counter_guard:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with counter_guard:
+                active -= 1
+            return _FakeOutput(torch.tensor([[2.0]]), torch.randn(1, seq_len, 8))
+
+        adapter._model = MagicMock(side_effect=model_call)
+        adapter._pruning_head = MagicMock(side_effect=lambda _h, mask: torch.zeros((1, seq_len)) * mask.float())
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _: adapter.extract([Item(text="hi")], instruction="q"), range(6)))
+
+        assert max_active == 1

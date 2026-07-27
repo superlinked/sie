@@ -1,5 +1,6 @@
 sie_id: Qwen/Qwen3-VL-Embedding-2B
 hf_id: Qwen/Qwen3-VL-Embedding-2B
+hf_revision: 9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda
 inputs:
   text: true
   image: true

@@ -277,7 +277,14 @@ class GLiNERAdapter(BaseAdapter):
 
             if is_adjacent and same_label:
                 # Merge: extend current entity to include next
-                new_end = next_entity.get("end")
+                next_end = next_entity.get("end")
+                current_end = current.get("end")
+                if current_end is None:
+                    new_end = next_end
+                elif next_end is None:
+                    new_end = current_end
+                else:
+                    new_end = max(current_end, next_end)
                 new_start = current.get("start")
                 new_text = text[new_start:new_end] if new_start is not None and new_end is not None else current["text"]
                 new_score = max(current["score"], next_entity["score"])

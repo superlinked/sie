@@ -22,7 +22,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_requests_total{namespace=\"$namespace\", model=\"$model\"}[5m]))",
+          "expr": "sum(rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", model=\"$model\"}[5m]))",
           "legendFormat": "Requests/s",
           "refId": "A"
         }
@@ -44,7 +44,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", model=\"$model\"}[5m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", model=\"$model\"}[5m]))) * 1000",
           "legendFormat": "p95 Latency (ms)",
           "refId": "A"
         }
@@ -66,7 +66,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "avg(sie_batch_size{namespace=\"$namespace\", model=\"$model\"})",
+          "expr": "sum(rate(sie_worker_batch_size_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\", model=\"$model\"}[5m])) / clamp_min(sum(rate(sie_worker_batch_size_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\", model=\"$model\"}[5m])), 1e-9)",
           "legendFormat": "Avg Batch Size",
           "refId": "A"
         }
@@ -84,12 +84,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(sie_gateway_worker_queue_depth{namespace=\"$namespace\"}) by (worker, pool, machine_profile, bundle)",
-          "legendFormat": "{{worker}} {{pool}}/{{machine_profile}}/{{bundle}}",
+          "expr": "max by (pool, machine_profile, bundle) (sie_gateway_lane_queue_depth{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "{{pool}}/{{machine_profile}}/{{bundle}}",
           "refId": "A"
         }
       ],
-      "title": "Queue Depth by Worker Lane",
+      "title": "Queue Depth by Lane",
       "type": "timeseries"
     },
     {
@@ -102,12 +102,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sie_batch_size{namespace=\"$namespace\", model=\"$model\"}",
-          "legendFormat": "{{pod}}",
+          "expr": "sum by (producer_instance) (rate(sie_worker_batch_size_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\", model=\"$model\"}[5m])) / clamp_min(sum by (producer_instance) (rate(sie_worker_batch_size_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\", model=\"$model\"}[5m])), 1e-9)",
+          "legendFormat": "{{producer_instance}}",
           "refId": "A"
         }
       ],
-      "title": "Batch Size by Pod",
+      "title": "Average Batch Size by Producer",
       "type": "timeseries"
     },
     {
@@ -125,17 +125,17 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", model=\"$model\"}[5m])) by (le, operation)) * 1000",
+          "expr": "histogram_quantile(0.50, sum by (le, operation) (rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", model=\"$model\"}[5m]))) * 1000",
           "legendFormat": "{{operation}} p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", model=\"$model\"}[5m])) by (le, operation)) * 1000",
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", model=\"$model\"}[5m]))) * 1000",
           "legendFormat": "{{operation}} p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", model=\"$model\"}[5m])) by (le, operation)) * 1000",
+          "expr": "histogram_quantile(0.99, sum by (le, operation) (rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", model=\"$model\"}[5m]))) * 1000",
           "legendFormat": "{{operation}} p99",
           "refId": "C"
         }
@@ -153,12 +153,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_tokens_processed_total{namespace=\"$namespace\", model=\"$model\"}[5m]))",
-          "legendFormat": "Tokens/s",
+          "expr": "sum by (unit_type) (rate(sie_worker_units_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", model=\"$model\"}[5m]))",
+          "legendFormat": "{{unit_type}}/s",
           "refId": "A"
         }
       ],
-      "title": "Token Throughput",
+      "title": "Authoritative Unit Throughput",
       "type": "timeseries"
     },
     {
@@ -171,7 +171,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_requests_total{namespace=\"$namespace\", model=\"$model\", status=\"error\"}[5m])) / sum(rate(sie_requests_total{namespace=\"$namespace\", model=\"$model\"}[5m])) * 100",
+          "expr": "sum(rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", model=\"$model\", outcome=\"error\"}[5m])) / clamp_min(sum(rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", model=\"$model\"}[5m])), 1e-9) * 100",
           "legendFormat": "Error Rate %",
           "refId": "A"
         }
@@ -193,11 +193,26 @@
         "multi": false,
         "name": "namespace",
         "options": [],
-        "query": "label_values(up, namespace)",
+        "query": "label_values(kube_pod_info, namespace)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "sie-sie-cluster-otel-collector", "value": "sie-sie-cluster-otel-collector" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Collector",
+        "multi": false,
+        "name": "collector",
+        "options": [],
+        "query": "label_values(up{namespace=\"$namespace\", endpoint=\"prometheus\", service=~\".+-otel-collector\"}, service)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
         "type": "query"
       },
       {
@@ -208,11 +223,11 @@
         "multi": false,
         "name": "model",
         "options": [],
-        "query": "label_values(sie_requests_total{namespace=\"$namespace\"}, model)",
+        "query": "label_values(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}, model)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
-        "sort": 1,
+        "sort": 2,
         "type": "query"
       }
     ]

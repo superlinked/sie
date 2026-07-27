@@ -18,24 +18,3 @@ spec:
       protocol: TCP
   selector:
     {{- include "sie-cluster.gateway.selectorLabels" . | nindent 4 }}
-{{- if .Values.serviceMonitor.enabled }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "sie-cluster.gateway.metricsServiceName" . }}
-  namespace: {{ include "sie-cluster.namespace" . }}
-  labels:
-    {{- include "sie-cluster.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gateway-metrics
-    sie.superlinked.com/prometheus-job: sie-gateway
-spec:
-  type: ClusterIP
-  ports:
-    - name: gateway-metrics
-      port: 9090
-      targetPort: gateway-metrics
-      protocol: TCP
-  selector:
-    {{- include "sie-cluster.gateway.selectorLabels" . | nindent 4 }}
-{{- end }}

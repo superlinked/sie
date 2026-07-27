@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import logging
 import os
 import struct
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Self, cast
 
 import msgpack
+import msgspec
 
 from sie_server.adapter_call_loop import handle_run_batch
 from sie_server.core.gpu_health import gpu_is_healthy_async
@@ -37,6 +39,7 @@ from sie_server.ipc_types import (
     EnsureModelReadyRequest,
     EnsureModelReadyResponse,
     GenerateEvent,
+    IpcResponseChunkV1,
     PingRequest,
     PingResponse,
     ProcessEncodeBatchRequest,
@@ -68,6 +71,14 @@ _LEN_BYTES = _LEN_STRUCT.size
 # any decoded WorkItem batch we would send in-band — large payloads arrive
 # via the payload store, not via IPC.
 _MAX_FRAME_BYTES = 32 * 1024 * 1024
+
+# A negotiated response may exceed one legacy IPC frame, but remains tightly
+# bounded so a malformed or unexpectedly large backend output cannot grow the
+# colocated sidecar without limit. Four MiB leaves ample room for the named-map
+# chunk envelope below the 32 MiB physical-frame ceiling.
+_IPC_RESPONSE_CHUNK_PAYLOAD_BYTES = 4 * 1024 * 1024
+_MAX_CHUNKED_IPC_RESPONSE_BYTES = 128 * 1024 * 1024
+_MAX_IPC_RESPONSE_CHUNKS = 64
 
 _GENERATE_SINK: contextvars.ContextVar[_IpcGenerateSink | None] = contextvars.ContextVar(
     "sie_generate_ipc_sink",
@@ -363,6 +374,8 @@ class IpcServer:
             raise IpcServerError("truncated frame body") from e
 
     async def _write_frame(self, writer: asyncio.StreamWriter, payload: bytes) -> None:
+        if len(payload) > _MAX_FRAME_BYTES:
+            raise IpcServerError(f"frame too large: {len(payload)} > {_MAX_FRAME_BYTES}")
         try:
             writer.write(_LEN_STRUCT.pack(len(payload)) + payload)
             await writer.drain()
@@ -390,6 +403,11 @@ class IpcServer:
         method = raw.get("method")
         request_id = raw.get("request_id", "")
         body = raw.get("body") or {}
+        # This is deliberately an exact, v1-only capability. Missing, false,
+        # or non-boolean values retain the one-frame response contract, which
+        # keeps new backends compatible with old sidecars during rolling
+        # deploys.
+        accepts_response_chunks_v1 = raw.get("accepts_ipc_response_chunks_v1") is True
         if not isinstance(method, str) or not isinstance(request_id, str) or not isinstance(body, dict):
             await self._send_error(writer, request_id, "envelope missing fields")
             return
@@ -407,12 +425,26 @@ class IpcServer:
             if self._drain_event.is_set():
                 await self._send_error(writer, request_id, "draining")
                 return
-            task = asyncio.create_task(self._run_method_task(method, request_id, body, writer))
+            task = asyncio.create_task(
+                self._run_method_task(
+                    method,
+                    request_id,
+                    body,
+                    writer,
+                    accepts_response_chunks_v1=accepts_response_chunks_v1,
+                )
+            )
             self._inflight.add(task)
             task.add_done_callback(self._inflight.discard)
             return
 
-        await self._run_method(method, request_id, body, writer)
+        await self._run_method(
+            method,
+            request_id,
+            body,
+            writer,
+            accepts_response_chunks_v1=accepts_response_chunks_v1,
+        )
 
     async def _run_method_task(
         self,
@@ -420,9 +452,17 @@ class IpcServer:
         request_id: str,
         body: dict[str, Any],
         writer: asyncio.StreamWriter,
+        *,
+        accepts_response_chunks_v1: bool = False,
     ) -> None:
         try:
-            await self._run_method(method, request_id, body, writer)
+            await self._run_method(
+                method,
+                request_id,
+                body,
+                writer,
+                accepts_response_chunks_v1=accepts_response_chunks_v1,
+            )
         except IpcClientDisconnectedError:
             logger.info("IPC client disconnected before %s response could be sent", method)
         except Exception:
@@ -434,6 +474,8 @@ class IpcServer:
         request_id: str,
         body: dict[str, Any],
         writer: asyncio.StreamWriter,
+        *,
+        accepts_response_chunks_v1: bool = False,
     ) -> None:
         import msgspec  # noqa: PLC0415
 
@@ -512,7 +554,71 @@ class IpcServer:
             ok=True,
             body=_to_builtins(resp_body),
         )
-        await self._write_frame(writer, msgpack.packb(_envelope_to_dict(envelope), use_bin_type=True))
+        await self._write_response_envelope(
+            writer,
+            envelope,
+            accepts_response_chunks_v1=accepts_response_chunks_v1,
+        )
+
+    async def _write_response_envelope(
+        self,
+        writer: asyncio.StreamWriter,
+        envelope: ResponseEnvelope,
+        *,
+        accepts_response_chunks_v1: bool,
+    ) -> None:
+        """Write one response frame or a negotiated sequence of v1 chunks.
+
+        Small responses take the legacy path byte-for-byte. For an oversized
+        response, the chunk payloads are slices of the exact bytes that would
+        otherwise have formed that single legacy frame.
+        """
+        payload = msgpack.packb(_envelope_to_dict(envelope), use_bin_type=True)
+        if len(payload) <= _MAX_FRAME_BYTES:
+            await self._write_frame(writer, payload)
+            return
+
+        if not accepts_response_chunks_v1:
+            await self._send_error(
+                writer,
+                envelope.request_id,
+                "IPC response exceeds the legacy frame limit; response chunking v1 was not negotiated",
+            )
+            return
+
+        chunk_count = (len(payload) + _IPC_RESPONSE_CHUNK_PAYLOAD_BYTES - 1) // _IPC_RESPONSE_CHUNK_PAYLOAD_BYTES
+        if len(payload) > _MAX_CHUNKED_IPC_RESPONSE_BYTES or chunk_count > _MAX_IPC_RESPONSE_CHUNKS:
+            await self._send_error(
+                writer,
+                envelope.request_id,
+                "IPC response exceeds the negotiated response chunking v1 bounds",
+            )
+            return
+
+        digest = hashlib.sha256(payload).digest()
+        payload_view = memoryview(payload)
+        for chunk_index in range(chunk_count):
+            start = chunk_index * _IPC_RESPONSE_CHUNK_PAYLOAD_BYTES
+            chunk = IpcResponseChunkV1(
+                version=IPC_VERSION,
+                request_id=envelope.request_id,
+                transfer_digest=digest,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                total_bytes=len(payload),
+                # The wire field remains typed as bytes so msgspec can build
+                # decoders/schemas for the shared contract. msgpack also
+                # accepts this bytes-like view and copies it only into the
+                # physical frame.
+                payload=cast("bytes", payload_view[start : start + _IPC_RESPONSE_CHUNK_PAYLOAD_BYTES]),
+            )
+            chunk_payload = msgpack.packb(_to_builtins(chunk), use_bin_type=True)
+            # Keep this check even though the configured payload target is far
+            # below the frame ceiling: it makes future envelope growth fail
+            # closed instead of silently violating the physical frame limit.
+            if len(chunk_payload) > _MAX_FRAME_BYTES:
+                raise IpcServerError(f"response chunk frame too large: {len(chunk_payload)} > {_MAX_FRAME_BYTES}")
+            await self._write_frame(writer, chunk_payload)
 
     # -- Handlers ----------------------------------------------------------
 
@@ -735,16 +841,15 @@ class IpcServer:
 def _to_builtins(obj: Any) -> Any:
     """Convert a msgspec Struct tree to plain builtins for msgpack.
 
-    ``builtin_types=(bytes,)`` is critical: by default ``to_builtins`` base64-
-    encodes ``bytes`` to ``str`` for JSON compatibility, but our wire format
-    is msgpack (binary-native) and the Rust side must see ``result_msgpack``
-    as raw bytes, not a base64 string.
+    Preserving ``bytes`` and ``memoryview`` is critical: by default
+    ``to_builtins`` base64-encodes binary values to ``str`` for JSON
+    compatibility, but this wire is msgpack-native. Response chunk payloads
+    deliberately use borrowed ``memoryview`` slices to avoid an intermediate
+    full chunk copy before ``msgpack.packb`` writes the physical frame.
     """
-    import msgspec  # noqa: PLC0415
-
     if obj is None:
         return None
-    return msgspec.to_builtins(obj, builtin_types=(bytes,))
+    return msgspec.to_builtins(obj, builtin_types=(bytes, memoryview))
 
 
 def _envelope_to_dict(envelope: ResponseEnvelope) -> dict[str, Any]:

@@ -123,6 +123,12 @@ class ScoreOutput:
     # keep each pair's count attributed to the right work item.
     input_token_counts: list[int] | None = None
 
+    # Authoritative per-pair counts of images actually processed. A query
+    # image is counted once for every candidate pair because the cross-encoder
+    # processes that image again for each candidate. The queue executor sums
+    # these counts into ``ItemOutcome.units.images``.
+    input_image_counts: list[int] | None = None
+
     def __post_init__(self) -> None:
         """Validate consistency of output fields."""
         if len(self.scores.shape) != 1:
@@ -136,6 +142,25 @@ class ScoreOutput:
         if self.input_token_counts is not None and len(self.input_token_counts) != self.batch_size:
             msg = f"input_token_counts length {len(self.input_token_counts)} != batch_size {self.batch_size}"
             raise ValueError(msg)
+        if self.input_token_counts is not None and not all(
+            isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in self.input_token_counts
+        ):
+            raise ValueError("input_token_counts must contain only non-negative integers")
+        if self.input_image_counts is not None and len(self.input_image_counts) != self.batch_size:
+            msg = f"input_image_counts length {len(self.input_image_counts)} != batch_size {self.batch_size}"
+            raise ValueError(msg)
+        if self.input_image_counts is not None and not all(
+            isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in self.input_image_counts
+        ):
+            raise ValueError("input_image_counts must contain only non-negative integers")
+
+
+@dataclass
+class ExtractItemError:
+    """Stable per-item extraction failure safe to expose to callers."""
+
+    code: str
+    message: str
 
 
 @dataclass
@@ -152,6 +177,8 @@ class ExtractOutput:
             None when the adapter does not produce object detections.
         data: Structured extraction payload per item (e.g., Docling document JSON).
             None when the adapter does not produce structured data.
+        errors: Stable per-item failures aligned with entities.
+            None entries identify successful items.
         batch_size: Number of items processed.
     """
 
@@ -160,6 +187,7 @@ class ExtractOutput:
     relations: list[list[Relation]] | None = None  # len=batch or None
     objects: list[list[DetectedObject]] | None = None  # len=batch or None
     data: list[dict[str, Any]] | None = None  # len=batch or None
+    errors: list[ExtractItemError | None] | None = None  # len=batch or None
 
     # Metadata
     batch_size: int = 0
@@ -205,6 +233,10 @@ class ExtractOutput:
 
         if self.data is not None and len(self.data) != self.batch_size:
             msg = f"data list length {len(self.data)} != batch_size {self.batch_size}"
+            raise ValueError(msg)
+
+        if self.errors is not None and len(self.errors) != self.batch_size:
+            msg = f"errors list length {len(self.errors)} != batch_size {self.batch_size}"
             raise ValueError(msg)
 
         if self.pages is not None and len(self.pages) != self.batch_size:

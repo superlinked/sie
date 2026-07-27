@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -11,6 +11,19 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 logger = logging.getLogger(__name__)
+
+
+def image_first_chat_message(*, role: str, text: str, image_count: int) -> dict[str, Any]:
+    """Build the canonical image-first chat-template message.
+
+    Native image ``generate`` and queue-backed message generation both use
+    this helper, keeping their model-template input byte-for-byte equivalent.
+    Image bytes travel separately; this value contains placeholders only.
+    """
+    content: list[dict[str, str]] = [{"type": "image"} for _ in range(image_count)]
+    if text:
+        content.append({"type": "text", "text": text})
+    return {"role": role, "content": content}
 
 
 def load_tokenizer(

@@ -30,7 +30,6 @@ from sie_server.core.batcher import BatchConfig
 from sie_server.core.gpu_health import gpu_is_healthy_async
 from sie_server.core.readiness import is_ready
 from sie_server.observability.gpu import get_gpu_metrics
-from sie_server.observability.prometheus import collect_prometheus_metrics
 
 if TYPE_CHECKING:
     from sie_server.config.model import ModelConfig as ServerModelConfig
@@ -352,6 +351,7 @@ def _compute_bundle_config_hash(registry: ModelRegistry, bundle_id: str) -> str:
     # max_batch_tokens, compute_precision, adapter_options.
     bundle_adapters = _bundle_adapter_modules(bundle_id)
     items_by_model: dict[str, dict[str, dict[str, object | None]]] = {}
+    revisions_by_model: dict[str, str | None] = {}
     for config in sorted(configs.values(), key=lambda c: c.sie_id):
         if _is_synthetic_profile_variant(config, configs):
             continue
@@ -363,6 +363,7 @@ def _compute_bundle_config_hash(registry: ModelRegistry, bundle_id: str) -> str:
         if config.synthetic_profile_variant_source is not None:
             base_id, variant_profile = config.synthetic_profile_variant_source
             profile_name_map = {"default": variant_profile}
+        revisions_by_model.setdefault(base_id, config.hf_revision)
 
         profiles_for_model = items_by_model.setdefault(base_id, {})
         for pname in sorted(profile_name_map):
@@ -376,7 +377,13 @@ def _compute_bundle_config_hash(registry: ModelRegistry, bundle_id: str) -> str:
         if not profiles:
             continue
         profiles_for_hash = [{"name": pname, "config": profiles[pname]} for pname in sorted(profiles)]
-        items.append({"sie_id": model_id, "profiles": profiles_for_hash})
+        items.append(
+            {
+                "sie_id": model_id,
+                "revision": revisions_by_model[model_id],
+                "profiles": profiles_for_hash,
+            }
+        )
 
     if not items:
         return ""
@@ -442,8 +449,6 @@ async def build_status_message(
     server_info = get_server_info()
     gpu_metrics_raw = get_gpu_metrics()
     model_status = get_model_status(registry)
-    prometheus_data = collect_prometheus_metrics()
-
     # Add memory threshold to GPU metrics for TUI display
     memory_threshold_pct = registry.memory_manager.pressure_threshold_pct
     gpu_metrics: list[GPUMetrics] = []
@@ -547,8 +552,6 @@ async def build_status_message(
         server=server_info,
         gpus=gpu_metrics,  # Individual GPU info still available here
         models=model_status,
-        counters=prometheus_data.get("counters", {}),
-        histograms=prometheus_data.get("histograms", {}),
     )
 
 

@@ -87,6 +87,17 @@ class TestMaxSim:
         # All scores should be finite
         assert all(np.isfinite(s) for s in scores)
 
+    def test_float16_inputs_accumulate_in_float32(self) -> None:
+        """Float16 transport values use a float32 MaxSim accumulator."""
+        rng = np.random.default_rng(7)
+        query = rng.standard_normal((32, 128)).astype(np.float16)
+        doc = rng.standard_normal((96, 128)).astype(np.float16)
+        expected = maxsim(query.astype(np.float32), doc.astype(np.float32))
+
+        actual = maxsim(query, doc)
+
+        np.testing.assert_allclose(actual, expected, rtol=0, atol=0)
+
 
 class TestMaxSimBatch:
     """Tests for maxsim_batch() function."""
@@ -125,3 +136,17 @@ class TestMaxSimBatch:
             individual_scores = maxsim(query, docs)
             for j, score in enumerate(individual_scores):
                 assert abs(batch_scores[i, j] - score) < 1e-5
+
+    def test_float16_batch_matches_float32_oracle(self) -> None:
+        """Batch MaxSim preserves float32 accumulation for float16 inputs."""
+        rng = np.random.default_rng(11)
+        queries = [rng.standard_normal((tokens, 64)).astype(np.float16) for tokens in (8, 17)]
+        docs = [rng.standard_normal((tokens, 64)).astype(np.float16) for tokens in (13, 29, 51)]
+        expected = maxsim_batch(
+            [query.astype(np.float32) for query in queries],
+            [doc.astype(np.float32) for doc in docs],
+        )
+
+        actual = maxsim_batch(queries, docs)
+
+        np.testing.assert_allclose(actual, expected, rtol=0, atol=0)

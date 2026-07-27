@@ -104,21 +104,25 @@ import type {
   CreatePoolOptions,
   EncodeOptions,
   EncodeResult,
+  ExtractItem,
   ExtractOptions,
   ExtractResult,
   FileDeleted,
   GenerateChunk,
+  GenerateGrammar,
   GenerateOptions,
   GenerateResult,
   Item,
   ModelInfo,
   PoolInfo,
   PoolSpec,
+  RequestMetadata,
   SIEClientOptions,
   File as SIEFile,
   ScoreOptions,
   ScoreResult,
   StatusMessage,
+  StreamGenerateOptions,
 } from "./types.js";
 import { SDK_VERSION } from "./version.js";
 
@@ -203,6 +207,133 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseNonnegativeMeterHeader(headers: Headers, name: string): number | undefined {
+  const raw = headers.get(name);
+  if (raw === null || !/^(0|[1-9]\d*)$/.test(raw)) return undefined;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/** Parse optional request-scoped metadata from one successful terminal response. */
+function parseRequestMetadata(headers: Headers): RequestMetadata | undefined {
+  const metadata: RequestMetadata = {};
+  const requestId = headers.get("x-sie-request-id");
+  if (
+    requestId !== null &&
+    requestId.length > 0 &&
+    requestId.length <= 256 &&
+    requestId === requestId.trim() &&
+    /^[\x20-\x7e]+$/.test(requestId)
+  ) {
+    metadata.id = requestId;
+  }
+  const executionIdentitySha256 = headers.get("x-sie-execution-identity-sha256");
+  if (executionIdentitySha256 !== null && /^[0-9a-f]{64}$/.test(executionIdentitySha256)) {
+    metadata.executionIdentitySha256 = executionIdentitySha256;
+  }
+
+  const usageHeaders = {
+    inputTokens: "x-sie-units-input-tokens",
+    pairs: "x-sie-units-pairs",
+    images: "x-sie-units-images",
+    pages: "x-sie-units-pages",
+    outputTokens: "x-sie-units-output-tokens",
+    audioMs: "x-sie-units-audio-ms",
+  } as const;
+  const usage: NonNullable<RequestMetadata["usage"]> = {};
+  for (const [field, header] of Object.entries(usageHeaders) as [
+    keyof typeof usageHeaders,
+    string,
+  ][]) {
+    const value = parseNonnegativeMeterHeader(headers, header);
+    if (value !== undefined) usage[field] = value;
+  }
+  if (Object.keys(usage).length > 0) metadata.usage = usage;
+
+  const creditsDebited = parseNonnegativeMeterHeader(headers, "x-sie-credits-debited");
+  if (creditsDebited !== undefined) metadata.creditsDebited = creditsDebited;
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function attachRequestMetadata<T extends { request?: RequestMetadata }>(
+  results: T[],
+  headers: Headers,
+): void {
+  const metadata = parseRequestMetadata(headers);
+  if (metadata === undefined) return;
+  for (const result of results) {
+    result.request = { ...metadata };
+    if (metadata.usage !== undefined) result.request.usage = { ...metadata.usage };
+  }
+}
+
+/** Enforce the JavaScript safe-integer contract before signed-i64 gateway transport. */
+function validateGenerationSeed(seed: number): number {
+  if (!Number.isSafeInteger(seed)) {
+    throw new RangeError("seed must be a JavaScript safe integer");
+  }
+  return seed;
+}
+
+/** Validate the discriminated native grammar before issuing a billable request. */
+function validateGenerateGrammar(grammar: GenerateGrammar | Record<string, unknown>): void {
+  if (typeof grammar !== "object" || grammar === null || Array.isArray(grammar)) {
+    throw new TypeError("grammar must be an object");
+  }
+  const allowed = new Set(["json_schema", "regex", "ebnf", "label", "strict"]);
+  const unknown = Object.keys(grammar).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new TypeError(`grammar contains unsupported field(s): ${unknown.sort().join(", ")}`);
+  }
+  const variants = ["json_schema", "regex", "ebnf"].filter((key) => Object.hasOwn(grammar, key));
+  if (variants.length !== 1) {
+    throw new TypeError("grammar must contain exactly one of json_schema, regex, or ebnf");
+  }
+  const variant = variants[0];
+  const value = grammar[variant as keyof GenerateGrammar];
+  if (
+    variant === "json_schema"
+      ? typeof value !== "object" || value === null || Array.isArray(value)
+      : typeof value !== "string"
+  ) {
+    throw new TypeError(
+      variant === "json_schema"
+        ? "grammar.json_schema must be an object"
+        : `grammar.${variant} must be a string`,
+    );
+  }
+  if (grammar.label !== undefined && grammar.label !== null && typeof grammar.label !== "string") {
+    throw new TypeError("grammar.label must be a string");
+  }
+  if (
+    grammar.strict !== undefined &&
+    grammar.strict !== null &&
+    typeof grammar.strict !== "boolean"
+  ) {
+    throw new TypeError("grammar.strict must be a boolean");
+  }
+}
+
+/** Serialize the controls shared by blocking and streaming native generation. */
+function applyGenerateOptions(body: Record<string, unknown>, options: GenerateOptions): void {
+  if (options.temperature !== undefined) body.temperature = options.temperature;
+  if (options.topP !== undefined) body.top_p = options.topP;
+  if (options.adapterOptions !== undefined) body.options = options.adapterOptions;
+  if (options.stop !== undefined) body.stop = options.stop;
+  if (options.frequencyPenalty !== undefined) body.frequency_penalty = options.frequencyPenalty;
+  if (options.presencePenalty !== undefined) body.presence_penalty = options.presencePenalty;
+  if (options.grammar !== undefined) {
+    validateGenerateGrammar(options.grammar);
+    body.grammar = options.grammar;
+  }
+  if (options.seed !== undefined) body.seed = validateGenerationSeed(options.seed);
+  if (options.logitBias !== undefined) body.logit_bias = options.logitBias;
+  if (options.routingKey !== undefined) body.routing_key = options.routingKey;
+  if (options.promptCacheKey !== undefined) body.prompt_cache_key = options.promptCacheKey;
+  if (options.safetyIdentifier !== undefined) body.safety_identifier = options.safetyIdentifier;
+  if (options.loraAdapter !== undefined) body.lora_adapter = options.loraAdapter;
+}
+
 /** Derive an upload filename: an explicit override > a File/Blob `.name` > default. */
 function resolveUploadFilename(file: FileUploadInput, filename?: string): string {
   if (filename) return filename;
@@ -235,6 +366,17 @@ const _LEASE_RENEWAL_MAX_RETRIES = 5;
 type ItemWithWireImages = Omit<Item, "images"> & { images?: ImageWireFormat[] };
 type ItemForWire = Item | ItemWithWireImages;
 
+interface AudioWireFormat {
+  data: Uint8Array;
+  format?: string;
+  sample_rate?: number;
+}
+
+type ExtractItemForWire = Omit<ExtractItem, "images" | "audio"> & {
+  images?: ImageWireFormat[];
+  audio?: AudioWireFormat;
+};
+
 function isImageWireFormat(image: ImageInput | ImageWireFormat): image is ImageWireFormat {
   return typeof image === "object" && image !== null && "data" in image;
 }
@@ -246,6 +388,29 @@ async function imageForWire(image: ImageInput | ImageWireFormat): Promise<ImageW
   return toImageWireFormat(image);
 }
 
+function imageBytesToBase64(data: Uint8Array): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("base64");
+  }
+  let binary = "";
+  const chunkSize = 32_768;
+  for (let offset = 0; offset < data.length; offset += chunkSize) {
+    binary += String.fromCharCode(...data.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function generationImagesForWire(
+  images: (ImageInput | ImageWireFormat)[],
+): Promise<{ data: string; format: ImageWireFormat["format"] }[]> {
+  return Promise.all(
+    images.map(async (image) => {
+      const wire = await imageForWire(image);
+      return { data: imageBytesToBase64(wire.data), format: wire.format };
+    }),
+  );
+}
+
 async function itemImagesForWire(item: Item): Promise<ItemForWire> {
   if (!item.images || item.images.length === 0) {
     return item;
@@ -255,6 +420,34 @@ async function itemImagesForWire(item: Item): Promise<ItemForWire> {
 
 async function itemsImagesForWire(items: Item[]): Promise<ItemForWire[]> {
   return Promise.all(items.map(itemImagesForWire));
+}
+
+async function extractItemForWire(item: ExtractItem): Promise<ExtractItemForWire> {
+  const { images, audio, ...wireItem } = item;
+  const wireImages = images ? await Promise.all(images.map(imageForWire)) : undefined;
+  if (!audio) {
+    return { ...wireItem, ...(wireImages === undefined ? {} : { images: wireImages }) };
+  }
+  if (audio instanceof Uint8Array) {
+    return {
+      ...wireItem,
+      ...(wireImages === undefined ? {} : { images: wireImages }),
+      audio: { data: audio },
+    };
+  }
+  const { sampleRate, ...wireAudio } = audio;
+  return {
+    ...wireItem,
+    ...(wireImages === undefined ? {} : { images: wireImages }),
+    audio: {
+      ...wireAudio,
+      ...(sampleRate === undefined ? {} : { sample_rate: sampleRate }),
+    },
+  };
+}
+
+async function itemsForExtractWire(items: ExtractItem[]): Promise<ExtractItemForWire[]> {
+  return Promise.all(items.map(extractItemForWire));
 }
 
 /**
@@ -483,6 +676,7 @@ export class SIEClient {
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseEncodeResults(data.items);
+    attachRequestMetadata(results, response.headers);
 
     if (isSingleItem) {
       const first = results[0];
@@ -695,12 +889,11 @@ export class SIEClient {
     const body: Record<string, unknown> = {
       prompt,
       max_new_tokens: options.maxNewTokens,
-      temperature: options.temperature ?? 1.0,
-      top_p: options.topP ?? 1.0,
     };
-    if (options.stop !== undefined) {
-      body.stop = options.stop;
+    if (options.images !== undefined) {
+      body.images = await generationImagesForWire(options.images);
     }
+    applyGenerateOptions(body, options);
 
     const { pool, gpu } = this.parseGpuParam(options.gpu);
     const headers: Record<string, string> = {
@@ -727,7 +920,9 @@ export class SIEClient {
     if (data === null || typeof data !== "object") {
       throw new RequestError("Unexpected generate response shape");
     }
-    return parseGenerateResult(data);
+    const result = parseGenerateResult(data);
+    attachRequestMetadata([result], response.headers);
+    return result;
   }
 
   /**
@@ -824,6 +1019,9 @@ export class SIEClient {
         400,
       );
     }
+    if (req.seed !== undefined) {
+      validateGenerationSeed(req.seed);
+    }
 
     const body = { ...req, stream: false };
     const url = `${this.baseUrl}/v1/chat/completions`;
@@ -849,6 +1047,7 @@ export class SIEClient {
     if (data === null || typeof data !== "object") {
       throw new RequestError("Unexpected chat.completion response shape");
     }
+    attachRequestMetadata([data], response.headers);
     return data;
   }
 
@@ -904,6 +1103,9 @@ export class SIEClient {
     req: ChatCompletionRequest,
     signal?: AbortSignal,
   ): AsyncGenerator<ChatCompletionChunk, void, undefined> {
+    if (req.seed !== undefined) {
+      validateGenerationSeed(req.seed);
+    }
     const body = { ...req, stream: true };
     const url = `${this.baseUrl}/v1/chat/completions`;
     yield* this.consumeSseStream<ChatCompletionChunk>(url, body, req.model, signal, (chunk) =>
@@ -917,10 +1119,10 @@ export class SIEClient {
    * chunk shape documented in
    * `packages/sie_gateway/src/handlers/sse.rs::build_generate_chunk_event`.
    *
-   * The first delta carries `seq: 0` and `text_delta` populated; the
-   * terminal chunk has `done: true`, `finish_reason`, and (typically)
-   * `usage` + `ttft_ms`. The generator completes on the `data: [DONE]`
-   * sentinel.
+   * Delta chunks may carry text, log probabilities, or both; callers must not
+   * assume every non-terminal event has a non-empty `text_delta`. The terminal
+   * chunk has `done: true`, `finish_reason`, and (typically) `usage` +
+   * `ttft_ms`. The generator completes on the `data: [DONE]` sentinel.
    *
    * Error semantics match {@link streamChatCompletions}: pre-stream HTTP
    * errors throw normally, mid-stream `error` chunks throw
@@ -941,17 +1143,23 @@ export class SIEClient {
   async *streamGenerate(
     model: string,
     prompt: string,
-    options: GenerateOptions,
+    options: StreamGenerateOptions,
     signal?: AbortSignal,
   ): AsyncGenerator<GenerateChunk, void, undefined> {
     const body: Record<string, unknown> = {
       prompt,
       max_new_tokens: options.maxNewTokens,
-      temperature: options.temperature ?? 1.0,
-      top_p: options.topP ?? 1.0,
       stream: true,
     };
-    if (options.stop !== undefined) body.stop = options.stop;
+    if (options.images !== undefined) {
+      body.images = await generationImagesForWire(options.images);
+    }
+    applyGenerateOptions(body, options);
+    if (options.logprobs !== undefined) body.logprobs = options.logprobs;
+    if (options.topLogprobs !== undefined) {
+      body.top_logprobs = options.topLogprobs;
+      body.logprobs = true;
+    }
 
     const safeModel = model.replaceAll("/", "__");
     const url = `${this.baseUrl}/v1/generate/${encodeURIComponent(safeModel)}`;
@@ -1240,7 +1448,9 @@ export class SIEClient {
     // Wire format response matches ScoreResult structure
     const data = unpackMessage<unknown>(new Uint8Array(await response.arrayBuffer()));
 
-    return parseScoreResult(data);
+    const result = parseScoreResult(data);
+    attachRequestMetadata([result], response.headers);
+    return result;
   }
 
   /**
@@ -1251,7 +1461,7 @@ export class SIEClient {
    * @param options - Extract options with labels
    * @returns Extract result with entities
    */
-  async extract(model: string, item: Item, options: ExtractOptions): Promise<ExtractResult>;
+  async extract(model: string, item: ExtractItem, options: ExtractOptions): Promise<ExtractResult>;
 
   /**
    * Extract entities from multiple items.
@@ -1261,7 +1471,11 @@ export class SIEClient {
    * @param options - Extract options with labels
    * @returns Array of extract results in same order as input
    */
-  async extract(model: string, items: Item[], options: ExtractOptions): Promise<ExtractResult[]>;
+  async extract(
+    model: string,
+    items: ExtractItem[],
+    options: ExtractOptions,
+  ): Promise<ExtractResult[]>;
 
   /**
    * Extract entities from one or more items.
@@ -1284,12 +1498,12 @@ export class SIEClient {
    */
   async extract(
     model: string,
-    items: Item | Item[],
+    items: ExtractItem | ExtractItem[],
     options: ExtractOptions,
   ): Promise<ExtractResult | ExtractResult[]> {
     const isSingleItem = !Array.isArray(items);
     const itemsArray = isSingleItem ? [items] : items;
-    const itemsForWire = await itemsImagesForWire(itemsArray);
+    const itemsForWire = await itemsForExtractWire(itemsArray);
 
     // Build request body
     const body: Record<string, unknown> = {
@@ -1328,6 +1542,7 @@ export class SIEClient {
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseExtractResults(data.items);
+    attachRequestMetadata(results, response.headers);
 
     if (isSingleItem) {
       const first = results[0];

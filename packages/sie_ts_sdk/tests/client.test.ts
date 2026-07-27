@@ -44,10 +44,14 @@ function createMockResponse(body: unknown, options: ResponseInit = {}): Response
 }
 
 // Helper to create msgpack response
-function createMsgpackResponse(body: unknown, status = 200): Response {
+function createMsgpackResponse(
+  body: unknown,
+  status = 200,
+  headers: Record<string, string> = {},
+): Response {
   return new Response(packMessage(body), {
     status,
-    headers: { "Content-Type": "application/msgpack" },
+    headers: { "Content-Type": "application/msgpack", ...headers },
   });
 }
 
@@ -181,6 +185,68 @@ describe("SIEClient.encode() - basic usage", () => {
     expect(results[0]?.id).toBe("doc-1");
     expect(results[1]?.id).toBe("doc-2");
     expect(results[2]?.id).toBe("doc-3");
+  });
+
+  it("attaches detached request-scoped usage and debit metadata", async () => {
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse(
+        {
+          items: [
+            { id: "doc-1", dense: { values: new Float32Array([0.1]) } },
+            { id: "doc-2", dense: { values: new Float32Array([0.2]) } },
+          ],
+        },
+        200,
+        {
+          "x-sie-request-id": "req-encode",
+          "x-sie-execution-identity-sha256": "a".repeat(64),
+          "x-sie-units-input-tokens": "11",
+          "x-sie-units-pairs": "2",
+          "x-sie-units-images": "1",
+          "x-sie-units-pages": "3",
+          "x-sie-units-output-tokens": "5",
+          "x-sie-units-audio-ms": "1200",
+          "x-sie-credits-debited": "17",
+        },
+      ),
+    );
+
+    const results = await client.encode("bge-m3", [
+      { id: "doc-1", text: "First" },
+      { id: "doc-2", text: "Second" },
+    ]);
+
+    expect(results[0]?.request).toEqual({
+      id: "req-encode",
+      executionIdentitySha256: "a".repeat(64),
+      usage: {
+        inputTokens: 11,
+        pairs: 2,
+        images: 1,
+        pages: 3,
+        outputTokens: 5,
+        audioMs: 1200,
+      },
+      creditsDebited: 17,
+    });
+    expect(results[1]?.request).toEqual(results[0]?.request);
+    expect(results[1]?.request).not.toBe(results[0]?.request);
+    expect(results[1]?.request?.usage).not.toBe(results[0]?.request?.usage);
+  });
+
+  it("omits malformed request metadata fields independently", async () => {
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({ items: [{ dense: { values: new Float32Array([0.1]) } }] }, 200, {
+        "x-sie-request-id": "réq-bad",
+        "x-sie-execution-identity-sha256": "A".repeat(64),
+        "x-sie-units-input-tokens": "01",
+        "x-sie-units-pairs": "2",
+        "x-sie-credits-debited": "9007199254740992",
+      }),
+    );
+
+    const result = await client.encode("bge-m3", { text: "test" });
+    expect(result.request).toEqual({ usage: { pairs: 2 } });
   });
 
   it("should preserve item IDs through encode cycle", async () => {
@@ -1180,6 +1246,7 @@ describe("SIEClient.score() - reranking", () => {
           { item_id: "doc-1", score: 0.72, rank: 1 },
           { item_id: "doc-3", score: 0.45, rank: 2 },
         ],
+        usage: { input_tokens: 91, images: 2 },
       }),
     );
 
@@ -1193,6 +1260,7 @@ describe("SIEClient.score() - reranking", () => {
     expect(result.scores[0]?.itemId).toBe("doc-2"); // Most relevant
     expect(result.scores[0]?.rank).toBe(0);
     expect(result.scores[0]?.score).toBeCloseTo(0.95);
+    expect(result.usage).toEqual({ inputTokens: 91, images: 2 });
   });
 
   it("should use correct URL with model in path", async () => {
@@ -1400,6 +1468,63 @@ describe("SIEClient.extract() - NER", () => {
 
     expect(parsed.items?.[0]?.images?.[0]?.data).toEqual(imageBytes);
     expect(parsed.items?.[0]?.images?.[0]?.format).toBe("jpeg");
+  });
+
+  it("should serialize audio metadata and preserve image and document payloads", async () => {
+    const audioBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
+    const imageBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+    const documentBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        items: [{ entities: [] }],
+      }),
+    );
+
+    await client.extract(
+      "whisper",
+      {
+        audio: { data: audioBytes, format: "wav", sampleRate: 16_000 },
+        images: [imageBytes],
+        document: { data: documentBytes, format: "pdf" },
+      },
+      { labels: [] },
+    );
+
+    const fetchCall = mockFetch.mock.calls[0];
+    const body = fetchCall?.[1]?.body as Uint8Array;
+    const parsed = unpackMessage<{
+      items?: {
+        audio?: { data: Uint8Array; format?: string; sample_rate?: number; sampleRate?: number };
+        images?: { data: Uint8Array; format: string }[];
+        document?: { data: Uint8Array; format?: string };
+      }[];
+    }>(body);
+    const item = parsed.items?.[0];
+
+    expect(item?.audio?.data).toEqual(audioBytes);
+    expect(item?.audio?.format).toBe("wav");
+    expect(item?.audio?.sample_rate).toBe(16_000);
+    expect(item?.audio?.sampleRate).toBeUndefined();
+    expect(item?.images).toEqual([{ data: imageBytes, format: "jpeg" }]);
+    expect(item?.document).toEqual({ data: documentBytes, format: "pdf" });
+  });
+
+  it("should normalize direct audio bytes to the wire format", async () => {
+    const audioBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        items: [{ entities: [] }],
+      }),
+    );
+
+    await client.extract("whisper", { audio: audioBytes }, { labels: [] });
+
+    const fetchCall = mockFetch.mock.calls[0];
+    const body = fetchCall?.[1]?.body as Uint8Array;
+    const parsed = unpackMessage<{
+      items?: { audio?: { data: Uint8Array; format?: string; sample_rate?: number } }[];
+    }>(body);
+    expect(parsed.items?.[0]?.audio).toEqual({ data: audioBytes });
   });
 
   it("should pass threshold option in params", async () => {

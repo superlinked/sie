@@ -44,7 +44,7 @@ One SIE cluster runs the inference behind a whole agent. Each task is a handful 
 | Task | What it does | Models |
 |---|---|---|
 | **Search** | Embed, match, and rerank to retrieve the right context. | `bge-m3`, `splade-v3`, `colbertv2`, `qwen3-reranker` |
-| **Document to markdown** | PDFs, Office files, and scans become clean markdown. | `glm-ocr`, `mineru`, `paddleocr-vl`, `docling` |
+| **Document to markdown** | PDFs, Office files, and scans become clean markdown. | `lightonocr`, `glm-ocr`, `mineru`, `paddleocr-vl`, `docling` |
 | **Structured output** | Schema-valid JSON, extracted or generated. | `gliner2`, `nuner-zero`, `qwen3.6-27b` |
 | **Guard content** | A safety verdict with a probability you threshold. | `granite-guardian-2b` |
 | **Run the agent loop** | Plan steps and call tools with an open LLM, streaming included. | `qwen3.6-27b` |
@@ -64,11 +64,19 @@ docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cuda12-default
 
+# Linux, NVIDIA GPU — Transformers 5 OCR models (LightOnOCR and GLM-OCR)
+docker run --gpus all -p 8080:8080 \
+  -v sie-hf-cache:/app/.cache/huggingface \
+  ghcr.io/superlinked/sie-server:latest-cuda12-transformers5
+
 # Linux, CPU
 docker run -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cpu-default
 ```
+
+Docker images are bundle-specific so dependency-incompatible model families stay isolated. Use the
+`transformers5` image for LightOnOCR or GLM-OCR; the `default` image intentionally does not advertise them.
 
 ```bash
 # in a second terminal
@@ -84,7 +92,8 @@ curl http://localhost:8080/v1/embeddings \
 # {"object": "list", "data": [{"object": "embedding", "embedding": [-0.0344, 0.0310, ...
 ```
 
-Each model's first call downloads its weights (a minute or three, progress in the server terminal); after that, calls return in milliseconds.
+Each model's first call downloads its weights (progress appears in the server terminal). Later calls skip the
+download; inference latency depends on the model, task, hardware, and batch size.
 
 **2. Install the SDK**
 

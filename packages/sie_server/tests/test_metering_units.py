@@ -24,30 +24,39 @@ import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import msgpack
 import numpy as np
 import pytest
+import torch
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.bert_flash import BertFlashAdapter
 from sie_server.adapters.clip import CLIPAdapter
 from sie_server.adapters.colbert import ColBERTAdapter
+from sie_server.adapters.colbert_modernbert_flash.adapter import ColBERTModernBERTFlashAdapter
 from sie_server.adapters.cross_encoder import CrossEncoderAdapter
 from sie_server.adapters.jina_flash_cross_encoder import JinaFlashCrossEncoderAdapter
+from sie_server.adapters.qwen3_vl_reranker.adapter import Qwen3VLRerankerAdapter
 from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
-from sie_server.adapters.siglip import SiglipAdapter
+from sie_server.adapters.siglip.adapter import SiglipAdapter
+from sie_server.adapters.splade_flash.adapter import SPLADEFlashAdapter
 from sie_server.core.encode_pipeline import EncodePipeline
-from sie_server.core.inference_output import EncodeOutput, ExtractOutput, ScoreOutput
+from sie_server.core.inference_output import EncodeOutput, ExtractItemError, ExtractOutput, ScoreOutput
+from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
+from sie_server.core.worker.handlers.score import ScoreHandler
 from sie_server.core.worker.types import WorkerResult
 from sie_server.ipc_types import (
     EncodeBatchItem,
     ExtractBatchItem,
+    PreparedAudioPcm16,
     ProcessEncodeBatchRequest,
     ProcessExtractBatchRequest,
     ProcessScoreBatchRequest,
     ScoreBatchItem,
+    UnitCounts,
 )
-from sie_server.queue_executor import QueueExecutor
+from sie_server.queue_executor import QueueExecutor, _per_pair_image_counts, _with_audio_ms
 from sie_server.types.inputs import Item
 
 
@@ -158,6 +167,53 @@ class TestCountPairInputTokens:
         adapter = self._adapter()
         adapter._tokenizer = None
         assert adapter.count_pair_input_tokens(Item(text="q"), [Item(text="d")]) is None
+
+
+# ---------------------------------------------------------------------------
+# Retrieval-family adapter-emitted counts
+# ---------------------------------------------------------------------------
+
+
+class TestRetrievalAdapterCounts:
+    def test_splade_idf_path_counts_transformed_truncated_input(self) -> None:
+        adapter = SPLADEFlashAdapter("stub/model", max_seq_length=4, query_template="query: {instruction} {text}")
+        adapter._model = object()
+        adapter._tokenizer = _FakeTokenizer()  # type: ignore[assignment]
+        adapter._idf = torch.ones(8, dtype=torch.float32)
+
+        output = adapter.encode(
+            [Item(text="alpha beta gamma")],
+            ["sparse"],
+            instruction="retrieve",
+            is_query=True,
+        )
+
+        assert output.extra["input_token_counts"] == [4]
+
+    def test_gte_score_counts_separate_query_and_document_caps(self) -> None:
+        adapter = ColBERTModernBERTFlashAdapter(
+            model_name_or_path="stub/model",
+            query_max_length=4,
+            max_seq_length=6,
+            query_prefix="q: ",
+            doc_prefix="d: ",
+        )
+        adapter._tokenizer = _FakeTokenizer()  # type: ignore[assignment]
+        adapter.score = MagicMock(side_effect=lambda _query, items, **_kwargs: [0.5] * len(items))  # type: ignore[method-assign]
+        queries = [Item(text="short"), Item(text="another query")]
+        docs = [
+            Item(text="two words"),
+            Item(text="one two three four five six seven"),
+        ]
+
+        output = adapter.score_pairs(
+            queries,
+            docs,
+            instruction="please rank",
+        )
+
+        assert output.scores.tolist() == [0.5, 0.5]
+        assert output.input_token_counts == [9, 10]
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +352,23 @@ def _score_request() -> ProcessScoreBatchRequest:
 
 
 class TestScoreBackfill:
+    @pytest.mark.parametrize("counts", [[-1], [True]])
+    def test_score_output_rejects_invalid_token_counts(self, counts: list[int]) -> None:
+        with pytest.raises(ValueError, match="non-negative integers"):
+            ScoreOutput(scores=np.array([0.5], dtype=np.float32), input_token_counts=counts)
+
+    @pytest.mark.parametrize("counts", [[-1], [True]])
+    def test_score_output_rejects_invalid_image_counts(self, counts: list[int]) -> None:
+        with pytest.raises(ValueError, match="non-negative integers"):
+            ScoreOutput(scores=np.array([0.5], dtype=np.float32), input_image_counts=counts)
+
+    def test_native_score_candidate_bounds(self) -> None:
+        query = Item(text="query")
+        with pytest.raises(ValueError, match="at least one"):
+            build_score_prepared_items(query, [])
+        with pytest.raises(ValueError, match="at most 1000"):
+            build_score_prepared_items(query, [Item(text="candidate")] * (MAX_SCORE_ITEMS + 1))
+
     @pytest.mark.asyncio
     async def test_backfills_units_for_flash_cross_encoder(self) -> None:
         adapter = JinaFlashCrossEncoderAdapter(model_name_or_path="stub/model", max_seq_length=512)
@@ -323,6 +396,7 @@ class TestScoreBackfill:
         score_output = ScoreOutput(
             scores=np.array([0.9, 0.1], dtype=np.float32),
             input_token_counts=[7, 7],
+            input_image_counts=[1, 2],
         )
         reg = _score_registry()
         reg.get.return_value = adapter
@@ -334,6 +408,108 @@ class TestScoreBackfill:
         o = outcome.outcomes[0]
         assert o.units is not None
         assert o.units.input_tokens == 14  # 7 + 7, not the fallback 10
+        assert o.units.images == 3
+        assert o.units.pairs == 2
+
+    def test_score_handler_preserves_image_counts_across_oom_slicing(self) -> None:
+        handler = ScoreHandler()
+        output = ScoreOutput(
+            scores=np.array([0.9, 0.1], dtype=np.float32),
+            input_token_counts=[7, 8],
+            input_image_counts=[1, 2],
+        )
+
+        partials = {index: handler.slice_output(output, index) for index in range(2)}
+        assembled = handler.assemble_output(partials, batch_size=2)
+
+        assert assembled.input_token_counts == [7, 8]
+        assert assembled.input_image_counts == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_qwen3_vl_settles_only_images_consumed_per_pair(self) -> None:
+        adapter = Qwen3VLRerankerAdapter(model_name_or_path="stub/model")
+        score_output = ScoreOutput(scores=np.array([0.9, 0.1], dtype=np.float32))
+        reg = _score_registry()
+        reg.get.return_value = adapter
+        reg.start_worker = AsyncMock(return_value=_score_worker(score_output))
+        request = ProcessScoreBatchRequest(
+            model_id="test/model",
+            items=[
+                ScoreBatchItem(
+                    work_item_id="req-vision.0",
+                    request_id="req-vision",
+                    item_index=0,
+                    total_items=1,
+                    timestamp=time.time(),
+                    query_item={"images": [_img(), _img()]},
+                    score_items=[
+                        {"images": [_img(), _img()], "id": "doc-image"},
+                        {"text": "text only", "id": "doc-text"},
+                    ],
+                )
+            ],
+        )
+
+        outcome = await QueueExecutor(reg).process_score_batch(request)
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert units.pairs == 2
+        # The image-query launch path cannot surface exact processor prompt
+        # tokens yet, so the catalog intentionally declares only pairs/images.
+        assert units.input_tokens is None
+        # Query first image is consumed once per pair; doc first image once.
+        assert units.images == 3
+
+    @pytest.mark.parametrize("invalid", [[1], [1, -1], [1, True], "two"])
+    def test_pair_image_evidence_fails_closed_when_malformed(self, invalid: object) -> None:
+        adapter = MagicMock()
+        adapter.count_pair_input_images.return_value = invalid
+
+        assert (
+            _per_pair_image_counts(
+                adapter,
+                Item(text="query"),
+                [Item(text="a"), Item(text="b")],
+                2,
+            )
+            is None
+        )
+
+    def test_pair_image_evidence_is_optional_for_other_adapters(self) -> None:
+        assert (
+            _per_pair_image_counts(
+                object(),
+                Item(text="query"),
+                [Item(text="doc")],
+                1,
+            )
+            is None
+        )
+
+
+# ---------------------------------------------------------------------------
+# Accepted-audio duration metering
+# ---------------------------------------------------------------------------
+
+
+class TestAudioDurationUnits:
+    def test_exact_milliseconds_are_preserved(self) -> None:
+        units = _with_audio_ms(None, 12_345)
+        assert units is not None
+        assert units.audio_ms == 12_345
+
+    def test_audio_fold_preserves_other_dimensions(self) -> None:
+        units = _with_audio_ms(UnitCounts(input_tokens=7, pages=2, images=1), 8)
+        assert units == UnitCounts(input_tokens=7, pages=2, images=1, audio_ms=8)
+
+    @pytest.mark.parametrize("invalid", [0, -1, True, 1.5, "1000", 1 << 64])
+    def test_invalid_audio_duration_fails_closed(self, invalid: object) -> None:
+        with pytest.raises(ValueError, match="positive u64"):
+            _with_audio_ms(None, invalid)  # type: ignore[arg-type]
+
+    def test_none_means_no_audio_dimension(self) -> None:
+        assert _with_audio_ms(None, None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +755,11 @@ class TestSGLangEmbeddingMetering:
 def _encode_registry(adapter: BaseAdapter) -> MagicMock:
     reg = MagicMock()
     reg.device = "cpu"
-    reg.get_config.return_value = MagicMock()
+    config = MagicMock()
+    config.sie_id = "test/model"
+    config.outputs = ["dense"]
+    config.resolve_profile.return_value.runtime = {}
+    reg.get_config.return_value = config
     reg.get.return_value = adapter
     return reg
 
@@ -757,6 +937,9 @@ class _FakeParseExtractAdapter(BaseAdapter):
     def load(self, device: str) -> None:  # pragma: no cover - not exercised
         _ = device
 
+    def count_input_images(self, items: list[Item]) -> None:
+        del items
+
     def extract(self, items: list[Item], **_: Any) -> ExtractOutput:  # pragma: no cover - worker mocked
         return ExtractOutput(entities=[[] for _ in items])
 
@@ -787,16 +970,89 @@ class TestExtractSeamPages:
         assert o.units.images is None  # document input consumes no images
 
     @pytest.mark.asyncio
-    async def test_parse_extract_without_pages_leaves_units_unset(self) -> None:
-        # An all-error parse (0 pages) surfaces no pages → the meter falls back
-        # to its reserve estimate rather than billing zero.
+    async def test_ocr_image_stamps_pages_without_image_double_count(self) -> None:
         adapter = _FakeParseExtractAdapter()
-        extract_output = ExtractOutput(entities=[[]], data=[{"error": "bad pdf"}], pages=None)
+        extract_output = ExtractOutput(
+            entities=[[{"text": "# page", "label": "markdown", "score": 1.0}]],
+            pages=[1],
+        )
+        reg = _extract_registry(adapter, _extract_worker(extract_output))
+        ex = QueueExecutor(reg)
+
+        outcome = await ex.process_extract_batch(_extract_request({"images": [{"data": b"png", "format": "png"}]}))
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert units.pages == 1
+        assert units.images is None
+
+    @pytest.mark.asyncio
+    async def test_parse_extract_error_retains_authoritative_pages(self) -> None:
+        adapter = _FakeParseExtractAdapter()
+        extract_output = ExtractOutput(
+            entities=[[]],
+            data=[{"partial": True}],
+            errors=[ExtractItemError(code="INFERENCE_ERROR", message="Document export failed")],
+            pages=[3],
+        )
+        reg = _extract_registry(adapter, _extract_worker(extract_output))
+        ex = QueueExecutor(reg)
+
+        outcome = await ex.process_extract_batch(
+            _extract_request({"document": {"data": b"%PDF-1.4 ...", "format": "pdf"}})
+        )
+
+        item = outcome.outcomes[0]
+        assert item.disposition == "publish_and_ack"
+        assert item.result_msgpack is not None
+        result = msgpack.unpackb(item.result_msgpack, raw=False)
+        assert result["data"] == {"partial": True}
+        assert result["error"] == {
+            "code": "INFERENCE_ERROR",
+            "message": "Document export failed",
+        }
+        assert item.units is not None
+        assert item.units.pages == 3
+
+    @pytest.mark.asyncio
+    async def test_parse_extract_zero_pages_remains_authoritative(self) -> None:
+        adapter = _FakeParseExtractAdapter()
+        extract_output = ExtractOutput(
+            entities=[[]],
+            data=[{}],
+            errors=[ExtractItemError(code="INFERENCE_ERROR", message="Document conversion failed")],
+            pages=[0],
+        )
         reg = _extract_registry(adapter, _extract_worker(extract_output))
         ex = QueueExecutor(reg)
 
         outcome = await ex.process_extract_batch(_extract_request({"document": {"data": b"garbage", "format": "pdf"}}))
 
+        item = outcome.outcomes[0]
+        assert item.disposition == "publish_and_ack"
+        assert item.units is not None
+        assert item.units.pages == 0
+
+    @pytest.mark.asyncio
+    async def test_parse_extract_without_pages_leaves_units_unset(self) -> None:
+        # A parser that cannot surface a page count leaves the dimension missing,
+        # so the meter retains its compatibility fallback.
+        adapter = _FakeParseExtractAdapter()
+        extract_output = ExtractOutput(
+            entities=[[]],
+            data=[{}],
+            errors=[ExtractItemError(code="INFERENCE_ERROR", message="Document conversion failed")],
+            pages=None,
+        )
+        reg = _extract_registry(adapter, _extract_worker(extract_output))
+        ex = QueueExecutor(reg)
+
+        outcome = await ex.process_extract_batch(_extract_request({"document": {"data": b"garbage", "format": "pdf"}}))
+
+        assert outcome.outcomes[0].disposition == "publish_and_ack"
+        assert outcome.outcomes[0].result_msgpack is not None
+        result = msgpack.unpackb(outcome.outcomes[0].result_msgpack, raw=False)
+        assert result["error"]["code"] == "INFERENCE_ERROR"
         assert outcome.outcomes[0].units is None
 
 
@@ -1025,3 +1281,110 @@ class TestCrossEncoderTokenizerConcurrencyGuard:
             t.join(timeout=30)
 
         assert any(isinstance(e, RuntimeError) and "Already borrowed" in str(e) for e in errors)
+
+
+class TestExtractSeamAudio:
+    @pytest.mark.asyncio
+    async def test_whisper_extract_stamps_exact_audio_ms(self) -> None:
+        adapter = _FakeTextExtractAdapter()
+        extract_output = ExtractOutput(
+            entities=[[]],
+            data=[{"text": "hello", "duration_ms": 1_001}],
+        )
+        reg = _extract_registry(adapter, _extract_worker(extract_output))
+        ex = QueueExecutor(reg)
+        prepared_audio = PreparedAudioPcm16(
+            pcm_s16le=b"\x00\x00" * 16_016,
+            sample_rate=16_000,
+            sample_count=16_016,
+            duration_ms=1_001,
+            source_sample_rate=16_000,
+            source_sample_count=16_016,
+            source_channels=1,
+            container="wav",
+        )
+        request = ProcessExtractBatchRequest(
+            model_id="test/model",
+            items=[
+                ExtractBatchItem(
+                    work_item_id="req-1.0",
+                    request_id="req-1",
+                    item_index=0,
+                    total_items=1,
+                    timestamp=time.time(),
+                    item={},
+                    prepared_audio=prepared_audio,
+                )
+            ],
+        )
+
+        outcome = await ex.process_extract_batch(request)
+
+        result = outcome.outcomes[0]
+        assert result.disposition == "publish_and_ack"
+        assert result.units is not None
+        assert result.units.audio_ms == 1_001
+        assert result.units.input_tokens is None
+        assert result.units.images is None
+        assert result.units.pages is None
+
+    @pytest.mark.asyncio
+    async def test_partial_audio_batch_emits_units_only_for_success(self) -> None:
+        adapter = _FakeTextExtractAdapter()
+        extract_output = ExtractOutput(
+            entities=[[]],
+            data=[{"text": "hello", "duration_ms": 1_001}],
+        )
+        ex = QueueExecutor(_extract_registry(adapter, _extract_worker(extract_output)))
+        valid_audio = PreparedAudioPcm16(
+            pcm_s16le=b"\x00\x00" * 16_016,
+            sample_rate=16_000,
+            sample_count=16_016,
+            duration_ms=1_001,
+            source_sample_rate=16_000,
+            source_sample_count=16_016,
+            source_channels=1,
+            container="wav",
+        )
+        invalid_audio = PreparedAudioPcm16(
+            pcm_s16le=b"\x00\x00",
+            sample_rate=16_000,
+            sample_count=1,
+            duration_ms=1,
+            source_sample_rate=0,
+            source_sample_count=1,
+            source_channels=1,
+            container="wav",
+        )
+        request = ProcessExtractBatchRequest(
+            model_id="test/model",
+            items=[
+                ExtractBatchItem(
+                    work_item_id="req-1.0",
+                    request_id="req-1",
+                    item_index=0,
+                    total_items=2,
+                    timestamp=time.time(),
+                    item={},
+                    prepared_audio=valid_audio,
+                ),
+                ExtractBatchItem(
+                    work_item_id="req-1.1",
+                    request_id="req-1",
+                    item_index=1,
+                    total_items=2,
+                    timestamp=time.time(),
+                    item={},
+                    prepared_audio=invalid_audio,
+                ),
+            ],
+        )
+
+        outcome = await ex.process_extract_batch(request)
+
+        success, failure = outcome.outcomes
+        assert success.disposition == "publish_and_ack"
+        assert success.units is not None
+        assert success.units.audio_ms == 1_001
+        assert failure.disposition == "publish_error_and_ack"
+        assert failure.units is None

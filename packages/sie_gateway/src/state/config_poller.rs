@@ -62,9 +62,12 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::config::ModalProxyToken;
+use crate::observability::metrics::{self as telemetry, ConfigOperation, ConfigOutcome};
 use crate::state::bundle_config_hashes_hash::BundleConfigHashesHash;
 use crate::state::bundles_hash::BundlesHash;
-use crate::state::config_bootstrap::{bootstrap_once, BootstrapClient, BootstrapError};
+use crate::state::config_bootstrap::{
+    bootstrap_once, telemetry_outcome, BootstrapClient, BootstrapError,
+};
 use crate::state::config_epoch::ConfigEpoch;
 use crate::state::model_registry::ModelRegistry;
 
@@ -99,12 +102,11 @@ pub fn spawn(
         {
             Ok(c) => c,
             Err(e) => {
+                telemetry::record_config_operation(
+                    ConfigOperation::Reconcile,
+                    ConfigOutcome::ClientError,
+                );
                 warn!(error = %e, "failed to build epoch-poll client; giving up");
-                // Same reasoning as `config_bootstrap.rs`: a broken
-                // HTTP client config prevents the epoch poller from
-                // ever running, which looks identical on dashboards
-                // to a sie-config outage. Count it once.
-                crate::metrics::CONFIG_BOOTSTRAP_FAILURES.inc();
                 return;
             }
         };
@@ -121,10 +123,18 @@ pub fn spawn(
             let snapshot = match client.fetch_epoch().await {
                 Ok(s) => s,
                 Err(BootstrapError::BadStatus { status, .. }) => {
+                    telemetry::record_config_operation(
+                        ConfigOperation::Reconcile,
+                        ConfigOutcome::FetchError,
+                    );
                     warn!(status = status, "epoch poll returned non-success");
                     continue;
                 }
                 Err(e) => {
+                    telemetry::record_config_operation(
+                        ConfigOperation::Reconcile,
+                        ConfigOutcome::FetchError,
+                    );
                     warn!(error = %e, "epoch poll failed");
                     continue;
                 }
@@ -205,8 +215,16 @@ pub fn spawn(
                         // already refreshed bundles via `install_bundles`
                         // and stored the new hash inside `BundlesHash`.
                         config_epoch.force_set(remote_epoch);
+                        telemetry::record_config_operation(
+                            ConfigOperation::Reconcile,
+                            ConfigOutcome::Success,
+                        );
                     }
                     Err(e) => {
+                        telemetry::record_config_operation(
+                            ConfigOperation::Reconcile,
+                            telemetry_outcome(&e),
+                        );
                         warn!(
                             error = %e,
                             "recovery export fetch failed; keeping stale local epoch and retrying next tick"
@@ -231,7 +249,7 @@ pub fn spawn(
                     },
                     "control-plane drift detected; re-running bootstrap"
                 );
-                if let Err(e) = bootstrap_once(
+                match bootstrap_once(
                     &client,
                     registry.as_ref(),
                     &config_epoch,
@@ -240,7 +258,17 @@ pub fn spawn(
                 )
                 .await
                 {
-                    warn!(error = %e, "catch-up bootstrap failed; will retry next tick");
+                    Ok(_) => telemetry::record_config_operation(
+                        ConfigOperation::Reconcile,
+                        ConfigOutcome::Success,
+                    ),
+                    Err(e) => {
+                        telemetry::record_config_operation(
+                            ConfigOperation::Reconcile,
+                            telemetry_outcome(&e),
+                        );
+                        warn!(error = %e, "catch-up bootstrap failed; will retry next tick");
+                    }
                 }
             } else {
                 debug!(

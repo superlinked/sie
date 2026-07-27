@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +13,8 @@ from sie_server.types.inputs import ImageInput, Item
 # load() bypasses the patched attribute and hits the real HuggingFace Hub.
 _ = transformers.AutoProcessor
 _ = transformers.Qwen2VLForConditionalGeneration
+
+_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "opendatalab__MinerU2.5-Pro-2604-1.2B.yaml"
 
 
 class TestMinerUVLAdapter:
@@ -299,8 +302,7 @@ class TestMinerUVLAdapter:
         import yaml
         from sie_server.config.model import ModelConfig
 
-        path = "packages/sie_server/models/opendatalab__MinerU2.5-Pro-2604-1.2B.yaml"
-        with open(path) as f:
+        with _MODEL_PATH.open() as f:
             data = yaml.safe_load(f)
         config = ModelConfig(**data)
         assert config.sie_id == "opendatalab/MinerU2.5-Pro-2604-1.2B"

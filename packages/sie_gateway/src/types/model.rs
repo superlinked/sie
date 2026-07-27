@@ -10,6 +10,10 @@ pub struct ModelInfoExtras {
     pub outputs: Vec<String>,
     pub dims: HashMap<String, i64>,
     pub max_sequence_length: Option<u64>,
+    /// Immutable Hugging Face commit SHA for the model weights. This is part
+    /// of worker/gateway parity and is absent for unpinned or package-backed
+    /// models.
+    pub revision: Option<String>,
     /// Per-request hard cap on ``max_new_tokens``. Mirrors
     /// ``tasks.generate.max_output_tokens`` from the model YAML; absent
     /// when the model has no ``generate`` task or the field was not
@@ -101,6 +105,11 @@ impl ModelInfoExtras {
         }
 
         extras.max_sequence_length = raw.get("max_sequence_length").and_then(|v| v.as_u64());
+        extras.revision = raw
+            .get("hf_revision")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
 
         let tasks = raw.get("tasks");
         if let Some(enc) = tasks.and_then(|t| match t.get("encode")? {
@@ -277,6 +286,7 @@ impl ModelInfoExtras {
                 outputs: vec!["dense".to_string()],
                 dims: HashMap::new(),
                 max_sequence_length: config.max_sequence_length,
+                revision: None,
                 max_output_tokens: None,
                 grammar_capabilities: None,
                 grammar_profile: None,
@@ -305,6 +315,8 @@ impl ModelInfoExtras {
 pub struct ModelConfig {
     #[serde(alias = "sie_id")]
     pub name: String,
+    #[serde(default)]
+    pub hf_revision: Option<String>,
     #[serde(default)]
     pub adapter_module: Option<String>,
     #[serde(default)]
@@ -365,6 +377,7 @@ impl ModelEntry {
             "state": state,
             "last_error": Value::Null,
             "max_sequence_length": self.info_extras.max_sequence_length,
+            "revision": self.info_extras.revision,
             "profiles": Value::Object(profiles),
             // Advertised model capabilities. ``lora_adapters`` lists the
             // public served-names of declared LoRA adapters (union across
@@ -696,6 +709,7 @@ profiles: {}
     fn test_model_config_json_roundtrip() {
         let config = ModelConfig {
             name: "test/model".into(),
+            hf_revision: Some("0123456789abcdef0123456789abcdef01234567".into()),
             adapter_module: Some("mod".into()),
             default_bundle: None,
             pool: Some("customer-a".into()),
@@ -707,6 +721,7 @@ profiles: {}
         let json = serde_json::to_string(&config).unwrap();
         let back: ModelConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "test/model");
+        assert_eq!(back.hf_revision, config.hf_revision);
         assert_eq!(back.adapter_module, Some("mod".into()));
         assert_eq!(back.pool, Some("customer-a".into()));
     }

@@ -9,11 +9,77 @@ from sie_server.core.preprocessor.text import TextPreprocessor
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers.encode import EncodeHandler
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 
 if TYPE_CHECKING:
+    from sie_server.config.model import ModelConfig, ResolvedProfile
     from sie_server.core.preprocessor_registry import PreprocessorRegistry
     from sie_server.ipc_types import PreparedTokens
+
+
+_ENCODE_OUTPUT_TYPES = frozenset({"dense", "sparse", "multivector"})
+
+
+def _validated_encode_output_types(value: object) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise InvalidInputError("'output_types' must be a non-empty array")
+    validated_output_types: list[str] = []
+    for output_type in value:
+        if not isinstance(output_type, str) or output_type not in _ENCODE_OUTPUT_TYPES:
+            raise InvalidInputError(
+                f"'output_types' entries must be one of {sorted(_ENCODE_OUTPUT_TYPES)}",
+            )
+        validated_output_types.append(output_type)
+    return validated_output_types
+
+
+def resolve_encode_output_types(
+    config: ModelConfig,
+    request_output_types: list[str] | None,
+    selected_profile: ResolvedProfile,
+    effective_options: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Resolve adapter and response output types for every encode ingress.
+
+    Profiles may expose a postprocessed output that the adapter does not emit
+    directly. MuVERA is the canonical example: the public response is dense,
+    while the adapter must first produce multivectors. Keeping capability
+    validation and that translation here prevents the HTTP and managed queue
+    paths from drifting apart.
+
+    Returns:
+        ``(adapter_output_types, response_output_types)``.
+
+    Raises:
+        InvalidInputError: If the requested response includes an output not
+            declared by the model or the selected profile.
+    """
+    if "output_types" in effective_options:
+        requested_outputs: object = effective_options["output_types"]
+    elif request_output_types is not None:
+        requested_outputs = request_output_types
+    else:
+        requested_outputs = ["dense"]
+    response_output_types = _validated_encode_output_types(requested_outputs)
+
+    profile_output_types = selected_profile.runtime.get("output_types")
+    if profile_output_types is not None:
+        supported_outputs = set(_validated_encode_output_types(profile_output_types))
+    else:
+        supported_outputs = set(config.outputs) & _ENCODE_OUTPUT_TYPES
+
+    unsupported = set(response_output_types) - supported_outputs
+    if unsupported:
+        msg = f"Model '{config.sie_id}' does not support output types: {unsupported}. Supported: {supported_outputs}"
+        raise InvalidInputError(msg)
+
+    adapter_output_types = list(response_output_types)
+    if effective_options.get("muvera") is not None and "dense" in response_output_types:
+        adapter_output_types = [output_type for output_type in response_output_types if output_type != "dense"]
+        if "multivector" not in adapter_output_types:
+            adapter_output_types.append("multivector")
+
+    return adapter_output_types, response_output_types
 
 
 class EncodePipeline:

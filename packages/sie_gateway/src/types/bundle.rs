@@ -152,6 +152,17 @@ default: true
     }
 
     #[test]
+    fn sealed_is_never_a_known_engine() {
+        // #1841 guard rail: "sealed" is a SERVER-DERIVED dispatch marker for org
+        // custom models — it must never be a client-pinnable engine. `parse_engine_pin`
+        // rejects any `X-SIE-Engine` value outside KNOWN_ENGINES with a 400, so keeping
+        // "sealed" out of this list is what stops a tenant from pinning `X-SIE-Engine:
+        // sealed` onto a CATALOG model and jumping into the sealed lane. If you ever add
+        // "sealed" here, add a compensating gate at the engine-pin parse first.
+        assert!(!KNOWN_ENGINES.contains(&"sealed"));
+    }
+
+    #[test]
     fn test_bundle_machine_profile_serde() {
         let json = r#"{"name":"l4","gpu_type":"L4","gpu_count":1,"max_batch_size":64,"max_sequence_length":512}"#;
         let profile: BundleMachineProfile = serde_json::from_str(json).unwrap();

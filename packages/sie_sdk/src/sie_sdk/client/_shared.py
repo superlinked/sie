@@ -4,15 +4,17 @@ import errno
 import logging
 import math
 import random
+import re
 import socket
 import ssl
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
+from urllib.parse import urljoin, urlsplit
 
 import msgpack
 import numpy as np
@@ -20,6 +22,110 @@ import numpy as np
 from sie_sdk.images import convert_item_images
 
 _logger = logging.getLogger(__name__)
+
+
+_HTTP_HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_RESERVED_BASE_URL_HEADERS = frozenset(
+    {
+        "accept",
+        "authorization",
+        "connection",
+        "content-length",
+        "content-type",
+        "cookie",
+        "host",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "set-cookie",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "x-sie-sdk-version",
+    }
+)
+
+
+def copy_base_url_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
+    """Validate and detach additional gateway-origin request headers.
+
+    These headers are intended for an HTTP edge in front of the configured SIE
+    gateway (for example Modal's ``Modal-Key`` / ``Modal-Secret`` pair). They
+    cannot replace SDK-owned authentication, representation, or hop-by-hop
+    headers. A detached copy prevents a caller from changing credentials after
+    client construction.
+    """
+    if headers is None:
+        return {}
+    if not isinstance(headers, Mapping):
+        msg = "base_url_headers must be a mapping of string header names to string values"
+        raise TypeError(msg)
+
+    copied: dict[str, str] = {}
+    normalized_names: set[str] = set()
+    for name, value in headers.items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            msg = "base_url_headers must contain only string header names and values"
+            raise TypeError(msg)
+        normalized = name.lower()
+        if not _HTTP_HEADER_NAME.fullmatch(name):
+            msg = f"invalid base_url_headers name: {name!r}"
+            raise ValueError(msg)
+        if normalized in normalized_names:
+            msg = f"duplicate base_url_headers name (case-insensitive): {name!r}"
+            raise ValueError(msg)
+        if normalized in _RESERVED_BASE_URL_HEADERS or normalized.startswith("sec-websocket-"):
+            msg = f"base_url_headers cannot override SDK-owned header {name!r}"
+            raise ValueError(msg)
+        if any(ord(char) < 0x20 and char != "\t" for char in value) or "\x7f" in value:
+            msg = f"invalid control character in base_url_headers value for {name!r}"
+            raise ValueError(msg)
+        normalized_names.add(normalized)
+        copied[name] = value
+    return copied
+
+
+def _http_origin(url: str) -> tuple[str, str, int] | None:
+    """Return a normalized HTTP origin, rejecting userinfo and malformed URLs."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname
+    if scheme not in {"http", "https"} or host is None or parsed.username is not None or parsed.password is not None:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return scheme, host.lower(), port
+
+
+def base_url_accepts_origin_credentials(base_url: str) -> bool:
+    """Whether gateway-origin credentials can be transported to ``base_url``."""
+    origin = _http_origin(base_url)
+    return origin is not None and origin[0] == "https"
+
+
+def request_matches_base_url_origin(base_url: str, request_url: str) -> bool:
+    """Whether ``request_url`` resolves to the exact HTTP origin of ``base_url``."""
+    base_origin = _http_origin(base_url)
+    if base_origin is None:
+        return False
+    resolved = urljoin(f"{base_url.rstrip('/')}/", request_url)
+    return _http_origin(resolved) == base_origin
+
+
+def websocket_matches_base_url_origin(base_url: str, websocket_url: str) -> bool:
+    """Whether a ws(s) URL is the WebSocket counterpart of ``base_url``'s origin."""
+    parsed = urlsplit(websocket_url)
+    if parsed.scheme not in {"ws", "wss"}:
+        return False
+    http_scheme = "https" if parsed.scheme == "wss" else "http"
+    http_url = parsed._replace(scheme=http_scheme).geturl()
+    return request_matches_base_url_origin(base_url, http_url)
 
 
 class _HttpResponse(Protocol):
@@ -39,8 +145,12 @@ from sie_sdk.types import (
     DetectedObject,
     EncodeResult,
     EntityResult,
+    ExtractItemErrorDetail,
     ExtractResult,
+    GenerateGrammar,
     Relation,
+    RequestMetadata,
+    RequestUsage,
     ScoreEntry,
     ScoreResult,
     SparseResult,
@@ -66,6 +176,62 @@ HTTP_SERVER_ERROR = 500
 HTTP_SERVICE_UNAVAILABLE = 503
 HTTP_GATEWAY_TIMEOUT = 504
 
+
+_GENERATE_GRAMMAR_VARIANTS = frozenset({"json_schema", "regex", "ebnf"})
+_GENERATE_GRAMMAR_FIELDS = _GENERATE_GRAMMAR_VARIANTS | {"label", "strict"}
+
+
+def validate_generate_grammar(grammar: GenerateGrammar | Mapping[str, Any]) -> GenerateGrammar:
+    """Validate and detach the native structured-output grammar envelope.
+
+    ``generate`` historically accepted a broad dictionary here. Keep that
+    source-compatible input type while validating the exact native three-arm
+    shape before issuing a request.
+    """
+    if not isinstance(grammar, Mapping):
+        msg = "grammar must be a mapping"
+        raise TypeError(msg)
+
+    unknown = set(grammar) - _GENERATE_GRAMMAR_FIELDS
+    if unknown:
+        names = ", ".join(sorted(str(name) for name in unknown))
+        msg = f"grammar contains unsupported field(s): {names}"
+        raise ValueError(msg)
+
+    grammar_dict = dict(grammar)
+    variants = _GENERATE_GRAMMAR_VARIANTS.intersection(grammar_dict)
+    if len(variants) != 1:
+        msg = "grammar must contain exactly one of json_schema, regex, or ebnf"
+        raise ValueError(msg)
+
+    variant = next(iter(variants))
+    value = grammar_dict[variant]
+    if variant == "json_schema":
+        if not isinstance(value, Mapping):
+            msg = "grammar.json_schema must be a mapping"
+            raise TypeError(msg)
+        grammar_dict["json_schema"] = dict(value)
+    elif not isinstance(value, str):
+        msg = f"grammar.{variant} must be a string"
+        raise TypeError(msg)
+
+    if "label" in grammar and grammar["label"] is not None and not isinstance(grammar["label"], str):
+        msg = "grammar.label must be a string"
+        raise TypeError(msg)
+    if "strict" in grammar and grammar["strict"] is not None and not isinstance(grammar["strict"], bool):
+        msg = "grammar.strict must be a boolean"
+        raise TypeError(msg)
+
+    return cast("GenerateGrammar", grammar_dict)
+
+
+def validate_generate_request_body(request_body: MutableMapping[str, Any]) -> None:
+    """Validate and detach any grammar in a fully merged generate request."""
+    grammar = request_body.get("grammar")
+    if grammar is not None:
+        request_body["grammar"] = validate_generate_grammar(grammar)
+
+
 # Default provisioning settings
 DEFAULT_PROVISION_TIMEOUT_S = 900.0  # 15 minutes
 DEFAULT_RETRY_DELAY_S = 5.0  # Retry every 5 seconds if no Retry-After header
@@ -84,6 +250,8 @@ MODEL_LOADING_DEFAULT_DELAY_S = 5.0  # Default retry delay (model loads take lon
 MODEL_LOADING_ERROR_CODE = "MODEL_LOADING"  # Error code from server
 PROVISIONING_ERROR_CODE = "PROVISIONING"  # Gateway scale-from-zero / worker provisioning
 SIE_ERROR_CODE_HEADER = "X-SIE-Error-Code"
+_MALFORMED_EXTRACT_ERROR_CODE = "INTERNAL_ERROR"
+_MALFORMED_EXTRACT_ERROR_MESSAGE = "Malformed extraction item error"
 
 # Terminal load failure (non-retryable). Server returns this with HTTP 502
 # and *no* Retry-After header so the SDK can short-circuit immediately
@@ -159,6 +327,20 @@ def apply_jitter(delay: float, *, rng: random.Random | None = None) -> float:
 # Version negotiation headers
 SDK_VERSION_HEADER = "X-SIE-SDK-Version"
 SERVER_VERSION_HEADER = "X-SIE-Server-Version"
+MODEL_REVISION_HEADER = "X-SIE-Model-Revision"
+EXECUTION_IDENTITY_SHA256_HEADER = "X-SIE-Execution-Identity-SHA256"
+REQUEST_ID_HEADER = "X-SIE-Request-ID"
+CREDITS_DEBITED_HEADER = "X-SIE-Credits-Debited"
+REQUEST_USAGE_HEADERS = {
+    "input_tokens": "X-SIE-Units-Input-Tokens",
+    "pairs": "X-SIE-Units-Pairs",
+    "images": "X-SIE-Units-Images",
+    "pages": "X-SIE-Units-Pages",
+    "output_tokens": "X-SIE-Units-Output-Tokens",
+    "audio_ms": "X-SIE-Units-Audio-Ms",
+}
+_MAX_REQUEST_ID_LENGTH = 256
+_MAX_METER_VALUE = (1 << 64) - 1
 
 
 def get_sdk_version() -> str:
@@ -412,6 +594,101 @@ def _header_value(headers: Any, name: str) -> Any:
     return value
 
 
+def _parse_nonnegative_meter_header(headers: Any, name: str) -> int | None:
+    value = _header_value(headers, name)
+    if (
+        not isinstance(value, str)
+        or not value.isascii()
+        or not value.isdigit()
+        or (len(value) > 1 and value.startswith("0"))
+    ):
+        return None
+    parsed = int(value)
+    return parsed if parsed <= _MAX_METER_VALUE else None
+
+
+def parse_request_metadata(headers: Any) -> RequestMetadata | None:
+    """Parse optional metadata from one terminal response.
+
+    Malformed fields are omitted independently. Integer meter headers must be
+    canonical non-negative unsigned decimal values; request ids must be
+    non-empty visible ASCII without surrounding whitespace. If no valid fields
+    remain, no metadata is attached.
+    """
+    metadata: RequestMetadata = {}
+
+    request_id = _header_value(headers, REQUEST_ID_HEADER)
+    if (
+        isinstance(request_id, str)
+        and 0 < len(request_id) <= _MAX_REQUEST_ID_LENGTH
+        and request_id == request_id.strip()
+        and request_id.isascii()
+        and request_id.isprintable()
+    ):
+        metadata["id"] = request_id
+
+    usage: RequestUsage = {}
+    input_tokens = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["input_tokens"])
+    pairs = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["pairs"])
+    images = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["images"])
+    pages = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["pages"])
+    output_tokens = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["output_tokens"])
+    audio_ms = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["audio_ms"])
+    if input_tokens is not None:
+        usage["input_tokens"] = input_tokens
+    if pairs is not None:
+        usage["pairs"] = pairs
+    if images is not None:
+        usage["images"] = images
+    if pages is not None:
+        usage["pages"] = pages
+    if output_tokens is not None:
+        usage["output_tokens"] = output_tokens
+    if audio_ms is not None:
+        usage["audio_ms"] = audio_ms
+    if usage:
+        metadata["usage"] = usage
+
+    credits_debited = _parse_nonnegative_meter_header(headers, CREDITS_DEBITED_HEADER)
+    if credits_debited is not None:
+        metadata["credits_debited"] = credits_debited
+
+    execution_identity_sha256 = _header_value(headers, EXECUTION_IDENTITY_SHA256_HEADER)
+    if (
+        isinstance(execution_identity_sha256, str)
+        and len(execution_identity_sha256) == 64
+        and all(char in "0123456789abcdef" for char in execution_identity_sha256)
+    ):
+        metadata["execution_identity_sha256"] = execution_identity_sha256
+
+    return metadata or None
+
+
+def parse_terminal_json_object(response: _HttpResponse, *, owner: str) -> dict[str, Any]:
+    """Parse one terminal JSON object while retaining response metering evidence."""
+    request = parse_request_metadata(response.headers)
+    try:
+        data = response.json()
+    except (TypeError, ValueError) as exc:
+        raise RequestError(f"Malformed {owner} JSON response", request=request) from exc
+    if not isinstance(data, dict):
+        msg = f"Unexpected {owner} response shape: {type(data).__name__}"
+        raise RequestError(msg, request=request)
+    return data
+
+
+def attach_request_metadata(results: Sequence[Any], headers: Any) -> None:
+    """Attach detached request-scoped metadata to one or more results."""
+    metadata = parse_request_metadata(headers)
+    if metadata is None:
+        return
+    for result in results:
+        detached = dict(metadata)
+        if "usage" in metadata:
+            detached["usage"] = dict(metadata["usage"])
+        result["request"] = detached
+
+
 def normalize_error_code(code: str | None) -> str | None:
     if code == "provisioning":
         return PROVISIONING_ERROR_CODE
@@ -516,6 +793,7 @@ def raise_if_model_load_failed(response: _HttpResponse, model: str | None = None
         error_class=str(error_class) if error_class is not None else None,
         permanent=permanent,
         attempts=attempts,
+        request=parse_request_metadata(response.headers),
     )
 
 
@@ -543,7 +821,7 @@ def raise_if_input_too_long(response: _HttpResponse, model: str | None = None) -
     if detail.get("code") != INPUT_TOO_LONG_ERROR_CODE:
         return
     message = str(detail.get("message") or "Input exceeds the model's maximum token capacity")
-    raise InputTooLongError(message, model=model)
+    raise InputTooLongError(message, model=model, request=parse_request_metadata(response.headers))
 
 
 def handle_error(response: _HttpResponse) -> None:
@@ -588,15 +866,17 @@ def handle_error(response: _HttpResponse) -> None:
     else:
         code = normalize_error_code(code)
 
+    request = parse_request_metadata(response.headers)
+
     # Fallback dispatch — ``model`` is only attached by the helper-style
     # short-circuit (``raise_if_input_too_long``) on the extract path.
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == PROVISIONING_ERROR_CODE:
         raise ProvisioningError(message, retry_after=get_retry_after(response))
     if response.status_code == HTTP_CLIENT_ERROR and code == INPUT_TOO_LONG_ERROR_CODE:
-        raise InputTooLongError(message)
+        raise InputTooLongError(message, request=request)
     if response.status_code >= HTTP_SERVER_ERROR:
-        raise ServerError(message, code=code, status_code=response.status_code)
-    raise RequestError(message, code=code, status_code=response.status_code)
+        raise ServerError(message, code=code, status_code=response.status_code, request=request)
+    raise RequestError(message, code=code, status_code=response.status_code, request=request)
 
 
 def provisioning_retry_delay(
@@ -677,7 +957,12 @@ def next_stream_retry_delay(
         if code == RESOURCE_EXHAUSTED_ERROR_CODE:
             if not wait_for_capacity or oom_retries >= max_oom_retries or elapsed >= timeout:
                 msg = f"Server out of memory after {oom_retries} retries for '{model}'"
-                raise ResourceExhaustedError(msg, model=model, retries=oom_retries)
+                raise ResourceExhaustedError(
+                    msg,
+                    model=model,
+                    retries=oom_retries,
+                    request=parse_request_metadata(response.headers),
+                )
             delay = compute_oom_backoff(get_retry_after(response), oom_retries)
             return min(delay, timeout - elapsed), oom_retries + 1
 
@@ -687,7 +972,12 @@ def next_stream_retry_delay(
             "a worker may already be generating. Not retried because generation is "
             "non-idempotent (retrying could double-bill)."
         )
-        raise ServerError(msg, code=get_error_code(response), status_code=status)
+        raise ServerError(
+            msg,
+            code=get_error_code(response),
+            status_code=status,
+            request=parse_request_metadata(response.headers),
+        )
 
     if status >= HTTP_CLIENT_ERROR:
         handle_error(response)  # always raises
@@ -695,7 +985,12 @@ def next_stream_retry_delay(
     # A non-200, non-error status with no retry rule — surface rather than
     # silently treat as streamable.
     msg = f"Unexpected status {status} opening stream"
-    raise ServerError(msg, code=get_error_code(response), status_code=status)
+    raise ServerError(
+        msg,
+        code=get_error_code(response),
+        status_code=status,
+        request=parse_request_metadata(response.headers),
+    )
 
 
 def build_chat_body(
@@ -773,6 +1068,36 @@ def build_chat_body(
     body.update({key: value for key, value in optional.items() if value is not None})
     if extra_body:
         body.update(extra_body)
+    return body
+
+
+def build_responses_body(
+    model: str,
+    input: str | Sequence[Mapping[str, Any]],
+    *,
+    max_output_tokens: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Assemble the strict, non-streaming ``/v1/responses`` request body.
+
+    The gateway's Responses MVP is stateless, text-only, and non-streaming.
+    Keeping this builder typed to the complete public OpenAPI allow-list
+    prevents SDK callers from accidentally relying on wider parser behavior or
+    OpenAI fields that the gateway contract does not expose.
+    """
+    body: dict[str, Any] = {
+        "model": model,
+        "input": input if isinstance(input, str) else list(input),
+    }
+    optional: dict[str, Any] = {
+        "max_output_tokens": max_output_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "seed": seed,
+    }
+    body.update({key: value for key, value in optional.items() if value is not None})
     return body
 
 
@@ -872,7 +1197,13 @@ def parse_encode_results(items: list[dict[str, Any]]) -> list[EncodeResult]:
     return results
 
 
-def validate_encode_result_count(results: list[EncodeResult], expected: int, model: str) -> None:
+def validate_encode_result_count(
+    results: list[EncodeResult],
+    expected: int,
+    model: str,
+    *,
+    request: RequestMetadata | None = None,
+) -> None:
     """Guard the encode contract: exactly one result per input item.
 
     Encode is positional — callers rely on a 1:1 input↔output correspondence:
@@ -906,7 +1237,7 @@ def validate_encode_result_count(results: list[EncodeResult], expected: int, mod
             f"exactly one per input. An input may have failed server-side "
             f"(e.g. exceeding the model's max_sequence_length) and been dropped from the batch."
         )
-        raise ServerError(msg, code="ENCODE_RESULT_COUNT_MISMATCH")
+        raise ServerError(msg, code="ENCODE_RESULT_COUNT_MISMATCH", request=request)
 
 
 def parse_score_result(data: dict[str, Any]) -> ScoreResult:
@@ -924,6 +1255,8 @@ def parse_score_result(data: dict[str, Any]) -> ScoreResult:
     }
     if data.get("query_id") is not None:
         result["query_id"] = data["query_id"]
+    if data.get("usage") is not None:
+        result["usage"] = data["usage"]
     return result
 
 
@@ -966,6 +1299,14 @@ def parse_extract_results(items: list[dict[str, Any]]) -> list[ExtractResult]:
             result["id"] = item["id"]
         if item.get("data"):
             result["data"] = item["data"]
+        error = item.get("error")
+        if error is not None:
+            code = error.get("code") if isinstance(error, Mapping) else None
+            message = error.get("message") if isinstance(error, Mapping) else None
+            if not isinstance(code, str) or not code.strip() or not isinstance(message, str) or not message.strip():
+                code = _MALFORMED_EXTRACT_ERROR_CODE
+                message = _MALFORMED_EXTRACT_ERROR_MESSAGE
+            result["error"] = ExtractItemErrorDetail(code=code, message=message)
 
         results.append(result)
 

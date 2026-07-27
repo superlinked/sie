@@ -27,21 +27,27 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::backend::{AdapterWorkerPool, BackendError, SharedBackend};
-use crate::batch_cancel::BatchCancelState;
+use crate::batch_cancel::{BatchCancelState, RequestCancelState};
 use crate::config_subscriber::ConfigApplyState;
 use crate::delivery::Delivery;
 use crate::ipc_client::IpcError;
 use crate::ipc_types::{
-    BatchOutcome, Disposition, EncodeBatchItem, ExtractBatchItem, GenerateEvent, ItemOutcome,
-    PreparedTokens, ProcessEncodeBatchRequest, ProcessExtractBatchRequest, ProcessGenerateRequest,
-    ProcessScoreBatchRequest, ReadinessState, RunBatchRequest, ScoreBatchItem,
+    BatchOutcome, BatchedF16MultivectorOutput, Disposition, EncodeBatchItem, ExtractBatchItem,
+    GenerateEvent, ItemOutcome, PreparedAudioPcm16, PreparedTokens, ProcessEncodeBatchRequest,
+    ProcessExtractBatchRequest, ProcessGenerateRequest, ProcessScoreBatchRequest, ReadinessState,
+    RunBatchRequest, ScoreBatchItem,
 };
 use crate::latency::LatencyTracker;
 use crate::log_util::ErrChain;
-use crate::metrics::MetricsRegistry;
+use crate::observability::metrics::SchedulerRequestBatchObservation;
 use crate::payload_store::{PayloadError, PayloadStore};
 use crate::pool_admission::PoolAdmissionGate;
-use crate::publisher::{shape_and_build_work_result, should_publish, Timings, WorkPublisher};
+use crate::prep::media::{validate_item_media, MediaValidationError};
+use crate::publisher::{
+    shape_and_build_work_result, shape_batched_f16_multivector_outcome, should_publish,
+    PublishResultContext, Timings, WorkPublisher,
+};
+use crate::runtime_state::{RuntimeGauge, RuntimeState};
 use crate::scheduler::{
     lora_from_options, HasCost, LoraKey, Op as SchedOp, ProductionScheduler,
     ProductionSchedulerRegistry, SchedulerItem, SchedulerMeta,
@@ -50,6 +56,7 @@ use crate::shutdown::Shutdown;
 use crate::subject::{extract_model_id, is_worker_direct_work_subject};
 use crate::tokenize::TokenizerRegistry;
 use crate::work_types::WorkItem;
+use half::f16;
 
 const MODEL_LOADING_ERROR_CODE: &str = "MODEL_LOADING";
 /// Terminal, non-retryable model-load failure. Emitted on the `WorkResult`
@@ -61,6 +68,27 @@ const MODEL_LOADING_ERROR_CODE: &str = "MODEL_LOADING";
 /// constant `sie_gateway::handlers::proxy::MODEL_LOAD_FAILED_ERROR_CODE` and
 /// the Python `ErrorCode.MODEL_LOAD_FAILED`.
 const MODEL_LOAD_FAILED_ERROR_CODE: &str = "MODEL_LOAD_FAILED";
+const INVALID_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
+const PAYLOAD_TOO_LARGE_ERROR_CODE: &str = "PAYLOAD_TOO_LARGE";
+const PAYLOAD_ERROR_CODE: &str = "payload_error";
+const PAYLOAD_RESOLVE_ERROR_MESSAGE: &str = "failed to resolve item";
+const PAYLOAD_TOO_LARGE_MESSAGE: &str = "referenced payload exceeds the worker size limit";
+
+fn payload_error_contract(error: &PayloadError) -> (&'static str, &'static str) {
+    match error {
+        PayloadError::TooLarge { .. } => (PAYLOAD_TOO_LARGE_ERROR_CODE, PAYLOAD_TOO_LARGE_MESSAGE),
+        _ => (PAYLOAD_ERROR_CODE, PAYLOAD_RESOLVE_ERROR_MESSAGE),
+    }
+}
+
+type ResolvedWorkItem = (WorkItem, Delivery, f64, Option<String>);
+
+#[derive(Debug, Clone, Copy)]
+struct BatchedF16MultivectorSlice<'a> {
+    values_f16: &'a [f16],
+    num_tokens: u32,
+    token_dims: u32,
+}
 
 #[derive(serde::Serialize)]
 struct GenerateTerminalErrorChunk<'a> {
@@ -216,6 +244,15 @@ fn msg_as_str(value: &MsgValue) -> Option<&str> {
     }
 }
 
+/// Extract the optional caller id from a resolved encode item. This runs after
+/// payload-store fetch, so inline and offloaded inputs preserve the same echo
+/// contract without retaining or cloning the full resolved payload.
+fn caller_item_id_from_value(value: &MsgValue) -> Option<String> {
+    msg_map_get(value, "id")
+        .and_then(msg_as_str)
+        .map(str::to_string)
+}
+
 /// True if `reply_subject` is acceptable for use on a `WorkItem`.
 /// Empty is allowed (fire-and-forget). Non-empty subjects must start
 /// with `_INBOX.` so malicious producers can't redirect results.
@@ -254,6 +291,66 @@ where
         .collect()
 }
 
+fn index_batched_f16_multivectors<'a>(
+    batches: &'a [BatchedF16MultivectorOutput],
+) -> HashMap<&'a str, Result<BatchedF16MultivectorSlice<'a>, String>> {
+    let item_count = batches.iter().map(|batch| batch.items.len()).sum();
+    let mut indexed = HashMap::with_capacity(item_count);
+    for batch in batches {
+        for item in &batch.items {
+            let entry = batched_f16_multivector_slice(batch, item);
+            if indexed.insert(item.work_item_id.as_str(), entry).is_some() {
+                indexed.insert(
+                    item.work_item_id.as_str(),
+                    Err("duplicate batched f16 multivector work_item_id".to_string()),
+                );
+            }
+        }
+    }
+    indexed
+}
+
+fn batched_f16_multivector_slice<'a>(
+    batch: &'a BatchedF16MultivectorOutput,
+    item: &'a crate::ipc_types::BatchedF16MultivectorItem,
+) -> Result<BatchedF16MultivectorSlice<'a>, String> {
+    let byte_offset = usize::try_from(item.byte_offset)
+        .map_err(|_| "batched f16 multivector offset exceeds platform range".to_string())?;
+    let byte_len = usize::try_from(item.byte_len)
+        .map_err(|_| "batched f16 multivector length exceeds platform range".to_string())?;
+    if !byte_offset.is_multiple_of(std::mem::size_of::<f16>())
+        || !byte_len.is_multiple_of(std::mem::size_of::<f16>())
+    {
+        return Err("batched f16 multivector range is not f16-aligned".to_string());
+    }
+    let end = byte_offset
+        .checked_add(byte_len)
+        .ok_or_else(|| "batched f16 multivector byte range overflow".to_string())?;
+    let value_offset = byte_offset / std::mem::size_of::<f16>();
+    let value_end = end / std::mem::size_of::<f16>();
+    let values_f16 = batch
+        .values_f16
+        .0
+        .get(value_offset..value_end)
+        .ok_or_else(|| "batched f16 multivector byte range exceeds buffer".to_string())?;
+    Ok(BatchedF16MultivectorSlice {
+        values_f16,
+        num_tokens: item.num_tokens,
+        token_dims: item.token_dims,
+    })
+}
+
+fn batched_f16_multivector_error_outcome(outcome: &ItemOutcome, message: &str) -> ItemOutcome {
+    ItemOutcome {
+        disposition: Disposition::PublishErrorAndAck,
+        result_msgpack: Vec::new(),
+        error: Some(format!("batched f16 multivector: {message}")),
+        error_code: Some("raw_output_shape_error".to_string()),
+        raw_output: None,
+        ..outcome.clone()
+    }
+}
+
 /// Fallback per-model batch budget when the Python side doesn't report
 /// one on EnsureModelReady (for example, while the model is not loaded).
 /// Reads `SIE_NATS_FETCH_BUDGET` (default
@@ -283,6 +380,16 @@ pub fn default_max_concurrent_batches() -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(4)
+}
+
+/// Process-wide cap on concurrent CPU audio decodes. One worst-case decode
+/// can transiently hold about 230 MiB, so the conservative default is one.
+fn default_audio_prep_permits() -> usize {
+    std::env::var("SIE_AUDIO_PREP_PERMITS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1)
 }
 
 #[derive(Debug, Error)]
@@ -364,7 +471,7 @@ pub struct Dispatcher {
     /// Stable worker id stamped on locally-delivered `WorkResult`s. Same
     /// value the NATS `WorkPublisher` stamps on its results.
     pub worker_id: String,
-    pub metrics: Arc<MetricsRegistry>,
+    pub runtime_state: Arc<RuntimeState>,
     /// Rolling latency tracker shared with the pull loop. On every
     /// successful publish we record `inference_ms + postprocess_ms`
     /// (default) or `queue_ms + inference_ms + postprocess_ms` when
@@ -374,6 +481,9 @@ pub struct Dispatcher {
     /// Caps concurrent model-group processing. Acquired once per group,
     /// held for the lifetime of the encode/score/extract fan-out.
     pub batch_semaphore: Arc<Semaphore>,
+    /// Bounds the largest CPU allocation path independently of batch fan-out.
+    /// One 12-minute 48 kHz decode can transiently hold about 230 MiB.
+    audio_prep_semaphore: Arc<Semaphore>,
     /// Rust-side tokenizer registry. Always present; an empty
     /// registry means "no model has registered a tokeniser yet" and
     /// every `get(model_id)` returns `None`, which collapses the
@@ -413,6 +523,7 @@ pub struct Dispatcher {
     pub scheduler_drain_handles: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     pub generation_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     pub batch_cancel_state: BatchCancelState,
+    pub request_cancel_state: RequestCancelState,
 }
 
 impl Dispatcher {
@@ -435,7 +546,7 @@ impl Dispatcher {
         payload_store: Arc<dyn PayloadStore>,
         publisher: Option<Arc<WorkPublisher>>,
         worker_id: String,
-        metrics: Arc<MetricsRegistry>,
+        runtime_state: Arc<RuntimeState>,
         latency_tracker: Arc<Mutex<LatencyTracker>>,
         tokenizer_registry: Arc<TokenizerRegistry>,
         scheduler_registry: Option<Arc<ProductionSchedulerRegistry>>,
@@ -443,6 +554,7 @@ impl Dispatcher {
         config_apply_state: Option<Arc<ConfigApplyState>>,
         pool_admission: Option<Arc<PoolAdmissionGate>>,
         batch_cancel_state: BatchCancelState,
+        request_cancel_state: RequestCancelState,
     ) -> Self {
         debug_assert_eq!(
             scheduler_registry.is_some(),
@@ -455,9 +567,10 @@ impl Dispatcher {
             payload_store,
             publisher,
             worker_id,
-            metrics,
+            runtime_state,
             latency_tracker,
             batch_semaphore: Arc::new(Semaphore::new(default_max_concurrent_batches())),
+            audio_prep_semaphore: Arc::new(Semaphore::new(default_audio_prep_permits())),
             tokenizer_registry,
             scheduler_registry,
             shutdown,
@@ -466,6 +579,7 @@ impl Dispatcher {
             scheduler_drain_handles: Arc::new(Mutex::new(HashMap::new())),
             generation_handles: Arc::new(Mutex::new(Vec::new())),
             batch_cancel_state,
+            request_cancel_state,
         }
     }
 }
@@ -477,31 +591,108 @@ impl Dispatcher {
             .map(|state| state.current_bundle_config_hash())
     }
 
-    fn is_cancelled_worker_direct_batch(
+    fn verified_execution_hash<'a>(&self, wi: &'a WorkItem) -> Option<&'a str> {
+        self.config_apply_state
+            .as_ref()
+            .filter(|state| state.accepts_bundle_config_hash(&wi.bundle_config_hash))
+            .and_then(|_| {
+                (!wi.bundle_config_hash.is_empty()).then_some(wi.bundle_config_hash.as_str())
+            })
+    }
+
+    fn cancellation_for(
         &self,
+        router_id: &str,
         request_id: &str,
         operation: &str,
         worker_direct: bool,
-    ) -> bool {
-        worker_direct && operation != "generate" && self.batch_cancel_state.is_cancelled(request_id)
+    ) -> Option<WorkCancellation> {
+        classify_cancellation(
+            &self.request_cancel_state,
+            &self.batch_cancel_state,
+            router_id,
+            request_id,
+            operation,
+            worker_direct,
+        )
     }
 
-    async fn ack_cancelled_worker_direct_batch(&self, wi: &WorkItem, delivery: &Delivery) {
+    async fn settle_if_cancelled(
+        &self,
+        wi: &WorkItem,
+        delivery: &Delivery,
+        stage: &'static str,
+    ) -> bool {
+        let Some(scope) = self.cancellation_for(
+            &wi.router_id,
+            &wi.request_id,
+            &wi.operation,
+            delivery.worker_direct(),
+        ) else {
+            return false;
+        };
         debug!(
             request_id = %wi.request_id,
             work_item_id = %wi.work_item_id,
             operation = %wi.operation,
             origin = %delivery.log_ref(),
-            "batch-direct: ACKing cancelled worker-direct item"
+            cancellation_scope = scope.as_str(),
+            stage,
+            "ACKing abandoned work item"
         );
-        match ack(delivery).await {
-            Ok(()) => self.metrics.messages_acked_total.inc(),
+        match ack(delivery, &self.runtime_state.telemetry).await {
+            Ok(()) => {}
             Err(e) => {
-                warn!(error = %e, "ack failed on cancelled worker-direct batch item");
-                self.metrics.jetstream_ack_failures_total.inc();
+                warn!(error = %e, stage, "ack failed on abandoned work item");
             }
         }
+        true
     }
+
+    async fn retain_uncancelled(
+        &self,
+        items: Vec<(WorkItem, Delivery)>,
+        stage: &'static str,
+    ) -> Vec<(WorkItem, Delivery)> {
+        let mut retained = Vec::with_capacity(items.len());
+        for (wi, delivery) in items {
+            if self.settle_if_cancelled(&wi, &delivery, stage).await {
+                continue;
+            }
+            retained.push((wi, delivery));
+        }
+        retained
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkCancellation {
+    Request,
+    BatchDirect,
+}
+
+impl WorkCancellation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::BatchDirect => "batch_direct",
+        }
+    }
+}
+
+fn classify_cancellation(
+    request_state: &RequestCancelState,
+    batch_state: &BatchCancelState,
+    router_id: &str,
+    request_id: &str,
+    operation: &str,
+    worker_direct: bool,
+) -> Option<WorkCancellation> {
+    if operation != "generate" && request_state.is_cancelled(router_id, request_id) {
+        return Some(WorkCancellation::Request);
+    }
+    (worker_direct && operation != "generate" && batch_state.is_cancelled(request_id))
+        .then_some(WorkCancellation::BatchDirect)
 }
 
 fn unknown_bundle_config_hash<'a>(
@@ -545,9 +736,6 @@ impl Dispatcher {
     pub(crate) async fn handle_batch(self: &Arc<Self>, messages: Vec<QueuedMessage>) {
         let batch_started = Instant::now();
         let batch_size = messages.len();
-        self.metrics
-            .messages_received_total
-            .inc_by(batch_size as u64);
         info!(batch_size, "handle_batch: start");
 
         let base_delay_ms = base_nak_delay_ms();
@@ -557,22 +745,9 @@ impl Dispatcher {
             // reject path below settles (ACK/NAK) and drops it immediately,
             // and successful decodes carry it until downstream settlement.
             let (msg, admission_permit) = queued.into_parts();
-            // Record JetStream delivery count so operators can spot hot
-            // redelivery (which usually means a worker is hitting ack_wait).
-            // `info()` returns Ok for pull-based messages; core NATS messages
-            // in tests return Err and are quietly skipped.
-            if let Ok(info) = msg.info() {
-                // Operation is part of the WorkItem, not the subject; use
-                // "all" here and rely on `sie_pull_loop_batch_process_seconds`
-                // (already labelled by operation) for per-op breakdowns.
-                self.metrics
-                    .nats_deliver_count
-                    .with_label_values(&["all"])
-                    .observe(info.delivered as f64);
-                if info.delivered > 1 {
-                    self.metrics.nats_redelivery_total.inc();
-                }
-            }
+            self.runtime_state
+                .telemetry
+                .nats_received(msg.info().ok().map(|info| info.delivered as u64));
             // Source of truth for routing is the NATS subject (JetStream
             // already used it to dispatch to this consumer). If the subject
             // doesn't yield a model_id, we can't trust the payload either,
@@ -587,7 +762,7 @@ impl Dispatcher {
                     nak_one(
                         &Delivery::Nats(msg, admission_permit),
                         base_delay_ms,
-                        &self.metrics,
+                        &self.runtime_state.telemetry,
                     )
                     .await;
                     continue;
@@ -603,26 +778,21 @@ impl Dispatcher {
                             reply_subject = %truncate(&wi.reply_subject, 60),
                             "rejecting WorkItem with suspicious reply_subject — ACKing to drop",
                         );
-                        match ack(&Delivery::Nats(msg, admission_permit)).await {
-                            Ok(()) => self.metrics.messages_acked_total.inc(),
+                        match ack(
+                            &Delivery::Nats(msg, admission_permit),
+                            &self.runtime_state.telemetry,
+                        )
+                        .await
+                        {
+                            Ok(()) => {}
                             Err(e) => {
                                 warn!(error = %e, "ack failed on drop");
-                                self.metrics.jetstream_ack_failures_total.inc();
                             }
                         }
                         continue;
                     }
-                    let worker_direct = is_worker_direct_work_subject(&msg.subject);
-                    if self.is_cancelled_worker_direct_batch(
-                        &wi.request_id,
-                        &wi.operation,
-                        worker_direct,
-                    ) {
-                        self.ack_cancelled_worker_direct_batch(
-                            &wi,
-                            &Delivery::Nats(msg, admission_permit),
-                        )
-                        .await;
+                    let delivery = Delivery::Nats(msg, admission_permit);
+                    if self.settle_if_cancelled(&wi, &delivery, "intake").await {
                         continue;
                     }
                     if let Some(gate) = self.pool_admission.as_ref() {
@@ -635,14 +805,11 @@ impl Dispatcher {
                                 physical_pool = %wi.pool_name,
                                 "WorkItem admission_pool does not assign this worker — NAKing for redelivery"
                             );
-                            self.metrics
-                                .pool_admission_naks_total
-                                .with_label_values(&["logical_pool_not_assigned"])
-                                .inc();
-                            nak_one(
-                                &Delivery::Nats(msg, admission_permit),
+                            nak_one_with_reason(
+                                &delivery,
                                 base_delay_ms,
-                                &self.metrics,
+                                &self.runtime_state.telemetry,
+                                "pool_not_assigned",
                             )
                             .await;
                             continue;
@@ -651,14 +818,14 @@ impl Dispatcher {
                     if wi.model_id != subject_model {
                         warn!(
                             work_item_id = %wi.work_item_id,
-                            subject = %msg.subject,
+                            origin = %delivery.log_ref(),
                             wi_model_id = %wi.model_id,
                             subject_model_id = %subject_model,
                             "WorkItem.model_id disagrees with subject — trusting subject",
                         );
                         wi.model_id = subject_model;
                     }
-                    decoded.push((wi, Delivery::Nats(msg, admission_permit)));
+                    decoded.push((wi, delivery));
                 }
                 Err(e) => {
                     // NAK so JetStream redelivers (possibly to a worker on a
@@ -669,7 +836,7 @@ impl Dispatcher {
                     nak_one(
                         &Delivery::Nats(msg, admission_permit),
                         base_delay_ms,
-                        &self.metrics,
+                        &self.runtime_state.telemetry,
                     )
                     .await;
                 }
@@ -758,11 +925,11 @@ impl Dispatcher {
                 };
                 let count_model_group_inflight = this.scheduler_registry.is_none();
                 if count_model_group_inflight {
-                    this.metrics.inflight_batches.inc();
+                    this.runtime_state.inflight_batches.inc();
                 }
                 let result = this.handle_model_group(&model_id, items).await;
                 if count_model_group_inflight {
-                    this.metrics.inflight_batches.dec();
+                    this.runtime_state.inflight_batches.dec();
                 }
                 drop(permit);
                 if let Err(e) = result {
@@ -792,13 +959,9 @@ impl Dispatcher {
 
     async fn handle_generate_item(self: Arc<Self>, mut wi: WorkItem, msg: QueuedMessage) {
         let model_id = wi.model_id.clone();
+        let profile_id =
+            (!wi.profile_id.trim().is_empty()).then(|| wi.profile_id.trim().to_string());
         let delivery = DeliveryContext::from_message(&msg);
-        let model_lbl = self.metrics.model_label(&model_id).into_owned();
-        let _timer = self
-            .metrics
-            .pull_batch_process_seconds
-            .with_label_values(&[&model_lbl, "generate"])
-            .start_timer();
         let base_delay_ms = base_nak_delay_ms();
         info!(
             work_item_id = %wi.work_item_id,
@@ -832,7 +995,12 @@ impl Dispatcher {
                     error = %ErrChain(&e),
                     "EnsureModelReady failed for generate — NAKing"
                 );
-                nak_msg(&msg, nak_delay_for_backend_error(&e), &self.metrics).await;
+                nak_msg(
+                    &msg,
+                    nak_delay_for_backend_error(&e),
+                    &self.runtime_state.telemetry,
+                )
+                .await;
                 return;
             }
         };
@@ -859,19 +1027,25 @@ impl Dispatcher {
                     .publish_generate_terminal_error(&wi, MODEL_LOADING_ERROR_CODE, &message)
                     .await
                 {
-                    Ok(_) => match ack_msg(&msg).await {
-                        Ok(()) => {
-                            self.metrics.messages_acked_total.inc();
-                            self.metrics
-                                .generate_model_loading_responses_total
-                                .with_label_values(&[
-                                    &model_lbl,
-                                    "loading_started",
-                                    "published_acked",
-                                ])
-                                .inc();
-                        }
+                    Ok(_) => match ack_msg(&msg, &self.runtime_state.telemetry).await {
+                        Ok(()) => self
+                            .runtime_state
+                            .telemetry
+                            .generation_model_loading_response(
+                                &model_id,
+                                profile_id.as_deref(),
+                                "loading_started",
+                                "success",
+                            ),
                         Err(e) => {
+                            self.runtime_state
+                                .telemetry
+                                .generation_model_loading_response(
+                                    &model_id,
+                                    profile_id.as_deref(),
+                                    "loading_started",
+                                    "ack_error",
+                                );
                             warn!(
                                 work_item_id = %wi.work_item_id,
                                 request_id = %wi.request_id,
@@ -881,23 +1055,18 @@ impl Dispatcher {
                                 error = %e,
                                 "ack after MODEL_LOADING chunk publish failed"
                             );
-                            self.metrics.jetstream_ack_failures_total.inc();
-                            self.metrics
-                                .generate_model_loading_responses_total
-                                .with_label_values(&[
-                                    &model_lbl,
-                                    "loading_started",
-                                    "published_ack_failed",
-                                ])
-                                .inc();
                         }
                     },
                     Err(_) => {
-                        self.metrics
-                            .generate_model_loading_responses_total
-                            .with_label_values(&[&model_lbl, "loading_started", "publish_failed"])
-                            .inc();
-                        nak_msg(&msg, base_delay_ms, &self.metrics).await;
+                        self.runtime_state
+                            .telemetry
+                            .generation_model_loading_response(
+                                &model_id,
+                                profile_id.as_deref(),
+                                "loading_started",
+                                "publish_error",
+                            );
+                        nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
                     }
                 }
                 return;
@@ -918,7 +1087,7 @@ impl Dispatcher {
                     pending = delivery.pending,
                     "generate model retry requested — NAKing"
                 );
-                nak_msg(&msg, base_delay_ms, &self.metrics).await;
+                nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
                 return;
             }
             ReadinessState::LoadingInProgress => {
@@ -944,19 +1113,25 @@ impl Dispatcher {
                     .publish_generate_terminal_error(&wi, MODEL_LOADING_ERROR_CODE, &message)
                     .await
                 {
-                    Ok(_) => match ack_msg(&msg).await {
-                        Ok(()) => {
-                            self.metrics.messages_acked_total.inc();
-                            self.metrics
-                                .generate_model_loading_responses_total
-                                .with_label_values(&[
-                                    &model_lbl,
-                                    "loading_in_progress",
-                                    "published_acked",
-                                ])
-                                .inc();
-                        }
+                    Ok(_) => match ack_msg(&msg, &self.runtime_state.telemetry).await {
+                        Ok(()) => self
+                            .runtime_state
+                            .telemetry
+                            .generation_model_loading_response(
+                                &model_id,
+                                profile_id.as_deref(),
+                                "loading_in_progress",
+                                "success",
+                            ),
                         Err(e) => {
+                            self.runtime_state
+                                .telemetry
+                                .generation_model_loading_response(
+                                    &model_id,
+                                    profile_id.as_deref(),
+                                    "loading_in_progress",
+                                    "ack_error",
+                                );
                             warn!(
                                 work_item_id = %wi.work_item_id,
                                 request_id = %wi.request_id,
@@ -966,27 +1141,18 @@ impl Dispatcher {
                                 error = %e,
                                 "ack after MODEL_LOADING chunk publish failed"
                             );
-                            self.metrics.jetstream_ack_failures_total.inc();
-                            self.metrics
-                                .generate_model_loading_responses_total
-                                .with_label_values(&[
-                                    &model_lbl,
-                                    "loading_in_progress",
-                                    "published_ack_failed",
-                                ])
-                                .inc();
                         }
                     },
                     Err(_) => {
-                        self.metrics
-                            .generate_model_loading_responses_total
-                            .with_label_values(&[
-                                &model_lbl,
+                        self.runtime_state
+                            .telemetry
+                            .generation_model_loading_response(
+                                &model_id,
+                                profile_id.as_deref(),
                                 "loading_in_progress",
-                                "publish_failed",
-                            ])
-                            .inc();
-                        nak_msg(&msg, delay_ms, &self.metrics).await;
+                                "publish_error",
+                            );
+                        nak_msg(&msg, delay_ms, &self.runtime_state.telemetry).await;
                     }
                 }
                 return;
@@ -1016,15 +1182,25 @@ impl Dispatcher {
                     .publish_generate_terminal_error(&wi, MODEL_LOAD_FAILED_ERROR_CODE, &message)
                     .await
                 {
-                    Ok(_) => match ack_msg(&msg).await {
-                        Ok(()) => {
-                            self.metrics.messages_acked_total.inc();
-                            self.metrics
-                                .generate_model_loading_responses_total
-                                .with_label_values(&[&model_lbl, "failed", "published_acked"])
-                                .inc();
-                        }
+                    Ok(_) => match ack_msg(&msg, &self.runtime_state.telemetry).await {
+                        Ok(()) => self
+                            .runtime_state
+                            .telemetry
+                            .generation_model_loading_response(
+                                &model_id,
+                                profile_id.as_deref(),
+                                "failed",
+                                "success",
+                            ),
                         Err(e) => {
+                            self.runtime_state
+                                .telemetry
+                                .generation_model_loading_response(
+                                    &model_id,
+                                    profile_id.as_deref(),
+                                    "failed",
+                                    "ack_error",
+                                );
                             warn!(
                                 work_item_id = %wi.work_item_id,
                                 request_id = %wi.request_id,
@@ -1034,22 +1210,21 @@ impl Dispatcher {
                                 error = %e,
                                 "ack after MODEL_LOAD_FAILED chunk publish failed"
                             );
-                            self.metrics.jetstream_ack_failures_total.inc();
-                            self.metrics
-                                .generate_model_loading_responses_total
-                                .with_label_values(&[&model_lbl, "failed", "published_ack_failed"])
-                                .inc();
                         }
                     },
                     Err(_) => {
-                        self.metrics
-                            .generate_model_loading_responses_total
-                            .with_label_values(&[&model_lbl, "failed", "publish_failed"])
-                            .inc();
+                        self.runtime_state
+                            .telemetry
+                            .generation_model_loading_response(
+                                &model_id,
+                                profile_id.as_deref(),
+                                "failed",
+                                "publish_error",
+                            );
                         // Terminal failure but the publish itself failed: NAK
                         // so redelivery can retry surfacing the typed error
                         // rather than silently dropping the client's request.
-                        nak_msg(&msg, base_delay_ms, &self.metrics).await;
+                        nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
                     }
                 }
                 return;
@@ -1093,8 +1268,8 @@ impl Dispatcher {
                             )
                             .await
                         {
-                            Ok(_) => match ack_msg(&msg).await {
-                                Ok(()) => self.metrics.messages_acked_total.inc(),
+                            Ok(_) => match ack_msg(&msg, &self.runtime_state.telemetry).await {
+                                Ok(()) => {}
                                 Err(e) => {
                                     warn!(
                                         work_item_id = %wi.work_item_id,
@@ -1105,15 +1280,44 @@ impl Dispatcher {
                                         error = %e,
                                         "ack after offload-decode error failed"
                                     );
-                                    self.metrics.jetstream_ack_failures_total.inc();
                                 }
                             },
-                            Err(_) => nak_msg(&msg, base_delay_ms, &self.metrics).await,
+                            Err(_) => {
+                                nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await
+                            }
                         }
                         return;
                     }
                 },
                 Err(e) => {
+                    if matches!(&e, PayloadError::TooLarge { .. }) {
+                        warn!(
+                            work_item_id = %wi.work_item_id,
+                            request_id = %wi.request_id,
+                            model = %model_id,
+                            error = %e,
+                            "offloaded generate payload too large — publishing terminal error + ACK"
+                        );
+                        match self
+                            .publish_generate_terminal_error(
+                                &wi,
+                                PAYLOAD_TOO_LARGE_ERROR_CODE,
+                                PAYLOAD_TOO_LARGE_MESSAGE,
+                            )
+                            .await
+                        {
+                            Ok(_) => match ack_msg(&msg, &self.runtime_state.telemetry).await {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    warn!(error = %e, "ack after oversized generate payload failed");
+                                }
+                            },
+                            Err(_) => {
+                                nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await
+                            }
+                        }
+                        return;
+                    }
                     warn!(
                         work_item_id = %wi.work_item_id,
                         request_id = %wi.request_id,
@@ -1128,11 +1332,32 @@ impl Dispatcher {
                         error = %e,
                         "failed to resolve offloaded generate payload — NAKing"
                     );
-                    nak_msg(&msg, base_delay_ms, &self.metrics).await;
+                    nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
                     return;
                 }
             }
         }
+
+        // Bind the whole streaming execution to one stable worker config.
+        // Config applies take the write side of this barrier; concurrent
+        // inference takes shared guards. Re-check after payload resolution so
+        // a queued A request can never execute after the worker advances to B.
+        let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
+            let guard = state.lock_execution().await;
+            if !state.accepts_bundle_config_hash(&wi.bundle_config_hash) {
+                info!(
+                    model = %model_id,
+                    expected_hash = %wi.bundle_config_hash,
+                    local_hash = %state.current_bundle_config_hash(),
+                    "generate bundle config hash changed before execution — NAKing"
+                );
+                nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
+                return;
+            }
+            Some(guard)
+        } else {
+            None
+        };
 
         let work_item_msgpack = match rmp_serde::to_vec_named(&wi) {
             Ok(bytes) => bytes,
@@ -1160,8 +1385,8 @@ impl Dispatcher {
                     )
                     .await
                 {
-                    Ok(_) => match ack_msg(&msg).await {
-                        Ok(()) => self.metrics.messages_acked_total.inc(),
+                    Ok(_) => match ack_msg(&msg, &self.runtime_state.telemetry).await {
+                        Ok(()) => {}
                         Err(e) => {
                             warn!(
                                 work_item_id = %wi.work_item_id,
@@ -1172,10 +1397,9 @@ impl Dispatcher {
                                 error = %e,
                                 "ack after generate encode error failed"
                             );
-                            self.metrics.jetstream_ack_failures_total.inc();
                         }
                     },
-                    Err(_) => nak_msg(&msg, base_delay_ms, &self.metrics).await,
+                    Err(_) => nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await,
                 }
                 return;
             }
@@ -1188,7 +1412,7 @@ impl Dispatcher {
                 work_item_id = %wi.work_item_id,
                 "generate item without a NATS publisher — NAKing"
             );
-            nak_msg(&msg, base_delay_ms, &self.metrics).await;
+            nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
             return;
         };
         let settled = Arc::new(AtomicBool::new(false));
@@ -1199,11 +1423,12 @@ impl Dispatcher {
             model_id: model_id.clone(),
             delivery,
         });
-        let metrics = Arc::clone(&self.metrics);
+        let executed_bundle_config_hash: Arc<str> = Arc::from(wi.bundle_config_hash.clone());
         let settled_for_events = Arc::clone(&settled);
         let msg_for_events = Arc::clone(&msg);
         let delivery_log_for_events = Arc::clone(&delivery_log);
-        self.metrics.inflight_batches.inc();
+        let telemetry_for_events = self.runtime_state.telemetry.clone();
+        self.runtime_state.inflight_batches.inc();
         let result = self
             .worker_pool
             .process_generate(
@@ -1213,19 +1438,28 @@ impl Dispatcher {
                 },
                 move |event| {
                     let publisher = Arc::clone(&publisher);
-                    let metrics = Arc::clone(&metrics);
+                    let executed_bundle_config_hash = Arc::clone(&executed_bundle_config_hash);
                     let settled = Arc::clone(&settled_for_events);
                     let msg = Arc::clone(&msg_for_events);
                     let delivery_log = Arc::clone(&delivery_log_for_events);
+                    let telemetry = telemetry_for_events.clone();
                     async move {
-                        handle_generate_event(event, publisher, metrics, settled, msg, delivery_log)
-                            .await
-                            .map_err(|e| IpcError::Server(e.to_string()))
+                        handle_generate_event(
+                            event,
+                            publisher,
+                            telemetry,
+                            settled,
+                            msg,
+                            delivery_log,
+                            &executed_bundle_config_hash,
+                        )
+                        .await
+                        .map_err(|e| IpcError::Server(e.to_string()))
                     }
                 },
             )
             .await;
-        decrement_gauge(&self.metrics.inflight_batches, 1);
+        decrement_gauge(&self.runtime_state.inflight_batches, 1);
 
         match result {
             Ok(()) => {
@@ -1243,7 +1477,7 @@ impl Dispatcher {
                         pending = delivery_log.delivery.pending,
                         "ProcessGenerate ended without ACK/NAK event — NAKing"
                     );
-                    nak_msg(&msg, base_delay_ms, &self.metrics).await;
+                    nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
                 }
             }
             Err(e) => {
@@ -1262,7 +1496,7 @@ impl Dispatcher {
                     "ProcessGenerate failed — NAKing if unsettled"
                 );
                 if !settled.swap(true, Ordering::SeqCst) {
-                    nak_msg(&msg, base_delay_ms, &self.metrics).await;
+                    nak_msg(&msg, base_delay_ms, &self.runtime_state.telemetry).await;
                 }
             }
         }
@@ -1273,6 +1507,12 @@ impl Dispatcher {
         model_id: &str,
         items: Vec<(WorkItem, Delivery)>,
     ) -> Result<(), DispatchError> {
+        let mut items = self
+            .retain_uncancelled(items, "before_model_readiness")
+            .await;
+        if items.is_empty() {
+            return Ok(());
+        }
         let group_started = Instant::now();
         let group_size = items.len();
         let base_delay_ms = base_nak_delay_ms();
@@ -1289,25 +1529,24 @@ impl Dispatcher {
                 expected_hash,
                 "request bundle config hash is unknown locally — NAKing group"
             );
-            nak_all(&items, base_delay_ms, &self.metrics).await;
+            nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
             return Ok(());
         }
         let readiness_resp = loop {
-            // `ipc_requests_total` / `ipc_failures_total` identify the IPC
-            // transport counters even though the backend trait is generic (see
-            // `crate::backend::InferenceBackend`).
-            self.metrics.ipc_requests_total.inc();
+            items = self.retain_uncancelled(items, "model_readiness").await;
+            if items.is_empty() {
+                return Ok(());
+            }
             let readiness_resp = match self.backend.ensure_model_ready(model_id).await {
                 Ok(r) => r,
                 Err(e) => {
-                    self.metrics.ipc_failures_total.inc();
                     warn!(
                         model = %model_id,
                         group_size,
                         error = %ErrChain(&e),
                         "EnsureModelReady failed — NAKing group"
                     );
-                    nak_all(&items, base_delay_ms, &self.metrics).await;
+                    nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
                     return Err(e.into());
                 }
             };
@@ -1340,8 +1579,8 @@ impl Dispatcher {
                     delay_ms,
                     "model loading — progress ACKing group before retry"
                 );
-                if !progress_all(&items, &self.metrics).await {
-                    nak_all(&items, base_delay_ms, &self.metrics).await;
+                if !progress_all(&items, &self.runtime_state.telemetry).await {
+                    nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
                     return Ok(());
                 }
                 if self.sleep_or_shutdown(delay_ms).await {
@@ -1350,15 +1589,22 @@ impl Dispatcher {
                         group_size,
                         "shutdown while waiting for model load — NAKing group"
                     );
-                    nak_all(&items, NAK_DELAY_DRAINING_MS, &self.metrics).await;
+                    nak_all(&items, NAK_DELAY_DRAINING_MS, &self.runtime_state.telemetry).await;
                     return Ok(());
                 }
                 continue;
             }
             info!(model = %model_id, "model not available — NAKing group");
-            nak_all(&items, base_delay_ms, &self.metrics).await;
+            nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
             return Ok(());
         };
+
+        items = self
+            .retain_uncancelled(items, "after_model_readiness")
+            .await;
+        if items.is_empty() {
+            return Ok(());
+        }
 
         // Adapter handshake: fold the adapter's `ModelDescriptor`
         // (if any) into our local registries. Idempotent on
@@ -1406,17 +1652,16 @@ impl Dispatcher {
                 overflow = overflow.len(),
                 "fair dispatch: NAKing overflow"
             );
-            nak_all(&overflow, NAK_DELAY_OVERFLOW_MS, &self.metrics).await;
+            nak_all(
+                &overflow,
+                NAK_DELAY_OVERFLOW_MS,
+                &self.runtime_state.telemetry,
+            )
+            .await;
         }
         if dispatch.is_empty() {
             return Ok(());
         }
-        let model_lbl = self.metrics.model_label(model_id);
-        self.metrics
-            .pull_items_fetched
-            .with_label_values(&[&model_lbl])
-            .observe(dispatch.len() as f64);
-
         // Fan out by operation; each op runs concurrently below. The IPC
         // client serialises at the socket but payload resolution, NATS
         // ACKs and publishes all overlap across ops.
@@ -1439,11 +1684,10 @@ impl Dispatcher {
                 .publish_error(wi, delivery, "bad_operation", "unknown operation")
                 .await
             {
-                Ok(_) => match ack(delivery).await {
-                    Ok(()) => self.metrics.messages_acked_total.inc(),
+                Ok(_) => match ack(delivery, &self.runtime_state.telemetry).await {
+                    Ok(()) => {}
                     Err(e) => {
                         warn!(error = %e, "ack after bad_operation error-publish failed");
-                        self.metrics.jetstream_ack_failures_total.inc();
                     }
                 },
                 Err(_) => {
@@ -1451,7 +1695,7 @@ impl Dispatcher {
                     // and we get another chance to either succeed or hit
                     // max_deliver → DLQ (preserves the failure rather
                     // than silently dropping it).
-                    nak_one(delivery, base_nak_delay_ms(), &self.metrics).await;
+                    nak_one(delivery, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
                 }
             }
         }
@@ -1538,15 +1782,15 @@ impl Dispatcher {
         model_id: &str,
         items: Vec<(WorkItem, Delivery)>,
     ) -> Result<(), DispatchError> {
-        let model_lbl = self.metrics.model_label(model_id);
-        let _timer = self
-            .metrics
-            .pull_batch_process_seconds
-            .with_label_values(&[&model_lbl, "encode"])
-            .start_timer();
-        let mut resolved: Vec<(WorkItem, Delivery, MsgValue, f64)> =
+        let mut resolved: Vec<(WorkItem, Delivery, MsgValue, f64, Option<String>)> =
             Vec::with_capacity(items.len());
         for (wi, delivery) in items {
+            if self
+                .settle_if_cancelled(&wi, &delivery, "before_payload_fetch")
+                .await
+            {
+                continue;
+            }
             let (item_json, fetch_ms) = match self.resolve_item(&wi).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1557,15 +1801,12 @@ impl Dispatcher {
                         model = %wi.model_id,
                         "failed to resolve encode item"
                     );
-                    match self
-                        .publish_error(&wi, &delivery, "payload_error", "failed to resolve item")
-                        .await
-                    {
-                        Ok(_) => match ack(&delivery).await {
-                            Ok(()) => self.metrics.messages_acked_total.inc(),
+                    let (code, message) = payload_error_contract(&e);
+                    match self.publish_error(&wi, &delivery, code, message).await {
+                        Ok(_) => match ack(&delivery, &self.runtime_state.telemetry).await {
+                            Ok(()) => {}
                             Err(e) => {
                                 warn!(error = %e, "ack after error-publish failed");
-                                self.metrics.jetstream_ack_failures_total.inc();
                             }
                         },
                         Err(_) => {
@@ -1573,21 +1814,77 @@ impl Dispatcher {
                             // gives another attempt (or surfaces the
                             // error later). Swallowed publish errors
                             // would otherwise silently drop the item.
-                            nak_one(&delivery, base_nak_delay_ms(), &self.metrics).await;
+                            nak_one(
+                                &delivery,
+                                base_nak_delay_ms(),
+                                &self.runtime_state.telemetry,
+                            )
+                            .await;
                         }
                     }
                     continue;
                 }
             };
-            resolved.push((wi, delivery, item_json, fetch_ms));
+            if self
+                .settle_if_cancelled(&wi, &delivery, "after_payload_fetch")
+                .await
+            {
+                continue;
+            }
+            let caller_item_id = caller_item_id_from_value(&item_json);
+            resolved.push((wi, delivery, item_json, fetch_ms, caller_item_id));
         }
+        if resolved.is_empty() {
+            return Ok(());
+        }
+
+        let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
+            let guard = state.lock_execution().await;
+            if let Some((expected_hash, unknown_hash_count)) =
+                unknown_bundle_config_hash(resolved.iter().map(|(wi, _, _, _, _)| wi), Some(state))
+            {
+                info!(
+                    model = %model_id,
+                    expected_hash,
+                    unknown_hash_count,
+                    local_hash = %state.current_bundle_config_hash(),
+                    "encode bundle config hash changed before execution — NAKing"
+                );
+                let msgs_only: Vec<(WorkItem, Delivery)> = resolved
+                    .into_iter()
+                    .map(|(wi, delivery, _, _, _)| (wi, delivery))
+                    .collect();
+                nak_all(
+                    &msgs_only,
+                    base_nak_delay_ms(),
+                    &self.runtime_state.telemetry,
+                )
+                .await;
+                return Ok(());
+            }
+            Some(guard)
+        } else {
+            None
+        };
+
+        let mut active = Vec::with_capacity(resolved.len());
+        for item in resolved {
+            if self
+                .settle_if_cancelled(&item.0, &item.1, "before_ipc")
+                .await
+            {
+                continue;
+            }
+            active.push(item);
+        }
+        let resolved = active;
         if resolved.is_empty() {
             return Ok(());
         }
 
         let batch_items: Vec<EncodeBatchItem> = resolved
             .iter()
-            .map(|(wi, _msg, item, fm)| {
+            .map(|(wi, _msg, item, fm, _caller_item_id)| {
                 let prepared_tokens = self.maybe_prepare_encode_tokens(model_id, wi, item);
                 EncodeBatchItem {
                     work_item_id: wi.work_item_id.clone(),
@@ -1608,18 +1905,17 @@ impl Dispatcher {
             })
             .collect();
 
-        self.metrics.ipc_requests_total.inc();
         let outcome = match self
             .backend
             .process_encode_batch(ProcessEncodeBatchRequest {
                 model_id: model_id.to_string(),
                 items: batch_items,
+                accepts_batched_f16_multivectors: true,
             })
             .await
         {
             Ok(o) => o,
             Err(e) => {
-                self.metrics.ipc_failures_total.inc();
                 let delay = nak_delay_for_backend_error(&e);
                 warn!(
                     model = %model_id,
@@ -1628,9 +1924,11 @@ impl Dispatcher {
                     batch_size = resolved.len(),
                     "ProcessEncodeBatch failed — NAKing group"
                 );
-                let msgs_only: Vec<(WorkItem, Delivery)> =
-                    resolved.into_iter().map(|(wi, m, _, _)| (wi, m)).collect();
-                nak_all(&msgs_only, delay, &self.metrics).await;
+                let msgs_only: Vec<(WorkItem, Delivery)> = resolved
+                    .into_iter()
+                    .map(|(wi, m, _, _, _)| (wi, m))
+                    .collect();
+                nak_all(&msgs_only, delay, &self.runtime_state.telemetry).await;
                 return Err(e.into());
             }
         };
@@ -1639,7 +1937,7 @@ impl Dispatcher {
             outcome,
             resolved
                 .into_iter()
-                .map(|(wi, m, _, fm)| (wi, m, fm))
+                .map(|(wi, m, _, fm, caller_item_id)| (wi, m, fm, caller_item_id))
                 .collect(),
         )
         .await;
@@ -1653,15 +1951,15 @@ impl Dispatcher {
         model_id: &str,
         items: Vec<(WorkItem, Delivery)>,
     ) -> Result<(), DispatchError> {
-        let model_lbl = self.metrics.model_label(model_id);
-        let _timer = self
-            .metrics
-            .pull_batch_process_seconds
-            .with_label_values(&[&model_lbl, "score"])
-            .start_timer();
         let mut prepared: Vec<(WorkItem, Delivery, MsgValue, Vec<MsgValue>, f64)> =
             Vec::with_capacity(items.len());
         for (wi, delivery) in items {
+            if self
+                .settle_if_cancelled(&wi, &delivery, "before_payload_fetch")
+                .await
+            {
+                continue;
+            }
             let (query, score_items, fetch_ms) = match self.resolve_score(&wi).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1672,31 +1970,78 @@ impl Dispatcher {
                         model = %wi.model_id,
                         "failed to resolve score payload"
                     );
-                    match self
-                        .publish_error(
-                            &wi,
-                            &delivery,
-                            "payload_error",
-                            "failed to resolve score payload",
-                        )
-                        .await
-                    {
-                        Ok(_) => match ack(&delivery).await {
-                            Ok(()) => self.metrics.messages_acked_total.inc(),
+                    let (code, message) = payload_error_contract(&e);
+                    match self.publish_error(&wi, &delivery, code, message).await {
+                        Ok(_) => match ack(&delivery, &self.runtime_state.telemetry).await {
+                            Ok(()) => {}
                             Err(e) => {
                                 warn!(error = %e, "ack after error-publish failed");
-                                self.metrics.jetstream_ack_failures_total.inc();
                             }
                         },
                         Err(_) => {
-                            nak_one(&delivery, base_nak_delay_ms(), &self.metrics).await;
+                            nak_one(
+                                &delivery,
+                                base_nak_delay_ms(),
+                                &self.runtime_state.telemetry,
+                            )
+                            .await;
                         }
                     }
                     continue;
                 }
             };
+            if self
+                .settle_if_cancelled(&wi, &delivery, "after_payload_fetch")
+                .await
+            {
+                continue;
+            }
             prepared.push((wi, delivery, query, score_items, fetch_ms));
         }
+        if prepared.is_empty() {
+            return Ok(());
+        }
+
+        let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
+            let guard = state.lock_execution().await;
+            if let Some((expected_hash, unknown_hash_count)) =
+                unknown_bundle_config_hash(prepared.iter().map(|(wi, _, _, _, _)| wi), Some(state))
+            {
+                info!(
+                    model = %model_id,
+                    expected_hash,
+                    unknown_hash_count,
+                    local_hash = %state.current_bundle_config_hash(),
+                    "score bundle config hash changed before execution — NAKing"
+                );
+                let msgs_only: Vec<(WorkItem, Delivery)> = prepared
+                    .into_iter()
+                    .map(|(wi, delivery, _, _, _)| (wi, delivery))
+                    .collect();
+                nak_all(
+                    &msgs_only,
+                    base_nak_delay_ms(),
+                    &self.runtime_state.telemetry,
+                )
+                .await;
+                return Ok(());
+            }
+            Some(guard)
+        } else {
+            None
+        };
+
+        let mut active = Vec::with_capacity(prepared.len());
+        for item in prepared {
+            if self
+                .settle_if_cancelled(&item.0, &item.1, "before_ipc")
+                .await
+            {
+                continue;
+            }
+            active.push(item);
+        }
+        let prepared = active;
         if prepared.is_empty() {
             return Ok(());
         }
@@ -1727,7 +2072,6 @@ impl Dispatcher {
             })
             .collect();
 
-        self.metrics.ipc_requests_total.inc();
         let outcome = match self
             .backend
             .process_score_batch(ProcessScoreBatchRequest {
@@ -1738,7 +2082,6 @@ impl Dispatcher {
         {
             Ok(o) => o,
             Err(e) => {
-                self.metrics.ipc_failures_total.inc();
                 let delay = nak_delay_for_backend_error(&e);
                 warn!(
                     model = %model_id,
@@ -1751,7 +2094,7 @@ impl Dispatcher {
                     .into_iter()
                     .map(|(wi, m, _, _, _)| (wi, m))
                     .collect();
-                nak_all(&msgs_only, delay, &self.metrics).await;
+                nak_all(&msgs_only, delay, &self.runtime_state.telemetry).await;
                 return Err(e.into());
             }
         };
@@ -1760,7 +2103,7 @@ impl Dispatcher {
             outcome,
             prepared
                 .into_iter()
-                .map(|(wi, m, _, _, fm)| (wi, m, fm))
+                .map(|(wi, m, _, _, fm)| (wi, m, fm, None))
                 .collect(),
         )
         .await;
@@ -1774,15 +2117,26 @@ impl Dispatcher {
         model_id: &str,
         items: Vec<(WorkItem, Delivery)>,
     ) -> Result<(), DispatchError> {
-        let model_lbl = self.metrics.model_label(model_id);
-        let _timer = self
-            .metrics
-            .pull_batch_process_seconds
-            .with_label_values(&[&model_lbl, "extract"])
-            .start_timer();
-        let mut resolved: Vec<(WorkItem, Delivery, MsgValue, f64)> =
-            Vec::with_capacity(items.len());
+        let mut resolved: Vec<(
+            WorkItem,
+            Delivery,
+            MsgValue,
+            Option<PreparedAudioPcm16>,
+            f64,
+        )> = Vec::with_capacity(items.len());
         for (wi, delivery) in items {
+            if self
+                .settle_if_cancelled(&wi, &delivery, "before_payload_fetch")
+                .await
+            {
+                continue;
+            }
+            if let Some(item) = &wi.item {
+                if let Err(err) = validate_item_media(item) {
+                    self.fail_invalid_media(&wi, &delivery, &err).await;
+                    continue;
+                }
+            }
             let (item_json, fetch_ms) = match self.resolve_item(&wi).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1793,39 +2147,105 @@ impl Dispatcher {
                         model = %wi.model_id,
                         "failed to resolve extract item"
                     );
-                    match self
-                        .publish_error(&wi, &delivery, "payload_error", "failed to resolve item")
-                        .await
-                    {
-                        Ok(_) => match ack(&delivery).await {
-                            Ok(()) => self.metrics.messages_acked_total.inc(),
+                    let (code, message) = payload_error_contract(&e);
+                    match self.publish_error(&wi, &delivery, code, message).await {
+                        Ok(_) => match ack(&delivery, &self.runtime_state.telemetry).await {
+                            Ok(()) => {}
                             Err(e) => {
                                 warn!(error = %e, "ack after error-publish failed");
-                                self.metrics.jetstream_ack_failures_total.inc();
                             }
                         },
                         Err(_) => {
-                            nak_one(&delivery, base_nak_delay_ms(), &self.metrics).await;
+                            nak_one(
+                                &delivery,
+                                base_nak_delay_ms(),
+                                &self.runtime_state.telemetry,
+                            )
+                            .await;
                         }
                     }
                     continue;
                 }
             };
-            resolved.push((wi, delivery, item_json, fetch_ms));
+            if self
+                .settle_if_cancelled(&wi, &delivery, "after_payload_fetch")
+                .await
+            {
+                continue;
+            }
+            if wi.item.is_none() {
+                if let Err(err) = validate_item_media(&item_json) {
+                    self.fail_invalid_media(&wi, &delivery, &err).await;
+                    continue;
+                }
+            }
+            let (item_json, prepared_audio) =
+                match prepare_extract_audio(item_json, &self.audio_prep_semaphore).await {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.fail_invalid_audio(&wi, &delivery, &error).await;
+                        continue;
+                    }
+                };
+            resolved.push((wi, delivery, item_json, prepared_audio, fetch_ms));
         }
         if resolved.is_empty() {
             return Ok(());
         }
 
-        let batch_items: Vec<ExtractBatchItem> = resolved
-            .iter()
-            .map(|(wi, _, item, fm)| ExtractBatchItem {
+        let _execution_guard = if let Some(state) = self.config_apply_state.as_ref() {
+            let guard = state.lock_execution().await;
+            if let Some((expected_hash, unknown_hash_count)) =
+                unknown_bundle_config_hash(resolved.iter().map(|(wi, _, _, _, _)| wi), Some(state))
+            {
+                info!(
+                    model = %model_id,
+                    expected_hash,
+                    unknown_hash_count,
+                    local_hash = %state.current_bundle_config_hash(),
+                    "extract bundle config hash changed before execution — NAKing"
+                );
+                let msgs_only: Vec<(WorkItem, Delivery)> = resolved
+                    .into_iter()
+                    .map(|(wi, delivery, _, _, _)| (wi, delivery))
+                    .collect();
+                nak_all(
+                    &msgs_only,
+                    base_nak_delay_ms(),
+                    &self.runtime_state.telemetry,
+                )
+                .await;
+                return Ok(());
+            }
+            Some(guard)
+        } else {
+            None
+        };
+
+        let mut active = Vec::with_capacity(resolved.len());
+        for item in resolved {
+            if self
+                .settle_if_cancelled(&item.0, &item.1, "before_ipc")
+                .await
+            {
+                continue;
+            }
+            active.push(item);
+        }
+        let mut resolved = active;
+        if resolved.is_empty() {
+            return Ok(());
+        }
+
+        let mut batch_items = Vec::with_capacity(resolved.len());
+        for (wi, _, item, prepared_audio, fm) in &mut resolved {
+            batch_items.push(ExtractBatchItem {
                 work_item_id: wi.work_item_id.clone(),
                 request_id: wi.request_id.clone(),
                 item_index: wi.item_index,
                 total_items: wi.total_items,
                 timestamp: wi.timestamp,
-                item: item.clone(),
+                item: std::mem::replace(item, MsgValue::Map(Vec::new())),
                 labels: wi.labels.clone(),
                 output_schema: wi.output_schema.clone(),
                 instruction: wi.instruction.clone(),
@@ -1833,10 +2253,10 @@ impl Dispatcher {
                 profile_id: opt_non_empty(&wi.profile_id),
                 bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
                 payload_fetch_ms: *fm,
-            })
-            .collect();
+                prepared_audio: prepared_audio.take(),
+            });
+        }
 
-        self.metrics.ipc_requests_total.inc();
         let outcome = match self
             .backend
             .process_extract_batch(ProcessExtractBatchRequest {
@@ -1847,7 +2267,6 @@ impl Dispatcher {
         {
             Ok(o) => o,
             Err(e) => {
-                self.metrics.ipc_failures_total.inc();
                 let delay = nak_delay_for_backend_error(&e);
                 warn!(
                     model = %model_id,
@@ -1856,9 +2275,11 @@ impl Dispatcher {
                     batch_size = resolved.len(),
                     "ProcessExtractBatch failed — NAKing group"
                 );
-                let msgs_only: Vec<(WorkItem, Delivery)> =
-                    resolved.into_iter().map(|(wi, m, _, _)| (wi, m)).collect();
-                nak_all(&msgs_only, delay, &self.metrics).await;
+                let msgs_only: Vec<(WorkItem, Delivery)> = resolved
+                    .into_iter()
+                    .map(|(wi, m, _, _, _)| (wi, m))
+                    .collect();
+                nak_all(&msgs_only, delay, &self.runtime_state.telemetry).await;
                 return Err(e.into());
             }
         };
@@ -1867,7 +2288,7 @@ impl Dispatcher {
             outcome,
             resolved
                 .into_iter()
-                .map(|(wi, m, _, fm)| (wi, m, fm))
+                .map(|(wi, m, _, _, fm)| (wi, m, fm, None))
                 .collect(),
         )
         .await;
@@ -1888,27 +2309,26 @@ impl Dispatcher {
 
     // -- outcome / publish helpers ---------------------------------------
 
-    async fn apply_outcomes(
-        &self,
-        outcome: BatchOutcome,
-        resolved: Vec<(WorkItem, Delivery, f64)>,
-    ) {
+    async fn apply_outcomes(&self, outcome: BatchOutcome, resolved: Vec<ResolvedWorkItem>) {
+        let BatchOutcome {
+            outcomes,
+            batched_f16_multivectors,
+        } = outcome;
+        let mut batched_f16_by_work_item_id =
+            index_batched_f16_multivectors(&batched_f16_multivectors);
         // Decide which index (if any) each outcome binds to, using the
         // pure `resolve_outcome_indices` helper. Indices are into
         // `resolved`; `None` means "ghost outcome, no matching item".
         let wiids: Vec<&str> = resolved
             .iter()
-            .map(|(wi, _, _)| wi.work_item_id.as_str())
+            .map(|(wi, _, _, _)| wi.work_item_id.as_str())
             .collect();
-        let bindings = resolve_outcome_indices(
-            &wiids,
-            outcome.outcomes.iter().map(|o| o.work_item_id.as_str()),
-        );
+        let bindings =
+            resolve_outcome_indices(&wiids, outcomes.iter().map(|o| o.work_item_id.as_str()));
 
-        let mut resolved: Vec<Option<(WorkItem, Delivery, f64)>> =
-            resolved.into_iter().map(Some).collect();
+        let mut resolved: Vec<Option<ResolvedWorkItem>> = resolved.into_iter().map(Some).collect();
 
-        for (outcome_idx, item_outcome) in outcome.outcomes.into_iter().enumerate() {
+        for (outcome_idx, item_outcome) in outcomes.into_iter().enumerate() {
             let Some(idx) = bindings[outcome_idx] else {
                 warn!(
                     work_item_id = %item_outcome.work_item_id,
@@ -1916,24 +2336,61 @@ impl Dispatcher {
                 );
                 continue;
             };
-            let Some((wi, delivery, fetch_ms)) = resolved[idx].take() else {
+            let Some((wi, delivery, fetch_ms, caller_item_id)) = resolved[idx].take() else {
                 continue;
             };
-            self.apply_outcome(&wi, &delivery, &item_outcome, fetch_ms)
-                .await;
+            let owned;
+            let effective_outcome =
+                match batched_f16_by_work_item_id.remove(item_outcome.work_item_id.as_str()) {
+                    Some(Ok(multivector)) => {
+                        owned = shape_batched_f16_multivector_outcome(
+                            &item_outcome,
+                            multivector.values_f16,
+                            multivector.num_tokens,
+                            multivector.token_dims,
+                            caller_item_id.as_deref(),
+                        );
+                        &owned
+                    }
+                    Some(Err(message)) => {
+                        owned = batched_f16_multivector_error_outcome(&item_outcome, &message);
+                        &owned
+                    }
+                    None => &item_outcome,
+                };
+            self.apply_outcome(
+                &wi,
+                &delivery,
+                effective_outcome,
+                fetch_ms,
+                caller_item_id.as_deref(),
+            )
+            .await;
+        }
+
+        for (work_item_id, _) in batched_f16_by_work_item_id {
+            warn!(
+                work_item_id,
+                "batched f16 multivector had no matching outcome — ignoring"
+            );
         }
 
         // Any messages left without a corresponding outcome: the executor
         // dropped them. NAK so they get redelivered.
         for slot in resolved.iter_mut() {
-            let Some((_wi, delivery, _fm)) = slot.take() else {
+            let Some((_wi, delivery, _fm, _caller_item_id)) = slot.take() else {
                 continue;
             };
             warn!(
                 origin = %delivery.log_ref(),
                 "no outcome from executor — NAKing"
             );
-            nak_one(&delivery, base_nak_delay_ms(), &self.metrics).await;
+            nak_one(
+                &delivery,
+                base_nak_delay_ms(),
+                &self.runtime_state.telemetry,
+            )
+            .await;
         }
     }
 
@@ -1943,6 +2400,7 @@ impl Dispatcher {
         delivery: &Delivery,
         outcome: &ItemOutcome,
         payload_fetch_ms: f64,
+        caller_item_id: Option<&str>,
     ) {
         match outcome.disposition {
             Disposition::PublishAndAck | Disposition::PublishErrorAndAck => {
@@ -1952,7 +2410,10 @@ impl Dispatcher {
                         queue_ms,
                         payload_fetch_ms,
                     });
-                    match self.deliver_result(wi, delivery, outcome, timings).await {
+                    match self
+                        .deliver_result(wi, delivery, outcome, timings, caller_item_id)
+                        .await
+                    {
                         Ok(()) => {
                             // Record latency only on the success path —
                             // sampling error-path latency would bias the
@@ -1982,52 +2443,6 @@ impl Dispatcher {
                                     total += queue_ms;
                                 }
                                 self.latency_tracker.lock().await.record(total);
-
-                                // Prometheus backend timing histograms. Observations
-                                // are per-item (one outcome == one source request), so
-                                // each completed backend batch contributes N samples
-                                // per timing bucket. Only the success path is sampled
-                                // to match the rationale above on latency_tracker.
-                                //
-                                // A zero field means "backend didn't report this phase"
-                                // (e.g. tokenize time for image-only models, or
-                                // postprocess when no postprocessor ran) — skip those
-                                // so the histograms reflect reality rather than
-                                // adding a pile of 0-bucket samples that bias p50.
-                                //
-                                // Cardinality: `operation` is a free-form String on
-                                // WorkItem, but PublishAndAck is only produced by the
-                                // encode/score/extract code paths (unknown ops route
-                                // to publish_error_and_ack and get filtered by the
-                                // outer match). We still check against the known set
-                                // defensively — a future refactor shouldn't be able
-                                // to sneak a new label value into Prometheus without
-                                // touching this list. If it's somehow not one of the
-                                // three, skip the observation (don't `return` — that
-                                // would bypass the ACK below and cause redelivery).
-                                if let op @ ("encode" | "score" | "extract") = wi.operation.as_str()
-                                {
-                                    let model_label =
-                                        self.metrics.model_label(&wi.model_id).into_owned();
-                                    let record_phase = |phase: &str, ms: f64| {
-                                        if ms > 0.0 {
-                                            self.metrics
-                                                .backend_phase_seconds
-                                                .with_label_values(&[
-                                                    op,
-                                                    model_label.as_str(),
-                                                    phase,
-                                                ])
-                                                .observe(ms / 1_000.0);
-                                        }
-                                    };
-                                    record_phase(
-                                        "tokenize",
-                                        outcome.tokenization_ms.unwrap_or(0.0),
-                                    );
-                                    record_phase("inference", inference_ms);
-                                    record_phase("postprocess", postprocess_ms);
-                                }
                             }
                         }
                         Err(crate::publisher::PublishError::EmptyReplySubject) => {
@@ -2050,11 +2465,10 @@ impl Dispatcher {
                         }
                     }
                 }
-                match ack(delivery).await {
-                    Ok(()) => self.metrics.messages_acked_total.inc(),
+                match ack(delivery, &self.runtime_state.telemetry).await {
+                    Ok(()) => {}
                     Err(e) => {
                         warn!(error = %e, "ack failed");
-                        self.metrics.jetstream_ack_failures_total.inc();
                     }
                 }
             }
@@ -2062,7 +2476,7 @@ impl Dispatcher {
                 nak_one(
                     delivery,
                     outcome.nak_delay_ms.unwrap_or_else(base_nak_delay_ms),
-                    &self.metrics,
+                    &self.runtime_state.telemetry,
                 )
                 .await;
             }
@@ -2081,6 +2495,7 @@ impl Dispatcher {
         delivery: &Delivery,
         outcome: &ItemOutcome,
         timings: Option<Timings>,
+        caller_item_id: Option<&str>,
     ) -> Result<(), crate::publisher::PublishError> {
         match delivery {
             Delivery::Nats(..) => {
@@ -2098,8 +2513,13 @@ impl Dispatcher {
                     .publish_result(
                         &wi.reply_subject,
                         outcome,
-                        timings,
-                        delivery.worker_direct(),
+                        PublishResultContext {
+                            caller_item_id,
+                            timings,
+                            worker_direct: delivery.worker_direct(),
+                            executed_bundle_config_hash: self.verified_execution_hash(wi),
+                            accepts_result_chunks: wi.accepts_result_chunks,
+                        },
                     )
                     .await
             }
@@ -2108,9 +2528,11 @@ impl Dispatcher {
                 // ingest socket back to the caller that is awaiting them.
                 let result = shape_and_build_work_result(
                     outcome,
+                    caller_item_id,
                     &self.worker_id,
                     timings,
                     delivery.worker_direct(),
+                    self.verified_execution_hash(wi),
                 );
                 if !local.send_result(result) {
                     debug!(
@@ -2145,7 +2567,10 @@ impl Dispatcher {
         message: &str,
     ) -> Result<bool, crate::publisher::PublishError> {
         let outcome = synthetic_error_outcome(wi, code, message);
-        match self.deliver_result(wi, delivery, &outcome, None).await {
+        match self
+            .deliver_result(wi, delivery, &outcome, None, None)
+            .await
+        {
             Ok(()) => Ok(true),
             Err(crate::publisher::PublishError::EmptyReplySubject) => {
                 // Fire-and-forget work item. No one is waiting for the
@@ -2183,21 +2608,20 @@ impl Dispatcher {
                 .publish_error(wi, delivery, MODEL_LOAD_FAILED_ERROR_CODE, &message)
                 .await
             {
-                Ok(_) => match ack(delivery).await {
-                    Ok(()) => self.metrics.messages_acked_total.inc(),
+                Ok(_) => match ack(delivery, &self.runtime_state.telemetry).await {
+                    Ok(()) => {}
                     Err(e) => {
                         warn!(
                             work_item_id = %wi.work_item_id,
                             error = %e,
                             "ack after MODEL_LOAD_FAILED publish failed"
                         );
-                        self.metrics.jetstream_ack_failures_total.inc();
                     }
                 },
                 Err(_) => {
                     // Publish failed — the client never got the typed error,
                     // so rely on redelivery rather than ACKing it away.
-                    nak_one(delivery, base_nak_delay_ms(), &self.metrics).await;
+                    nak_one(delivery, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
                 }
             }
         }
@@ -2225,7 +2649,17 @@ impl Dispatcher {
         };
         let outcome = synthetic_error_outcome(wi, code, message);
         match publisher
-            .publish_result(&wi.reply_subject, &outcome, None, worker_direct)
+            .publish_result(
+                &wi.reply_subject,
+                &outcome,
+                PublishResultContext {
+                    caller_item_id: None,
+                    timings: None,
+                    worker_direct,
+                    executed_bundle_config_hash: None,
+                    accepts_result_chunks: wi.accepts_result_chunks,
+                },
+            )
             .await
         {
             Ok(()) => Ok(true),
@@ -2323,12 +2757,6 @@ impl Dispatcher {
                     scheduler_drain_loop(model_id_s, disp, sched_c, shutdown_c).await;
                 });
                 handles.insert(model_id.to_owned(), handle);
-                // Increment the live `models_total` gauge the first time
-                // we materialise a scheduler for this model. Dashboards
-                // and the shutdown log both read this; we deliberately
-                // keep it monotonic-per-process (schedulers never get
-                // dropped mid-run) so a decrement path isn't needed.
-                self.metrics.scheduler.models_total.inc();
                 info!(
                     model = %model_id_log,
                     "rust-scheduler: drain loop spawned on first traffic",
@@ -2372,6 +2800,12 @@ impl Dispatcher {
     ) {
         let mut grouped: HashMap<LoraKey, Vec<(SchedulerItem, SchedulerMeta)>> = HashMap::new();
         for (wi, delivery) in items {
+            if self
+                .settle_if_cancelled(&wi, &delivery, "before_payload_fetch")
+                .await
+            {
+                continue;
+            }
             let (item_json, fetch_ms) = match self.resolve_item(&wi).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -2380,6 +2814,13 @@ impl Dispatcher {
                     continue;
                 }
             };
+            if self
+                .settle_if_cancelled(&wi, &delivery, "after_payload_fetch")
+                .await
+            {
+                continue;
+            }
+            let caller_item_id = caller_item_id_from_value(&item_json);
             let prepared_tokens = self.maybe_prepare_encode_tokens(model_id, &wi, &item_json);
             let lora = lora_from_options(&wi.options);
             let ebi = EncodeBatchItem {
@@ -2399,19 +2840,12 @@ impl Dispatcher {
                 prepared_tokens,
             };
             let item = SchedulerItem::Encode(ebi);
-            let child_index = self.record_scheduler_enqueue(model_id, &item);
+            let child_index = self.record_scheduler_enqueue(model_id, &wi.profile_id, &item);
             let worker_direct = delivery.worker_direct();
             let meta = SchedulerMeta::new_with_worker_direct(wi, delivery, fetch_ms, worker_direct)
-                .with_worker_child_index(child_index);
+                .with_worker_child_index(child_index)
+                .with_caller_item_id(caller_item_id);
             grouped.entry(lora).or_default().push((item, meta));
-        }
-        let enqueued = grouped.values().map(Vec::len).sum::<usize>();
-        if enqueued > 0 {
-            self.metrics
-                .scheduler
-                .enqueued_items_total
-                .with_label_values(&[&self.metrics.model_label(model_id), "encode"])
-                .inc_by(enqueued as u64);
         }
         for (lora, grouped_items) in grouped {
             scheduler
@@ -2437,6 +2871,12 @@ impl Dispatcher {
     ) {
         let mut grouped: Vec<(SchedulerItem, SchedulerMeta)> = Vec::new();
         for (wi, delivery) in items {
+            if self
+                .settle_if_cancelled(&wi, &delivery, "before_payload_fetch")
+                .await
+            {
+                continue;
+            }
             let (query, score_items, fetch_ms) = match self.resolve_score(&wi).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -2445,6 +2885,12 @@ impl Dispatcher {
                     continue;
                 }
             };
+            if self
+                .settle_if_cancelled(&wi, &delivery, "after_payload_fetch")
+                .await
+            {
+                continue;
+            }
             let sbi = ScoreBatchItem {
                 work_item_id: wi.work_item_id.clone(),
                 request_id: wi.request_id.clone(),
@@ -2459,19 +2905,14 @@ impl Dispatcher {
                 payload_fetch_ms: fetch_ms,
                 prepared_tokens: None,
             };
-            let item = SchedulerItem::Score(sbi);
-            let child_index = self.record_scheduler_enqueue(model_id, &item);
+            let item = SchedulerItem::score(sbi);
+            let child_index = self.record_scheduler_enqueue(model_id, &wi.profile_id, &item);
             let worker_direct = delivery.worker_direct();
             let meta = SchedulerMeta::new_with_worker_direct(wi, delivery, fetch_ms, worker_direct)
                 .with_worker_child_index(child_index);
             grouped.push((item, meta));
         }
         if !grouped.is_empty() {
-            self.metrics
-                .scheduler
-                .enqueued_items_total
-                .with_label_values(&[&self.metrics.model_label(model_id), "score"])
-                .inc_by(grouped.len() as u64);
             scheduler
                 .submit_many(SchedOp::Score, LoraKey::base(), grouped)
                 .await;
@@ -2491,6 +2932,18 @@ impl Dispatcher {
     ) {
         let mut grouped: HashMap<LoraKey, Vec<(SchedulerItem, SchedulerMeta)>> = HashMap::new();
         for (wi, delivery) in items {
+            if self
+                .settle_if_cancelled(&wi, &delivery, "before_payload_fetch")
+                .await
+            {
+                continue;
+            }
+            if let Some(item) = &wi.item {
+                if let Err(err) = validate_item_media(item) {
+                    self.fail_invalid_media(&wi, &delivery, &err).await;
+                    continue;
+                }
+            }
             let (item_json, fetch_ms) = match self.resolve_item(&wi).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -2499,7 +2952,27 @@ impl Dispatcher {
                     continue;
                 }
             };
+            if self
+                .settle_if_cancelled(&wi, &delivery, "after_payload_fetch")
+                .await
+            {
+                continue;
+            }
+            if wi.item.is_none() {
+                if let Err(err) = validate_item_media(&item_json) {
+                    self.fail_invalid_media(&wi, &delivery, &err).await;
+                    continue;
+                }
+            }
             let lora = lora_from_options(&wi.options);
+            let (item_json, prepared_audio) =
+                match prepare_extract_audio(item_json, &self.audio_prep_semaphore).await {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.fail_invalid_audio(&wi, &delivery, &error).await;
+                        continue;
+                    }
+                };
             let xbi = ExtractBatchItem {
                 work_item_id: wi.work_item_id.clone(),
                 request_id: wi.request_id.clone(),
@@ -2514,21 +2987,14 @@ impl Dispatcher {
                 profile_id: opt_non_empty(&wi.profile_id),
                 bundle_config_hash: opt_non_empty(&wi.bundle_config_hash),
                 payload_fetch_ms: fetch_ms,
+                prepared_audio,
             };
             let item = SchedulerItem::Extract(xbi);
-            let child_index = self.record_scheduler_enqueue(model_id, &item);
+            let child_index = self.record_scheduler_enqueue(model_id, &wi.profile_id, &item);
             let worker_direct = delivery.worker_direct();
             let meta = SchedulerMeta::new_with_worker_direct(wi, delivery, fetch_ms, worker_direct)
                 .with_worker_child_index(child_index);
             grouped.entry(lora).or_default().push((item, meta));
-        }
-        let enqueued = grouped.values().map(Vec::len).sum::<usize>();
-        if enqueued > 0 {
-            self.metrics
-                .scheduler
-                .enqueued_items_total
-                .with_label_values(&[&self.metrics.model_label(model_id), "extract"])
-                .inc_by(enqueued as u64);
         }
         for (lora, grouped_items) in grouped {
             scheduler
@@ -2537,19 +3003,31 @@ impl Dispatcher {
         }
     }
 
-    fn record_scheduler_enqueue(&self, model_id: &str, item: &SchedulerItem) -> usize {
+    fn record_scheduler_enqueue(
+        &self,
+        model_id: &str,
+        profile_id: &str,
+        item: &SchedulerItem,
+    ) -> usize {
         let cost = item.cost();
-        self.metrics.worker_queue_depth.inc();
-        self.metrics.worker_pending_cost.add(clamp_u64_to_i64(cost));
+        self.runtime_state.telemetry.queue_enqueued(
+            scheduler_operation_label(item.op()),
+            model_id,
+            (!profile_id.is_empty()).then_some(profile_id),
+        );
+        self.runtime_state.worker_queue_depth.inc();
+        self.runtime_state
+            .worker_pending_cost
+            .add(clamp_u64_to_i64(cost));
         self.worker_pool
             .record_model_pending_enqueue(model_id, cost)
     }
 
     /// Shared failure tail for the three scheduler-enqueue paths.
-    /// Mirrors the payload-resolve error branch in the legacy
-    /// [`Self::handle_encode`] / [`Self::handle_score`] /
-    /// [`Self::handle_extract`] flows: publish a synthetic
-    /// `payload_error` WorkResult then ACK; if the publish itself
+    /// Shared by legacy and scheduler paths: deterministic oversized payloads
+    /// publish `PAYLOAD_TOO_LARGE`; other resolution failures retain the
+    /// generic `payload_error`. Both ACK after a successful terminal publish;
+    /// if the publish itself
     /// fails, NAK so JetStream redelivers.
     async fn fail_resolve(
         &self,
@@ -2565,20 +3043,72 @@ impl Dispatcher {
             model = %wi.model_id,
             "{log_msg}"
         );
-        match self
-            .publish_error(wi, delivery, "payload_error", "failed to resolve item")
-            .await
-        {
-            Ok(_) => match ack(delivery).await {
-                Ok(()) => self.metrics.messages_acked_total.inc(),
+        let (code, message) = payload_error_contract(err);
+        match self.publish_error(wi, delivery, code, message).await {
+            Ok(_) => match ack(delivery, &self.runtime_state.telemetry).await {
+                Ok(()) => {}
                 Err(e) => {
                     warn!(error = %e, "ack after error-publish failed");
-                    self.metrics.jetstream_ack_failures_total.inc();
                 }
             },
             Err(_) => {
-                nak_one(delivery, base_nak_delay_ms(), &self.metrics).await;
+                nak_one(delivery, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
             }
+        }
+    }
+
+    /// Reject malformed media before Python IPC while preserving the same
+    /// terminal INVALID_INPUT + ACK settlement used by Python's
+    /// `InvalidMediaError`. Error text contains only field paths and sizes,
+    /// never user media bytes.
+    async fn fail_invalid_media(
+        &self,
+        wi: &WorkItem,
+        delivery: &Delivery,
+        err: &MediaValidationError,
+    ) {
+        warn!(
+            error = %err,
+            work_item_id = %wi.work_item_id,
+            request_id = %wi.request_id,
+            model = %wi.model_id,
+            "extract media validation failed before IPC"
+        );
+        match self
+            .publish_error(wi, delivery, INVALID_INPUT_ERROR_CODE, &err.to_string())
+            .await
+        {
+            Ok(_) => match ack(delivery, &self.runtime_state.telemetry).await {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!(error = %e, "ack after invalid-media error publish failed");
+                }
+            },
+            Err(_) => {
+                nak_one(delivery, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
+            }
+        }
+    }
+
+    async fn fail_invalid_audio(&self, wi: &WorkItem, delivery: &Delivery, error: &str) {
+        warn!(
+            error,
+            work_item_id = %wi.work_item_id,
+            request_id = %wi.request_id,
+            model = %wi.model_id,
+            "audio preparation rejected extract item"
+        );
+        match self
+            .publish_error(wi, delivery, "invalid_request", error)
+            .await
+        {
+            Ok(_) => match ack(delivery, &self.runtime_state.telemetry).await {
+                Ok(()) => {}
+                Err(error) => {
+                    warn!(error = %error, "ack after invalid-audio publish failed");
+                }
+            },
+            Err(_) => nak_one(delivery, base_nak_delay_ms(), &self.runtime_state.telemetry).await,
         }
     }
 
@@ -2769,11 +3299,23 @@ pub(crate) fn split_by_budget<T>(items: Vec<(WorkItem, T)>, budget: usize) -> Di
     (dispatch, overflow)
 }
 
-/// Compute `queue_ms` for a `WorkItem` given its embedded `timestamp`
-/// (unix seconds, set by the gateway publisher). Returns 0 for
-/// missing/future timestamps so we never report a negative latency.
-/// Compute one `total_ms` sample per *unique* `request_id` in the
-/// batch. Mirrors Python's `_complete_requests` dedup pattern (see
+/// Scheduler-local latency for one successful request-ID occurrence within one
+/// backend batch. Both fields use a monotonic [`Instant`] interval and are
+/// retained as [`Duration`] so the semantic facade owns unit conversion.
+#[derive(Debug, Clone, Copy)]
+struct PerRequestSchedulerLatency {
+    /// Scheduler enqueue through the instant immediately before `run_batch`.
+    dispatch_wait: Duration,
+    /// Scheduler enqueue through the completed `run_batch` reply.
+    total: Duration,
+}
+
+/// Compute one scheduler-local latency sample per *unique successful*
+/// `request_id` in this backend batch. A client request split across multiple
+/// backend batches contributes one sample in each batch, and a partially
+/// failed request contributes in a batch when at least one outcome is
+/// `PublishAndAck`. Mirrors Python's batch-local `_complete_requests` dedup
+/// pattern (see
 /// `model_worker.py:947-976` on main `bbe409c3`):
 ///
 /// ```python
@@ -2800,22 +3342,25 @@ pub(crate) fn split_by_budget<T>(items: Vec<(WorkItem, T)>, budget: usize) -> Di
 ///   * the IPC reply marked them anything other than `PublishAndAck`
 ///     (errors / NAK paths shouldn't bias the controller toward fast
 ///     no-op replies);
-///   * `total_ms` came out non-positive — represents IPC error paths
-///     where the per-item timing fields were left at zero. Letting
-///     these in would bias `observed_p50_ms` toward zero and pin the
+///   * total latency came out non-positive. Letting zero-duration replay
+///     samples in would bias `observed_p50_ms` toward zero and pin the
 ///     wait knob at the floor.
 ///
 /// Takes an iterator of `(request_id, submitted_at, outcome)` triples
 /// rather than a `&[SchedulerMeta]` so unit tests don't need to
 /// fabricate a `jetstream::Message` (which has no public constructor).
-fn dedupe_per_request_totals<'a, I>(rows: I, now: Instant) -> Vec<f64>
+fn dedupe_per_batch_request_latencies<'a, I>(
+    rows: I,
+    dispatch_started_at: Instant,
+    completed_at: Instant,
+) -> Vec<PerRequestSchedulerLatency>
 where
     I: IntoIterator<Item = (&'a str, Instant, &'a ItemOutcome)>,
 {
     let iter = rows.into_iter();
     let (lower, _) = iter.size_hint();
     let mut seen: HashSet<&str> = HashSet::with_capacity(lower);
-    let mut out: Vec<f64> = Vec::with_capacity(lower);
+    let mut out: Vec<PerRequestSchedulerLatency> = Vec::with_capacity(lower);
     for (request_id, submitted_at, o) in iter {
         if !matches!(o.disposition, Disposition::PublishAndAck) {
             continue;
@@ -2823,15 +3368,19 @@ where
         if !seen.insert(request_id) {
             continue;
         }
-        // Saturating subtract: in tests / replays where
-        // `submitted_at` could be set in the future relative to
-        // `now`, treat it as zero wait rather than panicking.
-        let batcher_wait_ms = now.saturating_duration_since(submitted_at).as_secs_f64() * 1000.0;
-        let inf = o.inference_ms.unwrap_or(0.0);
-        let post = o.postprocessing_ms.unwrap_or(0.0);
-        let total = batcher_wait_ms + inf + post;
-        if total > 0.0 {
-            out.push(total);
+        // `completed_at` is captured after RunBatch returns, so this
+        // interval already contains scheduler wait, IPC, inference,
+        // and postprocessing. Adding the outcome phase fields again
+        // would double-count backend work in the controller signal.
+        // Saturating subtract keeps future timestamps in tests/replays
+        // from panicking.
+        let total = completed_at.saturating_duration_since(submitted_at);
+        if !total.is_zero() {
+            let dispatch_wait = dispatch_started_at.saturating_duration_since(submitted_at);
+            out.push(PerRequestSchedulerLatency {
+                dispatch_wait,
+                total,
+            });
         }
     }
     out
@@ -2900,6 +3449,24 @@ fn synthetic_error_outcome(wi: &WorkItem, code: &str, message: &str) -> ItemOutc
     }
 }
 
+async fn prepare_extract_audio(
+    item: MsgValue,
+    permits: &Arc<Semaphore>,
+) -> Result<(MsgValue, Option<PreparedAudioPcm16>), String> {
+    let item = match crate::audio_prep::classify_item(item).map_err(|error| error.to_string())? {
+        crate::audio_prep::AudioPreparation::Ready(item) => return Ok((item, None)),
+        crate::audio_prep::AudioPreparation::Decode(item) => item,
+    };
+    let _permit = permits
+        .acquire()
+        .await
+        .map_err(|_| "audio preparation permit pool closed".to_string())?;
+    tokio::task::spawn_blocking(move || crate::audio_prep::prepare_item(item))
+        .await
+        .map_err(|error| format!("audio preparation task failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
 fn opt_non_empty(s: &str) -> Option<String> {
     if s.is_empty() {
         None
@@ -2936,20 +3503,21 @@ fn encode_generate_terminal_error_chunk(
 async fn handle_generate_event(
     event: GenerateEvent,
     publisher: Arc<WorkPublisher>,
-    metrics: Arc<MetricsRegistry>,
+    telemetry: crate::observability::metrics::SidecarTelemetry,
     settled: Arc<AtomicBool>,
     msg: Arc<QueuedMessage>,
     delivery_log: Arc<GenerateDeliveryLogContext>,
+    executed_bundle_config_hash: &str,
 ) -> Result<(), DispatchError> {
     match event.kind.as_str() {
         "publish" => {
-            publisher
-                .publish_raw(&event.reply_subject, event.payload)
-                .await?;
+            let payload =
+                stamp_generate_execution_hash(event.payload, executed_bundle_config_hash)?;
+            publisher.publish_raw(&event.reply_subject, payload).await?;
         }
         "ack" => {
             if !settled.swap(true, Ordering::SeqCst) {
-                match ack_msg(&msg).await {
+                match ack_msg(&msg, &telemetry).await {
                     Ok(()) => {
                         info!(
                             work_item_id = %delivery_log.work_item_id,
@@ -2964,7 +3532,6 @@ async fn handle_generate_event(
                             pending = delivery_log.delivery.pending,
                             "generate delivery ACKed"
                         );
-                        metrics.messages_acked_total.inc();
                     }
                     Err(e) => {
                         warn!(
@@ -2981,7 +3548,6 @@ async fn handle_generate_event(
                             error = %e,
                             "generate ACK failed"
                         );
-                        metrics.jetstream_ack_failures_total.inc();
                     }
                 }
             }
@@ -3003,12 +3569,19 @@ async fn handle_generate_event(
                     pending = delivery_log.delivery.pending,
                     "generate delivery NAKed by Python"
                 );
-                nak_msg(&msg, delay_ms, &metrics).await;
+                nak_msg(&msg, delay_ms, &telemetry).await;
             }
         }
         "in_progress" => {
             if !settled.load(Ordering::SeqCst) {
-                match msg.ack_with(async_nats::jetstream::AckKind::Progress).await {
+                let progress = msg.ack_with(async_nats::jetstream::AckKind::Progress).await;
+                telemetry.nats_operation(
+                    "progress",
+                    if progress.is_ok() { "success" } else { "error" },
+                    "none",
+                    1,
+                );
+                match progress {
                     Ok(()) => {
                         debug!(
                             work_item_id = %delivery_log.work_item_id,
@@ -3039,7 +3612,6 @@ async fn handle_generate_event(
                             error = %e,
                             "generate in-progress ACK failed"
                         );
-                        metrics.jetstream_ack_failures_total.inc();
                     }
                 }
             }
@@ -3051,31 +3623,92 @@ async fn handle_generate_event(
     Ok(())
 }
 
-async fn ack(delivery: &Delivery) -> Result<(), DispatchError> {
-    delivery.ack().await.map_err(DispatchError::Ack)
+fn stamp_generate_execution_hash(
+    payload: Vec<u8>,
+    executed_bundle_config_hash: &str,
+) -> Result<Vec<u8>, DispatchError> {
+    if executed_bundle_config_hash.is_empty() {
+        return Ok(payload);
+    }
+    let mut value: rmpv::Value = rmp_serde::from_slice(&payload)
+        .map_err(|error| IpcError::Server(format!("decode generation chunk: {error}")))?;
+    let rmpv::Value::Map(fields) = &mut value else {
+        return Err(IpcError::Server("generation chunk is not a msgpack map".to_string()).into());
+    };
+    fields.retain(|(key, _)| key.as_str() != Some("executed_bundle_config_hash"));
+    fields.push((
+        rmpv::Value::from("executed_bundle_config_hash"),
+        rmpv::Value::from(executed_bundle_config_hash),
+    ));
+    rmp_serde::to_vec_named(&value)
+        .map_err(|error| IpcError::Server(format!("encode generation chunk: {error}")).into())
 }
 
-async fn nak_all(items: &[(WorkItem, Delivery)], delay_ms: u64, metrics: &MetricsRegistry) {
+async fn ack(
+    delivery: &Delivery,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+) -> Result<(), DispatchError> {
+    let result = delivery.ack().await.map_err(DispatchError::Ack);
+    if matches!(delivery, Delivery::Nats(..)) {
+        telemetry.nats_operation(
+            "ack",
+            if result.is_ok() { "success" } else { "error" },
+            "completed",
+            1,
+        );
+    }
+    result
+}
+
+async fn nak_all(
+    items: &[(WorkItem, Delivery)],
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+) {
     for (_, d) in items {
-        nak_one(d, delay_ms, metrics).await;
+        nak_one(d, delay_ms, telemetry).await;
     }
     debug!(count = items.len(), delay_ms, "NAKed group");
 }
 
-async fn nak_one(delivery: &Delivery, delay_ms: u64, metrics: &MetricsRegistry) {
-    match delivery.nak(delay_ms).await {
-        Ok(()) => metrics.messages_naked_total.inc(),
+async fn nak_one(
+    delivery: &Delivery,
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+) {
+    nak_one_with_reason(delivery, delay_ms, telemetry, "retry").await;
+}
+
+async fn nak_one_with_reason(
+    delivery: &Delivery,
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+    reason: &str,
+) {
+    let result = delivery.nak(delay_ms).await;
+    if matches!(delivery, Delivery::Nats(..)) {
+        telemetry.nats_operation(
+            "nak",
+            if result.is_ok() { "success" } else { "error" },
+            reason,
+            1,
+        );
+    }
+    match result {
+        Ok(()) => {}
         Err(e) => {
             warn!(error = %e, "nak failed");
-            metrics.jetstream_nak_failures_total.inc();
         }
     }
 }
 
-async fn progress_all(items: &[(WorkItem, Delivery)], metrics: &MetricsRegistry) -> bool {
+async fn progress_all(
+    items: &[(WorkItem, Delivery)],
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+) -> bool {
     let mut all_ok = true;
     for (_, d) in items {
-        if !progress_one(d, metrics).await {
+        if !progress_one(d, telemetry).await {
             all_ok = false;
         }
     }
@@ -3085,12 +3718,23 @@ async fn progress_all(items: &[(WorkItem, Delivery)], metrics: &MetricsRegistry)
     all_ok
 }
 
-async fn progress_one(delivery: &Delivery, metrics: &MetricsRegistry) -> bool {
-    match delivery.progress().await {
+async fn progress_one(
+    delivery: &Delivery,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+) -> bool {
+    let result = delivery.progress().await;
+    if matches!(delivery, Delivery::Nats(..)) {
+        telemetry.nats_operation(
+            "progress",
+            if result.is_ok() { "success" } else { "error" },
+            "none",
+            1,
+        );
+    }
+    match result {
         Ok(()) => true,
         Err(e) => {
             warn!(error = %e, "progress ack failed");
-            metrics.jetstream_ack_failures_total.inc();
             false
         }
     }
@@ -3100,22 +3744,42 @@ async fn progress_one(delivery: &Delivery, metrics: &MetricsRegistry) -> bool {
 // its `Message` behind an `Arc` with the streaming-event callback, so it
 // cannot move it into a [`Delivery`]; these mirror `ack`/`nak_one` exactly.
 
-async fn ack_msg(msg: &Message) -> Result<(), DispatchError> {
-    msg.ack()
+async fn ack_msg(
+    msg: &Message,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+) -> Result<(), DispatchError> {
+    let result = msg
+        .ack()
         .await
-        .map_err(|e| DispatchError::Ack(e.to_string()))
+        .map_err(|e| DispatchError::Ack(e.to_string()));
+    telemetry.nats_operation(
+        "ack",
+        if result.is_ok() { "success" } else { "error" },
+        "completed",
+        1,
+    );
+    result
 }
 
-async fn nak_msg(msg: &Message, delay_ms: u64, metrics: &MetricsRegistry) {
+async fn nak_msg(
+    msg: &Message,
+    delay_ms: u64,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
+) {
     let delay = std::time::Duration::from_millis(delay_ms);
-    match msg
+    let result = msg
         .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
-        .await
-    {
-        Ok(()) => metrics.messages_naked_total.inc(),
+        .await;
+    telemetry.nats_operation(
+        "nak",
+        if result.is_ok() { "success" } else { "error" },
+        "retry",
+        1,
+    );
+    match result {
+        Ok(()) => {}
         Err(e) => {
             warn!(error = %e, "nak failed");
-            metrics.jetstream_nak_failures_total.inc();
         }
     }
 }
@@ -3157,8 +3821,8 @@ static SCHEDULER_BATCH_ID_COUNTER: std::sync::atomic::AtomicU64 =
 /// A wave starts with one **primary** batch and may continue with zero
 /// or more **drain** batches from the same `(op, lora)` queue. The
 /// adaptive controller must step exactly once per wave, using the
-/// primary batch size. Drains still feed inference-time and per-request
-/// latency samples, but they do not trigger efficiency records or PI
+/// primary batch size. Drains still feed inference-time and per-batch
+/// request-ID latency samples, but they do not trigger efficiency records or PI
 /// controller steps; otherwise the controller sees a stream of smaller
 /// drain batches and drives the wait knob too low under saturation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3170,18 +3834,39 @@ pub(crate) enum WaveRole {
     Primary,
     /// Continuation batch produced by `try_drain_same` on the same
     /// `(op, lora)` queue as the wave's primary. Feeds the
-    /// inference-calibration tracker (one sample) + the per-request
+    /// inference-calibration tracker (one sample) + the per-batch request-ID
     /// latency tracker, but does **not** step the controller and
     /// does **not** record an efficiency sample. The caps from the
     /// preceding primary's step stay in effect for the rest of the
-    /// wave; adaptive Prometheus gauges retain the primary's value
+    /// wave; adaptive controller state retains the primary's value
     /// (`gauge.set` is idempotent), so dashboards show one update
     /// per wave instead of one per IPC roundtrip.
     Drain,
 }
 
+fn scheduler_operation_label(operation: SchedOp) -> &'static str {
+    match operation {
+        SchedOp::Encode => "encode",
+        SchedOp::Score => "score",
+        SchedOp::Extract => "extract",
+    }
+}
+
+fn homogeneous_catalog_profile(metadata: &[SchedulerMeta]) -> Option<&str> {
+    let first = metadata.first()?.wi.profile_id.trim();
+    if first.is_empty()
+        || metadata
+            .iter()
+            .any(|meta| meta.wi.profile_id.trim() != first)
+    {
+        None
+    } else {
+        Some(first)
+    }
+}
+
 fn release_scheduler_pressure(
-    metrics: &MetricsRegistry,
+    runtime_state: &RuntimeState,
     worker_pool: &AdapterWorkerPool,
     model_id: &str,
     items: &[SchedulerItem],
@@ -3203,6 +3888,12 @@ fn release_scheduler_pressure(
 
     for (item, meta) in items.iter().zip(metadata.iter()) {
         let item_cost = item.cost();
+        runtime_state.telemetry.queue_released(
+            scheduler_operation_label(item.op()),
+            model_id,
+            (!meta.wi.profile_id.is_empty()).then_some(meta.wi.profile_id.as_str()),
+            meta.submitted_at.elapsed(),
+        );
         total_cost = total_cost.saturating_add(item_cost);
         if let Some(child_index) = meta.worker_child_index {
             let entry = child_pending.entry(child_index).or_insert((0, 0));
@@ -3214,8 +3905,11 @@ fn release_scheduler_pressure(
         }
     }
 
-    decrement_gauge(&metrics.worker_queue_depth, items.len() as i64);
-    decrement_gauge(&metrics.worker_pending_cost, clamp_u64_to_i64(total_cost));
+    decrement_gauge(&runtime_state.worker_queue_depth, items.len() as i64);
+    decrement_gauge(
+        &runtime_state.worker_pending_cost,
+        clamp_u64_to_i64(total_cost),
+    );
     for (child_index, (item_count, cost)) in child_pending {
         worker_pool.record_child_pending_dequeue(child_index, item_count, cost);
     }
@@ -3264,21 +3958,17 @@ async fn process_scheduler_batch(
     let mut kept_cost = 0_u64;
     let mut cancelled = 0_usize;
     for (item, meta) in items.into_iter().zip(metadata) {
-        if dispatcher.is_cancelled_worker_direct_batch(
-            &meta.wi.request_id,
-            &meta.wi.operation,
-            meta.worker_direct,
-        ) {
+        if dispatcher
+            .settle_if_cancelled(&meta.wi, &meta.delivery, "before_ipc")
+            .await
+        {
             release_scheduler_pressure(
-                &dispatcher.metrics,
+                &dispatcher.runtime_state,
                 &dispatcher.worker_pool,
                 model_id,
                 std::slice::from_ref(&item),
                 std::slice::from_ref(&meta),
             );
-            dispatcher
-                .ack_cancelled_worker_direct_batch(&meta.wi, &meta.delivery)
-                .await;
             cancelled += 1;
             continue;
         }
@@ -3290,7 +3980,7 @@ async fn process_scheduler_batch(
         debug!(
             model = %model_id,
             cancelled,
-            "batch-direct: dropped cancelled worker-direct scheduler items before IPC"
+            "dropped abandoned scheduler items before IPC"
         );
     }
     let batch = crate::scheduler::FormattedBatch {
@@ -3306,17 +3996,13 @@ async fn process_scheduler_batch(
     let total_cost = batch.total_cost;
     let flush_reason = batch.flush_reason.as_label();
     release_scheduler_pressure(
-        &dispatcher.metrics,
+        &dispatcher.runtime_state,
         &dispatcher.worker_pool,
         model_id,
         &batch.items,
         &batch.metadata,
     );
-    let op_label = match op {
-        SchedOp::Encode => "encode",
-        SchedOp::Score => "score",
-        SchedOp::Extract => "extract",
-    };
+    let op_label = scheduler_operation_label(op);
     // `lora.as_str()` yields `None` for the base key; on the wire
     // we send an empty string so Python's `lora_key or None` chain
     // roundtrips to the same value.
@@ -3431,53 +4117,71 @@ async fn process_scheduler_batch(
         lora_key: lora_str,
         total_cost,
         items: rb_items,
+        accepts_batched_f16_multivectors: true,
+    };
+    let batch_profile = dispatcher
+        .runtime_state
+        .telemetry
+        .is_enabled()
+        .then(|| homogeneous_catalog_profile(&batch.metadata).map(ToString::to_string))
+        .flatten();
+
+    // Record the scheduler-formed shape once before the RPC so failed backend
+    // calls still retain the authoritative batch observation.
+    dispatcher.runtime_state.telemetry.batch_formed(
+        op_label,
+        model_id,
+        batch_profile.as_deref(),
+        flush_reason,
+        batch_size,
+        total_cost,
+    );
+    let started = Instant::now();
+    dispatcher.runtime_state.inflight_batches.inc();
+
+    let _execution_guard = if let Some(state) = dispatcher.config_apply_state.as_ref() {
+        let guard = state.lock_execution().await;
+        if let Some((expected_hash, unknown_hash_count)) =
+            unknown_bundle_config_hash(batch.metadata.iter().map(|meta| &meta.wi), Some(state))
+        {
+            dispatcher.runtime_state.inflight_batches.dec();
+            info!(
+                model = %model_id,
+                op = op_label,
+                expected_hash,
+                unknown_hash_count,
+                local_hash = %state.current_bundle_config_hash(),
+                "scheduler bundle config hash changed before execution — NAKing batch"
+            );
+            let msgs_only: Vec<(WorkItem, Delivery)> = batch
+                .metadata
+                .into_iter()
+                .map(|meta| (meta.wi, meta.delivery))
+                .collect();
+            nak_all(
+                &msgs_only,
+                base_nak_delay_ms(),
+                &dispatcher.runtime_state.telemetry,
+            )
+            .await;
+            return;
+        }
+        Some(guard)
+    } else {
+        None
     };
 
-    let model_lbl = dispatcher.metrics.model_label(model_id);
-    // Basic scheduler observability: one sample per flushed batch of
-    // (items, total_cost) against `(model, operation, lora)`. Record
-    // *before* the RPC so we capture the batch shape even if the
-    // backend call ends up failing and the batch gets NAKed — the
-    // shape itself is what the scheduler produced.
-    //
-    // On the wire `lora_str` is `""` (matches Python's `lora_key or
-    // None` contract) but for dashboards we prefer the explicit
-    // `"base"` sentinel so PromQL doesn't need `lora=""` predicates.
-    // `lora.as_str()` yields `None` for the base key too, so this
-    // doesn't duplicate logic — we just pick a clearer label.
-    let lora_metric_label = lora.as_str().unwrap_or("base");
-    dispatcher
-        .metrics
-        .scheduler
-        .batch_items
-        .with_label_values(&[&model_lbl, op_label, lora_metric_label])
-        .observe(batch_size as f64);
-    dispatcher
-        .metrics
-        .scheduler
-        .batch_cost
-        .with_label_values(&[&model_lbl, op_label, lora_metric_label])
-        .observe(total_cost as f64);
-    dispatcher
-        .metrics
-        .scheduler
-        .flush_reason_total
-        .with_label_values(&[&model_lbl, op_label, lora_metric_label, flush_reason])
-        .inc();
-    let _timer = dispatcher
-        .metrics
-        .pull_batch_process_seconds
-        .with_label_values(&[&model_lbl, op_label])
-        .start_timer();
-    let started = Instant::now();
-    dispatcher.metrics.ipc_requests_total.inc();
-    dispatcher.metrics.inflight_batches.inc();
+    // Capture this monotonic boundary immediately before the backend RPC. The
+    // enqueue→dispatch histogram therefore includes time parked behind the
+    // scheduler pipeline permit, config execution barrier, and local request
+    // construction, while the enqueue→reply histogram additionally includes
+    // the backend roundtrip.
+    let dispatch_started_at = Instant::now();
 
     let outcome = match dispatcher.backend.run_batch(req).await {
         Ok(o) => o,
         Err(e) => {
-            dispatcher.metrics.inflight_batches.dec();
-            dispatcher.metrics.ipc_failures_total.inc();
+            dispatcher.runtime_state.inflight_batches.dec();
             let delay = nak_delay_for_backend_error(&e);
             warn!(
                 model = %model_id,
@@ -3492,11 +4196,11 @@ async fn process_scheduler_batch(
                 .into_iter()
                 .map(|m| (m.wi, m.delivery))
                 .collect();
-            nak_all(&msgs_only, delay, &dispatcher.metrics).await;
+            nak_all(&msgs_only, delay, &dispatcher.runtime_state.telemetry).await;
             return;
         }
     };
-    dispatcher.metrics.inflight_batches.dec();
+    dispatcher.runtime_state.inflight_batches.dec();
 
     // Collect per-item timings BEFORE we move the metadata into
     // `apply_outcomes`. Two telemetry flows out of this loop:
@@ -3506,65 +4210,89 @@ async fn process_scheduler_batch(
     //     representative). Feeds the auto-calibration tracker so
     //     `target_p50_ms` derives from GPU forward time, not the
     //     batcher+post sum.
-    //  2. `per_item_total_ms` — one entry per `PublishAndAck`
-    //     outcome, value = `batcher_wait + inference + postprocess`
-    //     for *that* item. Fed verbatim into the controller's
-    //     latency tracker so `observed_p50_ms` matches Python
-    //     `RequestTiming.total_ms` semantics. The signal must include
+    //  2. `per_batch_request_total_ms` — one entry per unique successful
+    //     request ID in this backend batch, measured from scheduler enqueue
+    //     until the RunBatch reply completes. A request spanning backend
+    //     batches contributes once in each batch. Fed verbatim into the
+    //     controller's latency tracker to mirror Python's batch-local
+    //     `RequestTiming.total_ms` deposits. The signal must include
     //     the Rust BatchFormer wait, must exclude upstream NATS queue
     //     depth, and must not collapse a batch to its max item latency;
     //     each of those alternatives biases the PI loop enough to pin
     //     the wait knob at a floor or ceiling.
     //
-    //     The semantically correct mirror of Python's `total_ms` is
-    //     `(now - submitted_at) + inference + post`. `submitted_at`
+    //     The closest queue-path mirror of Python's `total_ms` is
+    //     `completed_at - submitted_at`. `submitted_at`
     //     (`SchedulerMeta.submitted_at`) is stamped when the dispatcher
     //     enqueues the item into our scheduler — equivalent to when
     //     Python's `RequestTiming()` is constructed at the top of
     //     `EncodePipeline.run_encode`, which is *after* the NATS pull
-    //     but *before* batch formation. The delta (`now -
+    //     but *before* batch formation. The delta (`completed_at -
     //     submitted_at`) covers the time the item spent inside our
-    //     own (Rust) `BatchFormer` waiting to flush — the analogue
-    //     of Python's `total_ms` via `metadata.timing._start_time`
-    //     getting set in `EncodePipeline.run_encode`. Note: the sidecar
-    //     calls Python's pre-formed batch IPC entrypoint, so Python does
+    //     own (Rust) `BatchFormer`, the IPC roundtrip, and all backend
+    //     work through the reply. Backend phase fields are therefore
+    //     already contained in the interval and must not be added.
+    //     Note: the sidecar calls Python's pre-formed batch IPC entrypoint, so Python does
     //     not run its per-LoRA BatchFormer on this path; the entire
     //     batch-form delta is observed here on the Rust side instead of
     //     being split across Rust and Python batchers.
-    let now = Instant::now();
+    let completed_at = Instant::now();
     let inference_ms_sample = outcome
         .outcomes
         .iter()
         .find_map(|o| o.inference_ms)
         .unwrap_or_else(|| started.elapsed().as_secs_f64() * 1000.0);
-    // Per-request totals (deduped by `request_id`). When the gateway
+    // Per-batch request-ID totals. When the gateway
     // splits a multi-item client request into N NATS work-items they
     // share the same `request_id` but get distinct `item_index`es —
     // they may all land in one Rust batch. Python's
     // `_complete_requests` dedupes via a `seen: set[id(metadata)]` so a
-    // multi-item request deposits **one** latency sample, not N (see
-    // `model_worker.py:947-976` on main `bbe409c3`). The tracker p50 is
-    // a per-request signal, not a per-item one — recording N samples
-    // here would let a single 10-item request dominate `observed_p50_ms`
-    // 10× more than ten 1-item requests at the same throughput, which
-    // is exactly the bias the calibration tracker is designed to avoid.
-    // Picking the first occurrence's
+    // multi-item request deposits one latency sample per backend batch, not
+    // one per item in that batch (see `model_worker.py:947-976` on main
+    // `bbe409c3`). A request larger than the scheduler batch cap can therefore
+    // deposit multiple samples. This preserves the existing controller signal
+    // while avoiding item-count weighting within a batch. Picking the first
+    // successful occurrence's
     // `submitted_at` keeps `batcher_wait_ms` aligned with Python's
     // `RequestTiming._start_time`, which is set once when the request
     // enters the worker process and shared across all its items.
-    let per_request_total_ms: Vec<f64> = dedupe_per_request_totals(
+    let per_batch_request_latencies = dedupe_per_batch_request_latencies(
         batch
             .metadata
             .iter()
             .zip(outcome.outcomes.iter())
             .map(|(m, o)| (m.wi.request_id.as_str(), m.submitted_at, o)),
-        now,
+        dispatch_started_at,
+        completed_at,
     );
+    let per_batch_request_total_ms: Vec<f64> = per_batch_request_latencies
+        .iter()
+        .map(|sample| sample.total.as_secs_f64() * 1_000.0)
+        .collect();
 
-    let resolved: Vec<(WorkItem, Delivery, f64)> = batch
+    // Histograms preserve the full successful-request distribution across a
+    // scrape interval. Unlike the controller's end-of-run p50 gauge, they
+    // expose saturation tails and split upstream scheduler/pipeline residency
+    // from the RunBatch RPC. The same success filter + request-id dedupe feeds
+    // both histograms and the existing controller signal; observing them does
+    // not alter controller inputs or cadence.
+    for sample in &per_batch_request_latencies {
+        dispatcher
+            .runtime_state
+            .telemetry
+            .scheduler_request_batch_completed(SchedulerRequestBatchObservation {
+                operation: op_label,
+                model: model_id,
+                profile: batch_profile.as_deref(),
+                dispatch_wait: sample.dispatch_wait,
+                total: sample.total,
+            });
+    }
+
+    let resolved: Vec<ResolvedWorkItem> = batch
         .metadata
         .into_iter()
-        .map(|m| (m.wi, m.delivery, m.fetch_ms))
+        .map(|m| (m.wi, m.delivery, m.fetch_ms, m.caller_item_id))
         .collect();
     dispatcher.apply_outcomes(outcome, resolved).await;
 
@@ -3580,15 +4308,15 @@ async fn process_scheduler_batch(
     // sampling keeps calibration aging across multiple batches while
     // the GPU warms.
     //
-    // PI signal sample rate: per **unique request_id** (deduped).
-    // The tracker p50 is a per-request signal — a single 10-item
-    // request shouldn't dominate `observed_p50_ms` 10× more than ten
-    // 1-item requests at the same throughput. For typical bench
-    // workloads (1 item per request) dedup is a no-op.
+    // PI signal sample rate: per **unique request_id in each backend batch**.
+    // This avoids item-count weighting within a batch but intentionally keeps
+    // the existing behavior where requests spanning multiple backend batches
+    // contribute once in each batch. For typical benchmark workloads (one item
+    // per request) dedup is a no-op.
     //
     // Cadence (per [`WaveRole`]): Primary triggers
     // `record_completion` (efficiency record + controller step +
-    // cap propagation + Prometheus push). Drain feeds inference +
+    // cap propagation + canonical fill observation). Drain feeds inference +
     // latency samples only; the controller is **not** stepped — the
     // wave's caps were already updated by the primary, and Python's
     // `_process_loop` likewise steps once per wave with the primary
@@ -3598,47 +4326,32 @@ async fn process_scheduler_batch(
     // (every Drain also calls `record_completion`). Off-by-default;
     // see [`crate::wave_cadence_enabled`] for the rationale and the
     // p50/p99 trade-off.
-    if !per_request_total_ms.is_empty() {
+    if !per_batch_request_total_ms.is_empty() {
         scheduler.record_inference_sample(inference_ms_sample).await;
         scheduler
-            .record_latency_samples(&per_request_total_ms)
+            .record_latency_samples(&per_batch_request_total_ms)
             .await;
         if matches!(role, WaveRole::Primary) || !crate::wave_cadence_enabled() {
             let snapshot = scheduler.record_completion(total_cost, batch_size).await;
 
-            // Push the controller snapshot to Prometheus. In passthrough
-            // mode the Python adaptive controller never runs, so the Rust
-            // scheduler is the sole source of these metrics. `model_lbl`
-            // is already in scope from the pre-RPC path; re-using it keeps
-            // the label string stable across the
-            // batch_items / batch_cost / adaptive_* families so a
-            // PromQL `on(model)` join works.
-            let m = &dispatcher.metrics.scheduler;
-            m.adaptive_wait_ms
-                .with_label_values(&[&model_lbl])
-                .set(snapshot.new_wait_ms);
-            m.adaptive_cost
-                .with_label_values(&[&model_lbl])
-                .set(snapshot.new_batch_cost as f64);
-            if let Some(o) = snapshot.observed_p50_ms {
-                m.adaptive_observed_p50_ms
-                    .with_label_values(&[&model_lbl])
-                    .set(o);
-            }
-            if let Some(t) = snapshot.target_p50_ms {
-                m.adaptive_target_p50_ms
-                    .with_label_values(&[&model_lbl])
-                    .set(t);
-            }
+            dispatcher.runtime_state.telemetry.adaptive_snapshot(
+                model_id,
+                batch_profile.as_deref(),
+                snapshot.new_wait_ms,
+                snapshot.new_batch_cost,
+                snapshot.observed_p50_ms,
+                snapshot.target_p50_ms,
+                snapshot.starvation_resets_delta,
+            );
+
             if let Some(f) = snapshot.fill_ratio {
-                m.adaptive_fill_ratio
-                    .with_label_values(&[&model_lbl])
-                    .set(f);
-            }
-            if snapshot.starvation_resets_delta > 0 {
-                m.starvation_resets_total
-                    .with_label_values(&[&model_lbl])
-                    .inc_by(u64::from(snapshot.starvation_resets_delta));
+                dispatcher.runtime_state.telemetry.batch_fill_observed(
+                    op_label,
+                    model_id,
+                    batch_profile.as_deref(),
+                    flush_reason,
+                    f,
+                );
             }
         }
     }
@@ -3660,7 +4373,7 @@ fn clamp_u64_to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-fn decrement_gauge(gauge: &prometheus::IntGauge, value: i64) {
+fn decrement_gauge(gauge: &RuntimeGauge, value: i64) {
     if value <= 0 {
         return;
     }
@@ -3724,52 +4437,28 @@ fn scheduler_idle_bypass_enabled() -> bool {
     })
 }
 
-/// Acquire one permit from `pipeline_sem` (blocking the consume loop
-/// once the active depth — `ceiling` minus any autotune-parked
-/// permits — batches are in flight) then spawn the dispatch as an
-/// independent task. The task releases its permit when it returns.
+/// Spawn a dispatch as an independent task while holding a previously
+/// reserved pipeline permit. The task releases its permit when it
+/// returns.
 ///
-/// Backpressure direction: if the pipeline is saturated, the
-/// `acquire_owned` here yields the consume loop, which means the
-/// underlying `BatchFormer` keeps accumulating items. The next
-/// `consume_next` call therefore sees a fuller batch — net positive
-/// at saturation.
 // Each argument is independently sourced from the consume loop's
 // stack frame (model_id from the per-model task, dispatcher +
-// scheduler are shared Arcs, pipeline_sem is loop-local, op/lora/
+// scheduler are shared Arcs, permit is loop-local, op/lora/
 // batch come from the just-flushed scheduler tick, role comes from
 // the wave's primary-vs-drain role assignment). Bundling them into a
 // struct would introduce a one-shot wrapper type whose only purpose
 // is to satisfy this lint — net less readable, so explicit allow.
 #[allow(clippy::too_many_arguments)]
-async fn spawn_pipelined_batch(
+fn spawn_pipelined_batch_with_permit(
     model_id: &str,
     dispatcher: &Arc<Dispatcher>,
     scheduler: &Arc<ProductionScheduler>,
-    pipeline_sem: &Arc<Semaphore>,
+    permit: OwnedSemaphorePermit,
     op: SchedOp,
     lora: crate::scheduler::LoraKey,
     batch: crate::scheduler::FormattedBatch<SchedulerItem, SchedulerMeta>,
     role: WaveRole,
 ) {
-    if batch.items.is_empty() {
-        return;
-    }
-    let permit = match pipeline_sem.clone().acquire_owned().await {
-        Ok(p) => p,
-        Err(_) => {
-            // Semaphore closed. Should be impossible while the loop
-            // owns it, but log loudly and fall back to a serial
-            // dispatch on the consume loop's task so we don't drop
-            // the batch on the floor.
-            warn!(
-                model = %model_id,
-                "rust-scheduler: pipeline semaphore closed; running batch inline",
-            );
-            process_scheduler_batch(model_id, dispatcher, scheduler, op, lora, batch, role).await;
-            return;
-        }
-    };
     let model_id_c = model_id.to_owned();
     let disp_c = Arc::clone(dispatcher);
     let sched_c = Arc::clone(scheduler);
@@ -3777,6 +4466,53 @@ async fn spawn_pipelined_batch(
         process_scheduler_batch(&model_id_c, &disp_c, &sched_c, op, lora, batch, role).await;
         drop(permit);
     });
+}
+
+/// Reserve one pipeline slot unless shutdown wins first.
+///
+/// Every scheduler extract is preceded by this wait. While all slots are
+/// occupied, pending items therefore remain mutable inside the `BatchFormer`
+/// and later arrivals can join the next dispatch. The semaphore is loop-owned
+/// and never closed; closure is an internal invariant violation, not a reason
+/// to exceed the configured pipeline depth.
+async fn reserve_pipeline_slot(
+    pipeline_sem: &Arc<Semaphore>,
+    shutdown: &Shutdown,
+) -> Option<OwnedSemaphorePermit> {
+    tokio::select! {
+        biased;
+        _ = shutdown.wait() => None,
+        permit = pipeline_sem.clone().acquire_owned() => Some(
+            permit.expect("scheduler pipeline semaphore is loop-owned and never closed"),
+        ),
+    }
+}
+
+/// Reserve the first continuation slot, then snapshot one scheduler key's
+/// pending count.
+///
+/// This ordering admits arrivals accumulated while the pipeline was saturated
+/// before freezing the bounded drain-wave size. Counting is read-only, so it is
+/// safe to cancel if shutdown wins after permit acquisition; the local permit
+/// is dropped on that path.
+async fn reserve_continuation_slot_and_snapshot<I, T>(
+    scheduler: &crate::scheduler::Scheduler<I, T>,
+    pipeline_sem: &Arc<Semaphore>,
+    shutdown: &Shutdown,
+    op: SchedOp,
+    lora: crate::scheduler::LoraKey,
+) -> Option<(OwnedSemaphorePermit, usize)>
+where
+    I: HasCost + Send + Sync + 'static,
+    T: Send + Sync + 'static,
+{
+    let permit = reserve_pipeline_slot(pipeline_sem, shutdown).await?;
+    let budget = tokio::select! {
+        biased;
+        _ = shutdown.wait() => None,
+        count = scheduler.pending_count_same(op, lora) => Some(count),
+    }?;
+    Some((permit, budget))
 }
 
 pub(crate) async fn scheduler_drain_loop(
@@ -3836,14 +4572,20 @@ pub(crate) async fn scheduler_drain_loop(
     //     runtimes whose per-worker stream gets too thin under
     //     multi-worker fanout.
     //
-    //   * After every consumed batch we loop on `try_drain_same` for
-    //     the same `(op, lora)` until it returns `None`. With
-    //     pipelining this is still useful: items that landed in the
-    //     Rust `BatchFormer` between the timer firing and us reaching
-    //     this point get shipped immediately rather than waiting for
-    //     the next coalesce window. Each drained sub-batch goes
-    //     through the same permit-bounded spawn, so total in-flight
-    //     stays capped by `depth`.
+    //   * Before every primary or drain extract we reserve a pipeline
+    //     slot. A saturated pipeline therefore leaves its pending tail
+    //     mutable inside the Rust `BatchFormer`; arrivals during the
+    //     current GPU forwards can join the next dispatch instead of
+    //     sitting in an immutable third batch outside the scheduler.
+    //
+    //   * Once the first continuation slot opens, we snapshot the same
+    //     `(op, lora)` batcher's pending count and drain at most that
+    //     many items. Work accumulated during active forwards can join
+    //     the snapshot; later arrivals may participate after cost
+    //     sorting, but cannot grow the wave. The next iteration returns
+    //     to FCFS with each key's head refreshed to its actual oldest
+    //     remaining item, removing stale-head priority and restoring
+    //     controller cadence under continuous arrivals.
     //
     //   * `was_idle` is reset to true only when the just-finished
     //     wave produced no drained tail and the kicking batch was a
@@ -3852,54 +4594,129 @@ pub(crate) async fn scheduler_drain_loop(
     //     is steady and the next iteration should accumulate (no
     //     immediate flush).
     let mut was_idle = true;
-    loop {
-        tokio::select! {
-            (op, lora, batch) = scheduler.consume_next(was_idle && idle_bypass_enabled) => {
-                let initial_batch_size = batch.items.len();
-                // First batch in the wave drives the controller step.
-                spawn_pipelined_batch(
-                    &model_id,
-                    &dispatcher,
-                    &scheduler,
-                    &pipeline_sem,
-                    op,
-                    lora.clone(),
-                    batch,
-                    WaveRole::Primary,
-                ).await;
+    'run: loop {
+        let Some(primary_permit) = reserve_pipeline_slot(&pipeline_sem, &shutdown).await else {
+            info!(
+                model = %model_id,
+                "rust-scheduler: shutdown observed — entering final drain",
+            );
+            break;
+        };
 
-                let mut drained_any = false;
-                while let Some(drain_batch) =
-                    scheduler.try_drain_same(op, lora.clone()).await
-                {
-                    if drain_batch.items.is_empty() {
-                        break;
-                    }
-                    drained_any = true;
-                    // Drains continue the wave: feed inference +
-                    // latency samples, but no controller step.
-                    spawn_pipelined_batch(
-                        &model_id,
-                        &dispatcher,
-                        &scheduler,
-                        &pipeline_sem,
-                        op,
-                        lora.clone(),
-                        drain_batch,
-                        WaveRole::Drain,
-                    ).await;
+        // The permit must be held before `consume_next` extracts. If the queue
+        // is idle, shutdown cancels this wait and drops the reserved permit.
+        let primary = tokio::select! {
+            biased;
+            _ = shutdown.wait() => None,
+            batch = scheduler.consume_next(was_idle && idle_bypass_enabled) => Some(batch),
+        };
+        let Some((op, lora, batch)) = primary else {
+            drop(primary_permit);
+            info!(
+                model = %model_id,
+                "rust-scheduler: shutdown observed — entering final drain",
+            );
+            break;
+        };
+
+        let initial_batch_size = batch.items.len();
+        // First batch in the wave drives the controller step.
+        spawn_pipelined_batch_with_permit(
+            &model_id,
+            &dispatcher,
+            &scheduler,
+            primary_permit,
+            op,
+            lora.clone(),
+            batch,
+            WaveRole::Primary,
+        );
+
+        // Wait for the first continuation slot before snapshotting the drain
+        // budget. At saturation this is when one active backend call finishes,
+        // so arrivals accumulated during those forwards can all participate in
+        // the next batch. Freezing the count only now keeps later arrivals from
+        // extending the wave indefinitely without forcing a stale singleton.
+        let mut drained_any = false;
+        let Some((first_drain_permit, mut drain_budget)) = reserve_continuation_slot_and_snapshot(
+            scheduler.as_ref(),
+            &pipeline_sem,
+            &shutdown,
+            op,
+            lora.clone(),
+        )
+        .await
+        else {
+            info!(
+                model = %model_id,
+                "rust-scheduler: shutdown observed before continuous drain",
+            );
+            break 'run;
+        };
+        if drain_budget == 0 {
+            drop(first_drain_permit);
+            was_idle = initial_batch_size <= 1;
+            continue;
+        }
+
+        let mut drain_permit = Some(first_drain_permit);
+        while drain_budget > 0 {
+            let permit = drain_permit
+                .take()
+                .expect("positive drain budget always owns one pipeline permit");
+            let drained = tokio::select! {
+                biased;
+                _ = shutdown.wait() => None,
+                batch = scheduler.try_drain_same_up_to(op, lora.clone(), drain_budget) => {
+                    Some(batch)
                 }
-
-                was_idle = !drained_any && initial_batch_size <= 1;
-            }
-            _ = shutdown.wait() => {
+            };
+            let Some(drain_batch) = drained else {
+                drop(permit);
                 info!(
                     model = %model_id,
-                    "rust-scheduler: shutdown observed — entering final drain",
+                    "rust-scheduler: shutdown observed during continuous drain",
                 );
+                break 'run;
+            };
+            let Some(drain_batch) = drain_batch else {
+                drop(permit);
+                break;
+            };
+            if drain_batch.items.is_empty() {
+                drop(permit);
                 break;
             }
+
+            drain_budget = drain_budget.saturating_sub(drain_batch.items.len());
+            drained_any = true;
+            // Drains continue the wave: feed inference + latency samples, but
+            // no controller step.
+            spawn_pipelined_batch_with_permit(
+                &model_id,
+                &dispatcher,
+                &scheduler,
+                permit,
+                op,
+                lora.clone(),
+                drain_batch,
+                WaveRole::Drain,
+            );
+
+            if drain_budget > 0 {
+                let Some(next_permit) = reserve_pipeline_slot(&pipeline_sem, &shutdown).await
+                else {
+                    info!(
+                        model = %model_id,
+                        "rust-scheduler: shutdown observed during continuous drain",
+                    );
+                    break 'run;
+                };
+                drain_permit = Some(next_permit);
+            }
         }
+
+        was_idle = !drained_any && initial_batch_size <= 1;
     }
 
     // Quiesce the pipeline: acquire all `depth` permits so every
@@ -3981,14 +4798,137 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::delivery::LocalDelivery;
+    use crate::scheduler::{BatchConfig, Scheduler};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct PipelineTestItem {
+        idx: usize,
+    }
+
+    impl HasCost for PipelineTestItem {
+        fn cost(&self) -> u64 {
+            1
+        }
+
+        fn original_index(&self) -> usize {
+            self.idx
+        }
+    }
+
+    #[test]
+    fn cancellation_matrix_separates_request_batch_and_generation() {
+        let request = RequestCancelState::new(Duration::from_secs(60));
+        let batch = BatchCancelState::default();
+        request.cancel("gw-a".into(), "req-a".into());
+        assert_eq!(
+            classify_cancellation(&request, &batch, "gw-a", "req-a", "encode", false),
+            Some(WorkCancellation::Request)
+        );
+        assert_eq!(
+            classify_cancellation(&request, &batch, "gw-a", "req-a", "score", true),
+            Some(WorkCancellation::Request)
+        );
+        assert_eq!(
+            classify_cancellation(&request, &batch, "gw-b", "req-a", "encode", false),
+            None
+        );
+        assert_eq!(
+            classify_cancellation(&request, &batch, "gw-a", "req-a", "generate", true),
+            None
+        );
+
+        batch.cancel("req-b".into());
+        assert_eq!(
+            classify_cancellation(&request, &batch, "gw-a", "req-b", "extract", false),
+            None
+        );
+        assert_eq!(
+            classify_cancellation(&request, &batch, "gw-a", "req-b", "extract", true),
+            Some(WorkCancellation::BatchDirect)
+        );
+        assert_eq!(
+            classify_cancellation(&request, &batch, "gw-a", "req-b", "generate", true),
+            None
+        );
+    }
+
+    #[test]
+    fn payload_error_contract_maps_oversize_to_terminal_413_code() {
+        let error = PayloadError::TooLarge {
+            actual: 17,
+            max: 16,
+        };
+        assert_eq!(
+            payload_error_contract(&error),
+            (PAYLOAD_TOO_LARGE_ERROR_CODE, PAYLOAD_TOO_LARGE_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn payload_error_contract_keeps_other_store_failures_generic() {
+        let error = PayloadError::InvalidRef("missing".into());
+        assert_eq!(
+            payload_error_contract(&error),
+            (PAYLOAD_ERROR_CODE, PAYLOAD_RESOLVE_ERROR_MESSAGE)
+        );
+    }
 
     fn text_item(text: &str) -> MsgValue {
         MsgValue::Map(vec![(MsgValue::from("text"), MsgValue::from(text))])
     }
 
-    fn adapter_pool_with_metrics(metrics: Arc<MetricsRegistry>) -> Arc<AdapterWorkerPool> {
+    #[tokio::test]
+    async fn extract_audio_permit_only_gates_non_null_audio() {
+        let permits = Arc::new(Semaphore::new(0));
+
+        let (absent, prepared) = prepare_extract_audio(text_item("pass through"), &permits)
+            .await
+            .unwrap();
+        assert_eq!(absent, text_item("pass through"));
+        assert!(prepared.is_none());
+
+        let null = MsgValue::Map(vec![
+            (MsgValue::from("text"), MsgValue::from("pass through")),
+            (MsgValue::from("audio"), MsgValue::Nil),
+        ]);
+        let (null, prepared) = prepare_extract_audio(null, &permits).await.unwrap();
+        assert!(prepared.is_none());
+        assert!(
+            matches!(null, MsgValue::Map(fields) if fields == vec![(MsgValue::from("text"), MsgValue::from("pass through"))])
+        );
+
+        let duplicate = MsgValue::Map(vec![
+            (MsgValue::from("audio"), MsgValue::Nil),
+            (MsgValue::from("audio"), MsgValue::Nil),
+        ]);
+        let error = prepare_extract_audio(duplicate, &permits)
+            .await
+            .unwrap_err();
+        assert!(error.contains("duplicate field"));
+
+        let invalid_audio = MsgValue::Map(vec![(
+            MsgValue::from("audio"),
+            MsgValue::from("not an object"),
+        )]);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                prepare_extract_audio(invalid_audio.clone(), &permits),
+            )
+            .await
+            .is_err(),
+            "non-null audio must wait for the decode permit",
+        );
+        permits.add_permits(1);
+        let error = prepare_extract_audio(invalid_audio, &permits)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "audio must be an object");
+    }
+
+    fn adapter_pool_with_runtime_state(runtime_state: Arc<RuntimeState>) -> Arc<AdapterWorkerPool> {
         let paths = [PathBuf::from("/tmp/sie-test-ipc-0.sock")];
-        AdapterWorkerPool::new(&paths, 1, 60, 900, metrics)
+        AdapterWorkerPool::new(&paths, 1, 60, 900, runtime_state)
     }
 
     fn wi(request: &str, idx: u32, model: &str, op: &str) -> WorkItem {
@@ -4020,6 +4960,7 @@ mod tests {
             prompt_cache_key: None,
             bundle_config_hash: String::new(),
             router_id: String::new(),
+            accepts_result_chunks: false,
             reply_subject: "_INBOX.r.a".into(),
             traceparent: None,
             tracestate: None,
@@ -4048,13 +4989,16 @@ mod tests {
 
     #[test]
     fn releasing_cancelled_scheduled_item_clears_global_and_child_pressure() {
-        let metrics = Arc::new(MetricsRegistry::new().unwrap());
-        let worker_pool = adapter_pool_with_metrics(Arc::clone(&metrics));
+        let runtime_state = Arc::new(RuntimeState::new());
+        let worker_pool = adapter_pool_with_runtime_state(Arc::clone(&runtime_state));
         let work = wi("req-cancel", 0, "model-a", "encode");
         let item = encode_scheduler_item(&work);
         let child_index = worker_pool.record_model_pending_enqueue(&work.model_id, item.cost());
-        metrics.worker_queue_depth.inc();
-        metrics
+        runtime_state
+            .telemetry
+            .queue_enqueued("encode", &work.model_id, None);
+        runtime_state.worker_queue_depth.inc();
+        runtime_state
             .worker_pending_cost
             .add(clamp_u64_to_i64(item.cost()));
 
@@ -4068,29 +5012,21 @@ mod tests {
         .with_worker_child_index(child_index);
 
         release_scheduler_pressure(
-            &metrics,
+            &runtime_state,
             &worker_pool,
             &work.model_id,
             std::slice::from_ref(&item),
             std::slice::from_ref(&meta),
         );
 
-        assert_eq!(metrics.worker_queue_depth.get(), 0);
-        assert_eq!(metrics.worker_pending_cost.get(), 0);
-        let child_label = child_index.to_string();
+        assert_eq!(runtime_state.worker_queue_depth.get(), 0);
+        assert_eq!(runtime_state.worker_pending_cost.get(), 0);
         assert_eq!(
-            metrics
-                .worker_child_queue_depth
-                .with_label_values(&[child_label.as_str()])
-                .get(),
-            0
-        );
-        assert_eq!(
-            metrics
-                .worker_child_pending_cost
-                .with_label_values(&[child_label.as_str()])
-                .get(),
-            0
+            runtime_state
+                .telemetry
+                .queue_depth_for_tests("encode", &work.model_id),
+            0,
+            "canonical queue depth must balance on the cancellation release path"
         );
     }
 
@@ -4131,6 +5067,25 @@ mod tests {
         assert_eq!(decoded.error.message, "loading");
     }
 
+    #[test]
+    fn generation_chunk_is_stamped_with_stable_execution_hash() {
+        let original = rmp_serde::to_vec_named(&serde_json::json!({
+            "kind": "chunk",
+            "request_id": "req-1",
+            "attempt_id": "attempt-1",
+            "seq": 1,
+            "text_delta": "done",
+            "done": true
+        }))
+        .unwrap();
+
+        let stamped = stamp_generate_execution_hash(original, "hash-a").unwrap();
+        let decoded: serde_json::Value = rmp_serde::from_slice(&stamped).unwrap();
+        assert_eq!(decoded["executed_bundle_config_hash"], "hash-a");
+        assert_eq!(decoded["text_delta"], "done");
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn offloaded_generate_blob_with_base64_images_resolves_via_object_store() {
         use crate::payload_store::LocalPayloadStore;
@@ -4199,6 +5154,14 @@ mod tests {
     }
 
     #[test]
+    fn invalid_audio_uses_gateway_client_error_contract() {
+        let work = wi("req", 0, "openai/whisper-large-v3-turbo", "extract");
+        let outcome = synthetic_error_outcome(&work, "invalid_request", "bad audio");
+        assert_eq!(outcome.error_code.as_deref(), Some("invalid_request"));
+        assert_eq!(outcome.disposition, Disposition::PublishErrorAndAck);
+    }
+
+    #[test]
     fn groups_by_model_and_operation() {
         let items = vec![
             (wi("r1", 0, "A", "encode"), ()),
@@ -4236,19 +5199,24 @@ mod tests {
     }
 
     #[test]
-    fn unknown_bundle_config_hash_accepts_current_recent_and_empty_hashes() {
+    fn unknown_bundle_config_hash_accepts_only_current_and_empty_hashes() {
         let state = ConfigApplyState::new("hash-1".into());
         state.set_bundle_hash("hash-2".into());
 
         let mut current = wi("r1", 0, "A", "encode");
         current.bundle_config_hash = "hash-2".into();
-        let mut recent = wi("r1", 1, "A", "encode");
-        recent.bundle_config_hash = "hash-1".into();
         let legacy = wi("r1", 2, "A", "encode");
 
-        let items = [current, recent, legacy];
+        let items = [current, legacy];
         let unknown = unknown_bundle_config_hash(items.iter(), Some(&state));
         assert!(unknown.is_none());
+
+        let mut stale = wi("r1", 1, "A", "encode");
+        stale.bundle_config_hash = "hash-1".into();
+        assert_eq!(
+            unknown_bundle_config_hash([&stale], Some(&state)),
+            Some(("hash-1", 1))
+        );
     }
 
     #[test]
@@ -4275,6 +5243,19 @@ mod tests {
         assert!(!reply_subject_is_safe("sie.work.foo.l4"));
         assert!(!reply_subject_is_safe("something.evil"));
         assert!(!reply_subject_is_safe("_INBOX")); // no trailing dot
+    }
+
+    #[test]
+    fn caller_item_id_is_extracted_from_resolved_item_only_when_string() {
+        let item = MsgValue::Map(vec![
+            (MsgValue::from("id"), MsgValue::from("doc-42")),
+            (MsgValue::from("text"), MsgValue::from("hello")),
+        ]);
+        assert_eq!(caller_item_id_from_value(&item).as_deref(), Some("doc-42"));
+
+        let invalid = MsgValue::Map(vec![(MsgValue::from("id"), MsgValue::from(42))]);
+        assert!(caller_item_id_from_value(&invalid).is_none());
+        assert!(caller_item_id_from_value(&MsgValue::Nil).is_none());
     }
 
     #[test]
@@ -4339,13 +5320,14 @@ mod tests {
 
     #[test]
     fn default_max_concurrent_batches_env_parsing() {
-        // Env-free default should be 4. We only assert the env-free
-        // branch here to avoid polluting global state for other tests.
-        //
-        // SAFETY: this is a #[test] in a cfg(test) module and we don't
-        // actually mutate env here — we just check the function is sane
-        // when the variable is absent in CI.
+        // Avoid mutating process-global env in a parallel test.
         assert!(default_max_concurrent_batches() >= 1);
+    }
+
+    #[test]
+    fn default_audio_prep_permits_is_positive() {
+        // Invalid and absent operator values both fall back to one in production.
+        assert!(default_audio_prep_permits() >= 1);
     }
 
     #[test]
@@ -4356,6 +5338,102 @@ mod tests {
         if std::env::var("SIE_RUST_PIPELINE_DEPTH").is_err() {
             assert_eq!(pipeline_depth(), 2);
         }
+    }
+
+    #[tokio::test]
+    async fn saturated_pipeline_keeps_tail_mutable_until_a_slot_opens() {
+        let scheduler = Scheduler::<PipelineTestItem, usize>::new(BatchConfig {
+            max_batch_cost: 16,
+            max_batch_requests: 16,
+            max_batch_wait_ms: 100.0,
+            coalesce_ms: 100.0,
+            coalesce_ratio: 1.0,
+        });
+        let pipeline_sem = Arc::new(Semaphore::new(1));
+        let active_batch = pipeline_sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("test pipeline is open");
+
+        scheduler
+            .submit(
+                SchedOp::Encode,
+                LoraKey::base(),
+                PipelineTestItem { idx: 1 },
+                1,
+            )
+            .await;
+
+        // Poll the permit reservation once. With the only slot occupied, the
+        // dispatcher must stop before extracting item 1 from the scheduler.
+        let shutdown = Shutdown::new();
+        let mut continuation = Box::pin(reserve_continuation_slot_and_snapshot(
+            &scheduler,
+            &pipeline_sem,
+            &shutdown,
+            SchedOp::Encode,
+            LoraKey::base(),
+        ));
+        assert!(futures_util::poll!(&mut continuation).is_pending());
+        assert_eq!(scheduler.total_pending_count().await, 1);
+
+        // This arrival occurs while the pipeline is saturated. Because item 1
+        // remained mutable in the BatchFormer, both items form the next batch
+        // after the active dispatch releases its slot.
+        scheduler
+            .submit(
+                SchedOp::Encode,
+                LoraKey::base(),
+                PipelineTestItem { idx: 2 },
+                2,
+            )
+            .await;
+        drop(active_batch);
+
+        let (next_permit, drain_budget) = continuation
+            .await
+            .expect("pending reservation succeeds after a slot opens");
+        let batch = scheduler
+            .try_drain_same_up_to(SchedOp::Encode, LoraKey::base(), drain_budget)
+            .await
+            .expect("tail accumulated during saturation should drain together");
+        assert_eq!(drain_budget, 2, "snapshot happens after the slot opens");
+        assert_eq!(batch.metadata, vec![1, 2]);
+        assert_eq!(batch.items.len(), 2);
+        assert_eq!(scheduler.total_pending_count().await, 0);
+        drop(next_permit);
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_pipeline_wait_without_extracting_pending_tail() {
+        let scheduler = Scheduler::<PipelineTestItem, usize>::new(BatchConfig::default());
+        scheduler
+            .submit(
+                SchedOp::Encode,
+                LoraKey::base(),
+                PipelineTestItem { idx: 1 },
+                1,
+            )
+            .await;
+        let pipeline_sem = Arc::new(Semaphore::new(1));
+        let active_batch = pipeline_sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("test pipeline is open");
+        let shutdown = Shutdown::new();
+        let mut waiting = Box::pin(reserve_pipeline_slot(&pipeline_sem, &shutdown));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+
+        shutdown.fire();
+        assert!(waiting.await.is_none());
+        assert_eq!(
+            scheduler.total_pending_count().await,
+            1,
+            "shutdown before permit acquisition must not freeze or drop queued work"
+        );
+        drop(active_batch);
     }
 
     #[test]
@@ -4487,6 +5565,56 @@ mod tests {
     }
 
     #[test]
+    fn batched_f16_multivector_index_exposes_the_requested_slice() {
+        let batches = vec![BatchedF16MultivectorOutput {
+            values_f16: crate::ipc_types::F16Values(vec![
+                f16::from_bits(0x3c00),
+                f16::from_bits(0x4000),
+                f16::from_bits(0x4200),
+            ]),
+            items: vec![crate::ipc_types::BatchedF16MultivectorItem {
+                work_item_id: "wi-0".to_string(),
+                byte_offset: 2,
+                byte_len: 4,
+                num_tokens: 1,
+                token_dims: 2,
+            }],
+        }];
+
+        let indexed = index_batched_f16_multivectors(&batches);
+        let multivector = indexed["wi-0"].as_ref().expect("valid f16 range");
+
+        assert_eq!(
+            multivector
+                .values_f16
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![0x4000, 0x4200]
+        );
+        assert_eq!(multivector.num_tokens, 1);
+        assert_eq!(multivector.token_dims, 2);
+    }
+
+    #[test]
+    fn batched_f16_multivector_index_rejects_an_out_of_bounds_slice() {
+        let batches = vec![BatchedF16MultivectorOutput {
+            values_f16: crate::ipc_types::F16Values(vec![f16::from_bits(0x3c00)]),
+            items: vec![crate::ipc_types::BatchedF16MultivectorItem {
+                work_item_id: "wi-0".to_string(),
+                byte_offset: 2,
+                byte_len: 2,
+                num_tokens: 1,
+                token_dims: 1,
+            }],
+        }];
+
+        let indexed = index_batched_f16_multivectors(&batches);
+
+        assert!(indexed["wi-0"].is_err());
+    }
+
+    #[test]
     fn resolve_outcome_indices_handles_duplicate_wiids_fifo() {
         // Two messages with the same wiid (pathological redelivery or
         // upstream bug) must each bind to a *different* resolved slot
@@ -4536,7 +5664,7 @@ mod tests {
         assert_eq!(bindings, vec![None]);
     }
 
-    // ----- dedupe_per_request_totals ----------------------------------------
+    // ----- dedupe_per_batch_request_latencies -------------------------------
 
     fn outcome(
         request_id: &str,
@@ -4601,25 +5729,69 @@ mod tests {
             Some(2.0),
         );
 
-        let totals = dedupe_per_request_totals(
+        let latencies = dedupe_per_batch_request_latencies(
             [
                 ("req-A", t0, &oa0),
                 ("req-A", t0, &oa1),
                 ("req-A", t0, &oa2),
                 ("req-B", t0, &ob0),
             ],
+            now - std::time::Duration::from_millis(20),
             now,
         );
 
-        assert_eq!(totals.len(), 2, "one sample per unique request_id");
-        // Each sample is wait(50) + inf(20) + post(2) = 72 ms within
-        // a tight tolerance for the test scheduler.
-        for s in &totals {
+        assert_eq!(
+            latencies.len(),
+            2,
+            "one sample per unique request_id within this batch"
+        );
+        // The 50 ms wall interval already contains the reported
+        // inference and postprocessing phases; they must not be added.
+        for sample in &latencies {
+            let s = sample.total.as_secs_f64() * 1_000.0;
             assert!(
-                (70.0..=80.0).contains(s),
-                "sample {s} should be ~72ms (50 wait + 20 inf + 2 post)"
+                (45.0..=60.0).contains(&s),
+                "sample {s} should reflect the ~50ms scheduler-to-reply interval"
+            );
+            let wait_ms = sample.dispatch_wait.as_secs_f64() * 1_000.0;
+            assert!(
+                (25.0..=35.0).contains(&wait_ms),
+                "sample {wait_ms} should split enqueue-to-dispatch wait from total"
             );
         }
+    }
+
+    #[test]
+    fn dedupe_total_does_not_double_count_backend_phases() {
+        let completed_at = Instant::now();
+        let submitted_at = completed_at - std::time::Duration::from_millis(50);
+        let small_phases = outcome(
+            "req-small",
+            0,
+            Disposition::PublishAndAck,
+            Some(1.0),
+            Some(0.5),
+        );
+        let large_phases = outcome(
+            "req-large",
+            0,
+            Disposition::PublishAndAck,
+            Some(40.0),
+            Some(8.0),
+        );
+
+        let latencies = dedupe_per_batch_request_latencies(
+            [
+                ("req-small", submitted_at, &small_phases),
+                ("req-large", submitted_at, &large_phases),
+            ],
+            completed_at - std::time::Duration::from_millis(20),
+            completed_at,
+        );
+
+        assert_eq!(latencies.len(), 2);
+        assert_eq!(latencies[0].total, latencies[1].total);
+        assert!((45.0..=60.0).contains(&(latencies[0].total.as_secs_f64() * 1_000.0)));
     }
 
     #[test]
@@ -4645,12 +5817,44 @@ mod tests {
             Some(0.0),
         );
 
-        let totals = dedupe_per_request_totals(
+        let latencies = dedupe_per_batch_request_latencies(
             [("req-X", t0, &nak), ("req-Y", t0, &err), ("req-Z", t0, &ok)],
+            now,
             now,
         );
 
-        assert_eq!(totals.len(), 1, "only PublishAndAck contributes");
+        assert_eq!(latencies.len(), 1, "only PublishAndAck contributes");
+    }
+
+    #[test]
+    fn dedupe_partial_request_contributes_when_one_item_succeeds() {
+        let now = Instant::now();
+        let submitted_at = now - std::time::Duration::from_millis(10);
+        let nak = outcome("req-A", 0, Disposition::NakRetry, None, None);
+        let ok = outcome("req-A", 1, Disposition::PublishAndAck, None, None);
+
+        let latencies = dedupe_per_batch_request_latencies(
+            [("req-A", submitted_at, &nak), ("req-A", submitted_at, &ok)],
+            now,
+            now,
+        );
+
+        assert_eq!(latencies.len(), 1);
+    }
+
+    #[test]
+    fn request_spanning_backend_batches_contributes_once_per_batch() {
+        let now = Instant::now();
+        let submitted_at = now - std::time::Duration::from_millis(10);
+        let first = outcome("req-A", 0, Disposition::PublishAndAck, None, None);
+        let second = outcome("req-A", 12, Disposition::PublishAndAck, None, None);
+
+        let batch_one =
+            dedupe_per_batch_request_latencies([("req-A", submitted_at, &first)], now, now);
+        let batch_two =
+            dedupe_per_batch_request_latencies([("req-A", submitted_at, &second)], now, now);
+
+        assert_eq!(batch_one.len() + batch_two.len(), 2);
     }
 
     #[test]
@@ -4661,8 +5865,8 @@ mod tests {
         // floor and starve the wait knob.
         let now = Instant::now();
         let zero = outcome("req-zero", 0, Disposition::PublishAndAck, None, None);
-        let totals = dedupe_per_request_totals([("req-zero", now, &zero)], now);
-        assert!(totals.is_empty(), "zero-total samples must be dropped");
+        let latencies = dedupe_per_batch_request_latencies([("req-zero", now, &zero)], now, now);
+        assert!(latencies.is_empty(), "zero-total samples must be dropped");
     }
 
     #[test]
@@ -4679,11 +5883,14 @@ mod tests {
         let o_early = outcome("req-A", 0, Disposition::PublishAndAck, Some(0.0), Some(0.0));
 
         // Late item appears first (BatchFormer sorted by cost).
-        let totals =
-            dedupe_per_request_totals([("req-A", late, &o_late), ("req-A", early, &o_early)], now);
+        let latencies = dedupe_per_batch_request_latencies(
+            [("req-A", late, &o_late), ("req-A", early, &o_early)],
+            now,
+            now,
+        );
 
-        assert_eq!(totals.len(), 1);
-        let s = totals[0];
+        assert_eq!(latencies.len(), 1);
+        let s = latencies[0].total.as_secs_f64() * 1_000.0;
         assert!(
             (5.0..=20.0).contains(&s),
             "sample {s} should reflect the first-seen submitted_at (~10ms wait)"
@@ -4692,7 +5899,8 @@ mod tests {
 
     #[test]
     fn dedupe_empty_input_yields_empty_output() {
-        let totals = dedupe_per_request_totals(std::iter::empty(), Instant::now());
-        assert!(totals.is_empty());
+        let now = Instant::now();
+        let latencies = dedupe_per_batch_request_latencies(std::iter::empty(), now, now);
+        assert!(latencies.is_empty());
     }
 }

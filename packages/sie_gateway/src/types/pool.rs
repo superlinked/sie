@@ -40,7 +40,8 @@ pub struct PoolSpec {
     pub ttl_seconds: Option<u64>,
     /// Per-pool warm floor: the minimum number of machines the gateway keeps
     /// warm (via KEDA) so the first request to the pool never hits a cold VM.
-    /// The gateway publishes it as `sie_gateway_pool_warm_floor` for KEDA.
+    /// The gateway publishes it as `sie.gateway.pool.warm_floor`; the
+    /// collector translates it for KEDA's Prometheus query.
     /// Default 0 leaves scale-from-zero unchanged.
     #[serde(default)]
     pub minimum_worker_count: u32,

@@ -3,7 +3,6 @@ import importlib.util
 import inspect
 import logging
 import os
-import re
 import sys
 import tempfile
 import threading
@@ -21,7 +20,21 @@ from sie_sdk.storage import (
 from sie_server.adapters._generation_base import GenerationAdapter
 from sie_server.adapters.base import ModelAdapter
 from sie_server.config.engine import ComputePrecision
-from sie_server.config.model import AdapterOptions, ModelConfig, ProfileConfig, ResolvedProfile
+from sie_server.config.model import (
+    AdapterOptions,
+    ModelConfig,
+    ProfileConfig,
+    ResolvedProfile,
+    is_immutable_revision,
+    lora_entry_ref,
+)
+from sie_server.config.package_artifacts import (
+    PACKAGE_ARTIFACT_MANIFEST_PATH_KEY,
+    PACKAGE_ARTIFACT_MANIFEST_SHA256_KEY,
+    PACKAGE_ARTIFACT_MODE_KEY,
+    PackageArtifactMode,
+    verify_staged_package_artifacts,
+)
 from sie_server.core.inference import AttentionBackend
 
 logger = logging.getLogger(__name__)
@@ -29,20 +42,10 @@ logger = logging.getLogger(__name__)
 # Error messages
 _ERR_CONFIG_NOT_FOUND = "Config file not found: {path}"
 
-# Served-model version identity. An *immutable* HF revision is a
-# full 40-char git commit SHA (SHA-1, lowercase hex). Branch/tag names ("main",
-# "v1.0") resolve to *moving* targets on the Hub, so they are NOT acceptable
-# pins for a promoted/served model — the immutable-id contract is that a given
-# ``sie_id`` maps to identical weights forever. This regex is the single
-# authoritative rule; the staging/deploy tooling mirrors it rather than
-# importing this module, which would pull the adapter/torch stack into the
-# deploy tool.
-_IMMUTABLE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
-
-
-def is_immutable_revision(revision: str | None) -> bool:
-    """Return True when ``revision`` is a full 40-char git commit SHA (immutable)."""
-    return revision is not None and _IMMUTABLE_REVISION_RE.match(revision) is not None
+# The immutable-revision rule (40-hex commit SHA) moved to
+# ``sie_server.config.model`` so the config schema can apply it to pinned LoRA
+# refs (#2113) without a config -> core import cycle; ``is_immutable_revision``
+# is re-exported here for existing adapter/tooling imports.
 
 
 # Local cache for downloaded configs (used when models_dir is cloud)
@@ -68,12 +71,24 @@ def validate_pinned_revision(config: ModelConfig) -> None:
 
     A promoted/served, HF-backed model MUST pin ``hf_revision`` to an immutable
     commit SHA so its ``sie_id`` maps to identical weights forever. ``weights_path``
-    and ``package_backed`` models are exempt: they carry their own immutable
-    weights / package version and have no Hub revision that can drift. Raises
-    ``ValueError`` naming the fix.
+    models have no Hub revision to pin. Promoted package-backed models must name
+    a digest-verified staged manifest; bundled packages and live external
+    downloads do not by themselves establish immutable model identity. The
+    package lock is not treated as a model revision. Raises ``ValueError`` naming
+    the fix.
     """
+    if config.package_backed:
+        declaration = config.package_artifact_declaration
+        if declaration.mode != PackageArtifactMode.STAGED:
+            msg = (
+                f"Served package-backed model '{config.sie_id}' does not declare a staged artifact manifest. "
+                "Promoted serving requires an exact manifest and per-file digests; a package lock is not a "
+                "model-weights revision."
+            )
+            raise ValueError(msg)
+        return
     if config.hf_id is None:
-        # weights_path or package_backed: nothing on the Hub to pin.
+        # weights_path: nothing on the Hub to pin.
         return
     revision = config.hf_revision
     if revision is None:
@@ -600,5 +615,38 @@ def _build_adapter_kwargs(
         kwargs["revision"] = config.hf_revision
 
     kwargs.update(resolved.loadtime)
+
+    # Adapter constructors take ``lora_paths`` as served-name -> bare path/id
+    # (the sglang ``--lora-paths`` shape). A pinned ``{id, revision}`` value
+    # (#2113) is a *config* spelling: collapse it to the bare id here so no
+    # constructor ever sees the mapping. The revision itself is honored on the
+    # hot-reload preload path (``ModelLoader``), which rejects pins on adapters
+    # that cannot apply them.
+    lora_paths = kwargs.get("lora_paths")
+    if isinstance(lora_paths, Mapping):
+        kwargs["lora_paths"] = {
+            served: lora_entry_ref(value)[0] if value else value for served, value in lora_paths.items()
+        }
+
+    if config.package_backed:
+        declaration = config.package_artifact_declaration
+        offline = any(
+            os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+            for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+        )
+        if declaration.mode == PackageArtifactMode.LIVE and offline:
+            raise ValueError(
+                f"Package-backed model '{config.sie_id}' permits live external downloads but offline mode is enabled"
+            )
+        for key in (
+            PACKAGE_ARTIFACT_MODE_KEY,
+            PACKAGE_ARTIFACT_MANIFEST_PATH_KEY,
+            PACKAGE_ARTIFACT_MANIFEST_SHA256_KEY,
+        ):
+            kwargs.pop(key, None)
+        if declaration.mode == PackageArtifactMode.STAGED:
+            verified = verify_staged_package_artifacts(declaration)
+            kwargs["package_artifact_root"] = verified.root
+            kwargs[PACKAGE_ARTIFACT_MANIFEST_SHA256_KEY] = verified.manifest_sha256
 
     return kwargs

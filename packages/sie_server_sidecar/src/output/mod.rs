@@ -25,7 +25,7 @@
 //! * Supported: `dense`, `sparse`, and `multivector` encode outputs,
 //!   plus `score` rerank outputs.
 //! * Deferred: `json` extract payloads, MUVERA post-processing, and
-//!   quantization to dtypes other than float32.
+//!   quantization beyond the explicit shaper dtypes.
 //! * When Python emits the legacy `result_msgpack` or when the Rust
 //!   build is missing a shaper for a given [`crate::ipc_types::RawOutput`] variant,
 //!   the publisher passes through the Python bytes unchanged.
@@ -40,8 +40,9 @@ pub mod numpy_sentinel;
 use rmp::encode::{write_array_len, write_f64, write_map_len, write_nil, write_str, write_uint};
 
 pub use numpy_sentinel::{
-    write_f32_matrix_2d, write_f32_vector, write_i32_vector, write_numpy_sentinel, SentinelError,
-    DTYPE_F32, DTYPE_I32,
+    write_f16_matrix_2d_from_f32, write_f16_matrix_2d_from_le_bytes, write_f32_matrix_2d,
+    write_f32_vector, write_i32_vector, write_numpy_sentinel, SentinelError, DTYPE_F16, DTYPE_F32,
+    DTYPE_I32,
 };
 
 /// Errors raised while shaping a `RawOutput` into final msgpack
@@ -74,6 +75,24 @@ pub enum ShapeError {
 
 fn wrap_err<E: std::fmt::Display>(e: E) -> ShapeError {
     ShapeError::MsgpackWrite(e.to_string())
+}
+
+/// Write the top-level encode-result map prefix, optionally echoing the
+/// caller-provided item id before the embedding variant. The field order
+/// mirrors Python's ``{"id": item_id, **output}`` framing exactly while
+/// letting large multivectors stream directly into their final buffer.
+fn write_encode_output_prefix(
+    buf: &mut Vec<u8>,
+    output_key: &str,
+    item_id: Option<&str>,
+) -> Result<(), ShapeError> {
+    write_map_len(buf, if item_id.is_some() { 2 } else { 1 }).map_err(wrap_err)?;
+    if let Some(item_id) = item_id {
+        write_str(buf, "id").map_err(wrap_err)?;
+        write_str(buf, item_id).map_err(wrap_err)?;
+    }
+    write_str(buf, output_key).map_err(wrap_err)?;
+    Ok(())
 }
 
 /// L2-normalize a flat f32 vector in place.
@@ -133,14 +152,36 @@ pub fn l2_normalize_in_place(values: &mut [f32]) {
 /// the golden byte-for-byte tests in this module AND in
 /// `prep::outcome::tests::build_dense_payload_matches_python_wire_format`.
 pub fn build_dense_payload(values: &[f32], dim: usize) -> Result<Vec<u8>, ShapeError> {
+    build_dense_payload_with_item_id(values, dim, None)
+}
+
+pub fn build_dense_payload_with_item_id(
+    values: &[f32],
+    dim: usize,
+    item_id: Option<&str>,
+) -> Result<Vec<u8>, ShapeError> {
     if values.len() != dim {
         return Err(ShapeError::DenseDimMismatch {
             expected: dim,
             actual: values.len(),
         });
     }
-    crate::prep::outcome::build_dense_payload(values, dim)
-        .map_err(|e| ShapeError::MsgpackWrite(e.to_string()))
+    if item_id.is_none() {
+        return crate::prep::outcome::build_dense_payload(values, dim)
+            .map_err(|e| ShapeError::MsgpackWrite(e.to_string()));
+    }
+
+    let mut buf =
+        Vec::with_capacity(40 + item_id.map(str::len).unwrap_or_default() + values.len() * 4);
+    write_encode_output_prefix(&mut buf, "dense", item_id)?;
+    write_map_len(&mut buf, 3).map_err(wrap_err)?;
+    write_str(&mut buf, "dims").map_err(wrap_err)?;
+    write_uint(&mut buf, dim as u64).map_err(wrap_err)?;
+    write_str(&mut buf, "dtype").map_err(wrap_err)?;
+    write_str(&mut buf, "float32").map_err(wrap_err)?;
+    write_str(&mut buf, "values").map_err(wrap_err)?;
+    write_f32_vector(&mut buf, values)?;
+    Ok(buf)
 }
 
 /// Build the per-item `result_msgpack` bytes for a score (rerank)
@@ -246,16 +287,25 @@ pub fn build_sparse_payload(
     values: &[f32],
     dims: Option<u32>,
 ) -> Result<Vec<u8>, ShapeError> {
+    build_sparse_payload_with_item_id(indices, values, dims, None)
+}
+
+pub fn build_sparse_payload_with_item_id(
+    indices: &[i32],
+    values: &[f32],
+    dims: Option<u32>,
+    item_id: Option<&str>,
+) -> Result<Vec<u8>, ShapeError> {
     if indices.len() != values.len() {
         return Err(ShapeError::SparseLenMismatch {
             indices: indices.len(),
             values: values.len(),
         });
     }
-    let mut buf = Vec::with_capacity(64 + indices.len() * 8);
+    let mut buf =
+        Vec::with_capacity(72 + item_id.map(str::len).unwrap_or_default() + indices.len() * 8);
 
-    write_map_len(&mut buf, 1).map_err(wrap_err)?;
-    write_str(&mut buf, "sparse").map_err(wrap_err)?;
+    write_encode_output_prefix(&mut buf, "sparse", item_id)?;
 
     write_map_len(&mut buf, 4).map_err(wrap_err)?;
 
@@ -287,17 +337,16 @@ pub fn build_sparse_payload(
 ///   "multivector": {
 ///     "token_dims": <u32>,
 ///     "num_tokens": <u32>,
-///     "dtype":      "float32",
+///     "dtype":      "float32" | "float16",
 ///     "values":     <numpy_sentinel for [num_tokens, token_dims] f32>,
 ///   },
 /// }
 /// ```
 ///
-/// v1 scope is `float32` only. `float16` and the bit-packed `binary`
-/// path (`shape[1] < token_dims`, `dim/8` bytes per token) both stay
-/// on the Python framing path — the safety gate in
-/// `queue_executor._maybe_multivector_raw_output` refuses to emit a
-/// `MultivectorOutput` for those dtypes.
+/// `float16` uses the same envelope and writes a msgpack-numpy
+/// `"<f2"` sentinel. The bit-packed `binary` path (`shape[1] <
+/// token_dims`, `dim/8` bytes per token) still stays on the Python
+/// framing path.
 ///
 /// `values.len() == num_tokens * token_dims` is required; the shaper
 /// returns [`ShapeError::MultivectorShapeMismatch`] otherwise and
@@ -310,6 +359,25 @@ pub fn build_multivector_payload(
     num_tokens: u32,
     token_dims: u32,
 ) -> Result<Vec<u8>, ShapeError> {
+    build_multivector_payload_with_dtype(values, num_tokens, token_dims, "float32")
+}
+
+pub fn build_multivector_payload_with_dtype(
+    values: &[f32],
+    num_tokens: u32,
+    token_dims: u32,
+    dtype: &str,
+) -> Result<Vec<u8>, ShapeError> {
+    build_multivector_payload_with_dtype_and_item_id(values, num_tokens, token_dims, dtype, None)
+}
+
+pub fn build_multivector_payload_with_dtype_and_item_id(
+    values: &[f32],
+    num_tokens: u32,
+    token_dims: u32,
+    dtype: &str,
+    item_id: Option<&str>,
+) -> Result<Vec<u8>, ShapeError> {
     let expected = num_tokens as usize * token_dims as usize;
     if values.len() != expected {
         return Err(ShapeError::MultivectorShapeMismatch {
@@ -319,10 +387,10 @@ pub fn build_multivector_payload(
         });
     }
 
-    let mut buf = Vec::with_capacity(64 + values.len() * 4);
+    let mut buf =
+        Vec::with_capacity(72 + item_id.map(str::len).unwrap_or_default() + values.len() * 4);
 
-    write_map_len(&mut buf, 1).map_err(wrap_err)?;
-    write_str(&mut buf, "multivector").map_err(wrap_err)?;
+    write_encode_output_prefix(&mut buf, "multivector", item_id)?;
 
     write_map_len(&mut buf, 4).map_err(wrap_err)?;
 
@@ -333,10 +401,67 @@ pub fn build_multivector_payload(
     write_uint(&mut buf, u64::from(num_tokens)).map_err(wrap_err)?;
 
     write_str(&mut buf, "dtype").map_err(wrap_err)?;
-    write_str(&mut buf, "float32").map_err(wrap_err)?;
+    match dtype {
+        "float32" => write_str(&mut buf, "float32").map_err(wrap_err)?,
+        "float16" => write_str(&mut buf, "float16").map_err(wrap_err)?,
+        other => {
+            return Err(ShapeError::MsgpackWrite(format!(
+                "unsupported multivector dtype {other:?}; expected float32 or float16"
+            )));
+        }
+    }
 
     write_str(&mut buf, "values").map_err(wrap_err)?;
-    write_f32_matrix_2d(&mut buf, values, num_tokens, token_dims)?;
+    match dtype {
+        "float32" => write_f32_matrix_2d(&mut buf, values, num_tokens, token_dims)?,
+        "float16" => write_f16_matrix_2d_from_f32(&mut buf, values, num_tokens, token_dims)?,
+        _ => unreachable!("dtype validated above"),
+    }
+
+    Ok(buf)
+}
+
+pub fn build_multivector_payload_from_f16_bytes(
+    values_f16: &[u8],
+    num_tokens: u32,
+    token_dims: u32,
+) -> Result<Vec<u8>, ShapeError> {
+    build_multivector_payload_from_f16_bytes_with_item_id(values_f16, num_tokens, token_dims, None)
+}
+
+pub fn build_multivector_payload_from_f16_bytes_with_item_id(
+    values_f16: &[u8],
+    num_tokens: u32,
+    token_dims: u32,
+    item_id: Option<&str>,
+) -> Result<Vec<u8>, ShapeError> {
+    let expected = num_tokens as usize * token_dims as usize * 2;
+    if values_f16.len() != expected {
+        return Err(ShapeError::MultivectorShapeMismatch {
+            values: values_f16.len(),
+            rows: num_tokens as usize,
+            cols: token_dims as usize,
+        });
+    }
+
+    let mut buf =
+        Vec::with_capacity(72 + item_id.map(str::len).unwrap_or_default() + values_f16.len());
+
+    write_encode_output_prefix(&mut buf, "multivector", item_id)?;
+
+    write_map_len(&mut buf, 4).map_err(wrap_err)?;
+
+    write_str(&mut buf, "token_dims").map_err(wrap_err)?;
+    write_uint(&mut buf, u64::from(token_dims)).map_err(wrap_err)?;
+
+    write_str(&mut buf, "num_tokens").map_err(wrap_err)?;
+    write_uint(&mut buf, u64::from(num_tokens)).map_err(wrap_err)?;
+
+    write_str(&mut buf, "dtype").map_err(wrap_err)?;
+    write_str(&mut buf, "float16").map_err(wrap_err)?;
+
+    write_str(&mut buf, "values").map_err(wrap_err)?;
+    write_f16_matrix_2d_from_le_bytes(&mut buf, values_f16, num_tokens, token_dims)?;
 
     Ok(buf)
 }
@@ -613,6 +738,48 @@ mod tests {
             buf,
             hex_to_bytes(GOLDEN_MULTIVECTOR_3X4_HEX),
             "multivector [3, 4] f32 bytes must match _wrap_encode_output output"
+        );
+    }
+
+    #[test]
+    fn build_multivector_payload_supports_float16() {
+        let values = vec![1.0, -2.0, 3.5, 0.0];
+        let buf = build_multivector_payload_with_dtype(&values, 2, 2, "float16").unwrap();
+        assert!(
+            buf.windows("float16".len())
+                .any(|window| window == b"float16"),
+            "payload envelope must advertise float16"
+        );
+        assert!(
+            buf.windows(DTYPE_F16.len())
+                .any(|window| window == DTYPE_F16.as_bytes()),
+            "numpy sentinel must use <f2 dtype"
+        );
+        assert!(
+            buf.windows(4)
+                .any(|window| window == [0x00, 0x3c, 0x00, 0xc0]),
+            "payload data must contain little-endian f16 bytes for [1.0, -2.0]"
+        );
+    }
+
+    #[test]
+    fn build_multivector_payload_supports_preencoded_float16_bytes() {
+        let values_f16 = [0x00, 0x3c, 0x00, 0xc0, 0x00, 0x43, 0x00, 0x00];
+        let buf = build_multivector_payload_from_f16_bytes(&values_f16, 2, 2).unwrap();
+        assert!(
+            buf.windows("float16".len())
+                .any(|window| window == b"float16"),
+            "payload envelope must advertise float16"
+        );
+        assert!(
+            buf.windows(DTYPE_F16.len())
+                .any(|window| window == DTYPE_F16.as_bytes()),
+            "numpy sentinel must use <f2 dtype"
+        );
+        assert!(
+            buf.windows(values_f16.len())
+                .any(|window| window == values_f16),
+            "payload data must preserve supplied little-endian f16 bytes"
         );
     }
 

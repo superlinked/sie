@@ -115,6 +115,11 @@ Same criteria as the Python SDK, applied to `SIEClient` and its types in `@super
 - Removing or renaming a documented environment variable (e.g., renaming `SIE_DEVICE` to `SIE_COMPUTE_DEVICE`)
 - Changing the semantics of an existing environment variable value
 
+### Environment Variables (not breaking)
+
+- Adding a new environment variable with a default that preserves existing behavior
+- Test-harness variables (`SIE_FAKE_MEMORY_BUDGET`, `SIE_FAKE_FAULTS` — the Fake Engine, see `docs/fake-models.md`) are development/CI tooling, not part of the compatibility surface; they may change without deprecation
+
 ### CLI (breaking)
 
 - Removing or renaming a CLI command or flag (e.g., `sie-server serve`, `sie-gateway`, `sie-admin cache`)

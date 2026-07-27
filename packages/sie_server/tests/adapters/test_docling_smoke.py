@@ -7,7 +7,7 @@ import pytest
 
 pytest.importorskip("docling")
 
-from sie_server.adapters.docling import DoclingAdapter
+from sie_server.adapters.docling.adapter import DoclingAdapter
 from sie_server.types.inputs import Item
 
 

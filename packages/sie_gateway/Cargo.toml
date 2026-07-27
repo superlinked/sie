@@ -1,6 +1,6 @@
 [package]
 name = "sie-gateway"
-version = "0.6.19"
+version = "0.6.24"
 edition = "2021"
 publish = false
 
@@ -9,13 +9,13 @@ name = "sie-gateway"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["multipart", "ws"] }
 base64 = "0.22"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "stream", "rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
@@ -25,7 +25,6 @@ serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-prometheus = { version = "0.14", features = ["process"] }
 thiserror = "2"
 dashmap = "6"
 tower = "0.5"
@@ -80,13 +79,43 @@ utoipa = "5.4.0"
 # versions, so bumping requires updating all five lines.
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace"] }
+# Shared OTLP transport/proxy/resource/propagation plumbing (#2339).
+sie-telemetry = { path = "../sie_telemetry", features = ["http-propagation"] }
+# `grpc-tonic` keeps the historical in-cluster/Helm OTLP/gRPC path; `http-proto`
+# + `reqwest-blocking-client` add the OTLP/HTTP `http/protobuf` exporter the
+# MANAGED Modal collector needs (it publishes only OTLP/HTTP :4318, behind
+# proxy-auth headers). The BLOCKING reqwest client is deliberate (#1878 runtime
+# fix): the SDK's `BatchSpanProcessor` / `PeriodicReader` run the export on a
+# dedicated std thread via `futures_executor::block_on` with NO Tokio reactor,
+# so an async reqwest client panics there ("there is no reactor running"). The
+# blocking client drives its own internal runtime and works on that thread — it
+# is also opentelemetry-otlp's own default HTTP client for exactly this reason.
+# `metrics` adds the MeterProvider export path so the gateway pushes a bounded
+# request counter + duration histogram alongside its spans. TLS: `reqwest-rustls` pins rustls on the
+# HTTP exporter's reqwest client (in reqwest 0.13 `default-tls` == rustls, NOT
+# openssl — the zigbuild cross-compile stays clean) and `tls-ring` gives the
+# tonic gRPC path rustls-over-ring for an HTTPS collector (engaged only for
+# https endpoints, so the plaintext in-cluster :4317 gRPC path is untouched).
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "grpc-tonic",
+    "http-proto",
+    "trace",
+    "metrics",
+    "logs",
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+    "tls-ring",
+] }
 opentelemetry-http = "0.32"
 tracing-opentelemetry = "0.33"
 
 [features]
 default = []
 cloud-storage = ["dep:object_store", "dep:url"]
+# Test-target-only seam used by the managed composition's release telemetry
+# benchmark. It installs a synchronous in-memory reader, so the timed path
+# exercises the real facade without exporter network or background work.
+telemetry-benchmarks = ["opentelemetry_sdk/experimental_metrics_custom_reader"]
 # Compile-in the raw-routing-key field on `RoutingKeyResolved` and the
 # `SIE_ROUTING_LOG_RAW` env-var read paths. Without this feature, raw
 # routing keys CANNOT appear in logs regardless of the env var — the
@@ -99,3 +128,6 @@ tempfile = "3"
 http = "1"
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
+# `testing` unlocks the in-memory metric exporter used to assert the gateway's
+# the bounded request metric pair is actually recorded + exported (observability tests).
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }

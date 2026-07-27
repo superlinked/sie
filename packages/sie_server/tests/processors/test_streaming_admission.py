@@ -24,7 +24,6 @@ import pytest
 from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
-from sie_server.observability import metrics as _metrics
 from sie_server.processors.admission import (
     parse_admission_env,
     resolve_admission_enabled,
@@ -351,11 +350,8 @@ async def test_admission_off_never_rejects() -> None:
 
 
 @pytest.mark.asyncio
-async def test_admission_off_gauges_still_emit() -> None:
-    """Gauges update around the reserve/release regardless of admission state."""
-    # Capture the gauge metric values before/during/after.
-    metric = _metrics.GENERATION_KV_RESERVED_TOKENS.labels(model="gauge/model")
-    metric.set(0)
+async def test_admission_off_reservation_state_still_updates() -> None:
+    """Reservation state updates around work even when admission is disabled."""
     nc = AsyncMock()
     hold = asyncio.Event()
     script = [GenerationChunk(text_delta="ok", is_first=True)]

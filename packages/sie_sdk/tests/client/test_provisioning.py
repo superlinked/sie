@@ -83,6 +83,7 @@ class TestProvisioningRetry:
             # Should have retried and succeeded
             assert "dense" in result
             assert mock_client.return_value.post.call_count == 2
+            assert client.last_retry_count == 1
             client.close()
 
     def test_503_provisioning_timeout_raises_provisioning_error(self) -> None:

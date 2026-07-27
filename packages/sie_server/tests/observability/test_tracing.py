@@ -1,15 +1,31 @@
 """Tests for OpenTelemetry tracing."""
 
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
+import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from sie_server.observability.tracing import (
+    _build_span_exporter,
+    _endpoint_origin_for_log,
+    _OtlpTraceExportConfig,
+    _trace_export_config_from_values,
     get_current_trace_id,
     is_tracing_enabled,
     setup_tracing,
     shutdown_tracing,
     tracer,
 )
+
+
+def test_endpoint_log_origin_redacts_credentials_path_and_query() -> None:
+    raw = "https://user:secret@collector.example:4318/v1/traces?token=private#fragment"
+    assert _endpoint_origin_for_log(raw) == "https://collector.example:4318"
+    assert _endpoint_origin_for_log("not a URL with secret") == "<redacted>"
 
 
 class TestIsTracingEnabled:
@@ -122,6 +138,104 @@ class TestSetupTracing:
             setup_tracing(mock_app)
 
             mock_instrumentor.instrument_app.assert_not_called()
+
+    def test_invalid_protocol_is_operator_visible_and_fail_open(self, caplog: pytest.LogCaptureFixture) -> None:
+        mock_app = MagicMock()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "SIE_TRACING_ENABLED": "true",
+                    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
+                    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+                },
+                clear=True,
+            ),
+            patch("opentelemetry.instrumentation.fastapi.FastAPIInstrumentor") as mock_instrumentor,
+        ):
+            setup_tracing(mock_app)
+            mock_instrumentor.instrument_app.assert_not_called()
+
+        assert "Invalid OTLP trace exporter configuration" in caplog.text
+        assert "http/json" not in caplog.text
+
+    def test_exporter_setup_failure_does_not_log_credential_bearing_endpoint(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        secret = "credential-bearing-path-and-query"  # noqa: S105 - leak-detection sentinel
+        endpoint = f"https://collector.example/{secret}/v1/traces?token={secret}"
+        mock_app = MagicMock()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "SIE_TRACING_ENABLED": "true",
+                    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": endpoint,
+                    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+                },
+                clear=True,
+            ),
+            patch("sie_server.observability.tracing._build_span_exporter", side_effect=RuntimeError(endpoint)),
+            patch("opentelemetry.instrumentation.fastapi.FastAPIInstrumentor") as mock_instrumentor,
+        ):
+            setup_tracing(mock_app)
+            mock_instrumentor.instrument_app.assert_not_called()
+
+        assert "error_type=RuntimeError" in caplog.text
+        assert secret not in caplog.text
+
+
+def test_trace_export_config_keeps_specific_endpoint_and_paths_generic_http_base() -> None:
+    assert _trace_export_config_from_values(
+        True,
+        "https://trace.example/custom",
+        "https://generic.example",
+        "http/protobuf",
+        "grpc",
+    ) == _OtlpTraceExportConfig(endpoint="https://trace.example/custom", protocol="http")
+    assert _trace_export_config_from_values(
+        True,
+        None,
+        "https://collector.example/",
+        None,
+        "http/protobuf",
+    ) == _OtlpTraceExportConfig(endpoint="https://collector.example/v1/traces", protocol="http")
+
+
+class _TraceCaptureHandler(BaseHTTPRequestHandler):
+    request_path = ""
+    request_body = b""
+    request_headers: ClassVar[dict[str, str]] = {}
+
+    def do_POST(self) -> None:
+        type(self).request_path = self.path
+        type(self).request_headers = {key.lower(): value for key, value in self.headers.items()}
+        type(self).request_body = self.rfile.read(int(self.headers["content-length"]))
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+def test_generic_only_http_trace_config_posts_to_standard_trace_path() -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _TraceCaptureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        config = _trace_export_config_from_values(True, None, base, None, "http/protobuf")
+        assert config is not None
+        provider = TracerProvider(shutdown_on_exit=False)
+        provider.add_span_processor(SimpleSpanProcessor(_build_span_exporter(config)))
+        with provider.get_tracer("trace-path-capture").start_as_current_span("capture"):
+            pass
+        assert provider.force_flush(timeout_millis=5_000)
+        assert _TraceCaptureHandler.request_path == "/v1/traces"
+        provider.shutdown()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 class TestShutdownTracing:

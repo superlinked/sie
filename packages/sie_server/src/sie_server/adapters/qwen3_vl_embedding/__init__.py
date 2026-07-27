@@ -319,13 +319,6 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
         assert self._model is not None
         assert self._processor is not None
 
-        # Apply the chat template to get prompt text
-        prompt = self._processor.apply_chat_template(  # ty: ignore[unresolved-attribute]
-            conversation,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-
         # Extract images from conversation for the processor
         images = []
         for msg in conversation:
@@ -339,7 +332,6 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
 
         # Tokenize with processor
         proc_kwargs: dict[str, Any] = {
-            "text": [prompt],
             "return_tensors": "pt",
             "padding": True,
         }
@@ -349,7 +341,19 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
         if images:
             proc_kwargs["images"] = images
 
-        inputs = self._processor(**proc_kwargs)  # ty: ignore[call-non-callable]
+        # Qwen's fast tokenizer mutates its padding/truncation configuration
+        # per call and is not re-entrant. The direct EncodePipeline path runs
+        # concurrent requests through asyncio.to_thread against this shared
+        # processor, so keep chat-template and processor tokenization under
+        # the adapter-wide tokenizer guard.
+        with self._tokenizer_guard():
+            prompt = self._processor.apply_chat_template(  # ty: ignore[unresolved-attribute]
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            proc_kwargs["text"] = [prompt]
+            inputs = self._processor(**proc_kwargs)  # ty: ignore[call-non-callable]
         inputs = {k: v.to(self._device) for k, v in inputs.items()}
 
         with torch.inference_mode():

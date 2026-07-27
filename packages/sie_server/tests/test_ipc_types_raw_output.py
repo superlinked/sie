@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import msgspec
 from sie_server.ipc_types import (
+    BatchedF16MultivectorItem,
+    BatchedF16MultivectorOutput,
     BatchOutcome,
     DenseOutput,
     ItemOutcome,
@@ -160,3 +162,51 @@ def test_unknown_raw_output_variant_is_tolerated() -> None:
     # guarantee. Rolling deploys work in either order because neither
     # side has to know about the other's future fields.
     assert not hasattr(rt.raw_output, "extract_json")
+
+
+def test_batched_f16_multivector_roundtrips_as_one_byte_buffer() -> None:
+    batch = BatchOutcome(
+        outcomes=[
+            ItemOutcome(
+                work_item_id="wi-0",
+                request_id="req-0",
+                item_index=0,
+                disposition="publish_and_ack",
+            ),
+            ItemOutcome(
+                work_item_id="wi-1",
+                request_id="req-1",
+                item_index=1,
+                disposition="publish_and_ack",
+            ),
+        ],
+        batched_f16_multivectors=[
+            BatchedF16MultivectorOutput(
+                values_f16=b"\x00<\x00@\x00B",
+                items=[
+                    BatchedF16MultivectorItem(
+                        work_item_id="wi-0",
+                        byte_offset=0,
+                        byte_len=4,
+                        num_tokens=1,
+                        token_dims=2,
+                    ),
+                    BatchedF16MultivectorItem(
+                        work_item_id="wi-1",
+                        byte_offset=4,
+                        byte_len=2,
+                        num_tokens=1,
+                        token_dims=1,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    rt = msgspec.msgpack.decode(msgspec.msgpack.encode(batch), type=BatchOutcome)
+
+    assert len(rt.batched_f16_multivectors) == 1
+    shared = rt.batched_f16_multivectors[0]
+    assert shared.values_f16 == b"\x00<\x00@\x00B"
+    assert [item.byte_offset for item in shared.items] == [0, 4]
+    assert [item.byte_len for item in shared.items] == [4, 2]

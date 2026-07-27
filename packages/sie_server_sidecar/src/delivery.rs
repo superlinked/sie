@@ -209,6 +209,7 @@ mod tests {
             postprocessing_ms: None,
             payload_fetch_ms: None,
             units: None,
+            executed_bundle_config_hash: None,
         }
     }
 

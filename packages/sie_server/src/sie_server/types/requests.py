@@ -2,6 +2,7 @@ from typing import Any
 
 import msgspec
 
+from sie_server.core.score_cost import MAX_SCORE_ITEMS
 from sie_server.types.inputs import Item
 
 # -- Encode ------------------------------------------------------------------
@@ -35,6 +36,13 @@ class ScoreRequest(msgspec.Struct):
     def __post_init__(self) -> None:
         if not self.items:
             raise msgspec.ValidationError("Field 'items' must not be empty")
+        if self.options is not None and "instruction" in self.options:
+            try:
+                msgspec.convert(self.options["instruction"], type=str | None, strict=True)
+            except msgspec.ValidationError as exc:
+                raise msgspec.ValidationError(f"{exc} - at `$.options.instruction`") from exc
+        if len(self.items) > MAX_SCORE_ITEMS:
+            raise msgspec.ValidationError(f"Field 'items' must contain at most {MAX_SCORE_ITEMS} candidates")
 
 
 # -- Extract ------------------------------------------------------------------

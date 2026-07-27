@@ -51,16 +51,20 @@ export { SDK_VERSION } from "./version.js";
 // Types
 export type {
   // Core types
+  AudioInput,
+  ExtractItem,
   Item,
   SparseResult,
   TimingInfo,
   EncodeResult,
   ScoreEntry,
+  ScoreUsage,
   ScoreResult,
   Entity,
   Relation,
   Classification,
   DetectedObject,
+  ExtractItemError,
   ExtractResult,
   // Model and cluster info
   ModelCapabilities,
@@ -105,7 +109,12 @@ export type {
   // Generation
   FinishReason,
   GenerationUsage,
+  JsonSchemaGrammar,
+  RegexGrammar,
+  EbnfGrammar,
+  GenerateGrammar,
   GenerateOptions,
+  StreamGenerateOptions,
   GenerateResult,
   // Streaming generate (SSE)
   GenerateChunk,

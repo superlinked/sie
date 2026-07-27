@@ -14,12 +14,37 @@ tasks:
     multivector: null
   score: null
   extract: null
-max_sequence_length: 128
+# The checkpoint/tokenizer support 512 positions; the recommended retrieval recipe remains doc=128/query=24.
+max_sequence_length: 512
 profiles:
   default:
     max_batch_tokens: 8192
     compute_precision: null
-    adapter_path: sie_server.adapters.splade_flash:SPLADEFlashAdapter
+    adapter_path: sie_server.adapters.splade_flash.adapter:SPLADEFlashAdapter
     adapter_options:
       loadtime: {}
+      runtime:
+        # The checkpoint supports 512 tokens, while its published retrieval recipe uses 128-token documents.
+        max_seq_length: 128
+  sentence_transformer:
+    max_batch_tokens: 8192
+    compute_precision: null
+    adapter_path: sie_server.adapters.sentence_transformer:SentenceTransformerSparseAdapter
+    adapter_options:
+      loadtime:
+        max_seq_length: 128
+        trust_remote_code: false
       runtime: {}
+  candle:
+    extends: default
+    compute_precision: float16
+    adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
+    adapter_options:
+      loadtime:
+        max_seq_length: 128
+      runtime:
+        max_seq_length: 128
+        output_types:
+        - sparse
+        pooling: splade
+        normalize: false

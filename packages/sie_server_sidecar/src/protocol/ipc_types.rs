@@ -7,15 +7,18 @@
 //!
 //! All three are deliberately duplicated rather than extracted to a
 //! shared Python/Rust package: adapters are standalone deliverables, and
-//! we want adapter authors to vendor the
-//! protocol like any other API client. CI checks the three copies are
-//! field-compatible (see `tools/ci/check_ipc_types_parity.py`).
+//! we want adapter authors to vendor the protocol like any other API client.
+//! General sidecar/Python schema parity is checked by
+//! `tools/ci/check_ipc_types_parity.py`; the response-chunk v1 subset and its
+//! limits are pinned across all three peers by
+//! `tools/ci/check_response_chunk_protocol.py`.
 //!
 //! Wire format: `[4-byte BE length][msgpack body]`, where `body` is a
 //! msgpack **map** encoding `RequestEnvelope` / `ResponseEnvelope`.
 //! `rmp_serde::to_vec_named` + `serde(default)` for forward-compat
 //! field absorption.
 
+use half::f16;
 use serde::{Deserialize, Serialize};
 
 /// User item payloads are msgpack-native so binary fields (`bin` / `ext`) can
@@ -53,6 +56,10 @@ pub struct RequestEnvelope<'a, B: Serialize> {
     pub version: u32,
     pub method: &'a str,
     pub request_id: String,
+    /// Explicit v1-only negotiation for oversized non-streaming response
+    /// chunks. New sidecars set this true; old backends ignore the unknown
+    /// field and keep returning one legacy response frame.
+    pub accepts_ipc_response_chunks_v1: bool,
     pub body: B,
 }
 
@@ -65,6 +72,25 @@ pub struct ResponseEnvelope<B> {
     pub body: Option<B>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// One negotiated chunk of an oversized serialized [`ResponseEnvelope`].
+///
+/// `payload` contains a byte slice of the complete, already-serialized
+/// response. Consumers reconstruct those exact bytes and verify the SHA-256
+/// `transfer_digest` before decoding the ordinary response envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcResponseChunkV1 {
+    pub version: u32,
+    pub request_id: String,
+    #[serde(with = "serde_bytes")]
+    pub transfer_digest: Vec<u8>,
+    pub chunk_index: u32,
+    pub chunk_count: u32,
+    pub total_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    pub payload: Vec<u8>,
+    pub kind: String,
 }
 
 fn none_option<T>() -> Option<T> {
@@ -325,6 +351,8 @@ pub struct ReplaceModelConfigsResponse {
     pub config_version: u64,
     #[serde(default)]
     pub applied_models: Vec<String>,
+    #[serde(default)]
+    pub applied_profiles: Vec<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -508,8 +536,9 @@ pub struct RawOutput {
     #[serde(default)]
     pub sparse: Option<SparseOutput>,
     /// Multivector `[num_tokens, token_dims]` matrix for one encode
-    /// item — v1 scope is f32 only. `float16` and the bit-packed
-    /// binary-multivector variant (token row size `< token_dims`)
+    /// item. `dtype` defaults to `float32` for older producers and
+    /// may be `float16` when the shaper should write an f16
+    /// msgpack-numpy matrix. Bit-packed binary multivectors still
     /// stay on the Python path via the same gate.
     #[serde(default)]
     pub multivector: Option<MultivectorOutput>,
@@ -585,7 +614,7 @@ pub struct SparseOutput {
 }
 
 /// Multivector (per-token) embedding payload — `[num_tokens, token_dims]`
-/// contiguous f32 matrix in C (row-major) order.
+/// contiguous matrix in C (row-major) order.
 ///
 /// Shape guarantees: `values.len() == num_tokens * token_dims`. The
 /// shaper returns [`crate::output::ShapeError::MultivectorShapeMismatch`]
@@ -593,21 +622,32 @@ pub struct SparseOutput {
 /// outcome into an error `WorkResult` instead of emitting garbage
 /// bytes.
 ///
-/// v1 scope is `float32` only. Bit-packed binary multivector
-/// (`shape[1] < token_dims`, `dim/8` bytes per token) and `float16`
-/// remain on the Python framing path — the Python gate
-/// `_maybe_multivector_raw_output` refuses to emit this variant for
-/// those dtypes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultivectorOutput {
     /// Flattened `[num_tokens, token_dims]` f32 matrix in row-major
-    /// (C) order. Matches `np.ndarray.tobytes()` for a contiguous
-    /// array.
+    /// (C) order. For `dtype="float16"`, the shaper rounds these
+    /// host-side f32 values to IEEE f16 before writing the numpy
+    /// sentinel.
     pub values: Vec<f32>,
+    /// Optional pre-rounded little-endian f16 bytes for the same
+    /// `[num_tokens, token_dims]` matrix. When present with
+    /// `dtype="float16"`, the shaper writes these bytes directly into
+    /// the msgpack-numpy sentinel and skips host-side f32 rounding.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serde_bytes::serialize",
+        deserialize_with = "serde_bytes::deserialize"
+    )]
+    pub values_f16: Vec<u8>,
     /// Number of tokens (rows).
     pub num_tokens: u32,
     /// Per-token embedding dimension (columns).
     pub token_dims: u32,
+    /// Wire dtype for the msgpack-numpy matrix. Missing means
+    /// `float32` for forward compatibility with older producers.
+    #[serde(default)]
+    pub dtype: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -648,6 +688,11 @@ pub struct EncodeBatchItem {
 pub struct ProcessEncodeBatchRequest {
     pub model_id: String,
     pub items: Vec<EncodeBatchItem>,
+    /// Opt-in for the additive shared-buffer multivector response. Keeping
+    /// this false by default preserves a safe per-item fallback while a
+    /// worker and sidecar are rolled independently.
+    #[serde(default)]
+    pub accepts_batched_f16_multivectors: bool,
 }
 
 // -----------------------------------------------------------------------------
@@ -691,6 +736,26 @@ pub struct ProcessScoreBatchRequest {
 // -----------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreparedAudioPcm16 {
+    #[serde(with = "serde_bytes")]
+    pub pcm_s16le: Vec<u8>,
+    pub sample_rate: u32,
+    pub sample_count: u64,
+    pub duration_ms: u64,
+    pub source_sample_rate: u32,
+    pub source_sample_count: u64,
+    pub source_channels: u32,
+    pub container: String,
+}
+
+impl PreparedAudioPcm16 {
+    #[must_use]
+    pub fn duration_cost_ms(&self) -> u64 {
+        self.duration_ms
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractBatchItem {
     pub work_item_id: String,
     pub request_id: String,
@@ -712,6 +777,11 @@ pub struct ExtractBatchItem {
     pub bundle_config_hash: Option<String>,
     #[serde(default)]
     pub payload_fetch_ms: f64,
+    /// Canonical mono 16 kHz PCM16 prepared by the Rust sidecar. When set,
+    /// `item.audio` has been removed so encoded and decoded media never share
+    /// the sidecar-to-Python IPC frame.
+    #[serde(default)]
+    pub prepared_audio: Option<PreparedAudioPcm16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -788,11 +858,145 @@ pub struct UnitCounts {
     pub pages: Option<u64>,
     #[serde(default)]
     pub images: Option<u64>,
+    /// Exact duration of accepted audio input in integer milliseconds.
+    #[serde(default)]
+    pub audio_ms: Option<u64>,
+    /// Exact number of successfully scored query-document pairs. Appended to
+    /// preserve the legacy positional MessagePack field order.
+    #[serde(default)]
+    pub pairs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchOutcome {
     pub outcomes: Vec<ItemOutcome>,
+    /// Native Candle f16 multivectors can share one contiguous buffer across
+    /// a batch. The sidecar owns slicing and final public wire framing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batched_f16_multivectors: Vec<BatchedF16MultivectorOutput>,
+}
+
+/// Contiguous f16 values encoded as one MessagePack binary value.
+///
+/// This stays typed after IPC decode so the sidecar can slice token vectors
+/// without allocating a second byte buffer before public response framing.
+#[derive(Debug, Clone, Default)]
+pub struct F16Values(pub Vec<f16>);
+
+impl Serialize for F16Values {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[cfg(target_endian = "little")]
+        {
+            // SAFETY: `f16` is transparent over `u16`; a `u8` view has no
+            // alignment requirement and little-endian memory is the wire form.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    self.0.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(self.0.as_slice()),
+                )
+            };
+            serializer.serialize_bytes(bytes)
+        }
+
+        #[cfg(target_endian = "big")]
+        {
+            let mut bytes = Vec::with_capacity(std::mem::size_of_val(self.0.as_slice()));
+            for value in &self.0 {
+                bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+            }
+            serializer.serialize_bytes(&bytes)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for F16Values {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct F16ValuesVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for F16ValuesVisitor {
+            type Value = F16Values;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a little-endian f16 byte sequence")
+            }
+
+            fn visit_borrowed_bytes<E>(self, bytes: &'de [u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                f16_values_from_le_bytes(bytes).map_err(E::custom)
+            }
+
+            fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                f16_values_from_le_bytes(bytes).map_err(E::custom)
+            }
+
+            fn visit_byte_buf<E>(self, bytes: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                f16_values_from_le_bytes(&bytes).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_bytes(F16ValuesVisitor)
+    }
+}
+
+fn f16_values_from_le_bytes(bytes: &[u8]) -> Result<F16Values, &'static str> {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f16>()) {
+        return Err("f16 byte buffer length must be divisible by two");
+    }
+
+    #[cfg(target_endian = "little")]
+    {
+        let mut values = Vec::<f16>::with_capacity(bytes.len() / std::mem::size_of::<f16>());
+        // SAFETY: every f16 bit pattern is valid. The allocation retains f16
+        // alignment, unlike reinterpreting a Vec<u8> as an owning Vec<f16>.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                values.as_mut_ptr().cast::<u8>(),
+                bytes.len(),
+            );
+            values.set_len(bytes.len() / std::mem::size_of::<f16>());
+        }
+        Ok(F16Values(values))
+    }
+
+    #[cfg(target_endian = "big")]
+    {
+        Ok(F16Values(
+            bytes
+                .chunks_exact(std::mem::size_of::<f16>())
+                .map(|chunk| f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])))
+                .collect(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchedF16MultivectorOutput {
+    pub values_f16: F16Values,
+    pub items: Vec<BatchedF16MultivectorItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchedF16MultivectorItem {
+    pub work_item_id: String,
+    pub byte_offset: u64,
+    pub byte_len: u64,
+    pub num_tokens: u32,
+    pub token_dims: u32,
 }
 
 // -----------------------------------------------------------------------------
@@ -933,6 +1137,10 @@ pub struct RunBatchRequest {
     /// recomputes when it needs the exact value.
     pub total_cost: u64,
     pub items: Vec<RunBatchItem>,
+    /// Same capability gate as [`ProcessEncodeBatchRequest`], carried by the
+    /// scheduler's production RPC path.
+    #[serde(default)]
+    pub accepts_batched_f16_multivectors: bool,
 }
 
 // -----------------------------------------------------------------------------
@@ -957,6 +1165,38 @@ mod tests {
 
     fn text_item(text: &str) -> WireValue {
         WireValue::Map(vec![(WireValue::from("text"), WireValue::from(text))])
+    }
+
+    #[test]
+    fn unit_counts_decodes_legacy_positional_array_without_field_shift() {
+        let legacy = rmp_serde::to_vec(&(Some(11_u64), Some(2_u64), Some(3_u64), Some(4_000_u64)))
+            .expect("legacy positional units");
+        let decoded: UnitCounts = rmp_serde::from_slice(&legacy).expect("additive decode");
+
+        assert_eq!(decoded.input_tokens, Some(11));
+        assert_eq!(decoded.pages, Some(2));
+        assert_eq!(decoded.images, Some(3));
+        assert_eq!(decoded.audio_ms, Some(4_000));
+        assert_eq!(decoded.pairs, None);
+    }
+
+    #[test]
+    fn f16_values_roundtrip_as_little_endian_msgpack_binary() {
+        let values = F16Values(vec![f16::from_bits(0x3c00), f16::from_bits(0x8001)]);
+
+        let encoded = rmp_serde::to_vec_named(&values).unwrap();
+        let wire: serde_bytes::ByteBuf = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(wire.as_ref(), &[0x00, 0x3c, 0x01, 0x80]);
+
+        let decoded: F16Values = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(
+            decoded
+                .0
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![0x3c00, 0x8001]
+        );
     }
 
     #[test]
@@ -1203,6 +1443,7 @@ mod tests {
                 profile_id: None,
                 bundle_config_hash: None,
                 payload_fetch_ms: 0.0,
+                prepared_audio: None,
             }],
         };
 
@@ -1261,6 +1502,27 @@ mod tests {
             })
             .expect("document.data");
         assert_eq!(data, &rmpv::Value::Binary(pdf_bytes));
+    }
+
+    #[test]
+    fn unit_counts_audio_ms_is_additive_and_rejects_negative_values() {
+        let bytes = rmp_serde::to_vec_named(&serde_json::json!({
+            "input_tokens": 7,
+            "audio_ms": 12_345,
+        }))
+        .unwrap();
+        let units: UnitCounts = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(units.input_tokens, Some(7));
+        assert_eq!(units.audio_ms, Some(12_345));
+        assert!(units.pages.is_none());
+        assert!(units.images.is_none());
+
+        let legacy = rmp_serde::to_vec_named(&serde_json::json!({"input_tokens": 7})).unwrap();
+        let legacy: UnitCounts = rmp_serde::from_slice(&legacy).unwrap();
+        assert!(legacy.audio_ms.is_none());
+
+        let negative = rmp_serde::to_vec_named(&serde_json::json!({"audio_ms": -1})).unwrap();
+        assert!(rmp_serde::from_slice::<UnitCounts>(&negative).is_err());
     }
 
     #[test]

@@ -42,7 +42,6 @@ pub mod batch_config;
 pub mod batch_former;
 pub mod engine;
 pub mod item;
-pub mod metrics;
 pub mod registry;
 pub mod trackers;
 
@@ -51,7 +50,6 @@ pub use batch_config::BatchConfig;
 pub use batch_former::{BatchFormer, FlushReason, FormattedBatch, HasCost, PendingRequest};
 pub use engine::{LoraKey, Op, RecordCompletionOutcome, Scheduler, SchedulerBuilder};
 pub use item::{lora_from_options, SchedulerItem, SchedulerMeta};
-pub use metrics::{SchedulerMetrics, FLUSH_REASONS};
 pub use registry::SchedulerRegistry;
 pub use trackers::BatchEfficiencyTracker;
 

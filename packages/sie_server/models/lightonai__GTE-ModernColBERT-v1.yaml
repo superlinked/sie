@@ -19,26 +19,40 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: null
-    adapter_path: sie_server.adapters.colbert_modernbert_flash:ColBERTModernBERTFlashAdapter
+    adapter_path: sie_server.adapters.colbert_modernbert_flash.adapter:ColBERTModernBERTFlashAdapter
     adapter_options:
       loadtime:
         muvera_config:
-          num_repetitions: 40
+          num_repetitions: 96
           num_simhash_projections: 6
           projection_dim: 8
           final_projection_dim: null
           center_tokens: true
         token_dim: 128
         normalize: true
-        query_max_length: 32
+        query_max_length: 8192
         skip_special_tokens: false
-      runtime: {}
+        query_prefix: '[Q] '
+        doc_prefix: '[D] '
+        doc_punctuation_skiplist: true
+      runtime:
+        # Published MTEB recipe at the revision used by the governed targets.
+        query_max_length: 48
+        max_seq_length: 300
   muvera:
     extends: default
     adapter_options:
       runtime:
+        query_max_length: 48
+        max_seq_length: 300
         output_types:
         - dense
         output_similarity:
           dense: dot
         muvera: {}
+  long_context:
+    extends: default
+    adapter_options:
+      runtime:
+        query_max_length: 48
+        max_seq_length: 8192

@@ -1,5 +1,6 @@
 sie_id: Marqo/marqo-fashionSigLIP
 hf_id: Marqo/marqo-fashionSigLIP
+hf_revision: c56244cc94f92419e8369fa71efdaf403b124ce8
 inputs:
   text: true
   image: true
@@ -18,7 +19,7 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: float16
-    adapter_path: sie_server.adapters.siglip:SiglipAdapter
+    adapter_path: sie_server.adapters.siglip.adapter:SiglipAdapter
     adapter_options:
       loadtime:
         backend: open_clip

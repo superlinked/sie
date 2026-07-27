@@ -12,8 +12,8 @@ from sie_server.api.encode import router as encode_router
 from sie_server.api.extract import router as extract_router
 from sie_server.api.generate import router as generate_router
 from sie_server.api.health import router as health_router
-from sie_server.api.metrics import router as metrics_router
 from sie_server.api.models import router as models_router
+from sie_server.api.openai_audio import router as openai_audio_router
 from sie_server.api.openai_compat import router as openai_router
 from sie_server.api.openai_local import router as openai_local_router
 from sie_server.api.openapi import setup_custom_openapi_schema
@@ -31,6 +31,12 @@ from sie_server.ipc_server import IpcServer
 from sie_server.observability.gpu import _init_nvml, shutdown_nvml
 from sie_server.observability.telemetry import telemetry_sender
 from sie_server.observability.tracing import setup_tracing, shutdown_tracing
+from sie_server.observability.worker_telemetry import (
+    configure_worker_metric_context,
+    lane_from_environment,
+    setup_worker_telemetry,
+    shutdown_worker_telemetry,
+)
 from sie_server.queue_executor import QueueExecutor
 
 logger = logging.getLogger(__name__)
@@ -79,11 +85,12 @@ class AppFactory:
 
         # Setup OpenTelemetry tracing (no-op unless the flag and endpoint are set)
         setup_tracing(app)
+        setup_worker_telemetry()
 
         # Queue is the only supported routing mode: the worker-sidecar
         # drives NATS and talks to Python over UDS IPC. We still mount
-        # the HTTP routers for /healthz, /readyz, /metrics (K8s probes
-        # and Prometheus), the landing page, and /ws/status — which is
+        # the HTTP routers for /healthz and /readyz (K8s probes), the
+        # landing page, and /ws/status — which is
         # the gateway's worker-registration channel: the gateway dials
         # `ws://<pod>/ws/status` to learn pool_name, bundle,
         # machine_profile, and readiness. The inference endpoints
@@ -95,13 +102,13 @@ class AppFactory:
         # working; no traffic reaches them in a real cluster.
         app.include_router(root_router)
         app.include_router(health_router)
-        app.include_router(metrics_router)
         app.include_router(ws_router)
         app.include_router(encode_router)
         app.include_router(extract_router)
         app.include_router(generate_router)
         app.include_router(score_router)
         app.include_router(models_router)
+        app.include_router(openai_audio_router)  # OpenAI-compatible /v1/audio/transcriptions
         app.include_router(openai_router)  # OpenAI-compatible /v1/embeddings
         # Local-only convenience (single-node/dev); intentionally NOT in the published
         # openapi.json — see cli.openapi_export. The Rust gateway is the prod API authority.
@@ -131,6 +138,7 @@ class AppFactory:
                 # First to enter → last to tear down, so spans emitted during
                 # other stages' shutdown (model unload, drain) are still flushed.
                 _timed_stage("tracing", cls._tracing()),
+                _timed_stage("metrics", cls._metrics()),
                 _timed_stage("nvml", cls._nvml()),
                 _timed_stage("telemetry", telemetry_sender()),
                 _timed_stage("model_registry", cls._model_registry(config)) as registry,
@@ -172,6 +180,10 @@ class AppFactory:
             engine_config=engine_config,
             pool_name=config.pool_name,
             pinned_models=config.pinned_models,
+        )
+        configure_worker_metric_context(
+            lane=lane_from_environment(),
+            configs=registry.get_configs_snapshot(),
         )
         try:
             # Start background services (memory monitor, idle evictor, hot reload).
@@ -246,6 +258,15 @@ class AppFactory:
             yield
         finally:
             shutdown_tracing()
+
+    @classmethod
+    @asynccontextmanager
+    async def _metrics(cls) -> AsyncGenerator[None, None]:
+        """Flush the owned OTLP metrics provider after engine shutdown."""
+        try:
+            yield
+        finally:
+            shutdown_worker_telemetry()
 
     @classmethod
     @asynccontextmanager

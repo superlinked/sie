@@ -1,5 +1,5 @@
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
@@ -36,7 +36,11 @@ fn openai_model_object(name: &str) -> Value {
     tag = "models",
     responses((status = 200, description = "Models visible to this gateway replica", body = crate::openapi::ModelsResponse))
 )]
-pub async fn get_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_models(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let ext = req.extensions();
     let model_workers =
         canonical_worker_models(state.registry.get_models().await, &state.model_registry);
 
@@ -45,6 +49,15 @@ pub async fn get_models(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .list_models()
         .into_iter()
         .chain(model_workers.keys().cloned())
+        // #1841 org-scoped visibility: drop models this caller cannot see (other
+        // orgs' custom models), so the listing carries no cross-org existence
+        // oracle. No-op in OSS self-host (policy is None).
+        .filter(|name| {
+            state
+                .model_access_policy
+                .as_ref()
+                .is_none_or(|p| p.visible(name, ext))
+        })
         .collect();
     let models: Vec<serde_json::Value> = model_names
         .iter()
@@ -55,6 +68,7 @@ pub async fn get_models(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 Some(entry) => entry.to_model_info_value(loaded),
                 None => worker_only_model_info(name, loaded),
             };
+            attach_model_revision(&mut body, state.as_ref(), name);
             attach_pending_generation(&mut body, state.as_ref(), name);
             body
         })
@@ -92,7 +106,11 @@ pub async fn get_models(State(state): State<Arc<AppState>>) -> impl IntoResponse
         (status = 404, description = "Model not found", body = crate::openapi::ModelNotFoundResponse)
     )
 )]
-pub async fn get_model(Path(model): Path<String>, State(state): State<Arc<AppState>>) -> Response {
+pub async fn get_model(
+    Path(model): Path<String>,
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> Response {
     let model_entry = state.model_registry.get_model_info(&model);
     let known_in_registry = model_entry.is_some();
     // Own the canonical name so it stays valid after `model_entry` is
@@ -101,6 +119,24 @@ pub async fn get_model(Path(model): Path<String>, State(state): State<Arc<AppSta
         .as_ref()
         .map(|entry| entry.name.clone())
         .unwrap_or_else(|| model.clone());
+    // #1841 org-scoped visibility: a model this caller cannot see 404s exactly
+    // like an unknown one (no cross-org existence oracle). No-op in OSS.
+    if state
+        .model_access_policy
+        .as_ref()
+        .is_some_and(|p| !p.visible(&canonical_model, req.extensions()))
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "detail": {
+                    "code": "MODEL_NOT_FOUND",
+                    "message": format!("Model '{}' not found", model),
+                }
+            })),
+        )
+            .into_response();
+    }
     let bundles = state.model_registry.get_model_bundles(&model);
     let model_workers =
         canonical_worker_models(state.registry.get_models().await, &state.model_registry);
@@ -141,9 +177,19 @@ pub async fn get_model(Path(model): Path<String>, State(state): State<Arc<AppSta
             }
         }
     }
+    attach_model_revision(&mut body, state.as_ref(), &canonical_model);
     attach_pending_generation(&mut body, state.as_ref(), &canonical_model);
 
     (StatusCode::OK, Json(body)).into_response()
+}
+
+fn attach_model_revision(body: &mut Value, state: &AppState, model: &str) {
+    let Some(revision) = state.model_registry.get_model_revision(model) else {
+        return;
+    };
+    if let Some(map) = body.as_object_mut() {
+        map.insert("revision".to_string(), json!(revision));
+    }
 }
 
 fn attach_pending_generation(body: &mut Value, state: &AppState, model: &str) {
@@ -187,6 +233,7 @@ fn worker_only_model_info(name: &str, loaded: bool) -> Value {
             outputs: Vec::new(),
             dims: HashMap::new(),
             max_sequence_length: None,
+            revision: None,
             max_output_tokens: None,
             grammar_capabilities: None,
             grammar_profile: None,
@@ -199,120 +246,6 @@ fn worker_only_model_info(name: &str, loaded: bool) -> Value {
         },
     }
     .to_model_info_value(loaded)
-}
-
-pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
-    let header = headers
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .trim()
-        .to_string();
-    if header.is_empty() {
-        return None;
-    }
-    let token = if header.to_lowercase().starts_with("bearer ") {
-        header[7..].trim().to_string()
-    } else {
-        header
-    };
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
-}
-
-pub fn mask_token(token: &str) -> String {
-    if token.len() <= 4 {
-        "****".to_string()
-    } else {
-        format!(
-            "{}{}",
-            "*".repeat(token.len() - 4),
-            &token[token.len() - 4..]
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── extract_bearer_token ───────────────────────────────────────
-
-    #[test]
-    fn test_extract_bearer_token_with_prefix() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "Bearer my-token-123".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("my-token-123".into()));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_case_insensitive_prefix() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "bearer my-token".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("my-token".into()));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_without_prefix() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "raw-token-value".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("raw-token-value".into()));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_missing_header() {
-        let h = HeaderMap::new();
-        assert_eq!(extract_bearer_token(&h), None);
-    }
-
-    #[test]
-    fn test_extract_bearer_token_empty_value() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), None);
-    }
-
-    #[test]
-    fn test_extract_bearer_token_bearer_only() {
-        // "Bearer " trims to "Bearer", which doesn't start with "bearer " (missing trailing space),
-        // so it's treated as a raw token value.
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "Bearer ".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("Bearer".into()));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_whitespace_trimmed() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "  Bearer  my-token  ".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("my-token".into()));
-    }
-
-    // ── mask_token ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_mask_token_long() {
-        assert_eq!(mask_token("secret-token-123"), "************-123");
-    }
-
-    #[test]
-    fn test_mask_token_short() {
-        assert_eq!(mask_token("abc"), "****");
-        assert_eq!(mask_token(""), "****");
-    }
-
-    #[test]
-    fn test_mask_token_exactly_4() {
-        assert_eq!(mask_token("abcd"), "****");
-    }
-
-    #[test]
-    fn test_mask_token_5_chars() {
-        assert_eq!(mask_token("12345"), "*2345");
-    }
 }
 
 #[cfg(test)]
@@ -340,7 +273,6 @@ mod route_tests {
         Config {
             host: "127.0.0.1".to_string(),
             port: 0,
-            metrics_port: None,
             worker_urls: Vec::new(),
             use_kubernetes: false,
             k8s_namespace: "default".to_string(),
@@ -364,11 +296,13 @@ mod route_tests {
             stream_max_age_s: 1_800,
             configured_gpus: Vec::new(),
             gpu_profile_map: HashMap::new(),
+            configured_physical_lanes: Default::default(),
             static_queue_pools: Vec::new(),
             model_aliases: HashMap::new(),
             bundles_dir: bundles_dir.to_string(),
             models_dir: models_dir.to_string(),
             payload_store_url: String::new(),
+            public_base_url: None,
             config_service_url: None,
             config_service_token: None,
             config_modal_proxy_token: None,
@@ -406,8 +340,10 @@ mod route_tests {
             model_registry,
             pool_manager: Arc::new(PoolManager::new(Vec::new())),
             work_publisher: None,
-            demand_tracker: Arc::new(DemandTracker::new()),
+            lane_backlog_source: None,
+            demand_tracker: Arc::new(DemandTracker::new(Default::default())),
             config_epoch: crate::state::config_epoch::ConfigEpoch::new(),
+            model_access_policy: None,
         });
         let router = create_router(Arc::clone(&state), config);
         (router, state, bundles_dir, models_dir)
@@ -429,6 +365,7 @@ mod route_tests {
             .model_registry
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -468,6 +405,7 @@ mod route_tests {
             .model_registry
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -497,6 +435,7 @@ mod route_tests {
             .model_registry
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -549,28 +488,33 @@ mod route_tests {
             model_registry,
             pool_manager: Arc::new(PoolManager::new(Vec::new())),
             work_publisher: None,
-            demand_tracker: Arc::new(DemandTracker::new()),
+            lane_backlog_source: None,
+            demand_tracker: Arc::new(DemandTracker::new(Default::default())),
             config_epoch: crate::state::config_epoch::ConfigEpoch::new(),
+            model_access_policy: None,
         };
         seed_model(&state, "test/model");
 
         use crate::handlers::proxy::resolve_model_and_bundle;
         // sql -> BF16 bundle; code -> FP8 bundle (same base model, different precision).
         assert_eq!(
-            resolve_model_and_bundle(&state, "sql").unwrap(),
+            resolve_model_and_bundle(&state, "sql", &axum::http::Extensions::new()).unwrap(),
             ("test/model".to_string(), "bf16-pytorch".to_string()),
         );
         assert_eq!(
-            resolve_model_and_bundle(&state, "code").unwrap(),
+            resolve_model_and_bundle(&state, "code", &axum::http::Extensions::new()).unwrap(),
             ("test/model".to_string(), "fp8-pytorch".to_string()),
         );
         // An explicit caller bundle overrides the alias's bundle.
         assert_eq!(
-            resolve_model_and_bundle(&state, "fp8-pytorch:/sql").unwrap(),
+            resolve_model_and_bundle(&state, "fp8-pytorch:/sql", &axum::http::Extensions::new())
+                .unwrap(),
             ("test/model".to_string(), "fp8-pytorch".to_string()),
         );
         // Alias -> a bundle the model isn't registered under: hard 409, no fallback.
-        assert!(resolve_model_and_bundle(&state, "broken").is_err());
+        assert!(
+            resolve_model_and_bundle(&state, "broken", &axum::http::Extensions::new()).is_err()
+        );
     }
 
     /// Seed a multi-profile model whose profiles declare disjoint LoRA
@@ -619,6 +563,7 @@ mod route_tests {
             .model_registry
             .add_model_config(ModelConfig {
                 name: model_id.to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,

@@ -1,5 +1,8 @@
 sie_id: numind/NuNER_Zero
 hf_id: numind/NuNER_Zero
+hf_revision: c90187673f464518dca09f41689184ed6976242c
+hf_tokenizer_dependencies:
+  microsoft/deberta-v3-large: 64a8c8eab3e352a784c658aef62be1662607476f
 inputs:
   text: true
   image: false

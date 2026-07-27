@@ -9,6 +9,7 @@ Reference models:
 - jackboyla/glirel_re_large-v0 (relation-focused variant)
 """
 
+import re
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -23,6 +24,8 @@ from sie_server.types.responses import Entity, Relation
 
 # Error messages
 _ERR_REQUIRES_LABELS = "GLiREL requires labels parameter for relation extraction"
+_ERR_REQUIRES_ENTITIES = "GLiREL requires entities in item metadata for relation extraction"
+_TOKEN_PATTERN = re.compile(r"\w+(?:[-_]\w+)*|\S")
 
 
 class GLiRELAdapter(BaseAdapter):
@@ -30,7 +33,7 @@ class GLiRELAdapter(BaseAdapter):
 
     GLiREL extracts relations between entities. You provide:
     - Text to analyze
-    - Entity spans (in item metadata or auto-detected)
+    - Entity spans in item metadata
     - Relation labels to look for (e.g., ["founded_by", "works_at"])
 
     Example usage:
@@ -159,28 +162,20 @@ class GLiRELAdapter(BaseAdapter):
             entities = self._extract_entities(item)
 
             if not entities:
-                # No entities provided - return empty lists
-                all_entities.append([])
-                all_relations.append([])
-                continue
+                raise ValueError(_ERR_REQUIRES_ENTITIES)
 
-            # Convert entities to GLiREL format: [[start_char, end_char, type, text], ...]
-            # GLiREL v1.0+ uses character offsets, not token indices
-            ner_input = []
-            for ent in entities:
-                start_char = ent.get("start", 0)
-                end_char = ent.get("end", len(ent.get("text", "")))
-                ner_input.append([start_char, end_char, ent.get("label", "ENTITY"), ent.get("text", "")])
+            tokens, token_offsets = self._tokenize(text)
+            ner_input = self._to_glirel_ner(entities, token_offsets)
 
             # Get options with fallback to model defaults
             opts = options or {}
             effective_threshold = opts.get("threshold", self._threshold)
             effective_top_k = opts.get("top_k", 10)
 
-            # GLiREL prediction - v1.0+ API takes text directly
+            # GLiREL expects pre-tokenized text and inclusive token offsets.
             with torch.inference_mode():
                 raw_relations = self._model.predict_relations(
-                    text=text,
+                    text=tokens,
                     labels=labels,
                     threshold=effective_threshold,
                     ner=ner_input,
@@ -190,13 +185,8 @@ class GLiRELAdapter(BaseAdapter):
             # Convert to proper Relation objects
             item_relations = []
             for rel in raw_relations:
-                # Extract head/tail text (GLiREL v1.0+ returns strings, strip extra whitespace)
-                head_text = rel.get("head_text", "")
-                tail_text = rel.get("tail_text", "")
-                if isinstance(head_text, list):
-                    head_text = " ".join(head_text)
-                if isinstance(tail_text, list):
-                    tail_text = " ".join(tail_text)
+                head_text = self._relation_entity_text(rel, "head", entities, ner_input)
+                tail_text = self._relation_entity_text(rel, "tail", entities, ner_input)
 
                 item_relations.append(
                     Relation(
@@ -237,3 +227,62 @@ class GLiRELAdapter(BaseAdapter):
         if metadata is None:
             return []
         return metadata.get("entities", [])
+
+    @staticmethod
+    def _tokenize(text: str) -> tuple[list[str], list[tuple[int, int]]]:
+        """Tokenize text exactly like GLiREL and retain character offsets."""
+        matches = list(_TOKEN_PATTERN.finditer(text))
+        return [match.group() for match in matches], [(match.start(), match.end()) for match in matches]
+
+    @staticmethod
+    def _to_glirel_ner(
+        entities: list[dict[str, Any]],
+        token_offsets: list[tuple[int, int]],
+    ) -> list[list[Any]]:
+        """Convert SIE's character-offset entities to GLiREL token spans."""
+        ner_input: list[list[Any]] = []
+        for entity in entities:
+            start_char = entity.get("start")
+            end_char = entity.get("end")
+            if not isinstance(start_char, int) or not isinstance(end_char, int) or start_char >= end_char:
+                msg = "GLiREL entity metadata requires integer character offsets with start < end"
+                raise ValueError(msg)
+
+            covered_tokens = [
+                index
+                for index, (token_start, token_end) in enumerate(token_offsets)
+                if token_end > start_char and token_start < end_char
+            ]
+            if not covered_tokens:
+                msg = f"GLiREL entity span [{start_char}, {end_char}) does not cover any text token"
+                raise ValueError(msg)
+
+            ner_input.append(
+                [
+                    covered_tokens[0],
+                    covered_tokens[-1],
+                    entity.get("label", "ENTITY"),
+                    entity.get("text", ""),
+                ]
+            )
+        return ner_input
+
+    @staticmethod
+    def _relation_entity_text(
+        relation: dict[str, Any],
+        role: str,
+        entities: list[dict[str, Any]],
+        ner_input: list[list[Any]],
+    ) -> str:
+        """Use the caller's original entity text when GLiREL identifies its span."""
+        position = relation.get(f"{role}_pos")
+        if isinstance(position, list) and len(position) == 2:
+            for entity, ner_span in zip(entities, ner_input):
+                if position == [ner_span[0], ner_span[1] + 1]:
+                    return str(entity.get("text", ""))
+
+        relation_text = relation.get(f"{role}_text", "")
+        if isinstance(relation_text, list):
+            relation_text = " ".join(str(token) for token in relation_text)
+            relation_text = re.sub(r"\s+([,.;:!?%])", r"\1", relation_text)
+        return str(relation_text)

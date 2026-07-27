@@ -1,5 +1,6 @@
 sie_id: jinaai/jina-reranker-v2-base-multilingual
 hf_id: jinaai/jina-reranker-v2-base-multilingual
+hf_revision: 9cfeff2df7d40d1b78e75e5e9cebec92a99813c9
 inputs:
   text: true
   image: false

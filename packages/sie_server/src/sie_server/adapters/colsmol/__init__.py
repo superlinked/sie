@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -43,6 +44,7 @@ from sie_server.adapters._multivector import maxsim_scores
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
+from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
 from sie_server.types.inputs import media_bytes
 
 if TYPE_CHECKING:
@@ -151,9 +153,8 @@ class ColSmolAdapter(BaseAdapter):
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts. Forwarded to ``from_pretrained(..., revision=...)``.
             max_seq_length: Ignored — ColSmol uses dynamic sequence length.
-            muvera_config: Accepted for interface parity with the other Col*
-                adapters; ColSmol builds no MUVERA postprocessor, so this is
-                currently a no-op (neither stored nor applied).
+            muvera_config: Optional MUVERA configuration for converting
+                multi-vector outputs to dense representations.
             token_dim: Per-token embedding dimension (128 for ColSmol).
         """
         self._model_name_or_path = str(model_name_or_path)
@@ -164,7 +165,14 @@ class ColSmolAdapter(BaseAdapter):
 
         self._model: Any = None
         self._processor: Any = None
+        # HF fast tokenizers are NOT thread-safe: applying per-call padding/truncation
+        # reconfigures the underlying Rust tokenizer (a mutable borrow). The direct
+        # adapter path (encode_pipeline.py: asyncio.to_thread, no per-model lock) lets
+        # concurrent requests race with RuntimeError: Already borrowed (#2098). Serialise
+        # the processor call — microseconds vs the GPU forward. Matches CLIP/SigLIP.
+        self._tokenizer_lock = threading.Lock()
         self._device: str | None = None
+        self._muvera_config = muvera_config
         self._multivector_dim: int = token_dim
 
     def load(self, device: str) -> None:
@@ -331,12 +339,13 @@ class ColSmolAdapter(BaseAdapter):
         assert self._processor is not None
 
         # One text prompt per image; nested image lists pair image i with prompt i.
-        batch = self._processor(
-            text=[_VISUAL_PROMPT_PREFIX] * len(images),
-            images=[[img] for img in images],
-            padding="longest",
-            return_tensors="pt",
-        )
+        with self._tokenizer_lock:
+            batch = self._processor(
+                text=[_VISUAL_PROMPT_PREFIX] * len(images),
+                images=[[img] for img in images],
+                padding="longest",
+                return_tensors="pt",
+            )
         batch = {k: v.to(self._device) for k, v in batch.items() if hasattr(v, "to")}
 
         with torch.inference_mode():
@@ -364,11 +373,12 @@ class ColSmolAdapter(BaseAdapter):
         assert self._processor is not None
 
         augmented = text + _QUERY_AUGMENTATION_TOKEN * _QUERY_AUGMENTATION_COUNT
-        batch = self._processor(
-            text=[augmented],
-            return_tensors="pt",
-            padding="longest",
-        )
+        with self._tokenizer_lock:
+            batch = self._processor(
+                text=[augmented],
+                return_tensors="pt",
+                padding="longest",
+            )
         batch = {k: v.to(self._device) for k, v in batch.items() if hasattr(v, "to")}
 
         with torch.inference_mode():
@@ -427,6 +437,11 @@ class ColSmolAdapter(BaseAdapter):
         if unsupported:
             msg = f"Unsupported output types: {unsupported}. ColSmolAdapter only supports 'multivector'."
             raise ValueError(msg)
+
+    def get_postprocessors(self) -> dict[str, Any]:
+        """Return the configured MUVERA multivector-to-dense postprocessor."""
+        config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
+        return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim, config=config)}
 
     def get_preprocessor(self) -> Any | None:
         # ColSmol uses the Idefics3Processor, which requires the visual prompt

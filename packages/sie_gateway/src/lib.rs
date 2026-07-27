@@ -18,7 +18,6 @@ pub mod error;
 pub mod handlers;
 pub mod health_mode;
 pub mod http_error;
-pub mod metrics;
 pub mod middleware;
 pub mod nats;
 pub mod observability;

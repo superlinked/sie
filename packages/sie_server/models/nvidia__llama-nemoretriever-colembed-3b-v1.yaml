@@ -10,7 +10,7 @@ tasks:
     dense: null
     sparse: null
     multivector:
-      dim: 128
+      dim: 3072
   score: null
   extract: null
 max_sequence_length: 8192
@@ -26,7 +26,7 @@ profiles:
           num_simhash_projections: 6
           projection_dim: null
           final_projection_dim: 10240
-        token_dim: 128
+        token_dim: 3072
       runtime:
         normalize: true
         batch_size: 8

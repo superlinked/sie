@@ -15,6 +15,7 @@ from sie_server.core.batcher import BatchConfig
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.prepared import make_text_item
 from sie_server.core.worker import ModelWorker, WorkerConfig
+from sie_server.core.worker import model_worker as model_worker_module
 from sie_server.core.worker.types import AdaptiveBatchingParams
 from sie_server.types.inputs import Item
 
@@ -469,6 +470,44 @@ class TestAdaptiveBatchingWorkerIntegration:
         assert worker._efficiency_tracker is not None
         assert worker._adaptive_controller is not None
         assert worker._adaptive_controller.target_p50_ms == 50.0
+
+    @pytest.mark.asyncio
+    async def test_engine_controller_emits_one_typed_scheduler_snapshot(
+        self,
+        slow_adapter: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        telemetry = MagicMock()
+        monkeypatch.setattr(model_worker_module, "worker_telemetry", lambda: telemetry)
+        monkeypatch.setattr(model_worker_module, "worker_telemetry_enabled", lambda: True)
+        config = WorkerConfig(
+            max_batch_requests=1,
+            adaptive_batching=AdaptiveBatchingParams(
+                enabled=True,
+                target_p50_ms=50.0,
+                update_interval=1,
+            ),
+        )
+        worker = ModelWorker(slow_adapter, config, model_name="catalog/model")
+        await worker.start()
+        try:
+            future = await worker.submit(
+                [make_text_item([1, 2, 3], 0)],
+                [Item(text="hello")],
+                ["dense"],
+            )
+            await asyncio.wait_for(future, timeout=5.0)
+
+            telemetry.adaptive_snapshot.assert_called_once()
+            snapshot = telemetry.adaptive_snapshot.call_args.kwargs
+            assert snapshot["model"] == "catalog/model"
+            assert snapshot["profile"] == "default"
+            assert snapshot["wait_ms"] >= 0.0
+            assert snapshot["cost"] > 0
+            assert snapshot["target_p50_ms"] == 50.0
+            assert snapshot["starvation_resets_delta"] >= 0
+        finally:
+            await worker.stop()
 
     @pytest.mark.asyncio
     async def test_controller_not_created_when_disabled(self, slow_adapter: MagicMock) -> None:

@@ -51,11 +51,12 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, warn};
 
-use crate::metrics;
-use crate::queue::dispatch::WorkDispatcher;
+use crate::observability::metrics as telemetry;
+use crate::queue::dispatch::{PendingDispatchKind, WorkDispatcher};
 use crate::queue::publisher;
 use crate::queue::streaming::{ChunkEnvelope, StreamOutcome};
 use crate::server::AppState;
+use crate::state::demand_tracker::{DemandTracker, PhysicalLane};
 
 /// Wire shape selector — chat vs SIE-native generate.
 #[derive(Debug, Clone, Copy)]
@@ -77,6 +78,7 @@ pub enum SseEndpoint {
 pub struct SseParams<'a> {
     pub state: &'a AppState,
     pub work_publisher: Arc<dyn WorkDispatcher>,
+    pub physical_lane: PhysicalLane,
     /// DISPLAY id (the requested model) — surfaced in the streamed chunk
     /// ``model`` field and the routing/timeout metric labels.
     pub model: String,
@@ -109,6 +111,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
     let SseParams {
         state,
         work_publisher,
+        physical_lane,
         model,
         dispatch_model,
         bundle,
@@ -138,20 +141,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
             raw_for_debug: None,
         },
     };
-    // Bounded copies of the (caller-influenced) model + pool for metric
-    // labels; `model` / `pool` themselves stay raw for routing / NATS
-    // subjects. Known models are already canonicalised at the request
-    // boundary; `sanitize_label` is the backstop against unknown /
-    // oversized / junk-charset ids minting unbounded label series.
-    let pool_label = metrics::sanitize_label(&pool);
-    let model_label = metrics::sanitize_model_label(&model);
-    metrics::ROUTING_KEY_SOURCE
-        .with_label_values(&[&model_label, &pool_label, resolved_key.source.as_label()])
-        .inc();
     let (target, pool_fallback_lane_worker_count) = if resolved_key.hash.is_none() {
-        metrics::ROUTING_FALLBACK_TOTAL
-            .with_label_values(&[&model_label, &pool_label, "no_key"])
-            .inc();
         (
             publisher::PublishTarget::Pool {
                 pool: pool.clone(),
@@ -181,10 +171,6 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
             &bundle_config_hash,
             admitted_worker_names.as_ref(),
         );
-        let ring_len = ring.len();
-        metrics::ROUTING_HRW_RING_SIZE
-            .with_label_values(&[&model_label, &pool_label])
-            .set(ring_len as f64);
         match crate::routing::pick_worker(&ring, &resolved_key) {
             Some(worker_id) => (
                 publisher::PublishTarget::Worker {
@@ -196,25 +182,20 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
                 },
                 fallback_lane_worker_count,
             ),
-            None => {
-                metrics::ROUTING_FALLBACK_TOTAL
-                    .with_label_values(&[&model_label, &pool_label, "unhealthy_skipped"])
-                    .inc();
-                (
-                    publisher::PublishTarget::Pool {
-                        pool: pool.clone(),
-                        machine_profile: gpu.clone(),
-                        bundle: bundle.clone(),
-                        model: dispatch_model.clone(),
-                    },
-                    fallback_lane_worker_count,
-                )
-            }
+            None => (
+                publisher::PublishTarget::Pool {
+                    pool: pool.clone(),
+                    machine_profile: gpu.clone(),
+                    bundle: bundle.clone(),
+                    model: dispatch_model.clone(),
+                },
+                fallback_lane_worker_count,
+            ),
         }
     };
     let was_direct_dispatched = matches!(target, publisher::PublishTarget::Worker { .. });
 
-    let (request_id, outcome_rx, chunk_rx) = match work_publisher
+    let (request_id, outcome_rx, chunk_rx, durability) = match work_publisher
         .publish_generate_streaming_sse(
             target,
             &model,
@@ -232,23 +213,34 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
             // for the `PublishFailed` arm).
             let lower = e.to_lowercase();
             let retry_after = if lower.contains("no consumers") {
-                metrics::record_rejected_request_for_pool(&pool, &gpu, &bundle, "no_consumers");
+                telemetry::record_rejected_request(
+                    state.demand_tracker.as_ref(),
+                    &physical_lane,
+                    "no_consumers",
+                );
                 Some(crate::handlers::proxy::PROVISIONING_RETRY_AFTER)
             } else if lower.contains("backpressure") {
-                metrics::record_rejected_request_for_pool(&pool, &gpu, &bundle, "backpressure");
+                telemetry::record_rejected_request(
+                    state.demand_tracker.as_ref(),
+                    &physical_lane,
+                    "backpressure",
+                );
+                state.demand_tracker.record(&physical_lane);
                 Some("5")
             } else {
-                metrics::record_rejected_request_for_pool(
-                    &pool,
-                    &gpu,
-                    &bundle,
-                    "queue_publish_failed",
-                );
                 None
             };
             return crate::handlers::proxy::build_streaming_publish_failed_for_sse(&e, retry_after);
         }
     };
+    let durability_completion = crate::handlers::proxy::monitor_dispatch_durability(
+        Arc::clone(&state.demand_tracker),
+        physical_lane.clone(),
+        durability,
+        Arc::clone(&work_publisher),
+        request_id.clone(),
+        PendingDispatchKind::Stream,
+    );
 
     // Choose timeouts via the same helper as the non-SSE path; we
     // copy `params` for the helper to inspect max_new_tokens.
@@ -294,6 +286,8 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
     let driver_pool = pool.clone();
     let driver_bundle = bundle.clone();
     let driver_gpu = gpu.clone();
+    let driver_demand_tracker = Arc::clone(&state.demand_tracker);
+    let driver_physical_lane = physical_lane;
     let stream_chat_id = format!("chatcmpl-{}", request_id);
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -305,7 +299,10 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
             event_tx,
             chunk_rx,
             outcome_rx,
+            durability_completion,
             publisher: driver_publisher,
+            demand_tracker: driver_demand_tracker,
+            physical_lane: driver_physical_lane,
             request_id: driver_request_id,
             model: driver_model.clone(),
             pool: driver_pool.clone(),
@@ -361,7 +358,10 @@ struct SseDriverArgs {
     event_tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     chunk_rx: broadcast::Receiver<ChunkEnvelope>,
     outcome_rx: tokio::sync::oneshot::Receiver<StreamOutcome>,
+    durability_completion: tokio::sync::oneshot::Receiver<Result<(), String>>,
     publisher: Arc<dyn WorkDispatcher>,
+    demand_tracker: Arc<DemandTracker>,
+    physical_lane: PhysicalLane,
     request_id: String,
     model: String,
     pool: String,
@@ -375,6 +375,38 @@ struct SseDriverArgs {
     overall_timeout: Duration,
     was_direct_dispatched: bool,
     pool_fallback_lane_worker_count: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum TerminalDurabilityWait {
+    Confirmed,
+    Failed(String),
+    MonitorStopped,
+    ClientClosed,
+    OverallTimeout,
+}
+
+/// Wait for a terminal result's initial dispatch ACK without losing the
+/// request's outer lifecycle bounds. The durability arm is intentionally
+/// biased: if ACK and shutdown/deadline become ready together, the completed
+/// durability decision owns the terminal result.
+async fn wait_for_terminal_durability(
+    completion: &mut tokio::sync::oneshot::Receiver<Result<(), String>>,
+    event_tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    overall_deadline: tokio::time::Instant,
+) -> TerminalDurabilityWait {
+    tokio::select! {
+        biased;
+        completion = completion => match completion {
+            Ok(Ok(())) => TerminalDurabilityWait::Confirmed,
+            Ok(Err(error)) => TerminalDurabilityWait::Failed(error),
+            Err(_) => TerminalDurabilityWait::MonitorStopped,
+        },
+        _ = event_tx.closed() => TerminalDurabilityWait::ClientClosed,
+        _ = tokio::time::sleep_until(overall_deadline) => {
+            TerminalDurabilityWait::OverallTimeout
+        }
+    }
 }
 
 /// Internal SSE driver — loops on the broadcast tap, forwards
@@ -392,7 +424,10 @@ async fn run_sse_driver(args: SseDriverArgs) {
         event_tx,
         mut chunk_rx,
         outcome_rx,
+        mut durability_completion,
         publisher,
+        demand_tracker,
+        physical_lane,
         request_id,
         model,
         pool,
@@ -407,16 +442,16 @@ async fn run_sse_driver(args: SseDriverArgs) {
         was_direct_dispatched,
         pool_fallback_lane_worker_count,
     } = args;
+    let wait_start = std::time::Instant::now();
+    let record_wait = |outcome| {
+        telemetry::record_queue_result_wait("generate", outcome, wait_start.elapsed());
+    };
 
     // Install the cancel-on-drop guard. Mirrors
     // `run_streaming_generate`: a normal completion path defuses it;
     // a task abort (HTTP client disconnect) fires the cancel signal.
-    let cancel_guard = crate::handlers::proxy::StreamCancelGuard::new(
-        Arc::clone(&publisher),
-        request_id.clone(),
-        model.clone(),
-        pool.clone(),
-    );
+    let cancel_guard =
+        crate::handlers::proxy::StreamCancelGuard::new(Arc::clone(&publisher), request_id.clone());
 
     let publish_instant = tokio::time::Instant::now();
     let mut first_chunk_deadline = publish_instant + first_chunk_timeout;
@@ -463,6 +498,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
     // server-side). The Lagged arm uses it to skip a pointless worker cancel
     // for an already-completed request. #1602
     let mut stream_succeeded = false;
+    let mut durability_done = false;
 
     // Helper: send an SSE event onto the mpsc channel. Returns false
     // if the receiver is closed (HTTP client disconnect), which is
@@ -491,19 +527,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
             )
             .await;
             send_done(&event_tx).await;
-            metrics::GENERATION_TIMEOUTS
-                .with_label_values(&[
-                    &metrics::sanitize_model_label(&model),
-                    &metrics::sanitize_label(&pool),
-                    "overall",
-                ])
-                .inc();
-            metrics::record_rejected_request_for_pool(
-                &pool,
-                &gpu,
-                &bundle,
-                "generation_overall_timeout",
-            );
+            record_wait(telemetry::QueueResultOutcome::Timeout);
             cancel_guard.defuse();
             publisher.publish_cancel(&request_id).await;
             publisher.drop_pending_stream(&request_id);
@@ -544,6 +568,12 @@ async fn run_sse_driver(args: SseDriverArgs) {
                         continue;
                     }
                     Err(e) => {
+                        telemetry::record_rejected_request(
+                            demand_tracker.as_ref(),
+                            &physical_lane,
+                            "publish_ack_failed",
+                        );
+                        demand_tracker.record(&physical_lane);
                         warn!(
                             request_id = %request_id,
                             error = %e,
@@ -579,19 +609,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
             )
             .await;
             send_done(&event_tx).await;
-            metrics::GENERATION_TIMEOUTS
-                .with_label_values(&[
-                    &metrics::sanitize_model_label(&model),
-                    &metrics::sanitize_label(&pool),
-                    "first_chunk",
-                ])
-                .inc();
-            metrics::record_rejected_request_for_pool(
-                &pool,
-                &gpu,
-                &bundle,
-                "generation_first_chunk_timeout",
-            );
+            record_wait(telemetry::QueueResultOutcome::Timeout);
             cancel_guard.defuse();
             publisher.publish_cancel(&request_id).await;
             publisher.drop_pending_stream(&request_id);
@@ -611,19 +629,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 )
                 .await;
                 send_done(&event_tx).await;
-                metrics::GENERATION_TIMEOUTS
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(&model),
-                        &metrics::sanitize_label(&pool),
-                        "inter_chunk",
-                    ])
-                    .inc();
-                metrics::record_rejected_request_for_pool(
-                    &pool,
-                    &gpu,
-                    &bundle,
-                    "generation_inter_chunk_timeout",
-                );
+                record_wait(telemetry::QueueResultOutcome::Timeout);
                 cancel_guard.defuse();
                 publisher.publish_cancel(&request_id).await;
                 publisher.drop_pending_stream(&request_id);
@@ -642,6 +648,46 @@ async fn run_sse_driver(args: SseDriverArgs) {
 
         let chunk_or_timeout = tokio::select! {
             biased;
+            completion = &mut durability_completion, if !durability_done => {
+                durability_done = true;
+                match completion {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => {
+                        send_error_chunk(
+                            &event_tx,
+                            &endpoint,
+                            &stream_chat_id,
+                            created,
+                            &model,
+                            &request_id,
+                            "transport_failure",
+                            &format!("Queue durability confirmation failed: {error}"),
+                        )
+                        .await;
+                        send_done(&event_tx).await;
+                        record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                        cancel_guard.defuse();
+                        return;
+                    }
+                    Err(_) => {
+                        send_error_chunk(
+                            &event_tx,
+                            &endpoint,
+                            &stream_chat_id,
+                            created,
+                            &model,
+                            &request_id,
+                            "transport_failure",
+                            "Queue durability monitor stopped before completion",
+                        )
+                        .await;
+                        send_done(&event_tx).await;
+                        record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                        cancel_guard.defuse();
+                        return;
+                    }
+                }
+            }
             // Detect HTTP client disconnect while waiting between chunks.
             // Without this branch, a client that drops while the worker is
             // idle for `inter_chunk_timeout` would keep the broadcast
@@ -651,14 +697,16 @@ async fn run_sse_driver(args: SseDriverArgs) {
             // explicitly to the receiver's lifecycle closes that leak.
             _ = event_tx.closed() => {
                 debug!(request_id = %request_id, "SSE receiver dropped; tearing down driver");
-                let stage = if first_seen { "mid_stream" } else { "before_first_chunk" };
-                metrics::GENERATION_CANCELLED
-                    .with_label_values(&[
-                    &metrics::sanitize_model_label(&model),
-                    &metrics::sanitize_label(&pool),
-                    stage,
-                ])
-                    .inc();
+                record_wait(telemetry::QueueResultOutcome::Cancelled);
+                telemetry::record_generation_event(
+                    telemetry::GenerationEvent::Cancellation,
+                    if first_seen {
+                        telemetry::GenerationEventReason::MidStream
+                    } else {
+                        telemetry::GenerationEventReason::BeforeFirstChunk
+                    },
+                    telemetry::GenerationEventOutcome::Cancelled,
+                );
                 cancel_guard.defuse();
                 publisher.publish_cancel(&request_id).await;
                 publisher.drop_pending_stream(&request_id);
@@ -694,6 +742,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                             )
                             .await;
                             send_done(&event_tx).await;
+                            record_wait(telemetry::QueueResultOutcome::WorkerError);
                             cancel_guard.defuse();
                             publisher.drop_pending_stream(&request_id);
                             return;
@@ -761,6 +810,7 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 )
                 .await;
                 send_done(&event_tx).await;
+                record_wait(telemetry::QueueResultOutcome::WorkerError);
                 cancel_guard.defuse();
                 // Only cancel the worker if the generation is still in flight.
                 // A request whose terminal outcome already resolved Ok has
@@ -794,6 +844,11 @@ async fn run_sse_driver(args: SseDriverArgs) {
                     .await;
                     send_done(&event_tx).await;
                 }
+                record_wait(if stream_succeeded {
+                    telemetry::QueueResultOutcome::Success
+                } else {
+                    telemetry::QueueResultOutcome::ChannelClosed
+                });
                 cancel_guard.defuse();
                 return;
             }
@@ -805,6 +860,93 @@ async fn run_sse_driver(args: SseDriverArgs) {
 
         // Forward as an SSE event, then handle terminal/error/usage.
         let is_terminal = chunk.done;
+
+        // Never present a clean terminal event before the initial queue
+        // submission crossed its durable boundary. Normally the ACK resolved
+        // long before the first worker chunk, so this is a ready receiver and
+        // adds no latency. If a result races ahead of a pathological late ACK,
+        // hold only the terminal event; a rejection becomes an in-stream typed
+        // transport failure instead of an apparent success.
+        if is_terminal && !durability_done {
+            durability_done = true;
+            match wait_for_terminal_durability(
+                &mut durability_completion,
+                &event_tx,
+                overall_deadline,
+            )
+            .await
+            {
+                TerminalDurabilityWait::Confirmed => {}
+                TerminalDurabilityWait::Failed(error) => {
+                    send_error_chunk(
+                        &event_tx,
+                        &endpoint,
+                        &stream_chat_id,
+                        created,
+                        &model,
+                        &request_id,
+                        "transport_failure",
+                        &format!("Queue durability confirmation failed: {error}"),
+                    )
+                    .await;
+                    send_done(&event_tx).await;
+                    record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                    cancel_guard.defuse();
+                    return;
+                }
+                TerminalDurabilityWait::MonitorStopped => {
+                    send_error_chunk(
+                        &event_tx,
+                        &endpoint,
+                        &stream_chat_id,
+                        created,
+                        &model,
+                        &request_id,
+                        "transport_failure",
+                        "Queue durability monitor stopped before completion",
+                    )
+                    .await;
+                    send_done(&event_tx).await;
+                    record_wait(telemetry::QueueResultOutcome::DurabilityError);
+                    cancel_guard.defuse();
+                    publisher.publish_cancel(&request_id).await;
+                    publisher.drop_pending_stream(&request_id);
+                    return;
+                }
+                TerminalDurabilityWait::ClientClosed => {
+                    debug!(request_id = %request_id, "SSE receiver dropped while awaiting terminal durability");
+                    record_wait(telemetry::QueueResultOutcome::Cancelled);
+                    telemetry::record_generation_event(
+                        telemetry::GenerationEvent::Cancellation,
+                        telemetry::GenerationEventReason::MidStream,
+                        telemetry::GenerationEventOutcome::Cancelled,
+                    );
+                    cancel_guard.defuse();
+                    publisher.publish_cancel(&request_id).await;
+                    publisher.drop_pending_stream(&request_id);
+                    return;
+                }
+                TerminalDurabilityWait::OverallTimeout => {
+                    send_error_chunk(
+                        &event_tx,
+                        &endpoint,
+                        &stream_chat_id,
+                        created,
+                        &model,
+                        &request_id,
+                        "overall_timeout",
+                        "Generation aborted: overall timeout",
+                    )
+                    .await;
+                    send_done(&event_tx).await;
+                    record_wait(telemetry::QueueResultOutcome::Timeout);
+                    cancel_guard.defuse();
+                    publisher.publish_cancel(&request_id).await;
+                    publisher.drop_pending_stream(&request_id);
+                    return;
+                }
+            }
+        }
 
         // Detect streaming ``n>1``: any chunk past ``choice_index=0`` or any
         // non-terminal chunk with ``finish_reason`` set is a per-choice
@@ -845,21 +987,18 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 // Client disconnected — fire the cancel deterministically
                 // here instead of relying on the guard's Drop (which spawns
                 // a detached task and can race the outer return / next
-                // request). Record the cancelled metric inline so we don't
-                // lose it when defusing the guard.
+                // request).
                 debug!(request_id = %request_id, "SSE client disconnected mid-stream");
-                let stage = if first_seen {
-                    "mid_stream"
-                } else {
-                    "before_first_chunk"
-                };
-                metrics::GENERATION_CANCELLED
-                    .with_label_values(&[
-                        &metrics::sanitize_model_label(&model),
-                        &metrics::sanitize_label(&pool),
-                        stage,
-                    ])
-                    .inc();
+                record_wait(telemetry::QueueResultOutcome::Cancelled);
+                telemetry::record_generation_event(
+                    telemetry::GenerationEvent::Cancellation,
+                    if first_seen {
+                        telemetry::GenerationEventReason::MidStream
+                    } else {
+                        telemetry::GenerationEventReason::BeforeFirstChunk
+                    },
+                    telemetry::GenerationEventOutcome::Cancelled,
+                );
                 cancel_guard.defuse();
                 publisher.publish_cancel(&request_id).await;
                 publisher.drop_pending_stream(&request_id);
@@ -892,6 +1031,11 @@ async fn run_sse_driver(args: SseDriverArgs) {
                 }
             }
             send_done(&event_tx).await;
+            record_wait(if chunk.error.is_some() {
+                telemetry::QueueResultOutcome::WorkerError
+            } else {
+                telemetry::QueueResultOutcome::Success
+            });
             cancel_guard.defuse();
             return;
         }
@@ -1066,6 +1210,9 @@ fn build_generate_chunk_event(chunk: &ChunkEnvelope) -> Value {
         if let Some(t) = chunk.ttft_ms {
             obj.insert("ttft_ms".to_string(), json!(t));
         }
+        if let Some(logprobs) = chunk.logprobs.as_ref() {
+            obj.insert("logprobs".to_string(), json!(logprobs));
+        }
         if let Some(err) = chunk.error.as_ref() {
             obj.insert(
                 "error".to_string(),
@@ -1186,6 +1333,54 @@ mod tests {
         ChunkEnvelope, ChunkError, ToolCallDeltaWire, ToolCallFunctionWire, UsageBlock,
     };
 
+    #[tokio::test]
+    async fn terminal_durability_ready_wins_over_closed_client_and_deadline() {
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        drop(event_rx);
+        let (completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
+        completion_tx.send(Ok(())).expect("send durability result");
+
+        let result = wait_for_terminal_durability(
+            &mut completion_rx,
+            &event_tx,
+            tokio::time::Instant::now(),
+        )
+        .await;
+
+        assert_eq!(result, TerminalDurabilityWait::Confirmed);
+    }
+
+    #[tokio::test]
+    async fn terminal_durability_wait_preserves_overall_deadline() {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        let (_completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
+
+        let result = wait_for_terminal_durability(
+            &mut completion_rx,
+            &event_tx,
+            tokio::time::Instant::now(),
+        )
+        .await;
+
+        assert_eq!(result, TerminalDurabilityWait::OverallTimeout);
+    }
+
+    #[tokio::test]
+    async fn terminal_durability_wait_observes_client_disconnect() {
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        drop(event_rx);
+        let (_completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
+
+        let result = wait_for_terminal_durability(
+            &mut completion_rx,
+            &event_tx,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        )
+        .await;
+
+        assert_eq!(result, TerminalDurabilityWait::ClientClosed);
+    }
+
     /// Streaming path must preserve ``content_filter`` / ``function_call``
     /// (valid OpenAI finish reasons emitted by the worker) rather than
     /// collapse them to ``stop`` — kept in lockstep with
@@ -1238,6 +1433,8 @@ mod tests {
             logprobs: None,
             candidates: Vec::new(),
             choice_index: 0,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         }
     }
 
@@ -1258,6 +1455,8 @@ mod tests {
             logprobs: None,
             candidates: Vec::new(),
             choice_index: 0,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         }
     }
 
@@ -1399,6 +1598,20 @@ mod tests {
         assert_eq!(v["text_delta"], "tok");
         assert_eq!(v["done"], false);
         assert!(v.get("usage").is_none(), "usage absent on non-terminal");
+    }
+
+    #[test]
+    fn test_sse_generate_delta_includes_requested_logprobs() {
+        let mut chunk = _delta_chunk(0, "tok");
+        chunk.logprobs = Some(vec![json!({
+            "token": "tok",
+            "logprob": -0.25,
+            "bytes": [116, 111, 107],
+            "top_logprobs": [],
+        })]);
+        let v = build_generate_chunk_event(&chunk);
+        assert_eq!(v["logprobs"][0]["token"], "tok");
+        assert_eq!(v["logprobs"][0]["logprob"], -0.25);
     }
 
     #[test]
@@ -1708,6 +1921,8 @@ mod tests {
             logprobs: None,
             candidates: Vec::new(),
             choice_index: 0,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
         let delta = &v["choices"][0]["delta"];

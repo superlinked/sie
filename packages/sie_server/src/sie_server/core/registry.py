@@ -31,6 +31,7 @@ from sie_server.core.hot_reload import HotReloader
 from sie_server.core.load_errors import (
     LoadErrorClass,
     LoadFailure,
+    ModelLoadTimeoutError,
     classify_load_error,
 )
 from sie_server.core.loader import expand_profile_variants, load_model_configs
@@ -46,7 +47,7 @@ from sie_server.core.preprocessor_registry import PreprocessorRegistry
 from sie_server.core.residency import EvictionResult, select_eviction_candidate
 from sie_server.core.worker import ModelWorker
 from sie_server.core.worker.types import AdaptiveBatchingParams
-from sie_server.observability.metrics import record_idle_eviction
+from sie_server.observability.worker_telemetry import refresh_worker_metric_context, worker_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +188,9 @@ class ModelRegistry:
                        If None, registry starts empty and configs must be added manually.
             memory_config: Configuration for memory management. If None, uses defaults.
             drain_timeout_s: Timeout in seconds to wait for worker drain before unload.
-            model_filter: Optional list of model names to include. If None, all models are available.
+            model_filter: Optional list of model names to include. If None, all models are
+                available; an EMPTY list advertises zero models (a bundle whose adapters
+                match no onboarded model must not fall back to the full catalog).
             device: Default device for memory tracking (e.g., "cuda:0", "mps", "cpu").
             devices: Optional ordered list of devices available to this worker.
                 When set, lazy model loads place whole models across these
@@ -206,7 +209,10 @@ class ModelRegistry:
         """
         # Store as string to handle cloud URLs
         self._models_dir: str | None = str(models_dir) if models_dir is not None else None
-        self._model_filter = set(model_filter) if model_filter else None
+        # `is not None`, not truthiness: an empty filter (zero-match bundle)
+        # must stay an empty set — collapsing it to None would advertise the
+        # ENTIRE catalog to the gateway from a worker that can serve none of it.
+        self._model_filter = set(model_filter) if model_filter is not None else None
         self._device = device
         self._devices = _normalize_devices(device, devices)
         self._device_order = {name: i for i, name in enumerate(self._devices)}
@@ -534,10 +540,14 @@ class ModelRegistry:
         self._load_configs_from_dir(self._models_dir)
         new_names = set(self._configs.keys()) - old_names
 
+        # A rescan replaces the whole config map, so it can modify or delete
+        # entries even when it discovers no new model names. Keep both the
+        # loader and the bounded telemetry catalog on that authoritative map.
+        self._loader.update_configs(self._configs)
+        self._refresh_worker_metric_catalog()
+
         if new_names:
             logger.info("Discovered %d new models: %s", len(new_names), ", ".join(new_names))
-            # Update loader's config reference
-            self._loader.update_configs(self._configs)
 
         return list(new_names)
 
@@ -550,6 +560,11 @@ class ModelRegistry:
     def loaded_model_names(self) -> list[str]:
         """Return list of currently loaded model names."""
         return list(self._loaded.keys())
+
+    @property
+    def loaded_model_memory_bytes(self) -> dict[str, int]:
+        """Snapshot resident model memory for post-snapshot metric replay."""
+        return {name: loaded.memory_bytes for name, loaded in self._loaded.items()}
 
     @property
     def preprocessor_registry(self) -> PreprocessorRegistry:
@@ -839,72 +854,87 @@ class ModelRegistry:
 
         load_device = self._resolve_load_device(device)
         memory_manager = self._memory_manager_for_device(load_device)
-
-        # Ensure model weights are cached (download from HF / cluster cache
-        # if needed). Kept as a distinct phase from instantiate so the
-        # post-download timeout in ``ModelLoader`` does not cover the
-        # potentially long download — slow networks remain supported via
-        # ``HF_HUB_DOWNLOAD_TIMEOUT`` stall detection only.
-        self._loader.ensure_weights_cached(config)
-
-        # Instantiate the adapter on the resolved concrete device.
-        adapter = self._loader.instantiate_adapter(name, config, model_dir, load_device)
-
-        required_load_bytes = _adapter_load_required_bytes(adapter, memory_manager)
-        while memory_manager.should_evict_for_load(required_load_bytes):
-            lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-            if lru_model is None:
-                break
-
-            stats = memory_manager.get_stats()
-            logger.info(
-                "Pre-load eviction: %s %.2f GB free, %.2f GB required, %.1f%% used "
-                "(threshold %.1f%%); evicting '%s' before loading '%s'",
-                load_device,
-                stats.available_gb,
-                (required_load_bytes or 0) / (1024**3),
-                stats.usage_ratio * 100,
-                memory_manager.pressure_threshold_pct,
-                lru_model,
-                name,
-            )
-            self.unload(lru_model)
-
-        # Try to load onto device, with OOM retry
+        load_start = time.monotonic()
+        load_outcome = "error"
+        load_stage = "total"
         try:
-            loaded = self._loader.load_and_register(name, load_device, adapter, config)
-        except RuntimeError as e:
-            if not self._is_oom_error(e):
-                raise
+            # Ensure model weights are cached (download from HF / cluster cache
+            # if needed). Kept as a distinct phase from instantiate so the
+            # post-download timeout in ``ModelLoader`` does not cover the
+            # potentially long download — slow networks remain supported via
+            # ``HF_HUB_DOWNLOAD_TIMEOUT`` stall detection only.
+            self._loader.ensure_weights_cached(config)
 
-            # OOM - try to evict LRU non-pinned model and retry
-            lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-            if lru_model is None:
-                logger.error("OOM loading '%s' but no non-pinned models to evict", name)
-                raise
-
-            logger.warning(
-                "OOM loading '%s', evicting LRU model '%s' and retrying",
-                name,
-                lru_model,
-            )
-            self.unload(lru_model)
-
-            # Retry once after eviction - weights still on disk so we
-            # skip ``ensure_weights_cached`` here.
+            # Instantiate the adapter on the resolved concrete device.
             adapter = self._loader.instantiate_adapter(name, config, model_dir, load_device)
-            loaded = self._loader.load_and_register(name, load_device, adapter, config)
 
-        # Track loaded state
-        self._loaded[name] = loaded
+            required_load_bytes = _adapter_load_required_bytes(adapter, memory_manager)
+            while memory_manager.should_evict_for_load(required_load_bytes):
+                lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                if lru_model is None:
+                    break
 
-        # Register with memory manager for LRU tracking
-        self._memory_manager_for_device(loaded.device).register_model(name, estimated_bytes=loaded.memory_bytes)
+                stats = memory_manager.get_stats()
+                logger.info(
+                    "Pre-load eviction: %s %.2f GB free, %.2f GB required, %.1f%% used "
+                    "(threshold %.1f%%); evicting '%s' before loading '%s'",
+                    load_device,
+                    stats.available_gb,
+                    (required_load_bytes or 0) / (1024**3),
+                    stats.usage_ratio * 100,
+                    memory_manager.pressure_threshold_pct,
+                    lru_model,
+                    name,
+                )
+                self.unload(lru_model, reason="preload_pressure")
 
-        # Clear any stale failure record from a prior attempt.
-        self._failed.pop(name, None)
+            # Try to load onto device, with OOM retry.
+            try:
+                loaded = self._loader.load_and_register(name, load_device, adapter, config)
+            except RuntimeError as exc:
+                if not self._is_oom_error(exc):
+                    raise
 
-        return loaded.adapter
+                # OOM - try to evict LRU non-pinned model and retry.
+                lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                if lru_model is None:
+                    logger.error("OOM loading '%s' but no non-pinned models to evict", name)
+                    raise
+
+                logger.warning(
+                    "OOM loading '%s', evicting LRU model '%s' and retrying",
+                    name,
+                    lru_model,
+                )
+                self.unload(lru_model, reason="load_oom")
+
+                # Retry once after eviction - weights still on disk so we
+                # skip ``ensure_weights_cached`` here.
+                adapter = self._loader.instantiate_adapter(name, config, model_dir, load_device)
+                loaded = self._loader.load_and_register(name, load_device, adapter, config)
+
+            # Track loaded state and register it for LRU accounting.
+            self._loaded[name] = loaded
+            self._memory_manager_for_device(loaded.device).register_model(
+                name,
+                estimated_bytes=loaded.memory_bytes,
+            )
+
+            # Clear any stale failure record from a prior attempt.
+            self._failed.pop(name, None)
+            load_outcome = "success"
+            return loaded.adapter
+        except ModelLoadTimeoutError as exc:
+            load_outcome = "timeout"
+            load_stage = exc.stage
+            raise
+        finally:
+            worker_telemetry().model_load_completed(
+                model=name,
+                duration_s=time.monotonic() - load_start,
+                outcome=load_outcome,
+                stage=load_stage,
+            )
 
     async def load_async(self, name: str, device: str) -> ModelAdapter:
         """Load a model onto a device (async, concurrency-safe).
@@ -948,11 +978,12 @@ class ModelRegistry:
                 raise RuntimeError(msg)
 
             config = self._configs[name]
-            config = self._configs[name]
 
             # Mark as loading before starting (visible to WebSocket status)
             self._loading.add(name)
             load_start = time.monotonic()
+            load_outcome = "error"
+            load_stage = "total"
 
             try:
                 model_dir = self._model_dirs.get(name, Path())
@@ -1001,7 +1032,7 @@ class ModelRegistry:
                         lru_model,
                         name,
                     )
-                    await self._do_unload(lru_model)
+                    await self._do_unload(lru_model, reason="preload_pressure")
 
                 try:
                     # Load onto device (loader handles main thread vs executor)
@@ -1021,7 +1052,7 @@ class ModelRegistry:
                         name,
                         lru_model,
                     )
-                    await self._do_unload(lru_model)
+                    await self._do_unload(lru_model, reason="load_oom")
 
                     # Retry once after eviction. Weights are still cached
                     # on disk so we skip ``ensure_weights_cached_async``.
@@ -1046,8 +1077,19 @@ class ModelRegistry:
                         load_duration,
                     )
 
+                load_outcome = "success"
                 return loaded.adapter
+            except ModelLoadTimeoutError as exc:
+                load_outcome = "timeout"
+                load_stage = exc.stage
+                raise
             finally:
+                worker_telemetry().model_load_completed(
+                    model=name,
+                    duration_s=time.monotonic() - load_start,
+                    outcome=load_outcome,
+                    stage=load_stage,
+                )
                 # Always clear loading state when done (success or failure)
                 self._loading.discard(name)
 
@@ -1184,7 +1226,7 @@ class ModelRegistry:
                 "permanent" if classification.cooldown_s is None else f"{classification.cooldown_s:.0f}s",
             )
 
-    def unload(self, name: str) -> None:
+    def unload(self, name: str, *, reason: str = "manual") -> None:
         """Unload a model and free resources.
 
         Args:
@@ -1205,6 +1247,7 @@ class ModelRegistry:
 
         loaded = self._loaded.pop(name)
         device = loaded.device
+        worker_telemetry().model_evicted(model=name, reason=reason)
 
         # Adapter.unload() handles gc.collect + empty_cache
         loaded.adapter.unload()
@@ -1235,7 +1278,7 @@ class ModelRegistry:
                 cleared += 1
         return cleared
 
-    async def _do_unload(self, name: str) -> None:
+    async def _do_unload(self, name: str, *, reason: str = "other") -> None:
         """Unload a model safely (drains worker first).
 
         Must be called while holding _load_lock.
@@ -1272,6 +1315,7 @@ class ModelRegistry:
             # Remove from loaded dict before unloading adapter
             del self._loaded[name]
             device = loaded.device
+            worker_telemetry().model_evicted(model=name, reason=reason)
 
             # Once removed from ``_loaded`` above, the model is committed-gone
             # from the registry's view, so its MemoryManager entry MUST be
@@ -1347,19 +1391,19 @@ class ModelRegistry:
                 msg = _ERR_MODEL_NOT_LOADED.format(name=name)
                 raise KeyError(msg)
 
-            await self._do_unload(name)
+            await self._do_unload(name, reason="manual")
 
     def unload_all(self) -> None:
         """Unload all loaded models (sync version, for non-async contexts)."""
         for name in list(self._loaded.keys()):
-            self.unload(name)
+            self.unload(name, reason="shutdown")
 
     async def unload_all_async(self) -> None:
         """Unload all loaded models (async, concurrency-safe)."""
         lock = self._get_load_lock()
         async with lock:
             for name in list(self._loaded.keys()):
-                await self._do_unload(name)
+                await self._do_unload(name, reason="shutdown")
 
     def get_configs_snapshot(self, bundle_id: str | None = None) -> dict[str, ModelConfig]:
         """Return a shallow copy of the current model configs.
@@ -1378,6 +1422,19 @@ class ModelRegistry:
         if bundle_id is not None and self._model_filter is not None:
             configs = {k: v for k, v in configs.items() if k in self._model_filter}
         return configs
+
+    def _refresh_worker_metric_catalog(self) -> None:
+        """Publish the current registry catalog to the bounded metric facade.
+
+        The registry owns config mutation, so refresh belongs here rather than
+        in individual IPC, filesystem, or hot-reload callers. Telemetry is
+        strictly fail-open: a catalog projection bug must never reject an
+        otherwise valid serving configuration.
+        """
+        try:
+            refresh_worker_metric_context(configs=self.get_configs_snapshot())
+        except Exception:  # noqa: BLE001 - telemetry cannot break config apply
+            logger.warning("Failed to refresh worker metric catalog; serving config remains active", exc_info=True)
 
     def _validate_pool_isolation_of_loaded(self) -> None:
         """Enforce pool isolation across currently-loaded configs.
@@ -1431,6 +1488,7 @@ class ModelRegistry:
             raise RuntimeError(msg)
         self._apply_config_entry(config, model_dir)
         self._loader.update_configs(self._configs)
+        self._refresh_worker_metric_catalog()
         return updated_ids | removed_ids
 
     async def add_config_async(self, config: ModelConfig, model_dir: Path | None = None) -> set[str]:
@@ -1439,16 +1497,49 @@ class ModelRegistry:
         async with update_lock:
             expanded, updated_ids, removed_ids = self._prepare_config_update(config)
             self._preflight_config_update(expanded, updated_ids, removed_ids)
-            if removed_ids:
+            changed_ids = {
+                model_id
+                for model_id, candidate in expanded.items()
+                if model_id in self._configs
+                and not _model_configs_semantically_equal(self._configs.get(model_id), candidate)
+            }
+            invalidated_ids = removed_ids | changed_ids
+            if invalidated_ids:
                 lock = self._get_load_lock()
                 async with lock:
-                    for model_id in sorted(removed_ids):
+                    for model_id in sorted(invalidated_ids):
                         if model_id in self._loaded:
-                            await self._do_unload(model_id)
+                            await self._do_unload(model_id, reason="config_change")
+                    for model_id in sorted(removed_ids):
                         self._drop_config_entry(model_id)
             self._apply_config_entry(config, model_dir)
             self._loader.update_configs(self._configs)
+            self._refresh_worker_metric_catalog()
             return updated_ids | removed_ids
+
+    async def remove_config_async(self, model_id: str) -> set[str]:
+        """Drain and remove one base config plus its materialized variants.
+
+        This is the authoritative delete seam for filesystem hot reload. It
+        keeps loader state, failure state, and the telemetry catalog in lockstep
+        and handles profile-only configs whose bare base id is not routable.
+        """
+        update_lock = self._get_config_update_lock()
+        async with update_lock:
+            removed_ids = ({model_id} | self._synthetic_profile_variant_ids_for_base(model_id)) & set(self._configs)
+            if not removed_ids:
+                return set()
+
+            lock = self._get_load_lock()
+            async with lock:
+                for removed_id in sorted(removed_ids):
+                    if removed_id in self._loaded:
+                        await self._do_unload(removed_id, reason="config_change")
+                    self._drop_config_entry(removed_id)
+                self._loader.update_configs(self._configs)
+
+            self._refresh_worker_metric_catalog()
+            return removed_ids
 
     def _prepare_config_update(self, config: ModelConfig) -> tuple[dict[str, ModelConfig], set[str], set[str]]:
         expanded = expand_profile_variants([config])
@@ -1608,7 +1699,7 @@ class ModelRegistry:
 
                 for name in sorted(invalidated):
                     if name in self._loaded:
-                        await self._do_unload(name)
+                        await self._do_unload(name, reason="config_change")
 
                 self._configs = dict(new_configs)
                 self._loader.update_configs(self._configs)
@@ -1621,6 +1712,8 @@ class ModelRegistry:
                 for name in invalidated:
                     self._failed.pop(name, None)
                 self._config_version += 1
+
+            self._refresh_worker_metric_catalog()
 
         # Outside the load lock (``start_load_async`` acquires it): reload pinned
         # models that were just unloaded because their config changed, and load
@@ -1833,7 +1926,7 @@ class ModelRegistry:
                 exclude_name,
             )
             try:
-                await self._do_unload(candidate)
+                await self._do_unload(candidate, reason="oom_recovery")
             except Exception:
                 logger.exception("OOM recovery: failed to evict '%s'", candidate)
                 return EvictionResult.UNLOAD_FAILED
@@ -1972,13 +2065,9 @@ class ModelRegistry:
                             threshold,
                         )
                         try:
-                            await self._do_unload(name)
+                            await self._do_unload(name, reason="idle")
                         except Exception:
                             logger.exception("Idle eviction failed for '%s'", name)
-                        else:
-                            # Bump only on successful unload — failed evictions
-                            # leave the model loaded and will retry next tick.
-                            record_idle_eviction(name)
                         # One eviction per tick: yield the lock so other
                         # registry operations can make progress. The next
                         # tick handles any remaining stale models.
@@ -2079,7 +2168,7 @@ class ModelRegistry:
                                 manager.pressure_threshold_pct,
                                 lru_model,
                             )
-                            await self._do_unload(lru_model)
+                            await self._do_unload(lru_model, reason="memory_pressure")
 
             except asyncio.CancelledError:
                 break
@@ -2164,8 +2253,10 @@ class ModelRegistry:
         loaded_model = self._loaded[model]
         adapter = loaded_model.adapter
 
-        # Check if adapter supports LoRA
-        if not adapter.supports_lora():
+        # One LoRA capability handle for the whole load path, in place of the
+        # scattered supports_lora() / supports_hot_lora_reload() flag-checks.
+        lora_cap = adapter.lora_capability()
+        if lora_cap is None:
             msg = f"Model '{model}' does not support LoRA"
             raise ValueError(msg)
 
@@ -2206,14 +2297,14 @@ class ModelRegistry:
                     loaded_model.max_loras,
                 )
                 try:
-                    adapter.unload_lora(oldest_lora)
+                    lora_cap.unload_lora(oldest_lora)
                 except Exception:
                     logger.exception("Error unloading LoRA '%s'", oldest_lora)
                 del loaded_model.loras[oldest_lora]
 
         # Load outside the lock if adapter supports hot reload
         # (PEFT can load while other inference continues)
-        if adapter.supports_hot_lora_reload():
+        if lora_cap.supports_hot_lora_reload():
             # Non-blocking load in background
             task = asyncio.create_task(
                 self._load_lora_background(model, lora),
@@ -2243,10 +2334,15 @@ class ModelRegistry:
                 return
 
             adapter = loaded_model.adapter
+            # Config-pinned revision (#2113): an on-demand load of a
+            # profile-declared LoRA (e.g. a reload after LRU eviction) must
+            # honor the same pin the preload used, or eviction would silently
+            # reintroduce the drift the pin exists to prevent.
+            revision = loaded_model.config.lora_revisions().get(lora)
 
             # Run blocking load in thread pool
             def _do_load() -> int:
-                return adapter.load_lora(lora)
+                return adapter.load_lora(lora, revision=revision)
 
             memory_bytes = await loop.run_in_executor(None, _do_load)
 
@@ -2289,10 +2385,15 @@ class ModelRegistry:
                 return
 
             adapter = loaded_model.adapter
+            # Config-pinned revision (#2113): an on-demand load of a
+            # profile-declared LoRA (e.g. a reload after LRU eviction) must
+            # honor the same pin the preload used, or eviction would silently
+            # reintroduce the drift the pin exists to prevent.
+            revision = loaded_model.config.lora_revisions().get(lora)
 
             # Run blocking load in thread pool
             def _do_load() -> int:
-                return adapter.load_lora(lora)
+                return adapter.load_lora(lora, revision=revision)
 
             memory_bytes = await loop.run_in_executor(None, _do_load)
 

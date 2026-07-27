@@ -84,7 +84,10 @@ class AppStateConfig:
         elif ENV_DEVICES in os.environ:
             del os.environ[ENV_DEVICES]
 
-        if self.model_filter:
+        # `is not None`: an empty filter must round-trip as an empty env var,
+        # not vanish — unset means "no filter" and would re-advertise the full
+        # catalog after the uvicorn factory rebuilds state from env.
+        if self.model_filter is not None:
             os.environ[ENV_MODEL_FILTER] = ",".join(self.model_filter)
         elif ENV_MODEL_FILTER in os.environ:
             del os.environ[ENV_MODEL_FILTER]
@@ -112,7 +115,10 @@ class AppStateConfig:
         devices = [d.strip() for d in devices_str.split(",") if d.strip()] if devices_str else None
         models_dir = os.environ.get(ENV_MODELS_DIR)
         model_filter_str = os.environ.get(ENV_MODEL_FILTER)
-        model_filter = [m.strip() for m in model_filter_str.split(",") if m.strip()] if model_filter_str else None
+        # Unset -> None (no filter); set-but-empty -> [] (zero models).
+        model_filter = (
+            None if model_filter_str is None else [m.strip() for m in model_filter_str.split(",") if m.strip()]
+        )
         preload_str = os.environ.get(ENV_PRELOAD_MODELS)
         preload_models = [m.strip() for m in preload_str.split(",") if m.strip()] if preload_str else None
         pinned_str = os.environ.get(ENV_PINNED_MODELS)

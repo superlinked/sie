@@ -6,8 +6,8 @@ criteria for structured outputs:
 
 * §5.7 — moderate JSON Schema returns JSON conforming to the schema.
 * §5.9 — two identical-schema requests show exactly 1 compile + 1 hit
-  in the worker's Prometheus metrics.
-* §5.10 — a pathologically nested schema returns 400 ``grammar_invalid``
+  in the collector's Prometheus compatibility output.
+* §5.10 — a pathologically nested schema returns 400 ``invalid_request``
   *before* any compile metric ticks.
 
 The chat-side OpenAI SDK acceptance test (§5.8) lives in
@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
+import uuid
+from dataclasses import dataclass
 
 import httpx
 import pytest
@@ -25,8 +29,40 @@ import pytest
 pytestmark = pytest.mark.integration
 
 _GATEWAY_URL_ENV = "SIE_GATEWAY_URL"
-_WORKER_METRICS_URL_ENV = "SIE_WORKER_METRICS_URL"
+_COLLECTOR_METRICS_URL_ENV = "SIE_COLLECTOR_METRICS_URL"
 _GEN_MODEL_ENV = "SIE_GEN_MODEL"
+
+_PROMETHEUS_EXPORTER_LABELS = {
+    "job",
+    "instance",
+    "otel_scope_name",
+    "otel_scope_version",
+    "otel_scope_schema_url",
+}
+_PRODUCER_LABELS = {
+    "producer_service",
+    "producer_instance",
+}
+_GRAMMAR_BASE_LABELS = {
+    "grammar_backend",
+    "grammar",
+    "backend",
+    "lane",
+    "model",
+    "profile",
+}
+_SAMPLE_RE = re.compile(
+    r"^(?P<name>[A-Za-z_:][A-Za-z0-9_:]*)"
+    r"(?:\{(?P<labels>.*)\})?\s+"
+    r"(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    r"(?:\s+\d+)?$"
+)
+
+
+@dataclass(frozen=True)
+class _PrometheusSample:
+    labels: dict[str, str]
+    value: float
 
 
 def _gateway_url() -> str:
@@ -42,8 +78,13 @@ def _gen_model() -> str:
     return os.environ.get(_GEN_MODEL_ENV, "Qwen__Qwen3-4B-Instruct-2507")
 
 
-def _worker_metrics() -> str | None:
-    return os.environ.get(_WORKER_METRICS_URL_ENV)
+def _collector_metrics_url() -> str | None:
+    return os.environ.get(_COLLECTOR_METRICS_URL_ENV)
+
+
+def _telemetry_model() -> str:
+    """Translate the gateway's path-safe model spelling back to the catalog ID."""
+    return _gen_model().replace("__", "/")
 
 
 @pytest.fixture(scope="module")
@@ -93,35 +134,154 @@ def test_generate_with_json_schema_returns_conforming_json(gateway_url: str) -> 
 # -----------------------------------------------------------------------------
 
 
-def _read_metric(text: str, name: str, labels: dict[str, str] | None = None) -> float | None:
-    """Parse a single Prometheus counter / histogram count line.
+def _parse_labels(text: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    entries: list[str] = []
+    start = 0
+    quoted = False
+    escaped = False
+    for index, character in enumerate(text):
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == "," and not quoted:
+            entries.append(text[start:index])
+            start = index + 1
+    if text:
+        entries.append(text[start:])
+    for entry in entries:
+        key, separator, raw_value = entry.partition("=")
+        if not separator:
+            raise AssertionError(f"invalid Prometheus label entry: {entry!r}")
+        value = raw_value.strip()
+        if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+            raise AssertionError(f"invalid Prometheus label value: {entry!r}")
+        parsed_value = json.loads(value)
+        if not isinstance(parsed_value, str):
+            raise AssertionError(f"invalid Prometheus string label: {entry!r}")
+        labels[key.strip()] = parsed_value
+    return labels
 
-    Returns ``None`` when the metric (or label combination) is absent.
-    """
-    if labels is None:
-        labels = {}
+
+def _read_metric_samples(text: str, name: str) -> dict[tuple[tuple[str, str], ...], _PrometheusSample]:
+    samples: dict[tuple[tuple[str, str], ...], _PrometheusSample] = {}
     for line in text.splitlines():
         if line.startswith("#") or not line.strip():
             continue
-        if not line.startswith(name):
+        match = _SAMPLE_RE.fullmatch(line.strip())
+        if match is None or match.group("name") != name:
             continue
-        if "{" in line:
-            label_part = line[line.index("{") + 1 : line.index("}")]
-            parsed: dict[str, str] = {}
-            for entry in label_part.split(","):
-                if "=" not in entry:
-                    continue
-                k, v = entry.split("=", 1)
-                parsed[k.strip()] = v.strip().strip('"')
-            if not all(parsed.get(k) == v for k, v in labels.items()):
-                continue
-        elif labels:
+        labels = _parse_labels(match.group("labels") or "")
+        key = tuple(sorted(labels.items()))
+        if key in samples:
+            raise AssertionError(f"duplicate Prometheus series for {name}: {labels}")
+        samples[key] = _PrometheusSample(labels=labels, value=float(match.group("value")))
+    return samples
+
+
+def _metric_deltas(
+    before: str,
+    after: str,
+    name: str,
+    labels: dict[str, str],
+) -> list[tuple[dict[str, str], float]]:
+    before_samples = _read_metric_samples(before, name)
+    after_samples = _read_metric_samples(after, name)
+    deltas: list[tuple[dict[str, str], float]] = []
+    for key, sample in after_samples.items():
+        if not all(sample.labels.get(label) == value for label, value in labels.items()):
             continue
-        try:
-            return float(line.rsplit(" ", 1)[1])
-        except (ValueError, IndexError):
-            return None
-    return None
+        previous = before_samples.get(key)
+        deltas.append((sample.labels, sample.value - (previous.value if previous else 0.0)))
+    return deltas
+
+
+def _fetch_collector_metrics(url: str) -> str:
+    response = httpx.get(url, timeout=10.0)
+    response.raise_for_status()
+    return response.text
+
+
+def _wait_for_collector_deltas(
+    url: str,
+    before: str,
+    expectations: list[tuple[str, dict[str, str], float]],
+    *,
+    timeout_s: float = 30.0,
+) -> str:
+    deadline = time.monotonic() + timeout_s
+    after = ""
+    while time.monotonic() < deadline:
+        after = _fetch_collector_metrics(url)
+        if all(
+            sum(max(delta, 0.0) for _, delta in _metric_deltas(before, after, metric, labels)) >= minimum
+            for metric, labels, minimum in expectations
+        ):
+            return after
+        time.sleep(1)
+    observed = [(metric, labels, _metric_deltas(before, after, metric, labels)) for metric, labels, _ in expectations]
+    raise AssertionError(f"collector did not expose expected telemetry deltas: {expectations}; observed={observed}")
+
+
+def _assert_no_collector_delta(
+    url: str,
+    before: str,
+    name: str,
+    labels: dict[str, str],
+    *,
+    observation_s: float = 8.0,
+) -> None:
+    deadline = time.monotonic() + observation_s
+    while time.monotonic() < deadline:
+        after = _fetch_collector_metrics(url)
+        deltas = _metric_deltas(before, after, name, labels)
+        assert not any(delta > 0 for _, delta in deltas), f"unexpected collector telemetry delta: {deltas}"
+        time.sleep(1)
+
+
+def _assert_exact_worker_target(labels: dict[str, str], point_labels: set[str]) -> None:
+    expected_point_labels = point_labels | _PRODUCER_LABELS
+    actual_labels = set(labels)
+    assert actual_labels - _PROMETHEUS_EXPORTER_LABELS == expected_point_labels, labels
+    assert actual_labels <= expected_point_labels | _PROMETHEUS_EXPORTER_LABELS, labels
+    assert labels["job"] == "sie-worker", labels
+    assert labels["producer_service"] == "sie-worker", labels
+    assert labels["instance"] == labels["producer_instance"], labels
+    assert labels["producer_instance"], labels
+    assert labels["lane"] not in ("", "other"), labels
+    assert labels["model"] == _telemetry_model(), labels
+    assert labels["profile"] == "default", labels
+    assert labels["backend"] != "other", labels
+
+
+def test_collector_exposition_parser_keeps_exact_worker_scope() -> None:
+    labels = {
+        "backend": "sglang",
+        "grammar": "json_schema",
+        "grammar_backend": "outlines",
+        "instance": "worker-a/process-a",
+        "job": "sie-worker",
+        "lane": "generation|l4|default",
+        "model": "Qwen/Qwen3-4B-Instruct-2507",
+        "phase": "request",
+        "producer_instance": "worker-a/process-a",
+        "producer_service": "sie-worker",
+        "profile": "default",
+        "result": "miss",
+    }
+    label_text = ",".join(f"{key}={json.dumps(value)}" for key, value in sorted(labels.items()))
+    exposition = f"sie_worker_generation_grammar_cache_lookups_total{{{label_text}}} 3\n"
+
+    samples = _read_metric_samples(exposition, "sie_worker_generation_grammar_cache_lookups_total")
+
+    assert len(samples) == 1
+    sample = next(iter(samples.values()))
+    assert sample.labels == labels
+    assert sample.value == 3.0
+    _assert_exact_worker_target(sample.labels, _GRAMMAR_BASE_LABELS | {"phase", "result"})
 
 
 def test_pathological_schema_rejects_before_compile(gateway_url: str) -> None:
@@ -129,11 +289,10 @@ def test_pathological_schema_rejects_before_compile(gateway_url: str) -> None:
     compile activity. Confirms the gateway is the authority for safety
     caps.
     """
-    metrics_url = _worker_metrics()
-    before: float | None = None
+    metrics_url = _collector_metrics_url()
+    before = ""
     if metrics_url:
-        m = httpx.get(metrics_url, timeout=10.0).text
-        before = _read_metric(m, "sie_worker_grammar_compile_seconds_count") or 0.0
+        before = _fetch_collector_metrics(metrics_url)
 
     deep: dict = {"type": "string"}
     for _ in range(25):
@@ -153,10 +312,13 @@ def test_pathological_schema_rejects_before_compile(gateway_url: str) -> None:
     assert err["code"] == "invalid_request"
     assert err["param"].startswith("grammar.json_schema")
 
-    if metrics_url and before is not None:
-        m = httpx.get(metrics_url, timeout=10.0).text
-        after = _read_metric(m, "sie_worker_grammar_compile_seconds_count") or 0.0
-        assert after == before, f"worker observed a compile after a safety-cap reject: {before} -> {after}"
+    if metrics_url:
+        _assert_no_collector_delta(
+            metrics_url,
+            before,
+            "sie_worker_generation_grammar_compile_duration_seconds_count",
+            {"model": _telemetry_model(), "phase": "request"},
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -165,17 +327,18 @@ def test_pathological_schema_rejects_before_compile(gateway_url: str) -> None:
 
 
 def test_cache_hit_after_first_compile(gateway_url: str) -> None:
-    metrics_url = _worker_metrics()
+    metrics_url = _collector_metrics_url()
     if not metrics_url:
-        pytest.skip(f"set {_WORKER_METRICS_URL_ENV} to assert the worker cache counters")
+        pytest.skip(f"set {_COLLECTOR_METRICS_URL_ENV} to assert collector-exported grammar telemetry")
 
+    property_name = f"value_{uuid.uuid4().hex[:12]}"
     schema = {
         "type": "object",
-        "properties": {"value": {"type": "string"}},
-        "required": ["value"],
+        "properties": {property_name: {"type": "string"}},
+        "required": [property_name],
     }
     body = {
-        "prompt": 'Reply with JSON: {"value": "ok"}',
+        "prompt": f'Reply with JSON: {{"{property_name}": "ok"}}',
         "max_new_tokens": 32,
         "grammar": {"json_schema": schema},
     }
@@ -188,24 +351,128 @@ def test_cache_hit_after_first_compile(gateway_url: str) -> None:
         )
         assert r.status_code == 200, r.text
 
-    # Snapshot, send twice, snapshot. The worker should observe one
-    # additional compile observation and (at least) one additional
-    # cache hit. Tests run within a single worker so the labels match.
-    before = httpx.get(metrics_url, timeout=10.0).text
-    misses_before = _read_metric(before, "sie_worker_grammar_cache_misses_total") or 0.0
-    hits_before = _read_metric(before, "sie_worker_grammar_cache_hits_total") or 0.0
+    # Snapshot, send twice, snapshot. This opt-in test runs against one
+    # generation worker so one exact producer/lane/model series owns the
+    # compile and cache deltas.
+    before = _fetch_collector_metrics(metrics_url)
 
     _send()
     _send()
 
-    after = httpx.get(metrics_url, timeout=10.0).text
-    misses_after = _read_metric(after, "sie_worker_grammar_cache_misses_total") or 0.0
-    hits_after = _read_metric(after, "sie_worker_grammar_cache_hits_total") or 0.0
-
-    assert misses_after - misses_before == 1.0, (
-        f"expected exactly one new compile, observed {misses_after - misses_before}"
+    after = _wait_for_collector_deltas(
+        metrics_url,
+        before,
+        [
+            (
+                "sie_worker_generation_grammar_cache_lookups_total",
+                {"model": _telemetry_model(), "grammar": "json_schema", "phase": "request", "result": "miss"},
+                1.0,
+            ),
+            (
+                "sie_worker_generation_grammar_cache_lookups_total",
+                {"model": _telemetry_model(), "grammar": "json_schema", "phase": "request", "result": "hit"},
+                1.0,
+            ),
+            (
+                "sie_worker_generation_grammar_compile_duration_seconds_count",
+                {"model": _telemetry_model(), "grammar": "json_schema", "phase": "request", "outcome": "success"},
+                1.0,
+            ),
+            (
+                "sie_worker_generation_grammar_requests_total",
+                {"model": _telemetry_model(), "grammar": "json_schema"},
+                2.0,
+            ),
+        ],
     )
-    assert hits_after - hits_before >= 1.0, f"expected at least one cache hit, observed {hits_after - hits_before}"
+    cache_metric = "sie_worker_generation_grammar_cache_lookups_total"
+    miss_deltas = [
+        (labels, delta)
+        for labels, delta in _metric_deltas(
+            before,
+            after,
+            cache_metric,
+            {
+                "model": _telemetry_model(),
+                "grammar": "json_schema",
+                "phase": "request",
+                "result": "miss",
+            },
+        )
+        if delta > 0
+    ]
+    assert len(miss_deltas) == 1, f"expected one changed miss series, observed {miss_deltas}"
+    miss_labels, miss_delta = miss_deltas[0]
+    _assert_exact_worker_target(miss_labels, _GRAMMAR_BASE_LABELS | {"phase", "result"})
+    assert miss_labels["grammar_backend"] == "outlines", miss_labels
+    assert miss_delta == 1.0, f"expected exactly one cache miss, observed {miss_delta}"
+
+    producer_scope = {
+        label: miss_labels[label]
+        for label in (
+            "job",
+            "instance",
+            "producer_service",
+            "producer_instance",
+            "backend",
+            "lane",
+            "model",
+            "profile",
+            "grammar_backend",
+            "grammar",
+        )
+    }
+    hit_deltas = _metric_deltas(
+        before,
+        after,
+        cache_metric,
+        {**producer_scope, "phase": "request", "result": "hit"},
+    )
+    assert len(hit_deltas) == 1, f"expected one matching hit series, observed {hit_deltas}"
+    hit_labels, hit_delta = hit_deltas[0]
+    _assert_exact_worker_target(hit_labels, _GRAMMAR_BASE_LABELS | {"phase", "result"})
+    assert hit_delta >= 1.0, f"expected at least one cache hit, observed {hit_delta}"
+
+    compile_deltas = _metric_deltas(
+        before,
+        after,
+        "sie_worker_generation_grammar_compile_duration_seconds_count",
+        {**producer_scope, "phase": "request", "outcome": "success"},
+    )
+    assert len(compile_deltas) == 1, f"expected one matching compile series, observed {compile_deltas}"
+    compile_labels, compile_delta = compile_deltas[0]
+    _assert_exact_worker_target(compile_labels, _GRAMMAR_BASE_LABELS | {"phase", "outcome"})
+    assert compile_delta == 1.0, f"expected exactly one compile, observed {compile_delta}"
+
+    request_scope = {
+        label: miss_labels[label]
+        for label in (
+            "job",
+            "instance",
+            "producer_service",
+            "producer_instance",
+            "backend",
+            "lane",
+            "model",
+            "profile",
+            "grammar",
+        )
+    }
+    request_deltas = [
+        (labels, delta)
+        for labels, delta in _metric_deltas(
+            before,
+            after,
+            "sie_worker_generation_grammar_requests_total",
+            request_scope,
+        )
+        if delta > 0
+    ]
+    assert len(request_deltas) == 1, f"expected one matching grammar request series, observed {request_deltas}"
+    request_labels, request_delta = request_deltas[0]
+    _assert_exact_worker_target(request_labels, _GRAMMAR_BASE_LABELS)
+    assert request_labels["grammar_backend"] != "other", request_labels
+    assert request_delta == 2.0, f"expected two grammar requests, observed {request_delta}"
 
 
 # -----------------------------------------------------------------------------

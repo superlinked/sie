@@ -40,8 +40,8 @@
 //!   trigger scale-from-zero via a surface-specific provisioning response.
 //!   Bootstrap catch-up is visible separately via
 //!   `GET /v1/configs/models/{id}/status` (`config_epoch` on that payload), the
-//!   `sie_gateway_config_epoch` /
-//!   `sie_gateway_config_bootstrap_degraded` metrics, and gateway logs — not
+//!   canonical `sie.gateway.config.applied_epoch` /
+//!   `sie.gateway.config.bootstrap.degraded` telemetry, and gateway logs — not
 //!   via `/readyz` flipping on export completion.
 //! - `state::config_poller` runs in parallel, periodically reconciling
 //!   against `GET /v1/configs/epoch` so any missed NATS deltas after the
@@ -72,6 +72,7 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'%');
 
 use crate::config::ModalProxyToken;
+use crate::observability::metrics::{self as telemetry, ConfigOperation, ConfigOutcome};
 use crate::state::bundle_config_hashes_hash::BundleConfigHashesHash;
 use crate::state::bundles_hash::BundlesHash;
 use crate::state::config_epoch::ConfigEpoch;
@@ -207,6 +208,13 @@ pub enum BootstrapError {
     },
 }
 
+pub(crate) fn telemetry_outcome(error: &BootstrapError) -> ConfigOutcome {
+    match error {
+        BootstrapError::PartialApply { .. } => ConfigOutcome::PartialApply,
+        BootstrapError::Http(_) | BootstrapError::BadStatus { .. } => ConfigOutcome::FetchError,
+    }
+}
+
 pub struct BootstrapClient {
     base_url: String,
     admin_token: Option<String>,
@@ -214,7 +222,66 @@ pub struct BootstrapClient {
     /// request also carries `Modal-Key` / `Modal-Secret` so it clears the
     /// Modal edge before app code sees it. Absent on self-host / dev.
     modal_proxy_token: Option<ModalProxyToken>,
+    managed_proxy_auth: bool,
     http: reqwest::Client,
+}
+
+fn managed_proxy_auth_enabled() -> bool {
+    std::env::var("SIE_MODAL_PROXY_AUTH")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+fn canonical_modal_config_origin(raw: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(raw).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if parsed.scheme() != "https"
+        || !host.ends_with(".modal.run")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port_or_known_default() != Some(443)
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return None;
+    }
+    Some(format!("https://{host}"))
+}
+
+fn validate_managed_config_origin(
+    base_url: &str,
+    allowed_origin: Option<&str>,
+) -> Result<(), String> {
+    let allowed = allowed_origin
+        .and_then(canonical_modal_config_origin)
+        .ok_or_else(|| "managed config proxy-auth origin is missing or untrusted".to_string())?;
+    let actual = canonical_modal_config_origin(base_url)
+        .ok_or_else(|| "managed config-service URL is untrusted".to_string())?;
+    if actual != allowed {
+        return Err(
+            "managed config-service URL does not match its provisioned proxy-auth origin"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn build_config_http_client(managed_proxy_auth: bool) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().timeout(BOOTSTRAP_TIMEOUT);
+    if managed_proxy_auth {
+        // reqwest strips Authorization on cross-origin redirects but not
+        // custom Modal headers. Config endpoints never require redirects.
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    builder
+        .build()
+        .map_err(|error| format!("build config HTTP client: {error}"))
 }
 
 /// Outcome of a single `BootstrapClient::bootstrap` call.
@@ -265,14 +332,22 @@ impl BootstrapOutcome {
 }
 
 impl BootstrapClient {
-    pub fn new(base_url: String, admin_token: Option<String>) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
-            .timeout(BOOTSTRAP_TIMEOUT)
-            .build()?;
+    pub fn new(base_url: String, admin_token: Option<String>) -> Result<Self, String> {
+        let managed_proxy_auth = managed_proxy_auth_enabled();
+        if managed_proxy_auth {
+            validate_managed_config_origin(
+                &base_url,
+                std::env::var("SIE_CONFIG_PROXY_AUTH_ORIGIN")
+                    .ok()
+                    .as_deref(),
+            )?;
+        }
+        let http = build_config_http_client(managed_proxy_auth)?;
         Ok(Self {
             base_url,
             admin_token,
             modal_proxy_token: None,
+            managed_proxy_auth,
             http,
         })
     }
@@ -281,7 +356,10 @@ impl BootstrapClient {
     /// builder so `new`'s two-arg signature (and its many call sites) stays
     /// stable; the config client sets this from `Config::config_modal_proxy_token`.
     pub fn with_modal_proxy_token(mut self, token: Option<ModalProxyToken>) -> Self {
-        self.modal_proxy_token = token;
+        // A token present outside the explicit managed posture is ignored. This
+        // keeps arbitrary OSS config URLs working without turning them into a
+        // destination for the Modal credential.
+        self.modal_proxy_token = self.managed_proxy_auth.then_some(token).flatten();
         self
     }
 
@@ -573,8 +651,9 @@ pub async fn bootstrap_once(
 
 /// After this many failed attempts (or this much wall-clock elapsed,
 /// whichever comes first) the retry loop raises its log level from
-/// `warn!` to `error!` and flips the `sie_gateway_config_bootstrap_degraded`
-/// gauge to 1. This is the SRE-visible signal that the gateway has been
+/// `warn!` to `error!` and flips the canonical
+/// `sie.gateway.config.bootstrap.degraded` gauge to 1. This is the SRE-visible
+/// signal that the gateway has been
 /// serving filesystem-seed traffic for long enough that it's probably
 /// diverged from the control plane. The loop keeps retrying — we never
 /// give up — but a paging alert on `degraded == 1` is the right escape
@@ -592,12 +671,12 @@ const DEGRADED_AFTER: std::time::Duration = std::time::Duration::from_secs(5 * 6
 ///
 /// - No-op (logs at info) when `base_url` is unset. Single-process tests and
 ///   demos don't need to stand up `sie-config`.
-/// - On each failure, increments
-///   `sie_gateway_config_bootstrap_failures_total`, logs a warning, and
-///   sleeps `backoff`, doubled up to `BACKOFF_MAX`.
+/// - On each failure, records the bounded outcome in
+///   `sie.gateway.config.operations{operation="bootstrap", outcome=...}`,
+///   logs a warning, and sleeps `backoff`, doubled up to `BACKOFF_MAX`.
 /// - After `DEGRADED_AFTER_ATTEMPTS` attempts or `DEGRADED_AFTER` of
 ///   failed retries (whichever happens first), sets
-///   `sie_gateway_config_bootstrap_degraded` to 1 and escalates logs to
+///   `sie.gateway.config.bootstrap.degraded` to 1 and escalates logs to
 ///   `error!`. Emitted at most once per "cycle" — flapping is fine, a
 ///   sustained 1-minute+ burst of these is the paging signal.
 /// - After the first success, the task clears the degraded gauge and
@@ -616,6 +695,7 @@ pub fn spawn_bootstrap_retry(
     let admin_token = admin_token.map(str::to_string);
     let modal_proxy_token = modal_proxy_token.cloned();
     tokio::spawn(async move {
+        telemetry::set_config_bootstrap_degraded(false);
         let Some(base) = base_url else {
             info!("SIE_CONFIG_SERVICE_URL not set; skipping config bootstrap");
             return;
@@ -625,15 +705,12 @@ pub fn spawn_bootstrap_retry(
         {
             Ok(c) => c,
             Err(e) => {
+                telemetry::record_config_operation(
+                    ConfigOperation::Bootstrap,
+                    ConfigOutcome::ClientError,
+                );
+                telemetry::set_config_bootstrap_degraded(true);
                 warn!(error = %e, "failed to build bootstrap HTTP client; giving up");
-                // Count this as a bootstrap failure too, not just a
-                // degraded-state flip. A broken HTTP client config
-                // (bad TLS root bundle, invalid token header) looks
-                // identical on the failure-rate dashboard to a
-                // sie-config outage — both prevent any bootstrap from
-                // succeeding.
-                crate::metrics::CONFIG_BOOTSTRAP_FAILURES.inc();
-                crate::metrics::CONFIG_BOOTSTRAP_DEGRADED.set(1);
                 return;
             }
         };
@@ -652,6 +729,11 @@ pub fn spawn_bootstrap_retry(
             .await
             {
                 Ok(_) => {
+                    telemetry::record_config_operation(
+                        ConfigOperation::Bootstrap,
+                        ConfigOutcome::Success,
+                    );
+                    telemetry::set_config_bootstrap_degraded(false);
                     if degraded {
                         info!(
                             attempts,
@@ -659,18 +741,18 @@ pub fn spawn_bootstrap_retry(
                             "bootstrap recovered after sustained failure; clearing degraded state"
                         );
                     }
-                    crate::metrics::CONFIG_BOOTSTRAP_DEGRADED.set(0);
                     return;
                 }
                 Err(e) => {
+                    let outcome = telemetry_outcome(&e);
+                    telemetry::record_config_operation(ConfigOperation::Bootstrap, outcome);
                     attempts = attempts.saturating_add(1);
-                    crate::metrics::CONFIG_BOOTSTRAP_FAILURES.inc();
                     let elapsed = started.elapsed();
                     let should_degrade = !degraded
                         && (attempts >= DEGRADED_AFTER_ATTEMPTS || elapsed >= DEGRADED_AFTER);
                     if should_degrade {
                         degraded = true;
-                        crate::metrics::CONFIG_BOOTSTRAP_DEGRADED.set(1);
+                        telemetry::set_config_bootstrap_degraded(true);
                         tracing::error!(
                             error = %e,
                             attempts,
@@ -704,6 +786,27 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[test]
+    fn bootstrap_errors_map_to_bounded_telemetry_outcomes() {
+        assert_eq!(
+            telemetry_outcome(&BootstrapError::PartialApply {
+                epoch: 1,
+                applied: 1,
+                failed: 1,
+                total: 2,
+            }),
+            ConfigOutcome::PartialApply
+        );
+        assert_eq!(
+            telemetry_outcome(&BootstrapError::BadStatus {
+                status: 503,
+                url: "http://config.invalid/export".to_string(),
+                body: "unavailable".to_string(),
+            }),
+            ConfigOutcome::FetchError
+        );
+    }
+
     /// Build a registry against empty filesystem dirs and pre-install the
     /// `default` bundle directly via `install_bundles` — the same path
     /// `BootstrapClient::bootstrap` would take in production after fetching
@@ -731,6 +834,7 @@ mod tests {
     fn model_config(name: &str) -> ModelConfig {
         ModelConfig {
             name: name.to_string(),
+            hf_revision: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
@@ -1029,32 +1133,99 @@ mod tests {
         assert_eq!(snapshot.bundle_config_hashes_hash, "facefeed");
     }
 
-    /// #1740: a client with a Modal proxy token sends `Modal-Key` /
-    /// `Modal-Secret` ALONGSIDE the admin bearer. The mock only matches when
-    /// all three headers are present, so a green result proves both auth
-    /// layers ride every config request.
     #[tokio::test]
-    async fn config_client_sends_modal_proxy_headers_alongside_bearer() {
+    async fn config_client_drops_modal_token_outside_managed_posture() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/configs/epoch"))
             .and(header("authorization", "Bearer admin-secret"))
-            .and(header("modal-key", "wk-abc"))
-            .and(header("modal-secret", "ws-xyz"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "epoch": 5,
             })))
             .mount(&server)
             .await;
 
-        let client = BootstrapClient::new(server.uri(), Some("admin-secret".into()))
-            .unwrap()
-            .with_modal_proxy_token(Some(ModalProxyToken {
-                key: "wk-abc".into(),
-                secret: "ws-xyz".into(),
-            }));
+        let client = BootstrapClient {
+            base_url: server.uri(),
+            admin_token: Some("admin-secret".into()),
+            modal_proxy_token: None,
+            managed_proxy_auth: false,
+            http: reqwest::Client::new(),
+        }
+        .with_modal_proxy_token(Some(ModalProxyToken {
+            key: "wk-abc".into(),
+            secret: "ws-xyz".into(),
+        }));
         let snapshot = client.fetch_epoch().await.unwrap();
         assert_eq!(snapshot.epoch, 5);
+
+        let requests = server.received_requests().await.unwrap();
+        let request = requests.first().unwrap();
+        assert!(!request.headers.contains_key("modal-key"));
+        assert!(!request.headers.contains_key("modal-secret"));
+    }
+
+    #[tokio::test]
+    async fn managed_config_client_sends_both_auth_layers_without_following_redirects() {
+        let destination = MockServer::start().await;
+        let origin = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/configs/epoch"))
+            .and(header("authorization", "Bearer admin-secret"))
+            .and(header("modal-key", "wk-abc"))
+            .and(header("modal-secret", "ws-xyz"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .append_header("location", format!("{}/capture", destination.uri())),
+            )
+            .mount(&origin)
+            .await;
+
+        let client = BootstrapClient {
+            base_url: origin.uri(),
+            admin_token: Some("admin-secret".into()),
+            modal_proxy_token: Some(ModalProxyToken {
+                key: "wk-abc".into(),
+                secret: "ws-xyz".into(),
+            }),
+            managed_proxy_auth: true,
+            http: build_config_http_client(true).unwrap(),
+        };
+        let error = client
+            .fetch_epoch()
+            .await
+            .expect_err("302 must not be followed");
+        assert!(matches!(
+            error,
+            BootstrapError::BadStatus { status: 302, .. }
+        ));
+        assert_eq!(origin.received_requests().await.unwrap().len(), 1);
+        assert!(destination.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn managed_config_origin_requires_exact_canonical_modal_origin() {
+        assert!(validate_managed_config_origin(
+            "https://workspace--config.modal.run",
+            Some("https://workspace--config.modal.run"),
+        )
+        .is_ok());
+        for base in [
+            "https://attacker.example",
+            "https://sibling--config.modal.run",
+            "https://workspace--config.modal.run.evil.example",
+            "https://user@workspace--config.modal.run",
+            "http://workspace--config.modal.run",
+            "https://workspace--config.modal.run:8443",
+            "https://workspace--config.modal.run/path",
+            "not a URL",
+        ] {
+            assert!(validate_managed_config_origin(
+                base,
+                Some("https://workspace--config.modal.run"),
+            )
+            .is_err());
+        }
     }
 
     /// Without a proxy token, the client sends NO Modal headers — the

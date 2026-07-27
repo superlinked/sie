@@ -103,7 +103,8 @@ class OomRecoveryConfig:
 class OomRecoveryStats:
     """Counters for OOM recovery activity on a single worker.
 
-    Exposed via ``WorkerStats.oom_recoveries`` and surfaced in Prometheus
+    Exposed via ``WorkerStats.oom_recoveries`` and surfaced through canonical
+    OpenTelemetry
     so a sustained recovery rate can be alerted on (typically a sign of a
     real memory leak rather than transient pressure).
 
@@ -119,7 +120,7 @@ class OomRecoveryStats:
 
     # ``batch_splits`` counts top-level engagement of the split strategy
     # only (not recursive halves) — this matches the metric semantics
-    # operators see in ``sie_oom_batch_splits_total``.
+    # operators see in ``sie.worker.oom.recoveries{strategy="split_batch"}``.
     cache_clears: int = 0
     evictions_triggered: int = 0
     batch_splits: int = 0

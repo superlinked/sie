@@ -140,13 +140,16 @@ class SentenceTransformerDenseAdapter(BaseAdapter):
         opts = options or {}
         query_template = opts.get("query_template")
         doc_template = opts.get("doc_template")
+        default_instruction = opts.get("default_instruction")
+        template_instruction = instruction if instruction is not None else default_instruction
+        normalize = bool(opts.get("normalize", self._normalize))
 
         texts = [self._extract_text(item) for item in items]
 
         # Apply query/doc template from runtime options if provided
         template = query_template if is_query else doc_template
         if template:
-            texts = [template.format(text=text, instruction=instruction or "") for text in texts]
+            texts = [template.format(text=text, instruction=template_instruction or "") for text in texts]
             prompt_name = None
         else:
             # Determine prompt_name based on is_query and model's available prompts
@@ -157,15 +160,19 @@ class SentenceTransformerDenseAdapter(BaseAdapter):
                 elif not is_query and "document" in self._model.prompts:
                     prompt_name = "document"
 
-            # If instruction is provided explicitly, prepend it (fallback for models without prompts)
-            if instruction is not None and prompt_name is None:
-                texts = [f"{instruction} {text}" for text in texts]
+            # A configured default instruction is query-specific. Explicit
+            # per-request instructions retain the existing fallback behavior.
+            fallback_instruction = instruction
+            if fallback_instruction is None and is_query:
+                fallback_instruction = default_instruction
+            if fallback_instruction is not None and prompt_name is None:
+                texts = [f"{fallback_instruction} {text}" for text in texts]
 
         with torch.inference_mode():
             embeddings: np.ndarray = self._model.encode(
                 texts,
                 prompt_name=prompt_name,
-                normalize_embeddings=self._normalize,
+                normalize_embeddings=normalize,
                 convert_to_numpy=True,
                 show_progress_bar=False,
             )

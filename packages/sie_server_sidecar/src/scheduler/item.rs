@@ -11,9 +11,10 @@
 //! That's what this module is: the single production choice.
 //!
 //! * [`SchedulerItem`] is a tagged union over the three op-specific
-//!   batch items the Python adapter already consumes. Same on-wire
-//!   types — no re-encoding when we pack them into a
-//!   [`crate::ipc_types::RunBatchRequest`].
+//!   batch items the Python adapter already consumes. Score items also
+//!   retain a scheduler-local cost estimate; converting to
+//!   [`crate::ipc_types::RunBatchRequest`] moves only the on-wire item,
+//!   so the estimate never crosses IPC.
 //! * [`SchedulerMeta`] carries everything the dispatcher's
 //!   `apply_outcomes` path needs — the [`WorkItem`] for publishing
 //!   the result, the JetStream [`Message`] for the ACK, and the
@@ -27,14 +28,18 @@
 //! Scheduler flush triggers fire on **cost-cap** (sum of item costs),
 //! **count-cap**, or **wait-cap**. The cost of a single item matches
 //! Python's `PreparedTokens.total_tokens` when the dispatcher
-//! tokenised Rust-side, and falls back to `1` otherwise:
+//! tokenised Rust-side. Operation-specific fallbacks are:
 //!
-//! * **Encode / Extract**: sum of `prepared_tokens.input_ids[i].len()`
+//! * **Encode**: sum of `prepared_tokens.input_ids[i].len()`
 //!   — there is usually exactly one inner sequence per item, but we
 //!   sum defensively. `1` when `prepared_tokens` is `None` (Python
 //!   will retokenise).
-//! * **Score**: same sum (the score items emit the
-//!   `[query, doc_0]` layout), `1` when absent.
+//! * **Score**: same prepared-token sum when available. Otherwise use
+//!   the model-independent Python score batching proxy: Unicode
+//!   character count plus 1024 per media input, summed per
+//!   `(query, document)` pair (so query cost repeats for each document).
+//!   This is batching cost only, never a billable token count.
+//! * **Extract**: unit cost; Python owns extract preparation today.
 //!
 //! The adaptive controller auto-calibrates against observed latency,
 //! so being "approximately right" on cost is enough; what matters is
@@ -47,7 +52,7 @@ use std::time::Instant;
 
 use crate::delivery::Delivery;
 use crate::ipc_types::{
-    EncodeBatchItem, ExtractBatchItem, PreparedTokens, RunBatchItem, ScoreBatchItem,
+    EncodeBatchItem, ExtractBatchItem, PreparedTokens, RunBatchItem, ScoreBatchItem, WireValue,
 };
 use crate::work_types::WorkItem;
 
@@ -67,21 +72,108 @@ fn cost_from_prepared(pt: Option<&PreparedTokens>) -> u64 {
     total.max(1)
 }
 
-/// Concrete per-item payload the production scheduler carries. One of
-/// the three variants, all of which are already the on-wire types the
-/// Python adapter loop consumes — so packing a batch into a
-/// [`crate::ipc_types::RunBatchRequest`] is O(items) moves and zero re-serialisation.
+/// Keep this in lockstep with `sie_server.core.score_cost.SCORE_MEDIA_COST`.
+/// It is deliberately a coarse, model-independent batching proxy rather than
+/// a token count or billing unit.
+const SCORE_MEDIA_COST: u64 = 1024;
+
+fn wire_value_key_eq(key: &WireValue, expected: &str) -> bool {
+    match key {
+        WireValue::String(s) => s.as_str() == Some(expected),
+        WireValue::Binary(b) => std::str::from_utf8(b).ok() == Some(expected),
+        _ => false,
+    }
+}
+
+fn wire_map_get<'a>(value: &'a WireValue, key: &str) -> Option<&'a WireValue> {
+    let WireValue::Map(entries) = value else {
+        return None;
+    };
+    entries
+        .iter()
+        .find(|(candidate, _)| wire_value_key_eq(candidate, key))
+        .map(|(_, value)| value)
+}
+
+fn wire_text_char_count(value: &WireValue) -> u64 {
+    let WireValue::String(text) = value else {
+        return 0;
+    };
+    text.as_str()
+        .map(|text| u64::try_from(text.chars().count()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Match `sie_server.core.score_cost.score_item_cost` after Python's
+/// `decode_item` alias handling: `content` is used only when `text` is absent,
+/// images count individually, and each other non-null media field counts once.
+fn score_item_estimated_cost(item: &WireValue) -> u64 {
+    let text_cost = match wire_map_get(item, "text") {
+        Some(text) => wire_text_char_count(text),
+        None => wire_map_get(item, "content")
+            .map(wire_text_char_count)
+            .unwrap_or(0),
+    };
+
+    let image_count = match wire_map_get(item, "images") {
+        Some(WireValue::Array(images)) => u64::try_from(images.len()).unwrap_or(u64::MAX),
+        _ => 0,
+    };
+    let optional_media_count = ["audio", "video", "document"]
+        .into_iter()
+        .filter(|key| !matches!(wire_map_get(item, key), None | Some(WireValue::Nil)))
+        .count();
+    let media_count =
+        image_count.saturating_add(u64::try_from(optional_media_count).unwrap_or(u64::MAX));
+
+    text_cost.saturating_add(media_count.saturating_mul(SCORE_MEDIA_COST))
+}
+
+/// Match `sie_server.core.score_cost.build_score_prepared_items`: one
+/// `(query, document)` cost per document, including the query each time.
+fn score_estimated_cost(query: &WireValue, documents: &[WireValue]) -> u64 {
+    let query_cost = score_item_estimated_cost(query);
+    documents
+        .iter()
+        .fold(0_u64, |total, document| {
+            total.saturating_add(query_cost.saturating_add(score_item_estimated_cost(document)))
+        })
+        .max(1)
+}
+
+/// Concrete per-item payload the production scheduler carries. Encode and
+/// extract directly own their on-wire items; score owns its on-wire item plus
+/// a scheduler-only estimate. Packing a [`crate::ipc_types::RunBatchRequest`]
+/// moves the on-wire values and discards scheduler-only state without an
+/// encode/decode round trip.
 ///
 /// Named `SchedulerItem` rather than `Item` to avoid collision with
 /// the msgpack-native `item` fields that live inside the inner variants.
 #[derive(Debug, Clone)]
 pub enum SchedulerItem {
     Encode(EncodeBatchItem),
-    Score(ScoreBatchItem),
+    Score {
+        item: ScoreBatchItem,
+        /// Cached at scheduler ingress because cost is consulted repeatedly
+        /// during packing and controller accounting. This field is absent from
+        /// every IPC protocol type and is discarded by `into_run_batch_item`.
+        estimated_cost: u64,
+    },
     Extract(ExtractBatchItem),
 }
 
 impl SchedulerItem {
+    /// Wrap a score item and cache the Python-parity batching estimate without
+    /// adding scheduler policy to the serialized [`ScoreBatchItem`] contract.
+    #[must_use]
+    pub fn score(item: ScoreBatchItem) -> Self {
+        let estimated_cost = score_estimated_cost(&item.query_item, &item.score_items);
+        Self::Score {
+            item,
+            estimated_cost,
+        }
+    }
+
     /// Operation class — used by the dispatcher to pick the right
     /// batcher key when submitting into the scheduler, and by the
     /// drain loop to tag metrics + logs.
@@ -89,7 +181,7 @@ impl SchedulerItem {
     pub fn op(&self) -> Op {
         match self {
             Self::Encode(_) => Op::Encode,
-            Self::Score(_) => Op::Score,
+            Self::Score { .. } => Op::Score,
             Self::Extract(_) => Op::Extract,
         }
     }
@@ -102,7 +194,7 @@ impl SchedulerItem {
     pub fn into_run_batch_item(self) -> RunBatchItem {
         match self {
             Self::Encode(e) => RunBatchItem::encode(e),
-            Self::Score(s) => RunBatchItem::score(s),
+            Self::Score { item, .. } => RunBatchItem::score(item),
             Self::Extract(x) => RunBatchItem::extract(x),
         }
     }
@@ -128,13 +220,27 @@ impl HasCost for SchedulerItem {
     fn cost(&self) -> u64 {
         match self {
             Self::Encode(e) => cost_from_prepared(e.prepared_tokens.as_ref()),
-            Self::Score(s) => cost_from_prepared(s.prepared_tokens.as_ref()),
-            // Extract doesn't emit prepared tokens on the Rust side in
-            // the current path (Python owns extract tokenisation — see
-            // `docs/architecture-guide.md`), so
-            // there is no per-item seq_len to pay with. Unit cost
-            // matches Python's fallback.
-            Self::Extract(_) => 1,
+            Self::Score {
+                item,
+                estimated_cost,
+            } => item
+                .prepared_tokens
+                .as_ref()
+                .map(|prepared| cost_from_prepared(Some(prepared)))
+                .unwrap_or(*estimated_cost),
+            Self::Extract(e) => e
+                .prepared_audio
+                .as_ref()
+                .map_or(1, crate::ipc_types::PreparedAudioPcm16::duration_cost_ms),
+        }
+    }
+
+    fn hard_batch_cost_cap(&self) -> Option<u64> {
+        match self {
+            Self::Extract(e) if e.prepared_audio.is_some() => {
+                Some(crate::audio_prep::MAX_AUDIO_BATCH_DURATION_MS)
+            }
+            _ => None,
         }
     }
 
@@ -145,7 +251,7 @@ impl HasCost for SchedulerItem {
         // wiid → same original_index → stable ordering across retries.
         let idx = match self {
             Self::Encode(e) => e.item_index,
-            Self::Score(s) => s.item_index,
+            Self::Score { item, .. } => item.item_index,
             Self::Extract(x) => x.item_index,
         };
         idx as usize
@@ -177,6 +283,11 @@ pub struct SchedulerMeta {
     /// [`crate::publisher::Timings`] and on the `payload_fetch_seconds`
     /// histogram.
     pub fetch_ms: f64,
+    /// Optional caller-provided encode item id, extracted from the resolved
+    /// item before the payload is moved into the backend batch. This is kept
+    /// separately so offloaded items can echo the id without retaining or
+    /// cloning their full resolved payload through scheduling.
+    pub caller_item_id: Option<String>,
     /// True when this item was pulled from a worker-specific direct-dispatch
     /// subject rather than the pool subject.
     pub worker_direct: bool,
@@ -210,6 +321,7 @@ impl SchedulerMeta {
             wi,
             delivery,
             fetch_ms,
+            caller_item_id: None,
             worker_direct,
             submitted_at: Instant::now(),
             worker_child_index: None,
@@ -219,6 +331,12 @@ impl SchedulerMeta {
     #[must_use]
     pub fn with_worker_child_index(mut self, child_index: usize) -> Self {
         self.worker_child_index = Some(child_index);
+        self
+    }
+
+    #[must_use]
+    pub fn with_caller_item_id(mut self, caller_item_id: Option<String>) -> Self {
+        self.caller_item_id = caller_item_id;
         self
     }
 }
@@ -303,6 +421,36 @@ mod tests {
         }
     }
 
+    fn score_batch_item(
+        query_item: WireValue,
+        score_items: Vec<WireValue>,
+        prepared_tokens: Option<PreparedTokens>,
+    ) -> ScoreBatchItem {
+        ScoreBatchItem {
+            work_item_id: "r.0".into(),
+            request_id: "r".into(),
+            item_index: 0,
+            total_items: 1,
+            timestamp: 0.0,
+            query_item,
+            score_items,
+            instruction: None,
+            options: None,
+            profile_id: None,
+            payload_fetch_ms: 0.0,
+            prepared_tokens,
+        }
+    }
+
+    fn multimodal_item(entries: Vec<(&str, WireValue)>) -> WireValue {
+        WireValue::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (WireValue::from(key), value))
+                .collect(),
+        )
+    }
+
     #[test]
     fn cost_prefers_prepared_tokens_sum() {
         let it = SchedulerItem::Encode(encode_item(0, Some(pt_with_lens(&[17]))));
@@ -310,25 +458,69 @@ mod tests {
     }
 
     #[test]
-    fn cost_sums_multiple_inner_sequences() {
-        // Score emits `[query, doc_0]` as two inner sequences on the
-        // same PreparedTokens — the flushed batch cost must count
-        // both so the controller sees the real forward-pass cost.
-        let it = SchedulerItem::Score(ScoreBatchItem {
-            work_item_id: "r.0".into(),
-            request_id: "r".into(),
-            item_index: 0,
-            total_items: 1,
-            timestamp: 0.0,
-            query_item: text_item("q"),
-            score_items: vec![text_item("d")],
-            instruction: None,
-            options: None,
-            profile_id: None,
-            payload_fetch_ms: 0.0,
-            prepared_tokens: Some(pt_with_lens(&[5, 13])),
-        });
+    fn score_cost_prefers_prepared_tokens_sum() {
+        // Score emits `[query, doc_0, ...]` as inner sequences on the
+        // same PreparedTokens — the flushed batch cost must count all
+        // of them so the controller sees the real forward-pass cost.
+        let it = SchedulerItem::score(score_batch_item(
+            text_item("q"),
+            vec![text_item("d")],
+            Some(pt_with_lens(&[5, 13])),
+        ));
         assert_eq!(it.cost(), 18);
+    }
+
+    #[test]
+    fn score_cost_repeats_query_for_each_document() {
+        let it = SchedulerItem::score(score_batch_item(
+            text_item("four"),
+            vec![text_item("12345"), text_item("xy")],
+            None,
+        ));
+        assert_eq!(it.cost(), (4 + 5) + (4 + 2));
+    }
+
+    #[test]
+    fn score_cost_counts_unicode_characters_not_utf8_bytes() {
+        let it = SchedulerItem::score(score_batch_item(
+            text_item("é🙂"),
+            vec![text_item("東京")],
+            None,
+        ));
+        assert_eq!(it.cost(), 4);
+    }
+
+    #[test]
+    fn score_cost_content_alias_only_applies_when_text_is_absent() {
+        let query = multimodal_item(vec![("content", WireValue::from("alias"))]);
+        let document = multimodal_item(vec![
+            ("text", WireValue::Nil),
+            ("content", WireValue::from("ignored")),
+        ]);
+        let it = SchedulerItem::score(score_batch_item(query, vec![document], None));
+        assert_eq!(it.cost(), 5);
+    }
+
+    #[test]
+    fn score_cost_matches_python_media_proxy() {
+        let query = multimodal_item(vec![
+            ("text", WireValue::from("q")),
+            (
+                "images",
+                WireValue::Array(vec![WireValue::Map(vec![]), WireValue::Map(vec![])]),
+            ),
+            ("audio", WireValue::Map(vec![])),
+            ("video", WireValue::Nil),
+            ("document", WireValue::Map(vec![])),
+        ]);
+        let it = SchedulerItem::score(score_batch_item(query, vec![text_item("d")], None));
+        assert_eq!(it.cost(), 2 + (4 * SCORE_MEDIA_COST));
+    }
+
+    #[test]
+    fn score_cost_clamps_empty_document_list_to_one() {
+        let it = SchedulerItem::score(score_batch_item(text_item("query"), vec![], None));
+        assert_eq!(it.cost(), 1);
     }
 
     #[test]
@@ -363,8 +555,40 @@ mod tests {
             profile_id: None,
             bundle_config_hash: None,
             payload_fetch_ms: 0.0,
+            prepared_audio: None,
         });
         assert_eq!(it.cost(), 1);
+    }
+
+    #[test]
+    fn audio_extract_cost_uses_exact_milliseconds_and_hard_duration_cap() {
+        let it = SchedulerItem::Extract(ExtractBatchItem {
+            work_item_id: "r.0".into(),
+            request_id: "r".into(),
+            item_index: 0,
+            total_items: 1,
+            timestamp: 0.0,
+            item: text_item("x"),
+            labels: None,
+            output_schema: None,
+            instruction: None,
+            options: None,
+            profile_id: None,
+            bundle_config_hash: None,
+            payload_fetch_ms: 0.0,
+            prepared_audio: Some(crate::ipc_types::PreparedAudioPcm16 {
+                pcm_s16le: vec![0; 32_032],
+                sample_rate: 16_000,
+                sample_count: 16_016,
+                duration_ms: 1_001,
+                source_sample_rate: 16_000,
+                source_sample_count: 16_016,
+                source_channels: 1,
+                container: "wav".into(),
+            }),
+        });
+        assert_eq!(it.cost(), 1_001);
+        assert_eq!(it.hard_batch_cost_cap(), Some(720_000));
     }
 
     #[test]
@@ -377,20 +601,7 @@ mod tests {
     fn op_matches_variant() {
         let e = SchedulerItem::Encode(encode_item(0, None));
         assert_eq!(e.op(), Op::Encode);
-        let s = SchedulerItem::Score(ScoreBatchItem {
-            work_item_id: "".into(),
-            request_id: "".into(),
-            item_index: 0,
-            total_items: 1,
-            timestamp: 0.0,
-            query_item: WireValue::Nil,
-            score_items: vec![],
-            instruction: None,
-            options: None,
-            profile_id: None,
-            payload_fetch_ms: 0.0,
-            prepared_tokens: None,
-        });
+        let s = SchedulerItem::score(score_batch_item(WireValue::Nil, vec![], None));
         assert_eq!(s.op(), Op::Score);
         let x = SchedulerItem::Extract(ExtractBatchItem {
             work_item_id: "".into(),
@@ -406,6 +617,7 @@ mod tests {
             profile_id: None,
             bundle_config_hash: None,
             payload_fetch_ms: 0.0,
+            prepared_audio: None,
         });
         assert_eq!(x.op(), Op::Extract);
     }
@@ -420,6 +632,30 @@ mod tests {
         assert!(rbi.encode.is_some());
         assert!(rbi.score.is_none());
         assert!(rbi.extract.is_none());
+    }
+
+    #[test]
+    fn score_estimate_is_not_serialized_into_run_batch_item() {
+        let rbi = SchedulerItem::score(score_batch_item(
+            text_item("query"),
+            vec![text_item("document")],
+            None,
+        ))
+        .into_run_batch_item();
+        let bytes = rmp_serde::to_vec_named(&rbi).expect("serialize RunBatchItem");
+        let decoded: WireValue = rmp_serde::from_slice(&bytes).expect("decode RunBatchItem");
+
+        fn contains_key(value: &WireValue, needle: &str) -> bool {
+            match value {
+                WireValue::Map(entries) => entries.iter().any(|(key, value)| {
+                    wire_value_key_eq(key, needle) || contains_key(value, needle)
+                }),
+                WireValue::Array(values) => values.iter().any(|value| contains_key(value, needle)),
+                _ => false,
+            }
+        }
+
+        assert!(!contains_key(&decoded, "estimated_cost"));
     }
 
     #[test]
@@ -477,6 +713,7 @@ mod tests {
             prompt_cache_key: None,
             bundle_config_hash: String::new(),
             router_id: "r1".into(),
+            accepts_result_chunks: false,
             reply_subject: "_INBOX.r1.r".into(),
             traceparent: None,
             tracestate: None,

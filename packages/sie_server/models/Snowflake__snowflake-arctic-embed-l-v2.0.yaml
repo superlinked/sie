@@ -29,6 +29,7 @@ profiles:
         doc_template: '{text}'
   candle:
     extends: default
+    compute_precision: float16
     adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
     adapter_options:
       runtime:

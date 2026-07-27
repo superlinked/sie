@@ -96,10 +96,15 @@ class ScoreHandler(OperationHandler[ScoreOutput]):
         # EncodeHandler.slice_output's handling of ``input_token_counts``).
         counts = output.input_token_counts
         sliced_counts = [counts[index]] if counts is not None and 0 <= index < len(counts) else None
+        image_counts = output.input_image_counts
+        sliced_image_counts = (
+            [image_counts[index]] if image_counts is not None and 0 <= index < len(image_counts) else None
+        )
         return ScoreOutput(
             scores=output.scores[index : index + 1],
             batch_size=1,
             input_token_counts=sliced_counts,
+            input_image_counts=sliced_image_counts,
         )
 
     def assemble_output(
@@ -126,14 +131,22 @@ class ScoreHandler(OperationHandler[ScoreOutput]):
         # item exactly, so no counts are surfaced (metering then falls back to
         # its reserve estimate rather than under-counting).
         assembled_counts: list[int] = []
+        assembled_image_counts: list[int] = []
         for i in range(batch_size):
             partial_counts = partials[i].input_token_counts
             if not (isinstance(partial_counts, list) and len(partial_counts) == 1):
                 assembled_counts = []
-                break
-            assembled_counts.append(partial_counts[0])
+            else:
+                assembled_counts.append(partial_counts[0])
+
+            partial_image_counts = partials[i].input_image_counts
+            if not (isinstance(partial_image_counts, list) and len(partial_image_counts) == 1):
+                assembled_image_counts = []
+            else:
+                assembled_image_counts.append(partial_image_counts[0])
         return ScoreOutput(
             scores=scores,
             batch_size=batch_size,
-            input_token_counts=assembled_counts or None,
+            input_token_counts=assembled_counts if len(assembled_counts) == batch_size else None,
+            input_image_counts=assembled_image_counts if len(assembled_image_counts) == batch_size else None,
         )

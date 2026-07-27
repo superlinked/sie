@@ -4,8 +4,9 @@ hf_revision: 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
 inputs:
   # Qwen3.5-4B is a unified vision-language model (Gated DeltaNet + sparse MoE
   # with an integrated vision encoder). The wire surface accepts text+image
-  # via the OpenAI chat-completions schema (``image_url`` content parts);
-  # video is documented by Qwen but not yet wired through the SIE gateway.
+  # via SIE-native generate (inline ``images``) and the OpenAI chat-completions
+  # schema (``image_url`` content parts); video is documented by Qwen but not
+  # yet wired through the SIE gateway.
   text: true
   image: true
   audio: false
@@ -13,13 +14,13 @@ inputs:
 tasks:
   generate:
     # Native context length is 262,144 tokens (YaRN extends to ~1M).
-    # The 8192 default here matches what the L4 profile can actually fit
-    # (see §"Empirical KV calibration" below). A100/H100 profiles
-    # raise this on a per-profile basis.
+    # Keep the public request context at 8192 for every profile. The larger
+    # A100/H100 capacity measurements below size batching and admission; they
+    # are not a claim that a longer request context has been release-gated.
     context_length: 8192
     max_output_tokens: 4096
     # Route grammar-constrained requests (response_format / grammar) to the
-    # non-speculative variant. The default/a100/h100 profiles run NEXTN
+    # non-speculative variant. The free-text profiles run NEXTN
     # speculative decoding for free-text throughput, but NEXTN bypasses SGLang's
     # Outlines grammar FSM (leaks out-of-schema keys, truncates mid-JSON —
     # verified on L4). The `no-spec` profile (speculative off, same Outlines
@@ -112,25 +113,23 @@ max_sequence_length: 8192
 # tool ``tools/smoke_qwen35_4b.py`` if SGLang version or
 # ``mem_fraction_static`` changes.
 profiles:
-  # L4 is severely constrained for Qwen3.5-4B + NEXTN — fits only ~3
-  # concurrent requests, context cap ≈ 8192. The gating subset's
-  # ``concurrencies: [1, 16]`` axis will saturate at 3 on L4; treat L4
-  # as smoke / c=1 only. Use a100-40gb (below) for c=16 cells.
+  # The bare model is the measured production A100-40GB shape. The
+  # ``a100-40gb`` alias below preserves the resolved profile identity used by
+  # the checked-in acceptance evidence; new callers should use the bare id.
   default:
-    max_batch_tokens: 8192
+    max_batch_tokens: 32768
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
-    # Empirical: 31,610 / 4 = 7,902 → round to 7,168 (= 7 × 1024).
-    kv_budget_tokens: 7168
+    # Empirical: 847,848 / 4 = 211,962 → round to 210,944 (= 206 × 1024).
+    kv_budget_tokens: 210944
     adapter_options:
       loadtime:
         # Apple-Silicon (MLX) repo served by the MLX subprocess backend. On
         # non-CUDA devices SGLangGenerationAdapter.create_for_device swaps to
         # MLXGenerationAdapter, which reads this. Ignored on CUDA (SGLang
-        # swallows it via **kwargs). 4-bit MLX quant ≈ 120 tok/s on M-series.
+        # swallows it via **kwargs).
         mlx_repo: mlx-community/Qwen3.5-4B-4bit
-        # Empirical floor on L4 — anything lower OOMs at model load.
-        mem_fraction_static: 0.90
+        mem_fraction_static: 0.85
         served_model_name: Qwen/Qwen3.5-4B
         disable_cuda_graph: true
         attention_backend: triton
@@ -154,10 +153,13 @@ profiles:
         extra_launch_args:
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
-          - "--disable-overlap-schedule"
       runtime:
         first_chunk_timeout_s: 60
-        inter_chunk_timeout_s: 10
+        # The Stage-5 A100-80GB c=4 OSS queue run at 37771022d observed one
+        # governed 10s inter-chunk abort in its 300-row CaseHOLD tranche. 15s
+        # matches sibling large-generation profiles while preserving the 300s
+        # overall bound; the single full rerun remains required for promotion.
+        inter_chunk_timeout_s: 15
         overall_timeout_s: 300
         default_sampling:
           temperature: 0.7
@@ -165,15 +167,24 @@ profiles:
           presence_penalty: 1.5
         stop_tokens:
           - "<|im_end|>"
+  # Historical acceptance-benchmark identity. Keep it as a zero-delta alias so
+  # those results remain reproducible while production uses the bare model id.
   a100-40gb:
-    max_batch_tokens: 32768
+    extends: default
+  # L4 is severely constrained for Qwen3.5-4B + NEXTN — fits only ~3
+  # concurrent requests, context cap ≈ 8192. Use this explicit profile for
+  # smoke / c=1 only; it is not the production default.
+  l4-smoke:
+    max_batch_tokens: 8192
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
-    # Empirical: 847,848 / 4 = 211,962 → round to 210,944 (= 206 × 1024).
-    kv_budget_tokens: 210944
+    # Empirical: 31,610 / 4 = 7,902 → round to 7,168 (= 7 × 1024).
+    kv_budget_tokens: 7168
     adapter_options:
       loadtime:
-        mem_fraction_static: 0.85
+        mlx_repo: mlx-community/Qwen3.5-4B-4bit
+        # Empirical floor on L4 — anything lower OOMs at model load.
+        mem_fraction_static: 0.90
         served_model_name: Qwen/Qwen3.5-4B
         disable_cuda_graph: true
         attention_backend: triton
@@ -189,6 +200,7 @@ profiles:
         extra_launch_args:
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
+          - "--disable-overlap-schedule"
       runtime:
         first_chunk_timeout_s: 60
         inter_chunk_timeout_s: 10
@@ -235,19 +247,20 @@ profiles:
           presence_penalty: 1.5
         stop_tokens:
           - "<|im_end|>"
-  # No-speculative baseline profile — used by the matrix's
-  # speculative-on/off ablation cells so SIE-vs-raw-SGLang ratios can be
-  # measured independently of NEXTN's contribution.
+  # No-speculative companion for grammar-constrained requests on A100. It
+  # keeps the measured A100 runtime shape while disabling NEXTN, whose decode
+  # path bypasses the Outlines grammar FSM.
   no-spec:
     max_batch_tokens: 32768
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
-    # When speculative is off, KV budget can be higher (no draft KV
-    # competing for the static pool). Re-calibrate empirically before
-    # using in production.
-    kv_budget_tokens: 262144
+    # Keep the release-gated A100 budget used by the default profile. The
+    # non-speculative path may support more, but that requires a separate
+    # measured promotion.
+    kv_budget_tokens: 210944
     adapter_options:
       loadtime:
+        mlx_repo: mlx-community/Qwen3.5-4B-4bit
         mem_fraction_static: 0.85
         served_model_name: Qwen/Qwen3.5-4B
         disable_cuda_graph: true
@@ -279,5 +292,5 @@ profiles:
         stop_tokens:
           - "<|im_end|>"
   default-no-admission:
-    extends: a100-40gb
+    extends: default
     admission_enabled: false

@@ -25,7 +25,7 @@ use crate::ipc_types::{
     ReplaceModelConfigsRequest, ReplaceModelConfigsResponse, RunBatchRequest,
     SetPinnedModelsResponse, SignalGenerateCancelResponse, WorkerCapabilitiesResponse,
 };
-use crate::metrics::MetricsRegistry;
+use crate::runtime_state::RuntimeState;
 
 struct AdapterWorkerChild {
     index: usize,
@@ -56,7 +56,7 @@ pub struct AdapterWorkerPool {
     pinned_assignment_revision: AtomicU64,
     config_quarantined: AtomicBool,
     config_fanout_generation: AtomicU64,
-    metrics: Arc<MetricsRegistry>,
+    runtime_state: Arc<RuntimeState>,
 }
 
 impl AdapterWorkerPool {
@@ -65,7 +65,7 @@ impl AdapterWorkerPool {
         ipc_pool_size: usize,
         ipc_request_timeout_s: u64,
         model_ready_timeout_s: u64,
-        metrics: Arc<MetricsRegistry>,
+        runtime_state: Arc<RuntimeState>,
     ) -> Arc<Self> {
         let mut children = Vec::with_capacity(socket_paths.len().max(1));
         for (index, socket_path) in socket_paths.iter().enumerate() {
@@ -73,7 +73,7 @@ impl AdapterWorkerPool {
                 IpcClient::new_pool(socket_path, ipc_pool_size)
                     .with_timeout(Duration::from_secs(ipc_request_timeout_s))
                     .with_model_ready_timeout(Duration::from_secs(model_ready_timeout_s))
-                    .with_metrics(Arc::clone(&metrics)),
+                    .with_telemetry(runtime_state.telemetry.clone()),
             );
             children.push(Arc::new(AdapterWorkerChild {
                 index,
@@ -97,13 +97,12 @@ impl AdapterWorkerPool {
             pinned_assignment_revision: AtomicU64::new(0),
             config_quarantined: AtomicBool::new(false),
             config_fanout_generation: AtomicU64::new(0),
-            metrics,
+            runtime_state,
         });
-        pool.metrics
+        pool.runtime_state
             .worker_gpu_slots_total
             .set(pool.children.len() as i64);
-        pool.metrics.worker_gpu_slots_ready.set(0);
-        pool.refresh_all_child_metrics();
+        pool.runtime_state.worker_gpu_slots_ready.set(0);
         pool
     }
 
@@ -140,10 +139,9 @@ impl AdapterWorkerPool {
             (child.index, result)
         }))
         .await;
-        self.metrics
+        self.runtime_state
             .worker_gpu_slots_ready
             .set(self.ready_child_count() as i64);
-        self.refresh_all_child_metrics();
         out
     }
 
@@ -156,7 +154,6 @@ impl AdapterWorkerPool {
                 Ok(resp) => {
                     any_success = true;
                     self.mark_child_ready_from_health_success(child);
-                    self.refresh_child_metrics(child);
                     combined.has_generation_models |= resp.has_generation_models;
                     for model in resp.generation_models {
                         if !combined.generation_models.contains(&model) {
@@ -166,12 +163,11 @@ impl AdapterWorkerPool {
                 }
                 Err(e) => {
                     child.ready.store(false, Ordering::Release);
-                    self.refresh_child_metrics(child);
                     last_err = Some(e);
                 }
             }
         }
-        self.metrics
+        self.runtime_state
             .worker_gpu_slots_ready
             .set(self.ready_child_count() as i64);
         if any_success {
@@ -198,12 +194,10 @@ impl AdapterWorkerPool {
                             "adapter-worker-pool: child rejected config apply"
                         );
                     }
-                    self.refresh_child_metrics(child);
                     merge_apply_model_config_response(&mut combined, resp);
                 }
                 Err(e) => {
                     child.ready.store(false, Ordering::Release);
-                    self.refresh_child_metrics(child);
                     last_err = Some(e);
                 }
             }
@@ -237,12 +231,10 @@ impl AdapterWorkerPool {
                             "adapter-worker-pool: child rejected config replace"
                         );
                     }
-                    self.refresh_child_metrics(child);
                     merge_replace_model_configs_response(&mut combined, resp);
                 }
                 Err(e) => {
                     child.ready.store(false, Ordering::Release);
-                    self.refresh_child_metrics(child);
                     last_err = Some(e);
                 }
             }
@@ -303,7 +295,6 @@ impl AdapterWorkerPool {
             match child.ipc.set_pinned_models(child_models).await {
                 Ok(resp) => {
                     self.mark_child_ready_from_health_success(child);
-                    self.refresh_child_metrics(child);
                     applied &= resp.applied;
                     pinned_count = pinned_count.saturating_add(resp.pinned_count);
                 }
@@ -313,7 +304,7 @@ impl AdapterWorkerPool {
                 }
             }
         }
-        self.metrics
+        self.runtime_state
             .worker_gpu_slots_ready
             .set(self.ready_child_count() as i64);
         Ok(SetPinnedModelsResponse {
@@ -347,10 +338,8 @@ impl AdapterWorkerPool {
         let model_id = req.model_id.clone();
         let child = self.child_for_model(&model_id);
         child.inflight_batches.fetch_add(1, Ordering::AcqRel);
-        self.refresh_child_metrics(&child);
         let result = child.ipc.process_generate(req, on_event).await;
         child.inflight_batches.fetch_sub(1, Ordering::AcqRel);
-        self.refresh_child_metrics(&child);
         match &result {
             Ok(()) => self.mark_child_call_succeeded(&child),
             Err(_) => {
@@ -367,7 +356,6 @@ impl AdapterWorkerPool {
         child
             .pending_cost
             .fetch_add(clamp_u64_to_i64(cost), Ordering::AcqRel);
-        self.refresh_child_metrics(&child);
         child.index
     }
 
@@ -381,7 +369,6 @@ impl AdapterWorkerPool {
         };
         atomic_add_floor_zero(&child.pending_items, -(item_count as i64));
         atomic_add_floor_zero(&child.pending_cost, -clamp_u64_to_i64(cost));
-        self.refresh_child_metrics(&child);
     }
 
     pub fn record_model_pending_dequeue(&self, model_id: &str, item_count: usize, cost: u64) {
@@ -397,7 +384,6 @@ impl AdapterWorkerPool {
         let child = Arc::clone(&self.children[index]);
         atomic_add_floor_zero(&child.pending_items, -(item_count as i64));
         atomic_add_floor_zero(&child.pending_cost, -clamp_u64_to_i64(cost));
-        self.refresh_child_metrics(&child);
     }
 
     pub async fn drain_all(
@@ -428,7 +414,6 @@ impl AdapterWorkerPool {
                 .lock()
                 .expect("adapter worker child model set poisoned")
                 .remove(model_id);
-            self.refresh_child_metrics(&child);
         }
 
         let index = self.choose_child_index();
@@ -440,7 +425,6 @@ impl AdapterWorkerPool {
             .lock()
             .expect("adapter worker child model set poisoned")
             .insert(model_id.to_string());
-        self.refresh_child_metrics(&child);
         info!(
             model = %model_id,
             child_index = index,
@@ -508,7 +492,6 @@ impl AdapterWorkerPool {
                 .lock()
                 .expect("adapter worker child model set poisoned")
                 .remove(model_id);
-            self.refresh_child_metrics(&self.children[child_index]);
             debug!(
                 model = %model_id,
                 child_index,
@@ -519,18 +502,16 @@ impl AdapterWorkerPool {
 
     fn mark_child_call_failed(&self, child: &AdapterWorkerChild) {
         child.ready.store(false, Ordering::Release);
-        self.metrics
+        self.runtime_state
             .worker_gpu_slots_ready
             .set(self.ready_child_count() as i64);
-        self.refresh_child_metrics(child);
     }
 
     fn mark_child_call_succeeded(&self, child: &AdapterWorkerChild) {
         self.mark_child_ready_from_health_success(child);
-        self.metrics
+        self.runtime_state
             .worker_gpu_slots_ready
             .set(self.ready_child_count() as i64);
-        self.refresh_child_metrics(child);
     }
 
     fn mark_child_ready_from_health_success(&self, child: &AdapterWorkerChild) {
@@ -559,9 +540,8 @@ impl AdapterWorkerPool {
         self.config_quarantined.store(true, Ordering::Release);
         for child in &self.children {
             child.ready.store(false, Ordering::Release);
-            self.refresh_child_metrics(child);
         }
-        self.metrics.worker_gpu_slots_ready.set(0);
+        self.runtime_state.worker_gpu_slots_ready.set(0);
         debug!(
             operation,
             generation,
@@ -592,9 +572,8 @@ impl AdapterWorkerPool {
         }
         for child in &self.children {
             child.ready.store(false, Ordering::Release);
-            self.refresh_child_metrics(child);
         }
-        self.metrics.worker_gpu_slots_ready.set(0);
+        self.runtime_state.worker_gpu_slots_ready.set(0);
     }
 
     fn clear_config_quarantine_after_success(&self, operation: &'static str, generation: u64) {
@@ -614,42 +593,10 @@ impl AdapterWorkerPool {
         }
         for child in &self.children {
             child.ready.store(true, Ordering::Release);
-            self.refresh_child_metrics(child);
         }
-        self.metrics
+        self.runtime_state
             .worker_gpu_slots_ready
             .set(self.ready_child_count() as i64);
-    }
-
-    fn refresh_all_child_metrics(&self) {
-        for child in &self.children {
-            self.refresh_child_metrics(child);
-        }
-    }
-
-    fn refresh_child_metrics(&self, child: &AdapterWorkerChild) {
-        let child_label = child.index.to_string();
-        let labels = &[child_label.as_str()];
-        self.metrics
-            .worker_child_ready
-            .with_label_values(labels)
-            .set(i64::from(child.ready.load(Ordering::Acquire)));
-        self.metrics
-            .worker_child_models
-            .with_label_values(labels)
-            .set(child.model_count() as i64);
-        self.metrics
-            .worker_child_queue_depth
-            .with_label_values(labels)
-            .set(child.pending_items.load(Ordering::Acquire));
-        self.metrics
-            .worker_child_pending_cost
-            .with_label_values(labels)
-            .set(child.pending_cost.load(Ordering::Acquire));
-        self.metrics
-            .worker_child_inflight_batches
-            .with_label_values(labels)
-            .set(child.inflight_batches.load(Ordering::Acquire));
     }
 
     async fn run_child_batch<F, Fut>(
@@ -664,10 +611,8 @@ impl AdapterWorkerPool {
     {
         self.ensure_not_config_quarantined()?;
         child.inflight_batches.fetch_add(1, Ordering::AcqRel);
-        self.refresh_child_metrics(&child);
         let result = call(Arc::clone(&child.ipc)).await;
         child.inflight_batches.fetch_sub(1, Ordering::AcqRel);
-        self.refresh_child_metrics(&child);
         match &result {
             Ok(_) => self.mark_child_call_succeeded(&child),
             Err(_) => {
@@ -768,6 +713,21 @@ fn merge_replace_model_configs_response(
             .into_iter()
             .collect();
         existing.applied_models.sort();
+    }
+
+    let mut existing_profiles = existing.applied_profiles.clone();
+    let mut new_profiles = resp.applied_profiles;
+    existing_profiles.sort();
+    new_profiles.sort();
+    if existing_profiles != new_profiles {
+        existing.applied = false;
+        existing.applied_profiles = existing_profiles
+            .into_iter()
+            .chain(new_profiles)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        existing.applied_profiles.sort();
     }
 }
 
@@ -892,9 +852,15 @@ mod tests {
                         if sock.read_exact(&mut buf).await.is_err() {
                             return;
                         }
+                        let request: serde_json::Value =
+                            rmp_serde::from_slice(&buf).expect("decode cancel request");
+                        let request_id = request["request_id"]
+                            .as_str()
+                            .expect("cancel request envelope id")
+                            .to_owned();
                         let resp = crate::ipc_types::ResponseEnvelope {
                             version: crate::ipc_types::IPC_VERSION,
-                            request_id: "req-cancel".to_string(),
+                            request_id,
                             ok: true,
                             body: Some(SignalGenerateCancelResponse { matched: true }),
                             error: None,
@@ -921,33 +887,24 @@ mod tests {
         let paths: Vec<PathBuf> = (0..count)
             .map(|i| dir.path().join(format!("ipc-{i}.sock")))
             .collect();
-        let pool = AdapterWorkerPool::new(
-            &paths,
-            1,
-            60,
-            900,
-            Arc::new(MetricsRegistry::new().unwrap()),
-        );
+        let pool = AdapterWorkerPool::new(&paths, 1, 60, 900, Arc::new(RuntimeState::new()));
         for child in &pool.children {
             child.ready.store(true, Ordering::Release);
         }
-        pool.metrics
+        pool.runtime_state
             .worker_gpu_slots_ready
             .set(pool.ready_child_count() as i64);
-        pool.refresh_all_child_metrics();
         pool
     }
 
     fn pool_with_paths(paths: &[PathBuf]) -> Arc<AdapterWorkerPool> {
-        let pool =
-            AdapterWorkerPool::new(paths, 1, 1, 900, Arc::new(MetricsRegistry::new().unwrap()));
+        let pool = AdapterWorkerPool::new(paths, 1, 1, 900, Arc::new(RuntimeState::new()));
         for child in &pool.children {
             child.ready.store(true, Ordering::Release);
         }
-        pool.metrics
+        pool.runtime_state
             .worker_gpu_slots_ready
             .set(pool.ready_child_count() as i64);
-        pool.refresh_all_child_metrics();
         pool
     }
 
@@ -1039,7 +996,7 @@ mod tests {
 
         let first = pool.child_for_model("model-a").index;
         pool.children[first].ready.store(false, Ordering::Release);
-        pool.metrics
+        pool.runtime_state
             .worker_gpu_slots_ready
             .set(pool.ready_child_count() as i64);
         let second = pool.child_for_model("model-a").index;
@@ -1130,7 +1087,7 @@ mod tests {
         let server = spawn_cancel_ok(healthy_path.clone()).await;
         let pool = pool_with_paths(&[healthy_path, missing_path]);
 
-        assert_eq!(pool.metrics.worker_gpu_slots_ready.get(), 2);
+        assert_eq!(pool.runtime_state.worker_gpu_slots_ready.get(), 2);
 
         let resp = pool
             .signal_generate_cancel("req-cancel".to_string())
@@ -1140,7 +1097,7 @@ mod tests {
         assert!(resp.matched);
         assert!(pool.children[0].ready.load(Ordering::Acquire));
         assert!(!pool.children[1].ready.load(Ordering::Acquire));
-        assert_eq!(pool.metrics.worker_gpu_slots_ready.get(), 1);
+        assert_eq!(pool.runtime_state.worker_gpu_slots_ready.get(), 1);
 
         server.abort();
     }
@@ -1274,6 +1231,7 @@ mod tests {
                 bundle_config_hash: "h1".into(),
                 config_version: 1,
                 applied_models: vec!["model-a".into()],
+                applied_profiles: vec!["default".into()],
             },
         );
         merge_replace_model_configs_response(
@@ -1283,6 +1241,7 @@ mod tests {
                 bundle_config_hash: "h1".into(),
                 config_version: 1,
                 applied_models: vec!["model-b".into()],
+                applied_profiles: vec!["default".into()],
             },
         );
 
@@ -1291,6 +1250,36 @@ mod tests {
         assert_eq!(
             resp.applied_models,
             vec!["model-a".to_string(), "model-b".to_string()]
+        );
+        assert_eq!(resp.applied_profiles, vec!["default".to_string()]);
+    }
+
+    #[test]
+    fn replace_config_merge_rejects_child_profile_divergence() {
+        let mut combined = None;
+
+        for applied_profiles in [
+            vec!["default".into()],
+            vec!["default".into(), "fast".into()],
+        ] {
+            merge_replace_model_configs_response(
+                &mut combined,
+                ReplaceModelConfigsResponse {
+                    applied: true,
+                    bundle_config_hash: "h1".into(),
+                    config_version: 1,
+                    applied_models: vec!["model-a".into()],
+                    applied_profiles,
+                },
+            );
+        }
+
+        let resp = combined.expect("combined response");
+        assert!(!resp.applied);
+        assert_eq!(resp.applied_models, vec!["model-a".to_string()]);
+        assert_eq!(
+            resp.applied_profiles,
+            vec!["default".to_string(), "fast".to_string()]
         );
     }
 }

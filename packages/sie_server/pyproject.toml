@@ -1,6 +1,6 @@
 [project]
 name = "sie-server"
-version = "0.6.19"
+version = "0.6.24"
 description = "Search Inference Engine - GPU inference server for search workloads"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
@@ -63,7 +63,6 @@ dependencies = [
     "opentelemetry-sdk>=1.28,<2",
     "opentelemetry-instrumentation-fastapi>=0.49b0,<1",
     "opentelemetry-exporter-otlp>=1.28,<2",
-    "prometheus-client>=0.21,<1",
     # CLI / TUI
     "typer>=0.14,<1",
     "rich>=13,<14",
@@ -77,6 +76,7 @@ dependencies = [
     # the encode / score fast-path consumer — see
     # `sie_server.core.preprocessor.text.TextPreprocessor`.
     "blake3>=0.4,<1",
+    "python-multipart>=0.0.20,<1",
 ]
 
 [project.optional-dependencies]

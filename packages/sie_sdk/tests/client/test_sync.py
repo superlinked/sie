@@ -20,6 +20,16 @@ class TestSIEClientInit:
             assert call_kwargs["base_url"] == "http://localhost:8080"
             assert call_kwargs["timeout"] == 30.0
             assert call_kwargs["headers"]["Content-Type"] == "application/msgpack"
+            assert "limits" not in call_kwargs
+            client.close()
+
+    def test_max_connections(self) -> None:
+        """Client configures both total and keep-alive connection limits."""
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            client = SIEClient("http://localhost:8080", max_connections=512)
+            limits = mock_client.call_args.kwargs["limits"]
+            assert limits.max_connections == 512
+            assert limits.max_keepalive_connections == 512
             client.close()
 
     def test_custom_timeout(self) -> None:
@@ -198,6 +208,20 @@ class TestEncode:
         # Mock response with dense embedding
         mock_response = MagicMock()
         mock_response.status_code = 200
+        revision = "a" * 64
+        execution_identity = "b" * 64
+        mock_response.headers = {
+            "X-SIE-Model-Revision": revision,
+            "X-SIE-Execution-Identity-SHA256": execution_identity,
+            "X-SIE-Request-ID": "req-encode",
+            "X-SIE-Units-Input-Tokens": "2",
+            "X-SIE-Units-Pairs": "3",
+            "X-SIE-Units-Images": "1",
+            "X-SIE-Units-Pages": "4",
+            "X-SIE-Units-Output-Tokens": "5",
+            "X-SIE-Units-Audio-Ms": "17",
+            "X-SIE-Credits-Debited": "19",
+        }
         mock_response.content = msgpack.packb(
             {
                 "model": "bge-m3",
@@ -225,12 +249,30 @@ class TestEncode:
             assert result["id"] == "doc-1"
             assert isinstance(result["dense"], np.ndarray)
             assert result["dense"].shape == (4,)
+            assert result["request"] == {
+                "id": "req-encode",
+                "usage": {
+                    "input_tokens": 2,
+                    "pairs": 3,
+                    "images": 1,
+                    "pages": 4,
+                    "output_tokens": 5,
+                    "audio_ms": 17,
+                },
+                "credits_debited": 19,
+                "execution_identity_sha256": execution_identity,
+            }
+            assert client.last_model_revision == revision
             client.close()
 
     def test_encode_list_returns_list(self) -> None:
         """List of items input returns list of results."""
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.headers = {
+            "X-SIE-Request-ID": "req-encode-batch",
+            "X-SIE-Units-Input-Tokens": "2",
+        }
         mock_response.content = msgpack.packb(
             {
                 "model": "bge-m3",
@@ -249,6 +291,16 @@ class TestEncode:
 
             assert isinstance(results, list)
             assert len(results) == 2
+            assert (
+                results[0]["request"]
+                == results[1]["request"]
+                == {
+                    "id": "req-encode-batch",
+                    "usage": {"input_tokens": 2},
+                }
+            )
+            assert results[0]["request"] is not results[1]["request"]
+            assert results[0]["request"]["usage"] is not results[1]["request"]["usage"]
             client.close()
 
     def test_encode_with_output_types(self) -> None:
@@ -330,8 +382,10 @@ class TestEncode:
             np.testing.assert_array_equal(result["sparse"]["indices"], [100, 200, 300])
             client.close()
 
-    def test_encode_parses_multivector_result(self) -> None:
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_encode_parses_multivector_result(self, dtype: type[np.floating]) -> None:
         """Multivector results are parsed correctly."""
+        values = np.random.default_rng().random((3, 128)).astype(dtype)
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.content = msgpack.packb(
@@ -342,8 +396,8 @@ class TestEncode:
                         "multivector": {
                             "token_dims": 128,
                             "num_tokens": 3,
-                            "dtype": "float32",
-                            "values": np.random.default_rng().random((3, 128), dtype=np.float32),
+                            "dtype": "float16" if dtype is np.float16 else "float32",
+                            "values": values,
                         }
                     }
                 ],
@@ -359,6 +413,7 @@ class TestEncode:
             assert "multivector" in result
             assert isinstance(result["multivector"], np.ndarray)
             assert result["multivector"].shape == (3, 128)
+            assert result["multivector"].dtype == dtype
             client.close()
 
     def test_encode_single_item_empty_items_raises_server_error(self) -> None:
@@ -367,6 +422,11 @@ class TestEncode:
         """
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.headers = {
+            "X-SIE-Request-ID": "req-encode-desync",
+            "X-SIE-Units-Input-Tokens": "13",
+            "X-SIE-Credits-Debited": "5",
+        }
         mock_response.content = msgpack.packb({"model": "e5-mistral", "items": []}, use_bin_type=True)
 
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
@@ -378,6 +438,11 @@ class TestEncode:
             assert "e5-mistral" in str(excinfo.value)
             assert "0 embedding(s) for 1 input item(s)" in str(excinfo.value)
             assert excinfo.value.code == "ENCODE_RESULT_COUNT_MISMATCH"
+            assert excinfo.value.request == {
+                "id": "req-encode-desync",
+                "usage": {"input_tokens": 13},
+                "credits_debited": 5,
+            }
             client.close()
 
     def test_encode_batch_short_items_raises_server_error(self) -> None:
@@ -715,6 +780,11 @@ class TestScore:
         """score() returns a ScoreResult with sorted scores."""
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.headers = {
+            "X-SIE-Request-ID": "req-score",
+            "X-SIE-Units-Pairs": "3",
+            "X-SIE-Credits-Debited": "7",
+        }
         mock_response.content = msgpack.packb(
             {
                 "model": "bge-reranker-v2",
@@ -723,6 +793,7 @@ class TestScore:
                     {"item_id": "doc-2", "score": 0.72, "rank": 1},
                     {"item_id": "doc-3", "score": 0.31, "rank": 2},
                 ],
+                "usage": {"input_tokens": 91, "images": 2},
             },
             use_bin_type=True,
         )
@@ -746,12 +817,23 @@ class TestScore:
             assert result["scores"][0]["rank"] == 0
             assert result["scores"][0]["item_id"] == "doc-1"
             assert result["scores"][0]["score"] == 0.95
+            assert result["usage"] == {"input_tokens": 91, "images": 2}
+            assert result["request"] == {
+                "id": "req-score",
+                "usage": {"pairs": 3},
+                "credits_debited": 7,
+            }
             client.close()
 
     def test_score_with_instruction(self) -> None:
         """score() passes instruction correctly."""
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.headers = {
+            "X-SIE-Request-ID": " bad ",
+            "X-SIE-Units-Pairs": "-1",
+            "X-SIE-Credits-Debited": "1.5",
+        }
         mock_response.content = msgpack.packb(
             {
                 "model": "bge-reranker-v2",
@@ -763,7 +845,7 @@ class TestScore:
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
             mock_client.return_value.post.return_value = mock_response
             client = SIEClient("http://localhost:8080")
-            client.score(
+            result = client.score(
                 "bge-reranker-v2",
                 query={"text": "What is ML?"},
                 items=[{"text": "ML info"}],
@@ -773,6 +855,7 @@ class TestScore:
             call_args = mock_client.return_value.post.call_args
             request_body = msgpack.unpackb(call_args.kwargs["content"], raw=False)
             assert request_body["instruction"] == "Rank by relevance to the query"
+            assert "request" not in result
             client.close()
 
     def test_score_converts_image_query_and_items_to_wire_format(self) -> None:
@@ -840,6 +923,12 @@ class TestExtract:
         """Single item input returns single result (not list)."""
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.headers = {
+            "X-SIE-Request-ID": "req-extract",
+            "X-SIE-Units-Pages": "1",
+            "X-SIE-Units-Audio-Ms": "250",
+            "X-SIE-Credits-Debited": "11",
+        }
         mock_response.content = msgpack.packb(
             {
                 "model": "gliner-multi-v2.1",
@@ -870,12 +959,18 @@ class TestExtract:
             assert len(result["entities"]) == 2
             assert result["entities"][0]["text"] == "Apple"
             assert result["entities"][0]["label"] == "organization"
+            assert result["request"] == {
+                "id": "req-extract",
+                "usage": {"pages": 1, "audio_ms": 250},
+                "credits_debited": 11,
+            }
             client.close()
 
     def test_extract_list_returns_list(self) -> None:
         """List of items input returns list of results."""
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.headers = {}
         mock_response.content = msgpack.packb(
             {
                 "model": "gliner-multi-v2.1",
@@ -898,6 +993,7 @@ class TestExtract:
 
             assert isinstance(results, list)
             assert len(results) == 2
+            assert all("request" not in result for result in results)
             client.close()
 
     def test_extract_with_labels(self) -> None:

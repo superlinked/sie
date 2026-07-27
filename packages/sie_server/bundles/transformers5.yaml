@@ -4,13 +4,21 @@ default: false
 # Only adapters verified to work with transformers 5.x belong here.
 # Do NOT copy all default adapters — they may break with the newer version.
 adapters:
-- sie_server.adapters.lighton_ocr
+- sie_server.adapters.lighton_ocr.adapter
 - sie_server.adapters.glm_ocr
+- sie_server.adapters.gliner2.classification
+- sie_server.adapters.st_sparse_vision.adapter
 deps:
   # Transformers 5.x for models requiring newer architecture support
   # (e.g., LightOnOCR-2-1B needs LightOnOcrForConditionalGeneration,
-  # GLM-OCR needs GlmOcrForConditionalGeneration)
-  transformers: '>=5.0'
+  # GLM-OCR needs GlmOcrForConditionalGeneration). Floor raised to 5.14
+  # for the visual-SPLADE family (custom modeling code built on 5.13+);
+  # installs already resolved to the latest 5.x, so the floor is the
+  # guarantee, not a version change in practice.
+  transformers: '>=5.14,<6'
+  # Multimodal SparseEncoder (image documents) landed on the 5.6 line
+  # (st_sparse_vision adapter).
+  sentence-transformers: '>=5.6,<6'
   # Pin torch — flash-attn's unpinned torch dep can pull in 2.10+ which breaks torchvision
   torch: '>=2.9,<2.10'
   # No huggingface-hub override: transformers 5.x's own metadata
@@ -18,3 +26,5 @@ deps:
   # unsatisfiable against that pin and broke `uv run` resolution.
   # Let transformers drive the version.
   pillow: ''
+  # gliguard-LLMGuardrails-300M uses GLiNER2 classification APIs.
+  gliner2: '>=1.3.1,<2'

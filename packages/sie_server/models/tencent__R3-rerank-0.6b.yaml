@@ -1,0 +1,26 @@
+sie_id: tencent/R3-rerank-0.6b
+hf_id: tencent/R3-rerank-0.6b
+hf_revision: 6d0c3e486b8653578fd3f0e3c8e7871a0ce01953
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: {}
+  extract: null
+max_sequence_length: 4096
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.qwen2_flash_cross_encoder.adapter:Qwen2FlashCrossEncoderAdapter
+    adapter_options:
+      loadtime:
+        yes_token: "yes"
+        no_token: "no"
+        input_format: qwen3
+        score_mode: log_softmax
+        default_instruction: Given a user request, retrieve the agent skill that solves it.
+      runtime: {}

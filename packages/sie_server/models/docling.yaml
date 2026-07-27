@@ -1,5 +1,6 @@
 sie_id: docling
-package_backed: true
+hf_id: superlinked/docling-artifacts
+hf_revision: 6281da328c88328d2b36af759ff19d470b4f7411
 inputs:
   text: false
   image: true
@@ -14,15 +15,21 @@ profiles:
   default:
     max_batch_tokens: 1
     compute_precision: null
-    adapter_path: sie_server.adapters.docling:DoclingAdapter
+    adapter_path: sie_server.adapters.docling.adapter:DoclingAdapter
     adapter_options:
-      loadtime: {}
+      loadtime:
+        max_num_pages: 100
+        max_file_size_bytes: 16777216
+        document_timeout_s: 90
       runtime: {}
   ocr:
     max_batch_tokens: 1
     compute_precision: null
-    adapter_path: sie_server.adapters.docling:DoclingAdapter
+    adapter_path: sie_server.adapters.docling.adapter:DoclingAdapter
     adapter_options:
-      loadtime: {}
+      loadtime:
+        max_num_pages: 100
+        max_file_size_bytes: 16777216
+        document_timeout_s: 90
       runtime:
         ocr: true

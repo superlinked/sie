@@ -1,7 +1,8 @@
 [package]
 name = "sie-server-sidecar"
-version = "0.6.19"
+version = "0.6.24"
 edition = "2021"
+publish = false
 description = "SIE worker sidecar: NATS JetStream consumer, scheduler, IPC client, and GPU-independent prep for sie-server pods."
 
 [lib]
@@ -13,6 +14,9 @@ name = "sie-server-sidecar"
 path = "src/main.rs"
 
 [dependencies]
+sie-audio-prep = { path = "../sie_audio_prep", version = "0.6.20", features = ["msgpack"] }
+# Shared OTLP transport/proxy/resource/propagation plumbing (#2339).
+sie-telemetry = { path = "../sie_telemetry" }
 tokio = { version = "1", features = ["full"] }
 async-nats = "0.49"
 futures-util = "0.3"
@@ -26,6 +30,7 @@ serde = { version = "1", features = ["derive"] }
 # shadow-trace ULP diff. Do not drop this feature.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_bytes = "0.11"
+half = "2"
 rmp-serde = "1"
 # Low-level msgpack writer. Used to emit byte-for-byte compatible
 # `msgpack_numpy` sentinels on the result path so the Python SDK's
@@ -36,6 +41,7 @@ rmp = "0.8"
 # contain msgpack bin/ext fields (documents, images, numpy sentinels) that
 # cannot round-trip through serde_json::Value.
 rmpv = { version = "1", features = ["with-serde"] }
+sha2 = "0.10"
 
 clap = { version = "4", features = ["derive", "env"] }
 thiserror = "2"
@@ -43,24 +49,32 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
-# OpenTelemetry tracing — versions kept in lockstep with the gateway
+# OpenTelemetry tracing + canonical bounded metrics — versions kept in lockstep with the gateway
 # (`packages/sie_gateway/Cargo.toml`). OTel breaks compat across minor
 # versions, so bumping requires updating all four lines together.
-# `opentelemetry-http` is intentionally omitted: the sidecar extracts
-# trace context from the work-envelope W3C strings, not HTTP headers.
+# HTTP exporter support targets the managed Modal collector; trace context is
+# still extracted directly from the work-envelope W3C strings.
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "grpc-tonic",
+    "http-proto",
+    "trace",
+    "metrics",
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+    "tls-ring",
+] }
 tracing-opentelemetry = "0.33"
 
 async-trait = "0.1"
 bytes = "1"
 uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustix = { version = "1", features = ["fs"] }
 
-# Metrics server (matches gateway)
-prometheus = { version = "0.14", features = ["process"] }
+# Liveness/readiness probe server. Metrics are push-only OTLP.
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
@@ -88,3 +102,6 @@ cloud-storage = ["dep:object_store", "dep:url"]
 
 [dev-dependencies]
 tempfile = "3"
+# `testing` unlocks the in-memory exporter used to verify exact canonical metric
+# names, types, units, and bounded attributes without a live collector.
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }

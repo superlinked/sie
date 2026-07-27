@@ -10,7 +10,6 @@ from sie_server.api.helpers import (
     ModelStateChecker,
     RequestParser,
     ResponseBuilder,
-    extract_request_context,
     oom_retry_after_from_registry,
 )
 from sie_server.api.options import resolve_runtime_options
@@ -21,8 +20,8 @@ from sie_server.core.inference_output import ExtractOutput
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError, WorkerResult
 from sie_server.core.worker.handlers.extract import ExtractHandler
-from sie_server.observability.metrics import record_request
 from sie_server.observability.tracing import tracer
+from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 from sie_server.types.inputs import Item
 from sie_server.types.openapi import ExtractResponseModel
 from sie_server.types.requests import ExtractRequest
@@ -31,6 +30,7 @@ from sie_server.types.responses import (
     DetectedObject,
     Entity,
     ErrorCode,
+    ExtractItemErrorDetail,
     ExtractResponse,
     ExtractResult,
     Relation,
@@ -78,7 +78,7 @@ async def _extract_via_worker(
     # Create timing tracker for this request
     timing = RequestTiming()
 
-    # Check if a preprocessor is registered for this model (vision models like Florence-2, Donut)
+    # Check whether this model owns media preprocessing.
     # Use try/except for safety in tests where registry might be mocked
     preprocessor_registry = getattr(registry, "preprocessor_registry", None)
     config = None
@@ -90,30 +90,42 @@ async def _extract_via_worker(
 
     timing.start_tokenization()  # Using tokenization timing for prep phase
 
-    # Try to use preprocessor registry if available and model has image preprocessor
+    # Use exact booleans so MagicMock registries in narrow unit tests do not opt in.
     # Note: Check for real PreprocessorRegistry (not MagicMock which has all attributes)
     use_preprocessor = False
+    has_audio_preprocessor = False
+    has_image_preprocessor = False
     if preprocessor_registry is not None and config is not None:
         try:
-            # This will be True only if it's a real PreprocessorRegistry with has_preprocessor
-            # returning a boolean True. MagicMock returns a MagicMock which we catch below.
-            has_image = preprocessor_registry.has_preprocessor(model, "image")
-            # Must be a boolean True, not a MagicMock or other truthy value
-            use_preprocessor = has_image is True
+            has_audio_preprocessor = preprocessor_registry.has_preprocessor(model, "audio") is True
+            has_image_preprocessor = preprocessor_registry.has_preprocessor(model, "image") is True
+            use_preprocessor = has_audio_preprocessor or has_image_preprocessor
         except (AttributeError, TypeError):
             pass
 
     if use_preprocessor and preprocessor_registry is not None:
+        has_audio_input = any(item.audio is not None for item in items)
         has_images = any(item.images for item in items)
         try:
             has_text_preprocessor = preprocessor_registry.has_preprocessor(model, "text") is True
         except (AttributeError, TypeError):
             has_text_preprocessor = False
-        if not has_images and not has_text_preprocessor:
-            msg = f"Model '{model}' requires image input for extraction"
+        supported_input = (
+            (has_audio_input and has_audio_preprocessor)
+            or (has_images and has_image_preprocessor)
+            or (any(item.text is not None for item in items) and has_text_preprocessor)
+        )
+        if not supported_input:
+            if has_audio_preprocessor and has_image_preprocessor:
+                required = "audio or image"
+            elif has_audio_preprocessor:
+                required = "audio"
+            else:
+                required = "image"
+            msg = f"Model '{model}' requires {required} input for extraction"
             raise ValueError(msg)
 
-        # Vision model: use PreprocessorRegistry for CPU preprocessing in thread pool
+        # Run media preprocessing in the shared bounded CPU pool.
         # This uses the shared preprocessing thread pool for better resource utilization
         # Pass instruction and task for models like Florence-2 that need them in the prompt
         task = options.get("task") if options else None
@@ -217,16 +229,21 @@ def _build_response(
                 )
             )
 
-        results.append(
-            ExtractResult(
-                id=item_id,
-                entities=entities,
-                relations=relations,
-                classifications=classifications,
-                objects=objects,
-                data=result.get("data", {}),
-            )
+        item_result = ExtractResult(
+            id=item_id,
+            entities=entities,
+            relations=relations,
+            classifications=classifications,
+            objects=objects,
+            data=result.get("data", {}),
         )
+        error = result.get("error")
+        if isinstance(error, dict):
+            item_result["error"] = ExtractItemErrorDetail(
+                code=error["code"],
+                message=error["message"],
+            )
+        results.append(item_result)
 
     return ExtractResponse(
         model=model,
@@ -313,9 +330,6 @@ async def extract(
         registry = http_request.app.state.registry
         device = registry.device
 
-        # Extract request context for structured logging
-        ctx = extract_request_context(http_request, model, registry)
-
         # Validate model state using helper
         model_checker = ModelStateChecker(registry, model, span)
         model_checker.check_exists()
@@ -345,6 +359,9 @@ async def extract(
         output_schema = params.output_schema if params else None
         instruction = params.instruction if params else None
 
+        profile_name = (
+            str(params.options.get("profile") or "default") if params is not None and params.options else "default"
+        )
         options = resolve_runtime_options(config, params.options if params else None, span)
 
         # Request-level instruction takes precedence; fall back to profile instruction
@@ -358,8 +375,9 @@ async def extract(
             model,
             "extract",
             span,
-            ctx=ctx,
             oom_retry_after_s=oom_retry_after_from_registry(registry),
+            profile=profile_name,
+            item_count=len(items),
         )
         try:
             worker_result = await _extract_via_worker(
@@ -371,7 +389,8 @@ async def extract(
                 instruction=instruction,
                 options=options,
             )
-            extraction_results = ExtractHandler.format_output(cast("ExtractOutput", worker_result.output))
+            extract_output = cast("ExtractOutput", worker_result.output)
+            extraction_results = ExtractHandler.format_output(extract_output)
             timing = worker_result.timing
         except QueueFullError as e:
             raise error_handler.handle_queue_full(e) from e
@@ -385,16 +404,34 @@ async def extract(
         # Build response
         response = _build_response(model, items, extraction_results)
 
-        # Record successful request
-        record_request(
-            model=model,
-            endpoint="extract",
-            status="success",
-            timing=timing,
-            request_id=ctx.request_id,
-            api_key=ctx.api_key,
-            queue_depth=ctx.queue_depth,
-        )
+        if worker_telemetry_enabled():
+            units: dict[str, int] = {}
+            token_counts = extract_output.input_token_counts
+            if (
+                isinstance(token_counts, list)
+                and len(token_counts) == len(items)
+                and all(isinstance(count, int) and not isinstance(count, bool) for count in token_counts)
+            ):
+                units["input_tokens"] = sum(token_counts)
+            pages = extract_output.pages
+            if (
+                isinstance(pages, list)
+                and len(pages) == len(items)
+                and all(isinstance(page_count, int) and not isinstance(page_count, bool) for page_count in pages)
+            ):
+                units["pages"] = sum(pages)
+            worker_telemetry().item_completed(
+                operation="extract",
+                outcome="success",
+                model=model,
+                profile=profile_name,
+                duration_s=timing.total_ms / 1000.0,
+                item_count=len(items),
+                tokenization_s=timing.tokenization_ms / 1000.0,
+                inference_s=timing.inference_ms / 1000.0,
+                postprocessing_s=timing.postprocessing_ms / 1000.0,
+                units=units,
+            )
 
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)

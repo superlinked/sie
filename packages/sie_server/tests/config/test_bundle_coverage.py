@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 from sie_sdk.bundle_utils import match_bundle_models
+from sie_server.core.loader import load_model_config
 
 SIE_SERVER_ROOT = Path(__file__).resolve().parents[2]
 BUNDLES_DIR = SIE_SERVER_ROOT / "bundles"
@@ -50,6 +51,17 @@ def _load_model_adapter_refs() -> dict[str, dict[str, str]]:
             per_profile[pname] = ap.split(":", 1)[0]
         if per_profile:
             out[mf.name] = per_profile
+    return out
+
+
+def _load_model_generation_flags() -> dict[str, bool]:
+    """Return whether each base model declares the generation primitive."""
+    out: dict[str, bool] = {}
+    for model_yaml in sorted(MODELS_DIR.glob("*.yaml")):
+        data = yaml.safe_load(model_yaml.read_text()) or {}
+        model_id = data.get("sie_id")
+        if model_id:
+            out[model_id] = (data.get("tasks") or {}).get("generate") is not None
     return out
 
 
@@ -124,6 +136,43 @@ def test_candle_bundle_only_exposes_profile_variants() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("model_id", "transformers_bundle"),
+    [
+        ("lightonai/LightOnOCR-2-1B", "transformers5.yaml"),
+        ("PaddlePaddle/PaddleOCR-VL-1.5", "default.yaml"),
+        ("zai-org/GLM-OCR", "transformers5.yaml"),
+    ],
+)
+def test_generative_ocr_defaults_to_isolated_sglang_extract_and_keeps_transformers_fallback(
+    model_id: str,
+    transformers_bundle: str,
+) -> None:
+    extract_models = match_bundle_models(BUNDLES_DIR / "sglang-vision-extract.yaml", MODELS_DIR)
+    assert model_id in extract_models
+    assert f"{model_id}:transformers" not in extract_models
+
+    generation_models = match_bundle_models(BUNDLES_DIR / "sglang.yaml", MODELS_DIR)
+    assert model_id not in generation_models
+
+    transformers_models = match_bundle_models(BUNDLES_DIR / transformers_bundle, MODELS_DIR)
+    assert model_id not in transformers_models
+    assert f"{model_id}:transformers" in transformers_models
+
+
+@pytest.mark.parametrize("bundle_yaml", sorted(BUNDLES_DIR.glob("*.yaml")))
+def test_bundle_does_not_mix_generation_and_non_generation_models(bundle_yaml: Path) -> None:
+    generation_flags = _load_model_generation_flags()
+    matched = match_bundle_models(bundle_yaml, MODELS_DIR)
+    generation = sorted(model_id for model_id in matched if generation_flags[model_id.split(":", 1)[0]])
+    non_generation = sorted(model_id for model_id in matched if not generation_flags[model_id.split(":", 1)[0]])
+
+    assert not (generation and non_generation), (
+        f"{bundle_yaml.name} mixes generation and non-generation worker task classes; "
+        f"generation={generation}, non_generation={non_generation}"
+    )
+
+
 def test_gte_multilingual_candle_profile_targets_rust_fp16() -> None:
     model_yaml = MODELS_DIR / "Alibaba-NLP__gte-multilingual-base.yaml"
     data = yaml.safe_load(model_yaml.read_text()) or {}
@@ -140,6 +189,73 @@ def test_gte_multilingual_candle_profile_targets_rust_fp16() -> None:
         BUNDLES_DIR / "candle.yaml",
         MODELS_DIR,
     )
+
+
+def test_snowflake_arctic_candle_profile_targets_rust_fp16() -> None:
+    model_yaml = MODELS_DIR / "Snowflake__snowflake-arctic-embed-l-v2.0.yaml"
+    data = yaml.safe_load(model_yaml.read_text()) or {}
+    profiles = data["profiles"]
+
+    default = profiles["default"]
+    candle = profiles["candle"]
+
+    assert default["adapter_path"] == "sie_server.adapters.xlm_roberta_flash:XLMRobertaFlashAdapter"
+    assert default["compute_precision"] is None
+    assert candle["extends"] == "default"
+    assert candle["adapter_path"] == "sie_server_rust.adapters.candle:CandleEmbeddingAdapter"
+    assert candle["compute_precision"] == "float16"
+    assert "Snowflake/snowflake-arctic-embed-l-v2.0:candle" in match_bundle_models(
+        BUNDLES_DIR / "candle.yaml",
+        MODELS_DIR,
+    )
+
+
+def test_splade_pp_exposes_checkpoint_sequence_capacity() -> None:
+    model_yaml = MODELS_DIR / "prithivida__Splade_PP_en_v2.yaml"
+    data = yaml.safe_load(model_yaml.read_text()) or {}
+    config = load_model_config(model_yaml)
+
+    assert data["max_sequence_length"] == 512
+    assert data["profiles"]["default"]["adapter_options"]["runtime"]["max_seq_length"] == 128
+    assert data["profiles"]["sentence_transformer"]["adapter_options"]["loadtime"]["max_seq_length"] == 128
+    assert data["profiles"]["candle"]["adapter_options"]["loadtime"]["max_seq_length"] == 128
+    assert data["profiles"]["candle"]["adapter_options"]["runtime"]["max_seq_length"] == 128
+    assert config.resolve_profile("candle").loadtime["max_seq_length"] == 128
+    assert config.resolve_profile("candle").runtime["max_seq_length"] == 128
+
+
+@pytest.mark.parametrize(
+    "model_file",
+    [
+        "Snowflake__snowflake-arctic-embed-m-v2.0.yaml",
+        "ibm-granite__granite-embedding-english-r2.yaml",
+    ],
+)
+def test_cosqa_precision_sensitive_defaults_use_reference_adapter(model_file: str) -> None:
+    data = yaml.safe_load((MODELS_DIR / model_file).read_text()) or {}
+
+    assert data["profiles"]["default"]["compute_precision"] is None
+    assert data["profiles"]["default"]["adapter_path"] == (
+        "sie_server.adapters.sentence_transformer:SentenceTransformerDenseAdapter"
+    )
+
+
+def test_granite_candle_profile_keeps_explicit_bfloat16_precision() -> None:
+    model_yaml = MODELS_DIR / "ibm-granite__granite-embedding-english-r2.yaml"
+    config = load_model_config(model_yaml)
+
+    assert config.resolve_profile("candle").compute_precision == "bfloat16"
+
+
+def test_multilingual_e5_instruct_profiles_keep_catalog_instruction() -> None:
+    model_yaml = MODELS_DIR / "intfloat__multilingual-e5-large-instruct.yaml"
+    data = yaml.safe_load(model_yaml.read_text()) or {}
+    expected = "Given a web search query, retrieve relevant passages that answer the query"
+
+    for profile_name in ("default", "candle"):
+        runtime = data["profiles"][profile_name]["adapter_options"]["runtime"]
+        assert runtime["default_instruction"] == expected
+        assert "instruction" not in runtime
 
 
 @pytest.mark.parametrize("bundle_yaml", sorted(BUNDLES_DIR.glob("*.yaml")))

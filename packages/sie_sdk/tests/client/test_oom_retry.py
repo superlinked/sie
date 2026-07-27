@@ -116,6 +116,7 @@ class TestSyncOomRetry:
             result = client.extract("gliner", {"text": "hi"}, labels=["x"])
             assert isinstance(result, dict)
             assert mock_client.return_value.post.call_count == 2
+            assert client.last_retry_count == 1
             client.close()
 
     def test_provision_timeout_bounds_oom_retry_wall_time(self) -> None:

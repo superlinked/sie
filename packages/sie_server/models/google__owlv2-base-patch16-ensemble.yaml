@@ -1,5 +1,6 @@
 sie_id: google/owlv2-base-patch16-ensemble
 hf_id: google/owlv2-base-patch16-ensemble
+hf_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d
 inputs:
   text: false
   image: true
@@ -13,7 +14,7 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: float16
-    adapter_path: sie_server.adapters.owlv2:Owlv2Adapter
+    adapter_path: sie_server.adapters.owlv2.adapter:Owlv2Adapter
     adapter_options:
       loadtime:
         score_threshold: 0.1

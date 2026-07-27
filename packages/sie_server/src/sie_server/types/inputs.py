@@ -4,10 +4,11 @@ These types define the structure of items received over the wire after msgpack
 deserialization. The SDK converts flexible Python types (PIL.Image, numpy arrays,
 file paths) to these wire format types before transport.
 
-Using TypedDict for zero runtime overhead - validation is done manually where needed.
+Mapping-shaped media uses TypedDict where permissive compatibility is required;
+audio uses a strict msgspec struct because it crosses a bounded binary boundary.
 """
 
-from typing import Any, TypedDict, TypeGuard, cast
+from typing import Any, Literal, TypedDict, TypeGuard, cast, overload
 
 import msgspec
 
@@ -26,7 +27,7 @@ class ImageInput(TypedDict, total=False):
     format: str | None
 
 
-class AudioInput(TypedDict, total=False):
+class AudioInput(msgspec.Struct, forbid_unknown_fields=True, omit_defaults=True):
     """Audio input for audio models (wire format).
 
     On the wire, audio is sent as bytes with format and sample rate metadata.
@@ -38,8 +39,30 @@ class AudioInput(TypedDict, total=False):
     """
 
     data: bytes
-    format: str | None
-    sample_rate: int | None
+    format: str | None = None
+    sample_rate: int | None = None
+
+    @overload
+    def __getitem__(self, key: Literal["data"]) -> bytes:
+        pass
+
+    @overload
+    def __getitem__(self, key: Literal["format"]) -> str | None:
+        pass
+
+    @overload
+    def __getitem__(self, key: Literal["sample_rate"]) -> int | None:
+        pass
+
+    def __getitem__(self, key: str) -> object:
+        if key not in {"data", "format", "sample_rate"}:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def get(self, key: str, default: object = None) -> object:
+        if key not in {"data", "format", "sample_rate"}:
+            return default
+        return getattr(self, key)
 
 
 class VideoInput(TypedDict, total=False):
@@ -81,9 +104,9 @@ class Item(msgspec.Struct):
 
     id: str | None = None
     text: str | None = None
-    # These reference the typed *Input TypedDicts (data: bytes) rather than
-    # dict[str, Any] so msgspec base64-decodes the `data` field on the JSON
-    # path, matching the msgpack path. See issue #1026.
+    # These reference typed media inputs (data: bytes) rather than dict[str, Any]
+    # so msgspec base64-decodes the `data` field on the JSON path, matching the
+    # msgpack path. See issue #1026.
     images: list[ImageInput] | None = None
     audio: AudioInput | None = None
     video: VideoInput | None = None
@@ -109,14 +132,16 @@ def is_image_input(obj: Any) -> TypeGuard[ImageInput]:
 
 
 def is_audio_input(obj: Any) -> TypeGuard[AudioInput]:
-    """Check if obj is a valid AudioInput dict.
+    """Check if obj is a valid AudioInput struct or compatible mapping.
 
     Args:
         obj: Object to validate.
 
     Returns:
-        True if obj is a dict with 'data' key containing bytes.
+        True if obj carries a 'data' field containing bytes.
     """
+    if isinstance(obj, AudioInput):
+        return isinstance(obj.data, bytes)
     return isinstance(obj, dict) and "data" in obj and isinstance(obj.get("data"), bytes)
 
 
@@ -161,10 +186,18 @@ def is_item(obj: Any) -> TypeGuard[Item | dict[str, Any]]:
 # =============================================================================
 
 
-class InvalidMediaError(ValueError):
+class InvalidInputError(ValueError):
+    """A caller-controlled inference input violates an adapter contract.
+
+    This typed boundary distinguishes invalid requests from internal inference
+    failures on both the direct HTTP and queue/sidecar paths.
+    """
+
+
+class InvalidMediaError(InvalidInputError):
     """A media input's ``data`` field is missing or not bytes.
 
-    Subclasses ``ValueError`` on purpose so both request paths surface it as a
+    Subclasses :class:`InvalidInputError` so both request paths surface it as
     structured ``INVALID_INPUT`` (HTTP 400) rather than a generic 500:
 
     - HTTP / in-process: the endpoints' ``except ValueError`` routes it through
@@ -200,6 +233,14 @@ def media_bytes(media: object, *, kind: str = "media") -> bytes:
         InvalidMediaError: If ``media`` is not a mapping, lacks ``data``, or
             ``data`` is not a bytes-like object.
     """
+    if isinstance(media, AudioInput):
+        data = media.data
+        if isinstance(data, bytes):
+            return data
+        raise InvalidMediaError(
+            f"{kind} data must be bytes, got {type(data).__name__} "
+            "(base64 JSON strings must be decoded to bytes before inference)"
+        )
     if not isinstance(media, dict):
         raise InvalidMediaError(f"{kind} input must be a mapping with a 'data' field")
     mapping = cast("dict[str, Any]", media)
@@ -236,8 +277,9 @@ def decode_item(raw: dict[str, Any]) -> Item:
     same ``Item`` contract through :func:`msgspec.convert`, so the queue path
     rejects type violations exactly where the HTTP path does and base64-decodes
     ``str`` media ``data`` to ``bytes`` the same way the JSON path does. The
-    ``*Input`` TypedDicts are ``total=False``, so missing/empty media ``data``
-    is still enforced at point of use by :func:`media_bytes`.
+    Permissive ``*Input`` TypedDicts are ``total=False``, so missing/empty
+    media ``data`` is still enforced at point of use by :func:`media_bytes`;
+    the strict audio struct rejects unknown fields during conversion.
 
     Args:
         raw: The wire-format item mapping. The SDK ships ``content`` as an

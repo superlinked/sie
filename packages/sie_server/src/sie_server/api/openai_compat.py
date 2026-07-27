@@ -15,19 +15,20 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from typing import Annotated, Literal
 
 import numpy as np
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from sie_server.api.helpers import extract_request_context, oom_retry_after_from_registry
+from sie_server.api.helpers import check_sdk_version, oom_retry_after_from_registry
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.core.encode_pipeline import EncodePipeline
 from sie_server.core.oom import is_oom_error
 from sie_server.core.worker import QueueFullError
-from sie_server.observability.metrics import record_request
 from sie_server.observability.tracing import tracer
+from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 from sie_server.types.inputs import Item
 from sie_server.types.responses import ErrorCode
 
@@ -327,6 +328,7 @@ async def create_embeddings(
     """
     # Validate machine profile header
     validate_machine_profile_header(x_machine_profile)
+    check_sdk_version(http_request)
 
     model = request.model
     encoding_format = request.encoding_format or "float"
@@ -335,7 +337,6 @@ async def create_embeddings(
         span.set_attribute("model", model)
 
         registry = http_request.app.state.registry
-        ctx = extract_request_context(http_request, model, registry)
 
         # Check if model exists first (needed for token decoding)
         if not registry.has_model(model):
@@ -385,6 +386,8 @@ async def create_embeddings(
         items = [Item(text=text) for text in texts]
 
         # Run encoding
+        telemetry_enabled = worker_telemetry_enabled()
+        inference_started = time.perf_counter() if telemetry_enabled else None
         try:
             results, timing = await EncodePipeline.run_encode(
                 registry=registry,
@@ -398,14 +401,15 @@ async def create_embeddings(
             )
         except QueueFullError as e:
             span.set_attribute("error", "queue_full")
-            record_request(
-                model=model,
-                endpoint="embeddings",
-                status="queue_full",
-                request_id=ctx.request_id,
-                api_key=ctx.api_key,
-                queue_depth=ctx.queue_depth,
-            )
+            if inference_started is not None:
+                worker_telemetry().item_completed(
+                    operation="embeddings",
+                    outcome="retry",
+                    model=model,
+                    profile="default",
+                    duration_s=time.perf_counter() - inference_started,
+                    item_count=len(items),
+                )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
@@ -425,14 +429,15 @@ async def create_embeddings(
                 # it as a terminal 500. See #1604.
                 logger.warning("Embeddings OOM for model %s, returning 503 RESOURCE_EXHAUSTED: %s", model, e)
                 span.set_attribute("error", "resource_exhausted")
-                record_request(
-                    model=model,
-                    endpoint="embeddings",
-                    status="error",
-                    request_id=ctx.request_id,
-                    api_key=ctx.api_key,
-                    queue_depth=ctx.queue_depth,
-                )
+                if inference_started is not None:
+                    worker_telemetry().item_completed(
+                        operation="embeddings",
+                        outcome="retry",
+                        model=model,
+                        profile="default",
+                        duration_s=time.perf_counter() - inference_started,
+                        item_count=len(items),
+                    )
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail={
@@ -446,14 +451,15 @@ async def create_embeddings(
                 ) from e
             logger.exception("Inference error for model %s", model)
             span.set_attribute("error", "inference_error")
-            record_request(
-                model=model,
-                endpoint="embeddings",
-                status="error",
-                request_id=ctx.request_id,
-                api_key=ctx.api_key,
-                queue_depth=ctx.queue_depth,
-            )
+            if inference_started is not None:
+                worker_telemetry().item_completed(
+                    operation="embeddings",
+                    outcome="error",
+                    model=model,
+                    profile="default",
+                    duration_s=time.perf_counter() - inference_started,
+                    item_count=len(items),
+                )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={
@@ -465,14 +471,24 @@ async def create_embeddings(
                 },
             ) from e
 
-        # Build and return response
-        record_request(
-            model=model,
-            endpoint="embeddings",
-            status="success",
-            timing=timing,
-            request_id=ctx.request_id,
-            api_key=ctx.api_key,
-            queue_depth=ctx.queue_depth,
-        )
+        if telemetry_enabled:
+            units = None
+            if timing.input_token_counts is not None:
+                counts = timing.input_token_counts
+                if len(counts) == len(items) and all(
+                    isinstance(count, int) and not isinstance(count, bool) for count in counts
+                ):
+                    units = {"input_tokens": sum(counts)}
+            worker_telemetry().item_completed(
+                operation="embeddings",
+                outcome="success",
+                model=model,
+                profile="default",
+                duration_s=timing.total_ms / 1000.0,
+                item_count=len(items),
+                tokenization_s=timing.tokenization_ms / 1000.0,
+                inference_s=timing.inference_ms / 1000.0,
+                postprocessing_s=timing.postprocessing_ms / 1000.0,
+                units=units,
+            )
         return _build_embeddings_response(results, texts, model, encoding_format, token_count)

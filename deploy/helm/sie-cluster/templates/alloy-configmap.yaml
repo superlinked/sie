@@ -9,11 +9,17 @@ kind: ConfigMap
 metadata:
   # Name and key must stay in sync with alloy.alloy.configMap.name / key in values.yaml.
   name: {{ .Values.alloy.alloy.configMap.name }}
-  namespace: {{ include "sie-cluster.namespace" . }}
+  # The Alloy dependency deploys in Helm's release namespace and ConfigMaps
+  # cannot be mounted across namespaces.
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "sie-cluster.labels" . | nindent 4 }}
 data:
   {{ .Values.alloy.alloy.configMap.key }}: |
-    {{- $lokiUrl := default "http://loki:3100/loki/api/v1/push" (get (get .Values.alloy "logs") "lokiUrl") -}}
+    {{- $configuredLokiUrl := default "" (get (get .Values.alloy "logs") "lokiUrl") -}}
+    {{- $lokiUrl := $configuredLokiUrl -}}
+    {{- if or (not $lokiUrl) (eq $lokiUrl "http://loki:3100/loki/api/v1/push") -}}
+    {{- $lokiUrl = printf "%s/loki/api/v1/push" (include "sie-cluster.loki.httpEndpoint" .) -}}
+    {{- end -}}
     {{- .Files.Get "files/alloy/config.alloy" | replace "http://loki:3100/loki/api/v1/push" $lokiUrl | nindent 4 }}
 {{- end }}

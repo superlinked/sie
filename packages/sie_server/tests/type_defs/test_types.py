@@ -1,5 +1,6 @@
 """Tests for types used in the SIE Server API."""
 
+import msgspec
 import numpy as np
 import pytest
 from sie_server.types.inputs import Item
@@ -143,9 +144,7 @@ class TestRequestTypes:
 
     def test_encode_request_empty_items_rejected(self) -> None:
         """EncodeRequest with empty items raises ValidationError in __post_init__."""
-        import msgspec as _msgspec
-
-        with pytest.raises(_msgspec.ValidationError, match="items"):
+        with pytest.raises(msgspec.ValidationError, match="items"):
             EncodeRequest(items=[])
 
     def test_encode_params_defaults(self) -> None:
@@ -163,6 +162,16 @@ class TestRequestTypes:
         )
         assert req.query.id == "q1"
         assert len(req.items) == 1
+
+    def test_score_request_candidate_bounds(self) -> None:
+        assert len(EncodeRequest(items=[RequestItem(text="item")] * 1001).items) == 1001
+        with pytest.raises(msgspec.ValidationError, match="must not be empty"):
+            ScoreRequest(query=RequestItem(text="query"), items=[])
+        with pytest.raises(msgspec.ValidationError, match="at most 1000"):
+            ScoreRequest(
+                query=RequestItem(text="query"),
+                items=[RequestItem(text="candidate")] * 1001,
+            )
 
     def test_extract_request(self) -> None:
         """ExtractRequest for NER."""

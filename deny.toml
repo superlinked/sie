@@ -1,0 +1,85 @@
+# cargo-deny policy for the workspace (sie-gateway, sie-gateway-cloud,
+# sie-server-sidecar, sie-audio-prep) — merged from the former per-crate
+# packages/sie_gateway/deny.toml + packages/sie_audio_prep/deny.toml (#2339).
+# packages/sie_server_rust is not a workspace member (see Cargo.toml) and,
+# as before this merge, is not deny-audited.
+#
+# Run with: `mise run gateway-deny`
+# Docs:     https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true        # audit cloud-storage feature deps too
+no-default-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+# Each ignored entry must carry a reason and an upstream-fix path. When
+# the corresponding transitive bump lands (kube-rs, async-nats), drop the
+# entry — `cargo-deny` warns on unmatched ignores.
+ignore = [
+    # Two quick-xml 0.40.1 DoS advisories, both fixed in the breaking 0.41.0
+    # release. quick-xml comes in only transitively via object_store 0.14.0
+    # (latest), which pins quick-xml ^0.40.1, so there is no version to update
+    # to yet, and it parses only trusted cloud-provider API responses, not
+    # attacker-controlled XML. Drop both when object_store ships a release
+    # depending on quick-xml >=0.41.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml <0.41 quadratic duplicate-attribute parse DoS (upstream #969); transitive via object_store 0.14.0 (pins ^0.40.1); awaiting upstream bump" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml <0.41 namespace-declaration allocation DoS (upstream #970); transitive via object_store 0.14.0 (pins ^0.40.1); awaiting upstream bump" },
+    # Surfaced when the sidecar joined deny coverage (#2339): `paste` is
+    # archived-unmaintained (no vulnerability), transitive via
+    # tokenizers 0.23 -> macro_rules_attribute. Drop when tokenizers ships a
+    # release off macro_rules_attribute/paste.
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained (archived, no vuln); transitive via tokenizers 0.23 macro_rules_attribute; awaiting upstream bump" },
+]
+
+[licenses]
+version = 2
+# The workspace crates are `publish = false` or first-party; skip license
+# validation for them, only audit external dependency licenses.
+private = { ignore = true }
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+# Symphonia (sie-audio-prep) is consumed unmodified under MPL-2.0 file-level
+# weak copyleft; the crate remains Apache-2.0 and documents its dependency
+# licenses. Scoped as per-crate exceptions rather than a global allow so the
+# gateway/sidecar keep their historical no-MPL posture for any future dep.
+exceptions = [
+    { name = "symphonia", allow = ["MPL-2.0"] },
+    { name = "symphonia-adapter-libopus", allow = ["MPL-2.0"] },
+    { name = "symphonia-bundle-flac", allow = ["MPL-2.0"] },
+    { name = "symphonia-bundle-mp3", allow = ["MPL-2.0"] },
+    { name = "symphonia-codec-aac", allow = ["MPL-2.0"] },
+    { name = "symphonia-codec-alac", allow = ["MPL-2.0"] },
+    { name = "symphonia-codec-pcm", allow = ["MPL-2.0"] },
+    { name = "symphonia-codec-vorbis", allow = ["MPL-2.0"] },
+    { name = "symphonia-common", allow = ["MPL-2.0"] },
+    { name = "symphonia-core", allow = ["MPL-2.0"] },
+    { name = "symphonia-format-isomp4", allow = ["MPL-2.0"] },
+    { name = "symphonia-format-mkv", allow = ["MPL-2.0"] },
+    { name = "symphonia-format-ogg", allow = ["MPL-2.0"] },
+    { name = "symphonia-format-riff", allow = ["MPL-2.0"] },
+    { name = "symphonia-metadata", allow = ["MPL-2.0"] },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

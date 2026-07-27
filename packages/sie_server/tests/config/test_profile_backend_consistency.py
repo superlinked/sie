@@ -165,3 +165,15 @@ def test_guardian_profiles_carry_guard_threshold() -> None:
         f"{missing}. Non-extending profiles do not inherit it, so the variant would "
         f"skip thresholding. Duplicate the guard block into each profile's loadtime."
     )
+
+
+def test_guardian_task_pins_harm_risk() -> None:
+    """Granite's launch contract must not depend on a tokenizer default."""
+    if not GUARDIAN_PROFILE.exists():
+        pytest.skip(f"Guardian profile not present at {GUARDIAN_PROFILE}")
+    data = yaml.safe_load(GUARDIAN_PROFILE.read_text()) or {}
+
+    generate = (data.get("tasks") or {}).get("generate") or {}
+    assert generate.get("chat_template_kwargs") == {
+        "guardian_config": {"risk_name": "harm"},
+    }

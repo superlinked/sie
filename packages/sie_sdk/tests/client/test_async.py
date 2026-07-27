@@ -16,8 +16,8 @@ def _make_response(status_code: int = 200, content: bytes = b"", headers: dict |
     return _AioResponse(status_code, content, headers or {})
 
 
-def _make_msgpack_response(data: dict, status_code: int = 200) -> _AioResponse:
-    return _AioResponse(status_code, msgpack.packb(data, use_bin_type=True), {})
+def _make_msgpack_response(data: dict, status_code: int = 200, headers: dict[str, str] | None = None) -> _AioResponse:
+    return _AioResponse(status_code, msgpack.packb(data, use_bin_type=True), headers or {})
 
 
 def _make_json_response(data: dict, status_code: int = 200) -> _AioResponse:
@@ -295,7 +295,13 @@ class TestAsyncEncode:
                         },
                     }
                 ],
-            }
+            },
+            headers={
+                "X-SIE-Request-ID": "req-async-encode",
+                "X-SIE-Units-Input-Tokens": "2",
+                "X-SIE-Credits-Debited": "5",
+                "X-SIE-Execution-Identity-SHA256": "b" * 64,
+            },
         )
 
         client = SIEAsyncClient("http://localhost:8080")
@@ -306,6 +312,12 @@ class TestAsyncEncode:
         assert result["id"] == "doc-1"
         assert isinstance(result["dense"], np.ndarray)
         assert result["dense"].shape == (4,)
+        assert result["request"] == {
+            "id": "req-async-encode",
+            "usage": {"input_tokens": 2},
+            "credits_debited": 5,
+            "execution_identity_sha256": "b" * 64,
+        }
         await client.close()
 
     @pytest.mark.asyncio
@@ -317,7 +329,12 @@ class TestAsyncEncode:
                     {"dense": {"dims": 4, "dtype": "float32", "values": np.array([1.0, 2.0, 3.0, 4.0])}},
                     {"dense": {"dims": 4, "dtype": "float32", "values": np.array([5.0, 6.0, 7.0, 8.0])}},
                 ],
-            }
+            },
+            headers={
+                "X-SIE-Request-ID": " bad ",
+                "X-SIE-Units-Input-Tokens": "-1",
+                "X-SIE-Credits-Debited": "1.5",
+            },
         )
 
         client = SIEAsyncClient("http://localhost:8080")
@@ -326,12 +343,20 @@ class TestAsyncEncode:
 
         assert isinstance(results, list)
         assert len(results) == 2
+        assert all("request" not in result for result in results)
         await client.close()
 
     @pytest.mark.asyncio
     async def test_encode_single_item_empty_items_raises_server_error(self) -> None:
         """Empty ``items`` for a single input raises ``ServerError`` not ``IndexError`` (#1526)."""
-        resp = _make_msgpack_response({"model": "e5-mistral", "items": []})
+        resp = _make_msgpack_response(
+            {"model": "e5-mistral", "items": []},
+            headers={
+                "X-SIE-Request-ID": "req-async-encode-desync",
+                "X-SIE-Units-Input-Tokens": "13",
+                "X-SIE-Credits-Debited": "5",
+            },
+        )
 
         client = SIEAsyncClient("http://localhost:8080")
         client._post = AsyncMock(return_value=resp)  # type: ignore
@@ -340,6 +365,11 @@ class TestAsyncEncode:
         assert "e5-mistral" in str(excinfo.value)
         assert "0 embedding(s) for 1 input item(s)" in str(excinfo.value)
         assert excinfo.value.code == "ENCODE_RESULT_COUNT_MISMATCH"
+        assert excinfo.value.request == {
+            "id": "req-async-encode-desync",
+            "usage": {"input_tokens": 13},
+            "credits_debited": 5,
+        }
         await client.close()
 
     @pytest.mark.asyncio
@@ -403,7 +433,12 @@ class TestAsyncScore:
                     {"item_id": "doc-1", "score": 0.95, "rank": 0},
                     {"item_id": "doc-2", "score": 0.72, "rank": 1},
                 ],
-            }
+            },
+            headers={
+                "X-SIE-Request-ID": "req-async-score",
+                "X-SIE-Units-Pairs": "2",
+                "X-SIE-Credits-Debited": "7",
+            },
         )
 
         client = SIEAsyncClient("http://localhost:8080")
@@ -417,6 +452,11 @@ class TestAsyncScore:
         assert result["model"] == "bge-reranker-v2"
         assert len(result["scores"]) == 2
         assert result["scores"][0]["item_id"] == "doc-1"
+        assert result["request"] == {
+            "id": "req-async-score",
+            "usage": {"pairs": 2},
+            "credits_debited": 7,
+        }
         await client.close()
 
     @pytest.mark.asyncio
@@ -464,7 +504,13 @@ class TestAsyncExtract:
                         ]
                     }
                 ],
-            }
+            },
+            headers={
+                "X-SIE-Request-ID": "req-async-extract",
+                "X-SIE-Units-Pages": "1",
+                "X-SIE-Units-Audio-Ms": "250",
+                "X-SIE-Credits-Debited": "11",
+            },
         )
 
         client = SIEAsyncClient("http://localhost:8080")
@@ -479,6 +525,11 @@ class TestAsyncExtract:
         assert "entities" in result
         assert len(result["entities"]) == 1
         assert result["entities"][0]["text"] == "Apple"
+        assert result["request"] == {
+            "id": "req-async-extract",
+            "usage": {"pages": 1, "audio_ms": 250},
+            "credits_debited": 11,
+        }
         await client.close()
 
     @pytest.mark.asyncio
@@ -503,6 +554,7 @@ class TestAsyncExtract:
 
         assert isinstance(results, list)
         assert len(results) == 2
+        assert all("request" not in result for result in results)
         await client.close()
 
     @pytest.mark.asyncio

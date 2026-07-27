@@ -137,8 +137,128 @@ Mirrors kube-prometheus-stack's fullname helper truncation and service suffix.
 {{- printf "%s-prometheus" (include "sie-cluster.kubePrometheusStack.fullname" .) -}}
 {{- end }}
 
+{{/* Prometheus CR name copied onto operator-owned Pod identity labels. */}}
+{{- define "sie-cluster.kubePrometheusStack.prometheusCrName" -}}
+{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
+{{- if $values.cleanPrometheusOperatorObjectNames -}}
+{{- include "sie-cluster.kubePrometheusStack.fullname" . -}}
+{{- else -}}
+{{- printf "%s-prometheus" (include "sie-cluster.kubePrometheusStack.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/* The dependency follows its namespaceOverride or Helm release namespace. */}}
+{{- define "sie-cluster.kubePrometheusStack.namespace" -}}
+{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
+{{- default .Release.Namespace $values.namespaceOverride -}}
+{{- end }}
+
+{{/* Grafana has an independent namespaceOverride in the dependency chart. */}}
+{{- define "sie-cluster.kubePrometheusStack.grafanaNamespace" -}}
+{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
+{{- $grafana := $values.grafana | default dict -}}
+{{- default .Release.Namespace $grafana.namespaceOverride -}}
+{{- end }}
+
+{{/* Mirror the vendored Grafana subchart's fullname and admin Secret rules. */}}
+{{- define "sie-cluster.kubePrometheusStack.grafanaFullname" -}}
+{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
+{{- $grafana := $values.grafana | default dict -}}
+{{- if $grafana.fullnameOverride -}}
+{{- $grafana.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "grafana" $grafana.nameOverride -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.kubePrometheusStack.grafanaAdminSecretName" -}}
+{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
+{{- $grafana := $values.grafana | default dict -}}
+{{- $admin := $grafana.admin | default dict -}}
+{{- if $admin.existingSecret -}}
+{{- tpl ($admin.existingSecret | toString) . -}}
+{{- else -}}
+{{- include "sie-cluster.kubePrometheusStack.grafanaFullname" . -}}
+{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.kubePrometheusStack.grafanaAdminPasswordKey" -}}
+{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
+{{- $grafana := $values.grafana | default dict -}}
+{{- $admin := $grafana.admin | default dict -}}
+{{- default "admin-password" $admin.passwordKey -}}
+{{- end }}
+
+{{- define "sie-cluster.kubePrometheusStack.prometheusServicePort" -}}
+{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
+{{- $prometheus := $values.prometheus | default dict -}}
+{{- $service := $prometheus.service | default dict -}}
+{{- default 9090 $service.port -}}
+{{- end }}
+
 {{- define "sie-cluster.kubePrometheusStack.prometheusAddress" -}}
-{{- printf "http://%s.%s.svc.cluster.local:9090" (include "sie-cluster.kubePrometheusStack.prometheusServiceName" .) (include "sie-cluster.namespace" .) -}}
+{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
+{{- $prometheus := $values.prometheus | default dict -}}
+{{- $spec := $prometheus.prometheusSpec | default dict -}}
+{{- $web := $spec.web | default dict -}}
+{{- $tlsConfig := $web.tlsConfig | default dict -}}
+{{- if and $values.install (hasKey $prometheus "enabled") (not $prometheus.enabled) -}}
+{{- fail "autoscaling cannot use bundled kube-prometheus-stack when kube-prometheus-stack.prometheus.enabled=false" -}}
+{{- end -}}
+{{- if and $values.install $prometheus.agentMode -}}
+{{- fail "autoscaling cannot use bundled kube-prometheus-stack with prometheus.agentMode=true because agent mode has no query API" -}}
+{{- end -}}
+{{- if and $values.install $spec.listenLocal -}}
+{{- fail "autoscaling cannot use bundled Prometheus with prometheus.prometheusSpec.listenLocal=true because the query Service cannot reach loopback" -}}
+{{- end -}}
+{{- if and $values.install (not (empty $tlsConfig)) -}}
+{{- fail "autoscaling cannot use bundled Prometheus prometheus.prometheusSpec.web.tlsConfig because KEDA has no TLS/auth mapping; use a separately configured external Prometheus address" -}}
+{{- end -}}
+{{- if and $values.install (hasKey $web "maxConnections") (eq (toString $web.maxConnections) "0") -}}
+{{- fail "autoscaling cannot use bundled Prometheus prometheus.prometheusSpec.web.maxConnections=0 because the query Service would accept no connections" -}}
+{{- end -}}
+{{- $routePrefix := default "/" $spec.routePrefix | toString | trim -}}
+{{- $routeSuffix := "" -}}
+{{- if ne $routePrefix "/" -}}
+{{- if or (not (hasPrefix "/" $routePrefix)) (contains "?" $routePrefix) (contains "#" $routePrefix) -}}
+{{- fail "kube-prometheus-stack.prometheus.prometheusSpec.routePrefix must be / or an absolute URL path without query/fragment" -}}
+{{- end -}}
+{{- $routeSuffix = trimSuffix "/" $routePrefix -}}
+{{- end -}}
+{{- printf "http://%s.%s.svc.cluster.local:%s%s" (include "sie-cluster.kubePrometheusStack.prometheusServiceName" .) (include "sie-cluster.kubePrometheusStack.namespace" .) (include "sie-cluster.kubePrometheusStack.prometheusServicePort" .) $routeSuffix -}}
+{{- end }}
+
+{{/* A bundled KEDA operator must watch the namespace containing its targets. */}}
+{{- define "sie-cluster.validateKedaWatchNamespace" -}}
+{{- $keda := (index .Values "keda") | default dict -}}
+{{- $rawWatchNamespace := default "" $keda.watchNamespace | toString -}}
+{{- $watchNamespace := $rawWatchNamespace | trim -}}
+{{- if and .Values.autoscaling.enabled $keda.install (ne $rawWatchNamespace $watchNamespace) -}}
+{{- fail (printf "keda.watchNamespace=%q contains surrounding whitespace; KEDA 2.14 treats it as part of the namespace name" $rawWatchNamespace) -}}
+{{- end -}}
+{{- if and .Values.autoscaling.enabled $keda.install $watchNamespace -}}
+{{- $watchNamespaces := list -}}
+{{- $hasEmptyWatchNamespace := false -}}
+{{- range $entry := splitList "," $watchNamespace -}}
+{{- $normalizedEntry := $entry | trim -}}
+{{- if ne $entry $normalizedEntry -}}
+{{- fail (printf "keda.watchNamespace=%q contains surrounding whitespace; KEDA 2.14 treats it as part of the namespace name" $watchNamespace) -}}
+{{- end -}}
+{{- if eq $normalizedEntry "" -}}
+{{- $hasEmptyWatchNamespace = true -}}
+{{- else -}}
+{{- $watchNamespaces = append $watchNamespaces $normalizedEntry -}}
+{{- end -}}
+{{- end -}}
+{{- if or $hasEmptyWatchNamespace (not (has (include "sie-cluster.namespace" .) $watchNamespaces)) -}}
+{{- fail (printf "keda.watchNamespace=%q excludes the SIE workload namespace %q; leave it empty or include global.namespace/.Release.Namespace in the comma-separated list" $watchNamespace (include "sie-cluster.namespace" .)) -}}
+{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -203,14 +323,6 @@ Gateway service name (used for worker discovery)
 {{- end }}
 
 {{/*
-Gateway metrics service name (ClusterIP-only ServiceMonitor scrape target)
-Budget: prefix (≤47) + "-gateway-metrics" (16) = 63 (DNS-1123 label max).
-*/}}
-{{- define "sie-cluster.gateway.metricsServiceName" -}}
-{{- printf "%s-gateway-metrics" (include "sie-cluster.fullname" . | trunc 47 | trimSuffix "-") }}
-{{- end }}
-
-{{/*
 In-cluster URL used by workers to ask the gateway whether they are admitted
 to pull from their configured queue pool.
 */}}
@@ -242,40 +354,25 @@ imagePullSecrets:
 {{- end }}
 
 {{/*
-Health gate hook: Prometheus readiness SA name
+Explicit application health-gate switch. Autoscaling control-path gates are
+mandatory independently in their own templates.
 */}}
-{{- define "sie-cluster.healthGate.prometheus.serviceAccountName" -}}
-{{- printf "%s-health-prometheus" (include "sie-cluster.fullname" . | trunc 45 | trimSuffix "-") }}
+{{- define "sie-cluster.healthGates.enabled" -}}
+{{- if .Values.healthGates.enabled -}}true{{- else -}}false{{- end -}}
 {{- end }}
 
 {{/*
 Health gate hook: ScaledObject readiness SA name
 */}}
 {{- define "sie-cluster.healthGate.scaledobject.serviceAccountName" -}}
-{{- printf "%s-health-scaledobject" (include "sie-cluster.fullname" . | trunc 43 | trimSuffix "-") }}
-{{- end }}
-
-{{/*
-Health gate hook: Gateway readiness SA name
-*/}}
-{{- define "sie-cluster.healthGate.gateway.serviceAccountName" -}}
-{{- printf "%s-health-gateway" (include "sie-cluster.fullname" . | trunc 49 | trimSuffix "-") }}
-{{- end }}
-
-{{/*
-Health gate hook: Config readiness SA name.
-Budget: prefix (≤49) + "-health-config" (14) = 63 (DNS-1123 label max).
-*/}}
-{{- define "sie-cluster.healthGate.config.serviceAccountName" -}}
-{{- printf "%s-health-config" (include "sie-cluster.fullname" . | trunc 49 | trimSuffix "-") }}
+{{- include "sie-cluster.keda.suffixedName" (dict "base" (include "sie-cluster.fullname" .) "suffix" "-health-scaledobject") -}}
 {{- end }}
 
 {{/*
 Pre-install hook: cert-manager conflict-check SA name.
-Budget: prefix (≤45) + "-cm-conflict-check" (18) = 63 (DNS-1123 label max).
 */}}
 {{- define "sie-cluster.certManagerConflict.serviceAccountName" -}}
-{{- printf "%s-cm-conflict-check" (include "sie-cluster.fullname" . | trunc 45 | trimSuffix "-") }}
+{{- include "sie-cluster.keda.suffixedName" (dict "base" (include "sie-cluster.fullname" .) "suffix" "-cm-conflict-check") -}}
 {{- end }}
 
 {{/*
@@ -421,8 +518,118 @@ Runs from NOTES.txt so every install/upgrade is checked, regardless of which (or
 {{/*
 KEDA apply hook: ServiceAccount name
 */}}
+{{/*
+Keep a semantic suffix intact at the Kubernetes DNS-label limit without
+allowing distinct long release identities to collapse onto the same prefix.
+
+Args (dict): base, suffix.
+*/}}
+{{- define "sie-cluster.keda.suffixedName" -}}
+{{- $base := .base | toString -}}
+{{- $suffix := .suffix | toString -}}
+{{- $raw := printf "%s%s" $base $suffix -}}
+{{- if le (len $raw) 63 -}}
+{{- $raw -}}
+{{- else -}}
+{{- $hash := sha256sum $base | trunc 12 -}}
+{{- $budget := sub 63 (add (len $suffix) (add1 (len $hash))) -}}
+{{- if lt $budget 1 -}}
+{{- fail (printf "KEDA lifecycle suffix %q leaves no DNS-label prefix budget" $suffix) -}}
+{{- end -}}
+{{- printf "%s-%s%s" ($base | trunc (int $budget) | trimSuffix "-") $hash $suffix -}}
+{{- end -}}
+{{- end }}
+
 {{- define "sie-cluster.keda.apply.serviceAccountName" -}}
-{{- printf "%s-keda-apply" (include "sie-cluster.fullname" . | trunc 51 | trimSuffix "-") }}
+{{- include "sie-cluster.keda.suffixedName" (dict "base" (include "sie-cluster.fullname" .) "suffix" "-keda-apply") -}}
+{{- end }}
+
+{{- define "sie-cluster.keda.apply.jobName" -}}
+{{- $suffix := printf "-keda-apply-%d" .Release.Revision -}}
+{{- include "sie-cluster.keda.suffixedName" (dict "base" (include "sie-cluster.fullname" .) "suffix" $suffix) -}}
+{{- end }}
+
+{{/* Immutable multi-architecture kubectl image used by privileged KEDA hooks. */}}
+{{- define "sie-cluster.keda.hookImage" -}}
+alpine/k8s:1.29.10@sha256:a1f03afdc59b1acde5e740ed855079c7361505d6fed9d9c6069c8c3307264348
+{{- end }}
+
+{{/* Explicit kubectl credentials for hook containers. */}}
+{{- define "sie-cluster.kubernetes.inClusterKubeconfig" -}}
+KUBE_SERVICE_ACCOUNT_DIR=/var/run/secrets/kubernetes.io/serviceaccount
+KUBECONFIG=/tmp/sie-in-cluster-kubeconfig
+umask 077
+cat > "$KUBECONFIG" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+  - name: in-cluster
+    cluster:
+      certificate-authority: ${KUBE_SERVICE_ACCOUNT_DIR}/ca.crt
+      server: https://kubernetes.default.svc
+users:
+  - name: hook
+    user:
+      tokenFile: ${KUBE_SERVICE_ACCOUNT_DIR}/token
+contexts:
+  - name: in-cluster
+    context: {cluster: in-cluster, user: hook, namespace: ${NAMESPACE}}
+current-context: in-cluster
+EOF
+export KUBECONFIG
+{{- end }}
+
+{{/*
+Bound one DNS-label identity without making distinct long inputs collapse onto
+the same truncated prefix. The 16-hex SHA-256 suffix keeps 64 bits of the full
+identity while preserving a readable prefix. Callers supply only already
+validated DNS-label components.
+
+Args (dict): raw, maxLength.
+*/}}
+{{- define "sie-cluster.keda.boundedName" -}}
+{{- $raw := .raw | toString -}}
+{{- $maxLength := int .maxLength -}}
+{{- if le (len $raw) $maxLength -}}
+{{- $raw -}}
+{{- else -}}
+{{- $hash := sha256sum $raw | trunc 16 -}}
+{{- $prefixBudget := sub $maxLength (add1 (len $hash)) -}}
+{{- printf "%s-%s" ($raw | trunc (int $prefixBudget) | trimSuffix "-") $hash -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Preserve the canonical v0.6.20 ScaledObject identity through the OTLP cutover.
+The explicit HPA name below removes the old derived-name length constraint, so
+an already valid raw ScaledObject name remains stable up to Kubernetes'
+63-character label-value limit. Only a longer fresh-install identity is
+bounded; such a v0.6.20 object could not have reconciled because KEDA copies
+the ScaledObject name into label values.
+
+Args (dict): root, poolName, bundleName.
+*/}}
+{{- define "sie-cluster.keda.worker.scaledObjectName" -}}
+{{- $raw := printf "%s-worker-%s-%s-scaler" (include "sie-cluster.fullname" .root) .poolName .bundleName -}}
+{{- include "sie-cluster.keda.boundedName" (dict "raw" $raw "maxLength" 63) -}}
+{{- end }}
+
+{{- define "sie-cluster.keda.gateway.scaledObjectName" -}}
+{{- $raw := printf "%s-gateway-scaler" (include "sie-cluster.fullname" .) -}}
+{{- include "sie-cluster.keda.boundedName" (dict "raw" $raw "maxLength" 63) -}}
+{{- end }}
+
+
+{{/*
+Preserve KEDA's canonical v0.6.20 HPA identity exactly. ScaledObject names are
+DNS labels (at most 63 characters), while HPA metadata names are DNS
+subdomains (at most 253), so the `keda-hpa-` prefix remains valid without
+renaming or hashing an already-installed autoscaling object.
+
+Args (dict): scaledObjectName.
+*/}}
+{{- define "sie-cluster.keda.hpaName" -}}
+{{- printf "keda-hpa-%s" .scaledObjectName -}}
 {{- end }}
 
 {{/*
@@ -466,39 +673,124 @@ store enabled" and an empty result as "off".
 {{- end }}
 
 {{/*
-Distinct machine profiles serving a bundle within a queue pool.
+Canonical token used by every physical worker-lane surface.
 
-Drives the KEDA pending_demand trigger's scale-from-zero matcher. Current
-gateways fan gpu-agnostic cold demand (for example, /v1/chat/completions without
-an X-SIE-MACHINE-PROFILE or a model `:profile` suffix) out to concrete machine
-profiles at the source, so each per-lane scaler can see the demand it owns. Older
-gateways could emit that demand under the EMPTY machine_profile label instead.
-A lane whose bundle maps to exactly one machine profile in the pool is
-unambiguous and can safely keep counting that legacy empty-label bucket.
+Explicit values are trimmed but never defaulted: an explicitly empty or
+whitespace-only value is a configuration error. Defaults apply only when the
+calling field is omitted. Every accepted token is lowercase ASCII and safe for
+NATS subjects, Kubernetes label values, and Prometheus labels.
 
-Args (dict): root, queuePool, bundle.
-Returns a comma-joined, sorted list of distinct machine profiles.
+Args (dict): path, present, value, default.
 */}}
-{{- define "sie-cluster.bundle.machineProfiles" -}}
+{{- define "sie-cluster.worker.laneToken" -}}
+{{- $raw := "" -}}
+{{- if .present -}}
+{{- $raw = (default "" .value | toString | trim) -}}
+{{- else -}}
+{{- $raw = (default "" .default | toString | trim) -}}
+{{- end -}}
+{{- if eq $raw "" -}}
+{{- fail (printf "%s: value must not be empty or whitespace" .path) -}}
+{{- end -}}
+{{- if gt (len $raw) 63 -}}
+{{- fail (printf "%s: value %q exceeds the 63-character physical lane limit" .path $raw) -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]+$" $raw) -}}
+{{- fail (printf "%s: value %q must match ^[A-Za-z0-9_-]+$" .path $raw) -}}
+{{- end -}}
+{{- lower $raw -}}
+{{- end }}
+
+{{/*
+Validate a Helm map key that is also interpolated into Kubernetes object,
+ConfigMap-data, and KEDA metadata identities. These keys intentionally remain
+stable object identities; they are not the physical lane labels.
+
+Args (dict): path, value.
+*/}}
+{{- define "sie-cluster.worker.identityToken" -}}
+{{- $raw := default "" .value | toString -}}
+{{- if gt (len $raw) 63 -}}
+{{- fail (printf "%s: identity %q exceeds 63 characters" .path $raw) -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $raw) -}}
+{{- fail (printf "%s: identity %q must be a lowercase Kubernetes DNS-1123 label" .path $raw) -}}
+{{- end -}}
+{{- $raw -}}
+{{- end }}
+
+{{/*
+Resolve one canonical physical worker lane.
+
+Pool-level queuePool and machineProfile values use their documented defaults
+only when the fields are omitted. The bundle map key is always explicit.
+
+Args (dict): root, poolName, pool, bundleName.
+Returns JSON: queuePool, machineProfile, bundle, ownerPath.
+*/}}
+{{- define "sie-cluster.worker.lane" -}}
 {{- $root := .root -}}
-{{- $queuePool := .queuePool | lower -}}
-{{- $bundle := .bundle -}}
-{{- $defaultQueuePool := default "default" $root.Values.workers.common.queuePool | lower -}}
-{{- $profiles := dict -}}
+{{- $poolName := .poolName -}}
+{{- $pool := .pool -}}
+{{- $bundleName := .bundleName -}}
+{{- $queuePath := "workers.common.queuePool" -}}
+{{- $queuePresent := hasKey $root.Values.workers.common "queuePool" -}}
+{{- $queueValue := index $root.Values.workers.common "queuePool" -}}
+{{- $queueDefault := "default" -}}
+{{- if hasKey $pool "queuePool" -}}
+{{- $queuePath = printf "workers.pools.%s.queuePool" $poolName -}}
+{{- $queuePresent = true -}}
+{{- $queueValue = index $pool "queuePool" -}}
+{{- $queueDefault = "" -}}
+{{- end -}}
+{{- $queuePool := include "sie-cluster.worker.laneToken" (dict "path" $queuePath "present" $queuePresent "value" $queueValue "default" $queueDefault) -}}
+{{- $machinePath := printf "workers.pools.%s.machineProfile" $poolName -}}
+{{- $machinePresent := hasKey $pool "machineProfile" -}}
+{{- $machineValue := index $pool "machineProfile" -}}
+{{- $machineProfile := include "sie-cluster.worker.laneToken" (dict "path" $machinePath "present" $machinePresent "value" $machineValue "default" $poolName) -}}
+{{- $ownerPath := printf "workers.pools.%s.bundles[%q]" $poolName $bundleName -}}
+{{- $bundle := include "sie-cluster.worker.laneToken" (dict "path" $ownerPath "present" true "value" $bundleName "default" "") -}}
+{{- $_ := include "sie-cluster.worker.identityToken" (dict "path" (printf "workers.pools[%q]" $poolName) "value" $poolName) -}}
+{{- $_ = include "sie-cluster.worker.identityToken" (dict "path" $ownerPath "value" $bundleName) -}}
+{{- dict "queuePool" $queuePool "machineProfile" $machineProfile "bundle" $bundle "ownerPath" $ownerPath | toJson -}}
+{{- end }}
+
+{{/*
+Reject enabled worker entries that collapse onto one physical lane after
+trim/lower normalization. Distinct Kubernetes objects must never select or
+consume the same queuePool/machineProfile/bundle tuple.
+*/}}
+{{- define "sie-cluster.worker.validateLanes" -}}
+{{- $root := . -}}
+{{- $seen := dict -}}
+{{- $laneCount := 0 -}}
+{{- $helmLaneLimit := 192 -}}
+{{- $dependencyTopology := "external KEDA and Prometheus" -}}
+{{- if or $root.Values.keda.install (index $root.Values "kube-prometheus-stack" "install") -}}
+{{- $helmLaneLimit = 96 -}}
+{{- $dependencyTopology = "bundled KEDA or Prometheus" -}}
+{{- end -}}
 {{- range $poolName, $pool := $root.Values.workers.pools -}}
 {{- if $pool.enabled -}}
-{{- $mp := default $poolName $pool.machineProfile -}}
-{{- $qp := default $defaultQueuePool $pool.queuePool | lower -}}
-{{- if eq $qp $queuePool -}}
 {{- range $bundleName, $bundleCfg := $pool.bundles -}}
-{{- if and (eq $bundleName $bundle) (dig "enabled" true $bundleCfg) -}}
-{{- $_ := set $profiles $mp true -}}
+{{- if dig "enabled" true $bundleCfg -}}
+{{- $laneCount = add1 $laneCount -}}
+{{- if gt $laneCount 1024 -}}
+{{- fail "configured physical lane count exceeds gateway runtime hard limit 1024" -}}
+{{- end -}}
+{{- if and $root.Values.autoscaling.enabled (gt $laneCount $helmLaneLimit) -}}
+{{- fail (printf "configured physical lane count exceeds Helm release limit %d with %s" $helmLaneLimit $dependencyTopology) -}}
+{{- end -}}
+{{- $lane := include "sie-cluster.worker.lane" (dict "root" $root "poolName" $poolName "pool" $pool "bundleName" $bundleName) | fromJson -}}
+{{- $key := printf "%s|%s|%s" $lane.queuePool $lane.machineProfile $lane.bundle -}}
+{{- if hasKey $seen $key -}}
+{{- fail (printf "%s: canonical physical lane %q duplicates %s after trim/lower normalization" $lane.ownerPath $key (index $seen $key)) -}}
+{{- end -}}
+{{- $_ := set $seen $key $lane.ownerPath -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- end -}}
-{{- keys $profiles | sortAlpha | join "," -}}
 {{- end }}
 
 {{/*
@@ -582,74 +874,368 @@ via mcpEdge.clusterBaseUrl; otherwise the in-namespace gateway Service.
 {{- end }}
 
 {{/*
-Tracing: effective OTLP endpoint.
-
-When the bundled collector is enabled and no explicit endpoint is set, the
-endpoint defaults to the bundled collector's in-cluster gRPC address. Otherwise,
-bundled Tempo is used when installed. The explicit
-.Values.observability.tracing.endpoint always wins (may be empty).
-
-Caller context: root (.) — the full Helm root context.
+Canonical OTel signal gates. Prometheus/KEDA scraping implies application metric
+push and the bundled collector; it never restores application-local scraping.
 */}}
-{{- define "sie-cluster.tracing.endpoint" -}}
-{{- if .Values.observability.tracing.endpoint -}}
-{{- .Values.observability.tracing.endpoint -}}
-{{- else if .Values.observability.tracing.collector.install -}}
+{{- define "sie-cluster.otel.applicationPrometheusEnabled" -}}
+{{- if or .Values.autoscaling.enabled .Values.serviceMonitor.enabled .Values.alertRules.enabled (index .Values "kube-prometheus-stack" "install") -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.otel.metricsEnabled" -}}
+{{- if or (eq (include "sie-cluster.otel.applicationPrometheusEnabled" .) "true") .Values.observability.otel.metrics.enabled -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.otel.logsEnabled" -}}
+{{- if .Values.observability.otel.logs.enabled -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.otel.collectorEnabled" -}}
+{{- if or (eq (include "sie-cluster.otel.applicationPrometheusEnabled" .) "true") .Values.observability.otel.collector.install -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{/* Validate the collector's explicit external-Prometheus ingress namespaces. */}}
+{{- define "sie-cluster.otel.validatePrometheusScrapeNamespaces" -}}
+{{- $scrapeNamespaces := .Values.observability.otel.collector.prometheus.networkPolicy.scrapeNamespaceNames -}}
+{{- if not (kindIs "slice" $scrapeNamespaces) -}}
+{{- fail "observability.otel.collector.prometheus.networkPolicy.scrapeNamespaceNames must be a list" -}}
+{{- end -}}
+{{- $applicationPrometheusEnabled := eq (include "sie-cluster.otel.applicationPrometheusEnabled" .) "true" -}}
+{{- if and $applicationPrometheusEnabled (not (index .Values "kube-prometheus-stack" "install")) (eq (len $scrapeNamespaces) 0) -}}
+{{- fail "chart-managed Prometheus consumers with external Prometheus require observability.otel.collector.prometheus.networkPolicy.scrapeNamespaceNames to list every scraper namespace" -}}
+{{- end -}}
+{{- $seenScrapeNamespaces := dict -}}
+{{- range $index, $namespace := $scrapeNamespaces -}}
+{{- $rawNamespace := $namespace | toString -}}
+{{- $normalizedNamespace := $rawNamespace | trim -}}
+{{- if ne $rawNamespace $normalizedNamespace -}}
+{{- fail (printf "observability.otel.collector.prometheus.networkPolicy.scrapeNamespaceNames[%d] must not contain surrounding whitespace" $index) -}}
+{{- end -}}
+{{- if or (gt (len $normalizedNamespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $normalizedNamespace)) -}}
+{{- fail (printf "observability.otel.collector.prometheus.networkPolicy.scrapeNamespaceNames[%d]=%q must be a Kubernetes DNS-1123 namespace name" $index $rawNamespace) -}}
+{{- end -}}
+{{- if hasKey $seenScrapeNamespaces $normalizedNamespace -}}
+{{- fail (printf "observability.otel.collector.prometheus.networkPolicy.scrapeNamespaceNames contains duplicate namespace %q" $normalizedNamespace) -}}
+{{- end -}}
+{{- $_ := set $seenScrapeNamespaces $normalizedNamespace true -}}
+{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.otel.signalsEnabled" -}}
+{{- $metricsEnabled := eq (include "sie-cluster.otel.metricsEnabled" .) "true" -}}
+{{- $logsEnabled := eq (include "sie-cluster.otel.logsEnabled" .) "true" -}}
+{{- if or .Values.observability.tracing.enabled $metricsEnabled $logsEnabled -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{/* Effective bundled Loki switch, including the global force-on/off override. */}}
+{{- define "sie-cluster.otel.lokiEnabled" -}}
+{{- $logs := .Values.observability.logs -}}
+{{- $logsInstall := get $logs "install" -}}
+{{- $logsForceOn := and (kindIs "bool" $logsInstall) $logsInstall -}}
+{{- $logsForceOff := and (kindIs "bool" $logsInstall) (not $logsInstall) -}}
+{{- $lokiInstall := default false (get (get $logs "loki") "install") -}}
+{{- if or $logsForceOn (and (not $logsForceOff) $lokiInstall) -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{/* Mirror the bundled Tempo chart's Service identity and OTLP port. */}}
+{{- define "sie-cluster.tempo.fullname" -}}
+{{- $values := .Values.tempo | default dict -}}
+{{- if $values.fullnameOverride -}}
+{{- $values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "tempo" $values.nameOverride -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.tempo.otlpGrpcPort" -}}
+{{- $endpoint := .Values.tempo.tempo.receivers.otlp.protocols.grpc.endpoint | toString -}}
+{{- if not (regexMatch "^.+:[0-9]+$" $endpoint) -}}
+{{- fail "bundled Tempo requires tempo.tempo.receivers.otlp.protocols.grpc.endpoint in host:port form" -}}
+{{- end -}}
+{{- $port := regexFind "[0-9]+$" $endpoint -}}
+{{- if ne $port "4317" -}}
+{{- fail "vendored Tempo 2.2.3 forwards its OTLP Service target only to 4317; keep tempo.tempo.receivers.otlp.protocols.grpc.endpoint on port 4317 or use an external trace backend" -}}
+{{- end -}}
+{{- $port -}}
+{{- end }}
+
+{{- define "sie-cluster.tempo.otlpEndpoint" -}}
+{{- printf "http://%s.%s.svc.cluster.local:%s" (include "sie-cluster.tempo.fullname" .) .Release.Namespace (include "sie-cluster.tempo.otlpGrpcPort" .) -}}
+{{- end }}
+
+{{- define "sie-cluster.tempo.queryEndpoint" -}}
+{{- printf "http://%s.%s.svc.cluster.local:3200" (include "sie-cluster.tempo.fullname" .) .Release.Namespace -}}
+{{- end }}
+
+{{/* The bundled Loki values use SingleBinary mode, whose Service is fullname. */}}
+{{- define "sie-cluster.loki.fullname" -}}
+{{- $values := .Values.loki | default dict -}}
+{{- if $values.fullnameOverride -}}
+{{- $values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "loki" $values.nameOverride -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.loki.httpEndpoint" -}}
+{{- $port := default 3100 .Values.loki.loki.server.http_listen_port -}}
+{{- printf "http://%s.%s.svc.cluster.local:%s" (include "sie-cluster.loki.fullname" .) .Release.Namespace ($port | toString) -}}
+{{- end }}
+
+{{/* Fail before rollout for bundled backend modes the vendored Services cannot expose. */}}
+{{- define "sie-cluster.validateBundledTelemetryBackends" -}}
+{{- if .Values.observability.tracing.tempo.install -}}
+{{- $tempoHttpPort := default 3200 .Values.tempo.tempo.server.http_listen_port | int -}}
+{{- if ne $tempoHttpPort 3200 -}}
+{{- fail "vendored Tempo 2.2.3 exposes its query Service only on 3200; keep tempo.tempo.server.http_listen_port=3200 or use an external trace backend" -}}
+{{- end -}}
+{{- $_ := include "sie-cluster.tempo.otlpGrpcPort" . -}}
+{{- end -}}
+{{- if and (eq (include "sie-cluster.otel.lokiEnabled" .) "true") (ne (default "SingleBinary" .Values.loki.deploymentMode) "SingleBinary") -}}
+{{- fail "the SIE bundled Loki integration supports deploymentMode=SingleBinary; map a distributed Loki endpoint explicitly instead of changing the bundled topology during this migration" -}}
+{{- end -}}
+{{- $eventExporter := (index .Values "kubernetes-event-exporter") | default dict -}}
+{{- if and $eventExporter.install (eq (include "sie-cluster.otel.lokiEnabled" .) "true") (kindIs "map" $eventExporter.config) -}}
+{{- $legacyLokiEndpoint := false -}}
+{{- range $receiver := (get $eventExporter.config "receivers" | default list) -}}
+{{- $webhook := get $receiver "webhook" | default dict -}}
+{{- if and (eq (default "" (get $receiver "name")) "loki") (eq (default "" (get $webhook "endpoint")) "http://loki:3100/loki/api/v1/push") -}}
+{{- $legacyLokiEndpoint = true -}}
+{{- end -}}
+{{- end -}}
+{{- $expectedLokiEndpoint := printf "%s/loki/api/v1/push" (include "sie-cluster.loki.httpEndpoint" .) -}}
+{{- if and $legacyLokiEndpoint (ne $expectedLokiEndpoint (printf "http://loki.%s.svc.cluster.local:3100/loki/api/v1/push" .Release.Namespace)) -}}
+{{- fail (printf "kubernetes-event-exporter still uses the default Loki URL; set its loki webhook endpoint to %s after changing bundled Loki fullname/port" $expectedLokiEndpoint) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Effective producer OTLP endpoint. An external collector and the bundled
+collector are mutually exclusive. Direct-to-Tempo remains available only for a
+trace-only deployment; metrics/logs always require a collector.
+*/}}
+{{- define "sie-cluster.otel.endpoint" -}}
+{{- $external := .Values.observability.otel.endpoint -}}
+{{- $collectorEnabled := eq (include "sie-cluster.otel.collectorEnabled" .) "true" -}}
+{{- $metricsEnabled := eq (include "sie-cluster.otel.metricsEnabled" .) "true" -}}
+{{- $logsEnabled := eq (include "sie-cluster.otel.logsEnabled" .) "true" -}}
+{{- if and $external $collectorEnabled -}}
+{{- fail "observability.otel.endpoint is mutually exclusive with the bundled collector path enabled by autoscaling.enabled, serviceMonitor.enabled, alertRules.enabled, kube-prometheus-stack.install, or observability.otel.collector.install" -}}
+{{- else if $external -}}
+{{- $external -}}
+{{- else if $collectorEnabled -}}
 {{- printf "http://%s-otel-collector:4317" (include "sie-cluster.fullname" .) -}}
+{{- else if and .Values.observability.tracing.enabled .Values.observability.tracing.tempo.install (not $metricsEnabled) (not $logsEnabled) -}}
+{{- include "sie-cluster.tempo.otlpEndpoint" . -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.otel.collectorTraceEndpoint" -}}
+{{- $traceEndpoint := default "" .Values.observability.otel.collector.traces.endpoint | toString | trim -}}
+{{- $legacyDirectEndpoint := default "" (get .Values.observability.tracing "endpoint") | toString | trim -}}
+{{- $legacyCollector := default (dict) (get .Values.observability.tracing "collector") -}}
+{{- $legacyExporterEndpoint := default "" (get $legacyCollector "exporterEndpoint") | toString | trim -}}
+{{- $legacyExporterInsecure := true -}}
+{{- if hasKey $legacyCollector "exporterInsecure" -}}
+{{- $legacyExporterInsecure = get $legacyCollector "exporterInsecure" -}}
+{{- end -}}
+{{- $legacyCollectorInstall := default false (get $legacyCollector "install") -}}
+{{- $legacyCollectorActive := and .Values.observability.tracing.enabled $legacyCollectorInstall (not $legacyDirectEndpoint) -}}
+{{- $legacyCollectorImage := default (dict) (get $legacyCollector "image") -}}
+{{- $collectorImage := .Values.observability.otel.collector.image -}}
+{{- if and $legacyCollectorActive (or (ne (default "" (get $legacyCollectorImage "repository")) $collectorImage.repository) (ne (default "" (get $legacyCollectorImage "tag") | toString) ($collectorImage.tag | toString))) -}}
+{{- fail "legacy observability.tracing.collector.image is not consumed; map its repository/tag to observability.otel.collector.image or explicitly retire the old collector settings before upgrading" -}}
+{{- end -}}
+{{- $legacyCollectorResources := default (dict) (get $legacyCollector "resources") -}}
+{{- if and $legacyCollectorActive (not (empty $legacyCollectorResources)) -}}
+{{- $mergedCollectorResources := mergeOverwrite (deepCopy .Values.observability.otel.collector.resources) $legacyCollectorResources -}}
+{{- if not (deepEqual $mergedCollectorResources .Values.observability.otel.collector.resources) -}}
+{{- fail "legacy observability.tracing.collector.resources is not consumed; map its explicit limits/requests to observability.otel.collector.resources or explicitly retire the old collector settings before upgrading" -}}
+{{- end -}}
+{{- end -}}
+{{- if and $legacyCollectorActive $legacyExporterEndpoint $traceEndpoint (ne $legacyExporterInsecure .Values.observability.otel.collector.traces.insecure) -}}
+{{- fail "legacy observability.tracing.collector.exporterInsecure is not consumed; map it to observability.otel.collector.traces.insecure or explicitly retire the old collector setting before upgrading" -}}
+{{- end -}}
+{{- $localCollectorService := printf "%s-otel-collector" (include "sie-cluster.fullname" .) -}}
+{{- $localCollectorPattern := printf "^https?://%s(\\.%s(\\.svc(\\.cluster\\.local)?)?)?:(4317|4318|4327)/?$" $localCollectorService (include "sie-cluster.namespace" .) -}}
+{{- if and $traceEndpoint (regexMatch $localCollectorPattern $traceEndpoint) -}}
+{{- fail "observability.otel.collector.traces.endpoint must be a downstream trace backend, not this chart's own OTel collector service (that would create an export loop)" -}}
+{{- else if and .Values.observability.tracing.enabled (not $traceEndpoint) (or $legacyDirectEndpoint (and $legacyCollectorActive $legacyExporterEndpoint)) -}}
+{{- fail "legacy observability.tracing endpoint values are not consumed by the single-emission collector; map the active destination to observability.otel.collector.traces.endpoint and exporterInsecure to observability.otel.collector.traces.insecure" -}}
+{{- else if $traceEndpoint -}}
+{{- $traceEndpoint -}}
 {{- else if .Values.observability.tracing.tempo.install -}}
-{{- "http://tempo:4317" -}}
+{{- include "sie-cluster.tempo.otlpEndpoint" . -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end }}
+
+{{- define "sie-cluster.otel.collectorLogEndpoint" -}}
+{{- if .Values.observability.otel.collector.logs.endpoint -}}
+{{- .Values.observability.otel.collector.logs.endpoint -}}
+{{- else if eq (include "sie-cluster.otel.lokiEnabled" .) "true" -}}
+{{- printf "%s/otlp" (include "sie-cluster.loki.httpEndpoint" .) -}}
 {{- else -}}
 {{- "" -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-Tracing: effective bundled collector downstream OTLP endpoint.
-
-The collector forwards to an explicit collector exporterEndpoint when set. If
-bundled Tempo is installed and no downstream endpoint is configured, the
-collector forwards to Tempo. Otherwise it returns empty so the collector debug
-exporter is used.
-
-Caller context: root (.) — the full Helm root context.
+Canonical deployment.environment for every OTel producer and collector branch.
+The anonymous-telemetry vocabulary is mapped only as a local compatibility
+fallback; managed Better Stack export separately requires the dedicated OTel
+value to be explicit and canonical.
 */}}
-{{- define "sie-cluster.tracing.collectorExporterEndpoint" -}}
-{{- if .Values.observability.tracing.collector.exporterEndpoint -}}
-{{- .Values.observability.tracing.collector.exporterEndpoint -}}
-{{- else if .Values.observability.tracing.tempo.install -}}
-{{- "http://tempo:4317" -}}
+{{- define "sie-cluster.otel.deploymentEnvironment" -}}
+{{- $explicit := default "" .Values.observability.otel.resource.deploymentEnvironment | toString | trim | lower -}}
+{{- $candidate := $explicit -}}
+{{- if not $candidate -}}
+{{- $candidate = default "" .Values.telemetry.deploymentEnv | toString | trim | lower -}}
+{{- end -}}
+{{- if eq $candidate "production" -}}
+{{- "prod" -}}
+{{- else if eq $candidate "development" -}}
+{{- "dev" -}}
+{{- else if $candidate -}}
+{{- $candidate -}}
 {{- else -}}
-{{- "" -}}
+{{- "unknown" -}}
+{{- end -}}
+{{- end }}
+
+{{/* Canonical cloud.region; unknown is allowed only for local export. */}}
+{{- define "sie-cluster.otel.cloudRegion" -}}
+{{- $region := default "" .Values.observability.otel.resource.cloudRegion | toString | trim | lower -}}
+{{- if $region -}}{{- $region -}}{{- else -}}{{- "unknown" -}}{{- end -}}
+{{- end }}
+
+{{/* Roll every producer whenever its collector-authoritative resource identity changes. */}}
+{{- define "sie-cluster.otel.resourceChecksum" -}}
+{{- printf "%s:%s" (include "sie-cluster.otel.deploymentEnvironment" .) (include "sie-cluster.otel.cloudRegion" .) | sha256sum -}}
+{{- end }}
+
+{{/*
+Environment names that define the chart-owned OTLP transport and producer
+identity. Signal-specific endpoints/protocols are included because OTel SDKs
+give them precedence over the generic values rendered by the chart.
+*/}}
+{{- define "sie-cluster.otel.reservedEnvNames" -}}
+{{- list
+      "OTEL_EXPORTER_OTLP_ENDPOINT"
+      "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+      "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"
+      "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+      "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
+      "OTEL_EXPORTER_OTLP_PROTOCOL"
+      "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+      "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"
+      "OTEL_METRICS_EXEMPLAR_FILTER"
+      "OTEL_METRIC_EXPORT_INTERVAL"
+      "OTEL_RESOURCE_ATTRIBUTES"
+      "OTEL_SDK_DISABLED"
+      "OTEL_SERVICE_NAME"
+      "OTEL_TRACES_SAMPLER"
+      "OTEL_TRACES_SAMPLER_ARG"
+      "SIE_METRICS_ENABLED"
+      "SIE_OTEL_CLOUD_REGION"
+      "SIE_OTEL_DEPLOYMENT_ENVIRONMENT"
+      "SIE_OTLP_LOGS_ENABLED"
+      "SIE_TELEMETRY_INSTANCE_ID"
+      "SIE_TRACING_ENABLED"
+    | toJson -}}
+{{- end }}
+
+{{/* Reject last-entry-wins overrides of chart-owned environment values. */}}
+{{- define "sie-cluster.env.assertNoReserved" -}}
+{{- $path := .path -}}
+{{- $reserved := .reserved -}}
+{{- range $entry := default (list) .entries -}}
+{{- $name := default "" $entry.name -}}
+{{- if has $name $reserved -}}
+{{- fail (printf "%s must not override chart-owned variable %s" $path $name) -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-Tracing: OTLP exporter env block.
+One backend-neutral OTLP environment block shared by every SIE process.
 
-Emits the five OTEL/SIE env vars required to activate distributed tracing on a
-container. Fails fast when tracing is enabled but no endpoint is resolvable.
-
-Args (dict): root — full Helm root context; serviceName — OTEL_SERVICE_NAME value.
-
-Rendered lines are indented by the call site (use nindent in the include call).
+Args (dict): root — Helm root; serviceName — stable OTel service.name;
+instanceSuffix — container-unique suffix appended to the pod UID;
+collectorReceiver — `gateway` for the KEDA-trusted receiver, otherwise
+`application` (the default) for non-gateway producers.
 */}}
-{{- define "sie-cluster.tracing.env" -}}
-{{- $endpoint := include "sie-cluster.tracing.endpoint" .root -}}
+{{- define "sie-cluster.otel.env" -}}
+{{- $metricsEnabled := eq (include "sie-cluster.otel.metricsEnabled" .root) "true" -}}
+{{- $logsEnabled := eq (include "sie-cluster.otel.logsEnabled" .root) "true" -}}
+{{- $signalsEnabled := or .root.Values.observability.tracing.enabled $metricsEnabled $logsEnabled -}}
+{{- if $signalsEnabled -}}
+{{- $endpoint := include "sie-cluster.otel.endpoint" .root -}}
+{{- $collectorReceiver := default "application" .collectorReceiver -}}
+{{- if and (eq $collectorReceiver "gateway") (ne .serviceName "sie-gateway") -}}
+{{- fail "observability.otel.serviceName.gateway is a control-plane identity and must be exactly sie-gateway" -}}
+{{- end -}}
+{{- if and (eq (include "sie-cluster.otel.collectorEnabled" .root) "true") (eq $collectorReceiver "application") -}}
+{{- $endpoint = printf "http://%s-otel-collector:4327" (include "sie-cluster.fullname" .root) -}}
+{{- else if and (ne $collectorReceiver "application") (ne $collectorReceiver "gateway") -}}
+{{- fail "sie-cluster.otel.env collectorReceiver must be gateway or application" -}}
+{{- end -}}
 {{- if not $endpoint -}}
-{{- fail "observability.tracing.enabled=true requires observability.tracing.endpoint, observability.tracing.collector.install=true, or observability.tracing.tempo.install=true" -}}
+{{- fail "OpenTelemetry signals require autoscaling.enabled=true, serviceMonitor.enabled=true, observability.otel.endpoint, observability.otel.collector.install=true, or trace-only bundled Tempo" -}}
 {{- end -}}
+{{- if not .instanceSuffix -}}
+{{- fail "sie-cluster.otel.env requires a container-unique instanceSuffix" -}}
+{{- end -}}
+{{- if .root.Values.observability.tracing.enabled }}
 - name: SIE_TRACING_ENABLED
   value: "true"
+{{- end }}
+{{- if $metricsEnabled }}
+- name: SIE_METRICS_ENABLED
+  value: "true"
+- name: OTEL_METRICS_EXEMPLAR_FILTER
+  value: "always_off"
+{{- end }}
+{{- if $logsEnabled }}
+- name: SIE_OTLP_LOGS_ENABLED
+  value: "true"
+{{- end }}
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
   value: {{ $endpoint | quote }}
 - name: OTEL_EXPORTER_OTLP_PROTOCOL
   value: "grpc"
 - name: OTEL_SERVICE_NAME
   value: {{ .serviceName | quote }}
+- name: POD_UID
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.uid
+- name: SIE_TELEMETRY_INSTANCE_ID
+  value: {{ printf "$(POD_UID)/%s" .instanceSuffix | quote }}
+- name: SIE_OTEL_DEPLOYMENT_ENVIRONMENT
+  value: {{ include "sie-cluster.otel.deploymentEnvironment" .root | quote }}
+- name: SIE_OTEL_CLOUD_REGION
+  value: {{ include "sie-cluster.otel.cloudRegion" .root | quote }}
+{{- if or .root.Values.observability.tracing.enabled $logsEnabled }}
 - name: OTEL_TRACES_SAMPLER
   value: {{ .root.Values.observability.tracing.sampler | quote }}
 - name: OTEL_TRACES_SAMPLER_ARG
   value: {{ .root.Values.observability.tracing.samplerArg | quote }}
+{{- end }}
+{{- end -}}
 {{- end }}
 
 {{/*

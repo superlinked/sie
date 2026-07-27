@@ -1,6 +1,8 @@
 sie_id: urchade/gliner_multi-v2.1
 hf_id: urchade/gliner_multi-v2.1
 hf_revision: 443d26d654e0324125a96bebd8e796c14ff2efe6
+hf_tokenizer_dependencies:
+  microsoft/mdeberta-v3-base: a0484667b22365f84929a935b5e50a51f71f159d
 inputs:
   text: true
   image: false

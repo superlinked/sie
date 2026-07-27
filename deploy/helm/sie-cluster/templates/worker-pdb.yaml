@@ -3,6 +3,7 @@
 {{- if $pool.enabled }}
 {{- range $bundleName, $bundleCfg := $pool.bundles }}
 {{- if dig "enabled" true $bundleCfg }}
+{{- $lane := include "sie-cluster.worker.lane" (dict "root" $root "poolName" $poolName "pool" $pool "bundleName" $bundleName) | fromJson }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -12,14 +13,16 @@ metadata:
   labels:
     {{- include "sie-cluster.worker.labels" $root | nindent 4 }}
     sie.superlinked.com/pool: {{ $poolName | quote }}
-    sie.superlinked.com/bundle: {{ $bundleName | quote }}
+    sie.superlinked.com/queue-pool: {{ $lane.queuePool | quote }}
+    sie.superlinked.com/machine-profile: {{ $lane.machineProfile | quote }}
+    sie.superlinked.com/bundle: {{ $lane.bundle | quote }}
 spec:
   maxUnavailable: 1
   selector:
     matchLabels:
       {{- include "sie-cluster.worker.selectorLabels" $root | nindent 6 }}
       sie.superlinked.com/pool: {{ $poolName | quote }}
-      sie.superlinked.com/bundle: {{ $bundleName | quote }}
+      sie.superlinked.com/bundle: {{ $lane.bundle | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

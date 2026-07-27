@@ -1,18 +1,29 @@
-{{- if .Values.serviceMonitor.enabled }}
-{{- $maxWorkerChildCount := int (include "sie-cluster.worker.maxChildCount" .) }}
-{{/*
-Per-component ServiceMonitors. A single monitor with the shared
-`sie-cluster.selectorLabels` selector matches the gateway, config, and
-worker Services; only the worker Service exposes the `worker-metrics` port,
-so Prometheus would log scrape failures against gateway/config for that
-port. Split into one ServiceMonitor per component so each monitor only
-scrapes the ports it knows exist.
-*/}}
-# Gateway ServiceMonitor
+{{- if eq (include "sie-cluster.otel.applicationPrometheusEnabled" .) "true" }}
+{{- $intervalRaw := toString .Values.serviceMonitor.interval -}}
+{{- $timeoutRaw := toString .Values.serviceMonitor.scrapeTimeout -}}
+{{- if not (regexMatch "^[1-9][0-9]*s$" $intervalRaw) -}}
+{{- fail "serviceMonitor.interval must be a positive whole-second duration such as 5s" -}}
+{{- end -}}
+{{- if not (regexMatch "^[1-9][0-9]*s$" $timeoutRaw) -}}
+{{- fail "serviceMonitor.scrapeTimeout must be a positive whole-second duration such as 4s" -}}
+{{- end -}}
+{{- $intervalSeconds := int (trimSuffix "s" $intervalRaw) -}}
+{{- $timeoutSeconds := int (trimSuffix "s" $timeoutRaw) -}}
+{{- if gt $timeoutSeconds $intervalSeconds -}}
+{{- fail "serviceMonitor.scrapeTimeout must be less than or equal to serviceMonitor.interval" -}}
+{{- end -}}
+{{- if and .Values.autoscaling.enabled (gt $intervalSeconds 5) -}}
+{{- fail "autoscaling.enabled requires serviceMonitor.interval no slower than 5s" -}}
+{{- end }}
+# Applications emit canonical metrics once over OTLP. Prometheus scrapes only
+# the collector's compatibility exporter; no application-local /metrics surface
+# participates in dashboards, alerts, or KEDA. Any chart-managed application
+# Prometheus consumer makes this monitor and the bundled collector mandatory,
+# even when serviceMonitor.enabled is omitted.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "sie-cluster.fullname" . }}-gateway
+  name: {{ include "sie-cluster.fullname" . }}-otel-collector
   namespace: {{ include "sie-cluster.namespace" . }}
   labels:
     {{- include "sie-cluster.labels" . | nindent 4 }}
@@ -20,59 +31,22 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-  jobLabel: sie.superlinked.com/prometheus-job
   selector:
     matchLabels:
       {{- include "sie-cluster.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: gateway-metrics
+      app.kubernetes.io/component: otel-collector
   namespaceSelector:
     matchNames:
       - {{ include "sie-cluster.namespace" . }}
   endpoints:
-    - port: gateway-metrics
+    - port: prometheus
       interval: {{ .Values.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
       path: /metrics
----
-# Worker ServiceMonitor (adapter workers + optional worker-sidecar)
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: {{ include "sie-cluster.fullname" . }}-worker
-  namespace: {{ include "sie-cluster.namespace" . }}
-  labels:
-    {{- include "sie-cluster.labels" . | nindent 4 }}
-    {{- with .Values.serviceMonitor.labels }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
-spec:
-  selector:
-    matchLabels:
-      {{- include "sie-cluster.worker.selectorLabels" . | nindent 6 }}
-  namespaceSelector:
-    matchNames:
-      - {{ include "sie-cluster.namespace" . }}
-  endpoints:
-    - port: http
-      interval: {{ .Values.serviceMonitor.interval }}
-      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
-      path: /metrics
-    {{- if gt $maxWorkerChildCount 1 }}
-    {{- range $i := until $maxWorkerChildCount }}
-    {{- if gt $i 0 }}
-    - port: http-{{ $i }}
-      interval: {{ $.Values.serviceMonitor.interval }}
-      scrapeTimeout: {{ $.Values.serviceMonitor.scrapeTimeout }}
-      path: /metrics
-    {{- end }}
-    {{- end }}
-    {{- end }}
-    {{- if .Values.workers.common.workerSidecar.enabled }}
-    # worker-sidecar metrics (NATS pull loop, backend routing,
-    # circuit breaker state, per-backend latency histograms).
-    - port: worker-metrics
-      interval: {{ .Values.serviceMonitor.interval }}
-      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
-      path: /metrics
-    {{- end }}
+      # Scrape-target identity is authoritative. A producer must not be able to
+      # overwrite namespace/service/endpoint/job/instance and make an unrelated
+      # target eligible for KEDA. Explicit producer identity is authored inside
+      # the collector before Prometheus normalization, never copied from the
+      # producer-controllable exported_job/exported_instance compatibility labels.
+      honorLabels: false
 {{- end }}

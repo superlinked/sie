@@ -36,7 +36,7 @@ Key terms used throughout this document:
 - **Pool**: an operational routing group of workers managed by the gateway. Answers "which compatible workers should this request be queued to right now?". Pools are a runtime concept stored in Kubernetes.
 - **Config store**: `sie-config`'s backing store for persisted state. Per-model YAML files plus a plain-text monotonic `epoch` counter, laid out as `{base}/models/{id-with-/-as-__}.yaml` and `{base}/epoch`. The backend is selected by the `SIE_CONFIG_STORE_DIR` scheme: a local path (default — backed by an opt-in PVC in Helm), `s3://…`, or `gs://…`.
 - **Config epoch**: a monotonic integer. Every `sie-config` write that creates new profiles bumps it by one. The gateway tracks it locally as `ConfigEpoch` for drift detection.
-- **`bundle_config_hash`**: a content hash over the routable-profile fields (`adapter_path`, `max_batch_tokens`, `compute_precision`, `adapter_options`) for every model whose adapters match a bundle. Used by admin tooling and workers to tell whether a worker's local registry matches the gateway's expected config for this bundle.
+- **`bundle_config_hash`**: a content hash over each model's immutable weights revision and routable-profile fields (`adapter_path`, `max_batch_tokens`, `compute_precision`, `adapter_options`) for every model whose adapters match a bundle. Used by admin tooling and workers to tell whether a worker's local registry and weights identity match the gateway's expected config for this bundle.
 
 ## 2. Inference Request Path
 
@@ -57,7 +57,7 @@ Rules enforced on the inference path:
 - The inference hot path is queue-only. There is no direct-HTTP fallback. `src/handlers/proxy.rs` is the queue-submission handler despite its name.
 - If the queue transport is unavailable (no usable NATS client at init), the gateway returns `503`. It does not fall back to direct mode.
 - Unknown model ids fast-fail with `404` whenever the in-memory `ModelRegistry` has been populated (either by the filesystem seed or by a successful bootstrap / delta from `sie-config`). In the pre-bootstrap edge case where the registry is still empty — no seed, no export applied yet — the proxy falls back to the caller-supplied bundle (or `"default"`) so an unseeded gateway can still publish work to a cold pool that a caller pinned via `X-SIE-Pool`. Once any model is registered, this fallback is disabled and the 404 contract applies.
-- Automatic pool selection only considers healthy workers whose reported `bundle_config_hash` matches the gateway's expected hash. Explicit `X-SIE-Pool` selects a logical pool; the gateway publishes to that pool's backing queue pool (`PoolSpec.queue_pool`, default `default`) and stamps the logical pool into the work item as `admission_pool`. Deliveries with hashes unknown to the worker-sidecar, or logical pools that do not assign that worker, are NAKed before backend IPC.
+- Automatic pool selection only considers healthy workers whose reported `bundle_config_hash` matches the gateway's expected hash. Explicit `X-SIE-Pool` selects a logical pool; the gateway publishes to that pool's backing queue pool (`PoolSpec.queue_pool`, default `default`) and stamps the logical pool into the work item as `admission_pool`. Deliveries whose hash is not the worker-sidecar's current hash, or logical pools that do not assign that worker, are NAKed before backend IPC. Successful non-streaming results echo the execution hash; the gateway emits `X-SIE-Model-Revision` only when every successful result matches the hash and immutable revision captured atomically at routing time. Streaming responses omit this post-execution attestation because headers precede the terminal result.
 - On scale-from-zero — i.e. no healthy worker registered for the `(bundle, machine_profile)` tuple and the caller did not pin an explicit pool — the gateway records pending demand for KEDA and returns a retryable `503` provisioning response with `Retry-After: 60`, `X-SIE-Error-Code: PROVISIONING`, and gateway version headers. SIE-native surfaces use the SDK retry envelope (`{"error":{"code","message"}}`); OpenAI-compatible surfaces (`/v1/generate`, `/v1/embeddings`, `/v1/chat/completions`, `/v1/completions`, `/v1/responses`) use the OpenAI error envelope, because standard OpenAI clients parse 2xx as successful model output. This applies whether or not the caller set `X-SIE-MACHINE-PROFILE`; default-routing clients get the same contract as profile-pinned clients.
 - On no-consumer conditions for the JetStream publish, the gateway treats the miss as the same pre-execution provisioning state and returns the same retryable `503 PROVISIONING` contract (`Retry-After: 60`, `X-SIE-Error-Code: PROVISIONING`, and surface-specific error envelope). On backpressure conditions the gateway returns `503` with `Retry-After: 5`.
 - On queue result timeouts the gateway returns `504` with `X-SIE-Error-Code: GATEWAY_TIMEOUT` and `Retry-After: 5`. This means the gateway accepted and published the work item, but no worker result reached the gateway before `SIE_GATEWAY_REQUEST_TIMEOUT`; it must not be collapsed into worker-emitted `MODEL_LOADING`, which remains a separate retryable `503 MODEL_LOADING` signal.
@@ -128,9 +128,9 @@ The gateway does not block startup on `sie-config`. Startup is:
 3. Spawn two independent background tasks: `state::config_bootstrap::spawn_bootstrap_retry` and `state::config_poller::spawn`. They share the same `ModelRegistry`, `ConfigEpoch` (monotonic model-write counter), `BundlesHash` (sha256 fingerprint of `sie-config`'s loaded bundle set), and `BundleConfigHashesHash` (sha256 fingerprint of the per-bundle config-hash map). The poller skips its first tick (one `DEFAULT_POLL_INTERVAL` grace) so the initial bootstrap attempt can run first, and then reconciles on every subsequent tick regardless of whether the bootstrap task has completed yet.
 4. Bind the HTTP listener. Kubernetes probes use plain-text endpoints implemented in `handlers/health.rs`:
    - **`GET /healthz`** — liveness. Always **`200 OK`** with body **`ok`** and **`Content-Type: text/plain; charset=utf-8`** (same wire shape as `sie_server`'s `/healthz`).
-   - **`GET /readyz`** — readiness for **routing traffic to this gateway process**. Returns **`200 OK`** + **`ok`** once the gateway listener is serving. It is intentionally independent of worker health and `sie-config` reachability: a gateway with zero healthy workers must still receive the first inference request so it can return a retryable provisioning response and emit `sie_gateway_pending_demand` for scale-from-zero. Worker availability is exposed on **`GET /health`** and by the inference response path itself.
+   - **`GET /readyz`** — readiness for **routing traffic to this gateway process**. Returns **`200 OK`** + **`ok`** once the gateway listener is serving. It is intentionally independent of worker health and `sie-config` reachability: a gateway with zero healthy workers must still receive the first inference request so it can return a retryable provisioning response and emit canonical `sie.gateway.pending_demand` telemetry for scale-from-zero. Worker availability is exposed on **`GET /health`** and by the inference response path itself.
 
-The bootstrap/poller tasks are spawned **before** the HTTP listener binds, so requests hitting a freshly-bound replica can observe either filesystem-seed-only state or a partially-applied snapshot depending on timing. That is by design. **`/readyz` does not wait for control-plane sync** (see §11 caveat 3); bootstrap completeness is tracked via **`GET /v1/configs/models/{id}/status`**, **`sie_gateway_config_bootstrap_degraded`**, and **`sie_gateway_config_epoch`** — not by `/readyz` alone.
+The bootstrap/poller tasks are spawned **before** the HTTP listener binds, so requests hitting a freshly-bound replica can observe either filesystem-seed-only state or a partially-applied snapshot depending on timing. That is by design. **`/readyz` does not wait for control-plane sync** (see §11 caveat 3); bootstrap completeness is tracked via **`GET /v1/configs/models/{id}/status`**, **`sie.gateway.config.bootstrap.degraded`**, and **`sie.gateway.config.applied_epoch`** — not by `/readyz` alone.
 
 ### 4.1 Bootstrap retry
 
@@ -139,7 +139,7 @@ The bootstrap/poller tasks are spawned **before** the HTTP listener binds, so re
 Startup short-circuits:
 
 - If `SIE_CONFIG_SERVICE_URL` is unset, the task logs and returns immediately — there is nothing to bootstrap against. The gateway runs filesystem-seed-only.
-- If constructing the HTTP client fails, the task sets `sie_gateway_config_bootstrap_degraded` to `1` and returns; it does not retry.
+- If constructing the HTTP client fails, the task sets `sie.gateway.config.bootstrap.degraded` to `1` and returns; it does not retry.
 
 `bootstrap_once` runs a three-call sequence, authenticated with `SIE_ADMIN_TOKEN` as a bearer token on `SIE_CONFIG_SERVICE_URL`:
 
@@ -156,9 +156,9 @@ Why fetch `/epoch` BEFORE `/bundles`: if a bundle is added on `sie-config` betwe
 
 On failure (DNS, 5xx, timeout, decode error, partial apply):
 
-- Increments `sie_gateway_config_bootstrap_failures_total`.
+- Records `sie.gateway.config.operations{operation="bootstrap", outcome=...}`.
 - Sleeps with exponential backoff, initial 1s, doubling to a 60s cap.
-- After 10 failed attempts or 5 minutes of sustained failure, sets `sie_gateway_config_bootstrap_degraded` gauge to `1` and escalates logging to `error!`. The gauge clears on the first success.
+- After 10 failed attempts or 5 minutes of sustained failure, sets `sie.gateway.config.bootstrap.degraded` gauge to `1` and escalates logging to `error!`. The gauge clears on the first success.
 - The retry loop itself has no attempt ceiling — it keeps trying until one attempt succeeds (at which point the task exits) or the process is killed. `sie-config` is not a hard startup dependency.
 
 During the bootstrap-retry window (before the first successful fetch):
@@ -261,7 +261,7 @@ Computation rules:
 
 `bundle_config_hash` is computed independently by `sie-config`, the gateway, and workers. The `sie-config` export/epoch surface keeps the global per-bundle hash for bootstrap and drift detection, while export snapshots and live NATS deltas also carry per-bundle/per-pool hashes for worker convergence. Worker sidecars apply only models whose top-level `pool` matches their own `SIE_POOL`, then advertise that pool-scoped hash. Gateway hot routing/readiness compares workers against the hash for the same materialized scope the worker serves: the default pool scope for unfiltered workers, or the named physical queue-pool scope for workers filtered by `SIE_POOL`. Logical API pools may draw from a different backing queue pool via `PoolSpec.queue_pool`; for the admin-tooling readiness flow to work, gateway and worker hashes must be byte-identical for that backing bundle/pool scope. A model config's top-level `pool` must therefore match the physical queue scope that will materialize it; dynamic logical pools backed by `default` should use default-scoped model configs unless a dedicated worker queue exists.
 
-The hash is a SHA-256 over a JSON-serialized, sort-keys representation of a structured object. The outer shape is an array of models, each with `sie_id` and `profiles: [{name, config: {...4 fields...}}]`, where the inner `config` for each profile is strictly the four routable-profile fields: `adapter_path`, `max_batch_tokens`, `compute_precision`, `adapter_options`. Any field outside that whitelist is excluded from the hash so that non-routable edits (e.g. comments, description-style metadata) cannot unnecessarily invalidate worker acks. Python uses `orjson.dumps(..., OPT_SORT_KEYS)`; Rust mirrors this via `serde_json::to_vec` over `BTreeMap`-backed canonical types.
+The hash is a SHA-256 over a JSON-serialized, sort-keys representation of a structured object. The outer shape is an array of models, each with `sie_id`, `revision`, and `profiles: [{name, config: {...4 fields...}}]`. `revision` is the immutable `hf_revision` commit SHA, or null for package-backed/unpinned development models. The inner `config` for each profile is strictly the four routable-profile fields: `adapter_path`, `max_batch_tokens`, `compute_precision`, `adapter_options`. Any field outside that whitelist is excluded from the hash so that non-routable edits (e.g. comments, description-style metadata) cannot unnecessarily invalidate worker acks. Python uses `orjson.dumps(..., OPT_SORT_KEYS)`; Rust mirrors this via `serde_json::to_vec` over `BTreeMap`-backed canonical types.
 
 `adapter_options` is canonicalized before hashing:
 
@@ -290,6 +290,7 @@ Per-subject transport:
 | Pool inference work (`encode` / `score` / `extract`) | `sie.work.{pool}.{machine_profile}.{bundle}.{model}` | JetStream | Durability and max-delivery semantics required. Work-item payload is msgpack. One stream per pool (`WORK_POOL_{pool}`) captures ordinary non-generation work for the pool, while worker consumers filter one concrete machine-profile/bundle lane; see §8.2. |
 | Worker direct-dispatch | `sie.work.{pool}.{machine_profile}.{bundle}.{model}.{worker_id}` | JetStream | Worker-specific stream used by generation and by capped logical batch pools that must target an assigned worker instead of allowing unassigned workers on the same backing queue to burn JetStream delivery attempts. |
 | Batch direct cancel | `batch_cancel.{router_id}.{worker_id}.{request_id}` | NATS Core | Best-effort worker-scoped signal emitted only after non-streaming worker-direct fallback publishes are durably acked on the pool subject. Sidecars ACK-drop queued worker-direct encode/score/extract items for the request; pool fallback items are never cancelled by this signal. |
+| Non-generation request abandonment | `work_cancel.{router_id}.{request_id}` | NATS Core | Best-effort request-wide signal emitted when the gateway abandons encode/score/extract work. Active sidecars retain bounded namespaced tombstones and ACK-drop matching work before backend IPC. The signal is not replayed to disconnected or restarted workers, and static inference already past IPC is not preempted. |
 | Inference results | `_INBOX.{router_id}.{request_id}` | NATS Core | Gateway is waiting synchronously; a brief blip after publish but before delivery means the result is lost and the client may retry (the gateway returns `504` with `X-SIE-Error-Code: GATEWAY_TIMEOUT` and `Retry-After: 5` — see §2). Result payload is msgpack. |
 | Config deltas | `sie.config.models.{bundle}`, `sie.config.models._all` | NATS Core | Lightweight fan-out. Gateway durability comes from the snapshot/export path (section 4), not the bus. JSON payload (control plane, not hot path). The gateway subscribes on `_all`; worker-sidecar containers subscribe on their bundle subject and apply through backend IPC. |
 | Worker health | `sie.health.>` | NATS Core | Ephemeral, last-heartbeat-wins. The gateway subscribes in `health_mode=nats` (see `discovery/nats_health.rs`) and supervises the subscriber task: reconnects normally resume in `async-nats`, but a terminated subscription stream is recreated with bounded backoff because there is no full-state health poller. Worker-sidecar containers publish this heartbeat and include the latest bundle hash after successful config apply. Helm sidecar deployments set `health_mode=nats`; the gateway binary default remains `ws` so standalone/test deployments can use the Python WebSocket path. |
@@ -320,11 +321,44 @@ shape, and any old queued work should be drained or purged before rollout.
 
 The stream's subject filter `sie.work.{pool}.*.*.*` matches exactly one token each for machine profile, bundle, and model. Workers attach durable consumers with the narrower `sie.work.{pool}.{machine_profile}.{bundle}.*` filter, so multiple bundles can share a pool stream without stealing each other's work. NATS subject tokens legally contain `/`, so `BAAI/bge-m3` works directly. They cannot contain `.`, `*`, `>`, or whitespace, so any model whose `sie_id` contains one of those characters would — without normalization — expand into multiple tokens, not match the stream or consumer filters, and get rejected at the broker.
 
+Initial publication does not wait for the JetStream ACK on the HTTP request
+path. The dispatcher returns a transport-neutral durability completion, and a
+detached monitor drains every ACK. Before spawning it, the handler begins one
+request-scoped handoff lease for the exact physical lane. Complete success
+releases that lease; an ACK failure retains request-scoped demand, notifies the
+request driver, and cleans up the handoff when the request exits. The
+queue-publish metric therefore describes submission, while the bounded
+`publish_ack` queue event describes durability. The aggregate ACK completion is
+capped at six seconds, and exactly one handler-owned task awaits it. Its future
+set is proportional only to the already-admitted request batch, so it does not
+introduce a second unbounded admission class. The task is shorter-lived than
+the already in-flight result wait during a broker outage; there is no second
+publisher-owned task per request.
+
 To prevent that, the Rust gateway's `work_subject(pool, machine_profile, bundle, model)` in `packages/sie_gateway/src/queue/publisher.rs` calls a private `normalize_model_id` helper that mirrors the Python SDK (`sie_sdk.queue_types.normalize_model_id`): `/` → `__`, `.` → `_dot_`, and `*`/`>`/space → `_`. So `vidore/colqwen2.5-v0.2` on the default RTX 6000 default-bundle lane publishes on `sie.work.default.rtx6000.default.vidore__colqwen2_dot_5-v0_dot_2` — exactly six tokens, matches the lane consumer filter. The DLQ token extractor in `queue/dlq.rs` splits the advisory subject on `.` and takes `parts[5]`, which with the normalization in place is already a single safe token.
 
 Worker direct-dispatch uses `sie.work.{pool}.{machine_profile}.{bundle}.{model}.{worker_id}`, which has one additional token after the model. That subject intentionally does not match the pool stream's `sie.work.{pool}.*.*.*` filter. The sidecar binds this worker-specific stream at startup. It stays idle for ordinary pool-queued encode/score/extract traffic, but it is required for two cases: generation direct-dispatch and capped logical batch pools whose `admission_pool` assigns only a subset of workers on a shared backing queue. In the capped logical case the gateway builds an HRW ring from the assigned healthy workers for that lane and publishes to one worker subject, allowing lazy model load without unassigned peers repeatedly NAKing the same message into `max_deliver`. If a non-streaming worker-direct publish fails, the gateway immediately retries on the pool subject; if published work is still missing after the short fallback delay, it republishes the missing items once to the pool subject so a disappeared worker-specific consumer does not strand the request until the client timeout. The gateway emits `batch_cancel.{router_id}.{worker_id}.{request_id}` only after the pool fallback publishes are durably acked, and the original sidecar only ACK-drops matching queued worker-direct batch items that have not reached IPC. Sidecar `WorkResult` payloads also carry a direct-origin marker, so once the gateway has confirmed fallback for an item index it ignores any late direct-origin result for that index rather than allowing mixed direct/pool completion. In-flight direct work may still consume GPU, but it cannot win the collector after confirmed fallback.
 
 The same isolation applies in the gateway. Ordinary `encode` / `score` / `extract` and `/v1/embeddings` requests stay on the pool JetStream subject and keep the pre-generation queue-publish hot path. All recognized inference endpoints — generation and non-generation alike — inject the active W3C trace context into the queue work-item envelope (`injects_queue_trace_context`), so the worker span attaches to the gateway span across the pool/sidecar boundary; unrecognized labels fail closed. This is independent of generation-specific gateway proxy spans: capped logical pool requests may use worker direct-dispatch to preserve admission semantics, and non-generation endpoints do not pay generation proxy-span overhead. When tracing export is enabled, non-generation endpoints open the lightweight `gateway.publish` span around queue publish; generation endpoints open `gateway.proxy_generate` / `gateway.proxy_chat` spans on their streaming paths. New gateway hot-path decisions should use the shared endpoint classifier and its regression tests, not one-off string checks.
+
+The non-generation HTTP handler treats its result collector as exclusive
+transport ownership. Cancellation during queue publication, a client drop,
+handler timeout, explicit partial-publish or chunk-validation failure, and the
+periodic expiry sweep all race to remove the collector. Only the removal winner
+performs request abandonment: it releases chunk-memory reservations, terminates
+the response path without partial success, publishes `work_cancel`, and deletes
+exact-key offloaded payloads. Late results see no collector and are
+dropped. JetStream stays at-least-once; abandonment does not claim exactly-once
+delivery or execution.
+
+The managed Modal dispatcher implements the same ownership contract without a
+NATS cancellation hop. It registers an abort handle for each detached
+non-generation dispatch task before allowing that task to enter the i6pn call,
+and abandonment removes and aborts the task. Dropping an i6pn call before its
+frame commits returns its credit; an interrupted write retires the channel; and
+a committed call keeps its pending correlation until the transport settles the
+credit. This safely releases gateway ownership, but it cannot preempt static
+model execution after the remote call boundary.
 
 ### 8.3 Publisher/consumer ownership
 
@@ -348,14 +382,14 @@ The `ConfigNotification` JSON payload carries the following fields, verified aga
 The hot path is always **msgpack** (`rmp_serde` on the gateway, `msgpack-python` / `msgpack-numpy` on workers). Specifically:
 
 - `WorkItem` (gateway → worker on JetStream): msgpack.
-- `WorkResult` (worker → gateway on the inbox subject): msgpack. Numpy arrays use `msgpack-numpy`'s extension-free encoding (maps with a `nd: true` sentinel + `dtype`, `shape`, `data`). The gateway transcodes to native JSON arrays only when the client's `Accept` header asks for JSON.
+- `WorkResult` (worker → gateway on the inbox subject): msgpack. Numpy arrays use `msgpack-numpy`'s extension-free encoding (maps with a `nd: true` sentinel + `type`, `shape`, `data`). When the gateway advertises `WorkItem.accepts_result_chunks: true`, a result that does not fit one NATS message may instead arrive as named-msgpack `result_chunk_v1` envelopes. This boolean negotiates v1 only; a future envelope version requires a new capability rather than reinterpreting the existing field. The gateway reassembles v1 transfers within the pending request lifetime, with a SHA-256 digest and fixed item/chunk/request/process memory limits, then decodes the reconstructed bytes as the same `WorkResult`. The gateway transcodes to native JSON arrays only when the client's `Accept` header asks for JSON.
 
 JSON (`serde_json`) is used where payloads are low-frequency or human-oriented:
 
 - Control plane: `POST /v1/configs/models` body, `GET /v1/configs/export` response, `GET /v1/configs/epoch` response.
 - NATS config deltas: `ConfigNotification` is JSON.
 - Worker-ack status endpoint responses.
-- Operator-visible APIs: pool management, `/v1/models`, `/health`, `/metrics`.
+- Operator-visible APIs: pool management, `/v1/models`, `/health`.
 - Inference request/response envelopes, when the client opts into JSON via `Content-Type` / `Accept`. SDK clients typically use msgpack end-to-end.
 
 ## 9. Storage and Persistence
@@ -393,7 +427,7 @@ The gateway has no persistent config store. `SIE_CONFIG_STORE_DIR` and `SIE_CONF
 
 2. **Config deltas use NATS Core pub/sub; deltas published during a gateway-NATS disconnect are lost.** Recovery is automatic via the config poller (§4.2). The worst-case staleness window is `DEFAULT_POLL_INTERVAL` plus one export round-trip. No pod restart is required. Shortening `DEFAULT_POLL_INTERVAL` trades load on `sie-config` for recovery time.
 
-3. **Bootstrap is background-retried, not blocking.** A gateway started while `sie-config` is unreachable will serve filesystem-seed traffic immediately. API-added models are missing until the first successful export. `ConfigEpoch` typically stays at `0` during this window — but a NATS delta that arrives before the first export can move it above `0`, so admin tooling should use the `sie_gateway_config_bootstrap_degraded` gauge (set after 10 failed attempts or 5 minutes of sustained failure, cleared on first success) as the authoritative "has this replica ever reconciled with `sie-config`?" signal rather than `config_epoch == 0`. **`GET /readyz` does not encode bootstrap completion or worker health**; it is process readiness (§4).
+3. **Bootstrap is background-retried, not blocking.** A gateway started while `sie-config` is unreachable will serve filesystem-seed traffic immediately. API-added models are missing until the first successful export. `ConfigEpoch` typically stays at `0` during this window — but a NATS delta that arrives before the first export can move it above `0`, so admin tooling should use the `sie.gateway.config.bootstrap.degraded` gauge (set after 10 failed attempts or 5 minutes of sustained failure, cleared on first success) as the authoritative "has this replica ever reconciled with `sie-config`?" signal rather than `config_epoch == 0`. **`GET /readyz` does not encode bootstrap completion or worker health**; it is process readiness (§4).
 
 4. **Partial NATS publish on `sie-config`.** If a write succeeds on disk and in the registry but the NATS publish fails for a subset of affected bundles, `sie-config` still returns `201` (or `200` for no-op replays) with a structured `warnings` entry naming the failed bundles. Workers on those bundles stay on the previous epoch until the gateway poller triggers a re-export.
 
@@ -435,7 +469,7 @@ Gateway (`sie-gateway`):
 - `SIE_ADMIN_TOKEN` — (1) bearer token the gateway-as-client presents on `GET /v1/configs/export` and `GET /v1/configs/epoch`; (2) the token that `AuthLayer` requires for admin-gated mutations on the gateway itself (`POST/PUT/DELETE` on `/v1/configs/*`, `/v1/admin/*`, `/v1/pools/*`). If empty and the matching inbound request targets an admin path, the middleware fails closed with `403`. On outbound calls, if empty, no `Authorization` header is sent (so `sie-config` must either be unauthenticated or the gateway will fail with `401`/`403`).
 - `SIE_AUTH_TOKEN` / `SIE_AUTH_TOKENS` — tokens accepted by the gateway's own inference API (`/v1/encode`, `/v1/score`, `/v1/extract`) and for read-side pool/config routes. Not used for outbound calls to `sie-config`. When `SIE_AUTH_MODE` enables auth but this list is empty, every non-probe request returns `500`.
 - `SIE_AUTH_MODE` — `token` (alias: `static`) enforces auth; `none` (default) disables it. Typos are fail-open-to-bypass by design; `audit_auth` logs a startup error naming the bad value so operators see it in `kubectl logs`.
-- `SIE_AUTH_EXEMPT_OPERATIONAL` — when `true`, `/`, `/health`, `/metrics`, and `/ws/*` are exempt from auth (they expose worker URLs, bundle assignments, queue depth, GPU inventory — treat as sensitive). Default `false`. **`/healthz` and `/readyz` are always exempt from auth** so kubelet probes never fail with **`401`/`403`** because of a missing bearer token. `/readyz` reports process readiness only; worker health remains visible through `/health` and inference responses.
+- `SIE_AUTH_EXEMPT_OPERATIONAL` — when `true`, `/`, `/health`, and `/ws/*` are exempt from auth (they expose worker URLs, bundle assignments, queue depth, GPU inventory — treat as sensitive). Default `false`. **`/healthz` and `/readyz` are always exempt from auth** so kubelet probes never fail with **`401`/`403`** because of a missing bearer token. `/readyz` reports process readiness only; worker health remains visible through `/health` and inference responses.
 - `SIE_NATS_CONFIG_TRUSTED_PRODUCERS` — comma-separated producer allowlist for `sie.config.models._all`. Binary default is `sie-config`; Helm sets the release-scoped config Deployment name. Matching is exact OR K8s pod-name prefix (see §4.3). Untrusted notifications are dropped; the `config_poller` still closes the gap.
 - `SIE_NATS_CONFIG_TRUST_ANY_PRODUCER` — `true` disables producer validation entirely. Intended for local/dev. `main.rs` emits a startup warning when on.
 - NATS connection variables per the existing gateway configuration.
@@ -452,9 +486,10 @@ Config service (`sie-config`):
 Tracing (all runtimes):
 
 - `SIE_TRACING_ENABLED` and an OTLP endpoint are both required before spans are exported by the gateway, worker sidecar, Python worker, or Rust worker. The trace-specific `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` takes precedence over the generic `OTEL_EXPORTER_OTLP_ENDPOINT`; whitespace-only values are ignored. All four runtimes install the W3C trace-context propagator even when the exporter is off, so inbound `traceparent` / `tracestate` can still flow through queue envelopes.
-- `OTEL_SERVICE_NAME` controls the service name shown in the tracing backend. Helm defaults are `sie-gateway` for the gateway, `sie-worker-sidecar` for the sidecar, and `sie-server` for the worker container. If the Rust worker runs without the Helm-provided env, its binary default is `sie-server-rust`.
-- `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` configure head sampling. Helm defaults them to `parentbased_traceidratio` / `0.05`, so an inbound sampled decision is honored and new traces are sampled at 5%.
-- `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` is the supported chart path. The Python worker also has a local-dev `--tracing` CLI flag, which enables tracing to `localhost:4317`.
+- `OTEL_SERVICE_NAME` controls the service name shown in the tracing backend. Helm defaults are `sie-gateway` for the gateway, `sie-worker-sidecar` for the sidecar, and `sie-server` for the worker container. If the Rust worker runs without the Helm-provided env, its binary default is `sie-server-rust`. Managed launchers set each child process's identity explicitly so gateway, Python worker, and sidecar signals remain distinct.
+- `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` configure head sampling. Helm and the managed Modal endpoint secret set them to `parentbased_traceidratio` / `0.05`, so an inbound sampled decision is honored and new traces are sampled at 5%.
+- Every signal resolves its signal-specific endpoint before the generic OTLP endpoint and never inherits from another signal. Where transport is selectable, the signal-specific protocol likewise precedes the generic protocol. Dual-transport exporters accept only exact case-insensitive `grpc` and `http/protobuf`: `grpc` is the chart default, while `http/protobuf` is the managed Modal path because its collector edge publishes only OTLP/HTTP. The managed-only dispatcher requires explicit HTTP protobuf, and the provisioner supplies explicit trace, metric, and log settings. Unsupported values warn and disable only that signal; serving remains fail-open. The gateway, Python worker, and Rust sidecar attach the all-or-nothing `Modal-Key` / `Modal-Secret` pair only when managed proxy auth is enabled and the effective signal endpoint exactly matches the provisioner-recorded canonical `*.modal.run` HTTPS origin and OTLP path. Authenticated exporters do not follow redirects; an untrusted traces or metrics override disables that signal without stopping inference. The Python worker also has a local-dev `--tracing` CLI flag, which enables tracing to `localhost:4317`.
+- Resources always include `deployment.environment` and `cloud.region`; deployments inject concrete values and local runs use `unknown`.
 - Helm `observability.tracing.enabled` injects the exporter env block on gateway, worker, and sidecar containers. Rendering fails fast when no endpoint can be resolved from `observability.tracing.endpoint`, the bundled collector, or bundled Tempo.
 
 ## 14. Endpoint Reference
@@ -481,7 +516,6 @@ Pools and operator:
 - `GET /v1/pools`, `POST /v1/pools`, `GET /v1/pools/{name}`, `POST /v1/pools/{name}/renew`, `DELETE /v1/pools/{name}`
 - `GET /v1/models`, `GET /v1/models/{*model}` — model catalogue. JSON objects mirror `sie_server` **`ModelInfo`** shape (including `inputs`, `outputs`, `dims`, `profiles`, worker-derived `loaded` / `state`, optional `last_error`, …). An unknown `model` id returns **`404`** with **`{"detail":{"code":"MODEL_NOT_FOUND",...}}`** (same envelope style as FastAPI validation errors on `sie_server`).
 - `GET /healthz`, `GET /readyz`, `GET /health`
-- `GET /metrics`
 - `GET /ws/cluster-status`
 - `GET /` — HTML status page (operator-facing, not a programmatic API).
 
@@ -505,88 +539,64 @@ Config reads (read auth unless noted):
 
 `sie-config` does not serve `GET /v1/configs/models/{id}/status`. That endpoint is gateway-only by design (no worker registry on `sie-config`).
 
-## 15. Metrics
+## 15. Telemetry
 
-Both services expose Prometheus metrics on `GET /metrics`. The gateway uses the `prometheus` Rust crate; `sie-config` uses `prometheus-client` (matches `sie-server`'s library choice). All metric names use the `sie_gateway_` or `sie_config_` prefix to make cross-service dashboards unambiguous.
+The gateway emits each declared observation once through the canonical
+OpenTelemetry facade and exports OTLP to a collector. It does not link a
+Prometheus client, host an application `/metrics` route, or choose a backend.
+The collector owns Prometheus exposition for OSS/KEDA and OTLP routing for
+remote telemetry. The checked-in source of truth is `telemetry/contract.yaml`.
 
-When `SIE_METRICS_PORT` is set, the gateway also binds a metrics-only listener
-on that port with a single unauthenticated `GET /metrics` route. The Helm chart
-enables this for `serviceMonitor.enabled=true`: Prometheus scrapes a
-ClusterIP-only gateway metrics Service on port 9090, while the normal gateway
-Service on port 8080 keeps the public request surface behind the configured
-auth mode. The 8080 `/metrics` route still exists and follows the main app's
-auth rules.
+The gateway contract contains request count/duration/admission, five lane-value
+families (pending demand, durable lane queue depth, active lease GPUs, pool warm
+floor, and scale-worthy rejected requests), a local capacity-reconciliation
+timestamp, and a same-label queue-snapshot timestamp.
+KEDA state refreshes independently of HTTP at least every five seconds.
+The physical catalog is frozen for the bounded process lifetime; physical lane
+labels are `pool`, `machine_profile`, and `bundle`. For every catalog lane, the gateway reads the
+exact `WORK_POOL_{pool}` durable consumer and records
+`num_pending + num_ack_pending`; the latter keeps work visible while a worker
+is loading a model or dies before ACK. The configured consumer name and exact
+`sie.work.{pool}.{machine_profile}.{bundle}.*` filter are verified before any
+value is emitted. `StreamNotFound` is a safe zero; `ConsumerNotFound` uses an
+exact-subject retained-work check so another lane's consumer cannot hide
+orphan work. A timeout, auth failure, filter mismatch, or counter overflow
+updates neither that lane's queue value nor its freshness. Successful lanes and
+the independent pending-demand, active-lease, and warm-floor families still
+refresh, so one corrupt consumer ages out only its own KEDA input. The reader is
+bounded by the 1,024-entry deployment catalog, 32 concurrent queries, and a
+four-second whole-snapshot timeout. Each gateway hashes its process-start UUID
+to a stable offset within the five-second cadence, preventing rollout-aligned
+replicas from scanning in one burst. Helm caps metrics-enabled gateway replicas
+at ten, and the live broker benchmark covers the resulting maximum 10,240
+lookups per interval. Worker identity and heartbeat queue depth never enter
+this KEDA series.
 
-### 15.1 Request and latency — gateway
+Prometheus target labels bind every query to one Helm release; the queue gauge
+is sent to Better Stack under its canonical dotted name and naturally exports
+as `sie_gateway_lane_queue_depth`. Each business series
+must match a fresh timestamp from the same collector-authored
+`producer_instance` and Prometheus-only `collector_generation` before
+replica-safe aggregation, so exporter retention across a gateway restart
+cannot revive stale capacity state and a collector accumulator restart cannot
+silently continue an old counter series. The queue query uses its same-label
+broker timestamp and requires a fresh queue sample count, distinguishing a
+successful zero from a missing point. Broker, pool, and demand reads are
+independently reconciled and OTel gauge collection can overlap recording, so
+cross-family state is eventually consistent rather than export-atomic.
+Reconciliation start time is captured before those reads and recorded after
+the values; slow builds therefore age out, and the shared OSS/managed loop
+skips missed ticks.
 
-Emitted from a Tower middleware (`MetricsLayer` in `middleware/metrics.rs`) that wraps the proxy routes. Putting it in middleware rather than inline in handlers ensures these counters cover every response including early rejections (validation, auth, capacity, timeout).
+Resource identity always includes `service.name`, `service.instance.id`,
+`deployment.environment`, and `cloud.region`. Deployments inject concrete
+environment/region values; local runs use `unknown`. Ordinary point attributes
+are bounded by the contract, and invalid catalog values collapse to `other`.
+KEDA physical-lane attributes are stricter: they must resolve to an exact typed
+catalog member, and unresolved control observations are omitted rather than
+assigned a synthetic fallback lane.
 
-- `sie_gateway_requests_total{endpoint,status,machine_profile}` — counter.
-- `sie_gateway_request_latency_seconds{endpoint,machine_profile}` — histogram. Wall-clock from middleware entry to response.
-
-### 15.2 Routing outcomes — gateway
-
-- `sie_gateway_provisioning_responses_total{machine_profile}` — counter. A provisioning response was returned when no ready worker exists; paired with `sie_gateway_pending_demand` for KEDA scale-up.
-- `sie_gateway_rejected_requests_total{pool,machine_profile,bundle,reason}` — counter. In-handler emission because the `reason` label (`timeout`, `capacity`, `no_workers`, ...) is too granular for the middleware.
-- `sie_gateway_pending_demand{pool,machine_profile,bundle}` — gauge. KEDA trigger. Cleared by `clear_fulfilled_demand` when healthy workers appear on the exact queue lane.
-- `sie_gateway_active_lease_gpus{pool,machine_profile,bundle}` — gauge. KEDA trigger. Recomputed from distinct assigned workers in the current pool list on every `update_pool_metrics`; `pool` is the backing queue pool (`PoolSpec.queue_pool`, default `default`) so API-created logical pools reserve the KEDA lane they actually draw from. Workers assigned to multiple logical pools sharing the same backing lane are counted once.
-
-### 15.3 Worker and model state — gateway
-
-- `sie_gateway_workers{status}` — gauge, healthy/unhealthy counts.
-- `sie_gateway_worker_queue_depth{pool,worker,machine_profile,bundle}` — gauge.
-- `sie_gateway_worker_memory_used_bytes{worker,machine_profile,bundle}` — gauge.
-- `sie_gateway_model_workers{model}` — gauge, worker count per model.
-
-### 15.4 Queue and DLQ — gateway
-
-- `sie_gateway_queue_publish_seconds{operation}` — histogram, JetStream publish latency.
-- `sie_gateway_queue_items_published{operation}` — histogram, batch size.
-- `sie_gateway_queue_result_wait_seconds{operation}` — histogram, time from publish to result receipt on the NATS Core inbox.
-- `sie_gateway_queue_payload_offloads_total` — counter, large-payload offload events.
-- `sie_gateway_queue_inbox_skips_total` — counter, fast-path request-id skips on the inbox.
-- `sie_gateway_queue_ack_failures_total` — counter, fire-and-forget JetStream ack monitoring.
-- `sie_gateway_dlq_events_total{stream,consumer}` — counter, **successful** DLQ forwards.
-- `sie_gateway_dlq_republish_failures_total{stream,consumer}` — counter, DLQ publish failures. Companion to the success counter; without it a DLQ publish outage was invisible on the existing metric.
-
-### 15.5 Pool lifecycle — gateway
-
-- `sie_gateway_pool_events_total{event}` — counter. `event` is one of `created`, `updated`, `renewed`, `deleted`, `expired`. Complements the `active_lease_gpus` gauge: the gauge shows current state, this counter shows the rate of churn. A 5-minute rate over `event="expired"` catches runaway expirations; a sustained `event="created"` rate catches runaway pool creation.
-
-### 15.6 Config plane — gateway
-
-- `sie_gateway_config_bootstrap_failures_total` — counter. Background bootstrap retry failures (see §10).
-- `sie_gateway_config_bootstrap_degraded` — gauge, `0` or `1`. Set to `1` once the gateway has been serving the filesystem seed past the degraded threshold; cleared on the first successful bootstrap.
-- `sie_gateway_config_epoch` — gauge. Highest-known control-plane epoch on this gateway. Updated by bootstrap fetch, NATS Core delta handler, and the config poller. Pairs with `sie_config_epoch` for drift alerting (§15.9).
-- `sie_gateway_config_deltas_total{kind,result}` — counter. NATS Core config-delta processing outcomes. `kind` is the delta kind (`epoch_bump`, `model_added`); `result` is `applied`, `parse_error`, `apply_error`, or `rejected_untrusted`.
-- `sie_gateway_nats_connected` — gauge, `0` or `1`. Flipped by the NATS client's connect/disconnect event callbacks. Unlabeled: the gateway uses a single `async-nats` client for JetStream (work + results) and NATS Core (config deltas), so a single gauge accurately represents the only connection-state dimension that exists today. If we later split clients per purpose, re-introduce a `stream` label at that point.
-
-### 15.7 Request and latency — sie-config
-
-Emitted from a Starlette ASGI middleware (`_PrometheusHTTPMiddleware` in `app_factory.py`) that wraps the FastAPI app. The `path` label is the **FastAPI route template** (e.g. `/v1/configs/models/{model_id:path}`), not the raw URL — otherwise per-model reads would each produce their own time series. The middleware intentionally skips `/metrics` itself so scrape traffic does not pollute the counter.
-
-- `sie_config_http_requests_total{method,path,status}` — counter.
-- `sie_config_http_request_duration_seconds{method,path}` — histogram. Wall-clock end-to-end inside the ASGI app.
-
-### 15.8 Config plane state — sie-config
-
-- `sie_config_epoch` — gauge. Authoritative epoch persisted in `ConfigStore`. Seeded on startup from `ConfigStore.read_epoch`, updated on every successful `increment_epoch`. `0` when no `ConfigStore` is configured (standalone / test), which is the correct "never bumped" value.
-- `sie_config_models_total{source}` — gauge. `source` is `api` (added via `POST /v1/configs/models`, persisted in `ConfigStore`) or `filesystem` (seeded from the on-disk `bundles/` + `models/` directories). Refreshed on each successful write.
-- `sie_config_nats_connected` — gauge, `0` or `1`. Flipped by `NatsPublisher` in the connect / disconnect / reconnect callbacks.
-- `sie_config_nats_publishes_total{result}` — counter. One sample per `publish_config_notification` call. `result` is `success`, `partial`, or `failure`. `partial` means at least one bundle subject succeeded and at least one failed — operators treat this differently from `failure` because the gateway poller closes a partial gap within ~30 s.
-- `sie_config_store_writes_total{op,result}` — counter. `op` is `write_model` or `increment_epoch`; `result` is `success` or `failure`. A sustained `failure` rate is a PVC / disk-backend issue.
-
-### 15.9 Cross-service drift alert
-
-The most important alert across both services. Fires when any gateway's view of the control plane lags the authoritative epoch published by `sie-config`:
-
-```promql
-(sie_config_epoch - on() sie_gateway_config_epoch) > 0
-```
-
-Sustained non-zero for >1 minute means either NATS Core deltas are not flowing (pub/sub has no replay, so a disconnected gateway silently falls behind) or the config poller is stuck. The poller normally closes this gap within its poll interval regardless of NATS health, so a sustained alert here is always an actionable incident.
-
-### 15.10 Distributed tracing
+### 15.1 Distributed tracing
 
 Tracing uses W3C `traceparent` / `tracestate` propagation through the gateway queue envelopes described in §8.2 (`injects_queue_trace_context`). The SDKs are not instrumented today: a trace roots at the gateway unless the caller's own HTTP stack injects a context.
 
@@ -638,7 +648,7 @@ This section walks a concrete `encode` request through the system so the moving 
 
 ### 16.1 Bundles and model → bundle resolution
 
-A **bundle** defines which adapter module identifiers a worker deployment can run. Three shapes ship today:
+A **bundle** defines which adapter module identifiers a worker deployment can run. The principal shapes are:
 
 **`default` bundle** (priority `10`) — ~37 adapters for smaller BERT-class and cross-encoder models:
 
@@ -652,19 +662,38 @@ adapters:
 - sie_server.adapters.clip
 - sie_server.adapters.colbert
 - sie_server.adapters.sentence_transformer
-- sie_server.adapters.splade_flash
+- sie_server.adapters.splade_flash.adapter
 # … 30+ more
 ```
 
-**`sglang` bundle** (priority `20`) — one adapter for large LLM-based models using the SGLang inference engine:
+**SGLang task-class bundles** — three logical worker lanes share one pinned
+SGLang dependency stack and physical image while keeping generation, embedding,
+and vision extraction queues and autoscaling independent:
 
 ```yaml
 # bundles/sglang.yaml
 name: sglang
 priority: 20
 adapters:
-- sie_server.adapters.sglang
+- sie_server.adapters.sglang.generation
+
+# bundles/sglang-embedding.yaml
+name: sglang-embedding
+priority: 21
+adapters:
+- sie_server.adapters.sglang.embedding
+
+# bundles/sglang-vision-extract.yaml
+name: sglang-vision-extract
+priority: 22
+adapters:
+- sie_server.adapters.sglang_vision_extract.adapter
 ```
+
+The three bundles stay dependency-pin compatible. Kubernetes and Modal may reuse
+the `sglang` image for the two non-generation logical bundles, but routing,
+worker identity, metrics, queue subjects, and scaling always use the logical
+bundle name.
 
 **`candle` bundle** (priority `30`) — a Rust `sie-server-rust` IPC worker backed by native Candle execution:
 
@@ -687,10 +716,10 @@ Model: BAAI/bge-m3
   → routes to "default" workers
 
 Model: Qwen/Qwen3-Embedding-4B
-  adapter_path: sie_server.adapters.sglang:SGLangEmbeddingAdapter
-  adapter module: sie_server.adapters.sglang
-  → matches "sglang" bundle
-  → routes to "sglang" workers
+  adapter_path: sie_server.adapters.sglang.embedding:SGLangEmbeddingAdapter
+  adapter module: sie_server.adapters.sglang.embedding
+  → matches "sglang-embedding" bundle
+  → routes to "sglang-embedding" workers
 
 Model: intfloat/e5-small-v2:candle
   base model: intfloat/e5-small-v2
@@ -743,12 +772,13 @@ WorkItem {
   machine_profile: "default",
   item:          { "text": "..." },       // or omitted + payload_ref if >1MB
   reply_subject: "_INBOX.gw-1.abc-123",
+  accepts_result_chunks: true,              // supports result_chunk_v1 only; absent/false keeps one-shot
   bundle_config_hash: "a1b2c3…",
   …
 }
 ```
 
-JetStream publish is fire-and-forget: the gateway buffers publishes to the `async-nats` client and spawns a detached task to drain the acks, so the request handler does not block per-item on the JetStream round-trip. Ack failures are logged and counted via `sie_gateway_queue_ack_failures_total`. Backpressure and no-consumer conditions are caught earlier via a cached stream-info check (`stream_info_cache`), so a stalled stream surfaces as a prompt `503` rather than a stuck request.
+JetStream publish submission is asynchronous: the gateway buffers publishes to the `async-nats` client and returns an owned durability future, so the request handler does not block serially on per-item JetStream ACK round-trips. Queue APIs admit at most 4096 items and overlap at most 64 initial sends. The one pending-demand handoff task drains the bounded ACK set under a six-second aggregate deadline. Ack outcomes are logged and recorded once as `sie.gateway.queue.events{event="publish_ack",outcome="success|ack_error"}`; the collector exposes that counter as `sie_gateway_queue_events_total`. Backpressure and no-consumer conditions are caught earlier via a cached stream-info check (`stream_info_cache`), so a stalled stream surfaces as a prompt `503` rather than a stuck request.
 
 In parallel, the gateway registers a `ResultCollector` in its `DashMap<String, ResultCollector>` keyed by `request_id` and subscribes (once, app-wide) to `_INBOX.{router_id}.>` on NATS Core.
 
@@ -768,7 +798,11 @@ Workers are multi-model: one `default` worker can serve BGE-M3, a cross-encoder,
 
 **Step 4 — Gateway assembles the response** (`queue/publisher.rs`, `handlers/proxy.rs`):
 
-On each inbox message, the gateway first runs `extract_request_id_fast` — a bounded scan of the raw msgpack bytes that locates the `request_id` (or, for array-shape `WorkResult` payloads, the first string field, which the current codec places at the `request_id` / `work_item_id` position) without a full deserialization. If the extracted ID is not present in the `pending_results` `DashMap`, the message is dropped immediately (already completed, duplicate redelivery, or stale). Only when it is live does the handler run `rmp_serde::from_slice` to decode the full `WorkResult`. This lets the gateway shed redelivered JetStream messages at near-memcmp cost.
+On each inbox message, the gateway first runs `extract_request_id_fast` — a bounded scan of the raw msgpack bytes that locates the `request_id` (or, for array-shape `WorkResult` payloads, the first string field, which the current codec places at the `request_id` / `work_item_id` position) without a full deserialization. If the extracted ID is not present in the `pending_results` `DashMap`, the message is dropped immediately (already completed, duplicate redelivery, or stale). Only when it is live does the handler decode the payload. An exact `kind: result_chunk_v1` discriminator enters the v1 decoder and malformed exact-v1 envelopes fail closed; ordinary or future `WorkResult` maps remain compatible even if they add fields such as `total_bytes`. V1 accepts out-of-order and byte-identical duplicate chunks, and rejects identity/metadata conflicts, bad length/digest, more than 64 chunks, or more than 16 MiB per item. Chunk zero with a new digest replaces stale retry state. Chunk zero may also safely restart the same digest with a new canonical chunk count; bounded digest/layout tombstones stop delayed fragments from an abandoned attempt from mixing with or flipping the replacement. Unknown non-zero retry fragments are ignored.
+
+Memory is admission-controlled before a transfer allocates its chunk vector. Each item conservatively reserves three times its encoded length (partial fragments, contiguous reassembly/decode copy, and the decoded result retained until all request items complete) plus 4 KiB of bookkeeping headroom. Reservations for accepted completed chunked items are held until request completion; completed results rejected by first-result or stale direct-fallback semantics release their reservation immediately. Reservations are capped at 64 MiB per request and 256 MiB gateway-wide. The process-wide ceiling is one eighth of the gateway's 2 GiB container limit, leaving 1.75 GiB for normal response buffers, JSON expansion, NATS, allocator overhead, and the rest of the process. Request-collector RAII releases reservations on success, validation failure, timeout, and publish failure. The current reservation is exposed as `sie_gateway_queue_result_chunk_reserved_bytes`; global exhaustion increments `sie_gateway_queue_result_chunk_rejections_total{reason="global_budget"}`. Invalid transfers terminate the pending request with a static, non-retry-hinted `503 transport_failure` instead of waiting for timeout.
+
+The inbox remains a trusted in-cluster worker boundary, as it already was for one-shot `WorkResult`: a publisher that can write to another gateway's private inbox can name a live request. Chunk validation fails such a request closed, but never reflects the supplied ids, payload, or validation detail to the caller; the public message is the static transport error above.
 
 Results are stored by `item_index` in the `ResultCollector`, and a oneshot completes when all items have arrived. The gateway then converts the collected msgpack results into the client-requested format — pass-through for `Accept: application/msgpack` or transcoded to JSON (with numpy-array expansion) for `Accept: application/json`.
 
@@ -807,13 +841,31 @@ POST /v1/pools
 
 `gpus` is required capacity; `gpu_caps` is an optional assignment/view cap for that pool. `gpu_caps` is not an aggregate quota across several logical pools sharing the same backing queue; use separate physical queue pools for hard capacity separation. `bundle` is an optional assignment filter: when omitted, the logical pool may span multiple worker bundles and `status.assigned_workers[]` records each worker's actual bundle so `active_lease_gpus` can stay lane-aware. The `default` pool has zero requirements and no caps. The worker-sidecar polls pool status every 10 seconds before NATS pulls when the admission gate is enabled. Capped named physical pools fail closed unless this pod appears in `status.assigned_workers`; the `default` pool fails open during transient gateway/status errors so baseline capacity remains available. For logical API pools backed by a shared physical queue, the sidecar also tracks assigned logical pools from `GET /v1/pools` and NAKs work whose `admission_pool` does not assign this worker. HA gateways sort workers deterministically and persist named-pool assignment status.
 
-Helm publishes canonical machine profiles in `SIE_GATEWAY_CONFIGURED_GPUS`, request aliases in `SIE_GATEWAY_GPU_ALIASES`, and optional deploy-owned static queue pools in `SIE_GATEWAY_STATIC_QUEUE_POOLS`.
+Helm resolves every enabled worker entry through one canonical physical-lane
+tuple `(queuePool, machineProfile, bundle)`, then reuses it for worker/sidecar
+environment, heartbeat identity, Kubernetes labels/selectors, gateway
+configured profiles, and KEDA queries. Tokens are trimmed, limited to 63
+characters, validated against `^[A-Za-z0-9_-]+$`, and lowercased; explicit
+blank values and post-normalization tuple collisions fail chart rendering.
+Pool and bundle map keys remain stable Kubernetes/KEDA identities and are
+validated separately as lowercase DNS-1123 labels.
+Helm publishes those canonical machine profiles in
+`SIE_GATEWAY_CONFIGURED_GPUS`, request aliases in
+`SIE_GATEWAY_GPU_ALIASES`, and optional deploy-owned static queue pools in
+`SIE_GATEWAY_STATIC_QUEUE_POOLS`.
+It also publishes the exact tuple set in
+`SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES` (maximum 1024). The gateway resolves
+every scale-driving observation against this catalog before it can enter the
+pending-demand tracker or rejection metric. Unresolved caller input is omitted,
+not relabeled into a fake KEDA lane. The tracker stores at most the finite
+catalog, refreshes deadlines in place, and lets the five-second snapshot prune
+expiry; request cardinality therefore cannot create entries or Tokio tasks.
 
-Each physical queue pool gets its own JetStream stream (`WORK_POOL_{queue_pool}`) with subjects `sie.work.{queue_pool}.*.*.*`. Pool and queue-pool names are validated against `[A-Za-z0-9_-]` and canonicalized to lowercase at the API, gateway request, K8s restore/watch, and Helm render boundaries, so NATS subjects and KEDA labels do not split by case. Workers are deployed with `SIE_POOL={queue_pool}`, `SIE_MACHINE_PROFILE={profile}`, and `SIE_BUNDLE={bundle}`; they consume only from their concrete `sie.work.{queue_pool}.{profile}.{bundle}.*` lane. A logical API pool names the tenant/workload boundary and carries `PoolSpec.queue_pool` to select the physical queue lane; omitted `queue_pool` means `default`. Helm's baseline default puts enabled worker groups in `SIE_POOL=default`, so SDK calls can pass just the machine profile (`gpu="l4"`) for shared-cluster capacity, and API-created pools can borrow that same base capacity with `gpu="pool/l4"`. Dedicated queue deployments override Helm `queuePool` and must declare the same name under `queueRouting.staticQueuePools` before API pools can use it as a non-default `queue_pool`; callers can target the protected static pool directly or create a differently named logical pool backed by that queue, for example `{"name":"customer-acme-workload","queue_pool":"customer-acme"}` plus SDK `gpu="customer-acme-workload/l4"`. A cold `X-SIE-POOL` request without `X-SIE-MACHINE-PROFILE` records lane-specific `pending_demand` for every machine profile the pool can provision. Multi-profile pool demand therefore wakes all candidate lanes from zero instead of relying on an empty `machine_profile` label that no per-lane KEDA ScaledObject can observe; once a capable worker registers, exact-lane demand clears and idle candidate lanes scale back down normally.
+Each physical queue pool gets its own JetStream stream (`WORK_POOL_{queue_pool}`) with subjects `sie.work.{queue_pool}.*.*.*`. Pool and queue-pool names are validated against `[A-Za-z0-9_-]` and canonicalized to lowercase at the API, gateway request, K8s restore/watch, and Helm render boundaries, so NATS subjects and KEDA labels do not split by case. Workers are deployed with `SIE_POOL={queue_pool}`, `SIE_MACHINE_PROFILE={profile}`, and `SIE_BUNDLE={bundle}`; they consume only from their concrete `sie.work.{queue_pool}.{profile}.{bundle}.*` lane. A logical API pool names the tenant/workload boundary and carries `PoolSpec.queue_pool` to select the physical queue lane; omitted `queue_pool` means `default`. Helm's baseline default puts enabled worker groups in `SIE_POOL=default`, so SDK calls can pass just the machine profile (`gpu="l4"`) for shared-cluster capacity, and API-created pools can borrow that same base capacity with `gpu="pool/l4"`. Dedicated queue deployments override Helm `queuePool` and must declare the same name under `queueRouting.staticQueuePools` before API pools can use it as a non-default `queue_pool`; callers can target the protected static pool directly or create a differently named logical pool backed by that queue, for example `{"name":"customer-acme-workload","queue_pool":"customer-acme"}` plus SDK `gpu="customer-acme-workload/l4"`. A cold `X-SIE-POOL` request without `X-SIE-MACHINE-PROFILE` records lane-specific `pending_demand` for every machine profile the pool can provision. Multi-profile pool demand therefore wakes all candidate lanes from zero instead of relying on an empty `machine_profile` label that no per-lane KEDA ScaledObject can observe. Registration does not clear demand: only a successful gateway work publish clears the exact target lane; other candidate lanes retain demand until work is published to them or the entry expires. This preserves scale-up pressure when registered workers are saturated.
 
-A pool spec may also carry `minimum_worker_count` (a per-pool warm floor, default `0`). It keeps the first request from hitting a cold VM: every 30 seconds the gateway re-emits `sie_gateway_pool_warm_floor{pool,machine_profile,bundle}` for each backing queue lane the pool can name (clearing lanes that disappear), and a per-lane KEDA trigger reads it with `or vector(0)` so KEDA keeps machines warm. When multiple logical pools share one backing lane, the emitted value is the maximum requested floor for that physical lane, not a sum. Active lease capacity is labeled the same way. Default `0` emits nothing and leaves scale-from-zero unchanged.
+A pool spec may also carry `minimum_worker_count` (a per-pool warm floor, default `0`). It keeps the first request from hitting a cold VM: every five seconds the gateway re-emits `sie.gateway.pool.warm_floor{pool,machine_profile,bundle}` for each backing queue lane the pool can name (clearing lanes that disappear), and a per-lane KEDA trigger reads the collector's Prometheus translation with `or vector(0)` so KEDA keeps machines warm. When multiple logical pools share one backing lane, the emitted value is the maximum requested floor for that physical lane, not a sum. Active lease capacity is labeled the same way. Default `0` emits nothing and leaves scale-from-zero unchanged.
 
-A pool spec may also carry `pinned_models` (a per-pool set of always-loaded models, default empty), chosen from the models the gateway already tracks (`GET /v1/configs/models`); ids may be profile-qualified (`model-name:profile_name`, the registry's `{base}:{profile}` variant entries, with `model:default` folding to the base). The API validates each id against the registry and stores it canonicalized; every 30 seconds the gateway re-emits `sie_gateway_pool_pinned_model_loaded{pool,model}` = 1 when a healthy assigned worker has the model loaded, else 0 (clearing lanes that disappear). This makes the pinned set declarative and observable; actually keeping the models loaded (worker preload) and lazy-load/LRU using spare capacity around the pinned set are worker-side and tracked separately. Default empty leaves lazy-loading unchanged.
+A pool spec may also carry `pinned_models` (a per-pool set of always-loaded models, default empty), chosen from the models the gateway already tracks (`GET /v1/configs/models`); ids may be profile-qualified (`model-name:profile_name`, the registry's `{base}:{profile}` variant entries, with `model:default` folding to the base). The API validates each id against the registry and stores it canonicalized. Every 30 seconds the gateway emits the complete `sie.gateway.pool.pinned_model.loaded{pool,model}` snapshot through its canonical OTel facade: the value is `1` only when a healthy worker assigned to that logical pool reports the model loaded, and removed pools or pins are explicitly zeroed. Actually keeping the models loaded (worker preload) and lazy-load/LRU using spare capacity around the pinned set are worker-side and tracked separately. Default empty leaves lazy-loading unchanged.
 
 Creating a usable custom pool has two supported shapes. For a dynamic logical pool over base capacity, call `POST /v1/pools` with the logical name and GPU requirements and omit `queue_pool`; it defaults to `default`, so no additional Helm worker group is required. Pool `name` is user/dynamic. Non-default `queue_pool` is infra/admin: it must name a Helm-rendered `queuePool`/`SIE_POOL` backing lane declared under `queueRouting.staticQueuePools`. For a dedicated physical queue, first add that worker group to Helm values and declare the same name under `queueRouting.staticQueuePools`, then create logical pools with `queue_pool` set to that queue. Lease-owned dynamic pools expire after their TTL unless renewed with `POST /v1/pools/{name}/renew`. Clients target either shape with an explicit `X-SIE-POOL` header, for example `X-SIE-POOL: customer-acme`, or SDK `gpu="customer-acme/l4"`. The `default` pool is protected and cannot be deleted. Missing named pools intentionally fail closed so capped/dynamic pool isolation is not weakened by a silent fallback.
 

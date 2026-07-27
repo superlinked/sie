@@ -1,5 +1,6 @@
 sie_id: jinaai/jina-colbert-v2
 hf_id: jinaai/jina-colbert-v2
+hf_revision: 4552c4dc1ffd7d7a635b6a41a1077fe9c9cdd974
 inputs:
   text: true
   image: false
@@ -21,6 +22,7 @@ profiles:
     adapter_path: sie_server.adapters.colbert_rotary_flash:ColBERTRotaryFlashAdapter
     adapter_options:
       loadtime:
+        code_revision: 845308d0fd72a8406a3e378450e1a09522790419
         muvera_config:
           num_repetitions: 40
           num_simhash_projections: 6
@@ -30,14 +32,19 @@ profiles:
         normalize: true
         query_max_length: 32
         skip_special_tokens: false
-        query_prefix: '[QueryMarker] '
-        doc_prefix: '[DocumentMarker] '
+        doc_punctuation_skiplist: true
+        query_prefix: '[QueryMarker]'
+        doc_prefix: '[DocumentMarker]'
       runtime:
+        query_max_length: 32
+        max_seq_length: 300
         muvera: null
   muvera:
     extends: default
     adapter_options:
       runtime:
+        query_max_length: 32
+        max_seq_length: 300
         muvera: {}
         output_types:
         - dense

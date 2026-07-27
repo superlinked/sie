@@ -868,7 +868,7 @@ impl AdaptiveBatchController {
     /// target was set explicitly, calibration state is preserved.
     ///
     /// `starvation_resets` is deliberately *not* cleared — it's a
-    /// monotonic operational counter (scraped by Prometheus) and
+    /// monotonic operational counter and
     /// resetting it would erase evidence of incidents.
     pub fn reset(&mut self) {
         self.current_wait_ms = clamp(self.initial_wait_ms, self.min_wait_ms, self.max_wait_ms);

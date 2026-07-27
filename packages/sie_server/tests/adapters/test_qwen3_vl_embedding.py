@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 
@@ -93,6 +96,46 @@ class _FakeProcessor:
         return self._inputs
 
 
+class _RaceDetectingProcessor(_FakeProcessor):
+    """Emulate a fast tokenizer that raises on concurrent mutation."""
+
+    def __init__(self, inputs: dict[str, torch.Tensor]) -> None:
+        super().__init__(inputs)
+        self._active = 0
+        self._guard = threading.Lock()
+        self.peak_concurrency = 0
+
+    def _enter(self) -> bool:
+        with self._guard:
+            self._active += 1
+            self.peak_concurrency = max(self.peak_concurrency, self._active)
+            return self._active > 1
+
+    def _exit(self) -> None:
+        with self._guard:
+            self._active -= 1
+
+    def apply_chat_template(self, *args: Any, **kwargs: Any) -> str:
+        concurrent = self._enter()
+        try:
+            if concurrent:
+                raise RuntimeError("Already borrowed")
+            time.sleep(0.002)
+            return super().apply_chat_template(*args, **kwargs)
+        finally:
+            self._exit()
+
+    def __call__(self, **_kwargs: Any) -> dict[str, torch.Tensor]:
+        concurrent = self._enter()
+        try:
+            if concurrent:
+                raise RuntimeError("Already borrowed")
+            time.sleep(0.002)
+            return self._inputs
+        finally:
+            self._exit()
+
+
 class TestPostNormPooling:
     """The forward path must pool the post-RMSNorm ``last_hidden_state``."""
 
@@ -137,6 +180,22 @@ class TestPostNormPooling:
         # mean([2,0],[4,0]) = [3,0] -> normalized [1,0].
         assert result.shape == (2,)
         assert pytest.approx(result.tolist(), abs=1e-5) == [1.0, 0.0]
+
+    def test_processor_tokenization_is_thread_safe(self, adapter: Qwen3VLEmbeddingAdapter) -> None:
+        inputs = {
+            "input_ids": torch.tensor([[1, 2]]),
+            "attention_mask": torch.tensor([[1, 1]]),
+        }
+        processor = _RaceDetectingProcessor(inputs)
+        adapter._model = _FakeCausalLM(torch.tensor([[[1.0, 0.0], [0.0, 1.0]]]))  # ty: ignore[invalid-assignment]
+        adapter._processor = processor  # ty: ignore[invalid-assignment]
+        conversation = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _: adapter._forward_conversation(conversation), range(32)))
+
+        assert len(results) == 32
+        assert processor.peak_concurrency == 1
 
 
 class TestInstructionResolution:

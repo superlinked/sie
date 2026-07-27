@@ -1,0 +1,40 @@
+[project]
+name = "insurance-claims-agent"
+version = "0.1.0"
+description = "Review a realistic flood claim packet with specialized models served by SIE"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pypdf>=6.0",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "reportlab>=4.0",
+    "rich>=13.7",
+    "sie-sdk>=0.6.23",
+]
+
+[project.scripts]
+fetch-claim-sources = "insurance_claims.fetch:main"
+prepare-claim = "insurance_claims.prepare:main"
+review-claim = "insurance_claims.review:main"
+eval-claim = "insurance_claims.evaluate:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+    "ruff>=0.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["insurance_claims"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

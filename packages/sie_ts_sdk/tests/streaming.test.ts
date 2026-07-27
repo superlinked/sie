@@ -15,6 +15,7 @@ import {
   SIEStreamError,
 } from "../src/errors.js";
 import type { ChatCompletionChunk, GenerateChunk } from "../src/types.js";
+import { MINIMAL_JPEG_BASE64, MINIMAL_JPEG_BYTES } from "./fixtures.js";
 
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -326,6 +327,7 @@ describe("SIEClient.streamChatCompletions", () => {
       model: "m",
       messages: [{ role: "user", content: "hi" }],
       stream: false, // should be overridden
+      seed: -1,
     })) {
       // noop
     }
@@ -335,7 +337,40 @@ describe("SIEClient.streamChatCompletions", () => {
     expect(init.headers.Accept).toBe("text/event-stream");
     const body = JSON.parse(init.body);
     expect(body.stream).toBe(true);
+    expect(body.seed).toBe(-1);
   });
+
+  it.each([Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1, 1.5, Number.NaN])(
+    "rejects a chat seed outside the JavaScript safe-integer contract: %s",
+    async (seed) => {
+      const client = new SIEClient("http://localhost:8080");
+      const stream = client.streamChatCompletions({
+        model: "m",
+        messages: [{ role: "user", content: "hi" }],
+        seed,
+      });
+      await expect(stream.next()).rejects.toThrow(RangeError);
+      expect(mockFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER])(
+    "forwards a safe-integer boundary chat seed unchanged: %s",
+    async (seed) => {
+      mockFetch.mockResolvedValueOnce(sseResponse([chatChunk("ok")]));
+      const client = new SIEClient("http://localhost:8080");
+      for await (const _ of client.streamChatCompletions({
+        model: "m",
+        messages: [{ role: "user", content: "hi" }],
+        seed,
+      })) {
+        // Drain the generator.
+      }
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.seed).toBe(seed);
+    },
+  );
 
   it("throws RequestError on 400 before the stream opens", async () => {
     mockFetch.mockResolvedValueOnce(
@@ -405,7 +440,9 @@ describe("SIEClient.streamGenerate", () => {
   it("yields SIE-native chunks in order with a terminal usage+ttft chunk", async () => {
     mockFetch.mockResolvedValueOnce(
       sseResponse([
-        generateChunk(0, "Hello"),
+        generateChunk(0, "Hello", {
+          logprobs: [{ token: "Hello", logprob: -0.25, top_logprobs: [] }],
+        }),
         generateChunk(1, " world"),
         generateChunk(2, "", {
           done: true,
@@ -424,6 +461,7 @@ describe("SIEClient.streamGenerate", () => {
 
     expect(chunks).toHaveLength(3);
     expect(chunks.map((c) => c.text_delta).join("")).toBe("Hello world");
+    expect(chunks[0]?.logprobs?.[0]?.token).toBe("Hello");
     const last = chunks[2];
     expect(last?.done).toBe(true);
     expect(last?.finish_reason).toBe("stop");
@@ -461,9 +499,20 @@ describe("SIEClient.streamGenerate", () => {
     const client = new SIEClient("http://localhost:8080");
     for await (const _ of client.streamGenerate("Qwen/Qwen3-4B-Instruct-2507", "hi", {
       maxNewTokens: 4,
+      images: [MINIMAL_JPEG_BYTES],
       temperature: 0.5,
       topP: 0.9,
       stop: ["</s>"],
+      frequencyPenalty: 0.25,
+      presencePenalty: -0.5,
+      grammar: { regex: "[a-z]+", label: null, strict: null },
+      seed: -2,
+      logitBias: { "123": 1.5 },
+      topLogprobs: 3,
+      routingKey: "tenant-7",
+      promptCacheKey: "prompt-9",
+      safetyIdentifier: "safety-3",
+      loraAdapter: "sql-adapter",
     })) {
       // noop
     }
@@ -474,11 +523,33 @@ describe("SIEClient.streamGenerate", () => {
     expect(body).toEqual({
       prompt: "hi",
       max_new_tokens: 4,
+      images: [{ data: MINIMAL_JPEG_BASE64, format: "jpeg" }],
       temperature: 0.5,
       top_p: 0.9,
       stop: ["</s>"],
+      frequency_penalty: 0.25,
+      presence_penalty: -0.5,
+      grammar: { regex: "[a-z]+", label: null, strict: null },
+      seed: -2,
+      logit_bias: { "123": 1.5 },
+      logprobs: true,
+      top_logprobs: 3,
+      routing_key: "tenant-7",
+      prompt_cache_key: "prompt-9",
+      safety_identifier: "safety-3",
+      lora_adapter: "sql-adapter",
       stream: true,
     });
+  });
+
+  it("rejects an unsafe seed before opening the generation stream", async () => {
+    const client = new SIEClient("http://localhost:8080");
+    const stream = client.streamGenerate("m", "hi", {
+      maxNewTokens: 4,
+      seed: Number.MAX_SAFE_INTEGER + 1,
+    });
+    await expect(stream.next()).rejects.toThrow(RangeError);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("forwards gpu/pool routing headers", async () => {

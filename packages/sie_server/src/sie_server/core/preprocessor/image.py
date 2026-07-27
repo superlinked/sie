@@ -7,6 +7,7 @@ image-text models like CLIP and SigLIP that take single images.
 from __future__ import annotations
 
 import io
+import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -32,15 +33,47 @@ class ImagePreprocessor:
         self,
         processor: Any,  # SiglipProcessor, CLIPProcessor, etc.
         model_name: str,
+        processor_factory: Callable[[], Any] | None = None,
     ) -> None:
         """Initialize with an image processor.
 
         Args:
-            processor: HuggingFace processor with image_processor.
+            processor: HuggingFace processor with image_processor. Used directly
+                when ``processor_factory`` is None (CLIP/SigLIP/registry).
             model_name: Model name for logging.
+            processor_factory: Optional zero-arg factory building one processor
+                instance. When supplied, ``prepare`` builds a distinct processor
+                per pool thread (``threading.local``) and never touches the
+                shared ``processor``. Per-thread instances isolate non-thread-safe
+                HF processors (whose Rust fast tokenizer raises "Already borrowed"
+                on concurrent entry, #2098) WITHOUT serialising the preprocessor
+                pool — a lock here collapsed colpali eval throughput (image
+                transforms went single-threaded, the admission queue overflowed,
+                and cells failed with server 503s). Default None keeps thread-safe
+                processors (CLIP/SigLIP) on the shared instance unchanged.
         """
         self._processor = processor
         self._model_name = model_name
+        self._processor_factory = processor_factory
+        self._tls = threading.local() if processor_factory is not None else None
+
+    def _resolve_processor(self) -> Any:
+        """Return the processor to use for the calling thread.
+
+        With no factory, the shared processor is returned (byte-identical to the
+        pre-#2098 path). With a factory, a per-thread instance is built on first
+        use and reused for the life of the thread — no shared mutable state, no
+        lock, so the pool stays fully parallel.
+        """
+        if self._processor_factory is None:
+            return self._processor
+        tls = self._tls
+        assert tls is not None  # set whenever a factory is present
+        processor = getattr(tls, "processor", None)
+        if processor is None:
+            processor = self._processor_factory()
+            tls.processor = processor
+        return processor
 
     @property
     def modality(self) -> str:
@@ -76,6 +109,10 @@ class ImagePreprocessor:
         prepared_items: list[PreparedItem[ImagePayload]] = []
         total_cost = 0
 
+        # One processor per thread when a factory is set (#2098); otherwise the
+        # shared processor. Resolved once — a single prepare() runs on one thread.
+        processor = self._resolve_processor()
+
         for i, item in enumerate(items):
             if not item.images:
                 # Skip items without images (they may be text-only)
@@ -91,7 +128,7 @@ class ImagePreprocessor:
                 pil_img = pil_img.convert("RGB")
 
             # Process through HuggingFace processor
-            processed = self._processor(images=pil_img, return_tensors="pt")
+            processed = processor(images=pil_img, return_tensors="pt")
             pixel_values = processed["pixel_values"].squeeze(0)  # Remove batch dim
 
             payload = ImagePayload(

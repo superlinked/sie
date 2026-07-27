@@ -1,0 +1,29 @@
+sie_id: Snowflake/snowflake-arctic-embed-s
+hf_id: Snowflake/snowflake-arctic-embed-s
+hf_revision: e596f507467533e48a2e17c007f0e1dacc837b33
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 384
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        pooling: cls
+        normalize: true
+        query_template: 'Represent this sentence for searching relevant passages: {text}'
+        doc_template: '{text}'

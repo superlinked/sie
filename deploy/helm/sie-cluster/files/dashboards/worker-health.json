@@ -20,7 +20,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "changes(up{namespace=\"$namespace\", job=~\".*worker.*\"}[5m])",
+          "expr": "sum by (pod) (changes(kube_pod_container_status_ready{namespace=\"$namespace\", container=\"worker-sidecar\"}[5m]))",
           "legendFormat": "{{pod}}",
           "refId": "A"
         }
@@ -89,12 +89,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_requests_total{namespace=\"$namespace\", status=\"error\"}[5m])) by (pod)",
-          "legendFormat": "{{pod}}",
+          "expr": "sum(rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", outcome=\"error\"}[5m])) by (producer_instance)",
+          "legendFormat": "{{producer_instance}}",
           "refId": "A"
         }
       ],
-      "title": "Error Rate by Pod",
+      "title": "Error Rate by Worker Producer",
       "type": "timeseries"
     },
     {
@@ -130,12 +130,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sie_model_load_duration_seconds{namespace=\"$namespace\"}",
-          "legendFormat": "{{pod}} - {{model}}",
+          "expr": "histogram_quantile(0.95, sum(rate(sie_worker_model_load_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m])) by (le, producer_instance, model, stage, outcome))",
+          "legendFormat": "{{producer_instance}} - {{model}} - {{stage}} - {{outcome}}",
           "refId": "A"
         }
       ],
-      "title": "Model Load Times (s)",
+      "title": "Model Load Duration p95 (s)",
       "type": "timeseries"
     },
     {
@@ -148,12 +148,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sie_models_loaded{namespace=\"$namespace\"}",
-          "legendFormat": "{{pod}}",
+          "expr": "sie_worker_model_loaded{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}",
+          "legendFormat": "{{producer_instance}} - {{model}} - {{profile}}",
           "refId": "A"
         }
       ],
-      "title": "Models Loaded per Pod",
+      "title": "Loaded Models by Worker Producer",
       "type": "timeseries"
     },
     {
@@ -173,6 +173,271 @@
       ],
       "title": "CPU Usage (cores)",
       "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 38 },
+      "id": 70,
+      "title": "Sidecar Config, NATS, Payload, IPC, and Drain Health",
+      "description": "Config convergence, NATS/payload outcomes, delivery attempts, IPC acquisition, payload size, and bounded shutdown-drain signals from the realtime sidecar.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (source, operation, outcome, lane) (rate(sie_worker_config_applies_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m]))",
+          "legendFormat": "config apply {{source}} / {{operation}} / {{outcome}} / {{lane}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (source, lane) (sie_worker_config_epoch{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "config epoch {{source}} / {{lane}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max by (source, lane) (sie_worker_config_degraded_ratio{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "config degraded {{source}} / {{lane}}",
+          "refId": "C"
+        },
+        {
+          "expr": "sum by (operation, outcome, reason, lane) (rate(sie_worker_nats_operations_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m]))",
+          "legendFormat": "NATS {{operation}} / {{outcome}} / {{reason}} / {{lane}}",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, redelivered, lane) (rate(sie_worker_nats_delivery_attempts_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
+          "legendFormat": "delivery attempts p95 redelivered={{redelivered}} / {{lane}}",
+          "refId": "E"
+        },
+        {
+          "expr": "sum by (outcome, reason, lane) (rate(sie_worker_payload_fetches_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m]))",
+          "legendFormat": "payload fetch {{outcome}} / {{reason}} / {{lane}}",
+          "refId": "F"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, outcome, reason, lane) (rate(sie_worker_payload_fetch_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
+          "legendFormat": "payload fetch p95 {{outcome}} / {{reason}} / {{lane}}",
+          "refId": "G"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, outcome, reason, lane) (rate(sie_worker_payload_size_bytes_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
+          "legendFormat": "payload bytes p95 {{outcome}} / {{reason}} / {{lane}}",
+          "refId": "H"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, transport, outcome, lane) (rate(sie_worker_ipc_acquire_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
+          "legendFormat": "IPC acquire p95 {{transport}} / {{outcome}} / {{lane}}",
+          "refId": "I"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, outcome, lane) (rate(sie_worker_shutdown_drain_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
+          "legendFormat": "shutdown drain p95 {{outcome}} / {{lane}}",
+          "refId": "J"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 38 },
+      "id": 71,
+      "title": "Sidecar Capacity and Pressure State",
+      "description": "Current GPU slots, pending items/cost, in-flight batches, saturation, and IPC capacity/in-flight state by lane.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "max by (state, lane) (sie_worker_gpu_slots{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "GPU slots {{state}} / {{lane}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (lane) (sie_worker_pending_items{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "pending items {{lane}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max by (lane) (sie_worker_pending_cost{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "pending cost {{lane}}",
+          "refId": "C"
+        },
+        {
+          "expr": "max by (lane) (sie_worker_inflight_batches{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "inflight batches {{lane}}",
+          "refId": "D"
+        },
+        {
+          "expr": "max by (lane) (sie_worker_saturated_ratio{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "saturated {{lane}}",
+          "refId": "E"
+        },
+        {
+          "expr": "max by (transport, lane) (sie_worker_ipc_capacity{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "IPC capacity {{transport}} / {{lane}}",
+          "refId": "F"
+        },
+        {
+          "expr": "max by (transport, lane) (sie_worker_ipc_inflight{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "IPC inflight {{transport}} / {{lane}}",
+          "refId": "G"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 48 },
+      "id": 72,
+      "title": "Python Batch Shape and Rust Forward Runtime",
+      "description": "Python pending/batch/subgroup distributions and Rust forward concurrency, limit, total/stage duration, and permit wait.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation, lane) (rate(sie_worker_queue_pending_at_dispatch_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m])))",
+          "legendFormat": "pending at dispatch p95 {{operation}} / {{lane}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation, backend, lane) (rate(sie_worker_runtime_batch_size_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m])))",
+          "legendFormat": "batch size p95 {{backend}} / {{operation}} / {{lane}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation, backend, lane) (rate(sie_worker_runtime_batch_subgroups_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m])))",
+          "legendFormat": "batch subgroups p95 {{backend}} / {{operation}} / {{lane}}",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation, backend, lane) (rate(sie_worker_runtime_subgroup_size_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m])))",
+          "legendFormat": "subgroup size p95 {{backend}} / {{operation}} / {{lane}}",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model, profile, stage, outcome) (rate(sie_worker_runtime_forward_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m])))",
+          "legendFormat": "forward p95 {{model}} / {{stage}} / {{outcome}}",
+          "refId": "E"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model, profile, output_path) (rate(sie_worker_runtime_forward_permit_wait_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m])))",
+          "legendFormat": "permit wait p95 {{model}} / {{output_path}}",
+          "refId": "F"
+        },
+        {
+          "expr": "max by (model, profile, state) (sie_worker_runtime_forward_concurrent{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"})",
+          "legendFormat": "forward concurrent {{model}} / {{state}}",
+          "refId": "G"
+        },
+        {
+          "expr": "max by (model, profile) (sie_worker_runtime_forward_limit{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"})",
+          "legendFormat": "forward limit {{model}} / {{profile}}",
+          "refId": "H"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 48 },
+      "id": 73,
+      "title": "Model Memory, Evictions, and Adaptive Scheduler",
+      "description": "Model-memory/eviction signals and adaptive scheduler cost, wait, p50 target/observation, and starvation resets across the single conditional owner.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "max by (model, profile, backend, lane) (sie_worker_model_memory_bytes{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"})",
+          "legendFormat": "memory {{model}} / {{profile}} / {{backend}} / {{lane}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (model, profile, backend, lane, reason) (rate(sie_worker_model_evictions_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m]))",
+          "legendFormat": "eviction {{model}} / {{reason}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max by (model, profile, lane) (sie_worker_scheduler_adaptive_cost{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"})",
+          "legendFormat": "adaptive cost {{model}} / {{profile}} / {{lane}}",
+          "refId": "C"
+        },
+        {
+          "expr": "max by (model, profile, lane) (sie_worker_scheduler_adaptive_wait_seconds{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"})",
+          "legendFormat": "adaptive wait s {{model}} / {{profile}} / {{lane}}",
+          "refId": "D"
+        },
+        {
+          "expr": "max by (model, profile, lane, kind) (sie_worker_scheduler_adaptive_p50_seconds{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"})",
+          "legendFormat": "adaptive p50 {{kind}} {{model}} / {{profile}} / {{lane}}",
+          "refId": "E"
+        },
+        {
+          "expr": "sum by (model, profile, lane) (rate(sie_worker_scheduler_starvation_resets_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[5m]))",
+          "legendFormat": "starvation resets {{model}} / {{profile}} / {{lane}}",
+          "refId": "F"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 58 },
+      "id": 74,
+      "title": "Sidecar Result-Chunk Transport Health",
+      "description": "Terminal result-transport attempts, published chunk rate/size, negotiated IPC transfer outcomes, reconstructed size/chunk count, and current reservation state by bounded lane.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (mode, outcome, lane) (rate(sie_worker_result_transport_attempts_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m]))",
+          "legendFormat": "result attempts/sec {{mode}} / {{outcome}} / {{lane}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (lane) (rate(sie_worker_result_chunks_published_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m]))",
+          "legendFormat": "result chunks/sec {{lane}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lane) (rate(sie_worker_result_chunk_size_bytes_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
+          "legendFormat": "result chunk bytes p95 {{lane}}",
+          "refId": "C"
+        },
+        {
+          "expr": "sum by (outcome, lane) (rate(sie_worker_ipc_response_chunks_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m]))",
+          "legendFormat": "IPC chunk transfers/sec {{outcome}} / {{lane}}",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lane) (rate(sie_worker_ipc_response_reconstructed_size_bytes_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
+          "legendFormat": "IPC reconstructed bytes p95 {{lane}}",
+          "refId": "E"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lane) (rate(sie_worker_ipc_response_chunk_count_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[5m])))",
+          "legendFormat": "IPC chunks/transfer p95 {{lane}}",
+          "refId": "F"
+        },
+        {
+          "expr": "sum by (lane) (sie_worker_ipc_response_chunk_reserved_bytes{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"})",
+          "legendFormat": "IPC reserved bytes {{lane}}",
+          "refId": "G"
+        }
+      ]
     }
   ],
   "refresh": "10s",
@@ -188,11 +453,26 @@
         "multi": false,
         "name": "namespace",
         "options": [],
-        "query": "label_values(up, namespace)",
+        "query": "label_values(kube_pod_info, namespace)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "sie-sie-cluster-otel-collector", "value": "sie-sie-cluster-otel-collector" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Collector",
+        "multi": false,
+        "name": "collector",
+        "options": [],
+        "query": "label_values(up{namespace=\"$namespace\", endpoint=\"prometheus\", service=~\".+-otel-collector\"}, service)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
         "type": "query"
       }
     ]

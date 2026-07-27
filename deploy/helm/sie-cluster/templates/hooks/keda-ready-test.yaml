@@ -1,4 +1,21 @@
-{{- if and .Values.healthGates.enabled .Values.autoscaling.enabled }}
+{{- if .Values.autoscaling.enabled }}
+{{- $expectedScaledObjects := 1 -}}
+{{- range $pool := .Values.workers.pools -}}
+{{- if $pool.enabled -}}
+{{- range $bundleCfg := $pool.bundles -}}
+{{- if dig "enabled" true $bundleCfg -}}
+{{- $expectedScaledObjects = add1 $expectedScaledObjects -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $workerPollingInterval := max 1 (int .Values.autoscaling.pollingInterval) -}}
+{{- $maxPollingInterval := max 30 $workerPollingInterval -}}
+{{- $failureThreshold := 3 -}}
+{{- $validationWindow := mul $maxPollingInterval $failureThreshold -}}
+{{- $checkInterval := min 30 (max 5 $workerPollingInterval) -}}
+{{- $timeout := add $validationWindow 180 -}}
+{{- $activeDeadline := add $timeout 60 -}}
 # RBAC must be at a lower weight than the Job so it is fully propagated before the pod starts.
 apiVersion: v1
 kind: ServiceAccount
@@ -28,6 +45,9 @@ metadata:
 rules:
   - apiGroups: ["keda.sh"]
     resources: ["scaledobjects"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -65,7 +85,10 @@ metadata:
     helm.sh/hook-weight: "3"
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 240
+  # KEDA keeps trigger health in status without an observedGeneration. Wait a
+  # complete failure window after the apply hook before accepting that status,
+  # then retain three minutes for reconciliation/API retries.
+  activeDeadlineSeconds: {{ $activeDeadline }}
   ttlSecondsAfterFinished: 300
   template:
     metadata:
@@ -77,57 +100,156 @@ spec:
       restartPolicy: Never
       containers:
         - name: test
-          image: alpine/k8s:1.29.10
+          image: {{ include "sie-cluster.keda.hookImage" . }}
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
               NAMESPACE="{{ include "sie-cluster.namespace" . }}"
-              TIMEOUT=180
-              INTERVAL=5
-              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
-              CA_CERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-              API_SERVER="https://kubernetes.default.svc"
-              API_PATH="/apis/keda.sh/v1alpha1/namespaces/${NAMESPACE}/scaledobjects"
+              {{- include "sie-cluster.kubernetes.inClusterKubeconfig" . | nindent 14 }}
+              EXPECTED_COUNT={{ $expectedScaledObjects }}
+              SCALEDOBJECT_SELECTOR='app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/part-of=sie,app.kubernetes.io/managed-by=Helm,sie.superlinked.com/scaler-managed=true,sie.superlinked.com/scaler-revision={{ .Release.Revision }},sie.superlinked.com/helm-namespace={{ .Release.Namespace }}'
+              HPA_SELECTOR='app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/part-of=sie,app.kubernetes.io/managed-by=Helm,sie.superlinked.com/scaler-managed=true,sie.superlinked.com/helm-namespace={{ .Release.Namespace }}'
+              FAILURE_THRESHOLD={{ $failureThreshold }}
+              VALIDATION_WINDOW={{ $validationWindow }}
+              TIMEOUT={{ $timeout }}
+              INTERVAL={{ $checkInterval }}
+              SCALEDOBJECTS_FILE=/tmp/keda-scaledobjects.json
+              HPAS_FILE=/tmp/keda-hpas.json
               echo "=== ScaledObject Health Test ==="
-              k8s_get() {
-                curl -sS --cacert "$CA_CERT" -H "Authorization: Bearer $TOKEN" "$API_SERVER$API_PATH" 2>/dev/null || echo "{}"
+
+              # Ordinary kubectl resource reads use the projected in-cluster
+              # service-account credentials. --chunk-size keeps API responses
+              # bounded; the chart's 193-object cap keeps the combined client
+              # result comfortably inside this Job's memory limit. The pinned
+              # KEDA 2.14.1 does not propagate a ScaledObject label-only update
+              # to an existing HPA. Select the desired ScaledObjects by this
+              # Helm revision, select all HPAs owned by this release, and then
+              # require the two name sets to match exactly. That proves KEDA
+              # reconciled every desired HPA and removed every obsolete one
+              # without relying on a label KEDA may legitimately leave stale.
+              k8s_summary() {
+                if ! kubectl get scaledobjects.keda.sh -n "$NAMESPACE" -l "$SCALEDOBJECT_SELECTOR" \
+                  --chunk-size=32 --request-timeout=10s -o json > "$SCALEDOBJECTS_FILE"; then
+                  echo "Kubernetes ScaledObject query failed" >&2
+                  return 1
+                fi
+                if ! kubectl get horizontalpodautoscalers.autoscaling -n "$NAMESPACE" -l "$HPA_SELECTOR" \
+                  --chunk-size=32 --request-timeout=10s -o json > "$HPAS_FILE"; then
+                  echo "Kubernetes HPA query failed" >&2
+                  return 1
+                fi
+
+                jq -n --slurpfile scaledobject_list "$SCALEDOBJECTS_FILE" --slurpfile hpa_list "$HPAS_FILE" '
+                  ($scaledobject_list[0].items | map(
+                    (.status.health // {}) as $health |
+                    (.spec.triggers | to_entries | map("s\(.key)-\(.value.type)") | sort) as $expected_metrics |
+                    (.status.externalMetricNames // [] | sort) as $observed_metrics |
+                    (
+                      ($observed_metrics == $expected_metrics) and
+                      (($health | keys | sort) == $expected_metrics) and
+                      ((.status.hpaName // "") != "")
+                    ) as $status_reconciled |
+                    {
+                      name: .metadata.name,
+                      hpa_name: (.status.hpaName // ""),
+                      ready: any(.status.conditions[]?; .type == "Ready" and .status == "True"),
+                      fallback: any(.status.conditions[]?; .type == "Fallback" and .status == "True"),
+                      status_reconciled: $status_reconciled,
+                      trigger_health_happy: (
+                        $status_reconciled and
+                        (($health | length) == (.spec.triggers | length)) and
+                        all($health[]; .status == "Happy" and (.numberOfFailures // 0) == 0)
+                      )
+                    }
+                  )) as $scaledobjects |
+                  ($hpa_list[0].items | map({
+                    name: .metadata.name,
+                    scaledobject_name: (.metadata.labels["scaledobject.keda.sh/name"] // "")
+                  })) as $hpas |
+                  ($scaledobjects | map(.name) | sort) as $scaledobject_names |
+                  ($hpas | map(.scaledobject_name) | sort) as $hpa_scaledobject_names |
+                  ($hpas | map(.name) | sort) as $hpa_names |
+                  ($scaledobjects | map(.hpa_name) | sort) as $scaledobject_hpa_names |
+                  {
+                    count: ($scaledobjects | length),
+                    hpa_count: ($hpas | length),
+                    ready: ([$scaledobjects[] | select(.ready)] | length),
+                    fallback: ([$scaledobjects[] | select(.fallback)] | length),
+                    status_reconciled: ([$scaledobjects[] | select(.status_reconciled)] | length),
+                    healthy: ([$scaledobjects[] | select(.trigger_health_happy)] | length),
+                    hpa_set_reconciled: (
+                      ($hpas | length) == ($scaledobjects | length) and
+                      all($hpas[]; .scaledobject_name != "") and
+                      $hpa_scaledobject_names == $scaledobject_names and
+                      $hpa_names == $scaledobject_hpa_names
+                    ),
+                    not_ready: ([$scaledobjects[] | select(.ready | not) | .name] | .[:10]),
+                    fallback_names: ([$scaledobjects[] | select(.fallback) | .name] | .[:10]),
+                    status_unreconciled: ([$scaledobjects[] | select(.status_reconciled | not) | .name] | .[:10]),
+                    unhealthy: ([$scaledobjects[] | select(.trigger_health_happy | not) | .name] | .[:10]),
+                    hpa_set_difference: ([
+                      ($scaledobject_names - $hpa_scaledobject_names)[],
+                      ($hpa_scaledobject_names - $scaledobject_names)[]
+                    ] | .[:10])
+                  }
+                '
               }
+
               elapsed=0
+              echo "Waiting ${VALIDATION_WINDOW}s (failureThreshold=${FAILURE_THRESHOLD}, max polling interval={{ $maxPollingInterval }}s) before accepting KEDA status"
+              while [ "$elapsed" -lt "$VALIDATION_WINDOW" ]; do
+                remaining=$((VALIDATION_WINDOW - elapsed))
+                delay=$INTERVAL
+                if [ "$delay" -gt "$remaining" ]; then
+                  delay=$remaining
+                fi
+                sleep "$delay"
+                elapsed=$((elapsed + delay))
+              done
+
               while [ $elapsed -lt $TIMEOUT ]; do
-                response=$(k8s_get)
-                count=$(echo "$response" | jq -r '.items | length // 0')
-                # count==0 is intentional: the hook expects at least one ScaledObject to exist.
-                # If autoscaling.enabled=true but no pools are defined, the hook will time out.
-                if [ "$count" -eq "0" ]; then
-                  echo "Waiting for ScaledObjects... (${elapsed}s/${TIMEOUT}s)"
+                if ! summary=$(k8s_summary); then
+                  echo "Waiting for the release ScaledObject API... (${elapsed}s/${TIMEOUT}s)"
                   sleep $INTERVAL
                   elapsed=$((elapsed + INTERVAL))
                   continue
                 fi
-                fallback_count=$(echo "$response" | jq -r '[.items[].status.conditions[]? | select(.type=="Fallback" and .status=="True")] | length')
-                if [ "$fallback_count" -gt "0" ]; then
-                  echo "FAILED: ScaledObjects in Fallback mode"
-                  exit 1
+                count=$(printf '%s' "$summary" | jq -r '.count')
+                hpa_count=$(printf '%s' "$summary" | jq -r '.hpa_count')
+                ready_count=$(printf '%s' "$summary" | jq -r '.ready')
+                fallback_count=$(printf '%s' "$summary" | jq -r '.fallback')
+                status_reconciled_count=$(printf '%s' "$summary" | jq -r '.status_reconciled')
+                healthy_count=$(printf '%s' "$summary" | jq -r '.healthy')
+                hpa_set_reconciled=$(printf '%s' "$summary" | jq -r '.hpa_set_reconciled')
+                if [ "$count" -ne "$EXPECTED_COUNT" ] || [ "$hpa_count" -ne "$EXPECTED_COUNT" ]; then
+                  echo "Waiting for release autoscalers: ScaledObjects=$count HPAs=$hpa_count expected=$EXPECTED_COUNT (${elapsed}s/${TIMEOUT}s)"
+                  sleep $INTERVAL
+                  elapsed=$((elapsed + INTERVAL))
+                  continue
                 fi
-                ready_count=$(echo "$response" | jq -r '[.items[].status.conditions[]? | select(.type=="Ready" and .status=="True")] | length')
-                if [ "$ready_count" -eq "$count" ]; then
-                  echo "SUCCESS: All ScaledObjects are Ready"
+                if [ "$ready_count" -eq "$EXPECTED_COUNT" ] \
+                  && [ "$status_reconciled_count" -eq "$EXPECTED_COUNT" ] \
+                  && [ "$healthy_count" -eq "$EXPECTED_COUNT" ] \
+                  && [ "$fallback_count" -eq "0" ] \
+                  && [ "$hpa_set_reconciled" = "true" ]; then
+                  echo "SUCCESS: All $EXPECTED_COUNT release ScaledObjects and controller-reconciled HPAs are current with trigger health Happy"
                   exit 0
                 fi
-                echo "Waiting... (${elapsed}s/${TIMEOUT}s)"
+                echo "Waiting for KEDA reconciliation: ready=$ready_count/$EXPECTED_COUNT status=$status_reconciled_count/$EXPECTED_COUNT healthy=$healthy_count/$EXPECTED_COUNT fallback=$fallback_count HPA-set-current=$hpa_set_reconciled (${elapsed}s/${TIMEOUT}s)"
+                echo "Status sample: $summary"
                 sleep $INTERVAL
                 elapsed=$((elapsed + INTERVAL))
               done
-              echo "FAILED: ScaledObjects did not become Ready"
+              echo "FAILED: ScaledObjects and controller-reconciled HPAs did not become current, Ready, and trigger-healthy after a complete KEDA failure window"
               exit 1
           resources:
             requests:
               cpu: 10m
-              memory: 32Mi
+              memory: 64Mi
             limits:
               cpu: 100m
-              memory: 64Mi
+              memory: 256Mi
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists

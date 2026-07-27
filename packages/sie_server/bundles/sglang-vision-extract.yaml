@@ -1,0 +1,15 @@
+name: sglang-vision-extract
+priority: 22
+adapters:
+- sie_server.adapters.sglang_vision_extract.adapter
+deps:
+  # Keep this Linux serving stack aligned with the generation and embedding
+  # SGLang bundles. This task-class split is a worker-pool isolation boundary,
+  # not a different engine dependency surface.
+  sglang: '==0.5.10.post1'
+  xgrammar: '==0.1.32'
+  outlines: '==0.1.11'
+  llguidance: '>=0.7.11,<0.8.0'
+  # SGLang requires a flash-attn-4 pre-release. The explicit pin prevents
+  # PyPI's stable 0.0.1 placeholder from disabling pre-release resolution.
+  flash-attn-4: '==4.0.0b19'

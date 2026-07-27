@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import os
 import struct
 import tempfile
@@ -9,11 +10,14 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import msgpack
+import msgspec
 import numpy as np
 import pytest
+import sie_server.ipc_server as ipc_server_module
 import yaml
 from sie_config.model_registry import ModelRegistry as ConfigModelRegistry
 from sie_sdk.bundle_utils import match_bundle_models
@@ -28,12 +32,15 @@ from sie_server.ipc_server import IpcServer, IpcServerError
 from sie_server.ipc_types import (
     IPC_VERSION,
     ApplyModelConfigRequest,
+    IpcResponseChunkV1,
     ProcessGenerateRequest,
     ReplaceModelConfigEntry,
     ReplaceModelConfigsRequest,
+    ResponseEnvelope,
     SetPinnedModelsRequest,
     SignalGenerateCancelRequest,
 )
+from sie_server.observability import worker_telemetry
 from sie_server.queue_executor import QueueExecutor
 
 _LEN_STRUCT = struct.Struct("!I")
@@ -123,6 +130,18 @@ def _decode_written_frames(writer: _CapturingWriter) -> list[dict]:
     return frames
 
 
+def _written_payloads(writer: _CapturingWriter) -> list[bytes]:
+    payloads: list[bytes] = []
+    offset = 0
+    data = bytes(writer.buf)
+    while offset < len(data):
+        (length,) = _LEN_STRUCT.unpack(data[offset : offset + _LEN_STRUCT.size])
+        offset += _LEN_STRUCT.size
+        payloads.append(data[offset : offset + length])
+        offset += length
+    return payloads
+
+
 def _make_executor() -> tuple[QueueExecutor, MagicMock]:
     reg = MagicMock()
     reg.model_names = ["test/model"]
@@ -130,7 +149,11 @@ def _make_executor() -> tuple[QueueExecutor, MagicMock]:
     reg.loaded_model_names = ["test/model"]
     reg.is_loaded.return_value = True
     reg.is_loading.return_value = False
-    reg.get_config.return_value = MagicMock()
+    config = MagicMock()
+    config.sie_id = "test/model"
+    config.outputs = ["dense"]
+    config.resolve_profile.return_value.runtime = {}
+    reg.get_config.return_value = config
     reg.get_configs_snapshot.return_value = {}
     return QueueExecutor(reg), reg
 
@@ -225,6 +248,34 @@ profiles:
 """
 
 
+def _worker_telemetry_model_yaml(
+    model_id: str,
+    *,
+    default_adapter: str = "sie_server.adapters.sentence_transformer:Adapter",
+    accelerated_adapter: str | None = None,
+) -> str:
+    accelerated_profile = ""
+    if accelerated_adapter is not None:
+        accelerated_profile = f"""
+  accelerated:
+    adapter_path: {accelerated_adapter}
+    max_batch_tokens: 8192
+"""
+    return f"""
+sie_id: {model_id}
+hf_id: sentence-transformers/all-MiniLM-L6-v2
+tasks:
+  encode:
+    dense:
+      dim: 384
+profiles:
+  default:
+    adapter_path: {default_adapter}
+    max_batch_tokens: 4096
+{accelerated_profile}
+"""
+
+
 @pytest.fixture
 async def server_and_path():
     executor, _reg = _make_executor()
@@ -243,6 +294,190 @@ async def server_and_path():
 
 
 class TestFraming:
+    @pytest.mark.asyncio
+    async def test_small_negotiated_response_preserves_legacy_bytes(self) -> None:
+        executor, _reg = _make_executor()
+        server = IpcServer(_short_sock_path(), executor, worker_id="w")
+        writer = _CapturingWriter()
+        envelope = ResponseEnvelope(
+            version=IPC_VERSION,
+            request_id="r-small",
+            ok=True,
+            body={"value": [1, 2, 3]},
+        )
+        expected = msgpack.packb(
+            {
+                "version": IPC_VERSION,
+                "request_id": "r-small",
+                "ok": True,
+                "body": {"value": [1, 2, 3]},
+                "error": None,
+            },
+            use_bin_type=True,
+        )
+
+        await server._write_response_envelope(
+            writer,  # type: ignore[arg-type]
+            envelope,
+            accepts_response_chunks_v1=True,
+        )
+
+        assert _written_payloads(writer) == [expected]
+
+    @pytest.mark.asyncio
+    async def test_oversized_negotiated_response_chunks_exact_serialized_bytes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(ipc_server_module, "_MAX_FRAME_BYTES", 512)
+        monkeypatch.setattr(ipc_server_module, "_IPC_RESPONSE_CHUNK_PAYLOAD_BYTES", 128)
+        monkeypatch.setattr(ipc_server_module, "_MAX_CHUNKED_IPC_RESPONSE_BYTES", 4096)
+        executor, _reg = _make_executor()
+        server = IpcServer(_short_sock_path(), executor, worker_id="w")
+        writer = _CapturingWriter()
+        envelope = ResponseEnvelope(
+            version=IPC_VERSION,
+            request_id="r-large",
+            ok=True,
+            body={"blob": b"x" * 1200},
+        )
+        expected = msgpack.packb(
+            {
+                "version": IPC_VERSION,
+                "request_id": "r-large",
+                "ok": True,
+                "body": {"blob": b"x" * 1200},
+                "error": None,
+            },
+            use_bin_type=True,
+        )
+
+        await server._write_response_envelope(
+            writer,  # type: ignore[arg-type]
+            envelope,
+            accepts_response_chunks_v1=True,
+        )
+
+        frames = _decode_written_frames(writer)
+        assert len(frames) > 1
+        assert all(frame["kind"] == "ipc_response_chunk_v1" for frame in frames)
+        assert [frame["chunk_index"] for frame in frames] == list(range(len(frames)))
+        assert all(frame["chunk_count"] == len(frames) for frame in frames)
+        assert all(frame["total_bytes"] == len(expected) for frame in frames)
+        assert all(frame["transfer_digest"] == hashlib.sha256(expected).digest() for frame in frames)
+        assert b"".join(frame["payload"] for frame in frames) == expected
+        assert all(len(payload) <= 512 for payload in _written_payloads(writer))
+
+    def test_chunk_builtins_preserve_memoryview_as_msgpack_binary(self) -> None:
+        payload = b"abcdef"
+        chunk = IpcResponseChunkV1(
+            version=IPC_VERSION,
+            request_id="r-view",
+            transfer_digest=b"0" * 32,
+            chunk_index=0,
+            chunk_count=1,
+            total_bytes=len(payload),
+            payload=cast("bytes", memoryview(payload)[1:4]),
+        )
+
+        builtins = ipc_server_module._to_builtins(chunk)
+        assert isinstance(builtins["payload"], memoryview)
+        encoded = msgpack.packb(builtins, use_bin_type=True)
+        assert msgpack.unpackb(encoded, raw=False)["payload"] == b"bcd"
+        assert msgspec.msgpack.Decoder(IpcResponseChunkV1).decode(encoded).payload == b"bcd"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("capability", [False, 1, "true", None])
+    async def test_oversized_response_without_exact_v1_capability_returns_compact_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capability: object,
+    ) -> None:
+        monkeypatch.setattr(ipc_server_module, "_MAX_FRAME_BYTES", 512)
+        executor, _reg = _make_executor()
+        server = IpcServer(_short_sock_path(), executor, worker_id="w")
+        writer = _CapturingWriter()
+        envelope = ResponseEnvelope(
+            version=IPC_VERSION,
+            request_id="r-large",
+            ok=True,
+            body={"blob": b"x" * 1200},
+        )
+
+        await server._write_response_envelope(
+            writer,  # type: ignore[arg-type]
+            envelope,
+            accepts_response_chunks_v1=capability is True,
+        )
+
+        frames = _decode_written_frames(writer)
+        assert len(frames) == 1
+        assert frames[0]["ok"] is False
+        assert frames[0]["request_id"] == "r-large"
+        assert "not negotiated" in frames[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_negotiated_response_over_logical_bound_returns_compact_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(ipc_server_module, "_MAX_FRAME_BYTES", 512)
+        monkeypatch.setattr(ipc_server_module, "_IPC_RESPONSE_CHUNK_PAYLOAD_BYTES", 128)
+        monkeypatch.setattr(ipc_server_module, "_MAX_CHUNKED_IPC_RESPONSE_BYTES", 800)
+        executor, _reg = _make_executor()
+        server = IpcServer(_short_sock_path(), executor, worker_id="w")
+        writer = _CapturingWriter()
+        envelope = ResponseEnvelope(
+            version=IPC_VERSION,
+            request_id="r-overbound",
+            ok=True,
+            body={"blob": b"x" * 1200},
+        )
+
+        await server._write_response_envelope(
+            writer,  # type: ignore[arg-type]
+            envelope,
+            accepts_response_chunks_v1=True,
+        )
+
+        frames = _decode_written_frames(writer)
+        assert len(frames) == 1
+        assert frames[0]["ok"] is False
+        assert "bounds" in frames[0]["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("wire_value", "expected"),
+        [(True, True), (False, False), (1, False), ("true", False), (None, False)],
+    )
+    async def test_request_response_chunk_capability_is_exact_v1_boolean(
+        self,
+        wire_value: object,
+        expected: bool,
+    ) -> None:
+        executor, _reg = _make_executor()
+        server = IpcServer(_short_sock_path(), executor, worker_id="w")
+        writer = _CapturingWriter()
+        frame = msgpack.packb(
+            {
+                "version": IPC_VERSION,
+                "method": "Ping",
+                "request_id": "r-cap",
+                "body": {"timestamp_ms": 1.0},
+                "accepts_ipc_response_chunks_v1": wire_value,
+            },
+            use_bin_type=True,
+        )
+
+        with patch.object(server, "_run_method", new=AsyncMock()) as run_method:
+            await server._dispatch_frame(frame, writer)  # type: ignore[arg-type]
+
+        run_method.assert_awaited_once_with(
+            "Ping",
+            "r-cap",
+            {"timestamp_ms": 1.0},
+            writer,
+            accepts_response_chunks_v1=expected,
+        )
+
     @pytest.mark.asyncio
     async def test_ping_roundtrip(self, server_and_path) -> None:
         srv, sock = server_and_path
@@ -450,6 +685,7 @@ class TestApplyModelConfig:
             model_filter=default_filter,
             enable_hot_reload=False,
         )
+        assert any(config.hf_revision for config in default_registry.get_configs_snapshot("default").values())
         assert compute_bundle_config_hash_cached(
             default_registry,
             "default",
@@ -540,6 +776,92 @@ profiles:
                 await client.close()
         finally:
             await srv.stop(drain_timeout_s=1.0)
+
+    @pytest.mark.asyncio
+    async def test_apply_model_config_refreshes_worker_telemetry_catalog_for_added_model(self) -> None:
+        lane = "realtime|l4|default"
+        model_id = "telemetry/added-model"
+        worker_telemetry.configure_worker_metric_context(lane=lane, configs={})
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+
+        await executor.apply_model_config(
+            ApplyModelConfigRequest(
+                bundle_id="default",
+                model_id=model_id,
+                epoch=7,
+                bundle_config_hash="",
+                profiles_added=["default"],
+                model_config=_worker_telemetry_model_yaml(model_id),
+            )
+        )
+
+        assert worker_telemetry._dimensions(model_id, "default") == (
+            lane,
+            model_id,
+            "default",
+            "python",
+        )
+
+    @pytest.mark.asyncio
+    async def test_apply_model_config_refreshes_worker_telemetry_profiles_and_backend(self) -> None:
+        lane = "realtime|l4|default"
+        model_id = "telemetry/updated-model"
+        worker_telemetry.configure_worker_metric_context(lane=lane, configs={})
+        registry = ModelRegistry(models_dir=None)
+        executor = QueueExecutor(registry)
+
+        await executor.apply_model_config(
+            ApplyModelConfigRequest(
+                bundle_id="default",
+                model_id=model_id,
+                epoch=7,
+                bundle_config_hash="",
+                profiles_added=["default"],
+                model_config=_worker_telemetry_model_yaml(model_id),
+            )
+        )
+        assert worker_telemetry._dimensions(model_id, "accelerated") == (
+            lane,
+            "other",
+            "other",
+            "other",
+        )
+
+        await executor.apply_model_config(
+            ApplyModelConfigRequest(
+                bundle_id="default",
+                model_id=model_id,
+                epoch=8,
+                bundle_config_hash="",
+                profiles_added=["default", "accelerated"],
+                model_config=_worker_telemetry_model_yaml(
+                    model_id,
+                    default_adapter="sie_server.adapters.sglang.embedding:SGLangEmbeddingAdapter",
+                    accelerated_adapter="sie_server.adapters.sentence_transformer:Adapter",
+                ),
+            )
+        )
+
+        assert worker_telemetry._dimensions(model_id, "default") == (
+            lane,
+            model_id,
+            "default",
+            "sglang",
+        )
+        assert worker_telemetry._dimensions(model_id, "accelerated") == (
+            lane,
+            model_id,
+            "accelerated",
+            "python",
+        )
+        variant_id = f"{model_id}:accelerated"
+        assert worker_telemetry._dimensions(variant_id, "default") == (
+            lane,
+            model_id,
+            "accelerated",
+            "python",
+        )
 
     @pytest.mark.asyncio
     async def test_apply_model_config_expands_profile_variants(self) -> None:
@@ -656,6 +978,8 @@ profiles:
     async def test_apply_model_config_invalid_replacement_keeps_dropped_profile_variant(self) -> None:
         base_id = "Qwen/Qwen3.6-27B"
         variant_id = "Qwen/Qwen3.6-27B:rtx-pro-6000"
+        lane = "realtime|l4|sglang"
+        worker_telemetry.configure_worker_metric_context(lane=lane, configs={})
         registry = ModelRegistry(models_dir=None, model_filter=[base_id, variant_id])
         executor = QueueExecutor(registry)
 
@@ -670,6 +994,8 @@ profiles:
             )
         )
         assert registry.has_model(variant_id)
+        expected_dimensions = (lane, base_id, "rtx-pro-6000", "sglang")
+        assert worker_telemetry._dimensions(base_id, "rtx-pro-6000") == expected_dimensions
         executor._descriptor_cache[variant_id] = MagicMock()
 
         with pytest.raises(ValueError, match="legacy scalar"):
@@ -688,6 +1014,7 @@ profiles:
         assert registry.has_model(variant_id)
         assert registry._model_filter == {base_id, variant_id}
         assert variant_id in executor._descriptor_cache
+        assert worker_telemetry._dimensions(base_id, "rtx-pro-6000") == expected_dimensions
 
     @pytest.mark.asyncio
     async def test_apply_model_config_serializes_stale_variant_removal(self) -> None:
@@ -848,6 +1175,8 @@ profiles:
 
     @pytest.mark.asyncio
     async def test_replace_model_configs_drops_removed_registry_config(self) -> None:
+        lane = "realtime|l4|default"
+        worker_telemetry.configure_worker_metric_context(lane=lane, configs={})
         registry = ModelRegistry(models_dir=None, model_filter=["existing/model"])
         executor = QueueExecutor(registry)
 
@@ -884,6 +1213,12 @@ profiles:
         )
         assert registry.has_model("stale/model")
         assert registry.has_model("kept/model")
+        assert worker_telemetry._dimensions("stale/model", "default") == (
+            lane,
+            "stale/model",
+            "default",
+            "python",
+        )
         registry._loaded["stale/model"] = MagicMock()
         registry._do_unload = AsyncMock()
 
@@ -903,9 +1238,22 @@ profiles:
 
         assert resp.applied is True
         assert resp.applied_models == ["kept/model"]
-        registry._do_unload.assert_awaited_once_with("stale/model")
+        assert resp.applied_profiles == ["default"]
+        registry._do_unload.assert_awaited_once_with("stale/model", reason="config_change")
         assert not registry.has_model("stale/model")
         assert registry.has_model("kept/model")
+        assert worker_telemetry._dimensions("stale/model", "default") == (
+            lane,
+            "other",
+            "other",
+            "other",
+        )
+        assert worker_telemetry._dimensions("kept/model", "default") == (
+            lane,
+            "kept/model",
+            "default",
+            "python",
+        )
 
     @pytest.mark.asyncio
     async def test_replace_model_configs_expands_profile_variants_from_export(self) -> None:
@@ -928,6 +1276,7 @@ profiles:
 
         assert resp.applied is True
         assert resp.applied_models == ["Qwen/Qwen3.6-27B", "Qwen/Qwen3.6-27B:rtx-pro-6000"]
+        assert resp.applied_profiles == ["default", "rtx-pro-6000"]
         assert registry.has_model("Qwen/Qwen3.6-27B")
         assert registry.has_model("Qwen/Qwen3.6-27B:rtx-pro-6000")
         assert registry._model_filter == {"Qwen/Qwen3.6-27B", "Qwen/Qwen3.6-27B:rtx-pro-6000"}
@@ -1063,7 +1412,8 @@ profiles:
 
         assert resp.applied is True
         assert resp.applied_models == ["kept/model"]
-        registry._do_unload.assert_awaited_once_with("kept/model")
+        assert resp.applied_profiles == ["default"]
+        registry._do_unload.assert_awaited_once_with("kept/model", reason="config_change")
         assert registry.get_config("kept/model").profiles["default"].max_batch_tokens == 8192
 
     @pytest.mark.asyncio

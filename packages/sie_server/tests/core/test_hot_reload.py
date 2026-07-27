@@ -100,6 +100,7 @@ class TestHotReloader:
         registry.add_config_async = AsyncMock()  # type: ignore[method-assign]
         registry.load_async = AsyncMock()  # type: ignore[method-assign]
         registry.unload_async = AsyncMock()  # type: ignore[method-assign]
+        registry.remove_config_async = AsyncMock(return_value=set())  # type: ignore[method-assign]
         return registry
 
     @pytest.fixture
@@ -194,6 +195,7 @@ class TestHotReloaderHandlers:
         registry.add_config_async = AsyncMock()  # type: ignore[method-assign]
         registry.load_async = AsyncMock()  # type: ignore[method-assign]
         registry.unload_async = AsyncMock()  # type: ignore[method-assign]
+        registry.remove_config_async = AsyncMock(return_value=set())  # type: ignore[method-assign]
         return registry
 
     @pytest.mark.asyncio
@@ -333,6 +335,7 @@ class TestHotReloaderHandlers:
         # Mock that model is registered and loaded
         mock_registry.has_model.return_value = True
         mock_registry.is_loaded.return_value = True
+        mock_registry.remove_config_async.return_value = {"delete-model"}
 
         # Mock worker with no pending requests
         mock_worker = MagicMock()
@@ -356,7 +359,8 @@ class TestHotReloaderHandlers:
         result = await reloader._handle_model_deleted(change)
 
         assert result.status == ReloadStatus.SUCCESS
-        mock_registry.unload_async.assert_awaited_once_with("delete-model")
+        mock_registry.remove_config_async.assert_awaited_once_with("delete-model")
+        mock_registry.unload_async.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_drain_requests(self, temp_models_dir: Path, mock_registry: MagicMock) -> None:

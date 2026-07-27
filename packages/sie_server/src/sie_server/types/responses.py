@@ -5,7 +5,7 @@ Using TypedDict for zero runtime overhead.
 """
 
 from enum import StrEnum
-from typing import Any, TypedDict
+from typing import Any, NotRequired, Required, TypedDict
 
 from sie_server.types.outputs import EncodeResult
 
@@ -56,6 +56,11 @@ class ScoreEntry(TypedDict):
     rank: int
 
 
+class ScoreUsage(TypedDict):
+    input_tokens: Required[int]
+    images: NotRequired[int]
+
+
 class ScoreResponse(TypedDict, total=False):
     """Response body for POST /v1/score/{model}.
 
@@ -68,6 +73,7 @@ class ScoreResponse(TypedDict, total=False):
     model: str
     query_id: str | None
     scores: list[ScoreEntry]
+    usage: ScoreUsage
 
 
 class Entity(TypedDict, total=False):
@@ -132,6 +138,13 @@ class DetectedObject(TypedDict):
     bbox: list[int]
 
 
+class ExtractItemErrorDetail(TypedDict):
+    """Stable per-item extraction failure."""
+
+    code: str
+    message: str
+
+
 class ExtractResult(TypedDict, total=False):
     """Result of extracting from a single item.
 
@@ -142,6 +155,7 @@ class ExtractResult(TypedDict, total=False):
         classifications: Classifications.
         objects: Detected objects.
         data: Structured extraction results.
+        error: Stable per-item failure when extraction did not complete.
     """
 
     id: str
@@ -150,6 +164,7 @@ class ExtractResult(TypedDict, total=False):
     classifications: list[Classification]
     objects: list[DetectedObject]
     data: dict[str, Any]
+    error: ExtractItemErrorDetail
 
 
 # Backwards compatibility alias

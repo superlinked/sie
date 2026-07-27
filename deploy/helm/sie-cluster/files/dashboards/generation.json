@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Generation dashboard. Full §4.11 metric surface — header (TTFT/TPOT/throughput), overhead attribution (gateway vs worker), routing (direct-dispatch hits vs fallback by reason), admission (in-flight + KV reservation + rejected), grammar (compile latency + cache hit rate), failure modes (timeouts, cancellations, stale-attempt drops), saturation (per-worker flag), speculative decoding (acceptance rate when the speculative side-cell is active).",
+  "description": "Generation request envelope using only the activated cross-service telemetry contract. Generation-specific TTFT, TPOT, output-token, grammar, KV, and speculative-decoding instruments remain intentionally undeclared; this dashboard does not infer them.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -18,7 +18,7 @@
         "y": 0
       },
       "id": 100,
-      "title": "Header — TTFT / TPOT / Throughput",
+      "title": "Generation Request Envelope",
       "type": "row"
     },
     {
@@ -30,7 +30,7 @@
       },
       "id": 1,
       "type": "stat",
-      "title": "Gateway TTFT p50 (ms)",
+      "title": "Gateway Request p50 (ms)",
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
@@ -67,7 +67,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_gateway_generation_ttft_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\"}[$rate_window]))) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         }
@@ -82,7 +82,7 @@
       },
       "id": 2,
       "type": "stat",
-      "title": "Gateway TTFT p99 (ms)",
+      "title": "Gateway Request p99 (ms)",
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
@@ -119,7 +119,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(sie_gateway_generation_ttft_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\"}[$rate_window]))) * 1000",
           "legendFormat": "p99",
           "refId": "A"
         }
@@ -134,7 +134,7 @@
       },
       "id": 3,
       "type": "stat",
-      "title": "Gateway TPOT p50 / p99 (ms)",
+      "title": "Gateway Dispatch p50 / p99 (ms)",
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -154,12 +154,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_gateway_generation_tpot_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_gateway_dispatch_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\"}[$rate_window]))) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(sie_gateway_generation_tpot_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(sie_gateway_dispatch_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\"}[$rate_window]))) * 1000",
           "legendFormat": "p99",
           "refId": "B"
         }
@@ -174,7 +174,7 @@
       },
       "id": 4,
       "type": "stat",
-      "title": "Completion tokens / sec",
+      "title": "Successful Worker Items / sec",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -194,8 +194,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_gateway_generation_total_tokens{namespace=\"$namespace\",kind=\"completion\"}[$rate_window]))",
-          "legendFormat": "tokens/s",
+          "expr": "sum(rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", operation=\"generate\", outcome=\"success\"}[$rate_window]))",
+          "legendFormat": "items/s",
           "refId": "A"
         }
       ]
@@ -209,7 +209,7 @@
         "y": 7
       },
       "id": 101,
-      "title": "Overhead Attribution — Gateway vs Worker",
+      "title": "Gateway and Worker Duration Signals",
       "type": "row"
     },
     {
@@ -221,8 +221,8 @@
       },
       "id": 10,
       "type": "timeseries",
-      "title": "TTFT p50 — gateway vs worker (ms)",
-      "description": "Gap between the two lines is the NATS + queue overhead. Worker-side metric is observed inside the streaming adapter before any inter-process hop, so subtraction is honest given identical histogram buckets (TTFT_TPOT_BUCKETS).",
+      "title": "Request duration p50 — gateway vs worker (ms)",
+      "description": "Independent gateway request and worker item durations for generate operations. Their difference is not treated as an additive overhead measurement.",
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -246,12 +246,12 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_gateway_generation_ttft_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\"}[$rate_window]))) * 1000",
           "legendFormat": "gateway p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_worker_generation_ttft_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", operation=\"generate\"}[$rate_window]))) * 1000",
           "legendFormat": "worker p50",
           "refId": "B"
         }
@@ -266,7 +266,7 @@
       },
       "id": 11,
       "type": "timeseries",
-      "title": "TPOT p50 — gateway vs worker (ms)",
+      "title": "Dispatch and inference p50 (ms)",
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -290,13 +290,13 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_gateway_generation_tpot_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
-          "legendFormat": "gateway p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_gateway_dispatch_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\"}[$rate_window]))) * 1000",
+          "legendFormat": "dispatch p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_worker_generation_tpot_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
-          "legendFormat": "worker p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(sie_worker_inference_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", operation=\"generate\", phase=\"inference\"}[$rate_window]))) * 1000",
+          "legendFormat": "inference p50",
           "refId": "B"
         }
       ]
@@ -322,7 +322,7 @@
       },
       "id": 20,
       "type": "timeseries",
-      "title": "Timeouts / sec by model, pool, kind",
+      "title": "Generation Server Errors / sec",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -346,8 +346,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum by (model, pool, kind) (rate(sie_gateway_generation_timeout_total{namespace=\"$namespace\"}[$rate_window]))",
-          "legendFormat": "{{model}} / {{pool}} / {{kind}}",
+          "expr": "sum by (machine_profile) (rate(sie_gateway_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\", http_status_code=~\"5..\"}[$rate_window]))",
+          "legendFormat": "{{machine_profile}}",
           "refId": "A"
         }
       ]
@@ -361,7 +361,7 @@
       },
       "id": 21,
       "type": "timeseries",
-      "title": "Client cancellations / sec by stage",
+      "title": "Cancelled Dispatches / sec",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -385,8 +385,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum by (stage) (rate(sie_gateway_generation_cancelled_total{namespace=\"$namespace\"}[$rate_window]))",
-          "legendFormat": "{{stage}}",
+          "expr": "sum by (dispatch_path, lane) (rate(sie_gateway_dispatches_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\", outcome=\"cancelled\"}[$rate_window]))",
+          "legendFormat": "{{dispatch_path}} / {{lane}}",
           "refId": "A"
         }
       ]
@@ -400,8 +400,8 @@
       },
       "id": 22,
       "type": "timeseries",
-      "title": "Stale-attempt chunks dropped / sec",
-      "description": "JetStream-redelivered work after a worker crash generates a fresh attempt_id; if the gateway has already latched a different one, the late chunks are dropped and counted here. A sustained nonzero rate without corresponding pool churn means redelivery is happening but the pool-republish-driven attempt bumping isn't keeping up.",
+      "title": "Worker Retries / sec",
+      "description": "Completed worker items with the bounded retry outcome. Chunk-level stale-attempt telemetry is outside the activated contract.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -425,8 +425,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum by (model, pool) (rate(sie_gateway_generation_stale_attempt_chunks_total{namespace=\"$namespace\"}[$rate_window]))",
-          "legendFormat": "{{model}} / {{pool}}",
+          "expr": "sum by (model, lane, backend) (rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", operation=\"generate\", outcome=\"retry\"}[$rate_window]))",
+          "legendFormat": "{{model}} / {{lane}} / {{backend}}",
           "refId": "A"
         }
       ]
@@ -440,7 +440,7 @@
         "y": 25
       },
       "id": 103,
-      "title": "Routing — Direct-dispatch vs Fallback",
+      "title": "Routing Paths and Fallbacks",
       "type": "row"
     },
     {
@@ -453,7 +453,7 @@
       "id": 30,
       "type": "timeseries",
       "title": "Routing fallbacks / sec by reason",
-      "description": "Each HRW direct-dispatch miss attributes to one reason (unhealthy_skipped, saturated_skipped, no_key, nak_*, first_chunk_timeout). A sustained spike on `saturated_skipped` means admission high-water mark is too low; a spike on `unhealthy_skipped` means workers are flapping.",
+      "description": "Gateway dispatches that carry a bounded fallback reason other than none.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -477,8 +477,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum by (reason) (rate(sie_gateway_routing_fallback_total{namespace=\"$namespace\"}[$rate_window]))",
-          "legendFormat": "{{reason}}",
+          "expr": "sum by (fallback_reason, dispatch_path, lane) (rate(sie_gateway_dispatches_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\", fallback_reason!=\"none\"}[$rate_window]))",
+          "legendFormat": "{{fallback_reason}} / {{dispatch_path}} / {{lane}}",
           "refId": "A"
         }
       ]
@@ -492,8 +492,8 @@
       },
       "id": 31,
       "type": "timeseries",
-      "title": "Routing cache-hit estimate (per model/pool)",
-      "description": "Rolling-window estimate of routing-key → worker affinity. Higher is better — means consecutive requests with the same routing_key land on the same worker, maximising KV-cache reuse.",
+      "title": "Dispatcher Invocation Rate by Path",
+      "description": "Bounded dispatcher substrate paths for generate operations. Routing-cache-hit estimation is outside the activated contract.",
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -519,8 +519,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sie_gateway_routing_cache_hit_estimate{namespace=\"$namespace\"}",
-          "legendFormat": "{{model}} / {{pool}}",
+          "expr": "sum by (dispatch_path, lane, outcome) (rate(sie_dispatcher_invocations_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\", operation=\"generate\"}[$rate_window]))",
+          "legendFormat": "{{dispatch_path}} / {{lane}} / {{outcome}}",
           "refId": "A"
         }
       ]
@@ -534,7 +534,7 @@
         "y": 34
       },
       "id": 104,
-      "title": "Admission — In-flight, KV reservation, Rejections",
+      "title": "Admission and Lane Capacity",
       "type": "row"
     },
     {
@@ -546,7 +546,7 @@
       },
       "id": 40,
       "type": "timeseries",
-      "title": "In-flight generations (worker)",
+      "title": "In-flight Dispatcher Invocations",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -570,8 +570,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum by (model) (sie_worker_generation_in_flight{namespace=\"$namespace\"})",
-          "legendFormat": "{{model}}",
+          "expr": "sum by (dispatch_path, lane) (sie_dispatcher_inflight{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\", operation=\"generate\"})",
+          "legendFormat": "{{dispatch_path}} / {{lane}}",
           "refId": "A"
         }
       ]
@@ -585,8 +585,8 @@
       },
       "id": 41,
       "type": "timeseries",
-      "title": "KV reserved tokens (worker reports vs gateway view)",
-      "description": "Worker-side `sie_worker_generation_kv_reserved_tokens` is the source of truth; the gateway mirrors it as `sie_gateway_kv_reservation_known` so we can spot stale views. A widening gap means status envelopes are stalling.",
+      "title": "Lane Demand and Active Lease GPUs",
+      "description": "Authoritative lane-level KEDA state exported remotely. Generation-specific KV reservation remains outside the activated contract.",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -610,13 +610,13 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum by (model) (sie_worker_generation_kv_reserved_tokens{namespace=\"$namespace\"})",
-          "legendFormat": "worker {{model}}",
+          "expr": "max by (pool, machine_profile, bundle) (sie_gateway_pending_demand{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "demand {{pool}} / {{machine_profile}} / {{bundle}}",
           "refId": "A"
         },
         {
-          "expr": "sum by (worker) (sie_gateway_kv_reservation_known{namespace=\"$namespace\"})",
-          "legendFormat": "gateway view {{worker}}",
+          "expr": "max by (pool, machine_profile, bundle) (sie_gateway_active_lease_gpus{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "lease GPUs {{pool}} / {{machine_profile}} / {{bundle}}",
           "refId": "B"
         }
       ]
@@ -630,7 +630,7 @@
       },
       "id": 42,
       "type": "timeseries",
-      "title": "Admission rejections / sec by reason",
+      "title": "Admission Decisions / sec",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -654,8 +654,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum by (reason) (rate(sie_worker_generation_admission_rejected_total{namespace=\"$namespace\"}[$rate_window]))",
-          "legendFormat": "{{reason}}",
+          "expr": "sum by (outcome) (rate(sie_gateway_admission_decisions_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", operation=\"generate\"}[$rate_window]))",
+          "legendFormat": "{{outcome}}",
           "refId": "A"
         }
       ]
@@ -669,7 +669,7 @@
         "y": 43
       },
       "id": 105,
-      "title": "Grammar — Compile latency, Cache hit rate",
+      "title": "Worker Model Lifecycle",
       "type": "row"
     },
     {
@@ -681,7 +681,7 @@
       },
       "id": 50,
       "type": "timeseries",
-      "title": "Grammar compile latency p50/p99 (ms) by kind",
+      "title": "Model Load Duration p50/p99 (ms)",
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -705,13 +705,13 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le, kind) (rate(sie_worker_grammar_compile_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
-          "legendFormat": "p50 {{kind}}",
+          "expr": "histogram_quantile(0.50, sum by (le, stage, backend, model, outcome) (rate(sie_worker_model_load_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window]))) * 1000",
+          "legendFormat": "p50 {{stage}} / {{backend}} / {{model}} / {{outcome}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le, kind) (rate(sie_worker_grammar_compile_seconds_bucket{namespace=\"$namespace\"}[$rate_window]))) * 1000",
-          "legendFormat": "p99 {{kind}}",
+          "expr": "histogram_quantile(0.99, sum by (le, stage, backend, model, outcome) (rate(sie_worker_model_load_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window]))) * 1000",
+          "legendFormat": "p99 {{stage}} / {{backend}} / {{model}} / {{outcome}}",
           "refId": "B"
         }
       ]
@@ -725,8 +725,8 @@
       },
       "id": 51,
       "type": "timeseries",
-      "title": "Grammar cache hit rate",
-      "description": "hits / (hits + misses). A sustained low rate (< 0.5) means clients are sending one-off schemas and the worker cache is not amortising compile cost.",
+      "title": "Loaded Model State",
+      "description": "Canonical loaded-state gauge by model, profile, backend, and lane. Grammar cache telemetry remains outside the activated contract.",
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -752,8 +752,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum by (model) (rate(sie_worker_grammar_cache_hits_total{namespace=\"$namespace\"}[$rate_window])) / clamp_min(sum by (model) (rate(sie_worker_grammar_cache_hits_total{namespace=\"$namespace\"}[$rate_window]) + rate(sie_worker_grammar_cache_misses_total{namespace=\"$namespace\"}[$rate_window])), 1e-9)",
-          "legendFormat": "{{model}}",
+          "expr": "max by (model, profile, backend, lane) (sie_worker_model_loaded{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"})",
+          "legendFormat": "{{model}} / {{profile}} / {{backend}} / {{lane}}",
           "refId": "A"
         }
       ]
@@ -767,7 +767,7 @@
         "y": 52
       },
       "id": 106,
-      "title": "Saturation & Speculative Decoding",
+      "title": "Queue Pressure and Batch Fill",
       "type": "row"
     },
     {
@@ -779,13 +779,12 @@
       },
       "id": 60,
       "type": "timeseries",
-      "title": "Worker saturation flag (per model)",
-      "description": "0/1 gauge. A flat-1 model is permanently rejected by the HRW ring; check admission high-water tuning.",
+      "title": "Worker Queue Depth",
+      "description": "Canonical queue depth by model, profile, operation, and lane. A dedicated generation saturation flag is outside the activated contract.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "min": 0,
-          "max": 1
+          "min": 0
         }
       },
       "options": {
@@ -806,8 +805,8 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sie_worker_generation_saturated{namespace=\"$namespace\"}",
-          "legendFormat": "{{model}}",
+          "expr": "max by (model, profile, operation, lane) (sie_worker_queue_depth{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\", operation=\"generate\"})",
+          "legendFormat": "{{model}} / {{profile}} / {{operation}} / {{lane}}",
           "refId": "A"
         }
       ]
@@ -821,8 +820,8 @@
       },
       "id": 61,
       "type": "timeseries",
-      "title": "Speculative-decoding acceptance rate",
-      "description": "Populates only when the speculative-decoding side-cell is active; empty otherwise.",
+      "title": "Worker Batch Fill Ratio",
+      "description": "Canonical batch-fill ratio by model, lane, and flush reason. Speculative-decoding acceptance remains outside the activated contract.",
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -848,9 +847,154 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sie_worker_speculative_acceptance_rate{namespace=\"$namespace\"}",
-          "legendFormat": "{{model}}",
+          "expr": "max by (model, lane, flush_reason) (sie_worker_batch_fill_ratio{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\", operation=\"generate\"})",
+          "legendFormat": "{{model}} / {{lane}} / {{flush_reason}}",
           "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
+      "id": 70,
+      "type": "timeseries",
+      "title": "Gateway Generation Events, Tokens, and Latency",
+      "description": "Gateway-authoritative generation events/token throughput and TTFT/TPOT p95, plus dispatcher invocation p95. All selectors use the collector-owned contract aliases.",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (event, reason, outcome) (rate(sie_gateway_generation_events_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "event {{event}} / {{reason}} / {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (token_kind) (rate(sie_gateway_generation_tokens_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "tokens {{token_kind}}/s",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sie_gateway_generation_ttft_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])))",
+          "legendFormat": "gateway TTFT p95 s",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sie_gateway_generation_tpot_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])))",
+          "legendFormat": "gateway TPOT p95 s",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, dispatch_path) (rate(sie_dispatcher_invocation_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\", operation=\"generate\"}[$rate_window])))",
+          "legendFormat": "dispatcher {{dispatch_path}} p95 s",
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+      "id": 71,
+      "type": "timeseries",
+      "title": "Worker Generation Control-Event Rate",
+      "description": "Worker token, admission, duplicate-prevention, grammar-cache/request, and model-loading-response rates.",
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (model, token_type) (rate(sie_worker_generation_tokens_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window]))",
+          "legendFormat": "{{model}} tokens {{token_type}}/s",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (model, outcome, reason) (rate(sie_worker_generation_admission_decisions_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window]))",
+          "legendFormat": "admission {{model}} / {{outcome}} / {{reason}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (model, dispatch_path) (rate(sie_worker_generation_duplicate_prevented_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window]))",
+          "legendFormat": "duplicate prevented {{model}} / {{dispatch_path}}",
+          "refId": "C"
+        },
+        {
+          "expr": "sum by (model, phase, result) (rate(sie_worker_generation_grammar_cache_lookups_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window]))",
+          "legendFormat": "grammar cache {{model}} / {{phase}} / {{result}}",
+          "refId": "D"
+        },
+        {
+          "expr": "sum by (model, grammar) (rate(sie_worker_generation_grammar_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window]))",
+          "legendFormat": "grammar requests {{model}} / {{grammar}}",
+          "refId": "E"
+        },
+        {
+          "expr": "sum by (model, state, outcome) (rate(sie_worker_generation_model_loading_responses_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[$rate_window]))",
+          "legendFormat": "loading response {{model}} / {{state}} / {{outcome}}",
+          "refId": "F"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 69 },
+      "id": 72,
+      "type": "timeseries",
+      "title": "Worker Generation In-flight and KV Budget",
+      "description": "Current in-flight request count and reserved/available KV token budget by bounded model/profile identity.",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "max by (model, profile) (sie_worker_generation_inflight{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"})",
+          "legendFormat": "{{model}} / {{profile}} inflight",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (model, profile) (sie_worker_generation_kv_reserved{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"})",
+          "legendFormat": "{{model}} / {{profile}} KV reserved",
+          "refId": "B"
+        },
+        {
+          "expr": "max by (model, profile) (sie_worker_generation_kv_budget{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"})",
+          "legendFormat": "{{model}} / {{profile}} KV budget",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 69 },
+      "id": 73,
+      "type": "timeseries",
+      "title": "Worker Generation TTFT, TPOT, and Grammar Compile p95",
+      "description": "Worker-observed generation latency distributions, split by bounded model/profile and grammar dimensions.",
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model, profile, grammar) (rate(sie_worker_generation_ttft_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window])))",
+          "legendFormat": "TTFT {{model}} / {{profile}} / {{grammar}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model, profile, grammar) (rate(sie_worker_generation_tpot_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window])))",
+          "legendFormat": "TPOT {{model}} / {{profile}} / {{grammar}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model, profile, grammar_backend, phase, outcome) (rate(sie_worker_generation_grammar_compile_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window])))",
+          "legendFormat": "compile {{model}} / {{grammar_backend}} / {{phase}} / {{outcome}}",
+          "refId": "C"
         }
       ]
     }
@@ -875,11 +1019,30 @@
         "multi": false,
         "name": "namespace",
         "options": [],
-        "query": "label_values(up, namespace)",
+        "query": "label_values(kube_pod_info, namespace)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "sie-sie-cluster-otel-collector",
+          "value": "sie-sie-cluster-otel-collector"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Collector",
+        "multi": false,
+        "name": "collector",
+        "options": [],
+        "query": "label_values(up{namespace=\"$namespace\", endpoint=\"prometheus\", service=~\".+-otel-collector\"}, service)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
         "type": "query"
       },
       {

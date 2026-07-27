@@ -29,7 +29,7 @@
 //! * `crate::spawn_heartbeat` — calls
 //!   [`Readiness::record_ping_success`] after every successful
 //!   `IpcClient::ping`.
-//! * [`crate::metrics::spawn_metrics_server`] — reads via
+//! * [`crate::runtime_state::spawn_probe_server`] — reads via
 //!   [`Readiness::snapshot`] on every `GET /readyz`.
 //! * The `run()` shutdown path — calls [`Readiness::mark_draining`]
 //!   the moment the pull loop exits (which is itself driven by the

@@ -1,21 +1,8 @@
-{{- if .Values.healthGates.enabled }}
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ include "sie-cluster.healthGate.gateway.serviceAccountName" . }}
-  namespace: {{ include "sie-cluster.namespace" . }}
-  labels:
-    app.kubernetes.io/name: sie-health-test
-    app.kubernetes.io/component: gateway
-  annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-    helm.sh/hook-weight: "4"
----
+{{- if eq (include "sie-cluster.healthGates.enabled" .) "true" }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ printf "%s-health-gateway-%d" (include "sie-cluster.fullname" .) .Release.Revision | trunc 63 | trimSuffix "-" }}
+  name: {{ include "sie-cluster.keda.suffixedName" (dict "base" (include "sie-cluster.fullname" .) "suffix" (printf "-health-gateway-%d" .Release.Revision)) }}
   namespace: {{ include "sie-cluster.namespace" . }}
   labels:
     app.kubernetes.io/name: sie-health-test
@@ -34,7 +21,7 @@ spec:
         app.kubernetes.io/name: sie-health-test
         app.kubernetes.io/component: gateway
     spec:
-      serviceAccountName: {{ include "sie-cluster.healthGate.gateway.serviceAccountName" . }}
+      automountServiceAccountToken: false
       restartPolicy: Never
       containers:
         - name: test
@@ -49,8 +36,8 @@ spec:
               echo "=== Gateway Readiness Test ==="
               elapsed=0
               while [ $elapsed -lt $TIMEOUT ]; do
-                response=$(wget -qO- --timeout=5 "$GATEWAY_SERVICE" 2>/dev/null || echo "{}")
-                if echo "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+                response=$(wget -qO- --timeout=5 "$GATEWAY_SERVICE" 2>/dev/null || true)
+                if [ "$response" = "ok" ]; then
                   echo "SUCCESS: Gateway is healthy"
                   exit 0
                 fi

@@ -4,10 +4,10 @@ hf_revision: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
 inputs:
   # Qwen3.6-27B is a unified vision-language model (Gated DeltaNet + Gated
   # Attention with an integrated vision encoder; same hybrid family as
-  # Qwen3.5-4B but scaled to 64 layers / hidden_size=5120). The wire
-  # surface accepts text+image via the OpenAI chat-completions schema
-  # (``image_url`` content parts); video is documented by Qwen but not
-  # yet wired through the SIE gateway.
+  # Qwen3.5-4B but scaled to 64 layers / hidden_size=5120). The wire surface
+  # accepts text+image via SIE-native generate (inline ``images``) and the
+  # OpenAI chat-completions schema (``image_url`` content parts); video is
+  # documented by Qwen but not yet wired through the SIE gateway.
   text: true
   image: true
   audio: false
@@ -15,12 +15,16 @@ inputs:
 tasks:
   generate:
     # Native context length is 262,144 tokens (YaRN extends to ~1M).
-    # Keep the base model contract at the measured 4K window. The managed
+    # Keep the base model contract at the 8K launch window. The managed
     # tester rollout exposes the 32K surface only through the
     # ``:rtx-pro-6000`` variant below, whose profile-level ``max_seq_length``
     # is promoted into the generated variant config by the loader.
-    context_length: 4096
+    context_length: 8192
     max_output_tokens: 4096
+    # NEXTN cannot safely run Outlines grammar decoding. The gateway rewrites
+    # grammar-constrained requests to this non-speculative sibling, which is
+    # deployed on the same H100 machine class as the default lane.
+    grammar_profile: no-spec
     capabilities:
       # Same constraint as Qwen3.5-4B: SGLang's outlines_backend does
       # not implement ebnf. xgrammar smoke would pass all three; flip
@@ -63,7 +67,7 @@ tasks:
             answer:
               type: string
           required: [answer]
-max_sequence_length: 4096
+max_sequence_length: 8192
 # ── KV-cache math ──
 #
 # Qwen3.6-27B layer breakdown (per model card / config.json):
@@ -77,7 +81,7 @@ max_sequence_length: 4096
 # enough host RAM to read the BF16 checkpoint before quantization.
 #   * L4 (24 GB)         → infeasible
 #   * A100-40GB (40 GB)  → infeasible BF16; FP8/TP2 only
-#   * H100-80GB          → BF16 speculative profiles at the measured 4K window
+#   * H100-80GB          → BF16 speculative profiles at the 8K launch window
 #   * RTX PRO 6000 96GB  → FP8 + NEXTN profile with a 32K variant surface
 profiles:
   # L4 / A100-40GB BF16 profiles intentionally omitted — Qwen3.6-27B's BF16
@@ -86,9 +90,10 @@ profiles:
     max_batch_tokens: 16384
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
-    # H100-80GB speculative launch shape carried forward at the measured 4K
-    # base-model context. The managed cluster routes 32K 27B generation to
-    # ``rtx-pro-6000``.
+    # H100-80GB launch shape at the 8K base-model context. NEXTN is
+    # correctness-gated off on the pinned SGLang engine; retain the measured
+    # load-time shape while the generic newer-engine lane is validated. The
+    # managed cluster routes 32K 27B generation to ``rtx-pro-6000``.
     kv_budget_tokens: 8192
     adapter_options:
       loadtime:
@@ -99,11 +104,10 @@ profiles:
         grammar_backend: outlines
         reasoning_parser: qwen3
         tool_call_parser: qwen3_coder
-        # MTP/NEXTN per the Qwen3.x model-card recipe. Keep the smaller 2/2
-        # H100 draft shape from main; the larger 3/4 draft remains on the
-        # RTX-PRO-6000 FP8 profile.
+        # Preserve the smaller 2/2 H100 draft shape for a future validated
+        # engine, but keep it disabled on the pinned SGLang release.
         speculative:
-          enabled: true
+          enabled: false
           algorithm: nextn
           num_steps: 2
           eagle_topk: 1
@@ -123,6 +127,7 @@ profiles:
         default_sampling:
           temperature: 0.7
           top_p: 0.8
+          top_k: 20
           presence_penalty: 1.5
           min_new_tokens: 10
         stop_tokens:
@@ -132,7 +137,7 @@ profiles:
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
     # Same H100-80GB target as ``default`` with the model-card 3/4 NEXTN draft
-    # preserved from main. Keep the public H100 context at the measured 4K
+    # preserved from main. Keep the public H100 context at the 8K
     # base-model window until a separate 32K H100 smoke lands.
     kv_budget_tokens: 32768
     adapter_options:
@@ -164,6 +169,7 @@ profiles:
         default_sampling:
           temperature: 0.7
           top_p: 0.8
+          top_k: 20
           presence_penalty: 1.5
           min_new_tokens: 10
         stop_tokens:
@@ -258,6 +264,7 @@ profiles:
         default_sampling:
           temperature: 0.7
           top_p: 0.8
+          top_k: 20
           presence_penalty: 1.5
           min_new_tokens: 10
         stop_tokens:
@@ -313,6 +320,7 @@ profiles:
         default_sampling:
           temperature: 0.7
           top_p: 0.8
+          top_k: 20
           presence_penalty: 1.5
           min_new_tokens: 10
         stop_tokens:
@@ -349,6 +357,7 @@ profiles:
         default_sampling:
           temperature: 0.7
           top_p: 0.8
+          top_k: 20
           presence_penalty: 1.5
           min_new_tokens: 10
         stop_tokens:

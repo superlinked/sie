@@ -11,9 +11,11 @@
 
 import { describe, expect, it } from "vitest";
 import type {
+  AudioInput,
   DocumentInput,
   EncodeResult,
   Entity,
+  ExtractItem,
   ExtractResult,
   Item,
   ModelCapabilities,
@@ -71,6 +73,24 @@ describe("Item creation - common user patterns", () => {
 
     expect(item.images).toHaveLength(1);
     expect(item.images?.[0]).toBeInstanceOf(Uint8Array);
+  });
+
+  it("creates items with encoded audio and decoder metadata", () => {
+    const audio: AudioInput = {
+      data: new Uint8Array([0x52, 0x49, 0x46, 0x46]),
+      format: "wav",
+      sampleRate: 16_000,
+    };
+    const item: ExtractItem = { audio };
+
+    expect(item.audio).toEqual(audio);
+  });
+
+  it("creates items with direct encoded audio bytes", () => {
+    const audio = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
+    const item: ExtractItem = { audio };
+
+    expect(item.audio).toEqual(audio);
   });
 
   it("creates items with pre-encoded multivectors for client-side scoring", () => {
@@ -248,6 +268,7 @@ describe("ScoreResult - reranking results", () => {
         { itemId: "doc-1", score: 0.82, rank: 1 },
         { itemId: "doc-2", score: 0.65, rank: 2 },
       ],
+      usage: { inputTokens: 91, images: 2 },
     };
 
     expect(result.scores[0]?.itemId).toBe("doc-3"); // Most relevant
@@ -256,6 +277,7 @@ describe("ScoreResult - reranking results", () => {
     // User can easily get top K
     const top2 = result.scores.slice(0, 2);
     expect(top2.map((s) => s.itemId)).toEqual(["doc-3", "doc-1"]);
+    expect(result.usage).toEqual({ inputTokens: 91, images: 2 });
   });
 
   it("echoes back query ID for tracking", () => {

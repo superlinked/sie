@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -196,34 +197,37 @@ class BGEM3FlashAdapter(BGEM3ScoreMixin, PEFTLoRAMixin, FlashBaseAdapter):
         normalize = opts.get("normalize", self._normalize)
 
         texts = self._extract_texts(items, instruction)
+        if not texts:
+            raise ValueError("BGEM3FlashAdapter requires at least one item")
 
-        # Tokenize each sequence individually (no padding)
-        encodings = [
-            self._tokenizer(
-                text,
-                max_length=self._max_seq_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-            for text in texts
-        ]
+        # Batch tokenization — single call instead of per-text loop
+        batch_encoding = self._tokenizer(
+            texts,
+            max_length=self._max_seq_length,
+            truncation=True,
+            padding=False,
+            return_attention_mask=False,
+        )
 
-        # Build packed representation
-        seq_lengths = [enc["input_ids"].shape[1] for enc in encodings]
-        total_tokens = sum(seq_lengths)
+        # Extract input_ids as lists and compute seq_lengths
+        input_ids_lists = batch_encoding["input_ids"]
+        seq_lengths = [len(ids) for ids in input_ids_lists]
+        cu_seqlens_cpu = [0, *accumulate(seq_lengths)]
+        total_tokens = cu_seqlens_cpu[-1]
         max_seqlen = max(seq_lengths)
 
-        # Pack input_ids
-        input_ids_packed = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).to(self._device)
+        # Pack input_ids — build a flat list first, then create one tensor
+        all_input_ids: list[int] = []
+        for ids in input_ids_lists:
+            all_input_ids.extend(ids)
+        input_ids_packed = torch.tensor(all_input_ids, dtype=torch.long, device=self._device)
 
-        # Build cu_seqlens (cumulative sequence lengths)
-        cu_seqlens = torch.zeros(len(texts) + 1, dtype=torch.int32, device=self._device)
-        for i, length in enumerate(seq_lengths):
-            cu_seqlens[i + 1] = cu_seqlens[i] + length
+        # Build offsets on the CPU, then transfer one small int32 tensor.
+        cu_seqlens = torch.tensor(cu_seqlens_cpu, dtype=torch.int32, device=self._device)
 
         with torch.inference_mode():
             # Build XLMRoberta-style position IDs (start at padding_idx + 1)
-            position_ids_packed = self._build_position_ids(cu_seqlens, len(texts))
+            position_ids_packed = self._build_position_ids(cu_seqlens, len(texts), total_tokens=total_tokens)
 
             # Run embeddings
             hidden = self._run_embeddings(input_ids_packed, position_ids_packed)
@@ -253,9 +257,15 @@ class BGEM3FlashAdapter(BGEM3ScoreMixin, PEFTLoRAMixin, FlashBaseAdapter):
 
     # score() and score_pairs() are provided by BGEM3ScoreMixin.
 
-    def _build_position_ids(self, cu_seqlens: torch.Tensor, num_seqs: int) -> torch.Tensor:
+    def _build_position_ids(
+        self,
+        cu_seqlens: torch.Tensor,
+        num_seqs: int,
+        *,
+        total_tokens: int | None = None,
+    ) -> torch.Tensor:
         """Build XLMRoberta-style position IDs (each restarts at padding_idx + 1)."""
-        return build_position_ids(cu_seqlens, offset=self._padding_idx + 1)
+        return build_position_ids(cu_seqlens, offset=self._padding_idx + 1, total_tokens=total_tokens)
 
     def _run_embeddings(self, input_ids: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
         """Compute embeddings for packed input."""
@@ -380,7 +390,7 @@ class BGEM3FlashAdapter(BGEM3ScoreMixin, PEFTLoRAMixin, FlashBaseAdapter):
             start = cu_seqlens[i].item()
             end = cu_seqlens[i + 1].item()
 
-            weights = token_weights[start:end].float().cpu().numpy()
+            weights = token_weights[start:end].cpu().float().numpy()
             ids = input_ids[start:end].cpu().numpy()
 
             sparse_dict: dict[int, float] = {}
@@ -445,7 +455,7 @@ class BGEM3FlashAdapter(BGEM3ScoreMixin, PEFTLoRAMixin, FlashBaseAdapter):
         multivector_list: list[np.ndarray] | None = None
 
         if "dense" in output_types and "dense" in embeddings:
-            dense_np = embeddings["dense"].float().cpu().numpy()
+            dense_np = embeddings["dense"].cpu().float().numpy()
 
         if "sparse" in output_types and "sparse" in embeddings:
             sparse_list = []
@@ -459,7 +469,7 @@ class BGEM3FlashAdapter(BGEM3ScoreMixin, PEFTLoRAMixin, FlashBaseAdapter):
                 sparse_list.append(SparseVector(indices=indices, values=values))
 
         if "multivector" in output_types and "multivector" in embeddings:
-            multivector_list = [vecs.float().cpu().numpy() for vecs in embeddings["multivector"]]
+            multivector_list = [vecs.cpu().float().numpy() for vecs in embeddings["multivector"]]
 
         return EncodeOutput(
             dense=dense_np,

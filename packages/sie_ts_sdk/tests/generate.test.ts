@@ -15,6 +15,7 @@ import {
   SIEConnectionError,
   ServerError,
 } from "../src/errors.js";
+import { MINIMAL_JPEG_BASE64, MINIMAL_JPEG_BYTES } from "./fixtures.js";
 
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -62,6 +63,9 @@ describe("SIEClient.generate", () => {
     expect(result.attemptId).toBe("att-abc");
     expect(result.ttftMs).toBe(120.5);
     expect(result.tpotMs).toBe(45.2);
+    const omittedSamplerBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(omittedSamplerBody).not.toHaveProperty("temperature");
+    expect(omittedSamplerBody).not.toHaveProperty("top_p");
   });
 
   it("sends a JSON body with snake_case field names", async () => {
@@ -78,9 +82,19 @@ describe("SIEClient.generate", () => {
     const client = new SIEClient("http://localhost:8080");
     await client.generate("m", "Hi", {
       maxNewTokens: 8,
-      temperature: 0.7,
-      topP: 0.9,
+      temperature: 1.0,
+      topP: 1.0,
       stop: ["</s>"],
+      frequencyPenalty: 0.25,
+      presencePenalty: -0.5,
+      grammar: { regex: "[a-z]+", label: null, strict: null },
+      seed: -1,
+      logitBias: { "123": 1.5 },
+      routingKey: "tenant-7",
+      promptCacheKey: "prompt-9",
+      safetyIdentifier: "safety-3",
+      loraAdapter: "sql-adapter",
+      adapterOptions: { overall_timeout_s: 30 },
     });
 
     expect(mockFetch).toHaveBeenCalledOnce();
@@ -93,11 +107,89 @@ describe("SIEClient.generate", () => {
     expect(body).toEqual({
       prompt: "Hi",
       max_new_tokens: 8,
-      temperature: 0.7,
-      top_p: 0.9,
+      temperature: 1.0,
+      top_p: 1.0,
       stop: ["</s>"],
+      frequency_penalty: 0.25,
+      presence_penalty: -0.5,
+      grammar: { regex: "[a-z]+", label: null, strict: null },
+      seed: -1,
+      logit_bias: { "123": 1.5 },
+      routing_key: "tenant-7",
+      prompt_cache_key: "prompt-9",
+      safety_identifier: "safety-3",
+      lora_adapter: "sql-adapter",
+      options: { overall_timeout_s: 30 },
     });
   });
+
+  it("serializes native images as canonical base64 JSON envelopes", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        model: "vision-model",
+        text: "caption",
+        finish_reason: "stop",
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    );
+
+    const client = new SIEClient("http://localhost:8080");
+    await client.generate("vision-model", "Describe this image", {
+      maxNewTokens: 8,
+      images: [MINIMAL_JPEG_BYTES],
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.images).toEqual([{ data: MINIMAL_JPEG_BASE64, format: "jpeg" }]);
+    expect(body.images[0].data).not.toBeInstanceOf(Uint8Array);
+  });
+
+  it("accepts a valid grammar held in the legacy broad record type", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        model: "m",
+        text: "123",
+        finish_reason: "stop",
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    );
+    const grammar: Record<string, unknown> = { regex: "\\d+" };
+
+    const client = new SIEClient("http://localhost:8080");
+    await client.generate("m", "Return digits", { maxNewTokens: 8, grammar });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.grammar).toEqual(grammar);
+  });
+
+  it.each([
+    {},
+    { json_schema: {}, regex: "x" },
+    { regex: 123 },
+    { ebnf: "root", unknown: true },
+    { regex: "x", label: 123 },
+    { ebnf: "root", strict: "yes" },
+  ])("rejects an invalid grammar before request: %j", async (grammar) => {
+    const client = new SIEClient("http://localhost:8080");
+    await expect(
+      client.generate("m", "Hi", {
+        maxNewTokens: 8,
+        grammar: grammar as never,
+      }),
+    ).rejects.toThrow();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1, 1.5, Number.NaN])(
+    "rejects a seed that JSON cannot preserve exactly: %s",
+    async (seed) => {
+      const client = new SIEClient("http://localhost:8080");
+      await expect(client.generate("m", "Hi", { maxNewTokens: 8, seed })).rejects.toThrow(
+        RangeError,
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    },
+  );
 
   it("normalizes HF-style model ids to SIE-safe route ids", async () => {
     mockFetch.mockResolvedValueOnce(

@@ -25,7 +25,9 @@ OPTIONAL_FIELDS = (
     "batch_size",
     "gpu_type",
     "endpoint",
-    "api_key",
+    # "api_key" was listed here until #2339: no call site ever set it, and a
+    # raw credential must never be a pass-through log field. Log a masked
+    # token via sie_sdk.redaction.mask_token under a non-secret field instead.
     "queue_depth",
     "status",
     "tokenization_ms",

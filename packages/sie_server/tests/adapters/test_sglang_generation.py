@@ -667,6 +667,27 @@ def test_generate_forwards_top_k_and_repetition_penalty(mock_async_client: Magic
     assert body["sampling_params"]["repetition_penalty"] == pytest.approx(1.1)
 
 
+@pytest.mark.parametrize("seed", [-1, 0, 1])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_maps_seed_to_sglang_sampling_seed(mock_async_client: MagicMock, adapter, seed: int) -> None:
+    sse_lines = [
+        'data: {"text": "x", "meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "stop"}}}',
+    ]
+    client_instance = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    mock_async_client.return_value = client_instance
+    adapter._server_url = "http://localhost:30005"
+
+    async def _drain() -> None:
+        async for _ in adapter.generate(prompt="Hi", max_new_tokens=64, seed=seed):
+            pass
+
+    asyncio.run(_drain())
+
+    sampling_params = client_instance.stream.call_args.kwargs["json"]["sampling_params"]
+    assert sampling_params["sampling_seed"] == seed
+    assert "seed" not in sampling_params
+
+
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
 def test_generate_omits_top_k_and_repetition_penalty_when_unset(mock_async_client: MagicMock, adapter) -> None:
     sse_lines = [

@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use sie_server_sidecar::work_types::{WorkItem, WorkResult};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -213,7 +214,7 @@ impl LocalWorkerHarness {
             .env("SIE_MACHINE_PROFILE", "l4")
             .env("SIE_BUNDLE", "default")
             .env("SIE_IPC_SOCKET_PATH", ipc_socket)
-            .env("SIE_WORKER_METRICS_PORT", free_tcp_port().to_string())
+            .env("SIE_WORKER_PROBE_PORT", free_tcp_port().to_string())
             .env("SIE_WORKER_ID", "loopback-worker")
             .env("SIE_WORKER_PING_INTERVAL_MS", "500")
             .env("RUST_LOG", "info,sie_server_sidecar=debug")
@@ -325,6 +326,7 @@ fn work_item(request_id: &str, idx: u32, total: u32, op: &str, admission_pool: &
         prompt_cache_key: None,
         bundle_config_hash: String::new(),
         router_id: "loopback".into(),
+        accepts_result_chunks: false,
         reply_subject: String::new(), // NATS-only field; unused on this path
         traceparent: None,
         tracestate: None,
@@ -332,14 +334,43 @@ fn work_item(request_id: &str, idx: u32, total: u32, op: &str, admission_pool: &
     }
 }
 
+fn update_digest_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
 fn publish_work_body(items: &[WorkItem], admission_pool: &str, timeout_ms: i64) -> rmpv::Value {
     let items_bytes = rmp_serde::to_vec_named(items).expect("encode items");
+    let request_id = items.first().map(|i| i.request_id.as_str()).unwrap_or("");
+    let endpoint = items.first().map(|i| i.operation.as_str()).unwrap_or("");
+    let params = rmp_serde::to_vec_named(&serde_json::json!({})).unwrap();
+    let dispatch_context = b"loopback-test";
+    let fields: [&[u8]; 10] = [
+        dispatch_context,
+        b"default|l4|default",
+        endpoint.as_bytes(),
+        b"BAAI/bge-m3",
+        b"",
+        admission_pool.as_bytes(),
+        b"",
+        request_id.as_bytes(),
+        &params,
+        &items_bytes,
+    ];
+    let mut hasher = Sha256::new();
+    hasher.update(b"sie-local-ingest-v1\0");
+    for field in fields {
+        update_digest_field(&mut hasher, field);
+    }
+    hasher.update(timeout_ms.to_be_bytes());
+    let payload_digest = hasher.finalize().to_vec();
+
     rmpv::Value::Map(vec![
         (
             rmpv::Value::from("lane"),
             rmpv::Value::from("default|l4|default"),
         ),
-        (rmpv::Value::from("endpoint"), rmpv::Value::from("encode")),
+        (rmpv::Value::from("endpoint"), rmpv::Value::from(endpoint)),
         (rmpv::Value::from("model"), rmpv::Value::from("BAAI/bge-m3")),
         (rmpv::Value::from("engine"), rmpv::Value::from("")),
         (
@@ -352,13 +383,18 @@ fn publish_work_body(items: &[WorkItem], admission_pool: &str, timeout_ms: i64) 
         ),
         (
             rmpv::Value::from("request_id"),
-            rmpv::Value::from(items.first().map(|i| i.request_id.as_str()).unwrap_or("")),
+            rmpv::Value::from(request_id),
+        ),
+        (rmpv::Value::from("params"), rmpv::Value::Binary(params)),
+        (rmpv::Value::from("items"), rmpv::Value::Binary(items_bytes)),
+        (
+            rmpv::Value::from("dispatch_context"),
+            rmpv::Value::Binary(dispatch_context.to_vec()),
         ),
         (
-            rmpv::Value::from("params"),
-            rmpv::Value::Binary(rmp_serde::to_vec_named(&serde_json::json!({})).unwrap()),
+            rmpv::Value::from("payload_digest"),
+            rmpv::Value::Binary(payload_digest),
         ),
-        (rmpv::Value::from("items"), rmpv::Value::Binary(items_bytes)),
         (
             rmpv::Value::from("timeout_ms"),
             rmpv::Value::from(timeout_ms),

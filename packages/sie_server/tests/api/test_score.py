@@ -69,6 +69,8 @@ def _create_mock_worker(mock_adapter: MagicMock) -> MagicMock:
         score_output = ScoreOutput(
             scores=np.array(scores, dtype=np.float32),
             batch_size=len(scores),
+            input_token_counts=[7] * len(scores),
+            input_image_counts=[0] * len(scores),
         )
 
         # Create timing if not provided
@@ -172,6 +174,8 @@ class TestScoreEndpoint:
         assert data["scores"][1]["rank"] == 1
         # First item should have higher score
         assert data["scores"][0]["score"] >= data["scores"][1]["score"]
+        assert data["usage"]["input_tokens"] == 14
+        assert data["usage"]["images"] == 0
 
     def test_score_basic_msgpack(self, client: TestClient) -> None:
         """Basic score request returns msgpack by default."""
@@ -189,6 +193,8 @@ class TestScoreEndpoint:
         data = msgpack.unpackb(response.content, raw=False)
         assert data["model"] == "test-reranker"
         assert len(data["scores"]) == 1
+        assert data["usage"]["input_tokens"] == 7
+        assert data["usage"]["images"] == 0
 
     def test_score_with_query_id(self, client: TestClient) -> None:
         """Query ID is preserved in response."""
@@ -261,6 +267,102 @@ class TestScoreEndpoint:
         mock_adapter.score.assert_called_once()
         call_kwargs = mock_adapter.score.call_args
         assert call_kwargs.kwargs["instruction"] == "Rank documents by relevance"
+
+    @pytest.mark.parametrize("wire", ["json", "msgpack"])
+    @pytest.mark.parametrize(
+        ("include_top_level", "top_level", "option_instruction", "expected"),
+        [
+            pytest.param(False, None, "option", "option", id="missing-promotes-option"),
+            pytest.param(True, None, "option", "option", id="null-promotes-option"),
+            pytest.param(True, "", "option", "", id="empty-top-level-wins"),
+            pytest.param(True, "top", "option", "top", id="top-level-wins"),
+            pytest.param(False, None, None, None, id="null-option-remains-none"),
+            pytest.param(False, None, "", "", id="empty-option-is-promoted"),
+        ],
+    )
+    def test_score_instruction_precedence_matches_both_wire_formats(
+        self,
+        client: TestClient,
+        mock_adapter: MagicMock,
+        wire: str,
+        include_top_level: bool,
+        top_level: str | None,
+        option_instruction: str | None,
+        expected: str | None,
+    ) -> None:
+        body = {
+            "query": {"text": "Query"},
+            "items": [{"text": "Doc"}],
+            "options": {"instruction": option_instruction},
+        }
+        if include_top_level:
+            body["instruction"] = top_level
+
+        if wire == "json":
+            response = client.post(
+                "/v1/score/test-reranker",
+                json=body,
+                headers=JSON_HEADERS,
+            )
+        else:
+            response = client.post(
+                "/v1/score/test-reranker",
+                content=msgpack.packb(body, use_bin_type=True),
+                headers={
+                    "Content-Type": "application/msgpack",
+                    "Accept": "application/json",
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_adapter.score.call_args.kwargs["instruction"] == expected
+
+    @pytest.mark.parametrize("wire", ["json", "msgpack"])
+    @pytest.mark.parametrize(
+        "invalid_fields",
+        [
+            pytest.param({"instruction": []}, id="top-level-instruction"),
+            pytest.param({"options": []}, id="options-container"),
+            pytest.param(
+                {
+                    "instruction": "valid top-level value must not bypass validation",
+                    "options": {"instruction": False},
+                },
+                id="nested-instruction",
+            ),
+        ],
+    )
+    def test_score_rejects_invalid_instruction_grammar_before_inference(
+        self,
+        client: TestClient,
+        mock_adapter: MagicMock,
+        wire: str,
+        invalid_fields: dict[str, Any],
+    ) -> None:
+        body = {
+            "query": {"text": "Query"},
+            "items": [{"text": "Doc"}],
+            **invalid_fields,
+        }
+        if wire == "json":
+            response = client.post(
+                "/v1/score/test-reranker",
+                json=body,
+                headers=JSON_HEADERS,
+            )
+        else:
+            response = client.post(
+                "/v1/score/test-reranker",
+                content=msgpack.packb(body, use_bin_type=True),
+                headers={
+                    "Content-Type": "application/msgpack",
+                    "Accept": "application/json",
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "INVALID_INPUT"
+        mock_adapter.score.assert_not_called()
 
     def test_score_multimodal_items_contribute_media_batch_cost(
         self, client: TestClient, mock_registry: MagicMock

@@ -8,6 +8,7 @@ from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.prepared import TextPreparedItem, make_text_item
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import ModelWorker, RequestMetadata, WorkerConfig, WorkerResult, WorkerStats
+from sie_server.core.worker import model_worker as model_worker_module
 from sie_server.types.inputs import Item
 
 
@@ -236,6 +237,35 @@ class TestModelWorker:
             assert worker.stats.batches_processed >= 1
             assert worker.stats.items_processed >= 1
 
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_direct_queue_release_emits_once_at_engine_dequeue(
+        self,
+        mock_adapter: MagicMock,
+        tokenized_item: TextPreparedItem,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        telemetry = MagicMock()
+        monkeypatch.setattr(model_worker_module, "worker_telemetry", lambda: telemetry)
+        monkeypatch.setattr(model_worker_module, "worker_telemetry_enabled", lambda: True)
+        worker = ModelWorker(
+            mock_adapter,
+            WorkerConfig(max_batch_tokens=100, max_batch_requests=1, max_batch_wait_ms=1),
+            model_name="catalog/model",
+        )
+        await worker.start()
+        try:
+            future = await worker.submit([tokenized_item], [Item(text="hello")], ["dense"])
+            await asyncio.wait_for(future, timeout=2.0)
+
+            telemetry.queue_released.assert_called_once()
+            attributes = telemetry.queue_released.call_args.kwargs
+            assert attributes["operation"] == "encode"
+            assert attributes["model"] == "catalog/model"
+            assert attributes["profile"] == "default"
+            assert attributes["duration_s"] >= 0.0
         finally:
             await worker.stop()
 

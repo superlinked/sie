@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import msgpack
@@ -10,6 +11,7 @@ import numpy as np
 import pytest
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.inference_output import ExtractOutput, ScoreOutput
+from sie_server.core.loader import expand_profile_variants, load_model_config
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.types import WorkerResult
@@ -21,7 +23,95 @@ from sie_server.ipc_types import (
     ProcessScoreBatchRequest,
     ScoreBatchItem,
 )
-from sie_server.queue_executor import QueueExecutor
+from sie_server.queue_executor import QueueExecutor, _validate_prepared_audio
+
+_MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
+
+
+def _load_profile_variant(model_file: str, route: str) -> ModelConfig:
+    return expand_profile_variants([load_model_config(_MODELS_DIR / model_file)])[route]
+
+
+def test_prepared_audio_rejects_zero_source_sample_rate() -> None:
+    audio = MagicMock(
+        sample_rate=16_000,
+        source_sample_rate=0,
+        sample_count=16_000,
+        source_sample_count=48_000,
+        duration_ms=1_000,
+        pcm_s16le=b"\x00\x00" * 16_000,
+    )
+
+    with pytest.raises(ValueError, match="source_sample_rate must be between 8000 and 48000"):
+        _validate_prepared_audio(audio)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_channels", 3, "source_channels must be 1 or 2"),
+        ("container", "aac", "container is unsupported"),
+        ("duration_ms", 720_001, "duration_ms exceeds"),
+        ("sample_count", 11_522_049, "canonical sample_count exceeds"),
+    ],
+)
+def test_prepared_audio_rejects_untrusted_provenance(field: str, value: object, message: str) -> None:
+    audio = MagicMock(
+        sample_rate=16_000,
+        source_sample_rate=16_000,
+        source_channels=1,
+        sample_count=16_000,
+        source_sample_count=16_000,
+        duration_ms=1_000,
+        pcm_s16le=b"\x00\x00" * 16_000,
+        container="wav",
+    )
+    setattr(audio, field, value)
+    if field == "duration_ms":
+        audio.source_sample_count = 11_520_016
+    elif field == "sample_count":
+        audio.pcm_s16le = b"\x00\x00" * value
+
+    with pytest.raises(ValueError, match=message):
+        _validate_prepared_audio(audio)
+
+
+@pytest.mark.parametrize(("source_sample_count", "duration_ms"), [(1, 1), (1_601, 101)])
+def test_prepared_audio_accepts_ceil_duration(source_sample_count: int, duration_ms: int) -> None:
+    audio = MagicMock(
+        sample_rate=16_000,
+        source_sample_rate=16_000,
+        source_channels=1,
+        sample_count=source_sample_count,
+        source_sample_count=source_sample_count,
+        duration_ms=duration_ms,
+        pcm_s16le=b"\x00\x00" * source_sample_count,
+        container="wav",
+    )
+
+    _validate_prepared_audio(audio)
+
+
+@pytest.mark.parametrize(
+    ("source_sample_count", "duration_ms", "message"),
+    [(1, 0, "duration_ms must be positive"), (1_601, 100, "does not match")],
+)
+def test_prepared_audio_rejects_nonpositive_or_floor_duration(
+    source_sample_count: int, duration_ms: int, message: str
+) -> None:
+    audio = MagicMock(
+        sample_rate=16_000,
+        source_sample_rate=16_000,
+        source_channels=1,
+        sample_count=source_sample_count,
+        source_sample_count=source_sample_count,
+        duration_ms=duration_ms,
+        pcm_s16le=b"\x00\x00" * source_sample_count,
+        container="wav",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        _validate_prepared_audio(audio)
 
 
 def _make_registry(*, loaded: bool = True, loading: bool = False) -> MagicMock:
@@ -31,7 +121,23 @@ def _make_registry(*, loaded: bool = True, loading: bool = False) -> MagicMock:
     reg.has_model.return_value = True
     reg.is_loaded.return_value = loaded
     reg.is_loading.return_value = loading
-    reg.get_config.return_value = MagicMock()
+    reg.get_config.return_value = ModelConfig(
+        sie_id="test/model",
+        package_backed=True,
+        tasks=Tasks(
+            encode=EncodeTask(
+                dense=EmbeddingDim(dim=768),
+                sparse=EmbeddingDim(dim=768),
+                multivector=EmbeddingDim(dim=128),
+            )
+        ),
+        profiles={
+            "default": ProfileConfig(
+                adapter_path="sie_server.adapters.sentence_transformer:SentenceTransformerDenseAdapter",
+                max_batch_tokens=8192,
+            )
+        },
+    )
     # No recorded load failure by default — a bare MagicMock would otherwise
     # return a truthy stub for ``get_failure(...)`` and its ``.is_permanent``,
     # which ``ensure_model_ready`` now reads to gate the terminal ``failed``
@@ -90,27 +196,68 @@ def _encode_item(
     )
 
 
-def _score_item() -> ScoreBatchItem:
+def _score_item(
+    *,
+    wiid: str = "req-1.0",
+    options: dict | None = None,
+    item_index: int = 0,
+) -> ScoreBatchItem:
     return ScoreBatchItem(
-        work_item_id="req-1.0",
-        request_id="req-1",
-        item_index=0,
+        work_item_id=wiid,
+        request_id=wiid.split(".", maxsplit=1)[0],
+        item_index=item_index,
         total_items=1,
         timestamp=time.time(),
         query_item={"text": "q"},
         score_items=[{"text": "a", "id": "doc-a"}],
+        options=options,
     )
 
 
-def _extract_item() -> ExtractBatchItem:
+def _extract_item(
+    *,
+    wiid: str = "req-1.0",
+    options: dict | None = None,
+    item_index: int = 0,
+) -> ExtractBatchItem:
     return ExtractBatchItem(
-        work_item_id="req-1.0",
-        request_id="req-1",
-        item_index=0,
+        work_item_id=wiid,
+        request_id=wiid.split(".", maxsplit=1)[0],
+        item_index=item_index,
         total_items=1,
         timestamp=time.time(),
         item={"text": "Alice works at Acme."},
         labels=["person"],
+        options=options,
+    )
+
+
+def _runtime_profile_config() -> ModelConfig:
+    return ModelConfig.model_validate(
+        {
+            "sie_id": "test/runtime-profiles",
+            "hf_id": "test/runtime-profiles",
+            "inputs": {"text": True},
+            "tasks": {"encode": {"dense": {"dim": 8}}},
+            "max_sequence_length": 512,
+            "profiles": {
+                "default": {
+                    "max_batch_tokens": 8192,
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "adapter_options": {"runtime": {"threshold": 0.25}},
+                },
+                "tuned": {
+                    "max_batch_tokens": 8192,
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "adapter_options": {
+                        "runtime": {
+                            "threshold": 0.5,
+                            "lora": "profile-lora",
+                        }
+                    },
+                },
+            },
+        }
     )
 
 
@@ -559,6 +706,167 @@ class TestProcessEncodeBatch:
         assert outcome.outcomes[0].raw_output is not None
         assert outcome.outcomes[0].raw_output.sparse is not None
 
+    @pytest.mark.parametrize(
+        ("model_file", "route"),
+        [
+            (
+                "nvidia__llama-nemoretriever-colembed-3b-v1.yaml",
+                "nvidia/llama-nemoretriever-colembed-3b-v1:muvera",
+            ),
+            ("nvidia__nemotron-colembed-vl-4b-v2.yaml", "nvidia/nemotron-colembed-vl-4b-v2:muvera"),
+            ("vidore__colpali-v1.3-hf.yaml", "vidore/colpali-v1.3-hf:muvera"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_multimodal_muvera_route_translates_managed_adapter_output(
+        self,
+        model_file: str,
+        route: str,
+    ) -> None:
+        """Canonical multimodal routes authorize dense while adapters emit multivectors."""
+        config = _load_profile_variant(model_file, route)
+        assert config.inputs.image is True
+        assert config.synthetic_profile_variant_source is not None
+        reg = _make_registry()
+        reg.get_config.return_value = config
+        ex = QueueExecutor(reg)
+
+        with patch(
+            "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+            new_callable=AsyncMock,
+            return_value=([{"dense": [0.1, 0.2]}], RequestTiming()),
+        ) as mock_encode:
+            outcome = await ex.process_encode_batch(ProcessEncodeBatchRequest(model_id=route, items=[_encode_item()]))
+
+        call = mock_encode.await_args.kwargs
+        assert call["model"] == route
+        assert call["output_types"] == ["multivector"]
+        assert call["response_output_types"] == ["dense"]
+        assert outcome.outcomes[0].disposition == "publish_and_ack"
+        assert outcome.outcomes[0].result_msgpack is not None
+        assert msgpack.unpackb(outcome.outcomes[0].result_msgpack, raw=False) == {"dense": [0.1, 0.2]}
+
+    @pytest.mark.asyncio
+    async def test_request_options_cannot_self_authorize_managed_output(self) -> None:
+        """Caller options cannot expand the managed route's output allowlist."""
+        config = ModelConfig(
+            sie_id="test/colbert",
+            hf_id="test/colbert",
+            tasks=Tasks(encode=EncodeTask(multivector=EmbeddingDim(dim=8))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="sie_server.adapters.colbert:ColBERTAdapter",
+                    max_batch_tokens=8192,
+                )
+            },
+        )
+        reg = _make_registry()
+        reg.get_config.return_value = config
+        ex = QueueExecutor(reg)
+
+        outcome = await ex.process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/colbert",
+                items=[_encode_item(options={"muvera": {}, "output_types": ["dense"]})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+        assert "dense" in (outcome.outcomes[0].error or "")
+
+    @pytest.mark.parametrize("output_types", ["dense", [], [{}], ["score"], [1]])
+    @pytest.mark.asyncio
+    async def test_managed_output_types_reject_malformed_values(self, output_types: object) -> None:
+        outcome = await QueueExecutor(_make_registry()).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(options={"output_types": output_types})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+
+    @pytest.mark.parametrize("output_types", [[], ["score"]])
+    @pytest.mark.asyncio
+    async def test_managed_top_level_output_types_fail_closed(self, output_types: list[str]) -> None:
+        outcome = await QueueExecutor(_make_registry()).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(output_types=output_types)],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+
+    @pytest.mark.parametrize("profile", ["", " ", [], {}, 0, False, ["default"], {"name": "default"}])
+    @pytest.mark.asyncio
+    async def test_managed_profile_selector_rejects_malformed_values(self, profile: object) -> None:
+        outcome = await QueueExecutor(_make_registry()).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(options={"profile": profile})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+
+    @pytest.mark.asyncio
+    async def test_managed_unknown_profile_is_invalid_input(self) -> None:
+        outcome = await QueueExecutor(_make_registry()).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(options={"profile": "missing"})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+
+    @pytest.mark.asyncio
+    async def test_muvera_profile_translates_managed_adapter_output(self) -> None:
+        """Managed queue requests must use the same MuVERA contract as HTTP."""
+        config = ModelConfig.model_validate(
+            {
+                "sie_id": "test/colbert:muvera",
+                "hf_id": "test/colbert",
+                "inputs": {"text": True},
+                "tasks": {"encode": {"multivector": {"dim": 8}}},
+                "profiles": {
+                    "default": {
+                        "max_batch_tokens": 8192,
+                        "adapter_path": "sie_server.adapters.colbert:ColBERTAdapter",
+                        "adapter_options": {
+                            "runtime": {"muvera": {}, "output_types": ["dense"]},
+                        },
+                    },
+                },
+            }
+        )
+        reg = _make_registry()
+        reg.get_config.return_value = config
+        ex = QueueExecutor(reg)
+
+        fake_timing = RequestTiming()
+        with patch(
+            "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+            new_callable=AsyncMock,
+            return_value=([{"dense": [0.1, 0.2]}], fake_timing),
+        ) as mock_encode:
+            outcome = await ex.process_encode_batch(
+                ProcessEncodeBatchRequest(model_id="test/colbert:muvera", items=[_encode_item()])
+            )
+
+        call = mock_encode.await_args.kwargs
+        assert call["output_types"] == ["multivector"]
+        assert call["response_output_types"] == ["dense"]
+        assert outcome.outcomes[0].disposition == "publish_and_ack"
+        assert outcome.outcomes[0].result_msgpack is not None
+        assert msgpack.unpackb(outcome.outcomes[0].result_msgpack, raw=False) == {"dense": [0.1, 0.2]}
+
     @pytest.mark.asyncio
     async def test_request_output_types_and_base_default_unchanged(self) -> None:
         """The profile-default fix must not over-reach: with NO profile-level
@@ -733,79 +1041,6 @@ class TestProcessEncodeBatch:
 
         assert [o.work_item_id for o in outcome.outcomes] == ["a.0", "b.0", "c.0"]
 
-    @pytest.mark.asyncio
-    async def test_records_ipc_batch_shape_metric(self) -> None:
-        """process_encode_batch emits a fragmentation observation with
-        items==N and sub_groups==distinct(output_types, instruction, ...).
-
-        Guards the invariant that dashboards reading
-        `sie_ipc_batch_sub_groups / sie_ipc_batch_items` will correctly
-        reflect how many separate GPU forward passes the IPC batch
-        split into — that's the entire reason the metric exists.
-        """
-        reg = _make_registry()
-        ex = QueueExecutor(reg)
-
-        async def fake_run_encode(**kwargs):
-            n = len(kwargs["items"])
-            return [{"dense": [0.0]} for _ in range(n)], RequestTiming()
-
-        with (
-            patch(
-                "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
-                new=AsyncMock(side_effect=fake_run_encode),
-            ),
-            patch("sie_server.queue_executor.record_ipc_batch_shape") as mock_record,
-        ):
-            await ex.process_encode_batch(
-                ProcessEncodeBatchRequest(
-                    model_id="test/model",
-                    items=[
-                        _encode_item(wiid="a.0", output_types=["dense"]),
-                        _encode_item(wiid="b.0", output_types=["dense"], item_index=1),
-                        _encode_item(wiid="c.0", output_types=["dense"], item_index=2),
-                        _encode_item(wiid="d.0", output_types=["sparse"], item_index=3),
-                        _encode_item(wiid="e.0", output_types=["sparse"], item_index=4),
-                    ],
-                )
-            )
-
-        mock_record.assert_called_once()
-        kwargs = mock_record.call_args.kwargs
-        assert kwargs["model"] == "test/model"
-        assert kwargs["endpoint"] == "encode"
-        assert kwargs["total_items"] == 5
-        assert sorted(kwargs["sub_group_sizes"]) == [2, 3]
-
-    @pytest.mark.asyncio
-    async def test_ipc_batch_shape_recorded_even_when_pipeline_fails(self) -> None:
-        """Shape metric is observed before any forward pass runs, so
-        failed batches still populate the fragmentation histogram.
-        This keeps dashboards honest under error storms (otherwise
-        they'd under-report IPC batch volume).
-        """
-        reg = _make_registry()
-        ex = QueueExecutor(reg)
-
-        with (
-            patch(
-                "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
-                new=AsyncMock(side_effect=RuntimeError("boom")),
-            ),
-            patch("sie_server.queue_executor.record_ipc_batch_shape") as mock_record,
-        ):
-            await ex.process_encode_batch(
-                ProcessEncodeBatchRequest(
-                    model_id="test/model",
-                    items=[_encode_item(wiid="a.0"), _encode_item(wiid="b.0", item_index=1)],
-                )
-            )
-
-        mock_record.assert_called_once()
-        kwargs = mock_record.call_args.kwargs
-        assert kwargs["total_items"] == 2
-        assert kwargs["sub_group_sizes"] == [2]
-
 
 # -----------------------------------------------------------------------------
 # process_score_batch
@@ -854,6 +1089,50 @@ class TestProcessScoreBatch:
         assert o.raw_output.score is not None
         assert o.raw_output.score.item_ids == ["doc-a", "doc-b"]
         assert o.raw_output.score.scores == pytest.approx([0.9, 0.1])
+        assert o.units is not None
+        assert o.units.pairs == 2
+
+    @pytest.mark.asyncio
+    async def test_profile_runtime_is_effective_and_invalid_profile_is_per_item(self) -> None:
+        reg = _make_registry()
+        reg.get_config.return_value = _runtime_profile_config()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(
+            WorkerResult(output=ScoreOutput(scores=np.array([0.9], dtype=np.float32)), timing=RequestTiming())
+        )
+        worker.submit_score_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+
+        outcome = await QueueExecutor(reg).process_score_batch(
+            ProcessScoreBatchRequest(
+                model_id="test/model",
+                items=[
+                    _score_item(
+                        wiid="good.0",
+                        options={
+                            "profile": "tuned",
+                            "threshold": 0.75,
+                            "request_only": True,
+                        },
+                    ),
+                    _score_item(wiid="bad.0", options={"profile": "missing"}),
+                ],
+            )
+        )
+
+        by_id = {item.work_item_id: item for item in outcome.outcomes}
+        assert by_id["good.0"].disposition == "publish_and_ack"
+        assert by_id["bad.0"].disposition == "publish_error_and_ack"
+        assert by_id["bad.0"].error_code == "INVALID_INPUT"
+        worker.submit_score_preformed_batch.assert_awaited_once()
+        requests = worker.submit_score_preformed_batch.await_args.args[0]
+        assert len(requests) == 1
+        assert requests[0].options == {
+            "threshold": 0.75,
+            "lora": "profile-lora",
+            "request_only": True,
+        }
 
     @pytest.mark.asyncio
     async def test_malformed_item_isolated_as_invalid_input(self) -> None:
@@ -981,48 +1260,6 @@ class TestProcessScoreBatch:
         assert outcome.outcomes[0].error_code is None
         assert outcome.outcomes[0].error is None
 
-    @pytest.mark.asyncio
-    async def test_records_ipc_batch_shape(self) -> None:
-        """Compatible score IPC items stay in one preformed worker batch."""
-        reg = _make_registry()
-        worker = AsyncMock()
-        score_output = ScoreOutput(scores=np.array([0.5], dtype=np.float32))
-        wr = WorkerResult(output=score_output, timing=RequestTiming())
-        futures: list[asyncio.Future[WorkerResult]] = []
-        for _ in range(4):
-            fut: asyncio.Future[WorkerResult] = asyncio.Future()
-            fut.set_result(wr)
-            futures.append(fut)
-        worker.submit_score_preformed_batch = AsyncMock(return_value=futures)
-        reg.start_worker = AsyncMock(return_value=worker)
-
-        ex = QueueExecutor(reg)
-
-        with patch("sie_server.queue_executor.record_ipc_batch_shape") as mock_record:
-            await ex.process_score_batch(
-                ProcessScoreBatchRequest(
-                    model_id="test/model",
-                    items=[
-                        ScoreBatchItem(
-                            work_item_id=f"req-{i}.0",
-                            request_id=f"req-{i}",
-                            item_index=0,
-                            total_items=1,
-                            timestamp=time.time(),
-                            query_item={"text": "q"},
-                            score_items=[{"text": "a"}],
-                        )
-                        for i in range(4)
-                    ],
-                )
-            )
-
-        mock_record.assert_called_once()
-        kwargs = mock_record.call_args.kwargs
-        assert kwargs["endpoint"] == "score"
-        assert kwargs["total_items"] == 4
-        assert kwargs["sub_group_sizes"] == [4]
-
 
 # -----------------------------------------------------------------------------
 # process_extract_batch
@@ -1064,6 +1301,71 @@ class TestProcessExtractBatch:
         assert outcome.outcomes[0].disposition == "publish_and_ack"
         inner = msgpack.unpackb(outcome.outcomes[0].result_msgpack, raw=False)
         assert "entities" in inner
+
+    @pytest.mark.asyncio
+    async def test_effective_profile_options_drive_lora_grouping_and_invalid_is_per_item(self) -> None:
+        reg = _make_registry()
+        reg.get_config.return_value = _runtime_profile_config()
+        worker = AsyncMock()
+        calls: list[tuple[str | None, list]] = []
+
+        async def submit(requests, *, lora):
+            calls.append((lora, list(requests)))
+            futures: list[asyncio.Future[WorkerResult]] = []
+            for _ in requests:
+                fut: asyncio.Future[WorkerResult] = asyncio.Future()
+                fut.set_result(
+                    WorkerResult(
+                        output=ExtractOutput(entities=[[]]),
+                        timing=RequestTiming(),
+                    )
+                )
+                futures.append(fut)
+            return futures
+
+        worker.submit_extract_preformed_batch = AsyncMock(side_effect=submit)
+        reg.start_worker = AsyncMock(return_value=worker)
+
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(
+                model_id="test/model",
+                items=[
+                    _extract_item(
+                        wiid="profile.0",
+                        options={"profile": "tuned", "threshold": 0.75},
+                    ),
+                    _extract_item(
+                        wiid="override.0",
+                        options={
+                            "profile": "tuned",
+                            "lora": "request-lora",
+                        },
+                    ),
+                    _extract_item(
+                        wiid="invalid.0",
+                        options={"profile": "missing"},
+                    ),
+                ],
+            )
+        )
+
+        by_id = {item.work_item_id: item for item in outcome.outcomes}
+        assert by_id["profile.0"].disposition == "publish_and_ack"
+        assert by_id["override.0"].disposition == "publish_and_ack"
+        assert by_id["invalid.0"].disposition == "publish_error_and_ack"
+        assert by_id["invalid.0"].error_code == "INVALID_INPUT"
+
+        assert len(calls) == 2
+        by_lora = dict(calls)
+        assert set(by_lora) == {"profile-lora", "request-lora"}
+        assert by_lora["profile-lora"][0].options == {
+            "threshold": 0.75,
+            "lora": "profile-lora",
+        }
+        assert by_lora["request-lora"][0].options == {
+            "threshold": 0.5,
+            "lora": "request-lora",
+        }
 
     @pytest.mark.asyncio
     async def test_malformed_item_isolated_as_invalid_input(self) -> None:
@@ -1158,47 +1460,6 @@ class TestProcessExtractBatch:
         assert outcome.outcomes[0].nak_delay_ms == 13_000
         assert outcome.outcomes[0].error_code is None
         assert outcome.outcomes[0].error is None
-
-    @pytest.mark.asyncio
-    async def test_records_ipc_batch_shape(self) -> None:
-        """Compatible extract IPC items stay in one preformed worker batch."""
-        reg = _make_registry()
-        worker = AsyncMock()
-        extract_output = ExtractOutput(entities=[[]])
-        wr = WorkerResult(output=extract_output, timing=RequestTiming())
-        futures: list[asyncio.Future[WorkerResult]] = []
-        for _ in range(3):
-            fut: asyncio.Future[WorkerResult] = asyncio.Future()
-            fut.set_result(wr)
-            futures.append(fut)
-        worker.submit_extract_preformed_batch = AsyncMock(return_value=futures)
-        reg.start_worker = AsyncMock(return_value=worker)
-
-        ex = QueueExecutor(reg)
-
-        with patch("sie_server.queue_executor.record_ipc_batch_shape") as mock_record:
-            await ex.process_extract_batch(
-                ProcessExtractBatchRequest(
-                    model_id="test/model",
-                    items=[
-                        ExtractBatchItem(
-                            work_item_id=f"req-{i}.0",
-                            request_id=f"req-{i}",
-                            item_index=0,
-                            total_items=1,
-                            timestamp=time.time(),
-                            item={"text": "x"},
-                        )
-                        for i in range(3)
-                    ],
-                )
-            )
-
-        mock_record.assert_called_once()
-        kwargs = mock_record.call_args.kwargs
-        assert kwargs["endpoint"] == "extract"
-        assert kwargs["total_items"] == 3
-        assert kwargs["sub_group_sizes"] == [3]
 
 
 # -----------------------------------------------------------------------------

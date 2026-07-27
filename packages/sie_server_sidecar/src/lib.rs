@@ -6,6 +6,7 @@
 //! `packages/sie_server_sidecar/docs/architecture-guide.md` for the current
 //! runtime contract.
 
+pub mod audio_prep;
 pub mod backend;
 pub mod batch_cancel;
 pub mod config;
@@ -20,7 +21,6 @@ pub mod ipc_types;
 pub mod latency;
 pub mod local_ingest;
 pub mod log_util;
-pub mod metrics;
 pub mod nats_consumer;
 pub mod observability;
 pub mod output;
@@ -31,6 +31,7 @@ pub mod prep;
 pub mod protocol;
 pub mod publisher;
 pub mod readiness;
+pub mod runtime_state;
 pub mod scheduler;
 pub mod shutdown;
 pub mod subject;
@@ -49,21 +50,25 @@ use tokio::time::{interval, sleep, timeout};
 use tracing::{debug, info, warn};
 
 use crate::backend::{AdapterWorkerPool, BackendRouter, SharedBackend};
-use crate::batch_cancel::{request_id_from_batch_cancel_subject, BatchCancelState};
+use crate::batch_cancel::{
+    request_id_from_batch_cancel_subject, request_id_from_work_cancel_subject, BatchCancelState,
+    RequestCancelState,
+};
 use crate::config::WorkerConfig;
 use crate::config_subscriber::ConfigApplyState;
 use crate::dispatcher::{Dispatcher, QueuedMessage};
 use crate::latency::{FetchExpiryController, LatencyTracker};
 use crate::log_util::ErrChain;
-use crate::metrics::MetricsRegistry;
 use crate::nats_consumer::{
     connect, ensure_stream_and_consumer, ensure_worker_stream_and_consumer,
-    reconcile_stream_and_consumer, reconcile_worker_stream_and_consumer, NatsConsumer,
+    reconcile_stream_and_consumer, reconcile_worker_stream_and_consumer, work_cancel_tombstone_ttl,
+    NatsConsumer,
 };
-use crate::payload_store::{create_payload_store, MeteredPayloadStore};
+use crate::payload_store::{create_payload_store, with_telemetry as payload_store_with_telemetry};
 use crate::pool_admission::PoolAdmissionGate;
 use crate::publisher::WorkPublisher;
 use crate::readiness::Readiness;
+use crate::runtime_state::RuntimeState;
 use crate::shutdown::Shutdown;
 use crate::tokenize::TokenizerRegistry;
 
@@ -186,9 +191,10 @@ pub(crate) fn pull_quantum_includes_queue_ms() -> bool {
 /// care more about light-load p50 than saturated p99 can flip this off
 /// to recover smaller batch density.
 ///
-/// **No effect at `SIE_RUST_PIPELINE_DEPTH=1`** — strict serial
-/// dispatch never produces drains, so every batch is already
-/// Primary regardless of the toggle.
+/// At `SIE_RUST_PIPELINE_DEPTH=1`, backend calls remain strictly serial, but
+/// work accumulated during a Primary can still form a bounded Drain after that
+/// call releases the sole permit. The toggle therefore still controls adaptive
+/// controller cadence at depth one; it does not control dispatch concurrency.
 ///
 /// Cached after first call (`OnceLock`): same hot-path treatment as
 /// `pull_quantum_includes_queue_ms` — the per-batch gate must stay
@@ -305,21 +311,19 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         "readiness: /readyz freshness window configured"
     );
 
-    // --- Metrics: one registry shared between the HTTP server, IPC client,
-    // payload store, dispatcher, and backend router. Construct first so every
-    // downstream component observes its own RPCs into the same registry.
-    let metrics_registry = Arc::new(MetricsRegistry::new().context("construct metrics registry")?);
-    metrics_registry
+    // Construct the single telemetry facade and neutral runtime-pressure state
+    // before wiring components that report semantic observations through it.
+    let runtime_state = Arc::new(RuntimeState::new());
+    runtime_state
         .worker_gpu_slots_total
         .set(config.gpu_count.max(1).into());
-    metrics_registry.worker_gpu_slots_ready.set(0);
-    let metrics_handle = metrics::spawn_metrics_server(
-        config.metrics_port,
-        Arc::clone(&metrics_registry),
+    runtime_state.worker_gpu_slots_ready.set(0);
+    let probe_handle = runtime_state::spawn_probe_server(
+        config.probe_port,
         Arc::clone(&readiness),
         shutdown.clone(),
     )
-    .context("spawn metrics server")?;
+    .context("spawn probe server")?;
 
     // --- Adapter worker pool (connects lazily per child socket).
     let worker_pool = AdapterWorkerPool::new(
@@ -327,7 +331,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         config.ipc_pool_size,
         config.ipc_request_timeout_s,
         config.model_ready_timeout_s,
-        Arc::clone(&metrics_registry),
+        Arc::clone(&runtime_state),
     );
     info!(
         primary_socket = %config.ipc_socket_path.display(),
@@ -358,16 +362,18 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
     );
 
     // --- Payload store (wrapped so every fetch records metrics).
-    let raw_payload_store = create_payload_store(config.payload_store_url.as_deref())
+    let payload_store = create_payload_store(config.payload_store_url.as_deref())
         .await
         .context("create payload store")?;
-    let payload_store: Arc<dyn payload_store::PayloadStore> = Arc::new(MeteredPayloadStore::new(
-        raw_payload_store,
-        Arc::clone(&metrics_registry),
-    ));
+    let payload_store =
+        payload_store_with_telemetry(payload_store, runtime_state.telemetry.clone());
 
     // --- Publisher
-    let publisher = Arc::new(WorkPublisher::new(nats_client.clone(), &config.worker_id));
+    let publisher = Arc::new(WorkPublisher::new(
+        nats_client.clone(),
+        &config.worker_id,
+        runtime_state.telemetry.clone(),
+    ));
 
     // --- Adaptive fetch / latency tracker (shared across dispatcher + loop).
     // 200-sample window, 10-sample warm-up before p50 is reported.
@@ -398,8 +404,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
     let adapter_backend: SharedBackend = worker_pool.clone();
     let backends: Vec<SharedBackend> = vec![Arc::clone(&adapter_backend)];
 
-    let router =
-        BackendRouter::from_backends_with_metrics(backends, Some(Arc::clone(&metrics_registry)));
+    let router = BackendRouter::from_backends(backends);
     info!(
         backends = ?router.names(),
         "backend router initialised"
@@ -442,6 +447,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
     let config_apply_state = Arc::new(ConfigApplyState::new(config.bundle_config_hash.clone()));
     let loaded_models = config_apply_state.loaded_models();
     let batch_cancel_state = BatchCancelState::default();
+    let request_cancel_state = RequestCancelState::new(work_cancel_tombstone_ttl());
 
     let dispatcher = Arc::new(Dispatcher::new(
         Arc::clone(&backend),
@@ -449,7 +455,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         payload_store,
         Some(Arc::clone(&publisher)),
         config.worker_id.clone(),
-        Arc::clone(&metrics_registry),
+        Arc::clone(&runtime_state),
         Arc::clone(&latency_tracker),
         tokenizer_registry,
         Some(Arc::clone(&scheduler_registry)),
@@ -457,6 +463,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         Some(Arc::clone(&config_apply_state)),
         pool_admission.clone(),
         batch_cancel_state.clone(),
+        request_cancel_state.clone(),
     ));
 
     let generation_direct_dispatch = Arc::new(GenerationDirectDispatch::new(
@@ -471,6 +478,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         Arc::clone(&worker_pool),
         Arc::clone(&nats_direct_active),
         batch_cancel_state,
+        request_cancel_state,
     ));
     generation_direct_dispatch
         .activate("startup")
@@ -482,7 +490,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         config.bundle.clone(),
         Arc::clone(&worker_pool),
         Arc::clone(&config_apply_state),
-        Arc::clone(&metrics_registry),
+        runtime_state.telemetry.clone(),
         shutdown.clone(),
         crate::config_subscriber::ConfigSubscriberOptions {
             trusted_producers: config.nats_config_trusted_producers.clone(),
@@ -506,13 +514,14 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         }),
         Arc::clone(&worker_pool),
         Arc::clone(&config_apply_state),
-        Arc::clone(&metrics_registry),
+        runtime_state.telemetry.clone(),
         shutdown.clone(),
     );
 
     // --- Background: heartbeat pings into IPC so /readyz reflects liveness
     let heartbeat_handle = spawn_heartbeat(
         Arc::clone(&worker_pool),
+        Arc::clone(&runtime_state),
         Duration::from_millis(config.ping_interval_ms),
         Arc::clone(&readiness),
         Arc::clone(&config_apply_state),
@@ -542,7 +551,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
             gpu_count: config.gpu_count,
             bundle_config_hash: config_apply_state.bundle_config_hash(),
             loaded_models: Arc::clone(&loaded_models),
-            metrics: Arc::clone(&metrics_registry),
+            runtime_state: Arc::clone(&runtime_state),
             interval: Duration::from_millis(config.health_publish_interval_ms),
         })
     } else {
@@ -690,17 +699,13 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
     backend.drain(DRAIN_DEADLINE_MS).await;
     let drain_elapsed = drain_start.elapsed();
     let drain_result = if drain_elapsed.as_millis() as u64 > DRAIN_DEADLINE_MS {
-        metrics_registry
-            .shutdown_drain_deadline_exceeded_total
-            .inc();
         "deadline_exceeded"
     } else {
-        "ok"
+        "success"
     };
-    metrics_registry
-        .shutdown_drain_seconds
-        .with_label_values(&[drain_result])
-        .observe(drain_elapsed.as_secs_f64());
+    runtime_state
+        .telemetry
+        .shutdown_drain_completed(drain_result, drain_elapsed);
     info!(
         drain_seconds = drain_elapsed.as_secs_f64(),
         drain_result, "backends drained"
@@ -715,7 +720,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         debug!("NATS client flushed");
     }
 
-    metrics_handle.abort();
+    probe_handle.abort();
     info!("sie-server-sidecar shutdown complete");
     Ok(())
 }
@@ -763,25 +768,24 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
         config.ready_stale_mult,
     ));
 
-    let metrics_registry = Arc::new(MetricsRegistry::new().context("construct metrics registry")?);
-    metrics_registry
+    let runtime_state = Arc::new(RuntimeState::new());
+    runtime_state
         .worker_gpu_slots_total
         .set(config.gpu_count.max(1).into());
-    metrics_registry.worker_gpu_slots_ready.set(0);
-    let metrics_handle = metrics::spawn_metrics_server(
-        config.metrics_port,
-        Arc::clone(&metrics_registry),
+    runtime_state.worker_gpu_slots_ready.set(0);
+    let probe_handle = runtime_state::spawn_probe_server(
+        config.probe_port,
         Arc::clone(&readiness),
         shutdown.clone(),
     )
-    .context("spawn metrics server")?;
+    .context("spawn probe server")?;
 
     let worker_pool = AdapterWorkerPool::new(
         &config.ipc_socket_paths,
         config.ipc_pool_size,
         config.ipc_request_timeout_s,
         config.model_ready_timeout_s,
-        Arc::clone(&metrics_registry),
+        Arc::clone(&runtime_state),
     );
     info!(
         primary_socket = %config.ipc_socket_path.display(),
@@ -792,19 +796,14 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
         "local-ingest: adapter worker pool initialized"
     );
 
-    let raw_payload_store = create_payload_store(config.payload_store_url.as_deref())
+    let payload_store = create_payload_store(config.payload_store_url.as_deref())
         .await
         .context("create payload store")?;
-    let payload_store: Arc<dyn payload_store::PayloadStore> = Arc::new(MeteredPayloadStore::new(
-        raw_payload_store,
-        Arc::clone(&metrics_registry),
-    ));
+    let payload_store =
+        payload_store_with_telemetry(payload_store, runtime_state.telemetry.clone());
 
     let adapter_backend: SharedBackend = worker_pool.clone();
-    let backend: SharedBackend = BackendRouter::from_backends_with_metrics(
-        vec![Arc::clone(&adapter_backend)],
-        Some(Arc::clone(&metrics_registry)),
-    );
+    let backend: SharedBackend = BackendRouter::from_backends(vec![Arc::clone(&adapter_backend)]);
 
     // Tokenizer registry fills from `EnsureModelReady` descriptors exactly
     // like the NATS path — the engine (which carries the image-baked model
@@ -826,7 +825,7 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
         payload_store,
         None, // no NATS publisher: results ride the local delivery channels
         config.worker_id.clone(),
-        Arc::clone(&metrics_registry),
+        Arc::clone(&runtime_state),
         Arc::clone(&latency_tracker),
         tokenizer_registry,
         Some(Arc::clone(&scheduler_registry)),
@@ -836,10 +835,14 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
         // Batch-cancel rides the NATS cancel subject; local ingest has no
         // such feed, so a default (empty) state means "nothing cancelled".
         BatchCancelState::default(),
+        // Request-wide cancellation is also a NATS signal; local ingest has
+        // no subscription and therefore starts with an empty tombstone set.
+        RequestCancelState::new(work_cancel_tombstone_ttl()),
     ));
 
     let heartbeat_handle = spawn_heartbeat(
         Arc::clone(&worker_pool),
+        Arc::clone(&runtime_state),
         Duration::from_millis(config.ping_interval_ms),
         Arc::clone(&readiness),
         Arc::clone(&config_apply_state),
@@ -864,7 +867,7 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
         }),
         Arc::clone(&worker_pool),
         Arc::clone(&config_apply_state),
-        Arc::clone(&metrics_registry),
+        runtime_state.telemetry.clone(),
         shutdown.clone(),
     );
 
@@ -911,8 +914,22 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
     }
 
     info!("draining backends");
+    let drain_start = Instant::now();
     backend.drain(DRAIN_DEADLINE_MS).await;
-    metrics_handle.abort();
+    let drain_elapsed = drain_start.elapsed();
+    let drain_result = if drain_elapsed.as_millis() as u64 > DRAIN_DEADLINE_MS {
+        "deadline_exceeded"
+    } else {
+        "success"
+    };
+    runtime_state
+        .telemetry
+        .shutdown_drain_completed(drain_result, drain_elapsed);
+    info!(
+        drain_seconds = drain_elapsed.as_secs_f64(),
+        drain_result, "backends drained"
+    );
+    probe_handle.abort();
     info!("sie-server-sidecar (local ingest) shutdown complete");
     ingest_result
 }
@@ -922,6 +939,7 @@ struct GenerationDirectHandles {
     pull: Option<JoinHandle<()>>,
     generation_cancel: Option<JoinHandle<()>>,
     batch_cancel: Option<JoinHandle<()>>,
+    work_cancel: Option<JoinHandle<()>>,
 }
 
 /// Owns the worker-specific direct-dispatch stream and cancel subscriptions.
@@ -941,6 +959,7 @@ struct GenerationDirectDispatch {
     worker_pool: Arc<AdapterWorkerPool>,
     active: Arc<AtomicBool>,
     batch_cancel_state: BatchCancelState,
+    request_cancel_state: RequestCancelState,
     handles: Mutex<GenerationDirectHandles>,
 }
 
@@ -958,6 +977,7 @@ impl GenerationDirectDispatch {
         worker_pool: Arc<AdapterWorkerPool>,
         active: Arc<AtomicBool>,
         batch_cancel_state: BatchCancelState,
+        request_cancel_state: RequestCancelState,
     ) -> Self {
         Self {
             jetstream,
@@ -971,6 +991,7 @@ impl GenerationDirectDispatch {
             worker_pool,
             active,
             batch_cancel_state,
+            request_cancel_state,
             handles: Mutex::new(GenerationDirectHandles::default()),
         }
     }
@@ -995,6 +1016,21 @@ impl GenerationDirectDispatch {
             }
         };
 
+        let work_cancel = match spawn_work_cancel_subscriber(
+            self.nats_client.clone(),
+            self.request_cancel_state.clone(),
+            Arc::clone(&self.shutdown),
+        )
+        .await
+        .context("start request-wide work cancel subscriber")
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.active.store(false, Ordering::Release);
+                return Err(e);
+            }
+        };
+
         let batch_cancel = match spawn_batch_direct_cancel_subscriber(
             self.nats_client.clone(),
             self.config.worker_id.clone(),
@@ -1006,6 +1042,7 @@ impl GenerationDirectDispatch {
         {
             Ok(handle) => handle,
             Err(e) => {
+                work_cancel.abort();
                 self.active.store(false, Ordering::Release);
                 return Err(e);
             }
@@ -1038,6 +1075,7 @@ impl GenerationDirectDispatch {
         handles.pull = Some(pull);
         handles.generation_cancel = Some(generation_cancel);
         handles.batch_cancel = Some(batch_cancel);
+        handles.work_cancel = Some(work_cancel);
         info!(reason, "worker direct-dispatch activated");
         Ok(true)
     }
@@ -1049,6 +1087,7 @@ impl GenerationDirectDispatch {
                 pull: guard.pull.take(),
                 generation_cancel: guard.generation_cancel.take(),
                 batch_cancel: guard.batch_cancel.take(),
+                work_cancel: guard.work_cancel.take(),
             }
         };
 
@@ -1063,6 +1102,10 @@ impl GenerationDirectDispatch {
             let _ = h.await;
         }
         if let Some(h) = handles.batch_cancel {
+            h.abort();
+            let _ = h.await;
+        }
+        if let Some(h) = handles.work_cancel {
             h.abort();
             let _ = h.await;
         }
@@ -1102,6 +1145,64 @@ fn spawn_nats_consumer_reconciler(
                         error = %e,
                         "nats-consumer: worker direct-dispatch reconcile failed"
                     ),
+                }
+            }
+        }
+    }))
+}
+
+async fn spawn_work_cancel_subscriber(
+    nats_client: async_nats::Client,
+    request_cancel_state: RequestCancelState,
+    shutdown: Arc<Shutdown>,
+) -> anyhow::Result<JoinHandle<()>> {
+    let subject = "work_cancel.>".to_string();
+    let mut sub = nats_client
+        .subscribe(subject.clone())
+        .await
+        .context("subscribe to work_cancel.>")?;
+
+    Ok(tokio::spawn(async move {
+        info!("work-cancel: request-wide subscription started");
+        let retry_backoff = Duration::from_millis(500);
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.wait() => return,
+                maybe_msg = sub.next() => {
+                    let Some(msg) = maybe_msg else {
+                        warn!("work-cancel: subscription ended; retrying");
+                        loop {
+                            match nats_client.subscribe(subject.clone()).await {
+                                Ok(next_sub) => {
+                                    sub = next_sub;
+                                    info!("work-cancel: subscription restarted");
+                                    break;
+                                }
+                                Err(e) => warn!(
+                                    error = %e,
+                                    "work-cancel: failed to resubscribe to work_cancel.>"
+                                ),
+                            }
+                            tokio::select! {
+                                biased;
+                                _ = shutdown.wait() => return,
+                                _ = sleep(retry_backoff) => {}
+                            }
+                        }
+                        continue;
+                    };
+                    let subject = msg.subject.to_string();
+                    let Some((router_id, request_id)) = request_id_from_work_cancel_subject(&subject) else {
+                        debug!(subject = %subject, "work-cancel: ignoring malformed subject");
+                        continue;
+                    };
+                    request_cancel_state.cancel(router_id.clone(), request_id.clone());
+                    debug!(
+                        router_id = %router_id,
+                        request_id = %request_id,
+                        "work-cancel: recorded request-wide cancellation tombstone"
+                    );
                 }
             }
         }
@@ -1234,6 +1335,7 @@ fn request_id_from_cancel_subject(subject: &str) -> Option<String> {
 /// Each successful ready ping refreshes the [`Readiness`] heartbeat timestamp.
 fn spawn_heartbeat(
     worker_pool: Arc<AdapterWorkerPool>,
+    runtime_state: Arc<RuntimeState>,
     every: Duration,
     readiness: Arc<Readiness>,
     config_apply_state: Arc<ConfigApplyState>,
@@ -1259,6 +1361,7 @@ fn spawn_heartbeat(
                         .as_secs_f64() * 1000.0;
                     let ping_results = worker_pool.ping_all(ts).await;
                     let ready_children = worker_pool.ready_child_count();
+                    crate::health_publisher::record_runtime_telemetry(&runtime_state);
                     let successful_ready: Vec<_> = ping_results
                         .iter()
                         .filter_map(|(_index, result)| result.as_ref().ok())
@@ -1303,8 +1406,8 @@ fn spawn_heartbeat(
                         consecutive_failures = consecutive_failures.saturating_add(1);
                         // First failure and "big milestones" warn;
                         // in between, stay quiet (the
-                        // `ipc_request_seconds` metric still
-                        // records everything for Grafana).
+                        // canonical IPC completion telemetry still records
+                        // everything for the configured collector).
                         if consecutive_failures == 1
                             || consecutive_failures == 5
                             || consecutive_failures == 30
@@ -1350,17 +1453,20 @@ fn batch_quantum(ctrl: &FetchExpiryController, tracker: &LatencyTracker) -> Dura
 async fn build_pull_stream(
     consumer: &NatsConsumer,
     shutdown: &Shutdown,
-    dispatcher: &Dispatcher,
+    telemetry: &crate::observability::metrics::SidecarTelemetry,
     fetch_batch: usize,
     expires: Duration,
     backoff: Duration,
 ) -> Option<async_nats::jetstream::consumer::pull::Stream> {
     loop {
         match consumer.messages(fetch_batch, expires).await {
-            Ok(s) => return Some(s),
+            Ok(s) => {
+                telemetry.nats_operation("fetch", "success", "none", 1);
+                return Some(s);
+            }
             Err(e) => {
+                telemetry.nats_operation("fetch", "error", "transport", 1);
                 warn!(error = %e, "failed to open pull stream; retrying");
-                dispatcher.metrics.nats_fetch_errors_total.inc();
                 tokio::select! {
                     biased;
                     _ = shutdown.wait() => {
@@ -1480,7 +1586,7 @@ async fn run_pull_loop(
             stream = match build_pull_stream(
                 consumer,
                 &shutdown,
-                &dispatcher,
+                &dispatcher.runtime_state.telemetry,
                 fetch_batch,
                 pull_expires,
                 rebuild_backoff,
@@ -1513,7 +1619,10 @@ async fn run_pull_loop(
                 // still usable — async-nats will have re-armed another pull
                 // internally. Log, count, and keep going.
                 debug!(error = %e, "pull stream poll error; continuing");
-                dispatcher.metrics.nats_stream_errors_total.inc();
+                dispatcher
+                    .runtime_state
+                    .telemetry
+                    .nats_operation("fetch", "error", "transport", 1);
                 drop(first_permit);
                 continue 'outer;
             }
@@ -1524,7 +1633,12 @@ async fn run_pull_loop(
                 // recoverable via ack_wait → redelivery; we can't do
                 // better than that without a fresh stream.
                 warn!("pull stream returned None (terminal); rebuilding");
-                dispatcher.metrics.nats_stream_errors_total.inc();
+                dispatcher.runtime_state.telemetry.nats_operation(
+                    "stream",
+                    "error",
+                    "stream_ended",
+                    1,
+                );
                 stream = None;
                 drop(first_permit);
                 continue 'outer;
@@ -1562,7 +1676,10 @@ async fn run_pull_loop(
                             // have; the next iteration's block-on-first
                             // will resynchronise with the stream.
                             debug!(error = %e, "pull stream error mid-batch; flushing partial batch");
-                            dispatcher.metrics.nats_stream_errors_total.inc();
+                            dispatcher
+                                .runtime_state
+                                .telemetry
+                                .nats_operation("fetch", "error", "transport", 1);
                             drop(next_permit);
                             break;
                         }
@@ -1570,7 +1687,10 @@ async fn run_pull_loop(
                             // Terminal mid-batch. Flush what we have, then
                             // the next iteration will rebuild.
                             warn!("pull stream ended mid-batch; flushing partial batch");
-                            dispatcher.metrics.nats_stream_errors_total.inc();
+                            dispatcher
+                                .runtime_state
+                                .telemetry
+                                .nats_operation("stream", "error", "stream_ended", 1);
                             stream = None;
                             drop(next_permit);
                             break;

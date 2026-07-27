@@ -1,5 +1,6 @@
 sie_id: Marqo/marqo-ecommerce-embeddings-B
 hf_id: Marqo/marqo-ecommerce-embeddings-B
+hf_revision: 6854090aa39b2a9d70f390d83ae9e70cf9d9004e
 inputs:
   text: true
   image: true
@@ -18,7 +19,7 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: float16
-    adapter_path: sie_server.adapters.siglip:SiglipAdapter
+    adapter_path: sie_server.adapters.siglip.adapter:SiglipAdapter
     adapter_options:
       loadtime:
         backend: open_clip

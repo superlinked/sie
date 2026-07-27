@@ -7,6 +7,7 @@ import pytest
 import torch
 from PIL import Image
 from sie_server.core.preprocessor import Preprocessor
+from sie_server.core.preprocessor.audio import AudioPreprocessor
 from sie_server.core.preprocessor_registry import PreprocessorRegistry
 from sie_server.types.inputs import ImageInput, Item
 
@@ -73,6 +74,14 @@ class TestPreprocessorRegistry:
         assert "test-model" in registry.registered_models
         assert registry.has_preprocessor("test-model", "image")
         assert not registry.has_preprocessor("test-model", "text")
+
+    def test_register_custom_preprocessor(self, registry):
+        """Register a modality implementation without a private API."""
+        preprocessor = AudioPreprocessor()
+
+        registry.register("test-model", preprocessor)
+
+        assert registry.get_preprocessor("test-model", "audio") is preprocessor
 
     def test_register_both(self, registry, mock_tokenizer, mock_processor):
         """Register both text and image preprocessors."""
@@ -173,7 +182,7 @@ class TestPreprocessorRegistry:
         registry.register_text("test-model", mock_tokenizer)
         items = [Item()]  # No text, no images
 
-        with pytest.raises(ValueError, match="must have text or images"):
+        with pytest.raises(ValueError, match="must have audio, text, or images"):
             await registry.prepare("test-model", items, mock_config)
 
     def test_prepare_sync_text(self, registry, mock_tokenizer, mock_config):
