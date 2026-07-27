@@ -13,7 +13,7 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      DUSK_ENFORCE: "false"
+      DUSK_ENFORCE: "${DUSK_ENFORCE:-false}"
       DUSK_GATE_BASELINE_PATH: "/app/sample-data/baseline.json"
       DUSK_GATE_BASELINE_SOURCE: "generic"
       DUSK_DEMO_INTEGRATIONS: "false"

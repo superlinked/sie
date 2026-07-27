@@ -82,12 +82,15 @@ def run_scenario(agent_id: str, scenario: str) -> dict[str, Any]:
 
 
 def run_scenario_or_raise(agent_id: str, scenario: str) -> dict[str, Any]:
-    """Like run_scenario, but raises DuskBlockedError on WOULD-BLOCK/BLOCK.
+    """Like run_scenario, but raises DuskBlockedError on a real BLOCK.
 
-    Callers that want an exception-based flow (raise on block, proceed on
-    allow) use this instead of inspecting the returned verdict themselves.
+    WOULD-BLOCK (watch mode) returns normally instead of raising, since the
+    action was actually applied -- raising for it would make a caller
+    believe the action never reached downstream when it did. Callers that
+    also want to react to WOULD-BLOCK should inspect the returned verdict
+    themselves.
     """
     result = run_scenario(agent_id, scenario)
-    if result["verdict"] not in ("ALLOW", "NO_ACTION"):
+    if result["verdict"] == "BLOCK":
         raise DuskBlockedError({"verdict": result["verdict"], "reasons": result.get("reasons", [])})
     return result

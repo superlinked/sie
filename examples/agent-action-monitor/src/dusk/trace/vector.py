@@ -73,6 +73,12 @@ def reset_sie_circuit() -> None:
         _circuit_open_until = 0.0
 
 
+#: Cached SIEClient, rebuilt only when (endpoint, api_key, timeout) changes.
+_client_lock = threading.Lock()
+_cached_sie_client: Any | None = None
+_cached_sie_client_key: tuple[str, str | None, int] | None = None
+
+
 def _sigmoid(x: float) -> float:
     """Bound a raw cross-encoder logit into [0, 1]; monotonic, not a calibrated probability."""
     try:
@@ -105,21 +111,66 @@ _UNKNOWN_VERDICT_FALLBACK = "WOULD-BLOCK"
 
 
 def _sie_client(config: Config) -> Any | None:  # noqa: ANN401
-    """Return a constructed SIEClient if the sie-sdk package is installed, else None."""
+    """Return a cached SIEClient for this (endpoint, api_key, timeout) triple.
+
+    A fresh client per call was the original shape here; reused instead, so
+    a sustained-traffic gate process doesn't construct and leak one client
+    (and whatever connection it opens) per SIE call. Rebuilt only when the
+    resolved settings actually change -- e.g. a config reload -- closing the
+    stale client first via whatever cleanup the SDK exposes.
+    """
+    # Checked on every call, not cached: this import is what
+    # test_sie_client_returns_none_when_sie_sdk_not_installed simulates
+    # being absent via sys.modules, and Python's own import cache already
+    # makes a repeated `from ... import` here effectively free.
     try:
         from sie_sdk import SIEClient  # type: ignore[import-not-found]
     except ImportError:
         return None
+
+    api_key = os.getenv("SIE_API_KEY") or None
+    key = (config.sie_endpoint, api_key, config.sie_timeout_ms)
+
+    global _cached_sie_client, _cached_sie_client_key
+    with _client_lock:
+        if _cached_sie_client is not None and _cached_sie_client_key == key:
+            return _cached_sie_client
+        if _cached_sie_client is not None:
+            _close_sie_client(_cached_sie_client)
+            _cached_sie_client = None
+            _cached_sie_client_key = None
+        try:
+            client = SIEClient(
+                config.sie_endpoint.rstrip("/"),
+                api_key=api_key,
+                timeout_s=config.sie_timeout_ms / 1000,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SIE client construction failed: %s", exc)
+            return None
+        _cached_sie_client = client
+        _cached_sie_client_key = key
+        return client
+
+
+def _close_sie_client(client: Any) -> None:  # noqa: ANN401
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return
     try:
-        api_key = os.getenv("SIE_API_KEY") or None
-        return SIEClient(
-            config.sie_endpoint.rstrip("/"),
-            api_key=api_key,
-            timeout_s=config.sie_timeout_ms / 1000,
-        )
+        close()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("SIE client construction failed: %s", exc)
-        return None
+        logger.warning("Error closing stale SIE client: %s", exc)
+
+
+def reset_sie_client() -> None:
+    """Close and drop the cached SIEClient. Test-only hook, also usable on shutdown."""
+    global _cached_sie_client, _cached_sie_client_key
+    with _client_lock:
+        if _cached_sie_client is not None:
+            _close_sie_client(_cached_sie_client)
+        _cached_sie_client = None
+        _cached_sie_client_key = None
 
 
 def sie_encode(text: str, config: Config | None = None) -> list[float] | None:
@@ -141,8 +192,9 @@ def sie_encode(text: str, config: Config | None = None) -> list[float] | None:
             provision_timeout_s=_PROVISION_TIMEOUT_S,
         )
         dense = result["dense"] if isinstance(result, dict) else getattr(result, "dense", None)
+        parsed = [float(v) for v in dense] if dense is not None else None
         _record_sie_success()
-        return [float(v) for v in dense] if dense is not None else None
+        return parsed
     except Exception as exc:  # noqa: BLE001
         _record_sie_failure()
         logger.warning("SIE encode failed: %s", exc)
@@ -179,11 +231,13 @@ def sie_score(
             provision_timeout_s=_PROVISION_TIMEOUT_S,
         )
         entries = result["scores"] if isinstance(result, dict) else getattr(result, "scores", None)
-        _record_sie_success()
         if not entries:
+            _record_sie_success()
             return None
         score_by_id = {str(e["item_id"]): _sigmoid(float(e["score"])) for e in entries}
-        return [score_by_id.get(str(i), 0.0) for i in range(len(candidates))]
+        parsed = [score_by_id.get(str(i), 0.0) for i in range(len(candidates))]
+        _record_sie_success()
+        return parsed
     except Exception as exc:  # noqa: BLE001
         _record_sie_failure()
         logger.warning("SIE score failed: %s", exc)
@@ -220,8 +274,8 @@ def sie_extract(
         entities = (
             result["entities"] if isinstance(result, dict) else getattr(result, "entities", None)
         )
-        _record_sie_success()
         if not entities:
+            _record_sie_success()
             return []
         extracted: list[ExtractedTerm] = []
         for e in entities:
@@ -243,6 +297,7 @@ def sie_extract(
                         score=float(getattr(e, "score", 0.0)),
                     )
                 )
+        _record_sie_success()
         return extracted
     except Exception as exc:  # noqa: BLE001
         _record_sie_failure()

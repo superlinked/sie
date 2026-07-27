@@ -16,7 +16,9 @@ class DuskBlockedError(Exception):
 
     def __init__(self, verdict: dict[str, Any]) -> None:
         self.verdict = verdict
-        reasons = ", ".join(verdict.get("reasons", [])) or "no reason given"
+        # `or []`, not a `.get` default -- a verdict payload with an explicit
+        # "reasons": None must fall back the same way a missing key does.
+        reasons = ", ".join(verdict.get("reasons") or []) or "no reason given"
         super().__init__(f"blocked ({verdict.get('verdict')}): {reasons}")
 
 

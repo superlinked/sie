@@ -149,8 +149,12 @@ def test_record_does_not_block_on_a_slow_disk_write(tmp_path: Path, monkeypatch)
     storage = tmp_path / "offenses.json"
     original_replace = Path.replace
 
+    # A wide gap between the patched delay and the assertion threshold below
+    # -- not the delay itself -- is what makes this robust under CI
+    # contention; a delay only as large as the threshold leaves no margin
+    # for record()'s own scheduling overhead.
     def slow_replace(self: Path, target: object) -> object:
-        time.sleep(0.2)
+        time.sleep(1.0)
         return original_replace(self, target)
 
     monkeypatch.setattr(Path, "replace", slow_replace)
@@ -160,7 +164,7 @@ def test_record_does_not_block_on_a_slow_disk_write(tmp_path: Path, monkeypatch)
     _record(memory, trace_id="fast-return")
     elapsed = time.monotonic() - start
 
-    assert elapsed < 0.2, "record() waited on the disk write instead of backgrounding it"
+    assert elapsed < 0.5, "record() waited on the disk write instead of backgrounding it"
     assert not storage.exists(), "write should still be in flight at this point"
 
     memory.flush()

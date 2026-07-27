@@ -265,7 +265,6 @@ def test_sie_extract_high_confidence_non_privileged_label_is_ignored() -> None:
 
     assert extracted.score == baseline_only.score
     assert not any("SIE extract" in r for r in extracted.reasons)
-    assert not any("SIE extract" in r for r in extracted.reasons)
 
 
 def test_sie_extract_unavailable_does_not_change_score() -> None:

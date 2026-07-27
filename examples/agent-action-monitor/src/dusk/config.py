@@ -143,6 +143,16 @@ class Config:
             if value <= 0:
                 raise ConfigError(f"Config value '{name}' must be > 0, got {value!r}")
 
+        # analyse.py always caps the anomaly score to [0, 1] (min(1.0, score)),
+        # so a threshold above 1.0 -- a typo, wrong units, a bad env override
+        # -- would make the gate permanently unable to refuse anything without
+        # ever raising a ConfigError to flag it.
+        if self.gate_block_threshold > 1.0:
+            raise ConfigError(
+                f"Config value 'gate_block_threshold' must be <= 1.0, "
+                f"got {self.gate_block_threshold!r}"
+            )
+
         if not isinstance(logging.getLevelName(self.log_level), int):
             raise ConfigError(
                 f"Config value 'log_level' is not a valid level name: {self.log_level!r}"

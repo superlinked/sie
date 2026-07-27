@@ -82,6 +82,18 @@ def test_invalid_threshold_raises() -> None:
         Config(sweep_threshold=0)
 
 
+def test_gate_block_threshold_above_one_raises() -> None:
+    """A threshold above 1.0 would make the gate never refuse anything, so it's rejected."""
+    with pytest.raises(ConfigError):
+        Config(gate_block_threshold=1.5)
+
+
+def test_gate_block_threshold_of_exactly_one_is_valid() -> None:
+    """1.0 is the inclusive upper bound, not an off-by-one exclusion."""
+    config = Config(gate_block_threshold=1.0)
+    assert config.gate_block_threshold == 1.0
+
+
 def test_invalid_log_level_raises() -> None:
     """An unrecognised log level name is rejected."""
     with pytest.raises(ConfigError):

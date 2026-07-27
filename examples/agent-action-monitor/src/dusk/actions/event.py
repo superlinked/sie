@@ -73,6 +73,8 @@ class AgentAction:
             raise ValueError("agent_id must not contain control characters")
         if not isinstance(self.target, str) or not self.target.strip():
             raise ValueError("target must be a non-empty string")
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in self.target):
+            raise ValueError("target must not contain control characters")
         if not isinstance(self.timestamp, datetime):
             raise ValueError("timestamp must be a datetime")
         if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:

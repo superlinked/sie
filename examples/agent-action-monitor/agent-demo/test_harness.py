@@ -96,3 +96,18 @@ def test_run_scenario_or_raise_returns_on_allow(mock_post):
     result = run_scenario_or_raise("agent-1", "clean")
 
     assert result["applied"] is True
+
+
+@patch("harness.requests.post")
+def test_run_scenario_or_raise_returns_on_would_block(mock_post):
+    """WOULD-BLOCK does not raise -- watch mode already applied the action,
+    so raising would hide that from a caller using the exception-based flow."""
+    mock_post.side_effect = [
+        _mock_gate_response("WOULD-BLOCK", reasons=["anomalous"]),
+        _mock_apply_response(),
+    ]
+
+    result = run_scenario_or_raise("agent-1", "poisoned")
+
+    assert result["verdict"] == "WOULD-BLOCK"
+    assert result["applied"] is True

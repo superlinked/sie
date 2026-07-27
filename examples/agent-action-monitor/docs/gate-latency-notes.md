@@ -70,10 +70,12 @@ of courtesy to shared, sponsored compute in a visibly degraded state.
 The hosted tester cluster came back after the outage above, but not into a
 steady "always warm" state -- it scales its per-model capacity down to zero
 within roughly a minute of no traffic, then re-provisions on the next
-request. `sie_score` and `sie_extract` (the two primitives `/v1/gate`
-actually calls per request, via `_extra_sie_signals`; `sie_encode` is not
-on this request path) each took 0.1-35s to come back from cold before
-settling into sub-second responses. This is a real characteristic of a
+request. `sie_score` and `sie_extract` (the two primitives `analyse()` calls
+via `_extra_sie_signals`) each took 0.1-35s to come back from cold before
+settling into sub-second responses. `sie_encode` is also on the request
+path (via `embed_text()` in `_find_similar_decisions`/`_record_decision` in
+`api.py`, not through `analyse()`) but was warm throughout this run so it
+does not appear in the cold-start figures above. This is a real characteristic of a
 shared, scale-to-zero tester allocation, not a gate or SDK defect --
 `sie_sdk`'s own transient-error retry handled it transparently in every
 case except when a cold re-provision outlasted `agent-demo/harness.py`'s

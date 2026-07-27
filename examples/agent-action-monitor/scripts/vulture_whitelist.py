@@ -26,4 +26,8 @@ from dusk.trace.vector import SimilarDecision
 
 ActionGate.evaluate_all
 set_config
-SimilarDecision.similarity
+# SimilarDecision has no default values, so its fields are not class
+# attributes -- reference the field through a throwaway instance instead of
+# `SimilarDecision.similarity`, which raises AttributeError if this module
+# is ever actually executed rather than just parsed by vulture.
+SimilarDecision(id="", agent_id="", action="", similarity=0.0, verdict="", score=0).similarity

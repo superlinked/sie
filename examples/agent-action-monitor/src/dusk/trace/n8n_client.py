@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 #: Pool size is fixed from process configuration on first use.
 _executor: ThreadPoolExecutor | None = None
+_executor_lock = threading.Lock()
 
 #: Queued-or-in-flight send count; bounds the pool's own unbounded task queue.
 _pending_lock = threading.Lock()
@@ -22,11 +23,17 @@ _pending_count = 0
 
 
 def _get_executor() -> ThreadPoolExecutor:
+    # Double-checked locking, matching _get_gate_engine() in api.py: two
+    # concurrent first calls (e.g. two simultaneous requests at cold start)
+    # must not each construct their own ThreadPoolExecutor, silently
+    # discarding one.
     global _executor
     if _executor is None:
-        _executor = ThreadPoolExecutor(
-            max_workers=get_config().n8n_max_workers, thread_name_prefix="n8n-webhook"
-        )
+        with _executor_lock:
+            if _executor is None:
+                _executor = ThreadPoolExecutor(
+                    max_workers=get_config().n8n_max_workers, thread_name_prefix="n8n-webhook"
+                )
     return _executor
 
 

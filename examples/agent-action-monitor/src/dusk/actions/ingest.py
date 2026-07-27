@@ -29,7 +29,6 @@ def ingest_file(path: str, source: str) -> list[AgentAction]:
     """
     # Imported here so the adapter registry loads lazily and ingest stays free
     # of an import cycle (ingest -> normaliser -> adapters).
-    from dusk.actions.adapters.base import AdapterError
     from dusk.actions.normaliser import normalise_record
 
     if not os.path.exists(path):
@@ -59,7 +58,12 @@ def ingest_file(path: str, source: str) -> list[AgentAction]:
             continue
         try:
             actions.append(normalise_record(source, record))
-        except AdapterError as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Deliberately broad: a bug in one adapter for one malformed
+            # record must not abort the whole batch (this file's own
+            # contract), and _load_gate_engine() in api.py only catches
+            # (OSError, ValueError), so anything narrower here would still
+            # surface as an unhandled 500 through the lazy gate-engine loader.
             logger.warning("Skipping record %d in %s: %s", index, path, exc)
 
     logger.info(

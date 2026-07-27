@@ -11,6 +11,14 @@ from dusk.actions.event import AgentAction
 #: Split a target identifier into lowercase word tokens.
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+#: Defensive width bounds for request-driven feature extraction. Flask's
+#: MAX_CONTENT_LENGTH bounds the request body in bytes, but a pathologically
+#: wide or repetitive payload can still sit well under that cap while
+#: materializing far more tokens/nodes than any real target or change delta
+#: would -- these bound width, on top of the existing recursion-depth guard.
+_MAX_TOKENS = 200
+_MAX_FLATTEN_NODES = 500
+
 
 def target_class(target: str) -> str:
     """Return the coarse class of a target, its first token.
@@ -24,20 +32,32 @@ def target_class(target: str) -> str:
 
 
 def target_tokens(target: str) -> set[str]:
-    """Return the set of lowercase word tokens in a target identifier."""
-    return set(_TOKEN_RE.findall(target.lower()))
+    """Return the set of lowercase word tokens in a target identifier, capped at _MAX_TOKENS."""
+    return set(_TOKEN_RE.findall(target.lower())[:_MAX_TOKENS])
 
 
-def _flatten_scalars(payload: Any, values: set[str], *, _depth: int = 0) -> None:  # noqa: ANN401
-    """Collect nested scalar values with a defensive recursion limit."""
-    if _depth > 10:
+def _flatten_scalars(
+    payload: Any,  # noqa: ANN401
+    values: set[str],
+    budget: list[int],
+    *,
+    _depth: int = 0,
+) -> None:
+    """Collect nested scalar values, bounded by recursion depth and node count.
+
+    ``budget`` is a shared single-element counter (a list so recursive calls
+    mutate the same cell) decremented once per node visited; traversal stops
+    once it hits zero, independent of how deep or wide the payload is.
+    """
+    if _depth > 10 or budget[0] <= 0:
         return
+    budget[0] -= 1
     if isinstance(payload, dict):
         for value in payload.values():
-            _flatten_scalars(value, values, _depth=_depth + 1)
+            _flatten_scalars(value, values, budget, _depth=_depth + 1)
     elif isinstance(payload, list):
         for value in payload:
-            _flatten_scalars(value, values, _depth=_depth + 1)
+            _flatten_scalars(value, values, budget, _depth=_depth + 1)
     elif isinstance(payload, (str, int, float, bool)):
         values.add(str(payload).lower())
 
@@ -45,8 +65,9 @@ def _flatten_scalars(payload: Any, values: set[str], *, _depth: int = 0) -> None
 def _change_values(change: dict[str, Any]) -> set[str]:
     """Flatten a change delta into a set of stringified scalar values, at any nesting depth."""
     values: set[str] = set()
+    budget = [_MAX_FLATTEN_NODES]
     for side in ("before", "after"):
-        _flatten_scalars(change.get(side), values)
+        _flatten_scalars(change.get(side), values, budget)
     return values
 
 
