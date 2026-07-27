@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+reviews:
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "examples/**"
+    - "!examples/**/data/**"
+    - "!examples/**/fixtures/**"
+    - "examples/**/fixtures/SOURCES.md"
+    - "!examples/**/verified-run/**"
+    - "examples/**/verified-run/README.md"
+    - "!examples/**/uv.lock"
+  path_instructions:
+    - path: "examples/**"
+      instructions: |
+        Review runnable source, tests, configuration, and documentation.
+        Check that commands match the implementation and that tests cover failure paths.
+        Flag client-side model-name translation and undocumented synthetic results.
