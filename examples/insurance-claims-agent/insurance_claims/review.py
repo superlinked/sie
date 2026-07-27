@@ -164,11 +164,7 @@ def _parse_document(
 
 
 def chunk_markdown(markdown: str, target_characters: int) -> list[str]:
-    paragraphs = [
-        paragraph.strip()
-        for paragraph in markdown.split("\n\n")
-        if paragraph.strip()
-    ]
+    paragraphs = [paragraph.strip() for paragraph in markdown.split("\n\n") if paragraph.strip()]
     chunks: list[str] = []
     current: list[str] = []
     current_size = 0
@@ -294,10 +290,7 @@ def _final_review(
     policy_chunks: list[dict[str, Any]],
     provision_timeout_s: float,
 ) -> tuple[dict[str, Any], dict[str, Any], float]:
-    policy_evidence = "\n\n".join(
-        f"[policy chunk {chunk['chunk_id']}]\n{chunk['text']}"
-        for chunk in policy_chunks
-    )
+    policy_evidence = "\n\n".join(f"[policy chunk {chunk['chunk_id']}]\n{chunk['text']}" for chunk in policy_chunks)
     prompt = f"""
 Summarize FEMA Flood Insurance Appeal Decision B8 as a cited operations review.
 
@@ -351,9 +344,7 @@ def _require_sources() -> None:
     missing = [source.path for source in config.sources if not source.path.exists()]
     if missing:
         names = ", ".join(path.name for path in missing)
-        raise FileNotFoundError(
-            f"Missing source files: {names}. Run `uv run fetch-claim-sources` first."
-        )
+        raise FileNotFoundError(f"Missing source files: {names}. Run `uv run fetch-claim-sources` first.")
 
 
 def run_default_stage(run_id: str) -> Path:
@@ -404,16 +395,14 @@ def run_default_stage(run_id: str) -> Path:
             facts_result.get("data", facts_result),
         )
 
-        policy_chunks, rerank_result, timings["rerank_policy_ms"] = (
-            _retrieve_policy(
-                client,
-                config.models.rerank,
-                markdown["policy"],
-                chunk_characters=config.retrieval.chunk_characters,
-                candidate_limit=config.retrieval.candidate_chunks,
-                result_limit=config.retrieval.result_chunks,
-                provision_timeout_s=config.cluster.provision_timeout_s,
-            )
+        policy_chunks, rerank_result, timings["rerank_policy_ms"] = _retrieve_policy(
+            client,
+            config.models.rerank,
+            markdown["policy"],
+            chunk_characters=config.retrieval.chunk_characters,
+            candidate_limit=config.retrieval.candidate_chunks,
+            result_limit=config.retrieval.result_chunks,
+            provision_timeout_s=config.cluster.provision_timeout_s,
         )
         _write_json(raw_dir / "policy-rerank.json", rerank_result)
         _write_json(run_dir / "policy-evidence.json", policy_chunks)
@@ -448,19 +437,11 @@ def run_generation_stage(run_id: str) -> Path:
     markdown_dir = run_dir / "markdown"
     default_stage_path = run_dir / "default-stage.json"
     if not default_stage_path.exists():
-        raise FileNotFoundError(
-            f"Missing {default_stage_path}. Run the default stage first."
-        )
+        raise FileNotFoundError(f"Missing {default_stage_path}. Run the default stage first.")
     default_stage = json.loads(default_stage_path.read_text(encoding="utf-8"))
-    appeal_markdown = (markdown_dir / "appeal_decision.md").read_text(
-        encoding="utf-8"
-    )
-    claim_facts = json.loads(
-        (run_dir / "claim-facts.json").read_text(encoding="utf-8")
-    )
-    policy_chunks = json.loads(
-        (run_dir / "policy-evidence.json").read_text(encoding="utf-8")
-    )
+    appeal_markdown = (markdown_dir / "appeal_decision.md").read_text(encoding="utf-8")
+    claim_facts = json.loads((run_dir / "claim-facts.json").read_text(encoding="utf-8"))
+    policy_chunks = json.loads((run_dir / "policy-evidence.json").read_text(encoding="utf-8"))
     timings = dict(default_stage["timings_ms"])
 
     client = SIEClient(
@@ -501,9 +482,7 @@ def run_generation_stage(run_id: str) -> Path:
     _write_json(run_dir / "manifest.json", manifest)
     _write_json(
         run_dir / "source-manifest.json",
-        json.loads(
-            (DATA_DIR / "source-manifest.json").read_text(encoding="utf-8")
-        ),
+        json.loads((DATA_DIR / "source-manifest.json").read_text(encoding="utf-8")),
     )
 
     table = Table("Model call", "Latency")
@@ -523,9 +502,7 @@ def run_review(run_id: str | None = None) -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Review FEMA Flood Insurance Appeal Decision B8 through SIE"
-    )
+    parser = argparse.ArgumentParser(description="Review FEMA Flood Insurance Appeal Decision B8 through SIE")
     parser.add_argument("--run-id")
     parser.add_argument(
         "--stage",
@@ -534,9 +511,7 @@ def main() -> None:
         help="Run both stages, or release the GPU between the default and generation bundles",
     )
     args = parser.parse_args()
-    selected_run_id = args.run_id or datetime.now(UTC).strftime(
-        "%Y%m%dT%H%M%SZ"
-    )
+    selected_run_id = args.run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     if args.stage == "default":
         run_default_stage(selected_run_id)
     elif args.stage == "generation":

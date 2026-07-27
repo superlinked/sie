@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -59,8 +60,7 @@ def evaluate_review(review: dict[str, Any]) -> list[Check]:
         ),
         Check(
             "debris-volume",
-            summary.get("debris_cubic_yards_min") == 12
-            and summary.get("debris_cubic_yards_max") == 15,
+            summary.get("debris_cubic_yards_min") == 12 and summary.get("debris_cubic_yards_max") == 15,
             f"{summary.get('debris_cubic_yards_min')} to {summary.get('debris_cubic_yards_max')}",
         ),
         Check(
@@ -114,6 +114,21 @@ def evaluate_run(run_dir: Path) -> bool:
         + "\n",
         encoding="utf-8",
     )
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["artifacts"] = [
+            {
+                "path": str(path.relative_to(run_dir)),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for path in sorted(run_dir.rglob("*"))
+            if path.is_file() and path != manifest_path
+        ]
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2) + "\n",
+            encoding="utf-8",
+        )
     table = Table("Check", "Result", "Detail")
     for check in checks:
         table.add_row(

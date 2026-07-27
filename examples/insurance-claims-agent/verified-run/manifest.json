@@ -20,5 +20,55 @@
     "synthesize_review_ms": 151737.2
   },
   "source_manifest": "source-manifest.json",
-  "review": "review.json"
+  "review": "review.json",
+  "artifacts": [
+    {
+      "path": "claim-facts.json",
+      "sha256": "17afa9d8ec7c58087c156dcf732648ba9afc2b5d58e70f09b151cb2a81a5a397"
+    },
+    {
+      "path": "evaluation.json",
+      "sha256": "1c54c3f1e25ccfa77de7943812b6f4ee91e9df1ebd1361c5e9f68b9dc8de8a17"
+    },
+    {
+      "path": "markdown/appeal_decision.md",
+      "sha256": "fc81a335328381f9fff985167a859b58957a8b22e09ff19c16545be23034179d"
+    },
+    {
+      "path": "markdown/policy.md",
+      "sha256": "2deb8ba947a79bd3158956e97e3292a842579dbda0601512e8a72bf660082686"
+    },
+    {
+      "path": "policy-evidence.json",
+      "sha256": "0380f44cb3e8e07fccb4b0db5b964439ef5f7cc051a9ad45594006fd68f08db7"
+    },
+    {
+      "path": "raw/appeal_decision-parse.json",
+      "sha256": "9b2a00510f652b2ee45bb9e0c2adf5c9934fc72e44d62c7b30ff5e2133509069"
+    },
+    {
+      "path": "raw/claim-facts.json",
+      "sha256": "17afa9d8ec7c58087c156dcf732648ba9afc2b5d58e70f09b151cb2a81a5a397"
+    },
+    {
+      "path": "raw/policy-parse.json",
+      "sha256": "93ad890c597a82146a8200584241e291c25a70c6e9e4b709e14d7bf8a8222b76"
+    },
+    {
+      "path": "raw/policy-rerank.json",
+      "sha256": "adb807da7e89c7901004042c8ef5f2342f3133f5f868b097a521fa9bcdc13456"
+    },
+    {
+      "path": "raw/review-completion.json",
+      "sha256": "ffa30e9d6e40e411a25591bc289f9cf29902c5a1c63c7f2f56975bd77fe6d620"
+    },
+    {
+      "path": "review.json",
+      "sha256": "d26b0fe8aa8ee85c554ff3f2ca7fc48865458b79897b05906bf6b8e7e2be3987"
+    },
+    {
+      "path": "source-manifest.json",
+      "sha256": "9d8892b929c8552a0b34a96421bb712ffbe57bb828363d030989438b1b06249e"
+    }
+  ]
 }

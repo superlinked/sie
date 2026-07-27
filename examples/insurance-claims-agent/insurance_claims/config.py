@@ -106,6 +106,8 @@ def load_config() -> AppConfig:
         ),
         sources=tuple(Source(**row) for row in raw["sources"]),
     )
+
+
 def source_by_slug(config: AppConfig, slug: str) -> Source:
     for source in config.sources:
         if source.slug == slug:
