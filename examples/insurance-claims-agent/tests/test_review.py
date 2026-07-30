@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from insurance_claims.evaluate import ARTIFACT_EXCLUDED_FILENAMES, evaluate_review
+from insurance_claims.evaluate import ARTIFACT_EXCLUDED_PATHS, evaluate_review, evaluate_run
 from insurance_claims.review import (
     _extract_claim_facts,
     _json_object_from_text,
@@ -118,7 +118,26 @@ def test_evaluation_rejects_the_wrong_proof_of_loss_amount() -> None:
     }
 
     checks = {check.name: check for check in evaluate_review(review)}
-    assert checks["proof-of-loss-amount"].passed is False
+    assert {name for name, check in checks.items() if not check.passed} == {"proof-of-loss-amount"}
+
+
+def test_artifact_exclusions_only_apply_at_the_run_root(tmp_path: Path) -> None:
+    review = (VERIFIED_RUN / "review.json").read_text(encoding="utf-8")
+    (tmp_path / "review.json").write_text(review, encoding="utf-8")
+    (tmp_path / "README.md").write_text("run documentation", encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(json.dumps({"artifacts": []}), encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "README.md").write_text("nested artifact", encoding="utf-8")
+    (nested / "manifest.json").write_text("nested artifact manifest", encoding="utf-8")
+
+    assert evaluate_run(tmp_path) is True
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    artifact_paths = {entry["path"] for entry in manifest["artifacts"]}
+    assert "README.md" not in artifact_paths
+    assert "manifest.json" not in artifact_paths
+    assert {"nested/README.md", "nested/manifest.json"} <= artifact_paths
 
 
 def test_verified_evaluation_recomputes_from_the_recorded_review() -> None:
@@ -137,7 +156,7 @@ def test_verified_manifest_pins_every_recorded_artifact() -> None:
     expected_paths = {
         str(path.relative_to(VERIFIED_RUN))
         for path in VERIFIED_RUN.rglob("*")
-        if path.is_file() and path.name not in ARTIFACT_EXCLUDED_FILENAMES
+        if path.is_file() and path.relative_to(VERIFIED_RUN) not in ARTIFACT_EXCLUDED_PATHS
     }
     artifacts = {entry["path"]: entry["sha256"] for entry in manifest["artifacts"]}
 

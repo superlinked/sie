@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 console = Console()
-ARTIFACT_EXCLUDED_FILENAMES = {"README.md", "manifest.json"}
+ARTIFACT_EXCLUDED_PATHS = {Path("README.md"), Path("manifest.json")}
 
 
 @dataclass(frozen=True)
@@ -86,12 +86,13 @@ def evaluate_review(review: dict[str, Any]) -> list[Check]:
         ),
         Check(
             "finding-categories",
-            {
+            categories
+            == {
                 "covered_removal",
                 "excluded_transport",
                 "price_support",
                 "prior_claim_overlap",
-            }.issubset(categories),
+            },
             ", ".join(sorted(str(category) for category in categories)),
         ),
     ]
@@ -124,7 +125,7 @@ def evaluate_run(run_dir: Path) -> bool:
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             }
             for path in sorted(run_dir.rglob("*"))
-            if path.is_file() and path.name not in ARTIFACT_EXCLUDED_FILENAMES
+            if path.is_file() and path.relative_to(run_dir) not in ARTIFACT_EXCLUDED_PATHS
         ]
         manifest_path.write_text(
             json.dumps(manifest, indent=2) + "\n",
