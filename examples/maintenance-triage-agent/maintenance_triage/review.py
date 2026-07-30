@@ -479,7 +479,7 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
             "sebring_to_salem_minutes": salem_minute - sebring_minute,
             "salem_to_east_palestine_minutes": east_palestine_minute - salem_minute,
         },
-        "engineer_action": "began slowing before 8:54 p.m.",
+        "engineer_action": engineer_action,
         "derailment": {
             "total_cars": total_derailed_cars,
             "statement": "the hopper car and 37 others derailed as emergency braking activated",
