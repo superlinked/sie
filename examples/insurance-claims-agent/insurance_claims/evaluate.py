@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 console = Console()
+ARTIFACT_EXCLUDED_FILENAMES = {"README.md", "manifest.json"}
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,7 @@ def evaluate_run(run_dir: Path) -> bool:
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             }
             for path in sorted(run_dir.rglob("*"))
-            if path.is_file() and path != manifest_path
+            if path.is_file() and path.name not in ARTIFACT_EXCLUDED_FILENAMES
         ]
         manifest_path.write_text(
             json.dumps(manifest, indent=2) + "\n",

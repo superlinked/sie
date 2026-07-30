@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from insurance_claims.evaluate import evaluate_review
+from insurance_claims.evaluate import ARTIFACT_EXCLUDED_FILENAMES, evaluate_review
 from insurance_claims.review import (
     _extract_claim_facts,
     _json_object_from_text,
@@ -93,6 +93,34 @@ def test_evaluation_accepts_published_appeal_result() -> None:
     assert all(check.passed for check in evaluate_review(review))
 
 
+def test_evaluation_rejects_the_wrong_proof_of_loss_amount() -> None:
+    review = {
+        "route": "scope_review_required",
+        "appeal_summary": {
+            "proof_of_loss_amount": 1,
+            "removal_estimate": 49500,
+            "barge_estimate": 181832.94,
+            "debris_cubic_yards_min": 12,
+            "debris_cubic_yards_max": 15,
+        },
+        "decision": {
+            "covered_scope": "Remove flood-borne stones from underneath the insured building to its perimeter.",
+            "excluded_scope": "Barge transport, handling, disposal, and yard removal.",
+            "evidence_needed": "Other contractor estimates.",
+            "prior_claim_check": "Proof of repairs from previous claims.",
+        },
+        "findings": [
+            {"category": "covered_removal"},
+            {"category": "excluded_transport"},
+            {"category": "price_support"},
+            {"category": "prior_claim_overlap"},
+        ],
+    }
+
+    checks = {check.name: check for check in evaluate_review(review)}
+    assert checks["proof-of-loss-amount"].passed is False
+
+
 def test_verified_evaluation_recomputes_from_the_recorded_review() -> None:
     review = json.loads((VERIFIED_RUN / "review.json").read_text(encoding="utf-8"))
     recorded = json.loads((VERIFIED_RUN / "evaluation.json").read_text(encoding="utf-8"))
@@ -109,7 +137,7 @@ def test_verified_manifest_pins_every_recorded_artifact() -> None:
     expected_paths = {
         str(path.relative_to(VERIFIED_RUN))
         for path in VERIFIED_RUN.rglob("*")
-        if path.is_file() and path.name not in {"README.md", "manifest.json"}
+        if path.is_file() and path.name not in ARTIFACT_EXCLUDED_FILENAMES
     }
     artifacts = {entry["path"]: entry["sha256"] for entry in manifest["artifacts"]}
 
