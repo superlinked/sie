@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import copy
+import importlib.util
 import json
 import sys
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-import run
+RUN_SPEC = importlib.util.spec_from_file_location("multimodal_search_run", ROOT / "run.py")
+assert RUN_SPEC is not None
+assert RUN_SPEC.loader is not None
+run = importlib.util.module_from_spec(RUN_SPEC)
+sys.modules[RUN_SPEC.name] = run
+RUN_SPEC.loader.exec_module(run)
 
 
 def strings(value: Any):
@@ -58,6 +65,51 @@ class MultimodalSearchExampleTests(unittest.TestCase):
             self.assertEqual(left["file"], right["file"])
             self.assertEqual(left["sha256"], right["sha256"])
             self.assertAlmostEqual(left["score"], right["score"], places=15)
+
+    def test_source_manifest_fails_closed_on_tampering(self) -> None:
+        sources = run.load_and_verify_sources()
+
+        synthetic = copy.deepcopy(sources)
+        synthetic["synthetic_or_generated_images"] = True
+        with (
+            patch.object(run, "read_json", return_value=synthetic),
+            self.assertRaisesRegex(ValueError, "reject synthetic images"),
+        ):
+            run.load_and_verify_sources()
+
+        incomplete = copy.deepcopy(sources)
+        incomplete["images"].pop()
+        with (
+            patch.object(run, "read_json", return_value=incomplete),
+            self.assertRaisesRegex(ValueError, "exactly six"),
+        ):
+            run.load_and_verify_sources()
+
+        wrong_checksum = copy.deepcopy(sources)
+        wrong_checksum["images"][0]["sha256"] = "0" * 64
+        with (
+            patch.object(run, "read_json", return_value=wrong_checksum),
+            self.assertRaisesRegex(ValueError, "checksum changed"),
+        ):
+            run.load_and_verify_sources()
+
+    def test_dense_vector_rejects_non_finite_values(self) -> None:
+        vector = [0.0] * run.EXPECTED_DIMENSIONS
+        vector[-1] = float("nan")
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            run.dense_vector({"dense": vector})
+
+    def test_evaluation_rejects_an_unexpected_top_match(self) -> None:
+        sources = run.load_and_verify_sources()
+        query_vector = [1.0, *([0.0] * (run.EXPECTED_DIMENSIONS - 1))]
+        other_vector = [0.0, 1.0, *([0.0] * (run.EXPECTED_DIMENSIONS - 2))]
+        image_responses = [
+            {"dense": (other_vector if Path(image["file"]).name == run.EXPECTED_TOP_MATCH else query_vector)}
+            for image in sources["images"]
+        ]
+
+        with self.assertRaisesRegex(ValueError, "Expected red-leather-handbag.png"):
+            run.evaluate(sources, {"dense": query_vector}, image_responses)
 
     def test_manifest_pins_inputs_and_artifacts(self) -> None:
         manifest = run.read_json(ROOT / "verified-run" / "manifest.json")

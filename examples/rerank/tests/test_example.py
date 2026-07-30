@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import unittest
@@ -7,8 +8,12 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-import run
+RUN_SPEC = importlib.util.spec_from_file_location("rerank_run", ROOT / "run.py")
+assert RUN_SPEC is not None
+assert RUN_SPEC.loader is not None
+run = importlib.util.module_from_spec(RUN_SPEC)
+sys.modules[RUN_SPEC.name] = run
+RUN_SPEC.loader.exec_module(run)
 
 
 def strings(value: Any):
@@ -56,6 +61,16 @@ class RerankExampleTests(unittest.TestCase):
                 checks[case_id]["candidate_count"],
                 observed["candidate_count"],
             )
+
+    def test_boolean_score_fails_closed(self) -> None:
+        cases, _ = run.load_and_verify_inputs()
+        case_id = "scotus_two_contracts"
+        case = cases["cases"][case_id]
+        response = run.read_json(ROOT / "verified-run" / "raw" / "supreme-court-arbitration.json")
+        response["scores"][0]["score"] = True
+
+        with self.assertRaisesRegex(ValueError, "Invalid score"):
+            run.validate_response(case_id, case, response)
 
     def test_manifest_pins_every_artifact(self) -> None:
         manifest = run.read_json(ROOT / "verified-run" / "manifest.json")

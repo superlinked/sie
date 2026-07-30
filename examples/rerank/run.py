@@ -146,7 +146,7 @@ def validate_response(
         raise ValueError(f"Ranks are incomplete for {case_id}")
     for row in scores:
         score = row.get("score")
-        if not isinstance(score, (int, float)) or not math.isfinite(score):
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
             raise ValueError(f"Invalid score for {row.get('item_id')}")
     top = min(scores, key=lambda row: row["rank"])
     expected_top = case["expected_top_candidate_id"]

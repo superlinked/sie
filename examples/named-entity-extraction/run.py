@@ -171,7 +171,7 @@ def validate_response(
         if text[start:end] != entity.get("text"):
             raise ValueError(f"Offset text mismatch at entity {index}")
         score = entity.get("score")
-        if not isinstance(score, (int, float)) or not math.isfinite(score):
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
             raise ValueError(f"Invalid score at entity {index}")
         if score < 0 or score > 1:
             raise ValueError(f"Out-of-range score at entity {index}")

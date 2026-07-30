@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import unittest
@@ -7,8 +8,15 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-import run
+RUN_SPEC = importlib.util.spec_from_file_location(
+    "named_entity_extraction_run",
+    ROOT / "run.py",
+)
+assert RUN_SPEC is not None
+assert RUN_SPEC.loader is not None
+run = importlib.util.module_from_spec(RUN_SPEC)
+sys.modules[RUN_SPEC.name] = run
+RUN_SPEC.loader.exec_module(run)
 
 
 def strings(value: Any):
@@ -71,6 +79,15 @@ class NamedEntityExampleTests(unittest.TestCase):
         response = run.read_json(ROOT / "verified-run" / "raw" / "supreme-court-caption.json")
         response["entities"] = []
         with self.assertRaisesRegex(ValueError, "missing required anchors"):
+            run.validate_response(case_id, cases["cases"][case_id], response)
+
+    def test_boolean_score_fails_closed(self) -> None:
+        cases, _ = run.load_and_verify_inputs()
+        case_id = "scotus_two_contracts"
+        response = run.read_json(ROOT / "verified-run" / "raw" / "supreme-court-caption.json")
+        response["entities"][0]["score"] = True
+
+        with self.assertRaisesRegex(ValueError, "Invalid score"):
             run.validate_response(case_id, cases["cases"][case_id], response)
 
     def test_cms_false_positive_is_preserved_but_not_required(self) -> None:
