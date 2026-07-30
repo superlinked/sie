@@ -34,12 +34,12 @@
     {
       "name": "missing-timely-face-to-face",
       "passed": true,
-      "detail": "['face-to-face encounter within 6 months of proof of delivery']"
+      "detail": "[\"The doctor didn't document the face-to-face encounter within 6 months of proof of delivery.\"]"
     },
     {
       "name": "published-payment-action",
       "passed": true,
-      "detail": "insufficient documentation error; MAC recoups payment"
+      "detail": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.; The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment."
     },
     {
       "name": "ranked-source-evidence",

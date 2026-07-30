@@ -64,6 +64,8 @@ runs/<run-id>/raw/parse.json                 complete Docling response
 runs/<run-id>/raw/retrieve.json              embeddings and cosine ranking
 runs/<run-id>/raw/rerank.json                complete reranker response
 runs/<run-id>/raw/entities.json              combined GLiNER entity spans
+runs/<run-id>/raw/entities-detector-<index>.json per-detector GLiNER entity spans
+runs/<run-id>/raw/entities-outcome.json      outcome GLiNER entity spans
 runs/<run-id>/raw/gliner2-sebring.json       GLiNER2 Sebring spans
 runs/<run-id>/raw/gliner2-salem.json         GLiNER2 Salem spans
 runs/<run-id>/raw/gliner2-east-palestine.json GLiNER2 East Palestine spans

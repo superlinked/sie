@@ -1,1 +1,1 @@
-"""Read-only maintenance triage over synthetic plant records."""
+"""Read-only reconstruction of the NTSB's published bearing-detector sequence."""

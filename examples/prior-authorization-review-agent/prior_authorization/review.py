@@ -89,7 +89,7 @@ FIELD_SPECS: dict[str, dict[str, Any]] = {
     },
     "missing_documentation": {
         "description": "Return the exact source text stating what documentation was missing.",
-        "scope_tokens": ("didn", "within 6 months", "proof of delivery"),
+        "scope_tokens": ("document the face-to-face encounter within 6 months", "proof of delivery"),
     },
     "review_conclusion": {
         "description": "Return only the exact source text naming the review contractor's conclusion.",
@@ -361,6 +361,9 @@ def build_review(
     )
     if required_months != 6:
         raise RuntimeError(f"Mapped evidence returned the wrong face-to-face window: {required_months}")
+    overdue_by_months = observed_months - required_months
+    if overdue_by_months <= 0:
+        raise RuntimeError("Published example does not establish an overdue face-to-face encounter")
     if observed_months != 7:
         raise RuntimeError(f"Mapped evidence returned the wrong encounter age: {observed_months}")
 
@@ -383,9 +386,6 @@ def build_review(
     _require_tokens(str(outcome["review_conclusion"]), ("insufficient documentation",), "review_conclusion")
     _require_tokens(str(outcome["payment_action"]), ("mac", "recoup", "payment"), "payment_action")
 
-    overdue_by_months = observed_months - required_months
-    if overdue_by_months <= 0:
-        raise RuntimeError("Published example does not establish an overdue face-to-face encounter")
     return {
         "scope": "Reproduction of CMS's published L1851 insufficient-documentation example",
         "route": "insufficient_documentation",
@@ -399,9 +399,9 @@ def build_review(
             "medical_record": str(submission["submitted_medical_record"]),
             "proof_of_delivery": str(submission["submitted_proof_of_delivery"]),
         },
-        "missing_documentation": ["face-to-face encounter within 6 months of proof of delivery"],
-        "review_conclusion": "insufficient documentation error",
-        "payment_action": "MAC recoups payment",
+        "missing_documentation": [str(outcome["missing_documentation"]).strip()],
+        "review_conclusion": str(outcome["review_conclusion"]).strip(),
+        "payment_action": str(outcome["payment_action"]).strip(),
         "source": {
             "publisher": "Centers for Medicare & Medicaid Services",
             "title": "Lower Limb Orthoses",
@@ -449,12 +449,16 @@ def run(run_id: str) -> Path:
     config = load_config()
     parse_model = str(config["models"]["parse"])
     run_dir = RUNS_DIR / run_id
+    if run_dir.exists():
+        raise SystemExit(
+            f"Run directory already exists: {run_dir}. Choose a new --run-id or remove the existing run directory."
+        )
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=False)
     calls: list[dict[str, Any]] = []
     timeout = config["cluster"]["provision_timeout_s"]
 
-    with SIEClient(config["cluster"]["url"], api_key=config["cluster"]["api_key"] or None, timeout_s=900) as client:
+    with SIEClient(config["cluster"]["url"], api_key=config["cluster"]["api_key"] or None, timeout_s=timeout) as client:
         started = time.perf_counter()
         parsed = client.extract(
             parse_model,
@@ -555,7 +559,7 @@ def run(run_id: str) -> Path:
         outcome_rows = _select_evidence_rows(
             ranked,
             (
-                "didn't document the face-to-face",
+                "document the face-to-face encounter within 6 months",
                 "insufficient documentation error",
                 "mac recoups",
             ),

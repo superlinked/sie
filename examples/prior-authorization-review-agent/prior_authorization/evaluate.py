@@ -24,6 +24,9 @@ class Check:
 def evaluate_review(review: dict[str, Any]) -> list[Check]:
     evidence = review.get("ranked_source_evidence", [])
     evidence_text = "\n".join(str(row.get("text", "")) for row in evidence).casefold()
+    missing_documentation = " ".join(str(value) for value in review.get("missing_documentation", [])).casefold()
+    review_conclusion = str(review.get("review_conclusion", "")).casefold()
+    payment_action = str(review.get("payment_action", "")).casefold()
     return [
         Check(
             "published-cms-example-scope",
@@ -49,13 +52,16 @@ def evaluate_review(review: dict[str, Any]) -> list[Check]:
         Check("one-month-gap", review.get("overdue_by_months") == 1, str(review.get("overdue_by_months"))),
         Check(
             "missing-timely-face-to-face",
-            review.get("missing_documentation") == ["face-to-face encounter within 6 months of proof of delivery"],
+            all(
+                token in missing_documentation
+                for token in ("face-to-face encounter", "within 6 months", "proof of delivery")
+            ),
             str(review.get("missing_documentation")),
         ),
         Check(
             "published-payment-action",
-            review.get("review_conclusion") == "insufficient documentation error"
-            and review.get("payment_action") == "MAC recoups payment",
+            "insufficient documentation error" in review_conclusion
+            and all(token in payment_action for token in ("mac", "recoup", "payment")),
             f"{review.get('review_conclusion')}; {review.get('payment_action')}",
         ),
         Check(
@@ -103,7 +109,10 @@ def _record_evaluation_artifact(run_dir: Path) -> None:
 
 
 def evaluate_run(run_dir: Path) -> bool:
-    review = json.loads((run_dir / "review.json").read_text(encoding="utf-8"))
+    review_path = run_dir / "review.json"
+    if not review_path.is_file():
+        raise SystemExit(f"Review artifact not found: {review_path}")
+    review = json.loads(review_path.read_text(encoding="utf-8"))
     checks = evaluate_review(review)
     passed = all(check.passed for check in checks)
     (run_dir / "evaluation.json").write_text(

@@ -1,7 +1,12 @@
 import hashlib
 import json
+import sys
 from pathlib import Path
 
+import pytest
+
+import prior_authorization.evaluate as evaluate_module
+import prior_authorization.review as review_module
 from prior_authorization.evaluate import evaluate_review, evaluate_run
 from prior_authorization.review import (
     FIELD_SPECS,
@@ -14,6 +19,7 @@ from prior_authorization.review import (
     _chunks,
     _group_source_scope,
     _require_gliner2_group_evidence,
+    _require_ranked_evidence,
     _source_fragments,
     _source_scope,
     build_review,
@@ -61,6 +67,11 @@ def test_docling_bullets_stay_as_distinct_submission_chunks() -> None:
         "- Treating practitioner's medical record that has adequate medical necessity information",
         "- Proof of delivery with face-to-face encounter 7 months ago",
     ]
+
+
+def test_docling_chunks_reject_content_without_a_usable_chunk() -> None:
+    with pytest.raises(RuntimeError, match="no usable CMS source chunks"):
+        _chunks("too short")
 
 
 def test_joined_docling_bullets_map_to_distinct_source_fragments() -> None:
@@ -216,6 +227,14 @@ def test_each_field_gets_the_smallest_exact_ranked_source_scope() -> None:
     assert scopes["payment_action"]["chunk_id"] == "chunk-4"
 
 
+def test_source_scope_rejects_evidence_without_the_field_terms() -> None:
+    with pytest.raises(RuntimeError, match="omitted the exact source scope"):
+        _source_scope(
+            [{"chunk_id": "chunk-0", "rank": 1, "score": 0.9, "text": "Unrelated CMS source text."}],
+            "hcpcs_code",
+        )
+
+
 def test_group_inputs_deduplicate_the_smallest_exact_field_scopes() -> None:
     evidence = source_scope_evidence()
     requirements = _group_source_scope(evidence, "requirements")
@@ -272,7 +291,9 @@ def test_reproduces_cms_route_and_one_month_gap() -> None:
     assert review["required_face_to_face_within_months"] == 6
     assert review["documented_face_to_face_age_months"] == 7
     assert review["overdue_by_months"] == 1
-    assert review["payment_action"] == "MAC recoups payment"
+    assert "MAC recoups payment" in review["payment_action"]
+    assert "insufficient documentation error" in review["review_conclusion"]
+    assert "within 6 months of proof of delivery" in review["missing_documentation"][0]
 
 
 def test_review_stays_inside_published_example_boundary() -> None:
@@ -303,6 +324,38 @@ def test_evaluator_records_its_artifact_in_the_manifest(tmp_path: Path) -> None:
     evaluation = tmp_path / "evaluation.json"
     assert manifest["artifacts"][0]["sha256"] == hashlib.sha256(evaluation.read_bytes()).hexdigest()
     assert manifest["artifacts"][1]["sha256"] == "preserved"
+
+
+def test_evaluator_fails_when_the_one_month_gap_is_removed(tmp_path: Path) -> None:
+    review = build_valid_review()
+    review["overdue_by_months"] = 0
+    checks = evaluate_review(review)
+    one_month_gap = next(check for check in checks if check.name == "one-month-gap")
+    assert one_month_gap.passed is False
+
+    (tmp_path / "review.json").write_text(json.dumps(review), encoding="utf-8")
+    assert evaluate_run(tmp_path) is False
+    assert json.loads((tmp_path / "evaluation.json").read_text(encoding="utf-8"))["passed"] is False
+
+
+def test_evaluate_run_reports_a_missing_review_artifact(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="Review artifact not found"):
+        evaluate_run(tmp_path)
+
+
+def test_evaluate_main_exits_one_when_checks_fail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(evaluate_module, "evaluate_run", lambda _run_dir: False)
+    monkeypatch.setattr(sys, "argv", ["eval-pa", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc_info:
+        evaluate_module.main()
+    assert exc_info.value.code == 1
+
+
+def test_run_reports_an_existing_run_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(review_module, "RUNS_DIR", tmp_path)
+    (tmp_path / "local").mkdir()
+    with pytest.raises(SystemExit, match="Choose a new --run-id"):
+        review_module.run("local")
 
 
 def test_fails_closed_when_required_window_changes() -> None:
@@ -338,13 +391,22 @@ def test_fails_closed_without_ranked_payment_action() -> None:
         raise AssertionError("build_review accepted ranked evidence without the published payment action")
 
 
+def test_ranked_evidence_requires_chunk_identity_and_source_text() -> None:
+    for malformed in (
+        [{"rank": 1, "score": 0.9, "text": "source text"}],
+        [{"chunk_id": "chunk-0", "rank": 1, "score": 0.9, "text": ""}],
+    ):
+        with pytest.raises(RuntimeError, match="chunk identity and source text"):
+            _require_ranked_evidence(malformed)
+
+
 def test_fails_closed_when_submission_age_is_not_seven_months() -> None:
     submission = submission_data()
     submission["documented_face_to_face_age"] = "5 months ago"
     try:
         build_review(requirements_data(), submission, outcome_data(), ranked_evidence())
     except RuntimeError as exc:
-        assert "wrong encounter age" in str(exc)
+        assert "does not establish an overdue" in str(exc)
     else:
         raise AssertionError("build_review accepted a timing observation that conflicts with the CMS source")
 

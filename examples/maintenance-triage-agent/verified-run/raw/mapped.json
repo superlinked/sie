@@ -6,6 +6,7 @@
     "sebring_temperature": "38\u00b0F above ambient",
     "salem_time": "8:13 p.m.",
     "salem_temperature": "103\u00b0F above ambient",
+    "east_palestine_time": "8:52 p.m .",
     "east_palestine_temperature": "253\u00b0F above ambient",
     "sebring_alert_status_text": "not high enough to trigger an alert",
     "salem_alert_level_text": "noncritical alert",
@@ -67,6 +68,11 @@
       "stage": "salem",
       "chunk_id": "chunk-12",
       "source_sha256": "864d80e2d7aec89dcbdca6e30ef034f32f7be9f733c667394f6119e414496eac"
+    },
+    "east_palestine_time": {
+      "stage": "east_palestine",
+      "chunk_id": "chunk-13",
+      "source_sha256": "e78d51724d0ebbce9b68971491aff2b20d24bf0e2dca2f0c86a963e87c89c825"
     },
     "east_palestine_temperature": {
       "stage": "east_palestine",

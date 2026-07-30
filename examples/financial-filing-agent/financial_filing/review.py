@@ -135,7 +135,7 @@ def _normalize_source_text(value: str) -> str:
 
 def _require_entity_evidence(result: dict[str, Any]) -> None:
     observed = _normalize_source_text(" ".join(str(entity.get("text", "")) for entity in result.get("entities", [])))
-    required_spans = ("45,096", "36,080", "$1.68")
+    required_spans = ("45,096", "36,080", "$1.68", "$1.34")
     missing = sorted(span for span in required_spans if span.casefold() not in observed)
     if missing:
         raise RuntimeError(f"GLiNER omitted required source spans: {missing}")

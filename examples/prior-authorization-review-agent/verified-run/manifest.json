@@ -17,7 +17,7 @@
   "artifacts": [
     {
       "path": "evaluation.json",
-      "sha256": "436124fe249e3a44392458003815cfa46fbe12f9e9a0bc559439ff383e02b9dd"
+      "sha256": "ec159b7ec6bd1e3c310699501f8c9eb0af546818cc6e0c1b6b19d01f3a04ad3d"
     },
     {
       "path": "parsed.md",
@@ -81,7 +81,7 @@
     },
     {
       "path": "review.json",
-      "sha256": "02629e2ffd8ac0afe4f4c29e278a2b2a59f01619e030e011c84de90171eeccb5"
+      "sha256": "ace1b0c75e330c83b292f70a388a3399457edfc7b36eabedb1ebb2ed9fb57c69"
     }
   ],
   "source": {

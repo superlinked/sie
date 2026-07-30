@@ -67,6 +67,9 @@ runs/<run-id>/raw/parse.json      complete Docling response
 runs/<run-id>/raw/retrieve.json   embeddings and cosine ranking
 runs/<run-id>/raw/rerank.json     complete reranker response
 runs/<run-id>/raw/entities.json   combined entity spans
+runs/<run-id>/raw/entities-original-10q.json   original Form 10-Q entity spans
+runs/<run-id>/raw/entities-restated-10ka.json  restated Form 10-K/A entity spans
+runs/<run-id>/raw/entities-status.json         reliance-status entity spans
 runs/<run-id>/raw/gliner2-*.json raw GLiNER2 source-span responses
 runs/<run-id>/raw/mapped.json     validated record mapped from Docling table coordinates
 runs/<run-id>/parsed.md           parsed packet used downstream

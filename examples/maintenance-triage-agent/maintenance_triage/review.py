@@ -33,6 +33,7 @@ MAPPED_FIELDS = (
     "sebring_temperature",
     "salem_time",
     "salem_temperature",
+    "east_palestine_time",
     "east_palestine_temperature",
     "sebring_alert_status_text",
     "salem_alert_level_text",
@@ -277,6 +278,11 @@ def _map_exact_source_fields(
             r"\b103°F\s+above\s+ambient\b",
             "Salem temperature",
         ),
+        "east_palestine_time": _source_match(
+            east_palestine_text,
+            r"\b8:52\s+p\.m\s*\.",
+            "East Palestine time",
+        ),
         "east_palestine_temperature": _source_match(
             east_palestine_text,
             r"\b253°F\s+above\s+ambient\b",
@@ -344,7 +350,10 @@ def _map_exact_source_fields(
                 "salem_camera_observation_text",
             )
         },
-        **{field: "east_palestine" for field in ("east_palestine_temperature", "east_palestine_alert_text")},
+        **{
+            field: "east_palestine"
+            for field in ("east_palestine_time", "east_palestine_temperature", "east_palestine_alert_text")
+        },
     }
     source_scopes = {
         field: {
@@ -372,6 +381,13 @@ def _require_fields(data: dict[str, Any]) -> None:
         raise RuntimeError(f"Mapped source evidence omitted required fields: {missing}")
 
 
+def _derailed_car_count(value: str) -> int:
+    match = re.search(r"\b(?:the\s+)?hopper car and (\d+) others derailed\b", value, flags=re.IGNORECASE)
+    if match is None:
+        raise RuntimeError(f"Mapped derailment statement has no derivable railcar count: {value!r}")
+    return 1 + int(match.group(1))
+
+
 def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str, Any]:
     _require_ranked_evidence(ranked)
     _require_fields(data)
@@ -387,8 +403,13 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
         raise RuntimeError(f"Mapped detector temperatures do not match the NTSB source: {temperatures}")
     sebring_minute = _minute_of_day(str(data["sebring_time"]))
     salem_minute = _minute_of_day(str(data["salem_time"]))
-    if [sebring_minute, salem_minute] != [19 * 60 + 37, 20 * 60 + 13]:
-        raise RuntimeError("Mapped Sebring or Salem time does not match the NTSB source")
+    east_palestine_minute = _minute_of_day(str(data["east_palestine_time"]))
+    if [sebring_minute, salem_minute, east_palestine_minute] != [
+        19 * 60 + 37,
+        20 * 60 + 13,
+        20 * 60 + 52,
+    ]:
+        raise RuntimeError("Mapped detector time does not match the NTSB source")
 
     alert_checks = {
         "sebring": ("not", "alert"),
@@ -417,6 +438,9 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
         raise RuntimeError("Mapped source evidence omitted the engineer's action before 8:54 p.m.")
     if not all(token in derailment.casefold() for token in ("hopper", "37", "derail")):
         raise RuntimeError("Mapped source evidence omitted the hopper car and 37 other derailed cars")
+    total_derailed_cars = _derailed_car_count(derailment)
+    if total_derailed_cars != 38:
+        raise RuntimeError(f"Mapped source evidence returned the wrong derailed railcar count: {total_derailed_cars}")
     if not all(token in cause.casefold() for token in ("overheated bearing", "burned off", "hopper car")):
         raise RuntimeError("Mapped source evidence changed the NTSB's stated derailment cause")
 
@@ -453,11 +477,11 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
             "successive_increases_degrees_f": detector_deltas,
             "total_increase_degrees_f": temperatures[-1] - temperatures[0],
             "sebring_to_salem_minutes": salem_minute - sebring_minute,
-            "salem_to_east_palestine_minutes": 39,
+            "salem_to_east_palestine_minutes": east_palestine_minute - salem_minute,
         },
         "engineer_action": "began slowing before 8:54 p.m.",
         "derailment": {
-            "total_cars": 38,
+            "total_cars": total_derailed_cars,
             "statement": "the hopper car and 37 others derailed as emergency braking activated",
         },
         "ntsb_cause_statement": SOURCE_CAUSE_STATEMENT,
@@ -477,7 +501,7 @@ def run(run_id: str) -> Path:
     calls: list[dict[str, Any]] = []
     timeout = config["cluster"]["provision_timeout_s"]
 
-    with SIEClient(config["cluster"]["url"], api_key=config["cluster"]["api_key"] or None, timeout_s=900) as client:
+    with SIEClient(config["cluster"]["url"], api_key=config["cluster"]["api_key"] or None, timeout_s=timeout) as client:
         started = time.perf_counter()
         parsed = client.extract(
             parse_model,

@@ -12,10 +12,10 @@
     "proof_of_delivery": "Proof of delivery with face-to-face encounter 7 months ago"
   },
   "missing_documentation": [
-    "face-to-face encounter within 6 months of proof of delivery"
+    "The doctor didn't document the face-to-face encounter within 6 months of proof of delivery."
   ],
-  "review_conclusion": "insufficient documentation error",
-  "payment_action": "MAC recoups payment",
+  "review_conclusion": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.",
+  "payment_action": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment.",
   "source": {
     "publisher": "Centers for Medicare & Medicaid Services",
     "title": "Lower Limb Orthoses",

@@ -29,7 +29,9 @@ only the deduplicated shortest CMS fragments needed for that group. The run
 requires the model to recover the controlling phrases, including `L1851`,
 `6 months`, `7 months`, `insufficient documentation`, and `recoups payment`.
 Ordinary code then maps the exact ranked CMS fragments to the review fields.
-The raw response is written before the next group runs.
+The raw response is written before the next group runs. The final outcome
+fields retain those mapped source fragments; deterministic evaluation checks
+their required terms rather than replacing them with canned summaries.
 
 The deterministic validator then requires all of these facts:
 
@@ -72,6 +74,8 @@ runs/<run-id>/raw/parse.json                   complete Docling response
 runs/<run-id>/raw/retrieve.json                embeddings and cosine ranking
 runs/<run-id>/raw/rerank.json                  complete reranker response
 runs/<run-id>/raw/entities.json                combined GLiNER entity spans
+runs/<run-id>/raw/entities-requirement-<index>.json per-requirement GLiNER entity spans
+runs/<run-id>/raw/entities-case-<index>.json   per-case GLiNER entity spans
 runs/<run-id>/raw/gliner2-requirements.json    GLiNER2 requirement spans
 runs/<run-id>/raw/gliner2-submission.json      GLiNER2 submission spans
 runs/<run-id>/raw/gliner2-outcome.json         GLiNER2 outcome spans

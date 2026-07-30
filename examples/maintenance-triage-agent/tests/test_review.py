@@ -7,6 +7,8 @@ from maintenance_triage.review import (
     _map_exact_source_fields,
     _require_entity_evidence,
     _require_gliner2_evidence,
+    _require_ranked_evidence,
+    _row_for_location,
     build_review,
     load_config,
 )
@@ -32,6 +34,7 @@ def structured_data() -> dict[str, str]:
         "sebring_temperature": "38°F above ambient",
         "salem_time": "8:13 p.m.",
         "salem_temperature": "103°F above ambient",
+        "east_palestine_time": "8:52 p.m.",
         "east_palestine_temperature": "253°F above ambient",
         "sebring_alert_status_text": "not high enough to trigger an alert",
         "salem_alert_level_text": "noncritical alert",
@@ -122,6 +125,7 @@ def test_maps_only_exact_ranked_source_text_after_model_gates() -> None:
     detectors, outcome = exact_source_rows()
     mapped, scopes = _map_exact_source_fields(detectors, outcome)
     assert mapped["bearing"] == "L1"
+    assert mapped["east_palestine_time"] == "8:52 p.m ."
     assert mapped["sebring_temperature"] == "38°F above ambient"
     assert mapped["salem_alert_recipient_text"] == "Wayside Help Desk"
     assert mapped["east_palestine_alert_text"] == ("critical alarm, which was broadcast in the locomotive cab")
@@ -218,6 +222,32 @@ def test_review_fails_closed_without_ranked_evidence() -> None:
         assert "no evidence" in str(exc)
     else:
         raise AssertionError("build_review accepted an empty reranker response")
+
+
+def test_ranked_evidence_requires_chunk_identity_and_source_text() -> None:
+    for malformed in (
+        [{"rank": 1, "score": 0.9, "text": "source text"}],
+        [{"chunk_id": "chunk-0", "rank": 1, "score": 0.9, "text": ""}],
+    ):
+        try:
+            _require_ranked_evidence(malformed)
+        except RuntimeError as exc:
+            assert "chunk identity and source text" in str(exc)
+        else:
+            raise AssertionError("Accepted malformed ranked evidence")
+
+
+def test_detector_location_lookup_rejects_ambiguous_rows() -> None:
+    rows = [
+        {"chunk_id": "chunk-0", "rank": 1, "text": "Sebring HBD reading"},
+        {"chunk_id": "chunk-1", "rank": 2, "text": "Another Sebring HBD reading"},
+    ]
+    try:
+        _row_for_location(rows, "sebring hbd")
+    except RuntimeError as exc:
+        assert "found 2" in str(exc)
+    else:
+        raise AssertionError("Accepted ambiguous detector evidence")
 
 
 def test_gliner_gate_requires_all_detector_spans() -> None:
