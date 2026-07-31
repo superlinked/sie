@@ -98,8 +98,10 @@ round trip via `agent-demo/load_driver.py` (`harness.run_scenario` ->
 
 Correctness held throughout: every `ALLOW` reached `mock-prod` (confirmed
 via its `/log`, 46 applied actions across this run and earlier manual
-checks) and every poisoned action was `WOULD-BLOCK` in watch mode, never
-applied.
+checks) and every poisoned action was flagged `WOULD-BLOCK`. Watch mode
+forwards `WOULD-BLOCK` actions to `mock-prod` by design (the verdict is
+recorded without stopping anything), so flagged actions still show up in
+the applied log; enforce mode is what turns these verdicts into refusals.
 
 **Reading the errors:** the 2 timeouts at concurrency=1 are cold-provision
 blips (a model scaling back to zero between the sparse, sequential
