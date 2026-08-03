@@ -136,6 +136,12 @@ pub enum AdmissionOutcome {
     RegionMismatch,
     LicenseExcluded,
     PayloadTooLarge,
+    /// A policy gate refused the request because it could not read the field it
+    /// gates on — e.g. a `multipart/form-data` inference body whose `model`
+    /// part is absent, oversize, or unparseable. Distinct from `Admitted`
+    /// (which an unset slot defaults to) so a fail-closed ingress refusal is
+    /// never counted as an admitted request.
+    InvalidRequest,
     InsufficientCredits,
     KeySpendLimitExceeded,
     RateLimited,
@@ -151,6 +157,7 @@ impl AdmissionOutcome {
             Self::RegionMismatch => "region_mismatch",
             Self::LicenseExcluded => "license_excluded",
             Self::PayloadTooLarge => "payload_too_large",
+            Self::InvalidRequest => "invalid_request",
             Self::InsufficientCredits => "insufficient_credits",
             Self::KeySpendLimitExceeded => "key_spend_limit_exceeded",
             Self::RateLimited => "rate_limited",

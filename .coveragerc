@@ -1,0 +1,21 @@
+# Keep coverage configuration separate from pyproject.toml so report-only
+# changes do not alter the locked Python workspace. coverage.py auto-discovers
+# this file at the repository root.
+[run]
+# source_pkgs, not a source directory: a directory scan misses src-layout files
+# that were never imported, silently shrinking the denominator. Importable
+# package names keep never-imported modules in the report as 0% rows. Standalone
+# projects run coverage in their own locked environments.
+source_pkgs =
+    sie_config
+    sie_mcp
+    sie_sdk
+    sie_server
+relative_files = True
+omit =
+    */tests/*
+    */conftest.py
+
+[report]
+precision = 1
+skip_empty = True

@@ -143,7 +143,25 @@ class TimingInfo(TypedDict, total=False):
 
 
 class RequestUsage(TypedDict, total=False):
-    """Authoritative metered units for one completed inference request."""
+    """Authoritative metered units for one completed inference request.
+
+    ``credits_charged``/``rate_book_version`` are the SETTLED charge as this
+    response BODY reported it — never an estimate, never a reservation, and
+    never fabricated. They are published whenever the gateway could write them
+    into this body, including on a billing-fault response, where dispatches
+    that rated cleanly are burned before the fault is returned, so the charge
+    is real even though the result was not delivered. An explicit ``0`` is a
+    settlement that cost nothing.
+
+    Their ABSENCE means the body did not carry a settled charge — NOT that
+    nothing was charged. A body the gateway must leave byte-for-byte intact
+    (an opaque content type, one it cannot safely rewrite or buffer) still
+    settles and still charges, and reports the debit only in the
+    ``x-sie-credits-debited`` header. Read
+    :attr:`RequestMetadata.credits_debited` for the authoritative answer: the
+    SDK fills it from this block when present and from that header otherwise,
+    so it is absent only when nothing was charged.
+    """
 
     input_tokens: int
     pairs: int
@@ -151,6 +169,8 @@ class RequestUsage(TypedDict, total=False):
     pages: int
     output_tokens: int
     audio_ms: int
+    credits_charged: int
+    rate_book_version: str
 
 
 class RequestMetadata(TypedDict, total=False):
@@ -162,7 +182,18 @@ class RequestMetadata(TypedDict, total=False):
 
     id: str
     usage: RequestUsage
+    #: Exact committed debit — the authoritative charge for this request.
+    #: Body-first (``usage.credits_charged``), falling back to the
+    #: ``x-sie-credits-debited`` header, which the gateway sets on every
+    #: non-streamed response whose settlement committed (including
+    #: billing-fault responses and bodies it left untouched). The two always
+    #: agree when both are present. Absence here — unlike absence inside
+    #: ``usage`` — does mean nothing was charged. Streamed responses carry no
+    #: headers at all: their charge rides the terminal usage chunk.
     credits_debited: int
+    #: Immutable rate-book version that rated ``credits_debited``, when the
+    #: response reported one.
+    rate_book_version: str
     execution_identity_sha256: str
 
 
@@ -428,11 +459,30 @@ GenerateGrammar = JsonSchemaGrammar | RegexGrammar | EbnfGrammar
 
 
 class GenerationUsage(TypedDict):
-    """Token usage for a single generation call."""
+    """Token usage for a single generation call.
+
+    ``credits_charged``/``rate_book_version`` ride the same block on a settled
+    response — including the terminal chunk of a stream, the only place a
+    streamed request can report what it cost. An explicit ``0`` is a settlement
+    that cost nothing; nothing here is ever an estimate or a fabricated zero.
+
+    Absence means this block did not carry the charge, NOT that nothing was
+    charged. On a buffered call read :attr:`RequestMetadata.credits_debited`,
+    which also covers responses whose body the gateway left untouched. On a
+    stream there is no header to fall back to, and a chat/completions stream
+    carries the charge only when it opted into
+    ``stream_options.include_usage`` — without that there is no usage chunk at
+    all. Native generate always carries usage on its terminal chunk. A stream
+    whose terminal settle did not commit in time reports its tokens without a
+    charge rather than guessing one; ``GET /me/usage`` remains the balance
+    authority.
+    """
 
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    credits_charged: NotRequired[int]
+    rate_book_version: NotRequired[str]
 
 
 class GenerateResult(TypedDict, total=False):
@@ -1146,6 +1196,64 @@ class JobPreflight(TypedDict, total=False):
     estimate_basis: str
 
 
+class AppliedRate(TypedDict):
+    """One priced dimension's exact rational rate from the active rate book.
+
+    Credits are integers, so rates are exact rationals rather than floats:
+    ``rate_numerator / rate_denominator`` credits per unit. Multiply and round
+    once, never per-unit, if you re-derive a total client-side.
+    """
+
+    unit: str
+    rate_numerator: int
+    rate_denominator: int
+
+
+class CostEstimate(TypedDict):
+    """A dispatch-free quote from ``POST /v1/estimate``.
+
+    The gateway prices the request through the SAME reservation planner the
+    metered path runs, against the SAME active rate book, and returns the plan
+    instead of holding it — no dispatch, no reservation, no credits consumed.
+
+    ``estimated_credits`` is the CONSERVATIVE ceiling the live path would hold.
+    Settlement bills the worker-authoritative counts against that plan and
+    releases the remainder, so the real charge is at most this number.
+
+    ``minimum_billed_units`` is present only for duration-priced (sealed custom
+    lane, ``gpu_second``) identities, where a dry run cannot know the request's
+    duration: there the quote is a rate card — ``applied_rates`` plus this
+    per-request floor — and ``unit_ceilings`` is the whole-window hold, not a
+    prediction. ``estimate_basis`` says which of the two you are looking at.
+
+    Every field except ``minimum_billed_units`` is always present: the gateway
+    serializes a whole ``ReservationPlan`` projection, so a partial quote is not
+    a shape the server can produce. Mirrors the TypeScript ``CostEstimate``.
+    """
+
+    endpoint: str
+    identity: RateIdentity
+    estimated_credits: int
+    unit_ceilings: dict[str, int]
+    applied_rates: list[AppliedRate]
+    rate_book_version: str
+    rate_book_sha256: str
+    rounding_rule: str
+    estimate_basis: str
+    # `null` on every non-duration-priced identity, so it is always serialized
+    # but never meaningful outside the sealed rate card.
+    minimum_billed_units: NotRequired[dict[str, int] | None]
+
+
+class RateIdentity(TypedDict):
+    """The rate-book row set a request is priced under."""
+
+    model: str
+    profile: str
+    operation: str
+    region: str
+
+
 class JobChunk(TypedDict, total=False):
     """One spawned chunk's settle metadata (``output.chunks[]``; results-as-refs).
 
@@ -1158,7 +1266,13 @@ class JobChunk(TypedDict, total=False):
     state: str
     ref: str | None
     units: int | None
-    credits: int | None
+    #: Exact credits committed for this chunk, or ``None`` until the chunk's
+    #: settlement is acknowledged. A job settles per chunk, so these sum to the
+    #: job's ``settled_credits`` exactly.
+    credits_charged: int | None
+    #: Immutable rate-book version that rated ``credits_charged``. Present
+    #: exactly when ``credits_charged`` is.
+    rate_book_version: str | None
     error: Any
 
 
@@ -1286,6 +1400,16 @@ class File(TypedDict, total=False):
     expires_at: int
 
 
+class FileList(TypedDict, total=False):
+    """The listing envelope from ``GET /v1/files`` (OpenAI cursor page)."""
+
+    object: str
+    data: list[File]
+    first_id: str | None
+    last_id: str | None
+    has_more: bool
+
+
 class FileDeleted(TypedDict, total=False):
     """The envelope from deleting a file (OpenAI ``FileDeleted``)."""
 
@@ -1344,6 +1468,6 @@ class BatchList(TypedDict, total=False):
 
     object: str
     data: list[Batch]
-    first_id: str
-    last_id: str
+    first_id: str | None
+    last_id: str | None
     has_more: bool

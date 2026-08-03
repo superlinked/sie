@@ -13,12 +13,18 @@ use crate::observability::metrics::{AdmissionOutcome, AdmissionOutcomeSlot};
 
 use crate::config::Config;
 
-/// Paths that are always exempt from auth. Kubernetes liveness/readiness
-/// probes carry no credentials; gating them would take the pod out of
-/// rotation during an auth misconfiguration. `/health` (rich status JSON
-/// with worker URLs, bundle assignments, queue depth, GPU inventory) is
+/// Probe paths shared by every gateway surface (auth exemption here,
+/// audit classification in `middleware::audit`, OpenAPI security
+/// patching in `openapi`, and the managed cloud gateway's key auth /
+/// route classifier). Kubernetes liveness/readiness probes carry no
+/// credentials; gating them would take the pod out of rotation during
+/// an auth misconfiguration. `/health` (rich status JSON with worker
+/// URLs, bundle assignments, queue depth, GPU inventory) is
 /// intentionally NOT in this list — see `EXEMPT_OPERATIONAL_PATHS`.
-const EXEMPT_PROBE_PATHS: &[&str] = &["/healthz", "/readyz"];
+/// `/livez` (#1025) is a server-side probe, not a gateway route, so it
+/// is deliberately absent. Consumers with deliberate extras compose
+/// them explicitly instead of re-declaring this pair.
+pub const PROBE_PATHS: &[&str] = &["/healthz", "/readyz"];
 
 /// Public API description + rendered reference. Keep client-codegen,
 /// discovery, and the browsable `/docs` page usable even when request auth
@@ -83,7 +89,7 @@ where
 
             let path = req.uri().path();
 
-            if EXEMPT_PROBE_PATHS.contains(&path) || EXEMPT_DOC_PATHS.contains(&path) {
+            if PROBE_PATHS.contains(&path) || EXEMPT_DOC_PATHS.contains(&path) {
                 return inner.call(req).await;
             }
 
@@ -185,7 +191,12 @@ fn is_admin_endpoint(method: &Method, path: &str) -> bool {
     path.starts_with("/v1/config") || path.starts_with("/v1/admin") || path.starts_with("/v1/pools")
 }
 
-fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+/// Extract the token from an `Authorization` header, accepting
+/// `Bearer <token>` (case-insensitive prefix) or a raw token value.
+///
+/// Canonical shared implementation: also consumed by `handlers::proxy`
+/// and the managed cloud gateway (`sie_gateway_cloud::key_auth`).
+pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     let header = headers
         .get("authorization")?
         .to_str()
@@ -204,6 +215,25 @@ fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
         None
     } else {
         Some(token)
+    }
+}
+
+/// Mask a token for logs/audit records: keep the last 4 characters,
+/// star the rest; tokens of 4 chars or fewer are fully starred.
+///
+/// Canonical shared implementation: also consumed by `handlers::proxy`
+/// and `middleware::audit`.
+pub fn mask_token(token: &str) -> String {
+    // Char-based, not byte-based: byte slicing panics on a UTF-8 boundary
+    // for non-ASCII header values, and this runs in the per-request audit
+    // path. Identical output for ASCII tokens; mirrors the Python
+    // `sie_sdk.redaction.mask_token`.
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() <= 4 {
+        "****".to_string()
+    } else {
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{}{tail}", "*".repeat(chars.len() - 4))
     }
 }
 
@@ -255,6 +285,65 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_bearer_token_case_insensitive_prefix() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "bearer my-token".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), Some("my-token".into()));
+    }
+
+    #[test]
+    fn test_extract_bearer_token_empty_value() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), None);
+    }
+
+    #[test]
+    fn test_extract_bearer_token_bearer_only() {
+        // "Bearer " trims to "Bearer", which doesn't start with "bearer " (missing trailing space),
+        // so it's treated as a raw token value.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "Bearer ".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), Some("Bearer".into()));
+    }
+
+    #[test]
+    fn test_extract_bearer_token_whitespace_trimmed() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "  Bearer  my-token  ".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), Some("my-token".into()));
+    }
+
+    #[test]
+    fn test_mask_token_long() {
+        assert_eq!(mask_token("secret-token-123"), "************-123");
+    }
+
+    #[test]
+    fn test_mask_token_short() {
+        assert_eq!(mask_token("abc"), "****");
+        assert_eq!(mask_token(""), "****");
+    }
+
+    #[test]
+    fn test_mask_token_exactly_4() {
+        assert_eq!(mask_token("abcd"), "****");
+    }
+
+    #[test]
+    fn test_mask_token_5_chars() {
+        assert_eq!(mask_token("12345"), "*2345");
+    }
+
+    #[test]
+    fn test_mask_token_multibyte_does_not_panic() {
+        // A multibyte char straddling the old byte-index cut point must not
+        // panic and must mask by characters.
+        assert_eq!(mask_token("secrèt-tokén"), "********okén");
+        assert_eq!(mask_token("ééé"), "****");
+    }
+
+    #[test]
     fn test_constant_time_eq() {
         assert!(constant_time_eq_str("abc", "abc"));
         assert!(!constant_time_eq_str("abc", "def"));
@@ -298,12 +387,12 @@ mod tests {
     #[test]
     fn test_exempt_paths_partitioned() {
         // Probe paths are always exempt; operational paths are not.
-        assert!(EXEMPT_PROBE_PATHS.contains(&"/healthz"));
-        assert!(EXEMPT_PROBE_PATHS.contains(&"/readyz"));
+        assert!(PROBE_PATHS.contains(&"/healthz"));
+        assert!(PROBE_PATHS.contains(&"/readyz"));
         assert!(EXEMPT_DOC_PATHS.contains(&"/openapi.json"));
         assert!(EXEMPT_DOC_PATHS.contains(&"/docs"));
         assert!(EXEMPT_DOC_PATHS.contains(&"/docs/redoc.standalone.js"));
-        assert!(!EXEMPT_PROBE_PATHS.contains(&"/health"));
+        assert!(!PROBE_PATHS.contains(&"/health"));
         assert!(EXEMPT_OPERATIONAL_PATHS.contains(&"/"));
         assert!(EXEMPT_OPERATIONAL_PATHS.contains(&"/health"));
     }

@@ -17,18 +17,12 @@
 //!
 //! [`TraceContextPropagator`]: opentelemetry_sdk::propagation::TraceContextPropagator
 
-use std::collections::HashMap;
-use std::env;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry::KeyValue;
-use opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig};
-use opentelemetry_sdk::metrics::{
-    Instrument, PeriodicReader, SdkMeterProvider, Stream, Temporality,
-};
+use opentelemetry_sdk::metrics::{Instrument, PeriodicReader, SdkMeterProvider, Stream};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{SdkTracerProvider, Tracer};
 use opentelemetry_sdk::Resource;
@@ -41,7 +35,6 @@ const DEFAULT_SERVICE_NAME: &str = "sie-worker-sidecar";
 const UNKNOWN_RESOURCE_VALUE: &str = "unknown";
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
-static PROCESS_START_UUID: OnceLock<String> = OnceLock::new();
 
 /// Bounded flush deadline (ms) so process exit can't stall on an unreachable collector.
 const TRACING_SHUTDOWN_TIMEOUT_MS: u64 = 3_000;
@@ -55,27 +48,36 @@ pub fn metrics_provider_enabled() -> bool {
     METER_PROVIDER.get().is_some()
 }
 
-/// Selected OTLP transport for the trace exporter.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum OtlpProtocol {
-    /// gRPC/tonic — the in-cluster/Helm collector on `:4317` (the default).
-    Grpc,
-    /// HTTP `http/protobuf` — the managed Modal collector on `:4318`.
-    Http,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SignalExportConfig {
-    endpoint: String,
-    protocol: OtlpProtocol,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct SignalEndpoints {
-    tracing_enabled: bool,
-    metrics_enabled: bool,
-    metrics: Option<String>,
-}
+// The OTLP transport/proxy/resource plumbing is shared via `sie-telemetry`
+// (#2339); the imports below keep every historical call-site and test name
+// resolvable inside this module.
+use sie_telemetry::env::{cleaned_env, sie_tracing_enabled};
+use sie_telemetry::exporters::build_span_exporter;
+use sie_telemetry::resource::{instance_prefix_env, resource_from_values, service_instance_id};
+use sie_telemetry::transport::{
+    configured_signal_endpoints, endpoint_origin_for_log, otlp_metrics_protocol,
+    trace_export_config, OtlpProtocol, SignalExportConfig,
+};
+// Test-only shared names: the unit tests below exercise the extracted
+// implementations through this module's historical seams via `use super::*`.
+#[cfg(test)]
+use opentelemetry_sdk::metrics::Temporality;
+#[cfg(test)]
+use sie_telemetry::env::tracing_flag_set;
+#[cfg(test)]
+use sie_telemetry::proxy::{
+    authenticated_http_client, modal_proxy_headers_from_values, validate_modal_proxy_transport,
+};
+#[cfg(test)]
+use sie_telemetry::resource::compose_service_instance_id;
+#[cfg(test)]
+use sie_telemetry::transport::{
+    derive_metrics_endpoint, signal_endpoints_from_values, trace_export_config_from_values,
+};
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::env;
 
 /// Initialise OpenTelemetry + tracing-subscriber for the sidecar.
 ///
@@ -114,7 +116,7 @@ pub fn init_tracing() {
     global::set_text_map_propagator(TraceContextPropagator::new());
 
     let endpoints = configured_signal_endpoints();
-    let (trace_config, trace_config_error) = match configured_trace_export_config() {
+    let (trace_config, trace_config_error) = match trace_export_config(sie_tracing_enabled()) {
         Ok(config) => (config, None),
         Err(error) => {
             eprintln!(
@@ -192,271 +194,22 @@ pub fn init_tracing() {
     }
 }
 
-fn tracing_flag_set(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| {
-        let value = value.trim();
-        value.eq_ignore_ascii_case("true") || value == "1" || value.eq_ignore_ascii_case("yes")
-    })
-}
-
-fn sie_tracing_enabled() -> bool {
-    let raw = env::var("SIE_TRACING_ENABLED").ok();
-    tracing_flag_set(raw.as_deref())
-}
-
-fn sie_metrics_enabled() -> bool {
-    let raw = env::var("SIE_METRICS_ENABLED").ok();
-    tracing_flag_set(raw.as_deref())
-}
-
-fn configured_signal_endpoints() -> SignalEndpoints {
-    let metrics_endpoint = cleaned_env("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT");
-    let generic_endpoint = cleaned_env("OTEL_EXPORTER_OTLP_ENDPOINT");
-    signal_endpoints_from_values(
-        sie_tracing_enabled(),
-        sie_metrics_enabled(),
-        metrics_endpoint.as_deref(),
-        generic_endpoint.as_deref(),
-        otlp_metrics_protocol().unwrap_or(OtlpProtocol::Grpc),
-    )
-}
-
-fn signal_endpoints_from_values(
-    tracing_enabled: bool,
-    metrics_enabled: bool,
-    metrics_endpoint: Option<&str>,
-    generic_endpoint: Option<&str>,
-    metrics_protocol: OtlpProtocol,
-) -> SignalEndpoints {
-    let metrics = if !metrics_enabled {
-        None
-    } else if let Some(explicit) = metrics_endpoint {
-        Some(explicit.to_string())
-    } else {
-        generic_endpoint
-            .map(|base| derive_metrics_endpoint(base, metrics_protocol, None, Some(base)))
-    };
-    SignalEndpoints {
-        tracing_enabled,
-        metrics_enabled,
-        metrics,
-    }
-}
-
-fn configured_trace_export_config() -> Result<Option<SignalExportConfig>, String> {
-    trace_export_config_from_values(
-        sie_tracing_enabled(),
-        cleaned_env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").as_deref(),
-        cleaned_env("OTEL_EXPORTER_OTLP_ENDPOINT").as_deref(),
-        cleaned_env("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL").as_deref(),
-        cleaned_env("OTEL_EXPORTER_OTLP_PROTOCOL").as_deref(),
-    )
-}
-
-fn trace_export_config_from_values(
-    enabled: bool,
-    traces_endpoint: Option<&str>,
-    generic_endpoint: Option<&str>,
-    traces_protocol: Option<&str>,
-    generic_protocol: Option<&str>,
-) -> Result<Option<SignalExportConfig>, String> {
-    if !enabled {
-        return Ok(None);
-    }
-    let protocol = select_otlp_protocol(traces_protocol, generic_protocol)?;
-    let endpoint = if let Some(explicit) = traces_endpoint {
-        explicit.to_string()
-    } else {
-        let Some(base) = generic_endpoint else {
-            return Ok(None);
-        };
-        signal_endpoint(base, protocol, "/v1/traces")
-    };
-    Ok(Some(SignalExportConfig { endpoint, protocol }))
-}
-
-fn signal_endpoint(base: &str, protocol: OtlpProtocol, signal_path: &str) -> String {
-    match protocol {
-        OtlpProtocol::Grpc => base.to_string(),
-        OtlpProtocol::Http if base.ends_with(signal_path) => base.to_string(),
-        OtlpProtocol::Http => format!("{}{signal_path}", base.trim_end_matches('/')),
-    }
-}
-
-/// Read an env var, trimming surrounding whitespace and treating a
-/// whitespace-only value as absent so it can't shadow a valid fallback.
-fn cleaned_env(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Return only the scheme/host/explicit-port origin for diagnostics.
-///
-/// Operator-provided OTLP URLs may contain credentials or routing tokens in
-/// userinfo, path, query, or fragment components. Never reflect those fields
-/// into the sidecar's local logs.
-fn endpoint_origin_for_log(endpoint: &str) -> String {
-    let Ok(parsed) = reqwest::Url::parse(endpoint) else {
-        return "<redacted>".to_string();
-    };
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return "<redacted>".to_string();
-    }
-    let Some(host) = parsed.host_str() else {
-        return "<redacted>".to_string();
-    };
-    let host = if host.starts_with('[') && host.ends_with(']') {
-        host.to_string()
-    } else if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    match parsed.port() {
-        Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
-        None => format!("{}://{host}", parsed.scheme()),
-    }
-}
-
-/// OTLP transport for the trace exporter. The trace-specific setting wins over
-/// the generic setting. Only exact `grpc` and `http/protobuf` are accepted;
-/// absence preserves the historical gRPC path.
-/// Metrics-specific transport override, then generic, then the gRPC default.
-/// Metrics never inherit a trace-specific setting.
-fn otlp_metrics_protocol() -> Result<OtlpProtocol, String> {
-    select_metrics_protocol(
-        cleaned_env("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL").as_deref(),
-        cleaned_env("OTEL_EXPORTER_OTLP_PROTOCOL").as_deref(),
-    )
-}
-
-fn select_metrics_protocol(
-    metrics_protocol: Option<&str>,
-    generic_protocol: Option<&str>,
-) -> Result<OtlpProtocol, String> {
-    protocol_from_raw(metrics_protocol.or(generic_protocol))
-}
-
+/// Trace transport: trace-specific setting, then generic, then gRPC.
+#[cfg(test)]
 fn select_otlp_protocol(
     trace_protocol: Option<&str>,
     generic_protocol: Option<&str>,
 ) -> Result<OtlpProtocol, String> {
-    protocol_from_raw(trace_protocol.or(generic_protocol))
+    sie_telemetry::transport::select_signal_protocol(trace_protocol, generic_protocol, "traces")
 }
 
-fn protocol_from_raw(raw: Option<&str>) -> Result<OtlpProtocol, String> {
-    match raw.map(|value| value.trim().to_ascii_lowercase()) {
-        None => Ok(OtlpProtocol::Grpc),
-        Some(value) if value == "grpc" => Ok(OtlpProtocol::Grpc),
-        Some(value) if value == "http/protobuf" => Ok(OtlpProtocol::Http),
-        Some(value) => Err(format!("unsupported OTLP protocol: {value:?}")),
-    }
-}
-
-fn modal_proxy_auth_enabled() -> bool {
-    cleaned_env("SIE_MODAL_PROXY_AUTH").is_some_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
-fn trusted_modal_origin(
-    raw: &str,
-    origin_only: bool,
-    expected_path: Option<&str>,
-) -> Option<String> {
-    let parsed = reqwest::Url::parse(raw).ok()?;
-    let host = parsed.host_str()?.to_ascii_lowercase();
-    if parsed.scheme() != "https"
-        || !host.ends_with(".modal.run")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.port_or_known_default() != Some(443)
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-        || (origin_only && parsed.path() != "/")
-        || expected_path.is_some_and(|path| parsed.path() != path)
-    {
-        return None;
-    }
-    Some(format!("https://{host}"))
-}
-
-fn modal_proxy_headers(
-    endpoint: &str,
-    expected_path: &str,
-) -> Result<HashMap<String, String>, String> {
-    modal_proxy_headers_from_values(
-        endpoint,
-        expected_path,
-        modal_proxy_auth_enabled(),
-        cleaned_env("SIE_OTEL_PROXY_AUTH_ORIGIN").as_deref(),
-        cleaned_env("SIE_MODAL_PROXY_TOKEN_ID").as_deref(),
-        cleaned_env("SIE_MODAL_PROXY_TOKEN_SECRET").as_deref(),
-    )
-}
-
-fn modal_proxy_headers_from_values(
-    endpoint: &str,
-    expected_path: &str,
-    proxy_auth_enabled: bool,
-    allowed_origin: Option<&str>,
-    token_id: Option<&str>,
-    token_secret: Option<&str>,
-) -> Result<HashMap<String, String>, String> {
-    if !proxy_auth_enabled {
-        return Ok(HashMap::new());
-    }
-    let allowed = allowed_origin
-        .and_then(|origin| trusted_modal_origin(origin, true, None))
-        .ok_or_else(|| "managed OTLP proxy-auth origin is missing or untrusted".to_string())?;
-    let actual = trusted_modal_origin(endpoint, false, Some(expected_path))
-        .ok_or_else(|| "managed OTLP signal endpoint is untrusted".to_string())?;
-    if actual != allowed {
-        return Err(
-            "managed OTLP endpoint does not match the provisioned proxy-auth origin".to_string(),
-        );
-    }
-
-    let (id, secret) = token_id
-        .filter(|value| !value.trim().is_empty())
-        .zip(token_secret.filter(|value| !value.trim().is_empty()))
-        .ok_or_else(|| {
-            "managed OTLP proxy authentication requires a complete Modal credential pair"
-                .to_string()
-        })?;
-    let mut headers = HashMap::new();
-    headers.insert("Modal-Key".to_string(), id.to_string());
-    headers.insert("Modal-Secret".to_string(), secret.to_string());
-    Ok(headers)
-}
-
-fn authenticated_http_client() -> Result<reqwest::blocking::Client, String> {
-    // reqwest's blocking builder panics inside Tokio; tracing initializes after
-    // `#[tokio::main]`, so build off-runtime like OTel's default client does.
-    std::thread::spawn(|| {
-        reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .build()
-    })
-    .join()
-    .map_err(|_| "build no-redirect OTLP HTTP client panicked".to_string())?
-    .map_err(|error| format!("build no-redirect OTLP HTTP client: {error}"))
-}
-
-fn validate_modal_proxy_transport(
-    protocol: OtlpProtocol,
-    proxy_auth_enabled: bool,
-) -> Result<(), String> {
-    if proxy_auth_enabled && protocol != OtlpProtocol::Http {
-        return Err("Modal OTLP proxy authentication requires HTTP transport".to_string());
-    }
-    Ok(())
+/// Metrics transport: metrics-specific setting, then generic, then gRPC.
+#[cfg(test)]
+fn select_metrics_protocol(
+    metrics_protocol: Option<&str>,
+    generic_protocol: Option<&str>,
+) -> Result<OtlpProtocol, String> {
+    sie_telemetry::transport::select_signal_protocol(metrics_protocol, generic_protocol, "metrics")
 }
 
 /// Resolve the sidecar service identity while honoring every non-empty operator
@@ -470,12 +223,13 @@ fn sidecar_service_name(configured: Option<&str>) -> String {
 }
 
 /// Build the resource attributes shared with the gateway and managed lanes.
+/// The sidecar's historical shape: no `service.version` attribute and no
+/// `SIE_DEPLOYMENT_ENV` / `AWS_REGION` fallbacks (unlike gateway + worker —
+/// drift flagged in #2339, deliberately not normalized here).
 fn otlp_resource(service_name: &str) -> Resource {
-    let instance_prefix =
-        cleaned_env("SIE_TELEMETRY_INSTANCE_ID").or_else(|| cleaned_env("MODAL_TASK_ID"));
     otlp_resource_from_values(
         service_name,
-        &service_instance_id(instance_prefix.as_deref()),
+        &service_instance_id(instance_prefix_env().as_deref()),
         cleaned_env("SIE_OTEL_DEPLOYMENT_ENVIRONMENT").as_deref(),
         cleaned_env("SIE_OTEL_CLOUD_REGION").as_deref(),
         cleaned_env("SIE_CLOUD_REGION").as_deref(),
@@ -489,44 +243,15 @@ fn otlp_resource_from_values(
     otel_cloud_region: Option<&str>,
     cloud_region: Option<&str>,
 ) -> Resource {
-    Resource::builder_empty()
-        .with_service_name(service_name.to_string())
-        .with_attributes([
-            KeyValue::new("service.instance.id", service_instance_id.to_string()),
-            KeyValue::new(
-                "deployment.environment",
-                deployment_environment
-                    .unwrap_or(UNKNOWN_RESOURCE_VALUE)
-                    .to_string(),
-            ),
-            KeyValue::new(
-                "cloud.region",
-                otel_cloud_region
-                    .or(cloud_region)
-                    .unwrap_or(UNKNOWN_RESOURCE_VALUE)
-                    .to_string(),
-            ),
-        ])
-        .build()
-}
-
-fn service_instance_id(configured_prefix: Option<&str>) -> String {
-    let process_start_uuid = PROCESS_START_UUID
-        .get_or_init(|| uuid::Uuid::new_v4().to_string())
-        .as_str();
-    compose_service_instance_id(configured_prefix, process_start_uuid)
-}
-
-fn compose_service_instance_id(
-    configured_prefix: Option<&str>,
-    process_start_uuid: &str,
-) -> String {
-    configured_prefix
-        .map(str::trim)
-        .map(|prefix| prefix.trim_end_matches('/'))
-        .filter(|prefix| !prefix.is_empty())
-        .map(|prefix| format!("{prefix}/{process_start_uuid}"))
-        .unwrap_or_else(|| process_start_uuid.to_string())
+    resource_from_values(
+        service_name,
+        service_instance_id,
+        deployment_environment.unwrap_or(UNKNOWN_RESOURCE_VALUE),
+        otel_cloud_region
+            .or(cloud_region)
+            .unwrap_or(UNKNOWN_RESOURCE_VALUE),
+        None,
+    )
 }
 
 fn init_tracer(config: &SignalExportConfig) -> Result<Tracer, String> {
@@ -542,37 +267,6 @@ fn init_tracer(config: &SignalExportConfig) -> Result<Tracer, String> {
     global::set_tracer_provider(provider.clone());
     let _ = TRACER_PROVIDER.set(provider);
     Ok(tracer)
-}
-
-/// Build the exporter for the selected transport. HTTP carries Modal proxy
-/// authentication when configured; gRPC keeps the historical cluster path.
-fn build_span_exporter(
-    config: &SignalExportConfig,
-) -> Result<opentelemetry_otlp::SpanExporter, String> {
-    let proxy_auth_enabled = modal_proxy_auth_enabled();
-    validate_modal_proxy_transport(config.protocol, proxy_auth_enabled)?;
-    match config.protocol {
-        OtlpProtocol::Http => {
-            let mut builder = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_protocol(Protocol::HttpBinary)
-                .with_endpoint(&config.endpoint);
-            let headers = modal_proxy_headers(&config.endpoint, "/v1/traces")?;
-            if proxy_auth_enabled {
-                builder = builder
-                    .with_http_client(authenticated_http_client()?)
-                    .with_headers(headers);
-            }
-            builder
-                .build()
-                .map_err(|e| format!("build OTLP/HTTP span exporter: {e}"))
-        }
-        OtlpProtocol::Grpc => opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(&config.endpoint)
-            .build()
-            .map_err(|e| format!("build OTLP/gRPC span exporter: {e}")),
-    }
 }
 
 /// Install the MeterProvider that pushes the bounded dotted queue/batch
@@ -625,59 +319,14 @@ pub(crate) fn sidecar_metric_cardinality_view(instrument: &Instrument) -> Option
     )
 }
 
-fn derive_metrics_endpoint(
-    endpoint_seed: &str,
-    protocol: OtlpProtocol,
-    metrics_override: Option<&str>,
-    base_override: Option<&str>,
-) -> String {
-    if let Some(explicit) = metrics_override {
-        return explicit.to_string();
-    }
-    match protocol {
-        OtlpProtocol::Grpc => endpoint_seed.to_string(),
-        OtlpProtocol::Http => {
-            if endpoint_seed.ends_with("/v1/metrics") {
-                endpoint_seed.to_string()
-            } else if let Some(base) = base_override {
-                format!("{}/v1/metrics", base.trim_end_matches('/'))
-            } else {
-                format!("{}/v1/metrics", endpoint_seed.trim_end_matches('/'))
-            }
-        }
-    }
-}
-
 fn build_metric_exporter(
     endpoint: &str,
     protocol: OtlpProtocol,
 ) -> Result<opentelemetry_otlp::MetricExporter, String> {
-    let proxy_auth_enabled = modal_proxy_auth_enabled();
-    validate_modal_proxy_transport(protocol, proxy_auth_enabled)?;
-    match protocol {
-        OtlpProtocol::Http => {
-            let mut builder = opentelemetry_otlp::MetricExporter::builder()
-                .with_temporality(Temporality::LowMemory)
-                .with_http()
-                .with_protocol(Protocol::HttpBinary)
-                .with_endpoint(endpoint);
-            let headers = modal_proxy_headers(endpoint, "/v1/metrics")?;
-            if proxy_auth_enabled {
-                builder = builder
-                    .with_http_client(authenticated_http_client()?)
-                    .with_headers(headers);
-            }
-            builder
-                .build()
-                .map_err(|error| format!("build OTLP/HTTP metric exporter: {error}"))
-        }
-        OtlpProtocol::Grpc => opentelemetry_otlp::MetricExporter::builder()
-            .with_temporality(Temporality::LowMemory)
-            .with_tonic()
-            .with_endpoint(endpoint)
-            .build()
-            .map_err(|error| format!("build OTLP/gRPC metric exporter: {error}")),
-    }
+    sie_telemetry::exporters::build_metric_exporter(&SignalExportConfig {
+        endpoint: endpoint.to_string(),
+        protocol,
+    })
 }
 
 /// Graceful shutdown — flush any pending spans and metric points.
@@ -700,7 +349,6 @@ mod tests {
     use opentelemetry::trace::{Span as _, Tracer as _};
     use opentelemetry::{Key, Value};
     use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
-    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Mutex;

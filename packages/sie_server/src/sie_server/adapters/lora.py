@@ -25,8 +25,10 @@ class LoraCapability(Protocol):
         if the load blocks all requests (SGLang HTTP).
         """
 
-    def load_lora(self, lora_path: str) -> int:
-        """Load a LoRA adapter; return its memory usage in bytes."""
+    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
+        """Load a LoRA adapter (optionally at a pinned 40-hex commit SHA);
+        return its memory usage in bytes.
+        """
 
     def unload_lora(self, lora_name: str) -> None:
         """Unload a previously loaded LoRA adapter."""

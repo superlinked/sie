@@ -39,7 +39,14 @@ const PUBLISH_ACK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(6);
 const RESULT_CHUNK_KIND: &str = "result_chunk_v1";
 const MAX_RESULT_CHUNK_ITEM_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_RESULT_CHUNKS_PER_ITEM: u32 = 64;
-const MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST: usize = 64 * 1_024 * 1_024;
+/// The ceiling on result-transfer bytes ONE request may have reserved.
+///
+/// `pub(crate)` because it is also the anchor for
+/// `handlers::proxy::MAX_COMPAT_RESPONSE_BODY` (#2617): the OpenAI-compatible
+/// wrappers buffer an inner native reply whole, and they should bound that
+/// buffer at the number this crate already sizes single-request result state
+/// against rather than at a second, independently chosen one.
+pub(crate) const MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST: usize = 64 * 1_024 * 1_024;
 /// One eighth of the gateway's 2 GiB container limit. This leaves 1.75 GiB
 /// for normal request/response buffers, JSON expansion, NATS, and allocator
 /// headroom even when result chunk traffic is at its reservation ceiling.
@@ -699,6 +706,21 @@ pub struct UnitCounts {
     /// preserve the legacy positional MessagePack field order.
     #[serde(default)]
     pub pairs: Option<u64>,
+    /// Host-measured GPU-time share for sole-tenant sealed custom serving,
+    /// in whole seconds (ceil, request minimum 1). Stamped by the trusted
+    /// dispatcher — never by in-jail code — and only on sealed lanes;
+    /// catalog workers never emit it. Appended like `pairs`.
+    #[serde(default)]
+    pub gpu_second: Option<u64>,
+    /// Generated tokens on the per-ITEM result path (#2432). The realtime
+    /// generate surface carries its counts on the terminal chunk's
+    /// ``UsageBlock`` instead; this field is how ONE buffered generation
+    /// item's authoritative `completion_tokens` reaches the jobs/batch
+    /// settle path, which rates every item from `WorkResult.units`.
+    /// Appended last, like `pairs`/`gpu_second`, so the legacy positional
+    /// MessagePack field order is preserved.
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
 }
 
 struct CachedStreamInfo {
@@ -1406,6 +1428,18 @@ fn drop_pending_result_collector(
     pending: &DashMap<String, ResultCollector>,
     request_id: &str,
 ) -> bool {
+    pending.remove(request_id).is_some()
+}
+
+fn drop_disconnected_stream_collector(
+    pending: &DashMap<String, StreamCollector>,
+    request_id: &str,
+) -> bool {
+    let Some(collector) = pending.get(request_id) else {
+        return false;
+    };
+    collector.latch_client_disconnected();
+    drop(collector);
     pending.remove(request_id).is_some()
 }
 
@@ -3286,6 +3320,12 @@ impl WorkPublisher {
         self.pending_streams.remove(request_id);
     }
 
+    /// Drop a stream after its client-disconnect grace window and latch that
+    /// cause for every transport holder before the collector disappears.
+    pub fn drop_pending_stream_client_disconnect(&self, request_id: &str) {
+        drop_disconnected_stream_collector(&self.pending_streams, request_id);
+    }
+
     /// Tear down collector and payload state after the initial JetStream
     /// publish was submitted but its durable ACK later failed.
     ///
@@ -4687,6 +4727,34 @@ mod tests {
         assert_eq!(decoded.images, Some(3));
         assert_eq!(decoded.audio_ms, Some(4_000));
         assert_eq!(decoded.pairs, None);
+        assert_eq!(decoded.gpu_second, None);
+        assert_eq!(decoded.output_tokens, None);
+    }
+
+    /// `output_tokens` (#2432) is additive: a worker that already stamps
+    /// `pairs` and `gpu_second` positionally must keep decoding without a
+    /// field shift, and the new dimension must read as absent — never as a
+    /// fabricated zero the settle path would bill.
+    #[test]
+    fn unit_counts_output_tokens_is_wire_additive() {
+        let legacy = rmp_serde::to_vec(&(
+            Some(11_u64),
+            Some(2_u64),
+            Some(3_u64),
+            Some(4_000_u64),
+            Some(5_u64),
+            Some(6_u64),
+        ))
+        .expect("legacy positional units through gpu_second");
+        let decoded: UnitCounts = rmp_serde::from_slice(&legacy).expect("additive decode");
+
+        assert_eq!(decoded.input_tokens, Some(11));
+        assert_eq!(decoded.pages, Some(2));
+        assert_eq!(decoded.images, Some(3));
+        assert_eq!(decoded.audio_ms, Some(4_000));
+        assert_eq!(decoded.pairs, Some(5));
+        assert_eq!(decoded.gpu_second, Some(6));
+        assert_eq!(decoded.output_tokens, None);
     }
 
     #[test]
@@ -5932,6 +6000,26 @@ mod tests {
     }
 
     #[test]
+    fn client_disconnect_latches_before_the_stream_collector_is_dropped() {
+        let pending = DashMap::new();
+        let (tx, _rx) = oneshot::channel();
+        let collector = StreamCollector::new(tx, "model-a".into(), "default".into());
+        let disconnected = collector.client_disconnected_handle();
+        pending.insert("req-disconnect".to_string(), collector);
+
+        assert!(drop_disconnected_stream_collector(
+            &pending,
+            "req-disconnect"
+        ));
+        assert!(disconnected.load(Ordering::Acquire));
+        assert!(!pending.contains_key("req-disconnect"));
+        assert!(!drop_disconnected_stream_collector(
+            &pending,
+            "req-disconnect"
+        ));
+    }
+
+    #[test]
     fn test_normalize_model_id() {
         assert_eq!(normalize_model_id("BAAI/bge-m3"), "BAAI__bge-m3");
         assert_eq!(normalize_model_id("my-model"), "my-model");
@@ -6241,6 +6329,8 @@ mod tests {
                 pages: None,
                 images: None,
                 audio_ms: Some(1_001),
+                gpu_second: None,
+                output_tokens: None,
             }),
             worker_direct: true,
             executed_bundle_config_hash: None,

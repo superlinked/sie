@@ -9,6 +9,11 @@
 # The published image is ghcr.io/superlinked/sie-server-sidecar; the runtime
 # binary inside the image is /sie-server-sidecar.
 #
+# The build runs at the Cargo workspace root (#2339): the root
+# Cargo.toml/Cargo.lock plus every member's manifest+sources must be present
+# for cargo to load the workspace, and the binary is selected with
+# `-p sie-server-sidecar`.
+#
 # The only Cargo feature today is `cloud-storage` (S3/GCS payload modes),
 # which is the default for `ARG FEATURES` below. CI can override with
 # `--build-arg FEATURES=` if you want a leaner build with no remote
@@ -30,9 +35,11 @@ RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
 FROM chef AS planner
-COPY packages/sie_server_sidecar/Cargo.toml packages/sie_server_sidecar/Cargo.lock ./
-COPY packages/sie_audio_prep/ /sie_audio_prep/
-COPY packages/sie_server_sidecar/src/ src/
+COPY Cargo.toml Cargo.lock ./
+COPY packages/sie_audio_prep/ packages/sie_audio_prep/
+COPY packages/sie_gateway/ packages/sie_gateway/
+COPY packages/sie_server_sidecar/ packages/sie_server_sidecar/
+COPY packages/sie_telemetry/ packages/sie_telemetry/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # =============================================================================
@@ -63,26 +70,26 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 ENV RUSTONIG_STATIC_LIBONIG=1
 
 COPY --from=planner /build/recipe.json recipe.json
-# The path dependency resolves from /build/../sie_audio_prep. cargo-chef
-# reconstructs the root crate from recipe.json, but not a sibling directory.
-COPY packages/sie_audio_prep/ /sie_audio_prep/
 
 # Warm cargo's target cache with JUST the dependency graph. This keeps
 # iteration fast when only worker source changes (deps hash unchanged).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo chef cook --release \
+        --package sie-server-sidecar \
         --features "${FEATURES}" \
         --recipe-path recipe.json
 
 # Restore real source.
 #
-# `cargo chef cook` mutates the crate into dependency-only stubs. Re-copy
-# the real manifest and source before `cargo build` so the final image gets
+# `cargo chef cook` mutates the workspace into dependency-only stubs. Re-copy
+# the real manifests and sources before `cargo build` so the final image gets
 # `sie-server-sidecar`, not a cache-warming placeholder binary.
-COPY packages/sie_server_sidecar/Cargo.toml packages/sie_server_sidecar/Cargo.lock ./
-COPY packages/sie_audio_prep/ /sie_audio_prep/
-COPY packages/sie_server_sidecar/src/ src/
+COPY Cargo.toml Cargo.lock ./
+COPY packages/sie_audio_prep/ packages/sie_audio_prep/
+COPY packages/sie_gateway/ packages/sie_gateway/
+COPY packages/sie_server_sidecar/ packages/sie_server_sidecar/
+COPY packages/sie_telemetry/ packages/sie_telemetry/
 
 # Real build.
 #
@@ -91,7 +98,7 @@ COPY packages/sie_server_sidecar/src/ src/
 # reaches the runtime image.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --locked --release --bin sie-server-sidecar --features "${FEATURES}" \
+    cargo build --locked --release --package sie-server-sidecar --bin sie-server-sidecar --features "${FEATURES}" \
     && ls -lh target/release/sie-server-sidecar \
     && test "$(wc -c < target/release/sie-server-sidecar)" -gt 5000000 \
     && cp target/release/sie-server-sidecar /usr/local/bin/sie-server-sidecar

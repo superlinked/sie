@@ -6,15 +6,18 @@ All server management is inline to avoid cross-package dependencies.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import httpx
 import pytest
@@ -73,6 +76,175 @@ def _wait_for_health(
             pass
         time.sleep(poll_interval_s)
     return False
+
+
+class _SIEServerProcess:
+    """Test-local SIE server process with model dependency resolution.
+
+    This deliberately lives with the server tests to keep subprocess
+    management self-contained.
+    """
+
+    def __init__(
+        self,
+        *,
+        port: int,
+        models_dir: str | Path,
+        instrumentation: bool = False,
+    ) -> None:
+        self._port = port
+        models_path = Path(models_dir)
+        self._models_dir = models_path if models_path.is_absolute() else _project_root / models_path
+        self._instrumentation = instrumentation
+        self._process: subprocess.Popen[str] | None = None
+        self._requirements_path: Path | None = None
+        self._log_file: TextIO | None = None
+        self._log_path: Path | None = None
+
+    def _resolve_dependencies(self, model: str, device: str) -> str:
+        command = [
+            sys.executable,
+            "-m",
+            "sie_server.cli",
+            "resolve-deps",
+            "--models-dir",
+            str(self._models_dir),
+            "--models",
+            model,
+        ]
+        if not device.lower().startswith("cuda"):
+            command.append("--cpu")
+        result = subprocess.run(  # noqa: S603 — intentional subprocess call
+            command,
+            cwd=_project_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        if result.returncode != 0:
+            logger.warning("Failed to resolve test server dependencies: %s", result.stderr)
+            return ""
+        return result.stdout
+
+    def start(self, model: str, device: str) -> None:
+        if self._process is not None:
+            raise RuntimeError("SIE test server is already running")
+
+        requirements = self._resolve_dependencies(model, device)
+        if requirements.strip():
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".txt",
+                delete=False,
+                prefix="sie-server-test-requirements-",
+            ) as requirements_file:
+                requirements_file.write(requirements)
+                self._requirements_path = Path(requirements_file.name)
+
+        # Preserve the already-materialized workspace while layering
+        # model-specific requirements. Project mode would reconcile the
+        # virtual root and remove the workspace packages installed by CI.
+        command = ["uv", "run", "--no-project", "--python", sys.executable]
+        if self._requirements_path is not None:
+            command.extend(["--with-requirements", str(self._requirements_path)])
+        command.extend(
+            [
+                "python",
+                "-m",
+                "sie_server.cli",
+                "serve",
+                "--port",
+                str(self._port),
+                "--host",
+                "127.0.0.1",
+                "--device",
+                device,
+                "--models-dir",
+                str(self._models_dir),
+                "--models",
+                model,
+            ]
+        )
+        if self._instrumentation:
+            command.append("--tracing")
+
+        self._log_file = tempfile.NamedTemporaryFile(
+            mode="w+",
+            encoding="utf-8",
+            suffix=".log",
+            delete=False,
+            prefix="sie-server-test-",
+        )
+        self._log_path = Path(self._log_file.name)
+        logger.info("Starting test server: %s", " ".join(command))
+        self._process = subprocess.Popen(  # noqa: S603 — intentional subprocess call
+            command,
+            cwd=_project_root,
+            stdout=self._log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+
+    def wait_ready(self, timeout_s: float) -> None:
+        if self._process is None:
+            raise RuntimeError("SIE test server has not been started")
+        if _wait_for_health(self.get_url(), timeout_s=timeout_s, proc=self._process):
+            return
+
+        log_file = self._log_file
+        log_path = self._log_path
+        if log_file is None or log_path is None:
+            raise RuntimeError("SIE test server log is not initialized")
+        log_file.flush()
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+        tail = "\n".join(output.rstrip().splitlines()[-80:])
+        pytest.fail(f"SIE test server did not become ready within {timeout_s:.0f}s.\n{tail}")
+
+    def get_url(self) -> str:
+        if self._process is None:
+            raise RuntimeError("SIE test server is not running")
+        return f"http://127.0.0.1:{self._port}"
+
+    def stop(self) -> None:
+        process = self._process
+        try:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    # The child may exit between inspecting it and signaling its process group.
+                    pass
+                try:
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        # The child may exit after the timeout but before the fallback signal.
+                        pass
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=5)
+        finally:
+            self._process = None
+
+            if self._log_file is not None:
+                self._log_file.close()
+                self._log_file = None
+            if self._log_path is not None:
+                self._log_path.unlink(missing_ok=True)
+                self._log_path = None
+            if self._requirements_path is not None:
+                self._requirements_path.unlink(missing_ok=True)
+                self._requirements_path = None
+
+
+@pytest.fixture(scope="session")
+def sie_server_process_factory() -> type[_SIEServerProcess]:
+    """Return the test-local configurable server process."""
+    return _SIEServerProcess
 
 
 # =============================================================================

@@ -284,11 +284,20 @@ def test_decode_chunk_bytes_all_items() -> None:
 
 
 def test_job_chunks_extracts_ref_metadata() -> None:
+    """#2434: a settled chunk carries its charge under the unified name."""
     job = {
         "output": {
             "kind": "refs",
             "chunks": [
-                {"seq": 0, "items": 3, "state": "succeeded", "ref": "payload-store/c0", "units": 15, "credits": 15}
+                {
+                    "seq": 0,
+                    "items": 3,
+                    "state": "succeeded",
+                    "ref": "payload-store/c0",
+                    "units": 15,
+                    "credits_charged": 15,
+                    "rate_book_version": "book-v1",
+                }
             ],
         }
     }
@@ -300,7 +309,21 @@ def test_job_chunks_extracts_ref_metadata() -> None:
             "state": "succeeded",
             "ref": "payload-store/c0",
             "units": 15,
-            "credits": 15,
+            "credits_charged": 15,
+            "rate_book_version": "book-v1",
             "error": None,
         }
     ]
+
+
+def test_job_chunks_leave_an_unsettled_chunk_uncharged() -> None:
+    """A chunk the control plane has not acked yet reports no charge at all."""
+    job = {
+        "output": {
+            "kind": "refs",
+            "chunks": [{"seq": 1, "items": 3, "state": "spawned", "ref": None, "units": None}],
+        }
+    }
+    (chunk,) = job_chunks(job)
+    assert chunk["credits_charged"] is None
+    assert chunk["rate_book_version"] is None

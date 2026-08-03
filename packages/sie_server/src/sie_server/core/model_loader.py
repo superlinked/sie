@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sie_server.adapters.base import ModelAdapter
-from sie_server.config.model import ModelConfig, ProfileAdaptiveBatching
+from sie_server.config.model import ModelConfig, ProfileAdaptiveBatching, lora_entry_ref
 from sie_server.core.inference import AttentionBackend, ComputePrecision
 from sie_server.core.load_errors import ModelLoadTimeoutError
 from sie_server.core.loader import load_adapter
@@ -630,7 +630,26 @@ class ModelLoader:
         # Engine-owned adapters (sglang: ``supports_hot_lora_reload() == False``)
         # consume ``loadtime.lora_paths`` themselves at engine launch, so only
         # hot-reload (PEFT) adapters take the loadtime declarations from here.
-        if (lora_cap := adapter.lora_capability()) is not None:
+        lora_cap = adapter.lora_capability()
+
+        # A pinned LoRA revision (#2113) is only honored on the hot-reload path
+        # (``load_lora(revision=...)``). An engine-owned adapter consumes bare
+        # ids at engine launch and a LoRA-less adapter never loads the ref at
+        # all — in both cases a declared pin would silently resolve at the
+        # Hub's default branch, which is exactly the drift the pin exists to
+        # prevent. Fail the load loudly instead.
+        pinned = {ref: rev for ref, rev in config.lora_revisions().items() if rev is not None}
+        if pinned and (lora_cap is None or not lora_cap.supports_hot_lora_reload()):
+            msg = (
+                f"Model '{name}' pins LoRA revision(s) {pinned!r}, but adapter "
+                f"{type(adapter).__name__!r} cannot honor a pin: it loads LoRAs at engine "
+                "launch (or not at all), where only bare ids exist. Remove the pin, or "
+                "serve via a hot-reload (PEFT) adapter. In the managed path, staging "
+                "resolves pins to local snapshots before the server sees the config."
+            )
+            raise ValueError(msg)
+
+        if lora_cap is not None:
             profile_loras = self._collect_profile_loras(
                 config,
                 include_loadtime_paths=lora_cap.supports_hot_lora_reload(),
@@ -642,9 +661,9 @@ class ModelLoader:
                     name,
                     list(profile_loras),
                 )
-                for lora_path in profile_loras:
+                for lora_path, lora_revision in profile_loras.items():
                     try:
-                        lora_memory = lora_cap.load_lora(lora_path)
+                        lora_memory = lora_cap.load_lora(lora_path, revision=lora_revision)
                         loaded_model.loras[lora_path] = LoadedLora(
                             adapter_id=lora_path,
                             memory_bytes=lora_memory,
@@ -671,17 +690,18 @@ class ModelLoader:
         config: ModelConfig,
         *,
         include_loadtime_paths: bool = True,
-    ) -> set[str]:
-        """Collect all LoRA paths from model profiles.
+    ) -> dict[str, str | None]:
+        """Collect all LoRA paths from model profiles, with any pinned revision.
 
         The canonical spelling is
         ``adapter_options.loadtime["lora_paths"]`` — either a list of
         HuggingFace/local paths (each path doubles as the public LoRA id on
-        the PEFT path) or a dict of served-name → path (the sglang shape,
-        whose paths are what a PEFT adapter would load). The scalar
-        ``adapter_options.runtime["lora_id"]`` is the DEPRECATED legacy alias:
-        it is still accepted here for existing embedding profiles, but new
-        profiles should declare ``loadtime.lora_paths`` (the scalar form is
+        the PEFT path) or a dict of served-name → ref (the sglang shape,
+        whose paths are what a PEFT adapter would load). A dict-form ref may
+        be a bare path or a pinned ``{id, revision}`` mapping (#2113). The
+        scalar ``adapter_options.runtime["lora_id"]`` is the DEPRECATED legacy
+        alias: it is still accepted here for existing embedding profiles, but
+        new profiles should declare ``loadtime.lora_paths`` (the scalar form is
         already rejected outright on generation models — see
         ``core.pool_isolation.validate_no_legacy_scalar_lora_id``).
 
@@ -694,9 +714,13 @@ class ModelLoader:
                 double-load.
 
         Returns:
-            Set of unique LoRA paths from profiles.
+            Mapping of unique LoRA path/id -> pinned 40-hex revision, or
+            ``None`` when unpinned. Revisions come from
+            :meth:`ModelConfig.lora_revisions` (pin-beats-bare across
+            profiles; conflicting pins already rejected at config load).
         """
-        loras: set[str] = set()
+        revisions = config.lora_revisions()
+        loras: dict[str, str | None] = {}
 
         for profile_name, profile_config in config.profiles.items():
             # Canonical key: adapter_options.loadtime["lora_paths"].
@@ -704,7 +728,7 @@ class ModelLoader:
                 lora_paths = profile_config.adapter_options.loadtime.get("lora_paths")
                 entries: list[str] = []
                 if isinstance(lora_paths, dict):
-                    entries = [str(path) for path in lora_paths.values() if path]
+                    entries = [lora_entry_ref(ref)[0] for ref in lora_paths.values() if ref]
                 elif isinstance(lora_paths, (list, tuple)):
                     entries = [str(path) for path in lora_paths if path]
                 elif lora_paths:
@@ -715,7 +739,7 @@ class ModelLoader:
                         type(lora_paths).__name__,
                     )
                 for lora_path in entries:
-                    loras.add(lora_path)
+                    loras[lora_path] = revisions.get(lora_path)
                     logger.debug(
                         "Found LoRA '%s' in profile '%s' (loadtime.lora_paths)",
                         lora_path,
@@ -727,7 +751,7 @@ class ModelLoader:
             # backward compatibility with existing embedding profiles.
             lora_id = profile_config.adapter_options.runtime.get("lora_id")
             if lora_id:
-                loras.add(lora_id)
+                loras[lora_id] = revisions.get(lora_id)
                 logger.debug(
                     "Found LoRA '%s' in profile '%s' (legacy runtime.lora_id)",
                     lora_id,

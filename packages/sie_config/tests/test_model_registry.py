@@ -943,3 +943,50 @@ class TestEngineField:
 
     def test_known_engines_include_candle(self) -> None:
         assert frozenset({"pytorch", "candle"}) == KNOWN_ENGINES
+
+
+class TestProfileLoraPins:
+    """Dict-level mirror of sie_server's pinned-LoRA spelling rules (#2113)."""
+
+    SHA_A = "a" * 40
+    SHA_B = "b" * 40
+
+    @staticmethod
+    def _profiles(lora_paths) -> dict:
+        return {"p": {"adapter_options": {"loadtime": {"lora_paths": lora_paths}}}}
+
+    def test_bare_and_pinned_dict_values_pass(self) -> None:
+        model_registry._validate_profile_lora_pins(
+            self._profiles({"bare": "acme/l", "pinned": {"id": "acme/m", "revision": self.SHA_A}})
+        )
+
+    def test_branch_name_revision_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="40-char commit SHA"):
+            model_registry._validate_profile_lora_pins(self._profiles({"x": {"id": "acme/l", "revision": "main"}}))
+
+    def test_unknown_key_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unknown key"):
+            model_registry._validate_profile_lora_pins(self._profiles({"x": {"id": "acme/l", "rev": self.SHA_A}}))
+
+    def test_missing_id_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="'id'"):
+            model_registry._validate_profile_lora_pins(self._profiles({"x": {"revision": self.SHA_A}}))
+
+    def test_list_form_stays_bare_only(self) -> None:
+        with pytest.raises(ValueError, match="dict form"):
+            model_registry._validate_profile_lora_pins(self._profiles([{"id": "acme/l", "revision": self.SHA_A}]))
+
+    def test_conflicting_pins_across_profiles_are_rejected(self) -> None:
+        profiles = {
+            "a": {"adapter_options": {"loadtime": {"lora_paths": {"x": {"id": "acme/l", "revision": self.SHA_A}}}}},
+            "b": {"adapter_options": {"loadtime": {"lora_paths": {"x": {"id": "acme/l", "revision": self.SHA_B}}}}},
+        }
+        with pytest.raises(ValueError, match="two different revisions"):
+            model_registry._validate_profile_lora_pins(profiles)
+
+    def test_pin_beats_bare_mention_of_the_same_id(self) -> None:
+        profiles = {
+            "a": {"adapter_options": {"loadtime": {"lora_paths": {"x": {"id": "acme/l", "revision": self.SHA_A}}}}},
+            "b": {"adapter_options": {"runtime": {"lora_id": "acme/l"}}},
+        }
+        model_registry._validate_profile_lora_pins(profiles)

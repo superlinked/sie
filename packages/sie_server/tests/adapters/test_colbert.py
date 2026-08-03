@@ -106,6 +106,7 @@ class TestColBERTAdapter:
         mock_model = MagicMock()
         mock_model.config.hidden_size = 384
         mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)
         mock_model_class.from_pretrained.return_value = mock_model
 
         mock_tokenizer = MagicMock()
@@ -123,14 +124,106 @@ class TestColBERTAdapter:
     @patch("transformers.AutoConfig")
     @patch("transformers.AutoModel")
     @patch("transformers.AutoTokenizer")
-    def test_existing_prefix_markers_do_not_resize_embeddings(
+    def test_external_code_revision_survives_rotary_flash_fallback(
         self,
         mock_tokenizer_class: MagicMock,
         mock_model_class: MagicMock,
         mock_config_class: MagicMock,
         stub_chain_loader: None,
     ) -> None:
-        """Checkpoint vocabulary markers retain their trained embedding rows."""
+        mock_config = MagicMock(hidden_size=384)
+        mock_config_class.from_pretrained.return_value = mock_config
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 384
+        mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)
+        mock_model_class.from_pretrained.return_value = mock_model
+        mock_tokenizer = MagicMock(mask_token_id=None, vocab={})
+        mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
+
+        adapter = ColBERTRotaryFlashAdapter.create_for_device(
+            "cpu",
+            model_name_or_path="jinaai/jina-colbert-v2",
+            revision="model-sha",
+            code_revision="code-sha",
+        )
+        assert isinstance(adapter, ColBERTAdapter)
+        assert adapter._require_standalone_projection is True
+        projection = torch.nn.Linear(384, 128, bias=False)
+        with patch(
+            "sie_server.adapters.colbert.load_standalone_colbert_projection",
+            return_value=projection,
+        ) as projection_loader:
+            adapter.load("cpu")
+
+        for loader in (mock_tokenizer_class, mock_config_class, mock_model_class):
+            kwargs = loader.from_pretrained.call_args.kwargs
+            assert kwargs["revision"] == "model-sha"
+            assert kwargs["code_revision"] == "code-sha"
+        projection_loader.assert_called_once_with(
+            "jinaai/jina-colbert-v2",
+            revision="model-sha",
+            device="cpu",
+            dtype=torch.float32,
+            expected_in_features=384,
+            expected_out_features=128,
+            allow_bias=False,
+            required=True,
+        )
+
+    @patch("transformers.AutoConfig")
+    @patch("transformers.AutoModel")
+    @patch("transformers.AutoTokenizer")
+    def test_exact_prefix_markers_reuse_trained_ids_without_vocab_growth(
+        self,
+        mock_tokenizer_class: MagicMock,
+        mock_model_class: MagicMock,
+        mock_config_class: MagicMock,
+        stub_chain_loader: None,
+    ) -> None:
+        """Exact whitespace-bearing markers win over stripped vocabulary entries."""
+        mock_config = MagicMock(hidden_size=384)
+        mock_config_class.from_pretrained.return_value = mock_config
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 384
+        mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)
+        mock_model_class.from_pretrained.return_value = mock_model
+
+        marker_ids = {"[Q] ": 50368, "[D] ": 50369, "[Q]": 7, "[D]": 8}
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.mask_token_id = 103
+        mock_tokenizer.unk_token_id = 100
+        mock_tokenizer.vocab = marker_ids
+        mock_tokenizer.convert_tokens_to_ids.side_effect = lambda tokens: [marker_ids[tokens[0]]]
+        mock_tokenizer.encode.return_value = [42]
+        mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
+
+        adapter = ColBERTAdapter(
+            "test-colbert-model",
+            query_prefix="[Q] ",
+            doc_prefix="[D] ",
+            doc_punctuation_skiplist=False,
+        )
+        adapter.load("cpu")
+
+        mock_tokenizer.add_tokens.assert_not_called()
+        mock_model.resize_token_embeddings.assert_not_called()
+        assert adapter._query_prefix_id == 50368
+        assert adapter._doc_prefix_id == 50369
+
+    @patch("transformers.AutoConfig")
+    @patch("transformers.AutoModel")
+    @patch("transformers.AutoTokenizer")
+    def test_stripped_legacy_prefix_markers_do_not_resize_embeddings(
+        self,
+        mock_tokenizer_class: MagicMock,
+        mock_model_class: MagicMock,
+        mock_config_class: MagicMock,
+        stub_chain_loader: None,
+    ) -> None:
+        """Whitespace-suffixed legacy markers fall back to their stripped IDs."""
         mock_config = MagicMock()
         mock_config.hidden_size = 384
         mock_config_class.from_pretrained.return_value = mock_config
@@ -138,6 +231,7 @@ class TestColBERTAdapter:
         mock_model = MagicMock()
         mock_model.config.hidden_size = 384
         mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)
         mock_model_class.from_pretrained.return_value = mock_model
 
         marker_ids = {"[unused0]": 1, "[unused1]": 2}
@@ -153,6 +247,7 @@ class TestColBERTAdapter:
             "test-colbert-model",
             query_prefix="[unused0] ",
             doc_prefix="[unused1] ",
+            doc_punctuation_skiplist=False,
         )
         adapter.load("cpu")
 
@@ -241,6 +336,50 @@ class TestColBERTAdapter:
 
         call_kwargs = mock_model_class.from_pretrained.call_args
         assert call_kwargs.kwargs["attn_implementation"] == "flash_attention_2"
+        assert call_kwargs.kwargs["torch_dtype"] == torch.float16
+
+    @patch("transformers.AutoConfig")
+    @patch("transformers.AutoModel")
+    @patch("transformers.AutoTokenizer")
+    def test_native_load_float32_uses_sdpa_when_flash_attn_is_available(
+        self,
+        mock_tokenizer_class: MagicMock,
+        mock_model_class: MagicMock,
+        mock_config_class: MagicMock,
+        stub_chain_loader: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Native FP32 must use SDPA even when FlashAttention2 is installed."""
+        mock_config = MagicMock()
+        mock_config.hidden_size = 384
+        mock_config.model_type = "modernbert"
+        mock_config_class.from_pretrained.return_value = mock_config
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 384
+        mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)  # keep the projection probe offline
+        mock_model_class.from_pretrained.return_value = mock_model
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.mask_token_id = 103
+        mock_tokenizer.vocab = {}
+        mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
+
+        monkeypatch.setattr("sie_server.core.inference.is_flash_attention_available", lambda _device=None: True)
+        monkeypatch.setattr("sie_server.core.inference.is_sdpa_available", lambda: True)
+
+        adapter = ColBERTAdapter(
+            "test-colbert-model",
+            token_dim=128,
+            compute_precision="float32",
+            use_native_attention=True,
+        )
+        adapter.load("cuda")
+
+        call_kwargs = mock_model_class.from_pretrained.call_args
+        assert call_kwargs.kwargs["attn_implementation"] == "sdpa"
+        assert call_kwargs.kwargs["torch_dtype"] == torch.float32
 
     @patch("transformers.AutoConfig")
     @patch("transformers.AutoModel")
@@ -415,8 +554,9 @@ class TestColBERTAdapter:
 
         mock_tokenizer = MagicMock()
         mock_tokenizer.mask_token_id = 103
+        mock_tokenizer.unk_token_id = 100
         mock_tokenizer.vocab = {}
-        mock_tokenizer.encode.return_value = [42]
+        mock_tokenizer.convert_tokens_to_ids.return_value = 42
         mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
 
         disabled = ColBERTAdapter("test-colbert-model", doc_punctuation_skiplist=False)
@@ -692,7 +832,7 @@ class TestColBERTScorePairsOptions:
     """score_pairs() accepts runtime options instead of raising (#1430)."""
 
     def test_score_pairs_with_nonempty_options_does_not_raise(self) -> None:
-        """Non-empty encode-time options are accepted and ignored."""
+        """Non-empty runtime options reach the grouped score call."""
         adapter = ColBERTAdapter("test-model")
         adapter._model = MagicMock()
         adapter._device = "cpu"

@@ -670,12 +670,12 @@ def test_mixedbread_ai_mxbai_edge_colbert_v0_32m_multivector() -> None:
 
 @pytest.mark.xfail(reason="3B model too large for CPU unit tests", strict=False)
 def test_nvidia_llama_nemoretriever_colembed_3b_v1_multivector() -> None:
-    _assert_multivector("nvidia/llama-nemoretriever-colembed-3b-v1", 128, None)
+    _assert_multivector("nvidia/llama-nemoretriever-colembed-3b-v1", 3072, None)
 
 
 @pytest.mark.xfail(reason="3B model too large for CPU unit tests", strict=False)
 def test_nvidia_llama_nemoretriever_colembed_3b_v1_image_multivector() -> None:
-    _assert_multivector_image("nvidia/llama-nemoretriever-colembed-3b-v1", 128, None)
+    _assert_multivector_image("nvidia/llama-nemoretriever-colembed-3b-v1", 3072, None)
 
 
 @pytest.mark.xfail(reason="3B model too large for CPU unit tests", strict=False)
@@ -739,6 +739,21 @@ def test_mixedbread_ai_mxbai_edge_colbert_v0_32m_muvera_multivector() -> None:
     _assert_multivector(
         "mixedbread-ai/mxbai-edge-colbert-v0-32m:muvera", 64, [0.199462890625, -0.08306884765625, 0.05841064453125]
     )
+
+
+@pytest.mark.xfail(reason="3B model too large for CPU unit tests", strict=False)
+def test_nvidia_llama_nemoretriever_colembed_3b_v1_muvera_multivector() -> None:
+    _assert_multivector("nvidia/llama-nemoretriever-colembed-3b-v1:muvera", 3072, None)
+
+
+@pytest.mark.xfail(reason="3B model too large for CPU unit tests", strict=False)
+def test_vidore_colpali_v1_3_hf_muvera_multivector() -> None:
+    _assert_multivector("vidore/colpali-v1.3-hf:muvera", 128, None)
+
+
+@pytest.mark.xfail(reason="2B+ model too large for CPU unit tests", strict=False)
+def test_vidore_colqwen2_5_v0_2_muvera_multivector() -> None:
+    _assert_multivector("vidore/colqwen2.5-v0.2:muvera", 128, None)
 
 
 # =============================================================================

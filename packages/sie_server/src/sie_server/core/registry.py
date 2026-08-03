@@ -2334,10 +2334,15 @@ class ModelRegistry:
                 return
 
             adapter = loaded_model.adapter
+            # Config-pinned revision (#2113): an on-demand load of a
+            # profile-declared LoRA (e.g. a reload after LRU eviction) must
+            # honor the same pin the preload used, or eviction would silently
+            # reintroduce the drift the pin exists to prevent.
+            revision = loaded_model.config.lora_revisions().get(lora)
 
             # Run blocking load in thread pool
             def _do_load() -> int:
-                return adapter.load_lora(lora)
+                return adapter.load_lora(lora, revision=revision)
 
             memory_bytes = await loop.run_in_executor(None, _do_load)
 
@@ -2380,10 +2385,15 @@ class ModelRegistry:
                 return
 
             adapter = loaded_model.adapter
+            # Config-pinned revision (#2113): an on-demand load of a
+            # profile-declared LoRA (e.g. a reload after LRU eviction) must
+            # honor the same pin the preload used, or eviction would silently
+            # reintroduce the drift the pin exists to prevent.
+            revision = loaded_model.config.lora_revisions().get(lora)
 
             # Run blocking load in thread pool
             def _do_load() -> int:
-                return adapter.load_lora(lora)
+                return adapter.load_lora(lora, revision=revision)
 
             memory_bytes = await loop.run_in_executor(None, _do_load)
 

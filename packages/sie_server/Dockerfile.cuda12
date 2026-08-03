@@ -11,8 +11,14 @@ ARG UV_VERSION=0.9.28
 # to PyPI.
 FROM ghcr.io/pyo3/maturin:v1.13.3 AS audio-prep-builder
 WORKDIR /io
-COPY packages/sie_audio_prep .
-RUN maturin build --release --locked --out /dist
+# The crate is a Cargo workspace member (#2339): its pins live in the root
+# Cargo.lock, and loading the workspace needs every member's manifest+sources.
+COPY Cargo.toml Cargo.lock ./
+COPY packages/sie_audio_prep/ packages/sie_audio_prep/
+COPY packages/sie_gateway/ packages/sie_gateway/
+COPY packages/sie_server_sidecar/ packages/sie_server_sidecar/
+COPY packages/sie_telemetry/ packages/sie_telemetry/
+RUN maturin build --release --locked --out /dist --manifest-path packages/sie_audio_prep/Cargo.toml
 
 # =============================================================================
 # Dependency image: uv and standalone Python 3.12

@@ -33,6 +33,7 @@ from opentelemetry.sdk.metrics import (
 from opentelemetry.sdk.metrics.export import AggregationTemporality, PeriodicExportingMetricReader
 from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from sie_sdk.redaction import endpoint_origin_for_log as _endpoint_origin_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -43,19 +44,6 @@ MODELS_METRIC_NAME: Final = "sie.config.models"
 PUBLISH_METRIC_NAME: Final = "sie.config.publish"
 STORE_WRITES_METRIC_NAME: Final = "sie.config.store.writes"
 MESSAGING_READY_METRIC_NAME: Final = "sie.config.messaging.ready"
-
-
-def _endpoint_origin_for_log(endpoint: str) -> str:
-    """Return a credential- and query-free endpoint origin for diagnostics."""
-    try:
-        parsed = urlsplit(endpoint)
-        port = parsed.port
-    except ValueError:
-        return "<redacted>"
-    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
-        return "<redacted>"
-    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
-    return f"{parsed.scheme}://{host}{f':{port}' if port is not None else ''}"
 
 
 REQUEST_DURATION_BUCKETS_S: Final = (

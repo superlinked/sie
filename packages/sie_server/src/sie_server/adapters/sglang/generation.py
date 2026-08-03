@@ -971,6 +971,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # ``min_tokens`` knob (workaround for Qwen3.6's first-token-EOS
         # bug under greedy decode).
         if min_new_tokens is not None:
+            if min_new_tokens > max_new_tokens:
+                raise ValueError(f"min_new_tokens ({min_new_tokens}) must not exceed max_new_tokens ({max_new_tokens})")
             sampling_params["min_new_tokens"] = min_new_tokens
         # SGLang accepts both penalty knobs natively under
         # ``sampling_params`` with the same names OpenAI uses. Pass them
@@ -997,6 +999,20 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # Merge default sampling from model config (request fields win).
         for k, v in self._default_sampling.items():
             sampling_params.setdefault(k, v)
+        # A profile-level minimum is a soft default, while the request's
+        # ``max_new_tokens`` is a hard caller limit. Cap the default to that
+        # limit so short health checks and legitimate one-token requests do
+        # not send SGLang an impossible ``min_new_tokens > max_new_tokens``
+        # combination. An explicit caller minimum is validated above instead
+        # of being silently rewritten.
+        if min_new_tokens is None:
+            default_min_new_tokens = sampling_params.get("min_new_tokens")
+            if (
+                isinstance(default_min_new_tokens, int)
+                and not isinstance(default_min_new_tokens, bool)
+                and default_min_new_tokens > max_new_tokens
+            ):
+                sampling_params["min_new_tokens"] = max_new_tokens
 
         stop_list = list(stop or [])
         stop_list.extend(s for s in self._stop_tokens if s not in stop_list)

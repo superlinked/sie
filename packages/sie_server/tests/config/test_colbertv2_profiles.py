@@ -18,11 +18,11 @@ def test_default_and_muvera_preserve_published_retrieval_recipe() -> None:
     assert config.max_sequence_length == 512
     for name in ("default", "muvera"):
         profile = config.resolve_profile(name)
-        assert profile.loadtime["query_prefix"] == "[unused0] "
-        assert profile.loadtime["doc_prefix"] == "[unused1] "
+        assert profile.loadtime["query_prefix"] == "[unused0]"
+        assert profile.loadtime["doc_prefix"] == "[unused1]"
         assert profile.loadtime["doc_punctuation_skiplist"] is True
         assert profile.runtime["query_max_length"] == 32
-        assert profile.runtime["max_seq_length"] == 180
+        assert profile.runtime["max_seq_length"] == 300
 
     muvera = config.resolve_profile("muvera")
     assert muvera.runtime["muvera"] == {}

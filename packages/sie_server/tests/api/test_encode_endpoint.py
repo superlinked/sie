@@ -364,6 +364,45 @@ class TestEncodeEndpoint:
         assert "multivector" not in item
         muvera.transform.assert_called_once()
 
+    def test_default_profile_can_enable_dense_via_muvera(
+        self,
+        client: TestClient,
+        mock_registry: MagicMock,
+        mock_adapter: MagicMock,
+    ) -> None:
+        """A promoted MuVERA variant authorizes its default dense output."""
+        mock_registry.get_config.return_value = ModelConfig(
+            sie_id="test-model",
+            hf_id="org/test",
+            tasks=Tasks(encode=EncodeTask(multivector=EmbeddingDim(dim=128))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:TestAdapter",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(runtime={"muvera": {}, "output_types": ["dense"]}),
+                ),
+            },
+        )
+
+        def add_dense_output(output: Any, *, is_query: bool = False) -> None:
+            del is_query
+            output.dense = np.full((output.batch_size, 3), 0.5, dtype=np.float32)
+            output.dense_dim = 3
+
+        muvera_postprocessor = MagicMock()
+        muvera_postprocessor.transform.side_effect = add_dense_output
+        mock_registry.postprocessor_registry.register("test-model", {"muvera": muvera_postprocessor})
+
+        response = client.post(
+            "/v1/encode/test-model",
+            json={"items": [{"text": "Hello"}]},
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["items"][0]["dense"]["values"] == [0.5, 0.5, 0.5]
+        assert mock_adapter.encode.call_args.args[1] == ["multivector"]
+
     def test_request_option_cannot_self_authorize_unsupported_output(
         self, client: TestClient, mock_registry: MagicMock
     ) -> None:
@@ -383,6 +422,105 @@ class TestEncodeEndpoint:
 
         assert response.status_code == 400
         assert response.json()["detail"]["code"] == "INVALID_INPUT"
+
+    def test_request_options_cannot_self_authorize_output_type(
+        self,
+        client: TestClient,
+        mock_registry: MagicMock,
+        mock_adapter: MagicMock,
+    ) -> None:
+        """Only profile config, not merged request options, expands capabilities."""
+        mock_registry.get_config.return_value = ModelConfig(
+            sie_id="test-model",
+            hf_id="org/test",
+            tasks=Tasks(encode=EncodeTask(multivector=EmbeddingDim(dim=128))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:TestAdapter",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(runtime={"muvera": {}}),
+                ),
+            },
+        )
+
+        response = client.post(
+            "/v1/encode/test-model",
+            json={
+                "items": [{"text": "Hello"}],
+                "params": {
+                    "options": {
+                        "profile": "default",
+                        "muvera": {},
+                        "output_types": ["dense"],
+                    },
+                },
+            },
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["code"] == "INVALID_INPUT"
+        assert "dense" in detail["message"]
+        mock_adapter.encode.assert_not_called()
+
+    @pytest.mark.parametrize("output_types", ["dense", [], [{}], ["score"], [1]])
+    def test_request_options_reject_malformed_output_types(
+        self,
+        client: TestClient,
+        mock_adapter: MagicMock,
+        output_types: object,
+    ) -> None:
+        response = client.post(
+            "/v1/encode/test-model",
+            json={
+                "items": [{"text": "Hello"}],
+                "params": {"options": {"output_types": output_types}},
+            },
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "INVALID_INPUT"
+        mock_adapter.encode.assert_not_called()
+
+    def test_top_level_output_types_reject_cross_operation_capability(
+        self,
+        client: TestClient,
+        mock_adapter: MagicMock,
+    ) -> None:
+        response = client.post(
+            "/v1/encode/test-model",
+            json={
+                "items": [{"text": "Hello"}],
+                "params": {"output_types": ["score"]},
+            },
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "INVALID_INPUT"
+        mock_adapter.encode.assert_not_called()
+
+    @pytest.mark.parametrize("profile", ["", " ", [], {}, 0, False, ["default"], {"name": "default"}])
+    def test_profile_selector_rejects_malformed_values(
+        self,
+        client: TestClient,
+        mock_adapter: MagicMock,
+        profile: object,
+    ) -> None:
+        response = client.post(
+            "/v1/encode/test-model",
+            json={
+                "items": [{"text": "Hello"}],
+                "params": {"options": {"profile": profile}},
+            },
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "INVALID_INPUT"
+        mock_adapter.encode.assert_not_called()
 
     def test_encode_with_instruction(self, client: TestClient, mock_adapter: MagicMock) -> None:
         """Instruction parameter is passed to adapter."""

@@ -498,6 +498,50 @@ class TestGenerateEndpoint:
         assert fake_adapter.last_call["top_k"] == 40
         assert fake_adapter.last_call["min_new_tokens"] == 2
 
+    def test_profile_default_min_new_tokens_caps_to_explicit_max_before_adapter(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        config = _make_config()
+        config.profiles["default"].adapter_options = AdapterOptions(
+            runtime={"default_sampling": {"min_new_tokens": 10}}
+        )
+        registry.get_config.return_value = config
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hello", "max_new_tokens": 1},
+        )
+
+        assert response.status_code == 200
+        assert fake_adapter.last_call is not None
+        assert fake_adapter.last_call["max_new_tokens"] == 1
+        assert fake_adapter.last_call["min_new_tokens"] == 1
+
+    def test_explicit_min_new_tokens_above_max_rejects_before_load(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        fake_adapter: _FakeGenAdapter,
+    ) -> None:
+        registry.is_loaded.return_value = False
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={
+                "prompt": "Hello",
+                "max_new_tokens": 1,
+                "options": {"default_sampling": {"min_new_tokens": 10}},
+            },
+        )
+
+        assert response.status_code == 400
+        assert "min_new_tokens' (10) must not exceed max_new_tokens (1)" in response.json()["detail"]["message"]
+        registry.load_async.assert_not_awaited()
+        assert fake_adapter.last_call is None
+
     def test_non_default_options_profile_rejects_before_load(self, client: TestClient, registry: MagicMock) -> None:
         response = client.post(
             "/v1/generate/Qwen__Qwen3-4B-Instruct",

@@ -35,13 +35,13 @@ cargo build --release
 
 # Run with static workers
 SIE_NATS_URL=nats://localhost:4222 \
-./packages/sie_gateway/target/release/sie-gateway serve \
+./target/release/sie-gateway serve \
   -w http://worker1:8080 \
   -w http://worker2:8080
 
 # Run with Kubernetes discovery
 SIE_NATS_URL=nats://localhost:4222 \
-./packages/sie_gateway/target/release/sie-gateway serve \
+./target/release/sie-gateway serve \
   --kubernetes \
   --k8s-namespace sie \
   --k8s-service sie-worker

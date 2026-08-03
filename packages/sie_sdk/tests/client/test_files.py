@@ -10,7 +10,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sie_sdk import SIEAsyncClient, SIEClient
+from sie_sdk import FileList, SIEAsyncClient, SIEClient
 from sie_sdk.files import resolve_upload
 
 GW = "http://gw.test:8080"
@@ -57,6 +57,17 @@ class _FakeAio:
 # ---------------------------------------------------------------------------
 # resolve_upload (pure helper)
 # ---------------------------------------------------------------------------
+
+
+def test_file_list_is_exported_from_public_package() -> None:
+    page: FileList = {
+        "object": "list",
+        "data": [_FILE],
+        "first_id": "file-abc",
+        "last_id": "file-abc",
+        "has_more": False,
+    }
+    assert page["data"][0]["id"] == "file-abc"
 
 
 def test_resolve_upload_bytes_defaults_filename() -> None:
@@ -145,6 +156,65 @@ def test_retrieve_and_delete_hit_expected_urls() -> None:
         client.close()
 
 
+def test_list_encodes_openai_cursor_filters_and_preserves_sequence_return() -> None:
+    with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+        mock_client.return_value.request = MagicMock(
+            return_value=_json_resp(
+                200,
+                {
+                    "object": "list",
+                    "data": [_FILE],
+                    "first_id": "file-abc",
+                    "last_id": "file-abc",
+                    "has_more": True,
+                },
+            )
+        )
+        client = SIEClient(GW, api_key=KEY)
+        files = client.files.list(after='file/"a b"&purpose=x', limit=7, order="asc", purpose="batch")
+        assert [file["id"] for file in files] == ["file-abc"]
+        assert mock_client.return_value.request.call_args.args == (
+            "GET",
+            "/v1/files?after=file%2F%22a+b%22%26purpose%3Dx&limit=7&order=asc&purpose=batch",
+        )
+        client.close()
+
+
+def test_list_page_exposes_cursor_metadata() -> None:
+    with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+        mock_client.return_value.request = MagicMock(
+            return_value=_json_resp(
+                200,
+                {
+                    "object": "list",
+                    "data": [_FILE],
+                    "first_id": "file-abc",
+                    "last_id": "file-abc",
+                    "has_more": True,
+                },
+            )
+        )
+        client = SIEClient(GW, api_key=KEY)
+        page = client.files.list_page()
+        assert [file["id"] for file in page["data"]] == ["file-abc"]
+        assert page["first_id"] == "file-abc"
+        assert page["last_id"] == "file-abc"
+        assert page["has_more"] is True
+        client.close()
+
+
+def test_list_page_normalizes_legacy_bare_array() -> None:
+    with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+        mock_client.return_value.request = MagicMock(return_value=_json_resp(200, [_FILE, {**_FILE, "id": "file-def"}]))
+        client = SIEClient(GW, api_key=KEY)
+        page = client.files.list_page()
+        assert [file["id"] for file in page["data"]] == ["file-abc", "file-def"]
+        assert page["first_id"] == "file-abc"
+        assert page["last_id"] == "file-def"
+        assert page["has_more"] is False
+        client.close()
+
+
 def test_content_returns_raw_bytes() -> None:
     payload = b'{"custom_id":"a","response":{"status_code":200}}\n'
     with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
@@ -185,4 +255,29 @@ async def test_async_content_and_delete() -> None:
     out = await client.files.delete("file-1")
     assert out["deleted"] is True
     assert client._delete.call_args.args[0] == "/v1/files/file-1"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_list_and_list_page_share_cursor_arguments() -> None:
+    client = SIEAsyncClient(GW, api_key=KEY)
+    client._get = AsyncMock(
+        return_value=_FakeAio(
+            200,
+            {
+                "object": "list",
+                "data": [_FILE],
+                "first_id": "file-abc",
+                "last_id": "file-abc",
+                "has_more": False,
+            },
+        )
+    )
+    files = await client.files.list(after='file/"a b"', limit=7, order="desc", purpose="batch")
+    assert [file["id"] for file in files] == ["file-abc"]
+    assert client._get.call_args.args[0] == ("/v1/files?after=file%2F%22a+b%22&limit=7&order=desc&purpose=batch")
+    page = await client.files.list_page(limit=1)
+    assert page["first_id"] == "file-abc"
+    assert page["has_more"] is False
+    assert client._get.call_args.args[0] == "/v1/files?limit=1"
     await client.close()

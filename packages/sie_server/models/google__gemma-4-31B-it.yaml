@@ -1,0 +1,64 @@
+sie_id: google/gemma-4-31B-it
+hf_id: google/gemma-4-31B-it
+hf_revision: 842da3794eaa0b77d5f08bae87a17459d91ff475
+# Gemma 4 dense 31B is served by the dedicated ``gemma`` bundle
+# (SGLang 0.5.13 / transformers 5.8 / CUDA 13). The BF16 checkpoint is
+# 58.25 GiB, so the requested single-H100-80GB shape uses SGLang online FP8
+# weight quantization while retaining the checkpoint's bfloat16 compute dtype.
+# This leaves activation/KV headroom without introducing a one-model bundle.
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  generate:
+    # Native context is 262,144 tokens. Keep the initial served contract at 8K
+    # until the H100 FP8 smoke calibrates KV capacity and long-context quality.
+    context_length: 8192
+    max_output_tokens: 4096
+    capabilities:
+      grammar: ["json_schema", "regex"]
+      streaming: true
+      tools: true
+    chat_template_kwargs:
+      enable_thinking: false
+max_sequence_length: 8192
+profiles:
+  # Bare-id serving defaults to the requested H100-80GB FP8 shape. Speculative
+  # decoding and CUDA graphs stay off for the first smoke so online
+  # quantization, multimodal load, and grammar behavior are isolated.
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.gemma:SGLangGemmaAdapter
+    kv_budget_tokens: 8192
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.90
+        served_model_name: google/gemma-4-31B-it
+        disable_cuda_graph: true
+        attention_backend: triton
+        grammar_backend: xgrammar
+        reasoning_parser: gemma4
+        tool_call_parser: gemma4
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--quantization"
+          - "fp8"
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        # Official Gemma 4 non-thinking sampling recipe.
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 64
+          min_new_tokens: 1
+        stop_tokens:
+          - "<end_of_turn>"
+  # Caller-visible FP8 alias; select the H100-80GB machine profile separately.
+  h100-fp8:
+    extends: default

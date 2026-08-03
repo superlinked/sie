@@ -56,6 +56,39 @@ pub trait ModelAccessPolicy: Send + Sync {
     /// visible to the caller identified in `ext`. `false` ⇒ treat as not found.
     fn visible(&self, resolved_model: &str, ext: &axum::http::Extensions) -> bool;
 
+    /// A deployment-wide refusal to SERVE `resolved_model` at all — returned as
+    /// the finished caller-facing response, or `None` to allow (#2542).
+    ///
+    /// Distinct from [`Self::visible`]: that one is CALLER-scoped and answers
+    /// "not found" so a tenant cannot probe another tenant's models; this one is
+    /// caller-independent ("we do not serve this model here") and owns its own
+    /// status/envelope, because the reason is a deployment policy the OSS crate
+    /// has no vocabulary for (the managed service answers `403 LICENSE_EXCLUDED`
+    /// for a model whose upstream license forbids hosted serving).
+    ///
+    /// **Why it lives here.** Like `visible`, it is consulted at the model
+    /// RESOLUTION seam, on the id the dispatcher will actually route — after
+    /// alias expansion, `__`→`/`, and case folding. A gate that decides on the
+    /// caller's raw string cannot see through a registry alias, so an alias
+    /// pointing at a refused model would dispatch it; deciding here is what
+    /// makes the verdict authoritative for every surface that resolves a model.
+    /// Edge gates upstream may still refuse early, but they are an optimisation,
+    /// not the decision.
+    ///
+    /// `ext` carries the request extensions, so an implementation can record the
+    /// refusal on whatever per-request observability slot the deployment
+    /// installed. Consulted AFTER `visible`, so a caller who may not see the
+    /// model has already been answered the not-found shape and this refusal can
+    /// never become a cross-tenant existence oracle. The default returns `None`,
+    /// so the OSS self-host build refuses nothing.
+    fn serving_refusal(
+        &self,
+        _resolved_model: &str,
+        _ext: &axum::http::Extensions,
+    ) -> Option<axum::response::Response> {
+        None
+    }
+
     /// If `resolved_model` is served from a dedicated sandbox (a #1841 org custom
     /// model) rather than a catalog bundle, return its [`SealedRoute`]. Consulted
     /// ONLY after [`Self::visible`] has passed, so the caller already owns any
@@ -69,6 +102,53 @@ pub trait ModelAccessPolicy: Send + Sync {
     ) -> Option<SealedRoute> {
         None
     }
+
+    fn generation_route_policy(&self) -> Option<&dyn GenerationRoutePolicy> {
+        None
+    }
+}
+
+/// Customer-visible generation intent selected from a validated request.
+///
+/// Deployments may use a different physical model profile for structured
+/// output (for example a non-speculative sibling). Keeping the intent generic
+/// lets the OSS gateway expose one substrate-neutral routing seam without
+/// learning about any managed provider or commercial catalog.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GenerationRequestIntent {
+    Default,
+    Grammar,
+}
+
+/// Exact deployment-owned generation route selected before worker lookup.
+///
+/// The tuple is intentionally transport-neutral. Self-hosted compositions
+/// install no policy and retain registry-driven routing. A managed composition
+/// may install a policy compiled from its immutable desired state and route
+/// customer requests to one exact physical model/lane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernedGenerationRoute {
+    /// Physical model id dispatched to the worker (possibly a profile variant).
+    pub model: String,
+    /// Exact compatible worker bundle.
+    pub bundle: String,
+    /// Exact physical queue pool.
+    pub pool: String,
+    /// Exact machine profile.
+    pub machine_profile: String,
+}
+
+/// Optional deployment hook for exact generation routing.
+///
+/// The presence of a policy means generation is governed: returning `None`
+/// fails that request closed rather than falling back to registry insertion
+/// order. OSS/self-hosted gateways install no policy and remain unchanged.
+pub trait GenerationRoutePolicy: Send + Sync {
+    fn resolve(
+        &self,
+        customer_model: &str,
+        intent: GenerationRequestIntent,
+    ) -> Option<GovernedGenerationRoute>;
 }
 
 pub struct AppState {

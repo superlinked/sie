@@ -72,6 +72,59 @@ describe("client.files", () => {
     expect(mockFetch.mock.calls[1][1].method).toBe("DELETE");
   });
 
+  it("list encodes cursor and filter arguments and preserves the array return", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        object: "list",
+        data: [FILE],
+        first_id: "file-abc",
+        last_id: "file-abc",
+        has_more: true,
+      }),
+    );
+    const client = new SIEClient(GW);
+    const files = await client.files.list({
+      after: 'file/"a b"&purpose=x',
+      limit: 7,
+      order: "asc",
+      purpose: "batch",
+    });
+    expect(files.map((file) => file.id)).toEqual(["file-abc"]);
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      "http://gw:8080/v1/files?after=file%2F%22a+b%22%26purpose%3Dx&limit=7&order=asc&purpose=batch",
+    );
+  });
+
+  it("listPage exposes cursor metadata", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        object: "list",
+        data: [FILE],
+        first_id: "file-abc",
+        last_id: "file-abc",
+        has_more: true,
+      }),
+    );
+    const client = new SIEClient(GW);
+    const page = await client.files.listPage();
+    expect(page.data?.map((file) => file.id)).toEqual(["file-abc"]);
+    expect(page.first_id).toBe("file-abc");
+    expect(page.last_id).toBe("file-abc");
+    expect(page.has_more).toBe(true);
+  });
+
+  it("listPage normalizes a legacy bare array", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse([FILE, { ...FILE, id: "file-def", filename: "next.jsonl" }]),
+    );
+    const client = new SIEClient(GW);
+    const page = await client.files.listPage();
+    expect(page.data?.map((file) => file.id)).toEqual(["file-abc", "file-def"]);
+    expect(page.first_id).toBe("file-abc");
+    expect(page.last_id).toBe("file-def");
+    expect(page.has_more).toBe(false);
+  });
+
   it("content returns the raw file bytes", async () => {
     const payload = new TextEncoder().encode('{"custom_id":"a","response":{"status_code":200}}\n');
     mockFetch.mockResolvedValueOnce(new Response(payload, { status: 200 }));

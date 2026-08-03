@@ -117,11 +117,17 @@ def test_qwen35_timeout_margin_changes_only_default_family() -> None:
 def test_qwen36_grammar_requests_route_to_no_spec() -> None:
     config = ModelConfig.model_validate(yaml.safe_load(_QWEN36_MODEL_PATH.read_text()))
     default = config.resolve_profile("default")
+    h100_fp8 = config.resolve_profile("h100-fp8")
     no_spec = config.resolve_profile("no-spec")
 
     assert config.tasks.generate is not None
     assert config.tasks.generate.grammar_profile == "no-spec"
+    assert config.profiles["h100-fp8"].extends == "no-spec"
     assert default.adapter_path == no_spec.adapter_path == _ADAPTER
+    assert h100_fp8.adapter_path == no_spec.adapter_path
+    assert h100_fp8.runtime == no_spec.runtime
+    assert h100_fp8.loadtime["speculative"] == {"enabled": False}
+    assert h100_fp8.loadtime["extra_launch_args"] == ["--quantization", "fp8"]
     assert default.loadtime["grammar_backend"] == no_spec.loadtime["grammar_backend"] == "outlines"
     assert default.loadtime["speculative"] == {
         "enabled": False,
@@ -143,7 +149,7 @@ def test_qwen36_profiles_use_official_non_thinking_sampling_defaults() -> None:
         "min_new_tokens": 10,
     }
 
-    for profile_name in ("default", "h100", "rtx-pro-6000", "batch", "no-spec"):
+    for profile_name in ("default", "h100", "h100-fp8", "rtx-pro-6000", "batch", "no-spec"):
         assert config.resolve_profile(profile_name).runtime["default_sampling"] == expected
 
 
@@ -155,5 +161,6 @@ def test_qwen36_base_profiles_expose_8k_context() -> None:
     assert config.max_sequence_length == 8192
     assert config.resolve_profile("default").kv_budget_tokens == 8192
     assert config.resolve_profile("h100").kv_budget_tokens == 32768
+    assert config.resolve_profile("h100-fp8").kv_budget_tokens == 16384
     assert config.resolve_profile("batch").kv_budget_tokens == 32768
     assert config.resolve_profile("no-spec").kv_budget_tokens == 65536

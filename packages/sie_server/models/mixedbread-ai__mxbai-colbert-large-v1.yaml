@@ -1,5 +1,6 @@
 sie_id: mixedbread-ai/mxbai-colbert-large-v1
 hf_id: mixedbread-ai/mxbai-colbert-large-v1
+hf_revision: 591f3d193b80b75aac38e4ff9e341d6d136f045b
 inputs:
   text: true
   image: false
@@ -31,9 +32,10 @@ profiles:
         query_max_length: 128
         doc_max_length: 256
         skip_special_tokens: false
-        query_expansion: false
-        query_prefix: '[Q] '
-        doc_prefix: '[D] '
+        query_expansion: true
+        query_prefix: '[unused0]'
+        doc_prefix: '[unused1]'
+        doc_punctuation_skiplist: true
       runtime:
         muvera: null
   muvera:

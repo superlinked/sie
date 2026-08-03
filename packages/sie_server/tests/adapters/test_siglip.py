@@ -422,13 +422,15 @@ class TestSiglipAdapter:
             }
         ]
 
-    def test_encode_text_counts_from_primary_attention_mask_when_pad_equals_eos(self) -> None:
-        adapter = SiglipAdapter("google/siglip2-base-patch16-224", normalize=False)
+    @pytest.mark.parametrize(
+        "model_id",
+        ["google/siglip-so400m-patch14-384", "google/siglip2-base-patch16-224"],
+    )
+    def test_encode_text_bills_fixed_padded_length(self, model_id: str) -> None:
+        adapter = SiglipAdapter(model_id, normalize=False)
         model = MagicMock()
         model.get_text_features.return_value = torch.zeros((2, 8))
         tokenizer = MagicMock()
-        tokenizer.pad_token_id = 1
-        tokenizer.eos_token_id = 1
         tokenizer.side_effect = AssertionError("padding-free recount must not run")
         processor = MagicMock()
         processor.tokenizer = tokenizer
@@ -452,25 +454,15 @@ class TestSiglipAdapter:
 
         _embeddings, counts = adapter._encode_texts(["first", "second"])
 
-        assert counts == [3, 2]
+        assert counts == [64, 64]
         tokenizer.assert_not_called()
 
-    @pytest.mark.parametrize(
-        "attention_mask",
-        [
-            torch.tensor([[1, 1, 1], [1, 1, 0]]),
-            torch.tensor([[1, 1, 2, 0], [1, 1, 0, 0]]),
-        ],
-        ids=["wrong-shape", "non-binary"],
-    )
-    def test_encode_text_recounts_when_primary_attention_mask_is_malformed(self, attention_mask: torch.Tensor) -> None:
-        adapter = SiglipAdapter("google/siglip2-base-patch16-224", normalize=False)
+    def test_encode_text_bills_configured_padded_length(self) -> None:
+        adapter = SiglipAdapter("google/siglip2-base-patch16-224", normalize=False, max_seq_length=32)
         model = MagicMock()
         model.get_text_features.return_value = torch.zeros((2, 8))
         tokenizer = MagicMock()
-        tokenizer.pad_token_id = 1
-        tokenizer.eos_token_id = 1
-        tokenizer.return_value = {"input_ids": [[12, 13, 1], [42, 1]]}
+        tokenizer.side_effect = AssertionError("padding-free recount must not run")
         processor = MagicMock()
         processor.tokenizer = tokenizer
         processor.return_value = {
@@ -480,7 +472,7 @@ class TestSiglipAdapter:
                     [42, 1, 1, 1],
                 ]
             ),
-            "attention_mask": attention_mask,
+            "attention_mask": torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]]),
         }
         adapter._model = model
         adapter._processor = processor
@@ -488,12 +480,8 @@ class TestSiglipAdapter:
 
         _embeddings, counts = adapter._encode_texts(["first", "second"])
 
-        assert counts == [3, 2]
-        tokenizer.assert_called_once_with(
-            ["first", "second"],
-            truncation=True,
-            max_length=64,
-        )
+        assert counts == [32, 32]
+        tokenizer.assert_not_called()
 
     def test_transformers_backend_reuses_positionally_aligned_prepared_images(self) -> None:
         adapter = SiglipAdapter("google/siglip2-base-patch16-224", normalize=False)
@@ -587,6 +575,7 @@ class TestSiglipAdapter:
         # Batching proof: exactly one stacked forward per tower for the whole call.
         assert model.image_forward_calls == 1
         assert model.text_forward_calls == 1
+        assert out.extra["input_token_counts"] == [0, 0, 64, 0, 64]
 
         # Serial reference — replicate the pre-batch per-item algorithm exactly.
         def ref_image(item: Item) -> np.ndarray:
