@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "dataset": {
+    "name": "Supermarket Shelves Dataset",
+    "publisher": "Humans in the Loop",
+    "version": 2,
+    "updated": "2023-06-06",
+    "source_url": "https://www.kaggle.com/datasets/humansintheloop/supermarket-shelves-dataset",
+    "publisher_url": "https://humansintheloop.org/resources/datasets/",
+    "license": "CC0-1.0",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "archive_sha256": "988c30cc94c38660098114d7b8691e5a3f34123b8923e3772b64d6f5c7b67dd1",
+    "metadata_sha256": "fdfd21f8018b3720690b957fe332dc80638f1bb06da65cda19431849a83d48d0"
+  },
+  "model_pins": [
+    {
+      "id": "IDEA-Research/grounding-dino-base",
+      "revision": "12bdfa3120f3e7ec7b434d90674b3396eccf88eb",
+      "license": "Apache-2.0",
+      "role": "detection"
+    },
+    {
+      "id": "lightonai/LightOnOCR-2-1B",
+      "revision": "c97bd377f04481830395218fa8951df9deaba756",
+      "license": "Apache-2.0",
+      "role": "ocr"
+    }
+  ],
+  "files": [
+    {
+      "path": "assets/042-pharmacy-oos-sign.jpg",
+      "role": "source_image",
+      "source_path": "images/042.jpg",
+      "license": "CC0-1.0",
+      "width": 4032,
+      "height": 3024,
+      "sha256": "a8654b3a7c2be143fb788f91aeef0c09b23feaee0984151eefed95f6c7a96f63"
+    },
+    {
+      "path": "assets/042-pharmacy-oos-sign.jpg.json",
+      "role": "source_annotation",
+      "source_path": "annotations/042.jpg.json",
+      "license": "CC0-1.0",
+      "sha256": "5ff910b8b63f510f6e8a8ca807502c52fb0c2487eaf12799c9c8e65439d86c81"
+    },
+    {
+      "path": "recorded/modal-direct/launch-model-results.json",
+      "role": "raw_detector_batch",
+      "used_record": "calls.detection.detections.042",
+      "model": "IDEA-Research/grounding-dino-base",
+      "revision": "12bdfa3120f3e7ec7b434d90674b3396eccf88eb",
+      "sha256": "763d62850901d7105cfd97fdd066eded778cf0555469caef7891b2e26e36de45"
+    },
+    {
+      "path": "recorded/modal-direct/042-grounding-dino.jpg",
+      "role": "detector_review_image",
+      "source": "assets/042-pharmacy-oos-sign.jpg",
+      "model": "IDEA-Research/grounding-dino-base",
+      "revision": "12bdfa3120f3e7ec7b434d90674b3396eccf88eb",
+      "sha256": "536296285d5b04baeb3a1ef46eeb7256fe5c5945e2fd87f45a71f54d22b81c88"
+    },
+    {
+      "path": "recorded/modal-direct/derived-crops/candidate-1.jpg",
+      "role": "derived_ocr_crop",
+      "source": "assets/042-pharmacy-oos-sign.jpg",
+      "source_detection_xywh": [2300.1, 2318.7, 335.8, 244.5],
+      "crop_xyxy": [2233, 2258, 2703, 2624],
+      "display_scale": 3,
+      "width": 1410,
+      "height": 1098,
+      "sha256": "ebd695074a316e8b857aa7f5f1fda88ebc19ac6fc2ad3599d51df5ff3db30e0f"
+    },
+    {
+      "path": "recorded/modal-direct/derived-crops/candidate-2.jpg",
+      "role": "derived_ocr_crop",
+      "source": "assets/042-pharmacy-oos-sign.jpg",
+      "source_detection_xywh": [2235.5, 2559.4, 399.2, 186.3],
+      "crop_xyxy": [2156, 2513, 2715, 2792],
+      "display_scale": 3,
+      "width": 1677,
+      "height": 837,
+      "sha256": "cd86541f98be97ead3120c16c51c1fbba0ab9d8d83c7e0211b04f1b4045baf7b"
+    },
+    {
+      "path": "recorded/modal-direct/lighton-ocr-derived-results.json",
+      "role": "raw_ocr_run",
+      "model": "lightonai/LightOnOCR-2-1B",
+      "revision": "c97bd377f04481830395218fa8951df9deaba756",
+      "sha256": "99477bf3d9441cc0ae2372e03083ba9624a5c804e0369ed6a441fb9a7a859d45"
+    }
+  ]
+}

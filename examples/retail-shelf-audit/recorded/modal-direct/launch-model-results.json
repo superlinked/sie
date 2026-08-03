@@ -1,0 +1,703 @@
+{
+  "schema_version": "1.0",
+  "completed_at_utc": "2026-08-03T04:11:10.095191+00:00",
+  "runtime": {
+    "python": "3.12.6",
+    "torch": "2.13.0+cu130",
+    "transformers": "4.57.6",
+    "gpu": "NVIDIA L4"
+  },
+  "models": {
+    "visual_search": {
+      "id": "google/siglip2-base-patch16-224",
+      "revision": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
+    },
+    "detection": {
+      "id": "IDEA-Research/grounding-dino-base",
+      "revision": "12bdfa3120f3e7ec7b434d90674b3396eccf88eb"
+    }
+  },
+  "calls": {
+    "visual_search": {
+      "primitive": "encode",
+      "queries": {
+        "replenishment_priority": "a supermarket shelf with a large empty product facing and visible price labels",
+        "out_of_stock_sign": "a supermarket shelf with a clearly visible out of stock sign",
+        "fully_stocked": "a fully stocked supermarket shelf with no empty spaces"
+      },
+      "image_ids": [
+        "006",
+        "016",
+        "021",
+        "022",
+        "042"
+      ],
+      "latency_ms": 1131.0,
+      "scores": {
+        "replenishment_priority": [
+          {
+            "image_id": "022",
+            "score": 0.618652,
+            "rank": 1
+          },
+          {
+            "image_id": "042",
+            "score": 0.464844,
+            "rank": 2
+          },
+          {
+            "image_id": "016",
+            "score": 0.256836,
+            "rank": 3
+          },
+          {
+            "image_id": "021",
+            "score": 0.183594,
+            "rank": 4
+          },
+          {
+            "image_id": "006",
+            "score": 0.00629,
+            "rank": 5
+          }
+        ],
+        "out_of_stock_sign": [
+          {
+            "image_id": "022",
+            "score": 0.633301,
+            "rank": 1
+          },
+          {
+            "image_id": "042",
+            "score": 0.388672,
+            "rank": 2
+          },
+          {
+            "image_id": "021",
+            "score": 0.223999,
+            "rank": 3
+          },
+          {
+            "image_id": "016",
+            "score": 0.126831,
+            "rank": 4
+          },
+          {
+            "image_id": "006",
+            "score": 0.013222,
+            "rank": 5
+          }
+        ],
+        "fully_stocked": [
+          {
+            "image_id": "016",
+            "score": 0.647949,
+            "rank": 1
+          },
+          {
+            "image_id": "022",
+            "score": 0.484375,
+            "rank": 2
+          },
+          {
+            "image_id": "021",
+            "score": 0.267334,
+            "rank": 3
+          },
+          {
+            "image_id": "042",
+            "score": 0.105957,
+            "rank": 4
+          },
+          {
+            "image_id": "006",
+            "score": 0.045349,
+            "rank": 5
+          }
+        ]
+      }
+    },
+    "detection": {
+      "primitive": "extract",
+      "labels": [
+        "empty shelf space",
+        "out of stock sign",
+        "price tag"
+      ],
+      "options": {
+        "box_threshold": 0.2,
+        "text_threshold": 0.2
+      },
+      "image_ids": [
+        "006",
+        "016",
+        "021",
+        "022",
+        "042"
+      ],
+      "latency_ms": 3275.3,
+      "detections": {
+        "006": [
+          {
+            "label": "empty shelf space",
+            "score": 0.340705,
+            "bbox_xywh": [
+              18.5,
+              3073.8,
+              7804.8,
+              1760.9
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.362743,
+            "bbox_xywh": [
+              14.2,
+              1032.6,
+              7811.1,
+              1709.7
+            ]
+          },
+          {
+            "label": "out of stock sign",
+            "score": 0.273186,
+            "bbox_xywh": [
+              14.0,
+              674.2,
+              7807.1,
+              409.1
+            ]
+          },
+          {
+            "label": "out of stock sign",
+            "score": 0.300027,
+            "bbox_xywh": [
+              16.5,
+              680.8,
+              7810.0,
+              286.3
+            ]
+          },
+          {
+            "label": "out of stock sign",
+            "score": 0.323273,
+            "bbox_xywh": [
+              14.7,
+              4795.2,
+              7808.5,
+              318.3
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.256646,
+            "bbox_xywh": [
+              8.1,
+              2708.4,
+              7820.7,
+              327.7
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.224055,
+            "bbox_xywh": [
+              561.1,
+              4804.3,
+              423.6,
+              284.6
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.215681,
+            "bbox_xywh": [
+              2736.7,
+              4810.6,
+              780.9,
+              270.5
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.259263,
+            "bbox_xywh": [
+              69.6,
+              2763.0,
+              421.9,
+              235.8
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.219003,
+            "bbox_xywh": [
+              6773.3,
+              2759.6,
+              421.0,
+              229.1
+            ]
+          }
+        ],
+        "016": [
+          {
+            "label": "empty shelf space",
+            "score": 0.218169,
+            "bbox_xywh": [
+              439.5,
+              2978.7,
+              4090.4,
+              187.8
+            ]
+          },
+          {
+            "label": "price",
+            "score": 0.203391,
+            "bbox_xywh": [
+              3930.6,
+              2992.9,
+              276.4,
+              141.8
+            ]
+          },
+          {
+            "label": "price",
+            "score": 0.200871,
+            "bbox_xywh": [
+              2054.9,
+              2994.7,
+              269.4,
+              147.5
+            ]
+          }
+        ],
+        "021": [
+          {
+            "label": "empty shelf space",
+            "score": 0.338296,
+            "bbox_xywh": [
+              2280.9,
+              2183.4,
+              1743.7,
+              194.0
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.241311,
+            "bbox_xywh": [
+              1674.2,
+              2436.3,
+              353.1,
+              545.3
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.234056,
+            "bbox_xywh": [
+              1953.3,
+              1741.6,
+              368.7,
+              557.6
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.211091,
+            "bbox_xywh": [
+              2312.0,
+              1746.6,
+              337.4,
+              508.5
+            ]
+          },
+          {
+            "label": "out of stock sign",
+            "score": 0.247623,
+            "bbox_xywh": [
+              3.1,
+              333.9,
+              394.2,
+              581.4
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.203549,
+            "bbox_xywh": [
+              1318.0,
+              2440.3,
+              344.9,
+              541.4
+            ]
+          },
+          {
+            "label": "out of stock sign",
+            "score": 0.205934,
+            "bbox_xywh": [
+              18.3,
+              1730.6,
+              509.2,
+              613.0
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.207215,
+            "bbox_xywh": [
+              2305.4,
+              1660.5,
+              1717.4,
+              705.0
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.208501,
+            "bbox_xywh": [
+              2643.1,
+              1666.0,
+              1145.8,
+              542.0
+            ]
+          }
+        ],
+        "022": [
+          {
+            "label": "out of stock sign",
+            "score": 0.60778,
+            "bbox_xywh": [
+              19.5,
+              1.8,
+              482.5,
+              408.9
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.311741,
+            "bbox_xywh": [
+              10.7,
+              680.4,
+              4013.4,
+              231.7
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.32178,
+            "bbox_xywh": [
+              20.3,
+              1504.4,
+              3997.2,
+              219.6
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.216012,
+            "bbox_xywh": [
+              533.3,
+              2411.9,
+              107.2,
+              68.3
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.221519,
+            "bbox_xywh": [
+              22.3,
+              1723.1,
+              4001.3,
+              728.2
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.23546,
+            "bbox_xywh": [
+              16.9,
+              2396.9,
+              4006.8,
+              209.5
+            ]
+          }
+        ],
+        "042": [
+          {
+            "label": "price tag",
+            "score": 0.390069,
+            "bbox_xywh": [
+              1259.7,
+              1093.9,
+              431.5,
+              518.1
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.396535,
+            "bbox_xywh": [
+              2298.2,
+              1104.7,
+              438.5,
+              520.3
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.394376,
+            "bbox_xywh": [
+              1725.3,
+              1100.6,
+              434.5,
+              515.5
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.320928,
+            "bbox_xywh": [
+              2194.0,
+              1.0,
+              451.6,
+              341.2
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.356783,
+            "bbox_xywh": [
+              3192.9,
+              1105.3,
+              446.3,
+              519.9
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.316686,
+            "bbox_xywh": [
+              1709.1,
+              0.5,
+              446.4,
+              331.4
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.282592,
+            "bbox_xywh": [
+              1497.0,
+              2558.1,
+              335.5,
+              180.6
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.259638,
+            "bbox_xywh": [
+              2235.5,
+              2559.4,
+              399.2,
+              186.3
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.280222,
+            "bbox_xywh": [
+              784.4,
+              2559.5,
+              349.8,
+              175.1
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.23793,
+            "bbox_xywh": [
+              2237.3,
+              2561.7,
+              334.9,
+              181.2
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.254046,
+            "bbox_xywh": [
+              2.0,
+              2556.1,
+              312.7,
+              179.3
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.231093,
+            "bbox_xywh": [
+              2300.1,
+              2318.7,
+              335.8,
+              244.5
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.274157,
+            "bbox_xywh": [
+              2043.8,
+              2137.0,
+              623.6,
+              402.4
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.261708,
+            "bbox_xywh": [
+              3329.7,
+              0.7,
+              447.7,
+              336.0
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.2522,
+            "bbox_xywh": [
+              2864.4,
+              2572.6,
+              338.9,
+              178.3
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.221014,
+            "bbox_xywh": [
+              924.6,
+              377.8,
+              396.4,
+              708.5
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.23092,
+            "bbox_xywh": [
+              1723.3,
+              1752.8,
+              322.1,
+              774.4
+            ]
+          },
+          {
+            "label": "price",
+            "score": 0.201499,
+            "bbox_xywh": [
+              3723.1,
+              1107.7,
+              306.4,
+              194.4
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.218336,
+            "bbox_xywh": [
+              1098.9,
+              2771.0,
+              405.3,
+              246.3
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.231962,
+            "bbox_xywh": [
+              3488.5,
+              2577.8,
+              340.6,
+              183.9
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.227813,
+            "bbox_xywh": [
+              1403.0,
+              1745.3,
+              325.7,
+              776.7
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.21684,
+            "bbox_xywh": [
+              1.9,
+              1090.1,
+              654.9,
+              184.0
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.252384,
+            "bbox_xywh": [
+              8.0,
+              2552.5,
+              4019.2,
+              210.1
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.217171,
+            "bbox_xywh": [
+              1328.4,
+              433.6,
+              360.6,
+              653.9
+            ]
+          },
+          {
+            "label": "price tag",
+            "score": 0.232136,
+            "bbox_xywh": [
+              3768.7,
+              0.3,
+              261.6,
+              332.3
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.212722,
+            "bbox_xywh": [
+              5.0,
+              1270.1,
+              1265.5,
+              314.4
+            ]
+          },
+          {
+            "label": "empty shelf space",
+            "score": 0.2587,
+            "bbox_xywh": [
+              0.9,
+              1089.8,
+              4031.6,
+              214.1
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
