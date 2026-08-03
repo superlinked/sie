@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from PIL import Image
 
-import taxonomy_classification.catalog_agent as catalog_agent
+from taxonomy_classification import catalog_agent
 from taxonomy_classification.catalog_agent import (
     CatalogDecision,
     CatalogListing,

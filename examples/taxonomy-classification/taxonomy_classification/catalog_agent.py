@@ -434,9 +434,9 @@ def _write_evaluation_output(path: Path, output: dict[str, Any]) -> None:
             dir=path.parent,
             delete=False,
         ) as temporary:
+            temporary_path = Path(temporary.name)
             json.dump(output, temporary, indent=2, ensure_ascii=False)
             temporary.write("\n")
-            temporary_path = Path(temporary.name)
         temporary_path.replace(path)
     finally:
         if temporary_path is not None:
