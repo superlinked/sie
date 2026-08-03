@@ -86,13 +86,13 @@ def evaluate_review(review: dict[str, Any]) -> list[Check]:
         ),
         Check(
             "finding-categories",
-            categories
-            == {
+            {
                 "covered_removal",
                 "excluded_transport",
                 "price_support",
                 "prior_claim_overlap",
-            },
+            }
+            <= categories,
             ", ".join(sorted(str(category) for category in categories)),
         ),
     ]

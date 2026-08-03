@@ -341,16 +341,24 @@ schema.<|im_end|>
 
 def _require_sources() -> None:
     config = load_config()
-    missing = [source.path for source in config.sources if not source.path.exists()]
+    required_paths = [
+        *(source.path for source in config.sources),
+        DATA_DIR / "source-manifest.json",
+    ]
+    missing = [path for path in required_paths if not path.exists()]
     if missing:
         names = ", ".join(path.name for path in missing)
         raise FileNotFoundError(f"Missing source files: {names}. Run `uv run fetch-claim-sources` first.")
 
 
 def run_default_stage(run_id: str) -> Path:
+    run_dir = RUNS_DIR / run_id
+    if run_dir.exists():
+        raise FileExistsError(
+            f"Run {run_id} already exists at {run_dir}. Choose a new --run-id or remove that directory."
+        )
     config = load_config()
     _require_sources()
-    run_dir = RUNS_DIR / run_id
     raw_dir = run_dir / "raw"
     markdown_dir = run_dir / "markdown"
     raw_dir.mkdir(parents=True, exist_ok=False)

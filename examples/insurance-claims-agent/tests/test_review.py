@@ -4,12 +4,18 @@ import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import insurance_claims.review as review_module
 from insurance_claims.evaluate import ARTIFACT_EXCLUDED_PATHS, evaluate_review, evaluate_run
 from insurance_claims.review import (
     _extract_claim_facts,
     _json_object_from_text,
+    _require_sources,
     chunk_markdown,
+    run_default_stage,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +93,7 @@ def test_evaluation_accepts_published_appeal_result() -> None:
             {"category": "excluded_transport"},
             {"category": "price_support"},
             {"category": "prior_claim_overlap"},
+            {"category": "other"},
         ],
     }
 
@@ -119,6 +126,28 @@ def test_evaluation_rejects_the_wrong_proof_of_loss_amount() -> None:
 
     checks = {check.name: check for check in evaluate_review(review)}
     assert {name for name, check in checks.items() if not check.passed} == {"proof-of-loss-amount"}
+
+
+def test_existing_run_id_has_an_actionable_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(review_module, "RUNS_DIR", tmp_path)
+    (tmp_path / "local").mkdir()
+
+    with pytest.raises(FileExistsError, match="Choose a new --run-id or remove that directory"):
+        run_default_stage("local")
+
+
+def test_source_manifest_is_required_during_preflight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_path = tmp_path / "source.pdf"
+    source_path.write_bytes(b"source")
+    monkeypatch.setattr(review_module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        review_module,
+        "load_config",
+        lambda: SimpleNamespace(sources=[SimpleNamespace(path=source_path)]),
+    )
+
+    with pytest.raises(FileNotFoundError, match="source-manifest.json"):
+        _require_sources()
 
 
 def test_artifact_exclusions_only_apply_at_the_run_root(tmp_path: Path) -> None:

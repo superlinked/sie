@@ -82,6 +82,7 @@ uv run review-claim --run-id local --stage generation
 ```text
 runs/<run-id>/manifest.json           endpoints, models, and per-call latency
 runs/<run-id>/source-manifest.json    source URLs, rights, sizes, and checksums
+runs/<run-id>/default-stage.json      default-bundle endpoint, models, and timings
 runs/<run-id>/markdown/*.md           parsed appeal decision and policy
 runs/<run-id>/claim-facts.json        extracted amounts, dates, and scope phrases
 runs/<run-id>/policy-evidence.json    reranked policy passages
