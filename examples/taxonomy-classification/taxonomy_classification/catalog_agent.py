@@ -5,6 +5,7 @@ import base64
 import hashlib
 import io
 import json
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -122,7 +123,9 @@ def load_shopify_rows(
     for entry in payload["rows"]:
         row_idx = int(entry["row_idx"])
         row = entry["row"]
-        image_path = cache_dir / f"shopify-train-{row_idx}.image"
+        image_path = (
+            cache_dir / f"shopify-train-{DATASET_REVISION[:12]}-{row_idx}.image"
+        )
         if image_path.exists():
             image_bytes = image_path.read_bytes()
         else:
@@ -228,6 +231,8 @@ def verify_candidates(
     listing: CatalogListing,
     candidates: list[str],
 ) -> tuple[int, bool, str | None]:
+    if not candidates:
+        raise ValueError(f"No candidate paths supplied for row {listing.row_idx}")
     candidate_lines = "\n".join(
         f"{index}: {path}" for index, path in enumerate(candidates)
     )
@@ -376,36 +381,24 @@ def _common_parser(description: str) -> argparse.ArgumentParser:
     return parser
 
 
-def eval_main() -> None:
-    parser = _common_parser(
-        "Evaluate the focused multimodal catalog agent on Shopify listings."
-    )
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    listings = load_shopify_rows(
-        offset=args.offset,
-        limit=args.limit,
-        cache_dir=args.cache_dir,
-    )
-    decisions: list[CatalogDecision] = []
-    with create_sie_client(timeout_s=600) as client:
-        for listing in listings:
-            decision = classify_listing(client, listing)
-            decisions.append(decision)
-            print(
-                f"{listing.row_idx:>5} "
-                f"{'review' if decision.needs_review else 'accept':>6} "
-                f"{decision.selected_path}"
-            )
-
-    output = {
+def _evaluation_output(
+    listings: list[CatalogListing],
+    decisions_by_row: dict[int, CatalogDecision],
+    *,
+    offset: int,
+) -> dict[str, Any]:
+    completed_listings = [
+        listing for listing in listings if listing.row_idx in decisions_by_row
+    ]
+    decisions = [decisions_by_row[listing.row_idx] for listing in completed_listings]
+    return {
         "record_type": "sie_catalog_agent_evaluation",
         "run_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "dataset": {
             "id": DATASET,
             "revision": DATASET_REVISION,
             "split": DATASET_SPLIT,
-            "row_window": [args.offset, args.offset + len(listings) - 1],
+            "row_window": [offset, offset + len(listings) - 1],
         },
         "models": {
             "reranker": RERANKER_MODEL,
@@ -418,24 +411,127 @@ def eval_main() -> None:
         "response_schema": {
             "required": ["selected_index", "needs_review"],
         },
-        "metrics": evaluation_metrics(listings, decisions),
+        "metrics": evaluation_metrics(completed_listings, decisions),
         "results": [
             {
                 **asdict(decision),
-                "ground_truth_path": next(
-                    listing.ground_truth_path
-                    for listing in listings
-                    if listing.row_idx == decision.row_idx
-                ),
+                "ground_truth_path": listing.ground_truth_path,
             }
-            for decision in decisions
+            for listing, decision in zip(completed_listings, decisions, strict=True)
         ],
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(output, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+
+
+def _write_evaluation_output(path: Path, output: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{path.name}-",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as temporary:
+            json.dump(output, temporary, indent=2, ensure_ascii=False)
+            temporary.write("\n")
+            temporary_path = Path(temporary.name)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _load_checkpoint(
+    path: Path,
+    listings: list[CatalogListing],
+    *,
+    offset: int,
+) -> dict[int, CatalogDecision]:
+    if not path.exists():
+        return {}
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    expected_dataset = {
+        "id": DATASET,
+        "revision": DATASET_REVISION,
+        "split": DATASET_SPLIT,
+        "row_window": [offset, offset + len(listings) - 1],
+    }
+    expected_models = {
+        "reranker": RERANKER_MODEL,
+        "verifier": VERIFIER_MODEL,
+    }
+    if payload.get("record_type") != "sie_catalog_agent_evaluation":
+        raise ValueError(f"Cannot resume from {path}: unexpected record type")
+    if (
+        payload.get("dataset") != expected_dataset
+        or payload.get("models") != expected_models
+    ):
+        raise ValueError(f"Cannot resume from {path}: dataset window or models changed")
+
+    listings_by_row = {listing.row_idx: listing for listing in listings}
+    decisions: dict[int, CatalogDecision] = {}
+    for result in payload.get("results", []):
+        row_idx = int(result["row_idx"])
+        listing = listings_by_row.get(row_idx)
+        if listing is None:
+            raise ValueError(f"Cannot resume from {path}: unexpected row {row_idx}")
+        if row_idx in decisions:
+            raise ValueError(f"Cannot resume from {path}: duplicate row {row_idx}")
+        if result.get("ground_truth_path") != listing.ground_truth_path:
+            raise ValueError(
+                f"Cannot resume from {path}: reference changed for row {row_idx}"
+            )
+        decisions[row_idx] = CatalogDecision(
+            row_idx=row_idx,
+            selected_path=result["selected_path"],
+            needs_review=result["needs_review"],
+            candidate_union=result["candidate_union"],
+            text_scores=result["text_scores"],
+            image_plus_copy_scores=result["image_plus_copy_scores"],
+            verifier_response_id=result["verifier_response_id"],
+        )
+    return decisions
+
+
+def eval_main() -> None:
+    parser = _common_parser(
+        "Evaluate the focused multimodal catalog agent on Shopify listings."
     )
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    listings = load_shopify_rows(
+        offset=args.offset,
+        limit=args.limit,
+        cache_dir=args.cache_dir,
+    )
+    decisions_by_row = _load_checkpoint(args.output, listings, offset=args.offset)
+    if decisions_by_row:
+        print(
+            f"Resuming with {len(decisions_by_row)} completed rows from {args.output}"
+        )
+    pending_listings = [
+        listing for listing in listings if listing.row_idx not in decisions_by_row
+    ]
+    if pending_listings:
+        with create_sie_client(timeout_s=600) as client:
+            for listing in pending_listings:
+                decision = classify_listing(client, listing)
+                decisions_by_row[listing.row_idx] = decision
+                output = _evaluation_output(
+                    listings, decisions_by_row, offset=args.offset
+                )
+                _write_evaluation_output(args.output, output)
+                print(
+                    f"{listing.row_idx:>5} "
+                    f"{'review' if decision.needs_review else 'accept':>6} "
+                    f"{decision.selected_path}"
+                )
+
+    output = _evaluation_output(listings, decisions_by_row, offset=args.offset)
+    _write_evaluation_output(args.output, output)
     print(json.dumps(output["metrics"], indent=2))
 
 
@@ -445,7 +541,7 @@ def predict_main() -> None:
     args = parser.parse_args()
     listings = load_shopify_rows(
         offset=args.offset,
-        limit=1,
+        limit=args.limit,
         cache_dir=args.cache_dir,
     )
     with create_sie_client(timeout_s=600) as client:
