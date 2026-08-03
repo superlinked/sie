@@ -2,6 +2,28 @@
   "schema_version": "1.0",
   "integrity_policy": "Each input is a verbatim excerpt from the linked primary source. Authored evaluation queries are labeled as such.",
   "synthetic_or_paraphrased_evidence": false,
+  "excerpts": {
+    "sec_filing_amendment": {
+      "source_id": "sec_pathward_10ka",
+      "locator": "Explanatory Note and Restatement Background, normalized visible-text lines 5374 and 5376",
+      "sha256": "d5241aa366c1f5cb15f4973ab456f1d86b2870d61dfb6b919e071558b3063f19"
+    },
+    "cms_lower_limb_orthosis": {
+      "source_id": "cms_lower_limb",
+      "locator": "Example of Improper Payments and outcome, normalized visible-text lines 1242, 1245, 1247, 1249",
+      "sha256": "26461fcd40bd6ba26345e7b332439d5c54bee851a4e8f30ff87884c40d294cef"
+    },
+    "ntsb_detector_alert": {
+      "source_id": "ntsb_east_palestine",
+      "locator": "PDF page 3 (printed pages 4–5), \"Salem\" and \"East Palestine\"",
+      "sha256": "982d5b8af59904057dae58fe6fe64f1c68e7ca16746e24f9c3304ae58ba8eb55"
+    },
+    "scotus_two_contracts": {
+      "source_id": "scotus_coinbase_suski",
+      "locator": "Slip opinion page 1, caption",
+      "sha256": "30d4450da291d2434af7aa04fd1f6056f32016ff1e4059d491a03ebe13ad7306"
+    }
+  },
   "sources": {
     "sec_pathward_10ka": {
       "file": "pathward-2025-10ka.html",

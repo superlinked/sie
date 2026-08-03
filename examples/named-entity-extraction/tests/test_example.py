@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_SPEC = importlib.util.spec_from_file_location(
@@ -35,6 +38,23 @@ class NamedEntityExampleTests(unittest.TestCase):
         cases, sources = run.load_and_verify_inputs()
         self.assertEqual(len(cases["cases"]), 4)
         self.assertEqual(len(sources["sources"]), 4)
+
+    def test_coordinated_excerpt_mutation_fails_canonical_check(self) -> None:
+        cases = run.read_json(run.CASES_PATH)
+        case = cases["cases"]["sec_filing_amendment"]
+        mutated_text = case["text"] + " Coordinated mutation."
+        case["text"] = mutated_text
+        case["source"]["text"] = mutated_text
+        case["source"]["sha256"] = hashlib.sha256(mutated_text.encode("utf-8")).hexdigest()
+
+        with tempfile.TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.json"
+            run.write_json(cases_path, cases)
+            with (
+                patch.object(run, "CASES_PATH", cases_path),
+                self.assertRaisesRegex(ValueError, "Canonical excerpt changed"),
+            ):
+                run.load_and_verify_inputs()
 
     def test_recorded_audit_envelopes_match_the_runner(self) -> None:
         cases, _ = run.load_and_verify_inputs()

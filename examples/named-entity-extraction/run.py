@@ -80,16 +80,32 @@ def load_and_verify_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
     if set(cases["cases"]) != set(ARTIFACT_NAMES):
         raise ValueError("Case set changed")
 
+    canonical_excerpts = sources.get("excerpts")
+    if not isinstance(canonical_excerpts, dict) or set(canonical_excerpts) != set(ARTIFACT_NAMES):
+        raise ValueError("Canonical excerpt set changed")
     known_sources = set(sources["sources"])
     for case_id, case in cases["cases"].items():
         source = case["source"]
+        canonical = canonical_excerpts[case_id]
+        if not isinstance(canonical, dict) or set(canonical) != {
+            "source_id",
+            "locator",
+            "sha256",
+        }:
+            raise ValueError(f"Invalid canonical excerpt for {case_id}")
         if source["source_id"] not in known_sources:
             raise ValueError(f"Unknown source for {case_id}")
+        if source["source_id"] != canonical["source_id"]:
+            raise ValueError(f"Canonical source changed for {case_id}")
+        if source["locator"] != canonical["locator"]:
+            raise ValueError(f"Canonical locator changed for {case_id}")
         if source["text"] != case["text"]:
             raise ValueError(f"Source text changed for {case_id}")
         actual = sha256_bytes(case["text"].encode("utf-8"))
         if actual != source["sha256"]:
             raise ValueError(f"Source excerpt changed for {case_id}")
+        if actual != canonical["sha256"]:
+            raise ValueError(f"Canonical excerpt changed for {case_id}")
         labels = case.get("labels")
         if not isinstance(labels, list) or not labels or len(set(labels)) != len(labels):
             raise ValueError(f"Invalid labels for {case_id}")
