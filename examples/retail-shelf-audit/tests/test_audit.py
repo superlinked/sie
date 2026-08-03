@@ -37,9 +37,25 @@ def test_select_gap_rejects_full_width_strip() -> None:
     assert selected["score"] == 0.274157
 
 
+def test_select_gap_fails_when_only_full_width_strips_exist() -> None:
+    with pytest.raises(ValueError, match="No non-strip empty shelf detection"):
+        select_gap([_objects()[0]], (4032, 3024))
+
+
 def test_nearby_candidates_are_geometry_selected_and_deduplicated() -> None:
     selected = nearby_price_candidates(_objects(), _gap())
     assert [item["score"] for item in selected] == [0.259638, 0.231093]
+
+
+def test_nearby_candidates_require_two_distinct_boxes() -> None:
+    with pytest.raises(ValueError, match="Fewer than two distinct nearby price-tag candidates"):
+        nearby_price_candidates([_price()], _gap())
+
+
+def test_nearby_candidates_ignore_zero_width_boxes() -> None:
+    objects = [_price(), {"label": "price tag", "score": 0.8, "bbox": [2300, 2300, 0, 200]}]
+    with pytest.raises(ValueError, match="Fewer than two distinct nearby price-tag candidates"):
+        nearby_price_candidates(objects, _gap())
 
 
 def test_candidate_crop_is_derived_from_detection() -> None:
@@ -50,6 +66,15 @@ def test_vertical_roles_are_assigned_by_geometry() -> None:
     upper, lower = select_vertical_pair(nearby_price_candidates(_objects(), _gap()))
     assert upper["score"] == 0.231093
     assert lower["score"] == 0.259638
+
+
+def test_vertical_pair_requires_aligned_candidates() -> None:
+    candidates = [
+        {"label": "price tag", "score": 0.4, "bbox": [100, 100, 100, 100]},
+        {"label": "price tag", "score": 0.3, "bbox": [500, 300, 100, 100]},
+    ]
+    with pytest.raises(ValueError, match="No vertically aligned DINO candidate pair"):
+        select_vertical_pair(candidates)
 
 
 def test_ocr_fragments_use_position_and_line_order() -> None:

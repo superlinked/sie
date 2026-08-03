@@ -26,6 +26,19 @@ EXPECTED_OCR_FRAGMENTS = [
     "from our supplier",
 ]
 
+EXPECTED_DETECTIONS = {
+    "gap_detection": {
+        "label": "empty shelf space",
+        "score": 0.274157,
+        "bbox_xywh": [2043.8, 2137.0, 623.6, 402.4],
+    },
+    "price_detection": {
+        "label": "price tag",
+        "score": 0.259638,
+        "bbox_xywh": [2235.5, 2559.4, 399.2, 186.3],
+    },
+}
+
 
 def _load(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
@@ -45,7 +58,11 @@ def verify_manifest() -> None:
         actual = sha256(path)
         if actual != record["sha256"]:
             raise ValueError(f"Checksum mismatch for {record['path']}: {actual}")
-        if "width" in record or "height" in record:
+        has_width = "width" in record
+        has_height = "height" in record
+        if has_width != has_height:
+            raise ValueError(f"Manifest dimensions require width and height for {record['path']}")
+        if has_width:
             with Image.open(path) as image:
                 if image.size != (record["width"], record["height"]):
                     raise ValueError(f"Dimension mismatch for {record['path']}: {image.size}")
@@ -106,20 +123,8 @@ def verify_recorded_case() -> None:
     evidence = recorded_evidence()
     if evidence["ocr_fragments"] != EXPECTED_OCR_FRAGMENTS:
         raise ValueError("Recorded OCR fragments differ from the reviewed case-042 fixture")
-    expected_detections = {
-        "gap_detection": {
-            "label": "empty shelf space",
-            "score": 0.274157,
-            "bbox_xywh": [2043.8, 2137.0, 623.6, 402.4],
-        },
-        "price_detection": {
-            "label": "price tag",
-            "score": 0.259638,
-            "bbox_xywh": [2235.5, 2559.4, 399.2, 186.3],
-        },
-    }
     mismatches = {
-        key: (evidence.get(key), value) for key, value in expected_detections.items() if evidence.get(key) != value
+        key: (evidence.get(key), value) for key, value in EXPECTED_DETECTIONS.items() if evidence.get(key) != value
     }
     if mismatches:
         raise ValueError(f"Recorded detector evidence differs from reviewed case 042: {mismatches}")

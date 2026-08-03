@@ -88,8 +88,11 @@ def select_gap(objects: list[dict[str, Any]], image_size: tuple[int, int]) -> di
 def _horizontal_overlap(first: list[float], second: list[float]) -> float:
     first_left, _, first_width, _ = first
     second_left, _, second_width, _ = second
+    smaller_width = min(first_width, second_width)
+    if smaller_width <= 0:
+        return 0.0
     overlap = max(0.0, min(first_left + first_width, second_left + second_width) - max(first_left, second_left))
-    return overlap / min(first_width, second_width)
+    return overlap / smaller_width
 
 
 def _iou(first: list[float], second: list[float]) -> float:
