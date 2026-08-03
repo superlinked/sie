@@ -1,0 +1,65 @@
+{
+  "entities": [
+    {
+      "text": "$935.67",
+      "label": "excluded debris cost",
+      "score": 0.80859375,
+      "start": 2491,
+      "end": 2498,
+      "bbox": null
+    },
+    {
+      "text": "12 to 15 cubic yards",
+      "label": "debris volume",
+      "score": 0.97802734375,
+      "start": 2949,
+      "end": 2969,
+      "bbox": null
+    },
+    {
+      "text": "$182,552.00",
+      "label": "proof of loss amount",
+      "score": 0.998046875,
+      "start": 3065,
+      "end": 3076,
+      "bbox": null
+    },
+    {
+      "text": "$49,500.00",
+      "label": "debris removal estimate",
+      "score": 0.9775390625,
+      "start": 3726,
+      "end": 3736,
+      "bbox": null
+    },
+    {
+      "text": "$181,832.94",
+      "label": "barge transportation estimate",
+      "score": 0.9951171875,
+      "start": 3813,
+      "end": 3824,
+      "bbox": null
+    },
+    {
+      "text": "labor and equipment usage",
+      "label": "covered debris removal scope",
+      "score": 0.6630859375,
+      "start": 7859,
+      "end": 7884,
+      "bbox": null
+    },
+    {
+      "text": "July 2019",
+      "label": "date of loss",
+      "score": 0.99658203125,
+      "start": 9635,
+      "end": 9644,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "appeal-facts",
+  "model": "fastino/gliner2-large-v1"
+}

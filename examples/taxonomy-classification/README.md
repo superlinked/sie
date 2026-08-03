@@ -8,6 +8,69 @@ Taxonomy classification assigns a category path (e.g. `Electronics > Computers >
 
 Google's [Custom Taxonomy Classifier](https://github.com/google-marketing-solutions/custom-taxonomy-classifier) demonstrates a minimal version of this: embed flat category names with a single Vertex AI model, retrieve the nearest neighbor. This project goes further: we systematically evaluate multiple approaches across text, vision, with and without reranking on a hierarchical taxonomy.
 
+## Start with the focused catalog agent
+
+`catalog_agent.py` is the shortest path from a product listing to a normalized
+category decision:
+
+1. Rank the supplied candidate paths from listing copy.
+2. Rank the same paths from the product image and copy.
+3. Keep the top two paths from each ranking.
+4. Ask `Qwen/Qwen3.6-27B` to select one path or set `needs_review`.
+
+The runnable example sends all three model calls through SIE. The final response
+uses a two-field JSON schema, so application code receives one selected index
+and one review flag. The published Shopify label never enters the request.
+
+Run one real listing:
+
+```bash
+uv sync
+uv run predict-catalog-agent --offset 54
+```
+
+Evaluate the same 100 train rows used by the
+[e-commerce reference page](https://superlinked.com/e-commerce):
+
+```bash
+uv run eval-catalog-agent \
+  --offset 0 \
+  --limit 100 \
+  --output eval/catalog-agent.json
+```
+
+The recorded run moves exact-path matches from `42/100` for copy alone to
+`54/100` for the catalog agent. Macro hierarchical F1 moves from `0.6710` to
+`0.7446`; six listings are flagged for review. Shopify recommends hierarchical
+F1 for this benchmark because a nearby taxonomy branch and a different
+top-level category should not count as the same error.
+
+The run summary is in
+[`results/catalog-agent-summary.json`](results/catalog-agent-summary.json).
+
+### What the first 55 misses showed
+
+Image plus copy fixed 10 copy-only mistakes and introduced 7 regressions. Of
+the 55 image-plus-copy misses, 27 selected a nearby branch, 18 selected the
+wrong top-level branch, 6 selected an ancestor or descendant, and 4 stayed
+under the right top-level branch but missed elsewhere.
+
+The reference path was present in every supplied candidate list. It appeared
+in the union of the copy-only and image-plus-copy top two for 75 listings, while
+the best static blend of both reranker scores reached only 48 exact matches.
+That gap led to the verifier step.
+
+Several reference labels also conflict with the listing itself. Examples
+include a hydraulic pump labeled as a cone crusher and a decorative banner
+labeled as a traditional doll. Those rows should enter a dataset-review queue
+instead of silently training the classifier toward the bad label.
+
+The next useful iteration is a hierarchical verifier. It would decide the
+top-level branch first, then compare siblings with taxonomy definitions and
+merchant attributes. A disagreement rule can send low-margin or contradictory
+listings to review. This targets the two largest error groups without adding a
+larger model to every request.
+
 ## Why SIE
 
 Taxonomy classification is not a single-model problem. Finding the best approach requires experimenting with fundamentally different model types:

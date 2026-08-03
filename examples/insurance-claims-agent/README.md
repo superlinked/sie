@@ -1,36 +1,41 @@
-# Review a flood claim packet through one SIE cluster
+# Review a public flood-insurance appeal through one SIE cluster
 
-This example reviews a realistic claim packet built from an official FEMA proof
-of loss, the Standard Flood Insurance Policy, a public-domain damage photograph,
-and a fictional repair estimate.
+This example reviews FEMA Flood Insurance Appeal Decision B8 and the controlling
+Standard Flood Insurance Policy. The appeal is a public, redacted record. It
+concerns a July 2019 Lake Ontario flood and a disputed request to remove stones
+from underneath an insured building.
 
-The packet contains two deliberate problems. The proof of loss is unsigned. Its
-net claim total is $81,060, while the attached estimate and inventory support
-$80,660 after deductibles.
+The record is useful because the outcome turns on scope. FEMA directed the
+insurer to cover removal of 12 to 15 cubic yards of flood-borne stones from
+underneath the building to its perimeter. Barge transport, handling, disposal,
+and debris removal from the yard remain outside that covered scope.
 
 ## What SIE does
 
 | Stage | Model | Result |
 |---|---|---|
-| Parse the form, estimate, and policy | `docling` | Markdown with form labels, tables, and policy text |
-| Read the claim identity | `fastino/gliner2-large-v1` | Typed name, policy number, loss date, and property address |
-| Retrieve controlling policy language | `BAAI/bge-reranker-v2-m3` | Ranked passages about proof of loss and supporting records |
-| Detect visible damage categories | `IDEA-Research/grounding-dino-tiny` | Labels, confidence scores, and boxes |
-| Produce the evidence review | `Qwen/Qwen3.5-4B:no-spec` | JSON with route, totals, sourced findings, and next actions |
+| Parse the appeal and policy | `docling` | Markdown with the record, amounts, rules, analysis, and conclusion |
+| Extract claim facts | `fastino/gliner2-large-v1` | Amounts, debris volume, loss date, and coverage terms |
+| Retrieve controlling policy language | `BAAI/bge-reranker-v2-m3` | Ranked passages about non-owned debris removal |
+| Produce the cited review | `Qwen/Qwen3.5-4B:no-spec` | JSON separating covered work, excluded costs, and evidence still needed |
 
-Every model call goes through SIE. The review uses the generation endpoint; the
-photograph uses Grounding DINO through the extract endpoint.
+Every model call goes through SIE.
 
-## Verified result
+## Expected result
 
-We ran the complete packet on an NVIDIA L4 on July 23, 2026. The evaluator
-passed all six checks. Qwen returned `manual_review` with two sourced findings:
+The evaluator checks facts stated in FEMA's published decision:
 
-- Blocking: `Proof of Loss lacks required signature and date`
-- High priority: `Claimed total exceeds attachment total by $400.00`
+- amended proof of loss: `$182,552.00`;
+- debris-removal estimate: `$49,500.00`;
+- barge estimate: `$181,832.94`;
+- covered physical scope: `12` to `15` cubic yards beneath the building;
+- excluded scope: barge transport, handling, disposal, and yard removal;
+- follow-up evidence: comparison estimates and proof of work from prior claims.
 
-Grounding DINO found furniture at 0.509 confidence and standing water at 0.276
-confidence. The saved boxes use the original 3072 by 2304 image coordinates.
+The model summarizes a completed public appeal. It does not decide a live claim.
+
+The [`verified-run`](verified-run/) directory records a July 26, 2026, run in
+which all ten factual checks passed.
 
 ## Run it
 
@@ -40,14 +45,9 @@ cp .env.example .env
 uv sync
 
 uv run fetch-claim-sources
-uv run prepare-claim
 uv run review-claim --run-id local
 uv run eval-claim runs/local
 ```
-
-`prepare-claim` fills FEMA Form 086-0-09 with the fictional values in
-`fixtures/claim.json`. It also creates a contractor-style repair estimate and
-copies the public-domain photograph into the packet.
 
 For SIE Cloud, set one URL and key:
 
@@ -63,17 +63,17 @@ separate ports:
 # Terminal 1: Docling, GLiNER2, and reranking
 sie-server serve --port 8080
 
-# Terminal 2: Grounding DINO and Qwen generation
-sie-server serve --models IDEA-Research/grounding-dino-tiny,Qwen/Qwen3.5-4B:no-spec --port 8081
+# Terminal 2: Qwen generation
+sie-server serve --models Qwen/Qwen3.5-4B:no-spec --port 8081
 
 SIE_GENERATION_URL=http://localhost:8081 uv run review-claim --run-id local
 ```
 
-On one GPU, release the default bundle before loading the generation models:
+On one GPU, release the default bundle before loading the generation model:
 
 ```bash
 uv run review-claim --run-id local --stage default
-# Stop the default server, then start the Grounding DINO + Qwen server on the same port.
+# Stop the default server, then start Qwen on the same port.
 uv run review-claim --run-id local --stage generation
 ```
 
@@ -82,17 +82,17 @@ uv run review-claim --run-id local --stage generation
 ```text
 runs/<run-id>/manifest.json           endpoints, models, and per-call latency
 runs/<run-id>/source-manifest.json    source URLs, rights, sizes, and checksums
-runs/<run-id>/packet-manifest.json    packet files and expected reconciliation
-runs/<run-id>/markdown/*.md           parsed form, estimate, and policy
+runs/<run-id>/default-stage.json      default-bundle endpoint, models, and timings
+runs/<run-id>/markdown/*.md           parsed appeal decision and policy
+runs/<run-id>/claim-facts.json        extracted amounts, dates, and scope phrases
 runs/<run-id>/policy-evidence.json    reranked policy passages
-runs/<run-id>/photo-analysis.md       vision-model observations
-runs/<run-id>/review.json             structured claim review
-runs/<run-id>/evaluation.json         deterministic result checks
+runs/<run-id>/review.json             structured appeal review
+runs/<run-id>/evaluation.json         deterministic factual checks
 runs/<run-id>/raw/*.json              complete model responses
 ```
 
 ## Safety boundary
 
-The output routes evidence for a human adjuster. It does not approve or deny
-coverage, calculate a payment, label fraud, or make a legal determination. The
-claim is fictional, and the generated estimate is marked as a software fixture.
+The output summarizes a published FEMA appeal for software evaluation. It does
+not approve or deny coverage, calculate a payment, label fraud, or replace an
+adjuster.

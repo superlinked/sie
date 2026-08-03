@@ -52,8 +52,6 @@ def _download(source: Source) -> tuple[bytes, str]:
 def _validate(source: Source, payload: bytes) -> None:
     if source.media_type == "application/pdf" and not payload.startswith(b"%PDF"):
         raise ValueError(f"{source.url} did not return a PDF")
-    if source.media_type == "image/jpeg" and not payload.startswith(b"\xff\xd8\xff"):
-        raise ValueError(f"{source.url} did not return a JPEG")
 
 
 def fetch_sources(*, refresh: bool) -> Path:
@@ -103,7 +101,7 @@ def fetch_sources(*, refresh: bool) -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fetch the public claim form, policy, and damage photograph")
+    parser = argparse.ArgumentParser(description="Fetch the public FEMA appeal decision and flood policy")
     parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()
     console.print(f"\nSource manifest: {fetch_sources(refresh=args.refresh)}")

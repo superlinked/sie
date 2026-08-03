@@ -1,0 +1,29 @@
+{
+  "fetched_at": "2026-07-26T19:11:05.290899+00:00",
+  "sources": [
+    {
+      "slug": "nfip-appeal-b8",
+      "title": "FEMA Flood Insurance Appeal Decision B8",
+      "file_name": "nfip-appeal-b8.pdf",
+      "url": "https://www.floodsmart.gov/sites/default/files/media/document/2022-12/B8_Direct%20Physical%20Loss_Proof%20of%20Loss_Overturn.pdf",
+      "source_page": "https://www.floodsmart.gov/flood-claim-memos/appeal-issue/direct-physical-loss/proof-loss",
+      "rights": "U.S. federal government work. Do not imply FEMA or DHS endorsement.",
+      "media_type": "application/pdf",
+      "retrieval": "publisher",
+      "bytes": 114918,
+      "sha256": "8a8e4f852caf8a91e2c88f9ff194c2232d4d331de465d8cad5eb1a0b50efb19a"
+    },
+    {
+      "slug": "sfip-dwelling-policy",
+      "title": "Standard Flood Insurance Policy, Dwelling Form",
+      "file_name": "sfip-dwelling-policy.pdf",
+      "url": "https://www.fema.gov/sites/default/files/documents/fema_F-122-Dwelling-SFIP_2021.pdf",
+      "source_page": "https://www.fema.gov/flood-insurance/find-form/underwriting",
+      "rights": "U.S. federal government work. Do not imply FEMA or DHS endorsement.",
+      "media_type": "application/pdf",
+      "retrieval": "bundled-government-source",
+      "bytes": 393573,
+      "sha256": "4e91d6417cba13c18d4402083a0c02811da8264be6fcb8557c6afa4f8b6e2e74"
+    }
+  ]
+}
