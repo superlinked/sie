@@ -69,4 +69,4 @@ def test_sample_dry_run_uses_isolated_runtime_state() -> None:
     assert "Namespace: ablation-sample-baai-bge-m3" in completed.stderr
     assert "cache/ablation/sample" in completed.stderr
     assert "sample_ablation_results.csv" in completed.stderr
-    assert "Sample loaded: 12 documents, 6 queries, 10 qrels" in completed.stderr
+    assert "Sample loaded: 12 documents, 6 queries, 8 qrels" in completed.stderr

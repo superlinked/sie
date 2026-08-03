@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -76,6 +77,45 @@ def test_hash_failure_preserves_existing_output(tmp_path: Path, monkeypatch: pyt
     )
 
     with pytest.raises(ValueError, match="sample hash mismatch"):
+        prepare_sample_corpus.prepare(output_dir)
+
+    assert marker.read_text() == "keep"
+
+
+def test_copied_hash_failure_preserves_existing_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output_dir = tmp_path / "sample"
+    output_dir.mkdir()
+    marker = output_dir / "existing.txt"
+    marker.write_text("keep")
+    original_copyfile = shutil.copyfile
+
+    def copy_corrupt_source(source: Path, destination: Path) -> None:
+        original_copyfile(source, destination)
+        destination.write_bytes(b"corrupt")
+
+    monkeypatch.setattr(prepare_sample_corpus.shutil, "copyfile", copy_corrupt_source)
+
+    with pytest.raises(ValueError, match="copied sample hash mismatch"):
+        prepare_sample_corpus.prepare(output_dir)
+
+    assert marker.read_text() == "keep"
+
+
+def test_publish_failure_restores_existing_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output_dir = tmp_path / "sample"
+    output_dir.mkdir()
+    marker = output_dir / "existing.txt"
+    marker.write_text("keep")
+    original_rename = Path.rename
+
+    def fail_staging_publish(path: Path, target: Path) -> Path:
+        if path.name.startswith(".sample-") and not path.name.startswith(".sample-backup-"):
+            raise OSError("publish failed")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_staging_publish)
+
+    with pytest.raises(OSError, match="publish failed"):
         prepare_sample_corpus.prepare(output_dir)
 
     assert marker.read_text() == "keep"

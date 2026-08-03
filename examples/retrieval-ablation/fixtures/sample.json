@@ -67,7 +67,7 @@
     {
       "id": "q01",
       "text": "Who must approve a large supplier invoice?",
-      "relevant": {"1": 2, "2": 1}
+      "relevant": {"1": 2}
     },
     {
       "id": "q02",
@@ -92,7 +92,7 @@
     {
       "id": "q06",
       "text": "What controls are required before a risky production deployment?",
-      "relevant": {"12": 2, "3": 1}
+      "relevant": {"12": 2}
     }
   ]
 }

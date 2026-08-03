@@ -77,6 +77,11 @@ def prepare(output_dir: Path = DEFAULT_OUTPUT_DIR) -> list[dict[str, Any]]:
         for sample, source in sources:
             destination = pages_dir / sample.filename
             shutil.copyfile(source, destination)
+            copied_hash = _sha256(destination)
+            if copied_hash != sample.sha256:
+                raise ValueError(
+                    f"copied sample hash mismatch for {destination}: expected {sample.sha256}, got {copied_hash}"
+                )
             slug = source.stem
             rows.append(
                 {
@@ -95,9 +100,21 @@ def prepare(output_dir: Path = DEFAULT_OUTPUT_DIR) -> list[dict[str, Any]]:
 
         (staging_dir / "pages_manifest.json").write_text(json.dumps(rows, indent=2) + "\n")
 
+        backup_dir: Path | None = None
         if output_dir.exists():
-            shutil.rmtree(output_dir)
-        staging_dir.rename(output_dir)
+            backup_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-backup-", dir=output_dir.parent))
+            backup_dir.rmdir()
+            output_dir.rename(backup_dir)
+
+        try:
+            staging_dir.rename(output_dir)
+        except OSError:
+            if backup_dir is not None:
+                backup_dir.rename(output_dir)
+            raise
+        else:
+            if backup_dir is not None:
+                shutil.rmtree(backup_dir)
         return rows
     finally:
         if staging_dir.exists():

@@ -748,6 +748,13 @@ async def main():
             search_bm25(tpuf, ns_name, query_texts, cache_path=cache_dir / f"bm25_top{TOP_K_RETRIEVE}.json"),
             search_vector(tpuf, ns_name, query_vecs, cache_path=cache_dir / f"vector_top{TOP_K_RETRIEVE}.json"),
         )
+        expected_result_count = len(query_items)
+        if len(bm25_results) != expected_result_count or len(vec_results) != expected_result_count:
+            raise ValueError(
+                "retrieval result count mismatch: "
+                f"expected {expected_result_count}, got BM25={len(bm25_results)} "
+                f"and vector={len(vec_results)}"
+            )
         elapsed = time.perf_counter() - t0
         logger.info(
             f"Trial 2: {elapsed:.1f}s ({len(query_texts) * 2} queries, "
@@ -772,7 +779,7 @@ async def main():
             )
 
         if 3 not in skip:
-            rrf_results = [rrf_fuse([b, v]) for b, v in zip(bm25_results, vec_results)]
+            rrf_results = [rrf_fuse([b, v]) for b, v in zip(bm25_results, vec_results, strict=True)]
             m = evaluate(rrf_results, query_items, qrel_map)
             append_result(
                 results_log,
@@ -781,7 +788,7 @@ async def main():
             )
 
         # ── Build hybrid pool ──────────────────────────────────────
-        hybrid_pools = [build_hybrid_pool(b, v) for b, v in zip(bm25_results, vec_results)]
+        hybrid_pools = [build_hybrid_pool(b, v) for b, v in zip(bm25_results, vec_results, strict=True)]
         pool_sizes = [len(p) for p in hybrid_pools]
         logger.info(
             f"Hybrid pool: mean={np.mean(pool_sizes):.0f}, min={min(pool_sizes)}, max={max(pool_sizes)} candidates"
