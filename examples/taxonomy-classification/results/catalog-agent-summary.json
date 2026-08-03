@@ -1,0 +1,38 @@
+{
+  "record_type": "sie_catalog_agent_evaluation_summary",
+  "run_at": "2026-07-28T05:39:23.578423Z",
+  "dataset": {
+    "id": "Shopify/product-catalogue",
+    "revision": "d5c517c509f5aca99053897ef1de797d6d7e5aa5",
+    "split": "train",
+    "row_window": [0, 99]
+  },
+  "models": {
+    "reranker": {
+      "id": "Qwen/Qwen3-VL-Reranker-2B",
+      "revision": "4bd860ac4f15ad1897a214615cccc700f8f71818"
+    },
+    "verifier": {
+      "id": "Qwen/Qwen3.6-27B",
+      "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
+    }
+  },
+  "candidate_rule": "Union of the two highest-scoring paths from copy-only and image-plus-copy reranker calls.",
+  "response_schema": {
+    "type": "object",
+    "required": ["selected_index", "needs_review"],
+    "additionalProperties": false
+  },
+  "metrics": {
+    "copy_only_exact_path_correct": 42,
+    "image_plus_copy_exact_path_correct": 45,
+    "agent_exact_path_correct": 54,
+    "copy_only_top_level_correct": 81,
+    "image_plus_copy_top_level_correct": 82,
+    "agent_top_level_correct": 86,
+    "copy_only_macro_hierarchical_f1": 0.6709681429681428,
+    "image_plus_copy_macro_hierarchical_f1": 0.6881536796536796,
+    "agent_macro_hierarchical_f1": 0.7446406926406923,
+    "needs_review": 6
+  }
+}

@@ -6,9 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "chromadb>=1.5.9",
+    "pillow>=12.2.0",
     "polars>=1.40.0",
     "python-dotenv>=1.2.2",
-    "sie-sdk==0.2.0",
+    "sie-sdk==0.6.24",
     "tqdm>=4.67.3",
 ]
 
@@ -25,9 +26,13 @@ eval-image-retrieval = "taxonomy_classification.classifier.image_retrieval:eval_
 predict-image-retrieval = "taxonomy_classification.classifier.image_retrieval:predict_main"
 eval-reranking = "taxonomy_classification.classifier.reranking:eval_main"
 predict-reranking = "taxonomy_classification.classifier.reranking:predict_main"
+eval-catalog-agent = "taxonomy_classification.catalog_agent:eval_main"
+predict-catalog-agent = "taxonomy_classification.catalog_agent:predict_main"
 
 [dependency-groups]
 dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio",
   "ruff>=0.11.0",
 ]
 

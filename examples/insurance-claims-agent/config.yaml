@@ -9,7 +9,6 @@ models:
   parse: "docling"
   extract: "fastino/gliner2-large-v1"
   rerank: "BAAI/bge-reranker-v2-m3"
-  vision: "IDEA-Research/grounding-dino-tiny"
   review: "Qwen/Qwen3.5-4B:no-spec"
 
 retrieval:
@@ -18,14 +17,14 @@ retrieval:
   chunk_characters: 1800
 
 sources:
-  - slug: "nfip-proof-of-loss"
-    title: "NFIP Proof of Loss, FEMA Form 086-0-09"
-    file_name: "nfip-proof-of-loss.pdf"
+  - slug: "nfip-appeal-b8"
+    title: "FEMA Flood Insurance Appeal Decision B8"
+    file_name: "nfip-appeal-b8.pdf"
     media_type: "application/pdf"
-    url: "https://www.fema.gov/sites/default/files/2020-07/FEMA-Form_086-0-09_proof-of-loss.pdf"
-    source_page: "https://www.fema.gov/flood-insurance/find-form/claims"
+    url: "https://www.floodsmart.gov/sites/default/files/media/document/2022-12/B8_Direct%20Physical%20Loss_Proof%20of%20Loss_Overturn.pdf"
+    source_page: "https://www.floodsmart.gov/flood-claim-memos/appeal-issue/direct-physical-loss/proof-loss"
     rights: "U.S. federal government work. Do not imply FEMA or DHS endorsement."
-    fixture_file: "fixtures/sources/nfip-proof-of-loss.pdf"
+    fixture_file: "fixtures/sources/nfip-appeal-b8.pdf"
 
   - slug: "sfip-dwelling-policy"
     title: "Standard Flood Insurance Policy, Dwelling Form"
@@ -35,12 +34,3 @@ sources:
     source_page: "https://www.fema.gov/flood-insurance/find-form/underwriting"
     rights: "U.S. federal government work. Do not imply FEMA or DHS endorsement."
     fixture_file: "fixtures/sources/sfip-dwelling-policy.pdf"
-
-  - slug: "flooded-house-interior"
-    title: "Flooded house interior"
-    file_name: "flooded-house-interior.jpg"
-    media_type: "image/jpeg"
-    url: "https://upload.wikimedia.org/wikipedia/commons/0/01/Flooded_house_interior.jpg"
-    source_page: "https://commons.wikimedia.org/wiki/File:Flooded_house_interior.jpg"
-    rights: "Public domain U.S. Fish and Wildlife Service photograph."
-    fixture_file: "fixtures/sources/flooded-house-interior.jpg"
