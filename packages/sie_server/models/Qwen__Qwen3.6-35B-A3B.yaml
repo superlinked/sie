@@ -1,0 +1,62 @@
+sie_id: Qwen/Qwen3.6-35B-A3B
+hf_id: Qwen/Qwen3.6-35B-A3B
+hf_revision: 995ad96eacd98c81ed38be0c5b274b04031597b0
+# Qwen3.6-35B-A3B is the Qwen3.5-compatible hybrid VLM/MoE architecture
+# (35B total / 3B active). Its 66.97 GiB BF16 checkpoint fits the existing
+# SGLang 0.5.10+ family adapter, but a single H100-80GB needs online FP8 weight
+# quantization to preserve activation and KV headroom.
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  generate:
+    # Native context is 262,144 tokens. Start with the established 8K Qwen3.6
+    # serving contract until the single-H100 FP8 KV boundary is measured.
+    context_length: 8192
+    max_output_tokens: 4096
+    capabilities:
+      grammar: ["json_schema", "regex"]
+      streaming: true
+      tools: true
+    chat_template_kwargs:
+      enable_thinking: false
+max_sequence_length: 8192
+profiles:
+  # Correctness-first H100 FP8 bootstrap: no NEXTN and no CUDA graphs until
+  # the online-FP8 smoke validates the MoE kernels and memory envelope.
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    kv_budget_tokens: 8192
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.90
+        served_model_name: Qwen/Qwen3.6-35B-A3B
+        disable_cuda_graph: true
+        attention_backend: triton
+        grammar_backend: outlines
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--quantization"
+          - "fp8"
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        # Official Qwen3.6 non-thinking sampling recipe.
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+        stop_tokens:
+          - "<|im_end|>"
+  # Caller-visible FP8 alias; select the H100-80GB machine profile separately.
+  h100-fp8:
+    extends: default

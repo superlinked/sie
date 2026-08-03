@@ -68,50 +68,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _open_clip_token_counts(input_ids: Any) -> list[int] | None:
-    """Per-row non-pad token counts for an ``open_clip`` tokenizer batch (§7.3).
-
-    open_clip pads every text to the fixed context length with id ``0``, so the
-    count of non-zero ids per row is the real billable length (content plus the
-    sot/eot markers) the text tower encoded. Best-effort: any tensor quirk
-    yields ``None`` so the meter falls back to its reserve estimate rather than
-    mis-billing — metering must never fail inference.
-    """
-    try:
-        return [int((row != 0).sum().item()) for row in input_ids]
-    except Exception:  # noqa: BLE001 — metering must never fail inference
-        return None
-
-
-def _attention_mask_token_counts(
-    input_ids: Any,
-    attention_mask: Any,
-    *,
-    expected_len: int,
-) -> list[int] | None:
-    """Count the exact tokens selected by a shape-valid binary attention mask.
-
-    SigLIP tokenizers commonly use the same id for ``pad_token`` and
-    ``eos_token``. Counting ids unequal to the pad id would therefore omit the
-    real EOS token from every non-truncated input. The processor's attention
-    mask is the unambiguous record of which positions the text tower encoded.
-
-    Best-effort: malformed/custom processor output returns ``None`` so the
-    caller can use the existing padding-free tokenizer recount. Metering must
-    never fail inference or accept a malformed count as settlement evidence.
-    """
-    try:
-        input_shape = tuple(input_ids.shape)
-        mask_shape = tuple(attention_mask.shape)
-        if len(input_shape) != 2 or mask_shape != input_shape or input_shape[0] != expected_len:
-            return None
-        if not bool(torch.logical_or(attention_mask == 0, attention_mask == 1).all().item()):
-            return None
-        return [int(row.sum().item()) for row in attention_mask]
-    except Exception:  # noqa: BLE001 — metering must never fail inference
-        return None
-
-
 # Cross-item preprocessing is CPU-bound (PIL decode + resize). Fan the flat
 # image set across a small bounded thread pool so decode/resize overlaps.
 _MAX_PREPROCESS_THREADS = 8
@@ -594,6 +550,14 @@ class SiglipAdapter(BaseAdapter):
         # result path for metering (§P3.5).
         if per_item_token_counts is not None:
             output.extra["input_token_counts"] = per_item_token_counts
+        # Modality routing as MEASURED, not as inferred from the wire item
+        # (#2538). ``has_images`` wins over ``has_text`` above, so an item
+        # carrying BOTH never reaches the text tower and its exact text-token
+        # count is zero — a fact only this partition knows. The pipeline uses it
+        # as the last-resort token-count basis when nothing else could count,
+        # which is the difference between settling a wholly image-toward batch
+        # and faulting it as reserved-but-missing.
+        output.extra["text_tower_skipped"] = [i in set(image_indices) for i in range(len(items))]
         return output
 
     def _get_preprocess_pool(self) -> ThreadPoolExecutor:
@@ -721,10 +685,10 @@ class SiglipAdapter(BaseAdapter):
             # Serialise tokenization: fast tokenizers are not thread-safe.
             with self._tokenizer_lock:
                 input_ids = self._open_clip_tokenizer(list(texts))
-                # Unit-meter seam (§7.3): open_clip pads to a fixed context
-                # length with id 0, so the non-pad count per row is the real
-                # billable length (content + sot/eot) the tower encoded.
-                token_counts = _open_clip_token_counts(input_ids)
+                # Unit-meter seam (§7.3): SigLIP executes every text at the
+                # resolved fixed context length. Bill that padded work, not the
+                # content-dependent count of non-pad ids (#2629).
+                token_counts = [self._max_seq_length] * len(texts)
                 input_ids = input_ids.to(self._device)
             with torch.inference_mode():
                 text_features = self._model.encode_text(input_ids, normalize=self._normalize)
@@ -744,20 +708,11 @@ class SiglipAdapter(BaseAdapter):
                     truncation=True,
                     max_length=self._max_seq_length,
                 )
-                # Unit-meter seam (§7.3): the exact attention mask includes the
-                # real EOS token even when it shares an id with padding (the
-                # stock SigLIP tokenizer does this). Older/custom processors
-                # without a shape-valid binary mask retain the conservative
-                # padding-free recount fallback.
-                token_counts = _attention_mask_token_counts(
-                    inputs.get("input_ids"),
-                    inputs.get("attention_mask"),
-                    expected_len=len(texts),
-                )
-                if token_counts is None:
-                    token_counts = self._token_counts_or_none(
-                        self._processor.tokenizer, list(texts), expected_len=len(texts)
-                    )
+                # The processor was explicitly asked for max-length padding,
+                # and load() clamps this value to the text tower's capacity.
+                # The attention-mask sum is intentionally irrelevant: short
+                # captions execute the same padded work as long ones (#2629).
+                token_counts = [self._max_seq_length] * len(texts)
             inputs = {k: v.to(self._device) for k, v in inputs.items()}
             with torch.inference_mode():
                 text_features = _feature_tensor(self._model.get_text_features(**inputs))

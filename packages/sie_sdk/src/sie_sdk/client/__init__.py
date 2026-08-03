@@ -5,6 +5,7 @@ Re-exports all client classes and errors for backwards compatibility.
 
 from sie_sdk.client.async_ import SIEAsyncClient
 from sie_sdk.client.errors import (
+    EstimateUnroutableError,
     InputTooLongError,
     LoraLoadingError,
     ModelLoadFailedError,
@@ -19,6 +20,7 @@ from sie_sdk.client.errors import (
 from sie_sdk.client.sync import SIEClient
 
 __all__ = [
+    "EstimateUnroutableError",
     "InputTooLongError",
     "LoraLoadingError",
     "ModelLoadFailedError",

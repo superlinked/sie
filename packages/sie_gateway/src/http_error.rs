@@ -11,6 +11,51 @@
 
 use serde_json::{json, Map, Value};
 
+/// Response-extension marker: this error response is a fault the GATEWAY owns,
+/// produced AFTER the worker already ran, and the client receives none of the
+/// work it paid for.
+///
+/// A handler that translates a successful worker result into a client-facing
+/// shape can fail on its own — a subtitle timestamp the model left open, a
+/// response body larger than the read bound, an unexpected item count. Those are
+/// SIE's bugs, not the customer's request, and unlike a partial worker failure
+/// there is no delivered output to bill for. Attaching this to the response lets
+/// a downstream billing composition tell the two apart; without it, "the
+/// response is non-2xx" is indistinguishable from "one item of a batch failed",
+/// which legitimately still settles its successful siblings.
+///
+/// The OSS gateway attaches it and does nothing else with it. `stage` names the
+/// translation step for the alert; keep it a small closed vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GatewayOwnedFault {
+    pub stage: &'static str,
+}
+
+impl GatewayOwnedFault {
+    pub const fn new(stage: &'static str) -> Self {
+        Self { stage }
+    }
+
+    /// Attach the marker to an already-built error response.
+    ///
+    /// **This marker must survive every layer between the handler that sets it
+    /// and the composition that reads it, and it fails toward CHARGING if it
+    /// does not.** A dropped marker is not a visible error — the response is
+    /// unchanged and the customer is simply billed for a result they never
+    /// received, which is the exact outcome the marker exists to prevent.
+    ///
+    /// Wrapping a response is safe: `Response::from_parts(parts, new_body)`
+    /// carries `parts.extensions` through, which is how the managed edge's
+    /// permit-body layer preserves it today. REBUILDING one is not — any layer
+    /// that constructs a fresh `Response` from a status and body, rather than
+    /// re-using the original's parts, silently discards it. A layer that must
+    /// rebuild has to copy the extensions across explicitly.
+    pub fn mark(self, mut response: axum::response::Response) -> axum::response::Response {
+        response.extensions_mut().insert(self);
+        response
+    }
+}
+
 /// Stable ``detail.code`` values for gateway-generated errors.
 pub mod code {
     pub const MODEL_NOT_FOUND: &str = "MODEL_NOT_FOUND";

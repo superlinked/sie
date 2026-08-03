@@ -16,7 +16,7 @@ import zipfile
 from pathlib import Path
 
 MATURIN_VERSION = "1.13.3"
-AUDIO_PREP_VERSION = "0.6.23"  # x-release-please-version
+AUDIO_PREP_VERSION = "0.6.26"  # x-release-please-version
 AUDIO_WHEEL_COMPATIBILITY = "manylinux_2_28"
 AUDIO_WHEEL_FILENAME = f"sie_audio_prep-{AUDIO_PREP_VERSION}-cp312-abi3-{AUDIO_WHEEL_COMPATIBILITY}_x86_64.whl"
 AUDIO_WHEEL_REMOTE = f"/opt/sie/wheels/{AUDIO_WHEEL_FILENAME}"
@@ -26,12 +26,22 @@ _BUILD_FINGERPRINT = f"maturin={MATURIN_VERSION};compatibility={AUDIO_WHEEL_COMP
 def _source_digest(crate: Path) -> str:
     digest = hashlib.sha256()
     digest.update(_BUILD_FINGERPRINT.encode())
-    paths = [crate / "Cargo.toml", crate / "Cargo.lock", crate / "pyproject.toml"]
+    # The crate is a workspace member (#2339): its dependency pins live in
+    # the workspace-root Cargo.lock, one level above packages/<crate>. A
+    # missing lock must fail loudly — silently skipping it would drop
+    # dependency pins from the wheel cache fingerprint.
+    workspace_lock = crate.parents[1] / "Cargo.lock"
+    if not workspace_lock.is_file():
+        raise RuntimeError(f"workspace Cargo.lock not found at {workspace_lock}")
+    paths = [crate / "Cargo.toml", workspace_lock, crate / "pyproject.toml"]
     paths.extend(sorted((crate / "src").rglob("*")))
     for path in paths:
         if not path.is_file():
             continue
-        relative = path.relative_to(crate).as_posix().encode()
+        try:
+            relative = path.relative_to(crate).as_posix().encode()
+        except ValueError:  # workspace-root lock, above the crate dir
+            relative = f"../../{path.name}".encode()
         digest.update(len(relative).to_bytes(4, "big"))
         digest.update(relative)
         content = path.read_bytes()

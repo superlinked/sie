@@ -2,8 +2,8 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
-from sie_server.config.model import ModelConfig
-from sie_server.core.runtime_options import merge_runtime_options
+from sie_server.config.model import ModelConfig, ResolvedProfile
+from sie_server.core.runtime_options import merge_runtime_options_with_profile
 from sie_server.types.overflow_policy import VALID_OVERFLOW_POLICIES
 from sie_server.types.responses import ErrorCode
 
@@ -30,10 +30,18 @@ def resolve_runtime_options(
     Raises:
         HTTPException: 400 if profile name is invalid.
     """
-    # Shared with the cluster queue worker (queue_executor) so both ingress
-    # paths produce the same effective options; see core.runtime_options.
+    merged, _ = resolve_runtime_options_with_profile(config, request_options, span)
+    return merged
+
+
+def resolve_runtime_options_with_profile(
+    config: ModelConfig,
+    request_options: dict[str, Any] | None,
+    span: Any,
+) -> tuple[dict[str, Any], ResolvedProfile]:
+    """Resolve runtime options and retain the selected profile for encode validation."""
     try:
-        merged = merge_runtime_options(config, request_options)
+        merged, resolved_profile = merge_runtime_options_with_profile(config, request_options)
     except ValueError as e:
         span.set_attribute("error", "invalid_profile")
         raise HTTPException(
@@ -57,4 +65,4 @@ def resolve_runtime_options(
             },
         )
 
-    return merged
+    return merged, resolved_profile

@@ -1,6 +1,6 @@
 [project]
 name = "sie-sdk"
-version = "0.6.23"
+version = "0.6.26"
 description = "Search Inference Engine - Python SDK"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
@@ -31,7 +31,7 @@ storage = [
     "azure-storage-blob>=12.20,<13",
     "boto3>=1.35,<2",
     "google-cloud-storage>=2.18,<3",
-    "huggingface_hub[hf_transfer]>=0.26",
+    "huggingface-hub[hf-transfer]>=0.26,<2",
 ]
 langchain = ["langchain-core>=0.3,<1"]
 llamaindex = ["llama-index-core>=0.12,<1"]

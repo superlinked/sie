@@ -3,6 +3,7 @@
  */
 
 import {
+  EstimateUnroutableError,
   InputTooLongError,
   ModelLoadFailedError,
   ProvisioningError,
@@ -174,6 +175,66 @@ export async function throwIfInputTooLong(response: Response, model?: string): P
       ? detail.message
       : "Input exceeds the model's maximum token capacity";
   throw new InputTooLongError(message, { model });
+}
+
+/** The one exact path of the cost-estimate dry run (#2435). */
+export const ESTIMATE_PATH = "/v1/estimate";
+
+/**
+ * Error codes the gateway answers when it cannot PRICE a request.
+ *
+ * Both are the live billing path's own "this request is not sellable" verdict.
+ * A slab-capacity 503 (`BILLING_CAPACITY_UNAVAILABLE`) is a retryable gateway
+ * condition and deliberately stays a plain {@link ServerError}.
+ */
+const ESTIMATE_UNROUTABLE_ERROR_CODES = new Set(["QUEUE_UNAVAILABLE"]);
+
+/**
+ * The `POST /v1/estimate` envelope: the target path plus its verbatim body.
+ *
+ * The gateway prices whatever `request` would have been sent to `endpoint`, so
+ * the SDK does NOT reshape it. Anything normalized on the way in would be
+ * something the quote priced and the request never sent.
+ *
+ * @throws {TypeError} If the envelope arguments are malformed — a caller
+ *   mistake about WHAT is being priced, caught here rather than as a 400.
+ */
+export function buildEstimateEnvelope(
+  endpoint: string,
+  request: Record<string, unknown>,
+): { endpoint: string; request: Record<string, unknown> } {
+  if (typeof endpoint !== "string" || !endpoint.startsWith("/")) {
+    throw new TypeError(`estimate endpoint must be the exact target path (got ${endpoint})`);
+  }
+  if (request === null || typeof request !== "object" || Array.isArray(request)) {
+    throw new TypeError("estimate request must be the target request body object");
+  }
+  return { endpoint, request: { ...request } };
+}
+
+/**
+ * Throw {@link EstimateUnroutableError} for an estimate the active rate book
+ * cannot price. No-op for any other status / error code.
+ *
+ * Short-circuits {@link handleError}'s generic 5xx dispatch so callers can
+ * catch "this request is not sellable" specifically, without string-matching a
+ * code. The message is the planner's own reason.
+ */
+export async function throwIfEstimateUnroutable(response: Response): Promise<void> {
+  if (response.status !== 503) return;
+  // The SHARED code reader, so this follows the same `X-SIE-Error-Code`
+  // header-over-body precedence (and the same normalization) as `handleError`
+  // and the Python twin's `get_error_code`. Reading `detail.code` directly
+  // would classify an edge-normalized code differently in one SDK than the
+  // other. `detail` is kept only for the fallback message.
+  const code = await getErrorCode(response.clone());
+  if (code === undefined || !ESTIMATE_UNROUTABLE_ERROR_CODES.has(code)) return;
+  const detail = await getErrorDetail(response.clone());
+  const message =
+    detail && typeof detail.message === "string"
+      ? detail.message
+      : "the active rate book cannot price this request";
+  throw new EstimateUnroutableError(message, code);
 }
 
 /**
@@ -526,6 +587,26 @@ function describeType(value: unknown): string {
  * coercion: keep only finite numbers and truncate toward zero; everything
  * else (string, NaN, Infinity, null) becomes `0`.
  */
+/**
+ * The settled charge (#2434) carried by one wire `usage` block, as camelCase
+ * fields ready to spread into a parsed block.
+ *
+ * Both halves are required: a charge with no book version cannot be reconciled,
+ * and a version with no charge describes nothing. Anything malformed yields an
+ * empty object, so absence stays absence.
+ */
+export function settledChargeFields(usage: unknown): {
+  creditsCharged?: number;
+  rateBookVersion?: string;
+} {
+  if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return {};
+  const credits = (usage as Record<string, unknown>).credits_charged;
+  const version = (usage as Record<string, unknown>).rate_book_version;
+  if (typeof credits !== "number" || !Number.isSafeInteger(credits) || credits < 0) return {};
+  if (typeof version !== "string" || version.length === 0) return {};
+  return { creditsCharged: credits, rateBookVersion: version };
+}
+
 function coerceTokenCount(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0;
 }
@@ -552,6 +633,10 @@ export function parseGenerateResult(data: Record<string, unknown>): GenerateResu
       promptTokens: coerceTokenCount(usage.prompt_tokens),
       completionTokens: coerceTokenCount(usage.completion_tokens),
       totalTokens: coerceTokenCount(usage.total_tokens),
+      // #2434: the gateway merges the settled charge into this same block, so
+      // rebuilding it field-by-field must carry the charge across. Absence
+      // stays absence — a request that committed no debit gets neither key.
+      ...settledChargeFields(usage),
     },
     attemptId: wire.attempt_id,
     ttftMs: wire.ttft_ms,

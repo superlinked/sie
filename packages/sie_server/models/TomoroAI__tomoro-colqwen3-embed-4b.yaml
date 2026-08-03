@@ -22,7 +22,22 @@ profiles:
     adapter_path: sie_server.adapters.colqwen3:ColQwen3Adapter
     adapter_options:
       loadtime:
+        muvera_config:
+          num_repetitions: 40
+          num_simhash_projections: 6
+          projection_dim: null
+          final_projection_dim: 10240
         token_dim: 320
         trust_remote_code: true
       runtime:
         normalize: true
+  muvera:
+    extends: default
+    adapter_options:
+      runtime:
+        normalize: true
+        output_types:
+        - dense
+        output_similarity:
+          dense: dot
+        muvera: {}

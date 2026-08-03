@@ -504,7 +504,7 @@ class ModelAdapter(ABC):
         """
         return False
 
-    def load_lora(self, lora_path: str) -> int:
+    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
         """Load a LoRA adapter.
 
         This is called by the LoRA manager to load a new adapter. The adapter
@@ -515,6 +515,9 @@ class ModelAdapter(ABC):
 
         Args:
             lora_path: HuggingFace path (e.g., "org/lora-name") or local path.
+            revision: Pinned 40-hex commit SHA from the config's
+                ``loadtime.lora_paths`` dict form (#2113); ``None`` resolves
+                the Hub's default branch, as before.
 
         Returns:
             Memory usage of the loaded LoRA in bytes.

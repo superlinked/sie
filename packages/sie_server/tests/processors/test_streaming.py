@@ -29,9 +29,10 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.config.model import ModelConfig
 from sie_server.observability import worker_telemetry as worker_metrics
 from sie_server.processors import streaming as streaming_mod
-from sie_server.processors.streaming import StreamingProcessor
+from sie_server.processors.streaming import StreamingProcessor, _ValidationError
 
 
 class _FakeGenAdapter(GenerationAdapter):
@@ -107,6 +108,30 @@ def _make_work_item(
     }
     wi.update(overrides)
     return wi
+
+
+def _make_generation_config(*, min_new_tokens: int = 10) -> ModelConfig:
+    return ModelConfig.model_validate(
+        {
+            "sie_id": "test/model",
+            "hf_id": "test/model",
+            "inputs": {"text": True},
+            "tasks": {"generate": {"context_length": 4096, "max_output_tokens": 512}},
+            "max_sequence_length": 4096,
+            "profiles": {
+                "default": {
+                    "max_batch_tokens": 4096,
+                    "kv_budget_tokens": 2048,
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "adapter_options": {
+                        "runtime": {
+                            "default_sampling": {"min_new_tokens": min_new_tokens},
+                        }
+                    },
+                }
+            },
+        }
+    )
 
 
 def _make_msg(wi: dict[str, Any]) -> AsyncMock:
@@ -2596,6 +2621,34 @@ def test_validate_rejects_content_parts_image_count_mismatch() -> None:
     result = StreamingProcessor._validate_generate_params(wi)
     assert isinstance(result, _ValidationError)
     assert "image placeholder" in result.message
+
+
+def test_validate_generate_caps_profile_min_new_tokens_to_explicit_max() -> None:
+    result = StreamingProcessor._validate_generate_params(
+        _make_work_item(generate={"prompt": "Hello", "max_new_tokens": 1}),
+        _make_generation_config(min_new_tokens=10),
+    )
+
+    assert not isinstance(result, _ValidationError)
+    assert result.max_new_tokens == 1
+    assert result.min_tokens == 1
+
+
+def test_validate_generate_rejects_explicit_min_tokens_above_max() -> None:
+    result = StreamingProcessor._validate_generate_params(
+        _make_work_item(
+            generate={
+                "prompt": "Hello",
+                "max_new_tokens": 1,
+                "min_tokens": 10,
+            }
+        ),
+        _make_generation_config(min_new_tokens=10),
+    )
+
+    assert isinstance(result, _ValidationError)
+    assert result.code == "invalid_request"
+    assert result.message == "min_tokens (10) must not exceed max_new_tokens (1)"
 
 
 def test_validate_threads_matching_gateway_content_parts() -> None:

@@ -295,6 +295,11 @@ class CLIPAdapter(BaseAdapter):
         # text (which also misses the open_clip / mixed-batch cases).
         if per_item_token_counts is not None:
             output.extra["input_token_counts"] = per_item_token_counts
+        # Modality routing as MEASURED (#2538) — see the SigLIP twin. An item
+        # carrying both text and images takes the image tower only, so its exact
+        # text-token count is zero; the pipeline reads this as the last-resort
+        # basis when no tokenizer could produce counts for the batch.
+        output.extra["text_tower_skipped"] = [i in set(image_indices) for i in range(len(items))]
         return output
 
     def _get_preprocess_pool(self) -> ThreadPoolExecutor:

@@ -21,7 +21,23 @@ profiles:
     adapter_path: sie_server.adapters.nemo_colembed:NemoColEmbedAdapter
     adapter_options:
       loadtime:
+        muvera_config:
+          num_repetitions: 40
+          num_simhash_projections: 6
+          projection_dim: null
+          final_projection_dim: 10240
         token_dim: 2560
       runtime:
         normalize: true
         batch_size: 4
+  muvera:
+    extends: default
+    adapter_options:
+      runtime:
+        normalize: true
+        batch_size: 4
+        output_types:
+        - dense
+        output_similarity:
+          dense: dot
+        muvera: {}

@@ -16,6 +16,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput
+from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
 from sie_server.types.inputs import media_bytes
 
 if TYPE_CHECKING:
@@ -93,7 +94,12 @@ class ColQwen3Adapter(BaseAdapter):
         # concurrent requests race with RuntimeError: Already borrowed (#2098). Serialise
         # the processor call — microseconds vs the GPU forward. Matches CLIP/SigLIP.
         self._tokenizer_lock = threading.Lock()
+        # transformers' hidden-state recorder mutates model-layer forwards during
+        # each call. Serialize both text and image forwards so concurrent requests
+        # cannot race that patch/restore cycle.
+        self._forward_lock = threading.Lock()
         self._device: str | None = None
+        self._muvera_config = muvera_config
         self._multivector_dim: int = token_dim
 
     def load(self, device: str) -> None:
@@ -292,7 +298,7 @@ class ColQwen3Adapter(BaseAdapter):
             )
         inputs = {k: v.to(self._device) for k, v in inputs.items() if hasattr(v, "to")}
 
-        with torch.inference_mode():
+        with self._forward_lock, torch.inference_mode():
             outputs = self._model(**inputs)
 
         # ColQwen3 returns a ModelOutput-like object with ``.embeddings``
@@ -330,7 +336,7 @@ class ColQwen3Adapter(BaseAdapter):
             )
         inputs = {k: v.to(self._device) for k, v in inputs.items() if hasattr(v, "to")}
 
-        with torch.inference_mode():
+        with self._forward_lock, torch.inference_mode():
             outputs = self._model(**inputs)
 
         embeddings = outputs.embeddings  # (1, seq, token_dim)
@@ -382,6 +388,11 @@ class ColQwen3Adapter(BaseAdapter):
         if unsupported:
             msg = f"Unsupported output types: {unsupported}. ColQwen3Adapter only supports 'multivector'."
             raise ValueError(msg)
+
+    def get_postprocessors(self) -> dict[str, Any]:
+        """Return the configured MUVERA multivector-to-dense postprocessor."""
+        config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
+        return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim, config=config)}
 
     def get_preprocessor(self) -> Any | None:
         # ColQwen3 uses a custom processor that handles both text and images

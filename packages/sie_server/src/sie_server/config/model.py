@@ -1,6 +1,8 @@
 import logging
+import re
 import threading
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -21,6 +23,33 @@ PoolingStrategy = Literal["cls", "mean", "last_token", "splade", "none"]
 
 _MODALITY_NAMES = ("text", "image", "audio", "video", "document")
 _MAX_POOL_NAME_LEN = 128
+
+# Served-model version identity. An *immutable* HF revision is a full 40-char git
+# commit SHA (SHA-1, lowercase hex). Branch/tag names ("main", "v1.0") resolve to
+# *moving* targets on the Hub, so they are NOT acceptable pins for a promoted/served
+# model — the immutable-id contract is that a given ``sie_id`` maps to identical
+# weights forever. This regex is the single authoritative rule for both the base
+# weights (``hf_revision``) and pinned LoRA refs (``loadtime.lora_paths`` dict values,
+# #2113); staging/deploy tooling mirrors it rather than importing this module.
+_IMMUTABLE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def is_immutable_revision(revision: str | None) -> bool:
+    """Return True when ``revision`` is a full 40-char git commit SHA (immutable)."""
+    return revision is not None and _IMMUTABLE_REVISION_RE.match(revision) is not None
+
+
+def lora_entry_ref(value: Any) -> tuple[str, str | None]:
+    """Normalize one ``loadtime.lora_paths`` dict-form value to ``(id, revision)``.
+
+    The dict form's values are either a bare id string (unpinned, ``revision``
+    is ``None``) or a ``{id, revision}`` mapping (#2113). The list form and the
+    legacy scalar ``runtime.lora_id`` are bare-only and never reach this helper
+    with a mapping.
+    """
+    if isinstance(value, Mapping):
+        return str(value.get("id")), value.get("revision")
+    return str(value), None
 
 
 class InputModalities(BaseModel):
@@ -168,8 +197,11 @@ class GenerateTask(BaseModel):
     requests (OpenAI ``response_format`` / SIE-native ``grammar``) must run on.
     When set, the gateway rewrites such a request's model id to the
     ``{sie_id}:{grammar_profile}`` variant so it is served by that profile,
-    while unconstrained requests keep the request's resolved profile. This
-    exists because some throughput optimisations are incompatible with
+    while unconstrained requests keep the request's resolved profile. A
+    directly inheriting explicit variant may remain selected only when its
+    resolved adapter/backend and launch settings preserve the gateway's
+    grammar-safe contract; incompatible descendants still rewrite. This exists
+    because some throughput optimisations are incompatible with
     decode-time grammar enforcement — notably NEXTN/MTP speculative decoding
     bypasses SGLang's Outlines FSM (leaks out-of-schema keys, truncates
     mid-JSON), so a model whose default profile is speculative points
@@ -201,6 +233,52 @@ class AdapterOptions(BaseModel):
 
     loadtime: dict[str, Any] = Field(default_factory=dict)
     runtime: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_lora_paths(self) -> "AdapterOptions":
+        """Validate the ``loadtime.lora_paths`` LoRA-ref spellings (#2113).
+
+        The dict form (served-name -> ref) is the pinnable spelling: a value is
+        either a bare id string (unpinned, resolves at the Hub's default branch)
+        or ``{id: <repo>, revision: <40-hex SHA>}`` — the same immutability rule
+        as ``hf_revision``, so a served id cannot silently drift when the
+        adapter repo moves. The list form and the legacy scalar
+        ``runtime.lora_id`` stay bare-only; other ``lora_paths`` shapes are left
+        for the loader's existing warn-and-ignore path.
+        """
+        lora_paths = self.loadtime.get("lora_paths")
+        if isinstance(lora_paths, Mapping):
+            for served, value in lora_paths.items():
+                if not isinstance(value, Mapping):
+                    continue
+                unknown = set(value) - {"id", "revision"}
+                if unknown:
+                    msg = (
+                        f"loadtime.lora_paths[{served!r}] has unknown key(s) {sorted(unknown)!r}; "
+                        "a pinned LoRA ref is exactly {id: <hf repo>, revision: <40-hex commit SHA>}"
+                    )
+                    raise ValueError(msg)
+                ref_id = value.get("id")
+                if not isinstance(ref_id, str) or not ref_id:
+                    msg = f"loadtime.lora_paths[{served!r}] must set 'id' to a non-empty repo id string, got {ref_id!r}"
+                    raise ValueError(msg)
+                revision = value.get("revision")
+                if revision is not None and not (isinstance(revision, str) and is_immutable_revision(revision)):
+                    msg = (
+                        f"loadtime.lora_paths[{served!r}] pins revision={revision!r}, which is not an "
+                        "immutable 40-char commit SHA — a branch/tag name (e.g. 'main') drifts on the "
+                        "Hub. Pin the resolved commit SHA instead, or omit 'revision'."
+                    )
+                    raise ValueError(msg)
+        elif isinstance(lora_paths, (list, tuple)):
+            for value in lora_paths:
+                if isinstance(value, Mapping):
+                    msg = (
+                        "loadtime.lora_paths list entries must be bare id strings; the pinned "
+                        "{id, revision} spelling is only valid in the served-name -> ref dict form"
+                    )
+                    raise ValueError(msg)
+        return self
 
 
 class ProfileAdaptiveBatching(BaseModel):
@@ -447,6 +525,7 @@ class ModelConfig(BaseModel):
     sie_id: str
     hf_id: str | None = None
     hf_revision: str | None = None
+    hf_tokenizer_dependencies: dict[str, str] = Field(default_factory=dict)
     weights_path: Path | None = None
     package_backed: bool = False
     pool: str | None = None
@@ -490,6 +569,50 @@ class ModelConfig(BaseModel):
         if self.hf_id is None and self.weights_path is None:
             msg = "At least one of 'hf_id', 'weights_path', or 'package_backed' must be set"
             raise ValueError(msg)
+        return self
+
+    def lora_revisions(self) -> dict[str, str | None]:
+        """Every LoRA id any profile declares -> its pinned revision (``None`` = unpinned).
+
+        Merge policy across profiles (#2113): the LoRA identity is the bare id
+        (it is the public adapter id clients switch on), so one id maps to one
+        revision. A pin beats a bare mention — declaring the pin on one profile
+        does not force touching every profile that names the adapter — but two
+        *different* explicit SHAs for the same id are a genuine contradiction
+        and raise ``ValueError``.
+        """
+        refs: dict[str, str | None] = {}
+        for name, profile in self.profiles.items():
+            entries: list[tuple[str, str | None]] = []
+            lora_paths = profile.adapter_options.loadtime.get("lora_paths")
+            if isinstance(lora_paths, Mapping):
+                entries.extend(lora_entry_ref(value) for value in lora_paths.values() if value)
+            elif isinstance(lora_paths, (list, tuple)):
+                entries.extend((str(value), None) for value in lora_paths if value)
+            lora_id = profile.adapter_options.runtime.get("lora_id")
+            if lora_id:
+                entries.append((str(lora_id), None))
+            for ref_id, revision in entries:
+                if ref_id not in refs:
+                    refs[ref_id] = revision
+                elif revision is not None:
+                    if refs[ref_id] is None:
+                        refs[ref_id] = revision
+                    elif refs[ref_id] != revision:
+                        msg = (
+                            f"Model '{self.sie_id}' pins LoRA '{ref_id}' to two different revisions "
+                            f"({refs[ref_id]} vs {revision}, latest seen in profile '{name}'). One id "
+                            "maps to one adapter; pin a single SHA or serve the second revision under "
+                            "a different id."
+                        )
+                        raise ValueError(msg)
+        return refs
+
+    @model_validator(mode="after")
+    def validate_lora_revision_consistency(self) -> "ModelConfig":
+        # Surfaces the conflicting-pin error at register/config-load time rather
+        # than first at model load. See :meth:`lora_revisions` for the policy.
+        self.lora_revisions()
         return self
 
     @model_validator(mode="after")

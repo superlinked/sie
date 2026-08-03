@@ -5,11 +5,13 @@ for late interaction retrieval using MaxSim scoring.
 """
 
 import io
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -164,10 +166,6 @@ class TestColPaliAdapter:
         forward lock must serialize all three entry points against each
         other, not just same-path calls.
         """
-        import threading
-        import time
-        from concurrent.futures import ThreadPoolExecutor
-
         import torch
 
         counter_guard = threading.Lock()
@@ -252,13 +250,25 @@ class TestColQwen2Adapter:
         has no preprocessor, so every request runs on the unserialized
         to_thread path; overlapping forwards race transformers' recorder
         patch/restore and leak layer outputs on GPU. The tokenizer lock is
-        released before the forward, so only ``_forward_lock`` covers it.
+        released before the forward, so only ``_forward_lock`` can serialize
+        text, image, and batched-image model calls against one another.
         """
         counter_guard = threading.Lock()
         active = 0
         max_active = 0
 
-        def forward(**kwargs: Any) -> Any:
+        def processor(*args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:
+            count = len(kwargs.get("text") or [""])
+            batch = {
+                "input_ids": torch.zeros((count, 4), dtype=torch.long),
+                "attention_mask": torch.ones((count, 4), dtype=torch.long),
+            }
+            if kwargs.get("images") is not None:
+                batch["image_grid_thw"] = torch.ones((count, 3), dtype=torch.long)
+                batch["pixel_values"] = torch.zeros((count, 1))
+            return batch
+
+        def forward(**batch: Any) -> torch.Tensor:
             nonlocal active, max_active
             with counter_guard:
                 active += 1
@@ -266,14 +276,23 @@ class TestColQwen2Adapter:
             time.sleep(0.02)
             with counter_guard:
                 active -= 1
-            return torch.zeros(1, 3, 128)
+            return torch.zeros((batch["input_ids"].shape[0], 4, 128))
 
-        adapter._model = MagicMock(side_effect=forward)
-        adapter._processor = MagicMock(return_value={"input_ids": torch.zeros(1, 4, dtype=torch.long)})
+        adapter._processor = processor
+        adapter._model = forward
         adapter._device = "cpu"
 
+        def call(path: str) -> None:
+            if path == "text":
+                adapter._encode_text("query")
+            elif path == "image":
+                adapter._encode_images([MagicMock()])
+            else:
+                adapter._encode_images_batched([MagicMock(), MagicMock()])
+
+        paths = ["text", "image", "batched"] * 3
         with ThreadPoolExecutor(max_workers=4) as pool:
-            list(pool.map(lambda _: adapter._encode_text("q"), range(6)))
+            list(pool.map(call, paths))
 
         assert max_active == 1
 
@@ -444,6 +463,42 @@ class TestColQwen3Adapter:
         assert guard.borrow_error is False
         assert guard.max_concurrent == 1
 
+    def test_colqwen3_concurrent_forwards_serialize(self, adapter: ColQwen3Adapter) -> None:
+        """Text and image model calls share one forward lock."""
+        counter_guard = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def processor(*args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:
+            count = len(kwargs.get("text") or kwargs.get("images") or [""])
+            return {"input_ids": torch.zeros((count, 4), dtype=torch.long)}
+
+        def forward(**batch: Any) -> Any:
+            nonlocal active, max_active
+            with counter_guard:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with counter_guard:
+                active -= 1
+            count = batch["input_ids"].shape[0]
+            return SimpleNamespace(embeddings=torch.zeros((count, 4, 320)))
+
+        adapter._processor = processor
+        adapter._model = forward
+        adapter._device = "cpu"
+
+        def call(path: str) -> None:
+            if path == "text":
+                adapter._encode_text("query")
+            else:
+                adapter._encode_images([MagicMock()])
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(call, ["text", "image"] * 4))
+
+        assert max_active == 1
+
 
 class TestColSmolAdapter:
     """Tests for ColSmolAdapter with mocked model (small permissive visual-MV)."""
@@ -541,9 +596,8 @@ class TestNemoColEmbedV2Config:
             token_dim=2560,
             normalize=True,
         )
-        # The class-level spec dim is fixed at 128 (v1) but the per-instance
-        # _multivector_dim must reflect the v2 token_dim.
         assert adapter._multivector_dim == 2560
+        assert adapter.dims.multivector == 2560
 
     def test_v2_default_compute_precision(self) -> None:
         """V2 adapter inherits the bf16 default."""
@@ -575,7 +629,28 @@ class TestNemoColEmbedAdapter:
     def test_dims_before_load_has_default(self, adapter: NemoColEmbedAdapter) -> None:
         """Dims returns default value before load."""
         dims = adapter.dims
-        assert dims.multivector == 128  # NemoColEmbed default
+        assert dims.multivector == 3072
+
+    def test_discovers_v1_nested_llama_hidden_width(self) -> None:
+        """v1 emits the nested Llama hidden state, not the stale 128-d catalog width."""
+        config = SimpleNamespace(
+            embedding_dim=128,
+            hidden_size=None,
+            llm_config=SimpleNamespace(hidden_size=3072),
+        )
+
+        assert NemoColEmbedAdapter._discover_multivector_dim(config) == 3072
+
+    def test_discovers_v2_nested_text_hidden_width(self) -> None:
+        """v2 emits the nested Qwen3-VL text width before legacy fallbacks."""
+        config = SimpleNamespace(
+            embedding_dim=128,
+            hidden_size=None,
+            llm_config=None,
+            text_config=SimpleNamespace(hidden_size=2560),
+        )
+
+        assert NemoColEmbedAdapter._discover_multivector_dim(config) == 2560
 
     def test_encode_before_load_raises(self, adapter: NemoColEmbedAdapter) -> None:
         """Encode before load raises error."""
@@ -596,21 +671,22 @@ class TestNemoColEmbedAdapter:
         with pytest.raises(ValueError, match="Unsupported output types"):
             adapter.encode(items, output_types=["sparse"])
 
-    def test_concurrent_forwards_serialize(self, adapter: NemoColEmbedAdapter) -> None:
-        """The v1 document forward (output_hidden_states=True) is serialized by
-        _forward_lock, so concurrent forwards cannot race the recorder
-        patch/restore (#2144/#2204). Defensive: v1 uses a remote model class.
+    def test_concurrent_forwards_serialize(
+        self,
+        adapter: NemoColEmbedAdapter,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """All v1 model-forward entry points share one lock (#2144/#2204).
+
+        The remote v1 model requests hidden states, so overlapping native
+        query/image and prepared-image forwards could race transformers'
+        output-recorder patch/restore and leak layer outputs on GPU.
         """
-        from concurrent.futures import ThreadPoolExecutor
-
-        class _StopAfterForwardError(RuntimeError):
-            pass
-
         counter_guard = threading.Lock()
         active = 0
         max_active = 0
 
-        def forward(**kwargs: Any) -> Any:
+        def enter(result: Any) -> Any:
             nonlocal active, max_active
             with counter_guard:
                 active += 1
@@ -618,33 +694,130 @@ class TestNemoColEmbedAdapter:
             time.sleep(0.02)
             with counter_guard:
                 active -= 1
-            raise _StopAfterForwardError  # skip the reshape/EncodeOutput tail
+            return result
+
+        class ForwardProbe:
+            def forward_queries(self, texts: list[str], *, batch_size: int) -> list[torch.Tensor]:
+                return enter([torch.zeros((2, 128)) for _ in texts])
+
+            def forward_passages(self, images: list[Any], *, batch_size: int) -> list[torch.Tensor]:
+                return enter([torch.zeros((2, 128)) for _ in images])
+
+            def __call__(self, **kwargs: Any) -> Any:
+                batch_size = kwargs["input_ids"].shape[0]
+                return enter(SimpleNamespace(hidden_states=[torch.zeros((batch_size, 2, 128))]))
 
         processor = MagicMock()
-        processor.collate = MagicMock(
-            return_value={
-                "pixel_values": torch.zeros(1, 3, 2, 2),
-                "input_ids": torch.zeros(1, 4, dtype=torch.long),
-                "attention_mask": torch.ones(1, 4, dtype=torch.long),
-            }
-        )
+        processor.collate.return_value = {
+            "pixel_values": torch.zeros((1, 1)),
+            "input_ids": torch.zeros((1, 2), dtype=torch.long),
+            "attention_mask": torch.ones((1, 2), dtype=torch.long),
+        }
+        adapter._model = ForwardProbe()
         adapter._processor = processor
-        adapter._model = MagicMock(side_effect=forward)
         adapter._device = "cpu"
-        adapter._batch_size = 1
 
-        def call(_: int) -> None:
-            try:
-                adapter._encode_images_preprocessed([Item(text="d")], [object()], is_query=False)
-            except _StopAfterForwardError:
-                # Forward ran (overlap recorded); the downstream reshape/EncodeOutput
-                # tail is intentionally skipped — only forward serialization is under test.
-                pass
+        monkeypatch.setattr(PILImage, "open", lambda *args, **kwargs: MagicMock(mode="RGB"))
+        monkeypatch.setattr(torch, "autocast", lambda *args, **kwargs: nullcontext())
 
+        text_item = Item(text="query")
+        image_item = Item(images=[{"data": b"image", "format": "png"}])
+        prepared_item = SimpleNamespace(payload=SimpleNamespace())
+
+        def call(path: str) -> None:
+            if path == "text":
+                adapter._encode_texts([text_item], is_query=True)
+            elif path == "image":
+                adapter._encode_images([image_item], is_query=False)
+            else:
+                adapter._encode_images_preprocessed([image_item], [prepared_item], is_query=False)
+
+        paths = ["text", "image", "prepared"] * 3
         with ThreadPoolExecutor(max_workers=4) as pool:
-            list(pool.map(call, range(6)))
+            list(pool.map(call, paths))
 
         assert max_active == 1
+
+    def test_concurrent_v1_loads_serialize_dynamic_class_resolution(
+        self,
+        adapter: NemoColEmbedAdapter,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dynamic resolution cannot observe another load's to_dict patch."""
+
+        def original_to_dict(self: Any) -> dict[str, Any]:
+            return {"model_type": "nemo"}
+
+        class Config:
+            to_dict = original_to_dict
+
+        class ProbeLock:
+            """Expose when a second loader reaches the adapter lock."""
+
+            def __init__(self) -> None:
+                self._lock = threading.Lock()
+                self._entry_guard = threading.Lock()
+                self._entry_count = 0
+                self.second_entered = threading.Event()
+
+            def __enter__(self) -> Self:
+                with self._entry_guard:
+                    self._entry_count += 1
+                    if self._entry_count == 2:
+                        self.second_entered.set()
+                self._lock.acquire()
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                self._lock.release()
+
+        probe_lock = ProbeLock()
+        load_started = threading.Event()
+        load_count_lock = threading.Lock()
+        load_count = 0
+
+        class DynamicModel:
+            config_class = Config
+
+            @classmethod
+            def from_pretrained(cls, *args: Any, **kwargs: Any) -> object:
+                nonlocal load_count
+                assert Config.to_dict is not original_to_dict
+                with load_count_lock:
+                    load_count += 1
+                    current_load = load_count
+                if current_load == 1:
+                    load_started.set()
+                    assert probe_lock.second_entered.wait(timeout=5)
+                return object()
+
+        resolution_saw_original: list[bool] = []
+
+        def get_dynamic_class(*args: Any, **kwargs: Any) -> type[DynamicModel]:
+            resolution_saw_original.append(Config.to_dict is original_to_dict)
+            return DynamicModel
+
+        monkeypatch.setitem(sys.modules, "flash_attn", MagicMock())
+        monkeypatch.setattr("sie_server.adapters.nemo_colembed._V1_TO_DICT_PATCH_LOCK", probe_lock)
+        monkeypatch.setattr(
+            "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+            get_dynamic_class,
+        )
+        other = NemoColEmbedAdapter(
+            "nvidia/llama-nemoretriever-colembed-3b-v1",
+            normalize=True,
+            compute_precision="bfloat16",
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(adapter._load_v1_dynamic, "cpu", torch.float32)
+            assert load_started.wait(timeout=5)
+            second = pool.submit(other._load_v1_dynamic, "cpu", torch.float32)
+            first.result()
+            second.result()
+
+        assert resolution_saw_original == [True, True]
+        assert Config.to_dict is original_to_dict
 
 
 class TestNemoColEmbedPreprocessor:

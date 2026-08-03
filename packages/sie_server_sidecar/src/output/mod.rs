@@ -666,7 +666,7 @@ mod tests {
     /// `packages/sie_server/tests/test_stage1d_byte_identity.py`):
     ///
     /// ```sh
-    /// uv run python -c "
+    /// uv run --no-project --with msgpack --with msgpack-numpy --with numpy python -c "
     /// import msgpack, msgpack_numpy as m; m.patch()
     /// import numpy as np
     /// print(msgpack.packb({'sparse': {'dims': None, 'dtype': 'float32',

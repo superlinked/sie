@@ -33,8 +33,8 @@ profiles:
         query_max_length: 32
         skip_special_tokens: false
         doc_punctuation_skiplist: true
-        query_prefix: '[QueryMarker] '
-        doc_prefix: '[DocumentMarker] '
+        query_prefix: '[QueryMarker]'
+        doc_prefix: '[DocumentMarker]'
       runtime:
         query_max_length: 32
         max_seq_length: 300
@@ -49,4 +49,4 @@ profiles:
         output_types:
         - dense
         output_similarity:
-          dense: cosine
+          dense: dot

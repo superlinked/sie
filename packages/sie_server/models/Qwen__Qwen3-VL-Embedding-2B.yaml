@@ -5,7 +5,7 @@ inputs:
   text: true
   image: true
   audio: false
-  video: false
+  video: true
 tasks:
   encode:
     dense:

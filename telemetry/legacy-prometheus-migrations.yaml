@@ -1,0 +1,554 @@
+# Migration ledger for the Prometheus families registered at source_revision.
+# Legacy names are documentation/query-rewrite inputs, never producer aliases.
+# Canonical metrics first introduced on this branch, such as
+# sie.gateway.admission.decisions, are current contract entries rather than
+# legacy migrations and therefore do not inflate this inventory.
+schema_version: 1
+
+inventory:
+  source_revision: ba79a1e5b3e3e4056a12d764b93118f10ad056f1
+  declared_family_total: 245
+  sorted_family_sha256: 9190bc29c8564c90dd998d010d717064e346deb767b94f0e862a58b981592a9f
+  owner_counts:
+    gateway: 54
+    cloud_gateway_i6pn: 15
+    config: 7
+    python_engine: 49
+    rust_engine: 45
+    worker_sidecar: 75
+
+classification_semantics:
+  direct: one legacy semantic has a canonical dotted replacement
+  collapsed: overlapping legacy semantics are dimensions or outcomes of a canonical metric
+  derived: the legacy view is reconstructed by querying canonical metrics
+  narrowed: the legacy family name remains but only a safety-critical bounded semantic subset is retained
+  retired: the legacy view is intentionally unavailable because it was redundant, unbounded, or unactionable
+
+invariants:
+  single_emission: true
+  producer_aliases: forbidden
+  producer_duplicate_emission: forbidden
+  legacy_names_are_documentation_only_except_declared_collector_compatibility: true
+  collector_compatibility_families: []
+  compatibility_owner: collector_exporter_configuration
+
+keda:
+  legacy_to_canonical_rejection_reason_renames:
+    queue_publish_failed: publish_ack_failed
+  legacy_control_families:
+    - legacy_family: sie_gateway_pending_demand
+      canonical_metric: sie.gateway.pending_demand
+      legacy_labels: [pool, machine_profile, bundle]
+      canonical_labels: [pool, machine_profile, bundle]
+    - legacy_family: sie_gateway_worker_queue_depth
+      canonical_metric: sie.gateway.lane.queue.depth
+      legacy_labels: [pool, worker, machine_profile, bundle]
+      canonical_labels: [pool, machine_profile, bundle]
+      canonical_prometheus_family: sie_gateway_lane_queue_depth
+      compatibility: retired_no_alias
+      semantic_change: worker_heartbeat_gauge_replaced_by_exact_durable_consumer_backlog
+    - legacy_family: sie_gateway_active_lease_gpus
+      canonical_metric: sie.gateway.active_lease.gpus
+      legacy_labels: [pool, machine_profile, bundle]
+      canonical_labels: [pool, machine_profile, bundle]
+    - legacy_family: sie_gateway_pool_warm_floor
+      canonical_metric: sie.gateway.pool.warm_floor
+      legacy_labels: [pool, machine_profile, bundle]
+      canonical_labels: [pool, machine_profile, bundle]
+    - legacy_family: sie_gateway_rejected_requests_total
+      canonical_metric: sie.gateway.rejected.requests
+      legacy_labels: [pool, machine_profile, bundle, reason]
+      canonical_labels: [pool, machine_profile, bundle, reason, scaling_action]
+      retained_reasons: [backpressure, no_consumers, publish_ack_failed, upstream_result_timeout]
+      omitted_semantics: every_non_scale_up_rejection
+
+migrations:
+  gateway:
+    direct:
+      - canonical_metric: sie.gateway.requests
+        legacy_families: [sie_gateway_requests_total]
+      - canonical_metric: sie.gateway.request.duration
+        legacy_families: [sie_gateway_request_latency_seconds]
+      - canonical_metric: sie.gateway.config.applied_epoch
+        legacy_families: [sie_gateway_config_epoch]
+      - canonical_metric: sie.gateway.config.bootstrap.degraded
+        legacy_families: [sie_gateway_config_bootstrap_degraded]
+      - canonical_metric: sie.gateway.messaging.client.ready
+        legacy_families: [sie_gateway_nats_connected]
+      - canonical_metric: sie.gateway.queue.publish.duration
+        legacy_families: [sie_gateway_queue_publish_seconds]
+      - canonical_metric: sie.gateway.queue.publish.items
+        legacy_families: [sie_gateway_queue_items_published]
+      - canonical_metric: sie.gateway.queue.result_wait.duration
+        legacy_families: [sie_gateway_queue_result_wait_seconds]
+      - canonical_metric: sie.gateway.queue.result_chunks.received
+        legacy_families: [sie_gateway_queue_result_chunks_received_total]
+      - canonical_metric: sie.gateway.queue.result_chunk.bytes_received
+        legacy_families: [sie_gateway_queue_result_chunk_bytes_received_total]
+      - canonical_metric: sie.gateway.queue.result_chunk.rejections
+        legacy_families: [sie_gateway_queue_result_chunk_rejections_total]
+      - canonical_metric: sie.gateway.queue.result_chunk.transfers_completed
+        legacy_families: [sie_gateway_queue_result_chunk_transfers_completed_total]
+      - canonical_metric: sie.gateway.queue.result_chunk.duplicates
+        legacy_families: [sie_gateway_queue_result_chunk_duplicates_total]
+      - canonical_metric: sie.gateway.queue.result_chunk.retry_replacements
+        legacy_families: [sie_gateway_queue_result_chunk_retry_replacements_total]
+      - canonical_metric: sie.gateway.queue.result_chunk.stale_retries
+        legacy_families: [sie_gateway_queue_result_chunk_stale_retries_total]
+      - canonical_metric: sie.gateway.queue.result_chunk.reserved_bytes
+        legacy_families: [sie_gateway_queue_result_chunk_reserved_bytes]
+      - canonical_metric: sie.gateway.provisioning.responses
+        legacy_families: [sie_gateway_provisioning_responses_total]
+      - canonical_metric: sie.gateway.generation.tokens
+        legacy_families: [sie_gateway_generation_total_tokens]
+      - canonical_metric: sie.gateway.generation.tpot
+        legacy_families: [sie_gateway_generation_tpot_seconds]
+      - canonical_metric: sie.gateway.generation.ttft
+        legacy_families: [sie_gateway_generation_ttft_seconds]
+      - canonical_metric: sie.gateway.pending_demand
+        legacy_families: [sie_gateway_pending_demand]
+      - canonical_metric: sie.gateway.active_lease.gpus
+        legacy_families: [sie_gateway_active_lease_gpus]
+      - canonical_metric: sie.gateway.pool.warm_floor
+        legacy_families: [sie_gateway_pool_warm_floor]
+    narrowed:
+      - canonical_metric: sie.gateway.rejected.requests
+        legacy_families: [sie_gateway_rejected_requests_total]
+        retained_reasons: [backpressure, no_consumers, publish_ack_failed, upstream_result_timeout]
+        legacy_reason_renames:
+          queue_publish_failed: publish_ack_failed
+        omitted_semantics: every_non_scale_up_rejection
+    collapsed:
+      - canonical_metric: sie.gateway.config.operations
+        legacy_families:
+          - sie_gateway_config_bootstrap_failures_total
+          - sie_gateway_config_deltas_total
+      - canonical_metric: sie.gateway.queue.events
+        legacy_families:
+          - sie_gateway_dlq_events_total
+          - sie_gateway_dlq_republish_failures_total
+          - sie_gateway_queue_ack_failures_total
+          - sie_gateway_queue_payload_offloads_total
+      - canonical_metric: sie.gateway.generation.events
+        legacy_families:
+          - sie_gateway_generation_cancelled_total
+          - sie_gateway_generation_invalid_chunks_total
+          - sie_gateway_generation_seq_gap_chunks_total
+          - sie_gateway_generation_stale_attempt_chunks_total
+          - sie_gateway_generation_stale_attempt_naks_total
+      - canonical_metric: sie.gateway.dispatches
+        legacy_families: [sie_gateway_routing_fallback_total]
+      - canonical_metric: sie.gateway.pool.pinned_model.loaded
+        legacy_families: [sie_gateway_pool_pinned_model_loaded]
+    derived:
+      - canonical_metric: sie.worker.model.loaded
+        legacy_families:
+          - sie_gateway_model_workers
+      - canonical_metric: sie.worker.inflight.batches
+        legacy_families: [sie_gateway_worker_inflight_batches]
+      - canonical_metric: sie.worker.pending.cost
+        legacy_families: [sie_gateway_worker_pending_cost]
+      - canonical_metric: sie.worker.gpu.slots
+        legacy_families: [sie_gateway_worker_ready_gpu_slots]
+    retired:
+      - reason: per-worker heartbeat queue depth was replaced by exact durable-consumer backlog and cannot reconstruct the legacy worker-labelled view
+        legacy_families: [sie_gateway_worker_queue_depth]
+      - reason: fallback-refusal and rate-limit event views carried model, pool, and reason dimensions that the canonical completed-request metric does not retain
+        legacy_families:
+          - sie_gateway_generation_fallback_refused_total
+          - sie_gateway_rate_limit_total
+      - reason: the source gateway status envelope carried no KV reservation value, so this family was only a zero-valued worker-presence sentinel rather than a token-state measurement
+        legacy_families: [sie_gateway_kv_reservation_known]
+      - reason: worker health counts cannot be reconstructed from durable broker queue depth
+        legacy_families: [sie_gateway_workers]
+      - reason: broad diagnostic rejection counters were replaced by bounded request outcomes and worker diagnostics; KEDA retains only four scale-up reasons
+        legacy_families: [sie_gateway_generation_timeout_total, sie_gateway_grammar_reject_total]
+      - reason: state-transition debug counter replaced by current state and request outcomes
+        legacy_families: [sie_gateway_pool_events_total]
+      - reason: internal inbox optimization was not an operational service semantic
+        legacy_families: [sie_gateway_queue_inbox_skips_total]
+      - reason: process-local routing cache estimate was ambiguous under horizontal scale
+        legacy_families: [sie_gateway_routing_cache_hit_estimate]
+      - reason: ring implementation detail is neither an SLO nor a capacity signal
+        legacy_families: [sie_gateway_routing_hrw_ring_size]
+      - reason: routing-key provenance created unactionable request-path cardinality
+        legacy_families: [sie_gateway_routing_key_source_total]
+      - reason: gateway worker-memory mirror was stale; worker and platform memory are authoritative
+        legacy_families: [sie_gateway_worker_memory_used_bytes]
+
+  cloud_gateway_i6pn:
+    direct: []
+    narrowed: []
+    collapsed:
+      - canonical_metric: sie.gateway.dispatches
+        legacy_families:
+          - sie_i6pn_fastpath_fail_closed_total
+          - sie_i6pn_fastpath_fallback_total
+          - sie_i6pn_fastpath_served_total
+      - canonical_metric: sie.gateway.dispatch.duration
+        legacy_families: [sie_i6pn_call_seconds]
+    derived:
+      - canonical_metric: sie.worker.model.loaded
+        legacy_families: [sie_i6pn_worker_models]
+    retired:
+      - reason: gateway replica identity is the standard bounded service.instance.id resource attribute rather than a synthetic process-local metric
+        legacy_families: [sie_i6pn_gateway_replica_info]
+      - reason: typed draining retries are internal dispatch-attempt diagnostics represented by the final dispatch result plus request traces and logs
+        legacy_families: [sie_i6pn_lane_draining_total]
+      - reason: credit wait is a transient pre-spill attempt subphase; the canonical metric intentionally records the transport-agnostic final dispatch duration once
+        legacy_families: [sie_i6pn_credit_wait_seconds]
+      - reason: direct-credit waiters are transient pre-spill state; authoritative KEDA pressure remains the canonical pending-demand and durable lane-backlog signals
+        legacy_families: [sie_i6pn_queued_waiters]
+      - reason: process-local i6pn credits are a transport ledger detail rather than authoritative worker capacity
+        legacy_families: [sie_i6pn_credits]
+      - reason: live transport channels duplicate bounded worker health, model residency, and platform capacity signals
+        legacy_families: [sie_i6pn_live_channels]
+      - reason: rejected credit frames are attempt-level protocol diagnostics represented by bounded request traces and structured error logs
+        legacy_families: [sie_i6pn_credit_protocol_errors_total]
+      - reason: fast-path remap implementation detail has no stable cross-topology semantic
+        legacy_families: [sie_i6pn_fastpath_lazy_remap_total]
+      - reason: worker-promotion implementation detail is represented by dispatch and model state
+        legacy_families: [sie_i6pn_worker_promotions_total]
+      - reason: readiness is represented by standard health and worker capacity metrics
+        legacy_families: [sie_i6pn_worker_ready]
+
+  config:
+    direct:
+      - canonical_metric: sie.config.epoch
+        legacy_families: [sie_config_epoch]
+      - canonical_metric: sie.config.request.duration
+        legacy_families: [sie_config_http_request_duration_seconds]
+      - canonical_metric: sie.config.requests
+        legacy_families: [sie_config_http_requests_total]
+      - canonical_metric: sie.config.models
+        legacy_families: [sie_config_models_total]
+      - canonical_metric: sie.config.messaging.ready
+        legacy_families: [sie_config_nats_connected]
+      - canonical_metric: sie.config.publish
+        legacy_families: [sie_config_nats_publishes_total]
+      - canonical_metric: sie.config.store.writes
+        legacy_families: [sie_config_store_writes_total]
+    collapsed: []
+    derived: []
+    narrowed: []
+    retired: []
+
+  python_engine:
+    direct:
+      - canonical_metric: sie.worker.batch.size
+        legacy_families:
+          - sie_batch_size
+          - sie_gpu_batch_items
+      - canonical_metric: sie.worker.batch.cost
+        legacy_families: [sie_gpu_batch_tokens]
+      - canonical_metric: sie.worker.queue.depth
+        legacy_families:
+          - sie_queue_depth
+          - sie_model_loop_pending
+      - canonical_metric: sie.worker.queue.pending_at_dispatch
+        legacy_families: [sie_model_loop_pending_at_dispatch]
+      - canonical_metric: sie.worker.runtime.batch.size
+        legacy_families: [sie_ipc_batch_items]
+      - canonical_metric: sie.worker.runtime.subgroup.size
+        legacy_families: [sie_ipc_batch_sub_group_items]
+      - canonical_metric: sie.worker.runtime.batch.subgroups
+        legacy_families: [sie_ipc_batch_sub_groups]
+      - canonical_metric: sie.worker.requests
+        legacy_families: [sie_requests_total]
+      - canonical_metric: sie.worker.request.duration
+        legacy_families: [sie_request_duration_seconds]
+      - canonical_metric: sie.worker.units
+        legacy_families: [sie_tokens_processed_total]
+      - canonical_metric: sie.worker.model.loaded
+        legacy_families: [sie_model_loaded]
+      - canonical_metric: sie.worker.model.memory
+        legacy_families: [sie_model_memory_bytes]
+      - canonical_metric: sie.worker.model.evictions
+        legacy_families: [sie_idle_evictions_total]
+      - canonical_metric: sie.worker.generation.duplicate_prevented
+        legacy_families: [sie_generation_fallback_duplicate_total]
+      - canonical_metric: sie.worker.generation.inflight
+        legacy_families: [sie_worker_generation_in_flight]
+      - canonical_metric: sie.worker.generation.kv.reserved
+        legacy_families: [sie_worker_generation_kv_reserved_tokens]
+      - canonical_metric: sie.worker.generation.tpot
+        legacy_families: [sie_worker_generation_tpot_seconds]
+      - canonical_metric: sie.worker.generation.ttft
+        legacy_families: [sie_worker_generation_ttft_seconds]
+      - canonical_metric: sie.worker.scheduler.adaptive.cost
+        legacy_families: [sie_adaptive_batch_cost]
+      - canonical_metric: sie.worker.scheduler.adaptive.wait
+        legacy_families: [sie_adaptive_batch_wait_ms]
+      - canonical_metric: sie.worker.scheduler.adaptive.p50
+        legacy_families: [sie_adaptive_p50_ms]
+      - canonical_metric: sie.worker.scheduler.starvation.resets
+        legacy_families: [sie_adaptive_starvation_resets_total]
+    collapsed:
+      - canonical_metric: sie.worker.model.load.duration
+        legacy_families: [sie_model_load_timeouts_total]
+      - canonical_metric: sie.worker.oom.recoveries
+        legacy_families:
+          - sie_oom_batch_splits_total
+          - sie_oom_cache_clears_total
+          - sie_oom_evictions_triggered_total
+          - sie_oom_recoveries_succeeded_total
+          - sie_oom_terminal_failures_total
+      - canonical_metric: sie.worker.generation.admission.decisions
+        legacy_families:
+          - sie_worker_generation_admission_rejected_total
+          - sie_worker_generation_admission_resolver_errors_total
+      - canonical_metric: sie.worker.generation.ttft
+        legacy_families: [sie_structured_output_ttft_seconds]
+      - canonical_metric: sie.worker.generation.grammar.cache.lookups
+        legacy_families:
+          - sie_grammar_cache_hits_total
+          - sie_grammar_cache_misses_total
+          - sie_worker_grammar_cache_hits_total
+          - sie_worker_grammar_cache_misses_total
+      - canonical_metric: sie.worker.generation.grammar.compile.duration
+        legacy_families:
+          - sie_grammar_compile_seconds
+          - sie_worker_grammar_compile_seconds
+          - sie_worker_grammar_prewarm_seconds
+      - canonical_metric: sie.worker.generation.grammar.requests
+        legacy_families: [sie_worker_grammar_prewarm_total]
+      - canonical_metric: sie.worker.batch.fill_ratio
+        legacy_families:
+          - sie_adaptive_batch_efficiency
+          - sie_adaptive_fill_ratio
+    derived:
+      - canonical_metric: sie.worker.oom.recoveries
+        legacy_families: [sie_oom_recoveries_attempted_total]
+      - canonical_metric: sie.worker.scheduler.adaptive.p50
+        legacy_families: [sie_adaptive_headroom_ms]
+    narrowed: []
+    retired:
+      - reason: unique-schema state required an unbounded producer-side seen-set
+        legacy_families: [sie_grammar_unique_schema_total]
+      - reason: duplicate saturation surface had no production writer
+        legacy_families: [sie_worker_generation_saturated]
+      - reason: speculative acceptance surface had no production writer
+        legacy_families: [sie_worker_speculative_acceptance_rate]
+      - reason: starvation streak was internal state; reset events are the actionable semantic
+        legacy_families: [sie_adaptive_starvation_streak]
+
+  rust_engine:
+    direct:
+      - canonical_metric: sie.worker.runtime.forward.limit
+        legacy_families: [sie_server_rust_candle_encode_max_concurrent_forwards]
+    collapsed:
+      - canonical_metric: sie.worker.runtime.forward.duration
+        legacy_families:
+          - sie_server_rust_candle_score_group_errors_total
+          - sie_server_rust_candle_score_groups_total
+          - sie_server_rust_candle_encode_prepared_groups_total
+          - sie_server_rust_candle_encode_raw_groups_total
+          - sie_server_rust_candle_f16_multivector_batched_fast_path_groups_total
+          - sie_server_rust_candle_f16_multivector_individual_fallback_groups_total
+      - canonical_metric: sie.worker.model.evictions
+        legacy_families:
+          - sie_server_rust_candle_model_evictions_total
+          - sie_server_rust_candle_model_idle_evictions_total
+          - sie_server_rust_candle_model_lru_evictions_total
+      - canonical_metric: sie.worker.oom.recoveries
+        legacy_families:
+          - sie_server_rust_candle_oom_recoveries_succeeded_total
+          - sie_server_rust_candle_oom_recovery_batch_splits_total
+          - sie_server_rust_candle_oom_recovery_evictions_total
+          - sie_server_rust_candle_oom_recovery_terminal_failures_total
+      - canonical_metric: sie.worker.runtime.forward.concurrent
+        legacy_families:
+          - sie_server_rust_candle_encode_active
+          - sie_server_rust_candle_encode_waiting
+          - sie_server_rust_candle_score_active
+          - sie_server_rust_candle_score_waiting
+    derived:
+      - canonical_metric: sie.worker.model.load.duration
+        legacy_families: [sie_server_rust_candle_model_loads_total]
+      - canonical_metric: sie.worker.runtime.forward.permit.wait
+        legacy_families:
+          - sie_server_rust_candle_encode_lock_wait_seconds_count
+          - sie_server_rust_candle_encode_lock_wait_seconds_sum
+          - sie_server_rust_candle_score_lock_wait_seconds_count
+          - sie_server_rust_candle_score_lock_wait_seconds_sum
+      - canonical_metric: sie.worker.runtime.forward.duration
+        legacy_families:
+          - sie_server_rust_candle_encode_stage_seconds_count
+          - sie_server_rust_candle_encode_stage_seconds_sum
+          - sie_server_rust_candle_encode_wall_seconds_count
+          - sie_server_rust_candle_encode_wall_seconds_sum
+          - sie_server_rust_candle_score_wall_seconds_count
+          - sie_server_rust_candle_score_wall_seconds_sum
+    narrowed: []
+    retired:
+      - reason: exact process-lifetime and since-last-scrape maxima are backend-local scrape artifacts; canonical histograms provide portable bounded distributions
+        legacy_families:
+          - sie_server_rust_candle_encode_lock_wait_seconds_max
+          - sie_server_rust_candle_encode_lock_wait_seconds_max_since_last_scrape
+          - sie_server_rust_candle_encode_stage_seconds_max
+          - sie_server_rust_candle_encode_stage_seconds_max_since_last_scrape
+          - sie_server_rust_candle_encode_wall_seconds_max
+          - sie_server_rust_candle_encode_wall_seconds_max_since_last_scrape
+          - sie_server_rust_candle_score_lock_wait_seconds_max
+          - sie_server_rust_candle_score_lock_wait_seconds_max_since_last_scrape
+          - sie_server_rust_candle_score_wall_seconds_max
+          - sie_server_rust_candle_score_wall_seconds_max_since_last_scrape
+      - reason: score document fanout is request-payload shape rather than a stable cross-operation unit contract
+        legacy_families: [sie_server_rust_candle_score_documents_total]
+      - reason: encode group totals mixed executed forwards with pre-forward permit and join failures, while canonical request outcomes and forward attempts keep those concerns separate
+        legacy_families:
+          - sie_server_rust_candle_encode_group_errors_total
+          - sie_server_rust_candle_encode_groups_total
+      - reason: attempt-expanded encode item fanout counted OOM retries, splits, and pre-forward failures; canonical requests count each final item once and forward metrics count attempts
+        legacy_families: [sie_server_rust_candle_encode_items_total]
+      - reason: terminal model-load OOM retry-item fanout joined two lifecycle domains that the canonical model-load failure and final request outcome intentionally keep separate
+        legacy_families: [sie_server_rust_candle_model_load_oom_retry_outcomes_total]
+      - reason: recovery-loop entry count cannot be reconstructed from the canonical per-strategy outcome events without inventing a loop-final marker
+        legacy_families: [sie_server_rust_candle_oom_recoveries_attempted_total]
+
+  worker_sidecar:
+    direct:
+      - canonical_metric: sie.worker.config.epoch
+        legacy_families: [sie_worker_config_epoch]
+      - canonical_metric: sie.worker.generation.model_loading.responses
+        legacy_families: [sie_worker_generate_model_loading_responses_total]
+      - canonical_metric: sie.worker.inflight.batches
+        legacy_families: [sie_worker_inflight_batches]
+      - canonical_metric: sie.worker.ipc.capacity
+        legacy_families: [sie_worker_ipc_pool_size]
+      - canonical_metric: sie.worker.ipc.request.duration
+        legacy_families: [sie_worker_ipc_request_seconds]
+      - canonical_metric: sie.worker.ipc.response.chunks
+        legacy_families: [sie_worker_ipc_response_chunks_total]
+      - canonical_metric: sie.worker.ipc.response.reconstructed.size
+        legacy_families: [sie_worker_ipc_response_reconstructed_bytes]
+      - canonical_metric: sie.worker.ipc.response.chunk.count
+        legacy_families: [sie_worker_ipc_response_chunk_count]
+      - canonical_metric: sie.worker.ipc.response.chunk.reserved
+        legacy_families: [sie_worker_ipc_response_chunk_reserved_bytes]
+      - canonical_metric: sie.worker.nats.delivery.attempts
+        legacy_families: [sie_worker_nats_deliver_count]
+      - canonical_metric: sie.worker.payload.fetch.duration
+        legacy_families: [sie_worker_payload_fetch_seconds]
+      - canonical_metric: sie.worker.payload.size
+        legacy_families: [sie_worker_payload_bytes]
+      - canonical_metric: sie.worker.pending.cost
+        legacy_families: [sie_worker_pending_cost]
+      - canonical_metric: sie.worker.queue.depth
+        legacy_families: [sie_worker_queue_depth]
+      - canonical_metric: sie.worker.saturated
+        legacy_families: [sie_worker_saturated]
+      - canonical_metric: sie.worker.result.transport.attempts
+        legacy_families: [sie_worker_result_transport_total]
+      - canonical_metric: sie.worker.result.chunks.published
+        legacy_families: [sie_worker_result_chunks_published_total]
+      - canonical_metric: sie.worker.result.chunk.size
+        legacy_families: [sie_worker_result_chunk_bytes]
+      - canonical_metric: sie.worker.scheduler.adaptive.cost
+        legacy_families: [sie_worker_scheduler_adaptive_cost]
+      - canonical_metric: sie.worker.batch.fill_ratio
+        legacy_families: [sie_worker_scheduler_adaptive_fill_ratio]
+      - canonical_metric: sie.worker.scheduler.adaptive.wait
+        legacy_families: [sie_worker_scheduler_adaptive_wait_ms]
+      - canonical_metric: sie.worker.scheduler.request_batch.dispatch_wait
+        legacy_families: [sie_worker_scheduler_request_batch_dispatch_wait_seconds]
+      - canonical_metric: sie.worker.scheduler.request_batch.total
+        legacy_families: [sie_worker_scheduler_request_batch_total_seconds]
+      - canonical_metric: sie.worker.batch.cost
+        legacy_families: [sie_worker_scheduler_batch_cost]
+      - canonical_metric: sie.worker.batch.size
+        legacy_families: [sie_worker_scheduler_batch_items]
+      - canonical_metric: sie.worker.scheduler.starvation.resets
+        legacy_families: [sie_worker_scheduler_starvation_resets_total]
+    narrowed: []
+    collapsed:
+      - canonical_metric: sie.worker.request.duration
+        legacy_families:
+          - sie_pull_loop_batch_process_seconds
+          - sie_worker_backend_process_seconds
+      - canonical_metric: sie.worker.batch.size
+        legacy_families:
+          - sie_pull_loop_items_fetched
+          - sie_worker_backend_batch_items
+      - canonical_metric: sie.worker.model.load.duration
+        legacy_families:
+          - sie_pull_loop_model_loads_total
+          - sie_worker_backend_ensure_ready_seconds
+      - canonical_metric: sie.worker.nats.operations
+        legacy_families:
+          - sie_pull_loop_nak_unloaded_total
+          - sie_worker_jetstream_ack_failures_total
+          - sie_worker_jetstream_nak_failures_total
+          - sie_worker_messages_acked_total
+          - sie_worker_messages_naked_total
+          - sie_worker_messages_received_total
+          - sie_worker_nats_fetch_errors_total
+          - sie_worker_nats_stream_errors_total
+          - sie_worker_pool_admission_naks_total
+      - canonical_metric: sie.worker.requests
+        legacy_families:
+          - sie_worker_backend_item_outcomes_total
+          - sie_worker_backend_process_errors_total
+      - canonical_metric: sie.worker.inference.duration
+        legacy_families: [sie_worker_backend_phase_seconds]
+      - canonical_metric: sie.worker.config.applies
+        legacy_families: [sie_worker_config_deltas_total]
+      - canonical_metric: sie.worker.gpu.slots
+        legacy_families:
+          - sie_worker_gpu_slots_ready
+          - sie_worker_gpu_slots_total
+      - canonical_metric: sie.worker.ipc.requests
+        legacy_families:
+          - sie_worker_ipc_failures_total
+          - sie_worker_ipc_requests_total
+      - canonical_metric: sie.worker.ipc.acquire.duration
+        legacy_families:
+          - sie_worker_ipc_mux_acquire_wait_seconds
+          - sie_worker_ipc_pool_acquire_wait_seconds
+      - canonical_metric: sie.worker.ipc.inflight
+        legacy_families:
+          - sie_worker_ipc_mux_inflight
+          - sie_worker_ipc_pool_inflight
+      - canonical_metric: sie.worker.nats.delivery.attempts
+        legacy_families: [sie_worker_nats_redelivery_total]
+      - canonical_metric: sie.worker.payload.fetches
+        legacy_families:
+          - sie_worker_payload_fetch_errors_total
+          - sie_worker_payload_fetch_total
+      - canonical_metric: sie.worker.scheduler.adaptive.p50
+        legacy_families:
+          - sie_worker_scheduler_adaptive_observed_p50_ms
+          - sie_worker_scheduler_adaptive_target_p50_ms
+      - canonical_metric: sie.worker.shutdown.drain.duration
+        legacy_families:
+          - sie_worker_shutdown_drain_deadline_exceeded_total
+          - sie_worker_shutdown_drain_seconds
+    derived: []
+    retired:
+      - reason: per-child readiness, model count, queue depth, pending cost, and inflight state were intentionally collapsed to process-lane aggregates without a stable child dimension
+        legacy_families:
+          - sie_worker_child_inflight_batches
+          - sie_worker_child_models
+          - sie_worker_child_pending_cost
+          - sie_worker_child_queue_depth
+          - sie_worker_child_ready
+      - reason: lifetime materialized-scheduler count is not equivalent to current loaded-model residency
+        legacy_families: [sie_worker_scheduler_models_total]
+      - reason: cumulative post-resolution enqueue events cannot be reconstructed from released-item queue duration and current pending state
+        legacy_families: [sie_worker_scheduler_enqueued_items_total]
+      - reason: per-reason flush event counts cannot be reconstructed from batch size, which intentionally omits the flush-reason dimension, or from a last-value fill-ratio gauge
+        legacy_families: [sie_worker_scheduler_flush_reason_total]
+      - reason: current mean head-of-line wait across non-empty batchers is not equivalent to the released-item queue-duration distribution
+        legacy_families: [sie_worker_scheduler_hol_wait_ms_mean]
+      - reason: transport connection churn is internal; logical RPC outcomes are authoritative
+        legacy_families:
+          - sie_worker_ipc_connect_total
+          - sie_worker_ipc_reconnect_total
+      - reason: request and response byte sizes duplicated payload size without stable semantics
+        legacy_families:
+          - sie_worker_ipc_request_bytes
+          - sie_worker_ipc_response_bytes
+      - reason: legacy router fallthrough was a wire-compatibility implementation detail
+        legacy_families: [sie_worker_router_fallthrough_total]
+      - reason: active batcher count duplicated scheduler pending and inflight state
+        legacy_families: [sie_worker_scheduler_active_batchers]

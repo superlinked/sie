@@ -37,6 +37,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput
+from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
 from sie_server.types.inputs import media_bytes
 
 if TYPE_CHECKING:
@@ -192,6 +193,7 @@ class ColQwen2Adapter(BaseAdapter):
         # leaking layer outputs on GPU until OOM. Serialize forwards (#2144/#2204).
         self._forward_lock = threading.Lock()
         self._device: str | None = None
+        self._muvera_config = muvera_config
         self._multivector_dim: int = token_dim
 
     def load(self, device: str) -> None:
@@ -490,6 +492,11 @@ class ColQwen2Adapter(BaseAdapter):
         if unsupported:
             msg = f"Unsupported output types: {unsupported}. ColQwen2Adapter only supports 'multivector'."
             raise ValueError(msg)
+
+    def get_postprocessors(self) -> dict[str, Any]:
+        """Return the configured MUVERA multivector-to-dense postprocessor."""
+        config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
+        return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim, config=config)}
 
     def get_preprocessor(self) -> Any | None:
         # ColQwen2.5 handles image processing internally via _encode_images()

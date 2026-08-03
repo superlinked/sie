@@ -313,7 +313,8 @@ def job_chunks(job_doc: Mapping[str, Any]) -> list[JobChunk]:
             "state": chunk.get("state"),
             "ref": chunk.get("ref"),
             "units": chunk.get("units"),
-            "credits": chunk.get("credits"),
+            "credits_charged": chunk.get("credits_charged"),
+            "rate_book_version": chunk.get("rate_book_version"),
             "error": chunk.get("error"),
         }
         for chunk in raw

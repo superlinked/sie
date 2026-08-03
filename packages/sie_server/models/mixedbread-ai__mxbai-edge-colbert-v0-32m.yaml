@@ -18,7 +18,7 @@ max_sequence_length: 8192
 profiles:
   default:
     max_batch_tokens: 16384
-    compute_precision: null
+    compute_precision: bfloat16
     adapter_path: sie_server.adapters.colbert_modernbert_flash.adapter:ColBERTModernBERTFlashAdapter
     adapter_options:
       loadtime:
@@ -30,16 +30,23 @@ profiles:
           center_tokens: true
         token_dim: 64
         normalize: true
-        query_max_length: 32
+        query_max_length: 8192
         skip_special_tokens: false
+        query_prefix: '[Q] '
+        doc_prefix: '[D] '
+        doc_punctuation_skiplist: true
       runtime:
         muvera: null
+        query_max_length: 48
+        max_seq_length: 512
   muvera:
     extends: default
     adapter_options:
       runtime:
         muvera: {}
+        query_max_length: 48
+        max_seq_length: 512
         output_types:
         - dense
         output_similarity:
-          dense: dot
+          dense: cosine

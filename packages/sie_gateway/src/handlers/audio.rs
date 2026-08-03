@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 
 use crate::http_error::{
     code as err_code, embeddings_error, json_openai_error, openai_code as oai_code,
-    openai_type as oai_type,
+    openai_type as oai_type, GatewayOwnedFault,
 };
 use crate::server::AppState;
 
@@ -25,9 +25,23 @@ use super::proxy::{
 };
 
 const MAX_AUDIO_FILE_BYTES: usize = 24 * 1024 * 1024;
-pub(crate) const MAX_MULTIPART_BYTES: usize = MAX_AUDIO_FILE_BYTES + 1024 * 1024;
+/// Whole-body ingress bound for the multipart transcription upload: the audio
+/// file cap plus 1 MiB of form scaffolding and text fields.
+///
+/// `pub` because a downstream composition crate must be able to bound its own
+/// read of this body at exactly the same number. The managed edge buffers the
+/// body ahead of this handler to gate the multipart-carried `model` against its
+/// licensing overlay (#2430); if the two bounds could drift, the managed gate
+/// would either reject bodies this handler accepts or admit bodies it rejects.
+pub const MAX_MULTIPART_BYTES: usize = MAX_AUDIO_FILE_BYTES + 1024 * 1024;
 const MAX_TEXT_FIELD_BYTES: usize = 8 * 1024;
-const MAX_FORM_FIELDS: usize = 16;
+/// Field-count bound for the multipart transcription form.
+///
+/// `pub` for the same reason as [`MAX_MULTIPART_BYTES`]: the managed edge scans
+/// this form to gate its `model` part, and if its scan bound were lower than
+/// this one, a form whose `model` sits past the edge's cap would be rejected by
+/// the gate while this handler would have accepted it.
+pub const MAX_FORM_FIELDS: usize = 16;
 const MAX_NATIVE_RESPONSE_BYTES: usize = 34 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -661,33 +675,28 @@ pub async fn proxy_openai_transcription(
         return native_response;
     }
 
+    // From here the worker has already run and reported its units. Every failure
+    // below is OURS — a successful transcription this handler could not render
+    // into the client's requested shape — and the client gets nothing for it.
+    // Each is marked so a metered composition releases the hold instead of
+    // charging for an undelivered result (see [`GatewayOwnedFault`]).
     let native_headers = native_response.headers().clone();
     let bytes = match to_bytes(native_response.into_body(), MAX_NATIVE_RESPONSE_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(embeddings_error(
-                    err_code::INTERNAL_ERROR,
-                    None,
-                    "failed to read native extract response",
-                )),
-            )
-                .into_response();
+            return translation_fault(
+                "read_native_response",
+                "failed to read native extract response",
+            );
         }
     };
     let parsed: Value = match serde_json::from_slice(&bytes) {
         Ok(value) => value,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(embeddings_error(
-                    err_code::INTERNAL_ERROR,
-                    None,
-                    "native extract response is not valid JSON",
-                )),
-            )
-                .into_response();
+            return translation_fault(
+                "decode_native_response",
+                "native extract response is not valid JSON",
+            );
         }
     };
     let data = parsed
@@ -697,28 +706,35 @@ pub async fn proxy_openai_transcription(
         .and_then(|items| items[0].get("data"))
         .and_then(Value::as_object);
     let Some(data) = data else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(embeddings_error(
-                err_code::INTERNAL_ERROR,
-                None,
-                "native extract response is missing one transcription result",
-            )),
-        )
-            .into_response();
+        return translation_fault(
+            "native_response_shape",
+            "native extract response is missing one transcription result",
+        );
     };
     let mut response = match format_transcription_response(data, &form) {
         Ok(response) => response,
-        Err(message) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(embeddings_error(err_code::INTERNAL_ERROR, None, message)),
-            )
-                .into_response();
-        }
+        Err(message) => return translation_fault("format_transcription", message),
     };
     copy_native_response_headers(&native_headers, response.headers_mut());
     response
+}
+
+/// A 500 for a post-dispatch translation failure, marked as gateway-owned.
+///
+/// The worker already produced a valid result; this handler is what could not
+/// turn it into the requested response shape. The most reachable case is
+/// `response_format=srt`/`vtt` over a segment whose `end` timestamp Whisper left
+/// open — an ordinary, upstream-documented output shape, not a corrupt result.
+/// Without the marker that 500 still debits the full accepted duration, so the
+/// customer pays for a transcript they never receive.
+fn translation_fault(stage: &'static str, message: &str) -> Response {
+    GatewayOwnedFault::new(stage).mark(
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(embeddings_error(err_code::INTERNAL_ERROR, None, message)),
+        )
+            .into_response(),
+    )
 }
 
 #[cfg(test)]

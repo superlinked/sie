@@ -1,0 +1,59 @@
+[
+  {
+    "id": "dusk-gate-webhooks",
+    "name": "DUSK gate webhooks",
+    "active": true,
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "dusk-decision",
+          "responseMode": "onReceived",
+          "responseData": "{\"status\":\"received\"}",
+          "options": {}
+        },
+        "id": "n1",
+        "name": "decision",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [400, 200],
+        "webhookId": "dusk-decision"
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "dusk-report",
+          "responseMode": "onReceived",
+          "responseData": "{\"status\":\"received\"}",
+          "options": {}
+        },
+        "id": "n2",
+        "name": "report",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [400, 400],
+        "webhookId": "dusk-report"
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "dusk-alert",
+          "responseMode": "onReceived",
+          "responseData": "{\"status\":\"received\"}",
+          "options": {}
+        },
+        "id": "n3",
+        "name": "alert",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [400, 600],
+        "webhookId": "dusk-alert"
+      }
+    ],
+    "connections": {},
+    "settings": {},
+    "staticData": null,
+    "pinData": {},
+    "tags": []
+  }
+]

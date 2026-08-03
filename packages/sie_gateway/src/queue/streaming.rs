@@ -20,6 +20,7 @@
 //! bumping lands with the routing rollout.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -366,6 +367,18 @@ pub struct StreamCollector {
     /// latches. uuid4 attempt ids are never reused, so an incoming chunk whose
     /// id equals this is unambiguously from the abandoned attempt.
     pub abandoned_attempt_id: Option<String>,
+    /// Latched by the teardown that follows an HTTP client disconnect whose
+    /// bounded abort-terminal grace expired (see
+    /// `handlers::sse::CLIENT_DISCONNECT_TERMINAL_GRACE`).
+    ///
+    /// Set immediately BEFORE the collector is removed, and shared by `Arc` so
+    /// the terminal-side task — which learns of the removal only as a dropped
+    /// sender — can still tell "the client left and the worker never reported"
+    /// apart from a genuine lost terminal. The distinction is a billing one:
+    /// only the latter is a fault worth alerting on. Unread on transports with
+    /// no per-request billing.
+    #[allow(dead_code)] // Managed Modal dispatcher boundary.
+    pub client_disconnected: Arc<AtomicBool>,
     /// Snapshot of the per-attempt state cleared by
     /// [`Self::bump_attempt_generation`], consumed only by an
     /// immediately-following [`Self::rewind_attempt_generation`]. When a
@@ -431,6 +444,7 @@ impl StreamCollector {
             execution_identity_sha256: None,
             execution_identity_consistent: true,
             abandoned_attempt_id: None,
+            client_disconnected: Arc::new(AtomicBool::new(false)),
             snapshot: None,
         }
     }
@@ -439,6 +453,23 @@ impl StreamCollector {
     /// chunk arrivals without holding the DashMap entry lock.
     pub fn activity_handle(&self) -> Arc<Notify> {
         Arc::clone(&self.activity)
+    }
+
+    /// Clone the client-disconnect latch so a task that outlives this
+    /// collector's registration can still read it. See
+    /// [`Self::client_disconnected`].
+    #[allow(dead_code)] // Managed Modal dispatcher boundary.
+    pub fn client_disconnected_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.client_disconnected)
+    }
+
+    /// Latch "the HTTP client disconnected and no worker terminal arrived
+    /// inside the grace window". Call immediately before removing the
+    /// collector, so every holder of a
+    /// [`Self::client_disconnected_handle`] observes it.
+    #[allow(dead_code)] // Managed Modal dispatcher boundary.
+    pub fn latch_client_disconnected(&self) {
+        self.client_disconnected.store(true, Ordering::Release);
     }
 
     /// Install a broadcast tap on this collector so every non-stale

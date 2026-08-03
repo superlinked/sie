@@ -1,6 +1,8 @@
 sie_id: urchade/gliner_multi_pii-v1
 hf_id: urchade/gliner_multi_pii-v1
 hf_revision: 1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d
+hf_tokenizer_dependencies:
+  microsoft/mdeberta-v3-base: a0484667b22365f84929a935b5e50a51f71f159d
 inputs:
   text: true
   image: false
@@ -10,6 +12,7 @@ tasks:
   encode: null
   score: null
   extract: {}
+max_sequence_length: 384
 profiles:
   default:
     max_batch_tokens: 16384

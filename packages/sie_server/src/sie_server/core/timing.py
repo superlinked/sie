@@ -45,6 +45,16 @@ class RequestTiming:
     # not approximate).
     input_token_counts: list[int] | None = field(default=None, repr=False)
 
+    # Authoritative per-item input-IMAGE counts (§7 "$ per image"), aligned with
+    # the request's item order; ``None`` when the adapter surfaced no count and
+    # the result path must fall back to the wire-derived ``count_input_images``
+    # hook. Only adapters that expand an input into a different number of
+    # billable images than the wire item carries need this: the video-capable
+    # encoders bill the frames they actually sampled, a number the wire item
+    # (raw compressed bytes) cannot express. Set by ``EncodePipeline.run_encode``
+    # from ``EncodeOutput.extra["input_image_counts"]``.
+    input_image_counts: list[int] | None = field(default=None, repr=False)
+
     def start_tokenization(self) -> None:
         """Mark tokenization start."""
         self._tokenize_start = time.monotonic()

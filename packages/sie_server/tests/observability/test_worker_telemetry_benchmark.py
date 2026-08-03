@@ -2,7 +2,7 @@
 
 Run explicitly with::
 
-    SIE_RUN_TELEMETRY_BENCHMARK=1 mise exec -- uv run pytest \
+    SIE_RUN_TELEMETRY_BENCHMARK=1 mise exec -- uv run --frozen --project . --no-sync pytest -c pyproject.toml \
       packages/sie_server/tests/observability/test_worker_telemetry_benchmark.py -s -q
 
 The benchmark reports three independently warmed raw nanoseconds/completion

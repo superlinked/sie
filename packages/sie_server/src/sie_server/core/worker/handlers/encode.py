@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import numpy as np
 
@@ -13,6 +13,25 @@ if TYPE_CHECKING:
     from sie_server.core.postprocessor_registry import PostprocessorRegistry
     from sie_server.core.worker.types import RequestMetadata
     from sie_server.types.inputs import Item
+
+# ``EncodeOutput.extra`` keys whose values are per-item lists aligned 1:1 with
+# the batch, and which therefore MUST be sliced and reassembled with the item.
+# These are the unit meter's authoritative bases (§7): real tokenizer counts
+# from adapters that own their tokenization, and the images/video frames an
+# adapter actually processed — a number the wire item cannot express. Dropping
+# either here silently strips the meter's evidence whenever the worker fuses
+# several API requests into one GPU batch, which then bills the frames as zero
+# or faults settlement outright. Every other ``extra`` key has no defined
+# per-item semantics and is intentionally not propagated.
+# ``text_tower_skipped`` (#2538) is the third: the modality routing a vision
+# adapter actually applied, which is how the pipeline knows an item's zero text
+# tokens is a MEASUREMENT ("it took the image tower") and not an absent count.
+# It must be sliced with its item for the same reason the counts are.
+PER_ITEM_EXTRA_KEYS: Final[tuple[str, ...]] = (
+    "input_token_counts",
+    "input_image_counts",
+    "text_tower_skipped",
+)
 
 
 class EncodeHandler(OperationHandler[EncodeOutput]):
@@ -134,16 +153,13 @@ class EncodeHandler(OperationHandler[EncodeOutput]):
         Returns:
             Single-item EncodeOutput.
         """
-        # Per-item unit counts (``extra["input_token_counts"]``, emitted by
-        # adapters that own their tokenization) are positional like dense/
-        # sparse, so they must be sliced with the item — dropping them here
-        # would silently strip the meter's counts whenever the worker fuses
-        # requests into one GPU batch. Other ``extra`` keys have no defined
-        # per-item semantics and are intentionally not propagated.
+        # Per-item unit counts are positional like dense/sparse, so they must
+        # be sliced with the item — see ``PER_ITEM_EXTRA_KEYS``.
         extra: dict[str, Any] = {}
-        counts = output.extra.get("input_token_counts") if output.extra else None
-        if isinstance(counts, list) and 0 <= index < len(counts):
-            extra["input_token_counts"] = [counts[index]]
+        for key in PER_ITEM_EXTRA_KEYS:
+            counts = output.extra.get(key) if output.extra else None
+            if isinstance(counts, list) and 0 <= index < len(counts):
+                extra[key] = [counts[index]]
         return EncodeOutput(
             dense=output.dense[index : index + 1] if output.dense is not None else None,
             sparse=[output.sparse[index]] if output.sparse is not None else None,
@@ -201,20 +217,23 @@ class EncodeHandler(OperationHandler[EncodeOutput]):
         if first.multivector is not None:
             multivector = [partials[i].multivector[0] for i in range(batch_size)]  # ty: ignore[not-subscriptable]
 
-        # Reassemble per-item unit counts (see slice_output). All-or-nothing:
-        # a partial without a count means the meter cannot attribute the
-        # request exactly, so no counts are surfaced (metering then falls
-        # back to its reserve estimate rather than under-counting).
+        # Reassemble per-item unit counts (see slice_output). All-or-nothing
+        # per key: a partial without a count means the meter cannot attribute
+        # the request exactly, so that dimension is not surfaced (metering then
+        # falls back to its reserve estimate rather than under-counting). The
+        # keys are independent — a video encode carries image counts with no
+        # token counts at all.
         extra: dict[str, Any] = {}
-        assembled_counts: list[int] = []
-        for i in range(batch_size):
-            partial_counts = partials[i].extra.get("input_token_counts") if partials[i].extra else None
-            if not (isinstance(partial_counts, list) and len(partial_counts) == 1):
-                assembled_counts = []
-                break
-            assembled_counts.append(partial_counts[0])
-        if assembled_counts:
-            extra["input_token_counts"] = assembled_counts
+        for key in PER_ITEM_EXTRA_KEYS:
+            assembled_counts: list[int] = []
+            for i in range(batch_size):
+                partial_counts = partials[i].extra.get(key) if partials[i].extra else None
+                if not (isinstance(partial_counts, list) and len(partial_counts) == 1):
+                    assembled_counts = []
+                    break
+                assembled_counts.append(partial_counts[0])
+            if assembled_counts:
+                extra[key] = assembled_counts
 
         return EncodeOutput(
             dense=dense,

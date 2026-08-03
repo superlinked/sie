@@ -37,6 +37,22 @@ SIE is an open-source inference engine that runs the models behind every agent t
 - Ships the full production stack: load-balancing gateway, KEDA autoscaling, Grafana dashboards, Terraform for GKE, EKS, and AKS
 - Integrates with LangChain, LlamaIndex, Haystack, DSPy, CrewAI, Chroma, Qdrant, Weaviate, and LanceDB
 
+## Development
+
+The repository root is a virtual Python workspace. From the repository root,
+install and verify every workspace member with the committed lock (the
+audio-prep member requires its documented native build prerequisites):
+
+```bash
+uv python install 3.12
+uv lock --check
+uv sync --frozen --all-packages
+uv run --frozen --project . --no-sync pytest -c pyproject.toml
+```
+
+Package membership is explicit in the root `pyproject.toml`; a package joins
+the workspace only in the same change that adds its complete source.
+
 ## Tasks
 
 One SIE cluster runs the inference behind a whole agent. Each task is a handful of swappable models; browse [`packages/sie_server/models/`](https://github.com/superlinked/sie/tree/main/packages/sie_server/models) for the full set.

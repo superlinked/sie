@@ -1,6 +1,6 @@
 [package]
 name = "sie-gateway"
-version = "0.6.23"
+version = "0.6.26"
 edition = "2021"
 publish = false
 
@@ -15,6 +15,11 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# Already in the lock transitively (axum's `to_bytes` IS `Limited::collect`).
+# Direct so the compat wrapper can downcast `LengthLimitError` and tell "the
+# body exceeded the read bound" apart from "the stream broke" — two conditions
+# `axum::Error` otherwise collapses into one opaque value (#2617).
+http-body-util = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "stream", "rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-tungstenite = "0.29"
@@ -79,6 +84,8 @@ utoipa = "5.4.0"
 # versions, so bumping requires updating all five lines.
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+# Shared OTLP transport/proxy/resource/propagation plumbing (#2339).
+sie-telemetry = { path = "../sie_telemetry", features = ["http-propagation"] }
 # `grpc-tonic` keeps the historical in-cluster/Helm OTLP/gRPC path; `http-proto`
 # + `reqwest-blocking-client` add the OTLP/HTTP `http/protobuf` exporter the
 # MANAGED Modal collector needs (it publishes only OTLP/HTTP :4318, behind

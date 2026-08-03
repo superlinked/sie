@@ -30,11 +30,15 @@ pub struct ModelInfoExtras {
     /// ``tasks.generate.grammar_profile`` from the model YAML — the name of a
     /// profile that grammar-constrained requests must be served on. When set,
     /// the chat/completions/generate handlers rewrite a grammar request's model
-    /// id to the ``{model}:{grammar_profile}`` variant so it runs on a profile
-    /// that enforces the grammar correctly (e.g. ``no-spec`` — speculative
-    /// decoding bypasses SGLang's Outlines FSM). ``None`` when the model has no
-    /// ``generate`` task or does not declare the field (no rewrite).
+    /// id to the ``{model}:{grammar_profile}`` variant unless an explicitly
+    /// requested, directly inheriting variant preserves the resolved
+    /// grammar-safe launch contract. ``None`` when the model has no ``generate``
+    /// task or does not declare the field (no rewrite).
     pub grammar_profile: Option<String>,
+    /// Direct ``profiles.<name>.extends`` relationships. The gateway keeps
+    /// these only to evaluate explicit variants that inherit the configured
+    /// grammar-safe profile; they are not exposed by ``/v1/models``.
+    pub profile_parents: HashMap<String, String>,
     /// ``tasks.generate.capabilities.tools`` from the model YAML — a
     /// single boolean advertising whether the model supports
     /// OpenAI-style tool calling. The chat completion handler gates
@@ -224,6 +228,20 @@ impl ModelInfoExtras {
             }
         }
 
+        if let Some(serde_yaml::Value::Mapping(profiles)) = raw.get("profiles") {
+            for (profile_name, profile) in profiles {
+                let (Some(profile_name), Some(parent_name)) = (
+                    profile_name.as_str(),
+                    profile.get("extends").and_then(serde_yaml::Value::as_str),
+                ) else {
+                    continue;
+                };
+                extras
+                    .profile_parents
+                    .insert(profile_name.to_string(), parent_name.to_string());
+            }
+        }
+
         // Multi-LoRA: collect the served-names declared per profile and
         // also flatten/dedup them into the model-level union. The
         // per-profile map is the precise capability the gateway gates
@@ -290,6 +308,7 @@ impl ModelInfoExtras {
                 max_output_tokens: None,
                 grammar_capabilities: None,
                 grammar_profile: None,
+                profile_parents: HashMap::new(),
                 tools_supported: None,
                 code: false,
                 sql: false,

@@ -1,0 +1,2523 @@
+schema_version: 1
+contract_version: "2026-07-20"
+
+# This is the machine-readable telemetry source of truth. A request path emits
+# one typed semantic event; the owning facade is the only code allowed to turn
+# it into OTel instruments or log records. Every application exports each
+# observation once through OTLP; the collector translates and routes it to
+# Prometheus and/or a remote OTLP backend.
+invariants:
+  producer_api: opentelemetry
+  single_emission: true
+  application_export_protocol: otlp
+  application_metric_readers_per_provider: 1
+  application_metric_exporters_per_reader: 1
+  application_metric_temporality:
+    counter: delta
+    histogram: delta
+    observable_counter: delta
+    up_down_counter: cumulative
+    gauge: current_value
+  application_temporality_environment_override: forbidden
+  better_stack_metric_temporality_conversion: none
+  prometheus_delta_accumulation: collector_exporter
+  collector_self_metric_source: cumulative_prometheus_scrape
+  disabled_behavior: facade_noop
+  disabled_sdk_instruments: none
+  disabled_http_middleware: omitted
+  disabled_point_attribute_construction: forbidden
+  export_failure_behavior: bounded_fail_open
+  prometheus_is_collector_exporter: true
+  in_process_prometheus_instrumentation: forbidden
+  vendor_credentials_in_producers: false
+  arbitrary_metric_attributes: false
+  arbitrary_managed_logs: false
+
+cardinality_budgets:
+  worker_python_facade:
+    scope: per_process_per_instrument
+    sdk_series_retention: process_lifetime
+    sdk_default_series_limit: unbounded
+    collapse_before_sdk_aggregation: true
+    catalog_model_profile_pairs:
+      admitted_exact_process_lifetime: 256
+      collapsed_overflow_pairs: 1
+      total_series_pairs: 257
+      overflow_labels: {model: other, profile: other}
+      overflow_backend: other
+      overflow_effect: telemetry_only_serving_fail_open
+      warning: at_most_once_per_process
+    fixed_domains:
+      lane_per_process: 1
+      operation: operation
+      worker_outcome: worker_outcome
+      inference_phase: inference_phase
+      unit_type: unit_type
+    instrument_limits:
+      shared_worker_request:
+        metrics: [sie.worker.requests, sie.worker.request.duration]
+        formula: catalog_series_pairs * operation * worker_outcome
+        limit: 8995
+      shared_worker_phase:
+        metrics: [sie.worker.inference.duration]
+        formula: catalog_series_pairs * operation * worker_outcome * inference_phase
+        limit: 26985
+      shared_worker_units:
+        metrics: [sie.worker.units]
+        formula: catalog_series_pairs * operation * unit_type
+        limit: 5397
+    applies_to:
+      service: sie-worker
+      runtime: python
+      attribute_sets:
+        - worker_queue
+        - worker_batch
+        - worker_batch_core
+        - worker_request
+        - worker_phase
+        - worker_units
+        - worker_model
+        - worker_model_load
+        - worker_oom
+        - worker_runtime
+        - worker_eviction
+        - worker_scheduler
+        - worker_adaptive_p50
+        - generation_stream
+        - generation_tokens
+        - generation_admission
+        - generation_duplicate
+        - generation_grammar
+        - generation_grammar_cache
+        - generation_grammar_compile
+  worker_rust_facade:
+    scope: per_process_per_instrument
+    sdk_series_retention: process_lifetime
+    sdk_default_series_limit: 2000
+    collapse_before_sdk_aggregation: true
+    catalog_model_profile_pairs:
+      admitted_exact_process_lifetime: 256
+      collapsed_overflow_pairs: 1
+      total_series_pairs: 257
+      overflow_labels: {model: other, profile: other}
+      overflow_backend: other
+      overflow_effect: telemetry_only_serving_fail_open
+      warning: at_most_once_per_process
+    request_detail_model_profile_pairs:
+      admitted_exact_process_lifetime: 32
+      collapsed_overflow_pairs: 1
+      total_series_pairs: 33
+      admission_subset_of: catalog_model_profile_pairs
+      selection: first_observed_distinct_catalog_pairs
+      overflow_labels: {model: other, profile: other}
+      overflow_backend: other
+      overflow_effect: telemetry_only_serving_fail_open
+      applies_to:
+        - sie.worker.requests
+        - sie.worker.request.duration
+        - sie.worker.inference.duration
+        - sie.worker.units
+    forward_detail_model_profile_pairs:
+      admitted_exact_process_lifetime: 4
+      collapsed_overflow_pairs: 1
+      total_series_pairs: 5
+      admission_subset_of: catalog_model_profile_pairs
+      selection: first_observed_distinct_catalog_pairs
+      overflow_labels: {model: other, profile: other}
+      overflow_backend: other
+      overflow_effect: telemetry_only_serving_fail_open
+      applies_to: [sie.worker.runtime.forward.duration]
+    fixed_domains:
+      lane_per_process: 1
+      operation: operation
+      worker_outcome: worker_outcome
+      inference_phase: inference_phase
+      unit_type: unit_type
+      model_load_outcome: model_load_outcome
+      model_load_stage: model_load_stage
+      oom_strategy: oom_strategy
+      oom_outcome: oom_outcome
+      eviction_reason: eviction_reason
+      forward_state: forward_state
+      forward_outcome: forward_outcome
+      forward_input_source: forward_input_source
+      forward_output_path: forward_output_path
+      forward_stage: forward_stage
+    instrument_limits:
+      shared_worker_request:
+        metrics: [sie.worker.requests, sie.worker.request.duration]
+        formula: request_detail_series_pairs * operation * worker_outcome
+        limit: 1155
+      shared_worker_phase:
+        metrics: [sie.worker.inference.duration]
+        formula: request_detail_series_pairs * operation * worker_outcome * inference_phase
+        limit: 3465
+      shared_worker_units:
+        metrics: [sie.worker.units]
+        formula: request_detail_series_pairs * operation * unit_type
+        limit: 693
+      model_state:
+        metrics: [sie.worker.model.loaded, sie.worker.model.memory, sie.worker.runtime.forward.limit]
+        formula: catalog_series_pairs
+        limit: 257
+      model_load:
+        metrics: [sie.worker.model.load.duration]
+        formula: catalog_series_pairs * model_load_outcome * model_load_stage
+        limit: 5140
+      oom_recovery:
+        metrics: [sie.worker.oom.recoveries]
+        formula: catalog_series_pairs * oom_strategy * oom_outcome
+        limit: 4112
+      model_eviction:
+        metrics: [sie.worker.model.evictions]
+        formula: catalog_series_pairs * eviction_reason
+        limit: 2570
+      forward_duration:
+        metrics: [sie.worker.runtime.forward.duration]
+        formula: forward_detail_series_pairs * forward_outcome * forward_input_source * forward_output_path * forward_stage
+        limit: 8460
+      forward_permit:
+        metrics: [sie.worker.runtime.forward.permit.wait]
+        formula: catalog_series_pairs * forward_output_path
+        limit: 1542
+      forward_activity:
+        metrics: [sie.worker.runtime.forward.concurrent]
+        formula: catalog_series_pairs * forward_state
+        limit: 514
+    sdk_retained_memory_ceiling:
+      pinned_sdk: opentelemetry_sdk_0_32_1
+      readers_per_provider: 1
+      tracker_maps: 13
+      tracker_map_capacity_rule: one_plus_cardinality_limit
+      requested_initial_tracker_capacity_entries: 29590
+      total_instrument_series_limits: 29577
+      maximum_single_instrument_series: 8460
+      explicit_histogram_bucket_counter_cells_at_full_limits: 379022
+      bucket_counter_payload_bytes_at_full_limits: 3032176
+      bucket_counter_payload_bytes_with_one_export_snapshot: 6064352
+      additional_bounded_overhead:
+        - hash_table_control_bytes
+        - tracker_and_attribute_key_value_allocations
+        - allocator_rounding
+    applies_to:
+      service: sie-worker
+      runtime: rust
+      attribute_sets:
+        - worker_request
+        - worker_phase
+        - worker_units
+        - worker_model
+        - worker_model_load
+        - worker_oom
+        - worker_eviction
+        - worker_forward
+        - worker_forward_permit
+        - worker_forward_activity
+  worker_sidecar:
+    scope: per_process_per_instrument
+    sdk_default_series_limit: 2000
+    catalog_model_profile_pairs:
+      admitted_exact_process_lifetime: 256
+      collapsed_overflow_pairs: 1
+      total_series_pairs: 257
+      overflow_labels: {model: other, profile: other}
+      overflow_effect: telemetry_only_serving_fail_open
+      warning: at_most_once_per_process
+    fixed_domains:
+      lane_per_process: 1
+      operation: operation
+      flush_reason: flush_reason
+      ipc_method: ipc_method
+      ipc_outcome: ipc_outcome
+      ipc_response_chunk_outcome: ipc_response_chunk_outcome
+      config_source: sidecar_config_source
+      config_operation: sidecar_config_operation
+      config_outcome: sidecar_config_outcome
+      nats_operation: nats_operation
+      binary_outcome: binary_outcome
+      nats_reason: nats_reason
+      delivery_redelivered: delivery_redelivered
+      payload_reason: payload_reason
+      slot_state: slot_state
+      ipc_transport: ipc_transport
+      scheduler_p50_kind: scheduler_p50_kind
+      generation_loading_state: generation_loading_state
+      generation_response_outcome: generation_response_outcome
+      shutdown_drain_outcome: shutdown_drain_outcome
+      result_transport_mode: result_transport_mode
+      result_transport_outcome: result_transport_outcome
+    instrument_limits:
+      queue_and_batch_core:
+        metrics:
+          - sie.worker.queue.duration
+          - sie.worker.queue.depth
+          - sie.worker.batch.size
+          - sie.worker.batch.cost
+          - sie.worker.scheduler.request_batch.dispatch_wait
+          - sie.worker.scheduler.request_batch.total
+        formula: operation * catalog_series_pairs
+        limit: 1799
+      batch_fill:
+        metrics: [sie.worker.batch.fill_ratio]
+        formula: operation * catalog_series_pairs * flush_reason
+        limit: 14392
+      scheduler_base:
+        metrics:
+          - sie.worker.scheduler.adaptive.wait
+          - sie.worker.scheduler.adaptive.cost
+          - sie.worker.scheduler.starvation.resets
+        formula: catalog_series_pairs
+        limit: 257
+      scheduler_p50:
+        metrics: [sie.worker.scheduler.adaptive.p50]
+        formula: catalog_series_pairs * scheduler_p50_kind
+        limit: 514
+      ipc:
+        metrics: [sie.worker.ipc.requests, sie.worker.ipc.request.duration]
+        formula: ipc_method * ipc_outcome
+        limit: 98
+      ipc_response_chunks:
+        metrics:
+          - sie.worker.ipc.response.chunks
+          - sie.worker.ipc.response.reconstructed.size
+          - sie.worker.ipc.response.chunk.count
+          - sie.worker.ipc.response.chunk.reserved
+        formula: ipc_response_chunk_outcome * lane_per_process
+        limit: 3
+      config_apply:
+        metrics: [sie.worker.config.applies]
+        formula: config_source * config_operation * config_outcome
+        limit: 324
+      config_state:
+        metrics: [sie.worker.config.epoch, sie.worker.config.degraded]
+        formula: config_source
+        limit: 3
+      nats:
+        metrics: [sie.worker.nats.operations]
+        formula: nats_operation * binary_outcome * nats_reason
+        limit: 210
+      nats_delivery:
+        metrics: [sie.worker.nats.delivery.attempts]
+        formula: delivery_redelivered
+        limit: 2
+      result_transport:
+        metrics:
+          - sie.worker.result.transport.attempts
+          - sie.worker.result.chunks.published
+          - sie.worker.result.chunk.size
+        formula: result_transport_mode * result_transport_outcome * lane_per_process
+        limit: 16
+      payload:
+        metrics:
+          - sie.worker.payload.fetches
+          - sie.worker.payload.fetch.duration
+          - sie.worker.payload.size
+        formula: binary_outcome * payload_reason
+        limit: 24
+      slots:
+        metrics: [sie.worker.gpu.slots]
+        formula: slot_state
+        limit: 2
+      lane_state:
+        metrics:
+          - sie.worker.pending.items
+          - sie.worker.pending.cost
+          - sie.worker.inflight.batches
+          - sie.worker.saturated
+        formula: lane_per_process
+        limit: 1
+      ipc_transport:
+        metrics: [sie.worker.ipc.capacity, sie.worker.ipc.inflight]
+        formula: ipc_transport
+        limit: 3
+      ipc_acquire:
+        metrics: [sie.worker.ipc.acquire.duration]
+        formula: ipc_transport * binary_outcome
+        limit: 9
+      generation_loading:
+        metrics: [sie.worker.generation.model_loading.responses]
+        formula: catalog_series_pairs * generation_loading_state * generation_response_outcome
+        limit: 4112
+      shutdown:
+        metrics: [sie.worker.shutdown.drain.duration]
+        formula: shutdown_drain_outcome
+        limit: 3
+  keda_physical_lane_domain:
+    source: SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES
+    tuple: [pool, machine_profile, bundle]
+    normalization: trim_then_lowercase
+    allowed_characters: "^[A-Za-z0-9_-]+$"
+    maximum_component_length: 63
+    maximum_configured_lanes: 1024
+    reconciliation:
+      interval_seconds: 5
+      snapshot_timeout_seconds: 4
+      broker_query_concurrency_per_replica: 32
+      maximum_gateway_replicas: 10
+      replica_stagger: process_start_uuid_hash_modulo_interval
+    emission: exact_catalog_members_only
+    unresolved_lane_behavior: omit_control_metric
+    synthetic_fallback_lane: forbidden
+    sdk_stream_cardinality:
+      lane_state_gauges: 1024
+      scale_up_rejections: 4096
+      overflow_series: forbidden
+    applies_to:
+      - sie.gateway.pending_demand
+      - sie.gateway.lane.queue.depth
+      - sie.gateway.lane.queue.snapshot.timestamp
+      - sie.gateway.active_lease.gpus
+      - sie.gateway.pool.warm_floor
+      - sie.gateway.rejected.requests
+
+scope:
+  included: all_production_metrics_keda_control_signals_and_privacy_approved_managed_logs
+  excluded_until_declared:
+    - lane_lifecycle_signals
+    - service_log_events_other_than_the_declared_gateway_completion_record
+  rule: a_new_instrument_must_be_declared_before_it_is_emitted
+
+field_semantics:
+  metrics.export: collector_output_eligibility
+  logs.export: collector_output_eligibility
+  traces.remote_export: collector_privacy_boundary
+
+measurement_semantics:
+  generation_tpot:
+    start: first_output_bearing_event
+    end: last_output_bearing_event
+    formula: max(end_minus_start_seconds, 0) / denominator
+    denominator:
+      preferred: authoritative_positive_completion_token_count
+      fallback: observed_output_bearing_event_count
+      convention: includes_first_output
+    unmeasurable: omit_when_fewer_than_two_timed_output_events
+    rationale: preserves_the_existing_total_latency_equals_ttft_plus_tpot_times_output_tokens_convention
+  scheduler_request_batch_dispatch_wait:
+    sample: one_per_unique_successful_request_id_per_backend_batch
+    start: scheduler_enqueue
+    end: instant_immediately_before_run_batch_dispatch
+    filter: item_outcome_publish_and_ack
+    deduplication: first_successful_request_id_occurrence_in_batch_iteration_order
+  scheduler_request_batch_total:
+    sample: one_per_unique_successful_request_id_per_backend_batch
+    start: scheduler_enqueue
+    end: completed_run_batch_reply
+    filter: item_outcome_publish_and_ack
+    deduplication: first_successful_request_id_occurrence_in_batch_iteration_order
+
+resource_attributes:
+  required:
+    - service.name
+    - service.instance.id
+    - deployment.environment
+    - cloud.region
+  optional:
+    - service.version
+  resolution:
+    service.instance.id:
+      substrate_prefix_env: SIE_TELEMETRY_INSTANCE_ID
+      kubernetes_prefix: "$(POD_UID)/<container-name>"
+      composition: "<substrate-prefix>/<process-start-uuid>"
+      fallback: process_start_uuid_shared_across_signals
+      collector_self_source:
+        kubernetes: collector_file_provider_reads_proc_random_uuid_once_then_trims
+        managed_modal: launcher_generated_process_start_uuid_env
+      requirement: unique_per_process_start_including_same_container_restarts
+    deployment.environment:
+      producer_env: SIE_OTEL_DEPLOYMENT_ENVIRONMENT
+      managed_values: [dev, staging, prod]
+      fallback: unknown_local_only
+      requirement: explicit_on_every_operated_deployment
+    cloud.region:
+      producer_env: SIE_OTEL_CLOUD_REGION
+      fallback: unknown_local_only
+      requirement: explicit_on_every_operated_deployment
+  forbidden_as_point_attributes:
+    - deployment.environment
+    - cloud.region
+    - service.version
+
+services:
+  gateway:
+    service_name: sie-gateway
+    runtimes:
+      - packages/sie_gateway
+      - packages/sie_cloud/gateway
+  dispatcher:
+    service_name: sie-dispatcher
+    runtimes:
+      - packages/sie_cloud/dispatcher
+  config:
+    service_name: sie-config
+    runtimes:
+      - packages/sie_config
+  worker_sidecar:
+    service_name: sie-worker-sidecar
+    runtimes:
+      - packages/sie_server_sidecar
+  worker_engine:
+    service_name: sie-worker
+    runtimes:
+      - packages/sie_server
+      - packages/sie_server_rust
+  worker_python_engine:
+    service_name: sie-worker
+    runtimes:
+      - packages/sie_server
+  worker_rust_engine:
+    service_name: sie-worker
+    runtimes:
+      - packages/sie_server_rust
+
+conditional_owners:
+  worker_queue_owner:
+    realtime: worker_sidecar
+    modal_native: worker_python_engine
+    invariant: exactly_one_owner_per_observation
+  worker_scheduler_owner:
+    realtime: worker_sidecar
+    modal_native: worker_python_engine
+    invariant: exactly_one_owner_per_observation
+
+export_profiles:
+  oss:
+    application_exporters: [otlp]
+    collector_metric_exporters: [prometheus]
+    collector_log_exporters: [structured_stdout]
+  managed_modal:
+    application_exporters: [otlp]
+    collector_metric_exporters: [otlp]
+    collector_log_exporters: [otlp]
+  kubernetes_with_remote_telemetry:
+    # The collector fans one OTLP observation out. Producers still emit once.
+    application_exporters: [otlp]
+    collector_metric_exporters: [prometheus, otlp]
+    collector_log_exporters: [structured_stdout, otlp]
+  requirements:
+    application_otlp:
+      destination: regional_otel_collector
+      protocol: http/protobuf_or_grpc
+      metrics_export_interval_max_seconds: 5
+      fail_open: true
+    collector_prometheus:
+      listen: 0.0.0.0:9464
+      endpoint: /metrics
+      source: otel_collector_prometheus_exporter
+      resource_to_telemetry_conversion:
+        enabled: false
+      standard_target_identity:
+        job: service.name
+        instance: service.instance.id
+      prometheus_scrape_identity:
+        honor_labels: false
+        target_labels: [namespace, service, endpoint]
+        producer_service: collector_trusted_receiver_identity
+        producer_instance: sanitized_service_instance_id
+        collector_generation: procfs_uuid_read_once_per_collector_process_config_load
+        service_monitor_exported_label_copy: forbidden
+      service_monitor_scrape_interval_max_seconds: 5
+    collector_remote_otlp:
+      vendor_routing: collector_only
+
+metric_processing:
+  # Metric receivers are trust boundaries. The dotted name and the exact
+  # point-attribute set below are the wire contract, not suggestions to a
+  # dashboard author. Collector branches fail closed before Prometheus name
+  # normalization or remote export.
+  undeclared_metric_names: drop
+  receiver_name_allowlists:
+    gateway: owner_gateway_only
+    application: non_gateway_owners_only
+    managed_modal_shared: declared_remote_metrics_bound_to_owner_service
+  owner_service_binding:
+    policy: exact
+    unknown_service: drop
+    cross_owner_metric: drop
+    conditional_owners:
+      worker_queue_owner: [sie-worker, sie-worker-sidecar]
+      worker_scheduler_owner: [sie-worker, sie-worker-sidecar]
+  resource_attributes:
+    allow:
+      - service.name
+      - service.instance.id
+      - deployment.environment
+      - cloud.region
+      - service.version
+    unknown: drop
+    schema_url: clear
+    operated_environment_and_region: collector_authoritative
+  scope:
+    attributes: drop_all
+    name: clear
+    version: clear
+    schema_url: clear
+  descriptor:
+    description: clear
+    unit: canonicalize_from_metric_declaration
+  prometheus_compatibility:
+    # The pinned collector appends `_ratio` for canonical unit `1`. Clear the
+    # unit only on the local Prometheus branch to retain the established wire
+    # family while the canonical OTel instrument remains dimensionless.
+    sie.gateway.pool.pinned_model.loaded:
+      unit_override: ""
+      prometheus_name: sie_gateway_pool_pinned_model_loaded
+  datapoint_attributes:
+    policy: exact_metric_attribute_set
+    unknown: drop
+  exemplars:
+    policy: forbidden
+    producer_filter: always_off
+    collector_runtime_assertion: zero_remote_exemplars
+  prometheus_identity:
+    policy: collector_authored
+    producer_service: trusted_receiver_service_name
+    producer_instance: service.instance.id
+    collector_generation: prometheus_only_process_generation_uuid
+    service_monitor_exported_label_copy: forbidden
+
+traces:
+  # Producers emit one normal OTel trace stream. The collector preserves that
+  # stream for an explicitly configured local OSS/Tempo exporter, but a
+  # separate branch applies this fail-closed allowlist before any span reaches
+  # Better Stack. Topology and latency remain useful without forwarding
+  # request-derived attributes, exception events, or arbitrary status text.
+  remote_privacy:
+    destination: better_stack
+    policy: allowlist
+    identity:
+      operated_environment_and_region: collector_authoritative
+      service_instance_id: producer_process_identity
+      service_version: producer_optional
+      helm_receiver_binding:
+        gateway:
+          service_name: collector_authoritative_sie-gateway
+        application:
+          service_name_allow: [sie-config, sie-dispatcher, sie-worker, sie-worker-sidecar]
+          unknown_service: drop
+          gateway_claim: drop
+      managed_modal_shared:
+        service_name_allow: [sie-config, sie-dispatcher, sie-gateway, sie-worker, sie-worker-sidecar]
+        unknown_service: drop
+      local_oss_action: retain_producer_identity_unchanged
+    resource_attributes:
+      allow:
+        - service.name
+        - service.instance.id
+        - deployment.environment
+        - cloud.region
+        - service.version
+      unknown: drop
+      schema_url: clear
+    scope:
+      attributes: drop_all
+      name: clear
+      version: clear
+      schema_url: clear
+    span:
+      attributes: drop_all
+      events: drop_all
+      status_message: clear
+      trace_state: clear
+      # Trace/span/parent ids, start/end timestamps, span kind, status code and
+      # flags are structural OTel fields and remain untouched on retained
+      # spans. Links are not: every link can carry arbitrary attributes and
+      # trace-state text, and the pinned collector cannot mutate them in place.
+      retain:
+        - topology
+        - timing
+        - ids
+        - kind
+        - status_code
+        - flags
+      linked_spans:
+        remote_action: drop_entire_span
+        condition: Len(links) > 0
+        reason: pinned_collector_cannot_reliably_clear_link_attributes_or_trace_state
+        transform_defense: set_links_empty_for_future_runtime_support
+        local_oss_action: retain_unchanged
+      name:
+        unknown: other
+        allow:
+          - gateway.request
+          - gateway.publish
+          - gateway.proxy
+          - gateway.proxy_chat
+          - gateway.proxy_request
+          - gateway.proxy_generate
+          - sidecar.dispatch
+          - worker.run_batch
+          - worker.streaming_processor
+          - encode
+          - score
+          - extract
+          - generate
+          - openai_embeddings
+          - chat_completions
+          - rerank
+          - other
+  local_oss:
+    destination: configured_tempo_or_debug_exporter
+    policy: producer_trace_unchanged
+
+enums:
+  operation: [encode, score, extract, embeddings, moderations, generate, other]
+  request_outcome: [success, redirect, client_error, server_error, other]
+  admission_outcome:
+    - admitted
+    - unauthenticated
+    - forbidden
+    - auth_misconfigured
+    - region_mismatch
+    - license_excluded
+    - payload_too_large
+    - insufficient_credits
+    - key_spend_limit_exceeded
+    - rate_limited
+    - other
+  gateway_dispatch_path: [i6pn, modal, other]
+  dispatcher_path: [modal_remote, modal_stream, modal_spawn, generation_ws, other]
+  dispatch_outcome: [success, error, timeout, cancelled, not_found, other]
+  # `rejected` (the tenant's config cannot be served) is deliberately distinct from
+  # `error` (SIE broke): only the second is an incident. `other` is the facade's
+  # _bounded() collapse — an unclassified outcome must never mint a time series.
+  sealed_stage_outcome: [success, rejected, error, other]
+  # The sealed GPU ladder, mirrored by `telemetry._SEALED_GPU_CLASSES`. A class
+  # outside the ladder collapses to `other` (the facade's `_bounded()`) and an
+  # absent one to `unknown`, so a caller can never mint a time series.
+  sealed_gpu_class: [t4, l4, a10g, a100, a100-80gb, h100, other, unknown]
+  fallback_reason:
+    - none
+    - disabled
+    - not_applicable
+    - unknown_lane
+    - no_live_channel
+    - no_credit
+    - lane_error
+    - timeout
+    - transport_failure
+    - other
+  worker_outcome: [success, error, retry, cancelled, other]
+  worker_backend: [python, candle, sglang, other]
+  inference_phase: [tokenization, inference, postprocessing]
+  unit_type: [input_tokens, pages, images]
+  flush_reason: [cost_cap, count_cap, timeout, coalesce, single_oversize, idle_bypass, drain, other]
+  ipc_method:
+    - apply_model_config
+    - drain
+    - ensure_model_ready
+    - ping
+    - process_encode_batch
+    - process_extract_batch
+    - process_generate
+    - process_score_batch
+    - replace_model_configs
+    - run_batch
+    - set_pinned_models
+    - signal_generate_cancel
+    - worker_capabilities
+    - other
+  ipc_outcome: [success, success_after_retry, transport_error, protocol_error, timeout, server_error, other]
+  ipc_response_chunk_outcome: [completed, protocol_error, budget_rejected]
+  model_load_outcome: [success, error, timeout, other]
+  model_load_stage: [total, instantiate, load, resident, other]
+  oom_strategy: [cache_clear, evict_lru, split_batch, other]
+  oom_outcome: [success, failed, terminal, other]
+  config_source: [api, filesystem, other]
+  config_publish_operation: [delta, snapshot, other]
+  config_store_operation: [write_model, increment_epoch, other]
+  config_outcome: [success, partial, failure, other]
+  messaging_transport: [nats, nats_jetstream]
+  gateway_config_operation: [bootstrap, reconcile, delta_model, delta_epoch]
+  gateway_config_outcome:
+    - success
+    - client_error
+    - fetch_error
+    - partial_apply
+    - parse_error
+    - apply_error
+    - rejected_untrusted
+  queue_publish_outcome: [submitted, backpressure, no_consumers, error]
+  queue_result_outcome: [success, timeout, channel_closed, durability_error, worker_error, cancelled]
+  queue_result_chunk_rejection_reason:
+    - kind
+    - identity
+    - digest
+    - chunk_count
+    - chunk_index
+    - item_size
+    - payload_size
+    - aggregate_size
+    - global_budget
+    - metadata_conflict
+    - duplicate_conflict
+    - total_mismatch
+    - digest_mismatch
+    - decode
+  queue_event: [publish_ack, dlq_forward, payload_offload]
+  queue_event_outcome: [success, ack_error, error, deduplicated]
+  provisioning_surface: [native, openai]
+  generation_event: [cancellation, chunk, nak]
+  generation_event_reason:
+    - before_first_chunk
+    - mid_stream
+    - invalid_kind
+    - non_finite_ttft
+    - invalid_finish_reason
+    - sequence_gap
+    - stale_attempt
+    - duplicate
+  generation_event_outcome: [cancelled, dropped, rejected]
+  token_type: [prompt, completion]
+  http_method: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, other]
+  scaling_action: [scale_up]
+  keda_scale_up_rejection_reason: [backpressure, no_consumers, publish_ack_failed, upstream_result_timeout]
+  eviction_reason:
+    - preload_pressure
+    - load_oom
+    - lru
+    - manual
+    - shutdown
+    - config_change
+    - oom_recovery
+    - idle
+    - memory_pressure
+    - other
+  scheduler_p50_kind: [observed, target]
+  sidecar_config_source: [notification, export, other]
+  sidecar_config_operation: [model_config, epoch_bump, full_export, poll, subscribe, other]
+  sidecar_config_outcome:
+    - applied
+    - no_change
+    - no_relevant_models
+    - stale
+    - skipped_pool
+    - rejected_untrusted
+    - rejected_bundle
+    - rejected_oversized
+    - parse_error
+    - client_error
+    - fetch_error
+    - epoch_error
+    - apply_error
+    - apply_rejected
+    - hash_mismatch
+    - partial
+    - shutdown
+    - other
+  binary_outcome: [success, error, other]
+  nats_operation: [receive, ack, nak, progress, fetch, stream, other]
+  nats_reason:
+    - none
+    - completed
+    - retry
+    - pool_not_assigned
+    - first_delivery
+    - redelivery
+    - metadata_unavailable
+    - transport
+    - stream_ended
+    - other
+  delivery_redelivered: ["true", "false"]
+  payload_reason:
+    - none
+    - not_found
+    - permission_denied
+    - io
+    - invalid_ref
+    - unsupported
+    - object_store
+    - other
+  ipc_transport: [pool, mux, other]
+  result_transport_mode: [single, chunked, compact_error, rejected]
+  result_transport_outcome: [published, publish_error, flush_error, planning_error]
+  slot_state: [total, ready]
+  generation_loading_state: [loading_started, loading_in_progress, failed, other]
+  generation_response_outcome: [success, ack_error, publish_error, other]
+  shutdown_drain_outcome: [success, deadline_exceeded, other]
+  grammar: [none, json_schema, regex, ebnf, other]
+  grammar_backend: [outlines, xgrammar, llguidance, other]
+  grammar_phase: [request, prewarm, other]
+  grammar_outcome: [success, error, timeout, other]
+  grammar_cache_result: [hit, miss, other]
+  generation_admission_outcome: [admitted, rejected, error, other]
+  generation_admission_reason: [none, kv_budget, resolver_error, missing_budget, other]
+  generation_duplicate_path: [first_chunk_fallback, other]
+  forward_state: [active, waiting]
+  forward_outcome: [success, error]
+  forward_input_source: [prepared, raw, other]
+  forward_output_path:
+    - dense
+    - sparse
+    - multivector_f32
+    - multivector_f16_batched
+    - multivector_f16_individual
+    - other
+  forward_stage:
+    - total
+    - forward
+    - pool
+    - normalize
+    - conversion
+    - conversion_tensor_readback
+    - conversion_host_pack
+    - inference
+    - xlm_roberta_embedding
+    - xlm_roberta_attention
+    - xlm_roberta_attention_qkv
+    - xlm_roberta_attention_flash
+    - xlm_roberta_attention_output_dense
+    - xlm_roberta_attention_output_layernorm
+    - xlm_roberta_ffn
+    - xlm_roberta_ffn_intermediate_dense
+    - xlm_roberta_ffn_activation
+    - xlm_roberta_ffn_output_dense
+    - xlm_roberta_ffn_output_layernorm
+    - gte_rope_embedding
+    - gte_rope_rope_select
+    - gte_rope_attention
+    - gte_rope_attention_qkv
+    - gte_rope_attention_rotary
+    - gte_rope_attention_flash
+    - gte_rope_attention_output_dense
+    - gte_rope_attention_output_layernorm
+    - gte_rope_ffn
+    - gte_rope_ffn_up_gate
+    - gte_rope_ffn_activation
+    - gte_rope_ffn_down
+    - gte_rope_ffn_output_layernorm
+    - modernbert_embedding
+    - modernbert_embedding_norm
+    - modernbert_rope_select
+    - modernbert_attention
+    - modernbert_attention_norm
+    - modernbert_attention_qkv
+    - modernbert_attention_rotary
+    - modernbert_attention_flash
+    - modernbert_attention_output_dense
+    - modernbert_mlp
+    - modernbert_mlp_norm
+    - modernbert_mlp_wi
+    - modernbert_mlp_activation
+    - modernbert_mlp_wo
+    - modernbert_final_norm
+
+attribute_domains:
+  http.status_code: {type: integer, minimum: 100, maximum: 599, invalid: 0}
+  http.route: {type: registered_route_template, invalid: other}
+  machine_profile: {type: release_manifest_value, invalid: other}
+  lane: {type: release_manifest_value, invalid: other}
+  model: {type: release_catalog_value, invalid: other}
+  logical_pool: {type: gateway_logical_pool_name, invalid: other}
+  profile: {type: release_catalog_value, invalid: other}
+  pool: {type: physical_queue_pool, invalid: other}
+  bundle: {type: release_manifest_value, invalid: other}
+
+attribute_sets:
+  gateway_request:
+    operation: operation
+    outcome: request_outcome
+    http.status_code: http.status_code
+    machine_profile: machine_profile
+  gateway_admission:
+    operation: operation
+    outcome: admission_outcome
+  gateway_dispatch:
+    operation: operation
+    dispatch.path: gateway_dispatch_path
+    outcome: dispatch_outcome
+    fallback.reason: fallback_reason
+    lane: lane
+  gateway_config_operation:
+    operation: gateway_config_operation
+    outcome: gateway_config_outcome
+  messaging_ready:
+    transport: messaging_transport
+  gateway_queue_publish:
+    operation: operation
+    outcome: queue_publish_outcome
+  gateway_queue_result:
+    operation: operation
+    outcome: queue_result_outcome
+  gateway_queue_result_chunk_rejection:
+    reason: queue_result_chunk_rejection_reason
+  gateway_queue_event:
+    event: queue_event
+    outcome: queue_event_outcome
+  gateway_provisioning:
+    surface: provisioning_surface
+    http.status_code: http.status_code
+  gateway_generation_event:
+    event: generation_event
+    reason: generation_event_reason
+    outcome: generation_event_outcome
+  gateway_generation_completion:
+    operation: operation
+  gateway_generation_tokens:
+    operation: operation
+    token.kind: token_type
+  gateway_pinned_model:
+    pool: logical_pool
+    model: model
+  dispatcher_invocation:
+    operation: operation
+    dispatch.path: dispatcher_path
+    outcome: dispatch_outcome
+    lane: lane
+  dispatcher_inflight:
+    operation: operation
+    dispatch.path: dispatcher_path
+    lane: lane
+  dispatcher_sealed_stage:
+    outcome: sealed_stage_outcome
+  dispatcher_sealed_cold_start:
+    gpu_class: sealed_gpu_class
+  config_request:
+    http.method: http_method
+    http.route: http.route
+    http.status_code: http.status_code
+  config_models:
+    source: config_source
+  config_publish:
+    operation: config_publish_operation
+    outcome: config_outcome
+  config_store:
+    operation: config_store_operation
+    outcome: config_outcome
+  config_messaging:
+    transport: messaging_transport
+  worker_queue:
+    operation: operation
+    lane: lane
+    model: model
+    profile: profile
+  worker_batch:
+    operation: operation
+    lane: lane
+    model: model
+    profile: profile
+    flush.reason: flush_reason
+  worker_batch_core:
+    operation: operation
+    lane: lane
+    model: model
+    profile: profile
+  worker_ipc:
+    method: ipc_method
+    outcome: ipc_outcome
+    lane: lane
+  worker_ipc_response_chunk:
+    outcome: ipc_response_chunk_outcome
+    lane: lane
+  worker_result_transport:
+    mode: result_transport_mode
+    outcome: result_transport_outcome
+    lane: lane
+  worker_request:
+    operation: operation
+    outcome: worker_outcome
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_phase:
+    operation: operation
+    outcome: worker_outcome
+    phase: inference_phase
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_units:
+    operation: operation
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+    unit.type: unit_type
+  worker_model:
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_model_load:
+    outcome: model_load_outcome
+    stage: model_load_stage
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_oom:
+    strategy: oom_strategy
+    outcome: oom_outcome
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_runtime:
+    operation: operation
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_eviction:
+    reason: eviction_reason
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_scheduler:
+    lane: lane
+    model: model
+    profile: profile
+  worker_adaptive_p50:
+    kind: scheduler_p50_kind
+    lane: lane
+    model: model
+    profile: profile
+  worker_config_apply:
+    source: sidecar_config_source
+    operation: sidecar_config_operation
+    outcome: sidecar_config_outcome
+    lane: lane
+  worker_config_state:
+    source: sidecar_config_source
+    lane: lane
+  worker_nats:
+    operation: nats_operation
+    outcome: binary_outcome
+    reason: nats_reason
+    lane: lane
+  worker_nats_delivery:
+    redelivered: delivery_redelivered
+    lane: lane
+  worker_payload:
+    outcome: binary_outcome
+    reason: payload_reason
+    lane: lane
+  worker_slot:
+    state: slot_state
+    lane: lane
+  worker_lane:
+    lane: lane
+  worker_ipc_transport:
+    transport: ipc_transport
+    lane: lane
+  worker_ipc_acquire:
+    transport: ipc_transport
+    outcome: binary_outcome
+    lane: lane
+  worker_generation_loading:
+    state: generation_loading_state
+    outcome: generation_response_outcome
+    lane: lane
+    model: model
+    profile: profile
+  worker_shutdown:
+    outcome: shutdown_drain_outcome
+    lane: lane
+  generation_stream:
+    grammar: grammar
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  generation_tokens:
+    token.type: token_type
+    grammar: grammar
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  generation_admission:
+    outcome: generation_admission_outcome
+    reason: generation_admission_reason
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  generation_duplicate:
+    dispatch.path: generation_duplicate_path
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  generation_grammar:
+    grammar.backend: grammar_backend
+    grammar: grammar
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  generation_grammar_cache:
+    grammar.backend: grammar_backend
+    grammar: grammar
+    phase: grammar_phase
+    result: grammar_cache_result
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  generation_grammar_compile:
+    grammar.backend: grammar_backend
+    grammar: grammar
+    phase: grammar_phase
+    outcome: grammar_outcome
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_forward:
+    outcome: forward_outcome
+    input.source: forward_input_source
+    output.path: forward_output_path
+    stage: forward_stage
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_forward_permit:
+    output.path: forward_output_path
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_forward_activity:
+    state: forward_state
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  keda_lane:
+    pool: pool
+    machine_profile: machine_profile
+    bundle: bundle
+  keda_rejection:
+    pool: pool
+    machine_profile: machine_profile
+    bundle: bundle
+    reason: keda_scale_up_rejection_reason
+    scaling_action: scaling_action
+
+histogram_buckets:
+  gateway_request_seconds: [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.025, 0.03, 0.04, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+  gateway_queue_publish_seconds: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+  gateway_queue_publish_items: [1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61]
+  gateway_queue_result_wait_seconds: [0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0, 30.0]
+  dispatcher_invocation_seconds: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0]
+  # Sealed staging is fetch + seal + first model load, NOT a request: the measured
+  # cold start is ~130 s, so the interesting resolution is tens-to-hundreds of
+  # seconds. Reusing dispatcher_invocation_seconds would pile every real staging
+  # into its 120 s overflow bucket and measure nothing.
+  dispatcher_sealed_stage_seconds: [1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 180.0, 300.0, 450.0, 600.0, 900.0]
+  config_request_seconds: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
+  worker_queue_seconds: [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
+  worker_request_seconds: [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
+  worker_model_load_seconds: [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0]
+  worker_ipc_seconds: [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0]
+  worker_batch_items: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+  worker_batch_cost: [128, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
+  worker_pending_items: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+  generation_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
+  worker_delivery_attempts: [1, 2, 3, 5, 10]
+  worker_payload_bytes: [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864]
+  worker_transport_bytes: [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864]
+  worker_chunk_count: [1, 2, 4, 8, 16, 32, 64]
+  worker_ipc_acquire_seconds: [0.000001, 0.00001, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+  worker_shutdown_seconds: [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0]
+
+# prometheus_name is the exact base family expected from the collector's
+# Prometheus exporter. Histograms add _bucket/_sum/_count. These names are a
+# tested wire contract, not a second producer API.
+metrics:
+  - name: sie.gateway.requests
+    owner: gateway
+    facade_event: gateway.request_completed
+    type: counter
+    unit: "{request}"
+    attributes: gateway_request
+    prometheus_name: sie_gateway_requests_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.request.duration
+    owner: gateway
+    facade_event: gateway.request_completed
+    type: histogram
+    unit: s
+    attributes: gateway_request
+    buckets: gateway_request_seconds
+    prometheus_name: sie_gateway_request_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.gateway.admission.decisions
+    owner: gateway
+    facade_event: gateway.request_completed
+    type: counter
+    unit: "{request}"
+    attributes: gateway_admission
+    prometheus_name: sie_gateway_admission_decisions_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.dispatches
+    owner: gateway
+    facade_event: gateway.dispatch_completed
+    type: counter
+    unit: "{request}"
+    attributes: gateway_dispatch
+    prometheus_name: sie_gateway_dispatches_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.dispatch.duration
+    owner: gateway
+    facade_event: gateway.dispatch_completed
+    type: histogram
+    unit: s
+    attributes: gateway_dispatch
+    buckets: gateway_request_seconds
+    prometheus_name: sie_gateway_dispatch_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.gateway.config.applied_epoch
+    owner: gateway
+    facade_event: gateway.config_state_changed
+    type: gauge
+    unit: "{epoch}"
+    attributes: none
+    prometheus_name: sie_gateway_config_applied_epoch
+    export: [prometheus, otlp]
+  - name: sie.gateway.config.operations
+    owner: gateway
+    facade_event: gateway.config_operation_completed
+    type: counter
+    unit: "{operation}"
+    attributes: gateway_config_operation
+    prometheus_name: sie_gateway_config_operations_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.config.bootstrap.degraded
+    owner: gateway
+    facade_event: gateway.config_state_changed
+    type: gauge
+    unit: "1"
+    attributes: none
+    prometheus_name: sie_gateway_config_bootstrap_degraded_ratio
+    export: [prometheus, otlp]
+  - name: sie.gateway.messaging.client.ready
+    owner: gateway
+    facade_event: gateway.messaging_state_changed
+    type: gauge
+    unit: "1"
+    attributes: messaging_ready
+    prometheus_name: sie_gateway_messaging_client_ready_ratio
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.publishes
+    owner: gateway
+    facade_event: gateway.queue_publish_submitted
+    type: counter
+    unit: "{publish}"
+    attributes: gateway_queue_publish
+    prometheus_name: sie_gateway_queue_publishes_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.publish.duration
+    owner: gateway
+    facade_event: gateway.queue_publish_submitted
+    type: histogram
+    unit: s
+    attributes: gateway_queue_publish
+    buckets: gateway_queue_publish_seconds
+    prometheus_name: sie_gateway_queue_publish_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.publish.items
+    owner: gateway
+    facade_event: gateway.queue_publish_submitted
+    type: histogram
+    unit: "{item}"
+    attributes: gateway_queue_publish
+    buckets: gateway_queue_publish_items
+    prometheus_name: sie_gateway_queue_publish_items
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_waits
+    owner: gateway
+    facade_event: gateway.queue_result_wait_completed
+    type: counter
+    unit: "{wait}"
+    attributes: gateway_queue_result
+    prometheus_name: sie_gateway_queue_result_waits_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_wait.duration
+    owner: gateway
+    facade_event: gateway.queue_result_wait_completed
+    type: histogram
+    unit: s
+    attributes: gateway_queue_result
+    buckets: gateway_queue_result_wait_seconds
+    prometheus_name: sie_gateway_queue_result_wait_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.events
+    owner: gateway
+    facade_event: gateway.queue_durability_event
+    type: counter
+    unit: "{event}"
+    attributes: gateway_queue_event
+    prometheus_name: sie_gateway_queue_events_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_chunks.received
+    owner: gateway
+    facade_event: gateway.queue_result_chunk_received
+    type: counter
+    unit: "{chunk}"
+    attributes: none
+    prometheus_name: sie_gateway_queue_result_chunks_received_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_chunk.bytes_received
+    owner: gateway
+    facade_event: gateway.queue_result_chunk_received
+    type: counter
+    unit: By
+    attributes: none
+    prometheus_name: sie_gateway_queue_result_chunk_bytes_received_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_chunk.rejections
+    owner: gateway
+    facade_event: gateway.queue_result_chunk_rejected
+    type: counter
+    unit: "{rejection}"
+    attributes: gateway_queue_result_chunk_rejection
+    prometheus_name: sie_gateway_queue_result_chunk_rejections_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_chunk.transfers_completed
+    owner: gateway
+    facade_event: gateway.queue_result_chunk_event
+    type: counter
+    unit: "{transfer}"
+    attributes: none
+    prometheus_name: sie_gateway_queue_result_chunk_transfers_completed_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_chunk.duplicates
+    owner: gateway
+    facade_event: gateway.queue_result_chunk_event
+    type: counter
+    unit: "{chunk}"
+    attributes: none
+    prometheus_name: sie_gateway_queue_result_chunk_duplicates_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_chunk.retry_replacements
+    owner: gateway
+    facade_event: gateway.queue_result_chunk_event
+    type: counter
+    unit: "{transfer}"
+    attributes: none
+    prometheus_name: sie_gateway_queue_result_chunk_retry_replacements_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_chunk.stale_retries
+    owner: gateway
+    facade_event: gateway.queue_result_chunk_event
+    type: counter
+    unit: "{chunk}"
+    attributes: none
+    prometheus_name: sie_gateway_queue_result_chunk_stale_retries_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.queue.result_chunk.reserved_bytes
+    owner: gateway
+    facade_event: gateway.queue_result_chunk_reservation_changed
+    type: gauge
+    unit: By
+    attributes: none
+    prometheus_name: sie_gateway_queue_result_chunk_reserved_bytes
+    export: [prometheus, otlp]
+  - name: sie.gateway.provisioning.responses
+    owner: gateway
+    facade_event: gateway.provisioning_response_completed
+    type: counter
+    unit: "{response}"
+    attributes: gateway_provisioning
+    prometheus_name: sie_gateway_provisioning_responses_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.generation.events
+    owner: gateway
+    facade_event: gateway.generation_transport_event
+    type: counter
+    unit: "{event}"
+    attributes: gateway_generation_event
+    prometheus_name: sie_gateway_generation_events_total
+    export: [prometheus, otlp]
+  - name: sie.gateway.generation.ttft
+    owner: gateway
+    facade_event: gateway.generation_completed
+    type: histogram
+    unit: s
+    attributes: gateway_generation_completion
+    buckets: generation_seconds
+    prometheus_name: sie_gateway_generation_ttft_seconds
+    export: [prometheus, otlp]
+  - name: sie.gateway.generation.tpot
+    owner: gateway
+    facade_event: gateway.generation_completed
+    type: histogram
+    unit: s
+    attributes: gateway_generation_completion
+    buckets: generation_seconds
+    prometheus_name: sie_gateway_generation_tpot_seconds
+    export: [prometheus, otlp]
+    measurement: generation_tpot
+  - name: sie.gateway.generation.tokens
+    owner: gateway
+    facade_event: gateway.generation_completed
+    type: counter
+    unit: "{token}"
+    attributes: gateway_generation_tokens
+    prometheus_name: sie_gateway_generation_tokens_total
+    export: [prometheus, otlp]
+
+  - name: sie.dispatcher.invocations
+    owner: dispatcher
+    facade_event: dispatcher.invocation_completed
+    type: counter
+    unit: "{invocation}"
+    attributes: dispatcher_invocation
+    prometheus_name: sie_dispatcher_invocations_total
+    export: [prometheus, otlp]
+  - name: sie.dispatcher.invocation.duration
+    owner: dispatcher
+    facade_event: dispatcher.invocation_completed
+    type: histogram
+    unit: s
+    attributes: dispatcher_invocation
+    buckets: dispatcher_invocation_seconds
+    prometheus_name: sie_dispatcher_invocation_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.dispatcher.inflight
+    owner: dispatcher
+    facade_event: dispatcher.invocation_scope
+    type: up_down_counter
+    unit: "{invocation}"
+    attributes: dispatcher_inflight
+    prometheus_name: sie_dispatcher_inflight
+    export: [prometheus, otlp]
+
+  # #1841 sealed custom-model lane. Each resident engine holds a SOLE-TENANT GPU,
+  # so residency and held GPU-seconds are cost surfaces, not just health signals.
+  - name: sie.dispatcher.sealed.stage
+    owner: dispatcher
+    facade_event: dispatcher.sealed_stage_completed
+    type: counter
+    unit: "{stage}"
+    attributes: dispatcher_sealed_stage
+    prometheus_name: sie_dispatcher_sealed_stage_total
+    export: [prometheus, otlp]
+  - name: sie.dispatcher.sealed.stage.duration
+    owner: dispatcher
+    facade_event: dispatcher.sealed_stage_completed
+    type: histogram
+    unit: s
+    attributes: dispatcher_sealed_stage
+    buckets: dispatcher_sealed_stage_seconds
+    prometheus_name: sie_dispatcher_sealed_stage_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.dispatcher.sealed.resident
+    owner: dispatcher
+    facade_event: dispatcher.sealed_residency_changed
+    type: up_down_counter
+    unit: "{engine}"
+    attributes: none
+    prometheus_name: sie_dispatcher_sealed_resident
+    export: [prometheus, otlp]
+  - name: sie.dispatcher.sealed.sandbox.seconds
+    owner: dispatcher
+    facade_event: dispatcher.sealed_sandbox_closed
+    type: counter
+    unit: s
+    attributes: none
+    prometheus_name: sie_dispatcher_sealed_sandbox_seconds_total
+    export: [prometheus, otlp]
+  - name: sie.dispatcher.sealed.cold_start.seconds
+    owner: dispatcher
+    facade_event: dispatcher.sealed_cold_start_recorded
+    type: counter
+    unit: s
+    attributes: dispatcher_sealed_cold_start
+    prometheus_name: sie_dispatcher_sealed_cold_start_seconds_total
+    # REMOTELY EXPORTED as of #2583. It was Prometheus-only until then, which
+    # was exactly the observed behaviour: the metric (#2426) was never added to
+    # the managed collector's remote allowlist, so it was dropped before OTLP
+    # export and the control plane could only ever report the cold-start
+    # carve-out as UNMEASURED. Both collector remote allowlists now carry it,
+    # `gpu_class` is kept as its bounded remote dimension, and the
+    # `dispatcher_sealed_cold_start_seconds` chart renders it in Better Stack.
+    # The per-environment recovery import ids are still assigned by Better Stack
+    # on apply — an operator action this repo cannot author, so each
+    # `examples/*-telemetry/imports.tf` marks the entry as an operator backfill.
+    export: [prometheus, otlp]
+
+  - name: sie.config.requests
+    owner: config
+    facade_event: config.request_completed
+    type: counter
+    unit: "{request}"
+    attributes: config_request
+    prometheus_name: sie_config_requests_total
+    export: [prometheus, otlp]
+  - name: sie.config.request.duration
+    owner: config
+    facade_event: config.request_completed
+    type: histogram
+    unit: s
+    attributes: config_request
+    buckets: config_request_seconds
+    prometheus_name: sie_config_request_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.config.epoch
+    owner: config
+    facade_event: config.state_changed
+    type: gauge
+    unit: "{epoch}"
+    attributes: none
+    prometheus_name: sie_config_epoch
+    export: [prometheus, otlp]
+  - name: sie.config.models
+    owner: config
+    facade_event: config.state_changed
+    type: gauge
+    unit: "{model}"
+    attributes: config_models
+    prometheus_name: sie_config_models
+    export: [prometheus, otlp]
+  - name: sie.config.publish
+    owner: config
+    facade_event: config.publish_completed
+    type: counter
+    unit: "{operation}"
+    attributes: config_publish
+    prometheus_name: sie_config_publish_total
+    export: [prometheus, otlp]
+  - name: sie.config.store.writes
+    owner: config
+    facade_event: config.store_write_completed
+    type: counter
+    unit: "{operation}"
+    attributes: config_store
+    prometheus_name: sie_config_store_writes_total
+    export: [prometheus, otlp]
+  - name: sie.config.messaging.ready
+    owner: config
+    facade_event: config.messaging_state_changed
+    type: gauge
+    unit: "1"
+    attributes: config_messaging
+    prometheus_name: sie_config_messaging_ready_ratio
+    export: [prometheus, otlp]
+
+  # The realtime sidecar owns these events on the sidecar topology; the Python
+  # engine owns them on Modal-native batching. They must never both observe the
+  # same item/batch.
+  - name: sie.worker.queue.duration
+    owner: worker_queue_owner
+    facade_event: worker.queue_released
+    type: histogram
+    unit: s
+    attributes: worker_queue
+    buckets: worker_queue_seconds
+    prometheus_name: sie_worker_queue_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.queue.depth
+    owner: worker_queue_owner
+    facade_event: worker.queue_depth_changed
+    type: gauge
+    unit: "{item}"
+    attributes: worker_queue
+    prometheus_name: sie_worker_queue_depth
+    export: [prometheus, otlp]
+  - name: sie.worker.scheduler.request_batch.dispatch_wait
+    owner: worker_sidecar
+    facade_event: worker.scheduler_request_batch_completed
+    type: histogram
+    unit: s
+    attributes: worker_queue
+    buckets: worker_queue_seconds
+    prometheus_name: sie_worker_scheduler_request_batch_dispatch_wait_seconds
+    export: [prometheus, otlp]
+    measurement: scheduler_request_batch_dispatch_wait
+  - name: sie.worker.scheduler.request_batch.total
+    owner: worker_sidecar
+    facade_event: worker.scheduler_request_batch_completed
+    type: histogram
+    unit: s
+    attributes: worker_queue
+    buckets: worker_queue_seconds
+    prometheus_name: sie_worker_scheduler_request_batch_total_seconds
+    export: [prometheus, otlp]
+    measurement: scheduler_request_batch_total
+  - name: sie.worker.batch.size
+    owner: worker_queue_owner
+    facade_event: worker.batch_formed
+    type: histogram
+    unit: "{item}"
+    attributes: worker_batch_core
+    buckets: worker_batch_items
+    prometheus_name: sie_worker_batch_size
+    export: [prometheus, otlp]
+  - name: sie.worker.batch.cost
+    owner: worker_queue_owner
+    facade_event: worker.batch_formed
+    type: histogram
+    unit: "{cost}"
+    attributes: worker_batch_core
+    buckets: worker_batch_cost
+    prometheus_name: sie_worker_batch_cost
+    export: [prometheus, otlp]
+  - name: sie.worker.batch.fill_ratio
+    owner: worker_queue_owner
+    facade_event: worker.batch_fill_observed
+    type: gauge
+    unit: "1"
+    attributes: worker_batch
+    prometheus_name: sie_worker_batch_fill_ratio
+    export: [prometheus, otlp]
+  - name: sie.worker.queue.pending_at_dispatch
+    owner: worker_python_engine
+    facade_event: worker.queue_pending_observed
+    type: histogram
+    unit: "{item}"
+    attributes: worker_queue
+    buckets: worker_pending_items
+    prometheus_name: sie_worker_queue_pending_at_dispatch
+    export: [prometheus, otlp]
+  - name: sie.worker.scheduler.adaptive.wait
+    owner: worker_scheduler_owner
+    facade_event: worker.adaptive_scheduler_snapshot
+    type: gauge
+    unit: s
+    attributes: worker_scheduler
+    prometheus_name: sie_worker_scheduler_adaptive_wait_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.scheduler.adaptive.cost
+    owner: worker_scheduler_owner
+    facade_event: worker.adaptive_scheduler_snapshot
+    type: gauge
+    unit: "{cost}"
+    attributes: worker_scheduler
+    prometheus_name: sie_worker_scheduler_adaptive_cost
+    export: [prometheus, otlp]
+  - name: sie.worker.scheduler.adaptive.p50
+    owner: worker_scheduler_owner
+    facade_event: worker.adaptive_scheduler_snapshot
+    type: gauge
+    unit: s
+    attributes: worker_adaptive_p50
+    prometheus_name: sie_worker_scheduler_adaptive_p50_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.scheduler.starvation.resets
+    owner: worker_scheduler_owner
+    facade_event: worker.adaptive_scheduler_snapshot
+    type: counter
+    unit: "{reset}"
+    attributes: worker_scheduler
+    prometheus_name: sie_worker_scheduler_starvation_resets_total
+    export: [prometheus, otlp]
+  - name: sie.worker.ipc.requests
+    owner: worker_sidecar
+    facade_event: worker.ipc_completed
+    type: counter
+    unit: "{request}"
+    attributes: worker_ipc
+    prometheus_name: sie_worker_ipc_requests_total
+    export: [prometheus, otlp]
+  - name: sie.worker.ipc.request.duration
+    owner: worker_sidecar
+    facade_event: worker.ipc_completed
+    type: histogram
+    unit: s
+    attributes: worker_ipc
+    buckets: worker_ipc_seconds
+    prometheus_name: sie_worker_ipc_request_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.ipc.response.chunks
+    owner: worker_sidecar
+    facade_event: worker.ipc_response_chunk_transfer_completed
+    type: counter
+    unit: "{transfer}"
+    attributes: worker_ipc_response_chunk
+    prometheus_name: sie_worker_ipc_response_chunks_total
+    export: [prometheus, otlp]
+  - name: sie.worker.ipc.response.reconstructed.size
+    owner: worker_sidecar
+    facade_event: worker.ipc_response_chunk_transfer_completed
+    type: histogram
+    unit: By
+    attributes: worker_lane
+    buckets: worker_transport_bytes
+    prometheus_name: sie_worker_ipc_response_reconstructed_size_bytes
+    export: [prometheus, otlp]
+  - name: sie.worker.ipc.response.chunk.count
+    owner: worker_sidecar
+    facade_event: worker.ipc_response_chunk_transfer_completed
+    type: histogram
+    unit: "{chunk}"
+    attributes: worker_lane
+    buckets: worker_chunk_count
+    prometheus_name: sie_worker_ipc_response_chunk_count
+    export: [prometheus, otlp]
+  - name: sie.worker.ipc.response.chunk.reserved
+    owner: worker_sidecar
+    facade_event: worker.ipc_response_chunk_reserved_changed
+    type: gauge
+    unit: By
+    attributes: worker_lane
+    prometheus_name: sie_worker_ipc_response_chunk_reserved_bytes
+    export: [prometheus, otlp]
+  - name: sie.worker.result.transport.attempts
+    owner: worker_sidecar
+    facade_event: worker.result_transport_completed
+    type: counter
+    unit: "{attempt}"
+    attributes: worker_result_transport
+    prometheus_name: sie_worker_result_transport_attempts_total
+    export: [prometheus, otlp]
+  - name: sie.worker.result.chunks.published
+    owner: worker_sidecar
+    facade_event: worker.result_chunk_published
+    type: counter
+    unit: "{chunk}"
+    attributes: worker_lane
+    prometheus_name: sie_worker_result_chunks_published_total
+    export: [prometheus, otlp]
+  - name: sie.worker.result.chunk.size
+    owner: worker_sidecar
+    facade_event: worker.result_chunk_published
+    type: histogram
+    unit: By
+    attributes: worker_lane
+    buckets: worker_transport_bytes
+    prometheus_name: sie_worker_result_chunk_size_bytes
+    export: [prometheus, otlp]
+  - name: sie.worker.config.applies
+    owner: worker_sidecar
+    facade_event: worker.config_apply_completed
+    type: counter
+    unit: "{apply}"
+    attributes: worker_config_apply
+    prometheus_name: sie_worker_config_applies_total
+    export: [prometheus, otlp]
+  - name: sie.worker.config.epoch
+    owner: worker_sidecar
+    facade_event: worker.config_state_changed
+    type: gauge
+    unit: "{epoch}"
+    attributes: worker_config_state
+    prometheus_name: sie_worker_config_epoch
+    export: [prometheus, otlp]
+  - name: sie.worker.config.degraded
+    owner: worker_sidecar
+    facade_event: worker.config_state_changed
+    type: gauge
+    unit: "1"
+    attributes: worker_config_state
+    prometheus_name: sie_worker_config_degraded_ratio
+    export: [prometheus, otlp]
+  - name: sie.worker.nats.operations
+    owner: worker_sidecar
+    facade_event: worker.nats_operation_completed
+    type: counter
+    unit: "{operation}"
+    attributes: worker_nats
+    prometheus_name: sie_worker_nats_operations_total
+    export: [prometheus, otlp]
+  - name: sie.worker.nats.delivery.attempts
+    owner: worker_sidecar
+    facade_event: worker.nats_message_received
+    type: histogram
+    unit: "{attempt}"
+    attributes: worker_nats_delivery
+    buckets: worker_delivery_attempts
+    prometheus_name: sie_worker_nats_delivery_attempts
+    export: [prometheus, otlp]
+  - name: sie.worker.payload.fetches
+    owner: worker_sidecar
+    facade_event: worker.payload_fetch_completed
+    type: counter
+    unit: "{fetch}"
+    attributes: worker_payload
+    prometheus_name: sie_worker_payload_fetches_total
+    export: [prometheus, otlp]
+  - name: sie.worker.payload.fetch.duration
+    owner: worker_sidecar
+    facade_event: worker.payload_fetch_completed
+    type: histogram
+    unit: s
+    attributes: worker_payload
+    buckets: worker_queue_seconds
+    prometheus_name: sie_worker_payload_fetch_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.payload.size
+    owner: worker_sidecar
+    facade_event: worker.payload_fetch_completed
+    type: histogram
+    unit: By
+    attributes: worker_payload
+    buckets: worker_payload_bytes
+    prometheus_name: sie_worker_payload_size_bytes
+    export: [prometheus, otlp]
+  - name: sie.worker.gpu.slots
+    owner: worker_sidecar
+    facade_event: worker.runtime_snapshot
+    type: gauge
+    unit: "{slot}"
+    attributes: worker_slot
+    prometheus_name: sie_worker_gpu_slots
+    export: [prometheus, otlp]
+  - name: sie.worker.pending.items
+    owner: worker_sidecar
+    facade_event: worker.runtime_snapshot
+    type: gauge
+    unit: "{item}"
+    attributes: worker_lane
+    prometheus_name: sie_worker_pending_items
+    export: [prometheus, otlp]
+  - name: sie.worker.pending.cost
+    owner: worker_sidecar
+    facade_event: worker.runtime_snapshot
+    type: gauge
+    unit: "{cost}"
+    attributes: worker_lane
+    prometheus_name: sie_worker_pending_cost
+    export: [prometheus, otlp]
+  - name: sie.worker.inflight.batches
+    owner: worker_sidecar
+    facade_event: worker.runtime_snapshot
+    type: gauge
+    unit: "{batch}"
+    attributes: worker_lane
+    prometheus_name: sie_worker_inflight_batches
+    export: [prometheus, otlp]
+  - name: sie.worker.saturated
+    owner: worker_sidecar
+    facade_event: worker.runtime_snapshot
+    type: gauge
+    unit: "1"
+    attributes: worker_lane
+    prometheus_name: sie_worker_saturated_ratio
+    export: [prometheus, otlp]
+  - name: sie.worker.ipc.capacity
+    owner: worker_sidecar
+    facade_event: worker.ipc_transport_state_changed
+    type: gauge
+    unit: "{request}"
+    attributes: worker_ipc_transport
+    prometheus_name: sie_worker_ipc_capacity
+    export: [prometheus, otlp]
+  - name: sie.worker.ipc.inflight
+    owner: worker_sidecar
+    facade_event: worker.ipc_transport_state_changed
+    type: gauge
+    unit: "{request}"
+    attributes: worker_ipc_transport
+    prometheus_name: sie_worker_ipc_inflight
+    export: [prometheus, otlp]
+  - name: sie.worker.ipc.acquire.duration
+    owner: worker_sidecar
+    facade_event: worker.ipc_acquire_completed
+    type: histogram
+    unit: s
+    attributes: worker_ipc_acquire
+    buckets: worker_ipc_acquire_seconds
+    prometheus_name: sie_worker_ipc_acquire_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.model_loading.responses
+    owner: worker_sidecar
+    facade_event: worker.generation_model_loading_response_completed
+    type: counter
+    unit: "{response}"
+    attributes: worker_generation_loading
+    prometheus_name: sie_worker_generation_model_loading_responses_total
+    export: [prometheus, otlp]
+  - name: sie.worker.shutdown.drain.duration
+    owner: worker_sidecar
+    facade_event: worker.shutdown_drain_completed
+    type: histogram
+    unit: s
+    attributes: worker_shutdown
+    buckets: worker_shutdown_seconds
+    prometheus_name: sie_worker_shutdown_drain_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.runtime.batch.size
+    owner: worker_python_engine
+    facade_event: worker.runtime_batch_dispatched
+    type: histogram
+    unit: "{item}"
+    attributes: worker_runtime
+    buckets: worker_batch_items
+    prometheus_name: sie_worker_runtime_batch_size
+    export: [prometheus, otlp]
+  - name: sie.worker.runtime.batch.subgroups
+    owner: worker_python_engine
+    facade_event: worker.runtime_batch_dispatched
+    type: histogram
+    unit: "{subgroup}"
+    attributes: worker_runtime
+    buckets: worker_batch_items
+    prometheus_name: sie_worker_runtime_batch_subgroups
+    export: [prometheus, otlp]
+  - name: sie.worker.runtime.subgroup.size
+    owner: worker_python_engine
+    facade_event: worker.runtime_batch_dispatched
+    type: histogram
+    unit: "{item}"
+    attributes: worker_runtime
+    buckets: worker_batch_items
+    prometheus_name: sie_worker_runtime_subgroup_size
+    export: [prometheus, otlp]
+
+  # Both Python and Rust/Candle engines implement this exact engine contract.
+  - name: sie.worker.requests
+    owner: worker_engine
+    facade_event: worker.item_completed
+    type: counter
+    unit: "{item}"
+    measurement: completed_item_count
+    attributes: worker_request
+    prometheus_name: sie_worker_requests_total
+    export: [prometheus, otlp]
+  - name: sie.worker.request.duration
+    owner: worker_engine
+    facade_event: worker.item_completed
+    type: histogram
+    unit: s
+    measurement: one_observation_per_completed_item
+    attributes: worker_request
+    buckets: worker_request_seconds
+    prometheus_name: sie_worker_request_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.inference.duration
+    owner: worker_engine
+    facade_event: worker.item_completed
+    type: histogram
+    unit: s
+    measurement: one_observation_per_completed_item_and_non_null_phase
+    attributes: worker_phase
+    buckets: worker_request_seconds
+    prometheus_name: sie_worker_inference_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.units
+    owner: worker_engine
+    facade_event: worker.item_completed
+    type: counter
+    unit: "{unit}"
+    attributes: worker_units
+    prometheus_name: sie_worker_units_total
+    export: [prometheus, otlp]
+  - name: sie.worker.model.loaded
+    owner: worker_engine
+    facade_event: worker.model_residency_changed
+    type: gauge
+    unit: "{model}"
+    attributes: worker_model
+    prometheus_name: sie_worker_model_loaded
+    export: [prometheus, otlp]
+  - name: sie.worker.model.load.duration
+    owner: worker_engine
+    facade_event: worker.model_load_completed
+    type: histogram
+    unit: s
+    attributes: worker_model_load
+    buckets: worker_model_load_seconds
+    prometheus_name: sie_worker_model_load_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.model.memory
+    owner: worker_engine
+    facade_event: worker.model_residency_changed
+    type: gauge
+    unit: By
+    attributes: worker_model
+    prometheus_name: sie_worker_model_memory_bytes
+    export: [prometheus, otlp]
+    measurement: authoritative_only
+  - name: sie.worker.oom.recoveries
+    owner: worker_engine
+    facade_event: worker.oom_recovery_completed
+    type: counter
+    unit: "{recovery}"
+    attributes: worker_oom
+    prometheus_name: sie_worker_oom_recoveries_total
+    export: [prometheus, otlp]
+  - name: sie.worker.model.evictions
+    owner: worker_engine
+    facade_event: worker.model_evicted
+    type: counter
+    unit: "{model}"
+    attributes: worker_eviction
+    prometheus_name: sie_worker_model_evictions_total
+    export: [prometheus, otlp]
+
+  # Generation is currently implemented by the Python engine. It remains in
+  # the same sie-worker service stream and uses the same bounded catalog
+  # dimensions as the shared engine contract.
+  - name: sie.worker.generation.ttft
+    owner: worker_python_engine
+    facade_event: worker.generation_first_token_observed
+    type: histogram
+    unit: s
+    attributes: generation_stream
+    buckets: generation_seconds
+    prometheus_name: sie_worker_generation_ttft_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.tpot
+    owner: worker_python_engine
+    facade_event: worker.generation_stream_completed
+    type: histogram
+    unit: s
+    attributes: generation_stream
+    buckets: generation_seconds
+    prometheus_name: sie_worker_generation_tpot_seconds
+    export: [prometheus, otlp]
+    measurement: generation_tpot
+  - name: sie.worker.generation.tokens
+    owner: worker_python_engine
+    facade_event: worker.generation_stream_completed
+    type: counter
+    unit: "{token}"
+    attributes: generation_tokens
+    prometheus_name: sie_worker_generation_tokens_total
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.inflight
+    owner: worker_python_engine
+    facade_event: worker.generation_state_changed
+    type: gauge
+    unit: "{request}"
+    attributes: worker_model
+    prometheus_name: sie_worker_generation_inflight
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.kv.reserved
+    owner: worker_python_engine
+    facade_event: worker.generation_state_changed
+    type: gauge
+    unit: "{token}"
+    attributes: worker_model
+    prometheus_name: sie_worker_generation_kv_reserved
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.kv.budget
+    owner: worker_python_engine
+    facade_event: worker.generation_state_changed
+    type: gauge
+    unit: "{token}"
+    attributes: worker_model
+    prometheus_name: sie_worker_generation_kv_budget
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.admission.decisions
+    owner: worker_python_engine
+    facade_event: worker.generation_admission_decided
+    type: counter
+    unit: "{decision}"
+    attributes: generation_admission
+    prometheus_name: sie_worker_generation_admission_decisions_total
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.duplicate_prevented
+    owner: worker_python_engine
+    facade_event: worker.generation_duplicate_prevented
+    type: counter
+    unit: "{request}"
+    attributes: generation_duplicate
+    prometheus_name: sie_worker_generation_duplicate_prevented_total
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.grammar.compile.duration
+    owner: worker_python_engine
+    facade_event: worker.generation_grammar_compile_completed
+    type: histogram
+    unit: s
+    attributes: generation_grammar_compile
+    buckets: generation_seconds
+    prometheus_name: sie_worker_generation_grammar_compile_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.grammar.cache.lookups
+    owner: worker_python_engine
+    facade_event: worker.generation_grammar_cache_lookup
+    type: counter
+    unit: "{lookup}"
+    attributes: generation_grammar_cache
+    prometheus_name: sie_worker_generation_grammar_cache_lookups_total
+    export: [prometheus, otlp]
+  - name: sie.worker.generation.grammar.requests
+    owner: worker_python_engine
+    facade_event: worker.generation_grammar_requested
+    type: counter
+    unit: "{request}"
+    attributes: generation_grammar
+    prometheus_name: sie_worker_generation_grammar_requests_total
+    export: [prometheus, otlp]
+
+  # Rust/Candle-specific forward diagnostics share the canonical worker meter
+  # but are emitted only by sie-server-rust.
+  - name: sie.worker.runtime.forward.duration
+    owner: worker_rust_engine
+    facade_event: worker.forward_completed
+    type: histogram
+    unit: s
+    attributes: worker_forward
+    buckets: worker_request_seconds
+    prometheus_name: sie_worker_runtime_forward_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.runtime.forward.permit.wait
+    owner: worker_rust_engine
+    facade_event: worker.forward_permit_released
+    type: histogram
+    unit: s
+    attributes: worker_forward_permit
+    buckets: worker_request_seconds
+    prometheus_name: sie_worker_runtime_forward_permit_wait_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.runtime.forward.concurrent
+    owner: worker_rust_engine
+    facade_event: worker.forward_activity_changed
+    type: up_down_counter
+    unit: "{forward}"
+    attributes: worker_forward_activity
+    prometheus_name: sie_worker_runtime_forward_concurrent
+    export: [prometheus, otlp]
+  - name: sie.worker.runtime.forward.limit
+    owner: worker_rust_engine
+    facade_event: worker.forward_activity_changed
+    type: gauge
+    unit: "{forward}"
+    attributes: worker_model
+    prometheus_name: sie_worker_runtime_forward_limit
+    export: [prometheus, otlp]
+
+  - name: sie.gateway.pool.pinned_model.loaded
+    owner: gateway
+    facade_event: gateway.pinned_model_state_changed
+    type: gauge
+    unit: "1"
+    measurement: observable_current_snapshot
+    removed_lane: emit_zero_once_then_release_from_producer_state
+    attributes: gateway_pinned_model
+    prometheus_name: sie_gateway_pool_pinned_model_loaded
+    # Logical pool names are operator/API-defined and may encode tenant context;
+    # keep this pool/model readiness view local rather than exporting it.
+    export: [prometheus]
+
+  # KEDA control metrics. Their Prometheus spelling and label set are an API.
+  - name: sie.gateway.pending_demand
+    owner: gateway
+    facade_event: gateway.capacity_state_changed
+    type: gauge
+    unit: "{request}"
+    attributes: keda_lane
+    prometheus_name: sie_gateway_pending_demand
+    export: [prometheus, otlp]
+    topology_availability: [realtime_jetstream, managed_modal]
+    keda: pending_demand
+  - name: sie.gateway.lane.queue.depth
+    owner: gateway
+    facade_event: gateway.capacity_state_changed
+    type: gauge
+    unit: "{item}"
+    measurement: jetstream_consumer_num_pending_plus_num_ack_pending_for_exact_physical_lane
+    includes: delivered_but_unacknowledged_work_including_progress_acked_model_loading
+    excludes: [num_redelivered, num_waiting, worker_direct_streams, dlq_messages, acknowledged_work]
+    attributes: keda_lane
+    prometheus_name: sie_gateway_lane_queue_depth
+    export: [prometheus, otlp]
+    topology_availability: [realtime_jetstream]
+    managed_modal: omitted_not_applicable_no_durable_queue_authority
+    keda: lane_queue_depth
+  - name: sie.gateway.lane.queue.snapshot.timestamp
+    owner: gateway
+    facade_event: gateway.keda_capacity_snapshot
+    type: gauge
+    unit: s
+    value: unix_time_of_broker_reconciliation_start_recorded_after_successful_lane_value
+    attributes: keda_lane
+    prometheus_name: sie_gateway_lane_queue_snapshot_timestamp_seconds
+    # The global control timestamp remains local. This bounded lane companion
+    # is also routed remotely only so queue-depth views can reject stale data.
+    export: [prometheus, otlp]
+    topology_availability: [realtime_jetstream]
+    managed_modal: omitted_not_applicable_no_durable_queue_authority
+    keda: lane_queue_snapshot_freshness
+  - name: sie.gateway.active_lease.gpus
+    owner: gateway
+    facade_event: gateway.capacity_state_changed
+    type: gauge
+    unit: "{gpu}"
+    attributes: keda_lane
+    prometheus_name: sie_gateway_active_lease_gpus
+    export: [prometheus, otlp]
+    topology_availability: [realtime_jetstream, managed_modal]
+    keda: active_lease_gpus
+  - name: sie.gateway.pool.warm_floor
+    owner: gateway
+    facade_event: gateway.capacity_state_changed
+    type: gauge
+    unit: "{worker}"
+    attributes: keda_lane
+    prometheus_name: sie_gateway_pool_warm_floor
+    export: [prometheus, otlp]
+    topology_availability: [realtime_jetstream, managed_modal]
+    keda: pool_warm_floor
+  - name: sie.gateway.rejected.requests
+    owner: gateway
+    facade_event: gateway.request_rejected
+    type: counter
+    unit: "{request}"
+    measurement: scale_up_rejections_only
+    maximum_series: 4096
+    attributes: keda_rejection
+    prometheus_name: sie_gateway_rejected_requests_total
+    export: [prometheus, otlp]
+    keda: scale_worthy_rejection_rate
+  - name: sie.gateway.capacity.snapshot.timestamp
+    owner: gateway
+    facade_event: gateway.keda_capacity_snapshot
+    type: gauge
+    unit: s
+    value: unix_time_of_reconciliation_start_recorded_after_state_values
+    attributes: none
+    prometheus_name: sie_gateway_capacity_snapshot_timestamp_seconds
+    # This is a local autoscaling control signal, not a managed business KPI.
+    export: [prometheus]
+    keda: capacity_snapshot_freshness
+
+# Collector implementation health does not pass through an application facade,
+# but it is still part of the one checked-in operational contract. The managed
+# collector's isolated loopback scrape admits only these families before OTLP
+# export; it never broad-forwards every version-dependent otelcol self metric.
+collector_self_metrics:
+  source: prometheus/self
+  service_name: sie-otel-collector
+  export: [otlp]
+  # Prometheus counter exposition adds `_total`; normalize only these exact
+  # source aliases back to the stable OTLP family names below.
+  prometheus_input_aliases:
+    otelcol_receiver_refused_spans_total: otelcol_receiver_refused_spans
+    otelcol_exporter_send_failed_spans_total: otelcol_exporter_send_failed_spans
+    otelcol_receiver_refused_metric_points_total: otelcol_receiver_refused_metric_points
+    otelcol_exporter_send_failed_metric_points_total: otelcol_exporter_send_failed_metric_points
+    otelcol_receiver_refused_log_records_total: otelcol_receiver_refused_log_records
+    otelcol_exporter_send_failed_log_records_total: otelcol_exporter_send_failed_log_records
+  metrics:
+    - name: up
+      attributes: []
+    - name: otelcol_exporter_queue_size
+      attributes: [exporter, data_type]
+    - name: otelcol_exporter_queue_capacity
+      attributes: [exporter, data_type]
+    - name: otelcol_receiver_refused_spans
+      attributes: [receiver, transport]
+    - name: otelcol_exporter_send_failed_spans
+      attributes: [exporter, transport]
+    - name: otelcol_receiver_refused_metric_points
+      attributes: [receiver, transport]
+    - name: otelcol_exporter_send_failed_metric_points
+      attributes: [exporter, transport]
+    - name: otelcol_receiver_refused_log_records
+      attributes: [receiver, transport]
+    - name: otelcol_exporter_send_failed_log_records
+      attributes: [exporter, transport]
+
+logs:
+  - event_name: inference.request.completed
+    owner: gateway
+    facade_event: gateway.request_completed
+    body: inference.request.completed
+    severity: INFO
+    sampling: enclosing_trace_sampled
+    attributes:
+      event.name: inference.request.completed
+      event.schema.version: "1"
+      operation: operation
+      outcome: request_outcome
+      http.status_code: http.status_code
+    correlation: [trace_id, span_id]
+    export: [structured_stdout, otlp]
+
+log_processing:
+  declared_events_only: true
+  helm_receiver_binding:
+    receiver: gateway
+    other_receivers: reject
+    service_name: collector_authoritative_sie-gateway
+  resource_identity:
+    deployment.environment: collector_authoritative
+    cloud.region: collector_authoritative
+    service.instance.id: producer_process_identity
+    service.version: producer_optional
+
+forbidden_metric_attributes:
+  - tenant_id
+  - organization_id
+  - api_key_id
+  - request_id
+  - session_id
+  - job_id
+  - work_item_id
+  - container_id
+  - raw_url
+  - error_message
+  - exception_message
+
+forbidden_managed_log_fields:
+  - authorization
+  - api_key
+  - prompt
+  - document
+  - embedding
+  - model_output
+  - customer_id
+  - session_id
+  - request_body
+
+rejection_scaling_actions:
+  scale_up: [backpressure, no_consumers, publish_ack_failed, upstream_result_timeout]
+  non_scale_up_metric_behavior: omit
+
+keda:
+  source: prometheus_query_api
+  controller_compatibility:
+    bundled_app_version: 2.14.1
+    v0_6_20_boundary_external_requirement: compatible_with_the_bundled_2_14_1_status_and_hpa_contract_and_watches_the_effective_workload_namespace
+  required_exporter: otel_collector_prometheus_exporter
+  scrape_target:
+    endpoint: "http://<otel-collector-service>:9464/metrics"
+    discovery: service_monitor
+    consumer: prometheus
+  query_api:
+    endpoint: "<cluster-prometheus>/api/v1/query"
+    consumer: keda_prometheus_scaler
+  required_metric_visibility: local_cluster
+  application_metrics_export_interval_max_seconds: 5
+  prometheus_scrape_interval_max_seconds: 5
+  pipeline: application_otlp_to_collector_exposition_to_prometheus_to_keda
+  topology_scope:
+    realtime_jetstream: all_declared_control_families
+    managed_modal: no_prometheus_or_keda_control_path_queue_depth_and_queue_freshness_omitted_other_remote_capacity_state_retained
+  ingress_security:
+    gateway_receiver: release_gateway_pods_only_on_4317_and_4318
+    application_receiver: release_config_and_worker_pods_only_on_4327
+    prometheus_exposition: same_namespace_pods_exact_cross_namespace_bundled_prometheus_and_configured_scrape_namespace_names_only_on_9464
+    prometheus_scrape_namespace_names_default: []
+    bundled_prometheus_cross_namespace_identity: immutable_namespace_name_plus_operator_owned_prometheus_pod_labels
+    health_probe_network_policy_ingress: omitted_node_local_kubelet_traffic_unaffected
+    enforcement: kubernetes_network_policy_and_distinct_collector_receivers
+    namespace_trust_boundary: untrusted_workloads_must_not_have_pod_create_or_label_spoofing_rights_in_the_effective_workload_namespace_global_namespace_or_release_namespace
+  readiness_requirements:
+    - collector_prometheus_scrape_target_ready
+    - gateway_otlp_snapshot_fresh
+    - prometheus_target_up
+    - prometheus_query_api_ready
+  health_gate_enforcement:
+    autoscaling_enabled: mandatory_post_install_and_post_upgrade_prometheus_query_and_keda_hpa_hooks_even_when_explicit_health_gates_switch_is_false
+    explicit_health_gates: optional_gateway_and_enabled_config_http_smoke_hooks
+  application_target_matchers:
+    namespace: effective_workload_namespace_added_by_service_monitor
+    service: exact_collector_service_added_by_service_monitor
+    endpoint: prometheus
+    producer_service: sie-gateway_authored_by_trusted_collector_receiver
+  forward_migration_query_boundary:
+    source: v0_6_20_objects_use_their_historical_queries_until_target_apply
+    target: canonical_collector_freshness_gated_queries_only
+    overlap_bridge: none
+    producer_behavior: no_legacy_alias_and_no_duplicate_emission
+    cutover: standard_apply_updates_the_same_scaledobject_identities_in_place
+  prometheus_target_identity:
+    honor_labels: false
+    authority: service_monitor_target_labels
+    producer_service_source: trusted_collector_receiver
+    producer_instance_source: sanitized_service_instance_id
+    collector_generation_source: procfs_uuid_read_once_per_collector_process_config_load
+    service_monitor_exported_label_copy: forbidden
+  collector_readiness_guard: 'max(up{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus"}) == 1'
+  capacity_snapshot_freshness_max_seconds: 20
+  producer_freshness_guard: 'max(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)'
+  readiness_guard: '((max(up{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus"}) == 1) and on() (max(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)))'
+  stale_instance_policy: join_each_business_series_to_its_own_fresh_capacity_snapshot_and_collector_generation_before_ha_aggregation
+  empty_query_is_error: true
+  fallback_requirement: every_scaledobject_has_failure_threshold_and_bounded_safe_replica_floor
+  scaledobject_lifecycle:
+    ownership:
+      selector: exact_helm_release_identity_and_managed_label
+      required_labels:
+        app.kubernetes.io/instance: helm_release_name
+        app.kubernetes.io/part-of: sie
+        app.kubernetes.io/managed-by: Helm
+        sie.superlinked.com/scaler-managed: "true"
+        sie.superlinked.com/scaler-revision: helm_release_revision
+        sie.superlinked.com/helm-namespace: helm_release_namespace
+      same_name_adoption: canonical_same_release_identity_only
+      foreign_object_policy: reject_before_apply
+    identity:
+      scaledobject_names: unchanged_across_the_v0_6_20_boundary
+      hpa_names: exact_keda_hpa_scaledobject_name
+      scale_targets: unchanged_across_the_v0_6_20_boundary
+      immutable_workload_selectors: unchanged_across_the_v0_6_20_boundary
+      effective_workload_namespace: unchanged_during_the_boundary_upgrade
+    manifest_transport:
+      target_kind: config_map
+      rendered_payload: data.scaledobjects_yaml
+      worker_shard_size: 32
+      gateway_shards: 1
+      worker_lane_maximum_external_dependencies: 192
+      worker_lane_maximum_any_bundled_dependency: 96
+      runtime_telemetry_lane_maximum: 1024
+      helm_release_lane_limits_apply_when: autoscaling_enabled
+      helm_release_payload_budget_bytes: 917504
+      admission_basis: conservative_full_release_measurement_with_maximum_length_high_entropy_identities
+      apply: server_dry_run_then_standard_kubectl_apply
+      prune: exact_release_managed_names_absent_from_the_current_revision_only
+      apply_job_image: digest_pinned
+      security_property: manifest_is_nonsecret_and_configmap_write_in_the_effective_workload_namespace_is_a_trusted_control_plane_capability
+    workload_replicas:
+      autoscaling_enabled_existing_workload: render_live_spec_replicas_with_helm_lookup_to_prevent_the_helm_patch_from_resetting_the_hpa_count
+      fresh_install_or_missing_workload: use_configured_replica_floor
+      persistent_migration_state: none
+      persistent_migration_state_scope: target_chart_owned_resources
+      source_v0_6_20_hook_configmap: inert_obsolete_manifest_text_removed_manually_after_target_health_succeeds
+      purpose: prevent_helm_from_resetting_the_live_hpa_count_during_upgrade
+    forward_migration:
+      source: canonical_published_sie_cluster_0_6_20_only
+      operation: one_maintenance_window_helm_upgrade_wait_with_normal_hooks
+      source_preconditions: exact_release_identity_and_unchanged_namespace_lane_catalog_names_and_scale_targets_except_the_documented_over_limit_catalog_reduction
+      over_limit_catalog_reduction: stop_demand_drain_inflight_and_prove_zero_durable_work_delete_only_retired_exact_legacy_scaledobjects_verify_their_hpas_absent_then_upgrade_with_192_external_or_96_bundled_lanes
+      replica_preservation: helm_lookup_prevents_the_helm_resource_patch_from_resetting_each_observed_live_spec_replicas
+      scaledobject_cutover: standard_apply_updates_the_same_names_and_scale_targets_in_place
+      target_queries: canonical_collector_only_no_legacy_alias_or_duplicate_emission
+      target_proof: collector_prometheus_queries_and_keda_hpa_health_hooks_must_succeed
+      successful_completion: helm_upgrade_wait_returns_success_after_all_mandatory_hooks
+      failure_policy: keep_the_maintenance_window_fix_forward_and_retry_from_live_state
+      rollback: unsupported
+      helm_atomic: unsupported
+      helm_no_hooks: unsupported
+      topology_changes: perform_after_the_completed_boundary_upgrade_except_the_documented_over_limit_lane_reduction
+    apply: post_install_and_post_upgrade_server_dry_run_apply_then_exact_release_managed_prune
+    disable: pre_upgrade_delete_exact_release_managed_or_canonical_v0_6_20_scaledobjects
+    uninstall:
+      cleanup: pre_delete_delete_exact_release_managed_or_canonical_v0_6_20_scaledobjects
+      external_keda: controller_and_crds_not_owned_by_this_cleanup
+    readiness:
+      scaledobject_selector: exact_release_revision
+      hpa_selector: exact_release_identity_without_revision_because_keda_does_not_propagate_label_only_scaledobject_updates_to_existing_hpas
+      expected_count: enabled_worker_lanes_plus_gateway
+      reconciliation_proof: expected_revision_labeled_scaledobject_count_plus_an_exact_release_hpa_name_and_scaledobject_owner_label_set_match
+      status_consistency: external_metric_names_and_health_keys_equal_s_index_trigger_type_for_each_current_trigger_and_hpa_name_equals_keda_hpa_scaledobject_name
+      stale_status_guard: wait_full_three_poll_failure_window_after_apply
+      trigger_health: every_current_trigger_happy_with_zero_failures
+      fallback_condition: forbidden_after_validation_window
+      api_page_size: 32
+  state_gauge_temporality: synchronous_last_value_per_lane
+  snapshot_consistency: eventual_across_independently_locked_business_sources_and_not_export_atomic
+  timestamp_semantics: reconciliation_start_captured_before_async_build_and_recorded_after_state_values
+  missed_tick_behavior: skip
+  stale_series_policy: frozen_catalog_failed_lane_retains_last_value_with_aging_lane_freshness_successful_lane_records_explicit_zero
+  labels:
+    pool: lowercase_physical_queue_pool
+    machine_profile: lowercase_rendered_worker_machine_profile
+    bundle: lowercase_rendered_worker_bundle
+    reason: keda_scale_up_rejection_reason
+    scaling_action: scaling_action
+  exporter_identity_label:
+    producer_instance: collector_authored_from_sanitized_service_instance_id_for_per_producer_freshness_join_then_aggregated_away
+    collector_generation: prometheus_only_collector_authored_process_uuid_for_accumulator_restart_boundary_then_aggregated_away
+    better_stack_queue_scope:
+      - sie.gateway.lane.queue.depth
+      - sie.gateway.lane.queue.snapshot.timestamp
+  queries:
+    capacity_snapshot_freshness: 'max(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)'
+    lane_queue_snapshot_freshness: 'max(abs(time() - sie_gateway_lane_queue_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway", pool="{{ pool }}", machine_profile="{{ machine_profile }}", bundle="{{ bundle }}"}) < 20)'
+    pending_demand: '(max(sie_gateway_pending_demand{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway", pool="{{ pool }}", machine_profile="{{ machine_profile }}", bundle="{{ bundle }}"} and on(producer_instance,collector_generation) (abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)) and on() ((max(up{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus"}) == 1) and on() (max(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20))))'
+    lane_queue_depth: '(max(sie_gateway_lane_queue_depth{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway", pool="{{ pool }}", machine_profile="{{ machine_profile }}", bundle="{{ bundle }}"} and on(producer_instance,collector_generation) (abs(time() - sie_gateway_lane_queue_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway", pool="{{ pool }}", machine_profile="{{ machine_profile }}", bundle="{{ bundle }}"}) < 20)) and on() ((max(up{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus"}) == 1) and on() (count(sie_gateway_lane_queue_depth{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway", pool="{{ pool }}", machine_profile="{{ machine_profile }}", bundle="{{ bundle }}"} and on(producer_instance,collector_generation) (abs(time() - sie_gateway_lane_queue_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway", pool="{{ pool }}", machine_profile="{{ machine_profile }}", bundle="{{ bundle }}"}) < 20)) > 0)))'
+    active_lease_gpus: '(max(sie_gateway_active_lease_gpus{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway", pool="{{ pool }}", machine_profile="{{ machine_profile }}", bundle="{{ bundle }}"} and on(producer_instance,collector_generation) (abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)) and on() ((max(up{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus"}) == 1) and on() (max(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20))))'
+    pool_warm_floor: '(max(sie_gateway_pool_warm_floor{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway", pool="{{ pool }}", machine_profile="{{ machine_profile }}", bundle="{{ bundle }}"} and on(producer_instance,collector_generation) (abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)) and on() ((max(up{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus"}) == 1) and on() (max(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20))))'
+    scale_worthy_rejection_rate: '((sum(rate(sie_gateway_rejected_requests_total{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway", pool="{{ pool }}", machine_profile="{{ machine_profile }}", bundle="{{ bundle }}", scaling_action="scale_up"}[2m]) and on(producer_instance,collector_generation) (abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)) or on() (0 * max(sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"} and on(producer_instance,collector_generation) (abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)))) and on() ((max(up{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus"}) == 1) and on() (max(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20))))'
+    gateway_request_rate: '((sum(rate(sie_gateway_requests_total{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}[1m]) and on(producer_instance,collector_generation) (abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)) or on() (0 * max(sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"} and on(producer_instance,collector_generation) (abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20)))) and on() ((max(up{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus"}) == 1) and on() (max(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="{{ namespace }}", service="{{ collector_service }}", endpoint="prometheus", producer_service="sie-gateway"}) < 20))))'

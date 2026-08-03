@@ -239,6 +239,34 @@ class InputTooLongError(RequestError):
         self.model = model
 
 
+class EstimateUnroutableError(ServerError):
+    """The gateway cannot PRICE the request, so it will not run it either.
+
+    Raised by :meth:`SIEClient.estimate` when the dry run answers ``503``:
+    the active rate book declares no rate for the request's
+    (model, profile, operation, region) identity, or the planner cannot bound
+    one of the dimensions that book DOES price (an unbounded generation input,
+    say, or a sealed lane whose GPU class is unresolved).
+
+    This is deliberately the same verdict the real request would get — the
+    estimate runs the live planner — so treat it as "this request is not
+    sellable right now", not as an estimator limitation. :attr:`args` carries
+    the planner's own reason, which names the unpriced identity or the
+    dimension it could not bound.
+
+    Subclass of :class:`ServerError` so existing 5xx handlers keep working.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        request: RequestMetadata | None = None,
+    ) -> None:
+        super().__init__(message, code=code, status_code=503, request=request)
+
+
 class ResourceExhaustedError(ServerError):
     """Error when the server has exhausted its OOM-recovery strategies.
 

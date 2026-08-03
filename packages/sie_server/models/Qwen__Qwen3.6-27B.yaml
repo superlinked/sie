@@ -81,7 +81,8 @@ max_sequence_length: 8192
 # enough host RAM to read the BF16 checkpoint before quantization.
 #   * L4 (24 GB)         → infeasible
 #   * A100-40GB (40 GB)  → infeasible BF16; FP8/TP2 only
-#   * H100-80GB          → BF16 speculative profiles at the 8K launch window
+#   * H100-80GB          → BF16 speculative profiles, plus explicit non-spec
+#                          FP8, at the 8K launch window
 #   * RTX PRO 6000 96GB  → FP8 + NEXTN profile with a 32K variant surface
 profiles:
   # L4 / A100-40GB BF16 profiles intentionally omitted — Qwen3.6-27B's BF16
@@ -174,6 +175,33 @@ profiles:
           min_new_tokens: 10
         stop_tokens:
           - "<|im_end|>"
+  # H100-80GB FP8 profile for single-GPU EKS lanes. Keep the base model's
+  # release-gated 8K context and disable NEXTN/CUDA graphs for a
+  # correctness-first bootstrap. Online FP8 reduces the ~54 GB BF16 weights
+  # to ~27 GB, leaving H100 headroom for activations and a conservative
+  # two-admission KV budget. This is intentionally separate from ``h100``
+  # (BF16 + NEXTN) and ``rtx-pro-6000`` (FP8 + NEXTN + 32K).
+  # Hardware placement remains separate: pair this model profile with the
+  # cluster's H100-80GB machine profile.
+  h100-fp8:
+    # Inherit the grammar-safe, non-speculative profile so constrained
+    # requests can keep this FP8 variant instead of falling back to BF16.
+    extends: no-spec
+    kv_budget_tokens: 16384
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.90
+        served_model_name: Qwen/Qwen3.6-27B
+        disable_cuda_graph: true
+        attention_backend: triton
+        grammar_backend: outlines
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--quantization"
+          - "fp8"
   # RTX PRO 6000 (96 GB GDDR7, Blackwell Server Edition, sm_120) profile.
   # FP8-first for max throughput: ``--quantization fp8`` (SGLang online
   # dynamic FP8 quant of the BF16 checkpoint) via the ``extra_launch_args``

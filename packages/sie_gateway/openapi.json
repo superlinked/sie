@@ -2341,7 +2341,7 @@
             "items": {
               "type": "string"
             },
-            "maxItems": 4096,
+            "maxItems": 256,
             "type": "array"
           }
         ]
@@ -3686,7 +3686,7 @@
       "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
     },
     "title": "SIE Gateway",
-    "version": "0.6.23"
+    "version": "0.6.26"
   },
   "openapi": "3.1.0",
   "paths": {

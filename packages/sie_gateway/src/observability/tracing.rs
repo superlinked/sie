@@ -36,7 +36,6 @@
 //!
 //! [`TraceContextPropagator`]: opentelemetry_sdk::propagation::TraceContextPropagator
 
-use std::collections::HashMap;
 use std::env;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
@@ -44,14 +43,11 @@ use std::time::{Duration, SystemTime};
 use opentelemetry::global;
 use opentelemetry::logs::{AnyValue, LogRecord as _, Logger as _, LoggerProvider as _, Severity};
 use opentelemetry::trace::{SpanContext, TracerProvider as _};
-use opentelemetry::KeyValue;
 use opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 #[cfg(feature = "telemetry-benchmarks")]
 use opentelemetry_sdk::metrics::ManualReader;
-use opentelemetry_sdk::metrics::{
-    Instrument, PeriodicReader, SdkMeterProvider, Stream, Temporality,
-};
+use opentelemetry_sdk::metrics::{Instrument, PeriodicReader, SdkMeterProvider, Stream};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{SdkTracerProvider, Tracer};
 use opentelemetry_sdk::Resource;
@@ -65,6 +61,40 @@ use crate::observability::metrics::{
     PENDING_DEMAND_METRIC_NAME, POOL_WARM_FLOOR_METRIC_NAME, REJECTED_REQUESTS_METRIC_NAME,
 };
 use crate::state::demand_tracker::MAX_CONFIGURED_PHYSICAL_LANES;
+
+// The OTLP transport/proxy/resource plumbing is shared via `sie-telemetry`
+// (#2339); the imports keep every historical call-site and test name
+// resolvable inside this module.
+use sie_telemetry::env::{cleaned_env, sie_tracing_enabled, tracing_flag_set};
+use sie_telemetry::exporters::build_span_exporter;
+#[cfg(test)]
+use sie_telemetry::proxy::modal_proxy_headers_from_values;
+use sie_telemetry::proxy::{
+    authenticated_http_client, modal_proxy_auth_enabled,
+    modal_proxy_headers as modal_proxy_headers_for_endpoint, validate_modal_proxy_transport,
+};
+#[cfg(test)]
+use sie_telemetry::resource::compose_service_instance_id;
+pub(crate) use sie_telemetry::resource::process_start_uuid;
+use sie_telemetry::resource::{resource_from_values, service_instance_id};
+use sie_telemetry::transport::{
+    configured_signal_endpoints, endpoint_origin_for_log, otlp_metrics_protocol,
+    select_signal_protocol, trace_export_config, OtlpProtocol, SignalExportConfig,
+};
+
+/// Legacy single-arg test seam for the shared protocol parser.
+#[cfg(test)]
+fn protocol_from_raw(raw: Option<&str>) -> Result<OtlpProtocol, String> {
+    sie_telemetry::transport::protocol_from_raw(raw, "traces")
+}
+#[cfg(any(test, feature = "telemetry-benchmarks"))]
+use opentelemetry_sdk::metrics::Temporality;
+#[cfg(test)]
+use sie_telemetry::transport::{
+    derive_metrics_endpoint, signal_endpoints_from_values, trace_export_config_from_values,
+};
+#[cfg(test)]
+use std::collections::HashMap;
 
 /// Service name used when `OTEL_SERVICE_NAME` is not set.
 const DEFAULT_SERVICE_NAME: &str = "sie-gateway";
@@ -99,6 +129,10 @@ pub fn metrics_exporter_enabled() -> bool {
 /// builds retain the normal OTLP-only initialization path.
 #[cfg(feature = "telemetry-benchmarks")]
 #[doc(hidden)]
+// Consumed only through the lib target (cloud-gateway benchmarks). The bin
+// target compiles the same module tree, where workspace feature unification
+// can switch the feature on with no in-crate caller — dead code there only.
+#[allow(dead_code)]
 pub fn install_metrics_benchmark_provider() {
     assert!(
         METER_PROVIDER.get().is_none(),
@@ -123,32 +157,6 @@ pub fn install_metrics_benchmark_provider() {
 /// Both event name and body are fixed; no generic message reaches OTLP.
 pub const REQUEST_COMPLETION_LOG_EVENT: &str = "inference.request.completed";
 const REQUEST_COMPLETION_LOG_SCHEMA: &str = "1";
-
-/// Selected OTLP transport for the exporters.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum OtlpProtocol {
-    /// gRPC/tonic — the in-cluster/Helm collector on `:4317` (the default).
-    Grpc,
-    /// HTTP `http/protobuf` — the managed Modal collector on `:4318`.
-    Http,
-}
-
-/// Fully resolved exporter configuration for one OTLP signal.
-///
-/// Keeping the endpoint and protocol together prevents the HTTP path decision
-/// from being recomputed later with a different precedence rule.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SignalExportConfig {
-    endpoint: String,
-    protocol: OtlpProtocol,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct SignalEndpoints {
-    tracing_enabled: bool,
-    metrics_enabled: bool,
-    metrics: Option<String>,
-}
 
 /// True when the OTLP trace exporter/provider is installed.
 pub fn exporter_enabled() -> bool {
@@ -212,7 +220,7 @@ pub fn init_tracing(level: &str, json: bool) {
     global::set_text_map_propagator(TraceContextPropagator::new());
 
     let endpoints = configured_signal_endpoints();
-    let (trace_config, trace_config_error) = match configured_trace_export_config() {
+    let (trace_config, trace_config_error) = match trace_export_config(sie_tracing_enabled()) {
         Ok(config) => (config, None),
         Err(error) => {
             eprintln!(
@@ -338,97 +346,6 @@ pub fn init_tracing(level: &str, json: bool) {
     }
 }
 
-fn tracing_flag_set(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| {
-        let value = value.trim();
-        value.eq_ignore_ascii_case("true") || value == "1" || value.eq_ignore_ascii_case("yes")
-    })
-}
-
-fn sie_tracing_enabled() -> bool {
-    let raw = env::var("SIE_TRACING_ENABLED").ok();
-    tracing_flag_set(raw.as_deref())
-}
-
-fn sie_metrics_enabled() -> bool {
-    let raw = env::var("SIE_METRICS_ENABLED").ok();
-    tracing_flag_set(raw.as_deref())
-}
-
-fn configured_signal_endpoints() -> SignalEndpoints {
-    let metrics_endpoint = cleaned_env("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT");
-    let generic_endpoint = cleaned_env("OTEL_EXPORTER_OTLP_ENDPOINT");
-    signal_endpoints_from_values(
-        sie_tracing_enabled(),
-        sie_metrics_enabled(),
-        metrics_endpoint.as_deref(),
-        generic_endpoint.as_deref(),
-        otlp_metrics_protocol().unwrap_or(OtlpProtocol::Grpc),
-    )
-}
-
-fn signal_endpoints_from_values(
-    tracing_enabled: bool,
-    metrics_enabled: bool,
-    metrics_endpoint: Option<&str>,
-    generic_endpoint: Option<&str>,
-    metrics_protocol: OtlpProtocol,
-) -> SignalEndpoints {
-    let metrics = if !metrics_enabled {
-        None
-    } else if let Some(explicit) = metrics_endpoint {
-        Some(explicit.to_string())
-    } else {
-        generic_endpoint
-            .map(|base| derive_metrics_endpoint(base, metrics_protocol, None, Some(base)))
-    };
-    SignalEndpoints {
-        tracing_enabled,
-        metrics_enabled,
-        metrics,
-    }
-}
-
-fn configured_trace_export_config() -> Result<Option<SignalExportConfig>, String> {
-    trace_export_config_from_values(
-        sie_tracing_enabled(),
-        cleaned_env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").as_deref(),
-        cleaned_env("OTEL_EXPORTER_OTLP_ENDPOINT").as_deref(),
-        cleaned_env("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL").as_deref(),
-        cleaned_env("OTEL_EXPORTER_OTLP_PROTOCOL").as_deref(),
-    )
-}
-
-fn trace_export_config_from_values(
-    enabled: bool,
-    traces_endpoint: Option<&str>,
-    generic_endpoint: Option<&str>,
-    traces_protocol: Option<&str>,
-    generic_protocol: Option<&str>,
-) -> Result<Option<SignalExportConfig>, String> {
-    if !enabled {
-        return Ok(None);
-    }
-    let protocol = protocol_from_raw(traces_protocol.or(generic_protocol))?;
-    let endpoint = if let Some(explicit) = traces_endpoint {
-        explicit.to_string()
-    } else {
-        let Some(base) = generic_endpoint else {
-            return Ok(None);
-        };
-        signal_endpoint(base, protocol, "/v1/traces")
-    };
-    Ok(Some(SignalExportConfig { endpoint, protocol }))
-}
-
-fn signal_endpoint(base: &str, protocol: OtlpProtocol, signal_path: &str) -> String {
-    match protocol {
-        OtlpProtocol::Grpc => base.to_string(),
-        OtlpProtocol::Http if base.ends_with(signal_path) => base.to_string(),
-        OtlpProtocol::Http => format!("{}{signal_path}", base.trim_end_matches('/')),
-    }
-}
-
 fn safe_logs_enabled() -> bool {
     let raw = env::var("SIE_OTLP_LOGS_ENABLED").ok();
     tracing_flag_set(raw.as_deref())
@@ -448,193 +365,27 @@ fn logs_endpoint_source_from_values(
     logs_endpoint.or(generic_endpoint).map(str::to_string)
 }
 
-/// Read an env var, trimming surrounding whitespace and treating a
-/// whitespace-only value as absent so it can't shadow a valid fallback.
-fn cleaned_env(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Return only the scheme/host/explicit-port origin for diagnostics.
-///
-/// OTLP endpoints may be supplied by operators and can contain URL userinfo,
-/// path credentials, query tokens, or fragments. None of those fields belong
-/// in process logs, including telemetry setup failure logs.
-fn endpoint_origin_for_log(endpoint: &str) -> String {
-    let Ok(parsed) = reqwest::Url::parse(endpoint) else {
-        return "<redacted>".to_string();
-    };
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return "<redacted>".to_string();
-    }
-    let Some(host) = parsed.host_str() else {
-        return "<redacted>".to_string();
-    };
-    let host = if host.starts_with('[') && host.ends_with(']') {
-        host.to_string()
-    } else if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    match parsed.port() {
-        Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
-        None => format!("{}://{host}", parsed.scheme()),
-    }
-}
-
 /// OTLP transport for the exporters (#1740 transport reconciliation). Reads
 /// `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` then `OTEL_EXPORTER_OTLP_PROTOCOL`;
 /// only exact `grpc` and `http/protobuf` are accepted, while absent stays gRPC.
 /// Mirrors the lane's `_otlp_traces_protocol`.
 #[cfg(test)]
 fn otlp_protocol() -> Result<OtlpProtocol, String> {
-    protocol_from_raw(
-        cleaned_env("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
-            .or_else(|| cleaned_env("OTEL_EXPORTER_OTLP_PROTOCOL"))
-            .as_deref(),
-    )
-}
-
-/// Metrics-specific transport override, then generic, then the gRPC default.
-/// Metrics never inherit a trace-specific setting.
-fn otlp_metrics_protocol() -> Result<OtlpProtocol, String> {
-    protocol_from_raw(
-        cleaned_env("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL")
-            .or_else(|| cleaned_env("OTEL_EXPORTER_OTLP_PROTOCOL"))
-            .as_deref(),
+    select_signal_protocol(
+        cleaned_env("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL").as_deref(),
+        cleaned_env("OTEL_EXPORTER_OTLP_PROTOCOL").as_deref(),
+        "traces",
     )
 }
 
 /// Logs-specific transport override, then generic, then the gRPC default.
 /// Logs never inherit trace configuration.
 fn otlp_logs_protocol() -> Result<OtlpProtocol, String> {
-    protocol_from_raw(
-        cleaned_env("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL")
-            .or_else(|| cleaned_env("OTEL_EXPORTER_OTLP_PROTOCOL"))
-            .as_deref(),
+    select_signal_protocol(
+        cleaned_env("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL").as_deref(),
+        cleaned_env("OTEL_EXPORTER_OTLP_PROTOCOL").as_deref(),
+        "logs",
     )
-}
-
-fn protocol_from_raw(raw: Option<&str>) -> Result<OtlpProtocol, String> {
-    match raw.map(|s| s.trim().to_ascii_lowercase()) {
-        None => Ok(OtlpProtocol::Grpc),
-        Some(value) if value == "grpc" => Ok(OtlpProtocol::Grpc),
-        Some(value) if value == "http/protobuf" => Ok(OtlpProtocol::Http),
-        Some(value) => Err(format!("unsupported OTLP protocol: {value:?}")),
-    }
-}
-
-/// True only for the explicit managed Modal proxy-auth posture.
-fn modal_proxy_auth_enabled() -> bool {
-    cleaned_env("SIE_MODAL_PROXY_AUTH").is_some_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
-/// Canonicalize a trusted Modal HTTPS URL, or reject it.
-fn trusted_modal_origin(
-    raw: &str,
-    origin_only: bool,
-    expected_path: Option<&str>,
-) -> Option<String> {
-    let parsed = reqwest::Url::parse(raw).ok()?;
-    let host = parsed.host_str()?.to_ascii_lowercase();
-    if parsed.scheme() != "https"
-        || !host.ends_with(".modal.run")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.port_or_known_default() != Some(443)
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-        || (origin_only && parsed.path() != "/")
-        || expected_path.is_some_and(|path| parsed.path() != path)
-    {
-        return None;
-    }
-    Some(format!("https://{host}"))
-}
-
-/// Return Modal headers only for the exact provisioner-resolved collector.
-fn modal_proxy_headers_for_endpoint(
-    endpoint: &str,
-    expected_path: &str,
-) -> Result<HashMap<String, String>, String> {
-    modal_proxy_headers_from_values(
-        endpoint,
-        expected_path,
-        modal_proxy_auth_enabled(),
-        cleaned_env("SIE_OTEL_PROXY_AUTH_ORIGIN").as_deref(),
-        cleaned_env("SIE_MODAL_PROXY_TOKEN_ID").as_deref(),
-        cleaned_env("SIE_MODAL_PROXY_TOKEN_SECRET").as_deref(),
-    )
-}
-
-fn modal_proxy_headers_from_values(
-    endpoint: &str,
-    expected_path: &str,
-    proxy_auth_enabled: bool,
-    allowed_origin: Option<&str>,
-    token_id: Option<&str>,
-    token_secret: Option<&str>,
-) -> Result<HashMap<String, String>, String> {
-    if !proxy_auth_enabled {
-        return Ok(HashMap::new());
-    }
-    let allowed = allowed_origin
-        .and_then(|origin| trusted_modal_origin(origin, true, None))
-        .ok_or_else(|| "managed OTLP proxy-auth origin is missing or untrusted".to_string())?;
-    let actual = trusted_modal_origin(endpoint, false, Some(expected_path))
-        .ok_or_else(|| "managed OTLP endpoint is untrusted".to_string())?;
-    if actual != allowed {
-        return Err(
-            "managed OTLP endpoint does not match the provisioned proxy-auth origin".to_string(),
-        );
-    }
-
-    let (id, secret) = token_id
-        .filter(|value| !value.trim().is_empty())
-        .zip(token_secret.filter(|value| !value.trim().is_empty()))
-        .ok_or_else(|| {
-            "managed OTLP proxy authentication requires a complete Modal credential pair"
-                .to_string()
-        })?;
-    let mut headers = HashMap::new();
-    headers.insert("Modal-Key".to_string(), id.to_string());
-    headers.insert("Modal-Secret".to_string(), secret.to_string());
-    Ok(headers)
-}
-
-/// Blocking client for authenticated export. Redirects are disabled because
-/// reqwest otherwise preserves custom Modal headers across redirects.
-fn authenticated_http_client() -> Result<reqwest::blocking::Client, String> {
-    // reqwest's blocking builder panics when constructed inside a Tokio
-    // runtime. Both binaries initialize tracing after `#[tokio::main]`, so
-    // mirror OTel's own blocking-client builder and construct it off-runtime.
-    std::thread::spawn(|| {
-        reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .build()
-    })
-    .join()
-    .map_err(|_| "build no-redirect OTLP HTTP client panicked".to_string())?
-    .map_err(|error| format!("build no-redirect OTLP HTTP client: {error}"))
-}
-
-fn validate_modal_proxy_transport(
-    protocol: OtlpProtocol,
-    proxy_auth_enabled: bool,
-) -> Result<(), String> {
-    if proxy_auth_enabled && protocol != OtlpProtocol::Http {
-        return Err("Modal OTLP proxy authentication requires HTTP transport".to_string());
-    }
-    Ok(())
 }
 
 /// Build the OTel resource stamped on every span/metric: `service.name` plus
@@ -668,48 +419,13 @@ fn otlp_resource_from_values(
     deployment_environment: &str,
     cloud_region: &str,
 ) -> Resource {
-    // Use an explicit contract resource. The default builder runs the
-    // OTEL_RESOURCE_ATTRIBUTES detector; an injected service.namespace would
-    // change Prometheus `job` and silently disconnect KEDA selectors.
-    Resource::builder_empty()
-        .with_service_name(service_name.to_string())
-        .with_attributes([
-            KeyValue::new("service.instance.id", instance_id.to_string()),
-            KeyValue::new("deployment.environment", deployment_environment.to_string()),
-            KeyValue::new("cloud.region", cloud_region.to_string()),
-            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-        ])
-        .build()
-}
-
-/// Compose stable substrate placement with a process-start UUID. The suffix
-/// prevents a restarted container from refreshing the previous process's KEDA
-/// freshness series when the pod/container prefix is reused.
-fn service_instance_id(configured_prefix: Option<&str>) -> String {
-    let process_start_uuid = process_start_uuid();
-    compose_service_instance_id(configured_prefix, &process_start_uuid)
-}
-
-fn compose_service_instance_id(
-    configured_prefix: Option<&str>,
-    process_start_uuid: &str,
-) -> String {
-    match configured_prefix
-        .map(str::trim)
-        .map(|prefix| prefix.trim_end_matches('/'))
-        .filter(|prefix| !prefix.is_empty())
-    {
-        Some(prefix) => format!("{prefix}/{process_start_uuid}"),
-        None => process_start_uuid.to_string(),
-    }
-}
-
-/// Stable within this process and unique across process starts.
-pub(crate) fn process_start_uuid() -> String {
-    static PROCESS_START_UUID: OnceLock<String> = OnceLock::new();
-    PROCESS_START_UUID
-        .get_or_init(|| uuid::Uuid::new_v4().to_string())
-        .clone()
+    resource_from_values(
+        service_name,
+        instance_id,
+        deployment_environment,
+        cloud_region,
+        Some(env!("CARGO_PKG_VERSION")),
+    )
 }
 
 fn init_tracer(config: &SignalExportConfig) -> Result<Tracer, String> {
@@ -746,38 +462,6 @@ fn local_log_context_provider(service_name: &str) -> SdkTracerProvider {
     SdkTracerProvider::builder()
         .with_resource(otlp_resource(service_name))
         .build()
-}
-
-/// Build the span exporter for the selected transport. gRPC preserves the
-/// in-cluster path; HTTP targets the managed collector and rides the Modal
-/// proxy-auth headers only after the exact-origin trust check succeeds.
-fn build_span_exporter(
-    config: &SignalExportConfig,
-) -> Result<opentelemetry_otlp::SpanExporter, String> {
-    let proxy_auth_enabled = modal_proxy_auth_enabled();
-    validate_modal_proxy_transport(config.protocol, proxy_auth_enabled)?;
-    match config.protocol {
-        OtlpProtocol::Http => {
-            let mut builder = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_protocol(Protocol::HttpBinary)
-                .with_endpoint(&config.endpoint);
-            let headers = modal_proxy_headers_for_endpoint(&config.endpoint, "/v1/traces")?;
-            if proxy_auth_enabled {
-                builder = builder
-                    .with_http_client(authenticated_http_client()?)
-                    .with_headers(headers);
-            }
-            builder
-                .build()
-                .map_err(|e| format!("build OTLP/HTTP span exporter: {e}"))
-        }
-        OtlpProtocol::Grpc => opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(&config.endpoint)
-            .build()
-            .map_err(|e| format!("build OTLP/gRPC span exporter: {e}")),
-    }
 }
 
 /// Install the MeterProvider used by the canonical telemetry facade.
@@ -851,62 +535,14 @@ fn metrics_export_interval(raw: Option<&str>) -> Duration {
     Duration::from_millis(millis)
 }
 
-fn derive_metrics_endpoint(
-    endpoint_seed: &str,
-    protocol: OtlpProtocol,
-    metrics_override: Option<&str>,
-    base_override: Option<&str>,
-) -> String {
-    if let Some(explicit) = metrics_override {
-        return explicit.to_string();
-    }
-    match protocol {
-        // gRPC uses one base endpoint for every signal — no per-signal path.
-        OtlpProtocol::Grpc => endpoint_seed.to_string(),
-        OtlpProtocol::Http => {
-            if endpoint_seed.ends_with("/v1/metrics") {
-                endpoint_seed.to_string()
-            } else if let Some(base) = base_override {
-                format!("{}/v1/metrics", base.trim_end_matches('/'))
-            } else {
-                format!("{}/v1/metrics", endpoint_seed.trim_end_matches('/'))
-            }
-        }
-    }
-}
-
 fn build_metric_exporter(
     endpoint: &str,
     protocol: OtlpProtocol,
 ) -> Result<opentelemetry_otlp::MetricExporter, String> {
-    let proxy_auth_enabled = modal_proxy_auth_enabled();
-    validate_modal_proxy_transport(protocol, proxy_auth_enabled)?;
-    match protocol {
-        OtlpProtocol::Http => {
-            let mut builder = opentelemetry_otlp::MetricExporter::builder()
-                // LowMemory means DELTA for monotonic counters/histograms but
-                // preserves current-value gauges used by the KEDA contract.
-                .with_temporality(Temporality::LowMemory)
-                .with_http()
-                .with_protocol(Protocol::HttpBinary)
-                .with_endpoint(endpoint);
-            let headers = modal_proxy_headers_for_endpoint(endpoint, "/v1/metrics")?;
-            if proxy_auth_enabled {
-                builder = builder
-                    .with_http_client(authenticated_http_client()?)
-                    .with_headers(headers);
-            }
-            builder
-                .build()
-                .map_err(|e| format!("build OTLP/HTTP metric exporter: {e}"))
-        }
-        OtlpProtocol::Grpc => opentelemetry_otlp::MetricExporter::builder()
-            .with_temporality(Temporality::LowMemory)
-            .with_tonic()
-            .with_endpoint(endpoint)
-            .build()
-            .map_err(|e| format!("build OTLP/gRPC metric exporter: {e}")),
-    }
+    sie_telemetry::exporters::build_metric_exporter(&SignalExportConfig {
+        endpoint: endpoint.to_string(),
+        protocol,
+    })
 }
 
 /// Install the privacy-safe managed log producer.
@@ -1090,7 +726,6 @@ mod tests {
     };
     use opentelemetry::{Context, Key};
     use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
-    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Mutex;
