@@ -1,0 +1,1 @@
+"""Retail shelf audit example."""

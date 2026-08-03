@@ -1,11 +1,15 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 
 reviews:
+  request_changes_workflow: true
   auto_review:
-    enabled: true
+    enabled: false
     drafts: false
+    labels:
+      - "coderabbit-direct"
   path_filters:
     - "examples/**"
+    - "README.md"
     - "!examples/**/data/**"
     - "!examples/**/fixtures/**"
     - "examples/**/fixtures/SOURCES.md"
