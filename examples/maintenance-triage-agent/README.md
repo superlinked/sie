@@ -7,9 +7,9 @@ NTSB's `SPC-24-06` digest.
 The result reconstructs one sequence:
 
 ```text
-Sebring          7:37 p.m.   38°F above ambient   no alert
-Salem            8:13 p.m.  103°F above ambient   noncritical alert to the Wayside Help Desk, not the crew
-East Palestine  ~8:52 p.m.  253°F above ambient   critical alarm in the locomotive cab
+Sebring          7:37 p.m.   38°F above ambient   not high enough to trigger an alert
+Salem            8:13 p.m.  103°F above ambient   noncritical alert; Wayside Help Desk; not to the crew
+East Palestine  8:52 p.m .  253°F above ambient   critical alarm, which was broadcast in the locomotive cab
 ```
 
 It retains the NTSB's published cause statement. It does not infer a new root

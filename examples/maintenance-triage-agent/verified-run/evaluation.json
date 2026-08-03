@@ -9,7 +9,7 @@
     {
       "name": "three-detector-readings",
       "passed": true,
-      "detail": "[{'location': 'Sebring', 'time': '7:37 p.m.', 'degrees_f_above_ambient': 38, 'alert': 'none'}, {'location': 'Salem', 'time': '8:13 p.m.', 'degrees_f_above_ambient': 103, 'alert': 'noncritical alert to the Wayside Help Desk, not the crew', 'camera_observation': 'fire near the bearing'}, {'location': 'East Palestine', 'time': 'about 8:52 p.m.', 'degrees_f_above_ambient': 253, 'alert': 'critical alarm broadcast in the locomotive cab'}]"
+      "detail": "[{'location': 'Sebring', 'time': '7:37 p.m.', 'degrees_f_above_ambient': 38, 'alert': 'not high enough to trigger an alert'}, {'location': 'Salem', 'time': '8:13 p.m.', 'degrees_f_above_ambient': 103, 'alert': 'noncritical alert', 'alert_recipient': 'Wayside Help Desk', 'crew_notification': 'not to the crew', 'camera_observation': 'fire near the bearing'}, {'location': 'East Palestine', 'time': '8:52 p.m .', 'degrees_f_above_ambient': 253, 'alert': 'critical alarm, which was broadcast in the locomotive cab'}]"
     },
     {
       "name": "temperature-deltas",
@@ -19,7 +19,7 @@
     {
       "name": "published-derailment-count",
       "passed": true,
-      "detail": "{'total_cars': 38, 'statement': 'the hopper car and 37 others derailed as emergency braking activated'}"
+      "detail": "{'total_cars': 38, 'statement': \"The hopper car and 37 others derailed as the train's emergency braking system activated\"}"
     },
     {
       "name": "ranked-primary-source-evidence",

@@ -28,24 +28,9 @@ def test_config_uses_canonical_docling_id() -> None:
 
 
 def structured_data() -> dict[str, str]:
-    return {
-        "bearing": "L1",
-        "sebring_time": "7:37 p.m.",
-        "sebring_temperature": "38°F above ambient",
-        "salem_time": "8:13 p.m.",
-        "salem_temperature": "103°F above ambient",
-        "east_palestine_time": "8:52 p.m.",
-        "east_palestine_temperature": "253°F above ambient",
-        "sebring_alert_status_text": "not high enough to trigger an alert",
-        "salem_alert_level_text": "noncritical alert",
-        "salem_alert_recipient_text": "Wayside Help Desk",
-        "salem_crew_notification_text": "not to the crew",
-        "salem_camera_observation_text": "fire near the bearing",
-        "east_palestine_alert_text": "critical alarm broadcast in the locomotive cab",
-        "engineer_action": "began to slow the train before 8:54 p.m.",
-        "derailment_statement": "the hopper car and 37 others derailed",
-        "cause_statement": "an overheated bearing burned off the accident hopper car",
-    }
+    detectors, outcome = exact_source_rows()
+    mapped, _ = _map_exact_source_fields(detectors, outcome)
+    return mapped
 
 
 def ranked_evidence() -> list[dict[str, object]]:

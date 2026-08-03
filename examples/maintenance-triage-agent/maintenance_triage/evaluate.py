@@ -34,7 +34,14 @@ def evaluate_review(review: dict[str, Any]) -> list[Check]:
         ),
         Check(
             "three-detector-readings",
-            [row.get("degrees_f_above_ambient") for row in readings] == [38, 103, 253],
+            [row.get("degrees_f_above_ambient") for row in readings] == [38, 103, 253]
+            and [row.get("time") for row in readings] == ["7:37 p.m.", "8:13 p.m.", "8:52 p.m ."]
+            and readings[0].get("alert") == "not high enough to trigger an alert"
+            and readings[1].get("alert") == "noncritical alert"
+            and readings[1].get("alert_recipient") == "Wayside Help Desk"
+            and readings[1].get("crew_notification") == "not to the crew"
+            and readings[1].get("camera_observation") == "fire near the bearing"
+            and readings[2].get("alert") == "critical alarm, which was broadcast in the locomotive cab",
             str(readings),
         ),
         Check(
@@ -44,7 +51,9 @@ def evaluate_review(review: dict[str, Any]) -> list[Check]:
         ),
         Check(
             "published-derailment-count",
-            derailment.get("total_cars") == 38 and "37 others" in str(derailment.get("statement")),
+            derailment.get("total_cars") == 38
+            and str(derailment.get("statement", "")).casefold()
+            == "the hopper car and 37 others derailed as the train's emergency braking system activated".casefold(),
             str(derailment),
         ),
         Check(

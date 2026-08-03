@@ -451,26 +451,28 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
     return {
         "route": "read_only_detector_trend_review",
         "source": "NTSB Illustrated Digest SPC-24-06, printed pages 4–5",
-        "bearing": "L1",
+        "bearing": str(data["bearing"]),
         "detector_readings": [
             {
                 "location": "Sebring",
-                "time": "7:37 p.m.",
+                "time": str(data["sebring_time"]),
                 "degrees_f_above_ambient": temperatures[0],
-                "alert": "none",
+                "alert": str(data["sebring_alert_status_text"]),
             },
             {
                 "location": "Salem",
-                "time": "8:13 p.m.",
+                "time": str(data["salem_time"]),
                 "degrees_f_above_ambient": temperatures[1],
-                "alert": "noncritical alert to the Wayside Help Desk, not the crew",
-                "camera_observation": "fire near the bearing",
+                "alert": str(data["salem_alert_level_text"]),
+                "alert_recipient": str(data["salem_alert_recipient_text"]),
+                "crew_notification": str(data["salem_crew_notification_text"]),
+                "camera_observation": str(data["salem_camera_observation_text"]),
             },
             {
                 "location": "East Palestine",
-                "time": "about 8:52 p.m.",
+                "time": str(data["east_palestine_time"]),
                 "degrees_f_above_ambient": temperatures[2],
-                "alert": "critical alarm broadcast in the locomotive cab",
+                "alert": str(data["east_palestine_alert_text"]),
             },
         ],
         "trend": {
@@ -482,9 +484,9 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
         "engineer_action": engineer_action,
         "derailment": {
             "total_cars": total_derailed_cars,
-            "statement": "the hopper car and 37 others derailed as emergency braking activated",
+            "statement": derailment,
         },
-        "ntsb_cause_statement": SOURCE_CAUSE_STATEMENT,
+        "ntsb_cause_statement": cause,
         "ranked_source_evidence": ranked,
         "new_causal_inferences": [],
         "control_writes": [],

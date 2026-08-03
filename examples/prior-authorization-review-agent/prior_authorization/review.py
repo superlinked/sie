@@ -661,7 +661,7 @@ def run(run_id: str) -> Path:
             "parse",
             "retrieve",
             "rerank",
-            "entities_requirements",
+            "entities_requirement",
             "entities_case",
             *[f"gliner2_{group}" for group in GROUP_FIELDS],
             "deterministic_source_mapping",

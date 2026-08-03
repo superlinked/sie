@@ -180,7 +180,7 @@ def test_cross_filing_check_rejects_a_mismatched_previously_reported_value() -> 
 
 def test_verified_manifest_hashes() -> None:
     manifest_path = ROOT / "verified-run" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     fixture = manifest["fixture"]
     assert hashlib.sha256((ROOT / fixture["path"]).read_bytes()).hexdigest() == fixture["sha256"]
     for entry in manifest["artifacts"]:
