@@ -21,6 +21,10 @@ deps:
   sentence-transformers: '>=5.6,<6'
   # Pin torch — flash-attn's unpinned torch dep can pull in 2.10+ which breaks torchvision
   torch: '>=2.9,<2.10'
+  # Keep the compiled torchvision operators paired with torch 2.9.x. A broad
+  # torchvision range can resolve 0.28.x, which imports against newer torch
+  # ABIs but fails at runtime with missing operators on this lane.
+  torchvision: '==0.24.1'
   # No huggingface-hub override: transformers 5.x's own metadata
   # pins it to >=1.3,<2.0. An override here was previously
   # unsatisfiable against that pin and broke `uv run` resolution.

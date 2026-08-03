@@ -411,7 +411,7 @@ fn patch_queue_request_batch_limits(value: &mut Value) {
     {
         for variant in variants {
             if variant.get("type").and_then(Value::as_str) == Some("array") {
-                variant["maxItems"] = queue_maximum.clone();
+                variant["maxItems"] = json!(crate::handlers::proxy::MAX_EMBEDDING_INPUTS);
             }
         }
     }
@@ -3687,7 +3687,7 @@ mod tests {
             .expect("embedding input must document the string-array form");
         assert_eq!(
             embedding_array["maxItems"],
-            json!(crate::queue::publisher::MAX_QUEUE_REQUEST_ITEMS),
+            json!(crate::handlers::proxy::MAX_EMBEDDING_INPUTS),
         );
 
         for path in ["/v1/encode/{model}", "/v1/score/{model}"] {

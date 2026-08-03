@@ -75,8 +75,8 @@ const MAX_POOL_NAME_LEN: usize = 128;
 /// A model declares ``tasks.generate.grammar_profile`` (surfaced as
 /// ``ModelInfoExtras::grammar_profile`` on its *base* entry) naming the profile
 /// that honours SGLang's Outlines grammar FSM. Speculative-decoding profiles
-/// (NEXTN/MTP) bypass that FSM, so every grammar request — whatever id it names
-/// — must land on ``{base}:{grammar_profile}``.
+/// (NEXTN/MTP) bypass that FSM, so grammar requests use that profile unless
+/// the requested variant inherits it and preserves its grammar-safe settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrammarRoute {
     /// Rewrite the dispatch id to this ``{base}:{grammar_profile}`` variant.
@@ -503,6 +503,7 @@ impl ModelRegistry {
         // (see ``base_grammar_profile``), so a sibling variant such as
         // ``…:a100-40gb`` still reroutes to ``{base}:{grammar_profile}``.
         narrowed.grammar_profile = None;
+        narrowed.profile_parents.clear();
         if let Some(map) = base.profile_lora_adapters.as_ref() {
             let scoped = map.get(profile_name).cloned().unwrap_or_default();
             if scoped.is_empty() {
@@ -1034,14 +1035,15 @@ impl ModelRegistry {
     /// ``ModelInfoExtras::grammar_profile``), grammar requests must run on the
     /// ``{base}:{grammar_profile}`` profile variant rather than a speculative
     /// one — NEXTN/MTP speculative decoding bypasses SGLang's Outlines grammar
-    /// FSM, so the constraint must be enforced on a profile that honours it
-    /// (e.g. ``no-spec``).
+    /// FSM. An explicit variant that inherits the grammar profile, uses its
+    /// adapter/backend, and keeps speculation disabled remains selected.
     ///
     /// The routing target is resolved off the request's *base* model, so the
     /// rewrite fires regardless of which id the caller named:
     /// - base id (``Qwen/Qwen3.5-4B``)            → ``…:no-spec``
     /// - sibling variant (``…:a100-40gb``, NEXTN) → ``…:no-spec``
     /// - target variant (``…:no-spec``)           → ``Keep`` (already safe)
+    /// - inheriting variant (``…:h100-fp8``)      → ``Keep`` (already safe)
     /// - no ``grammar_profile`` declared          → ``Keep``
     /// - target variant missing from registry     → ``MissingVariant`` (degrade)
     ///
@@ -1086,12 +1088,73 @@ impl ModelRegistry {
         }
         // Otherwise it may be a variant ``{base}:{profile}`` (variants clear the
         // hint). Strip the trailing ``:profile`` and read the base entry's hint.
-        let (base, _profile) = canonical.rsplit_once(':')?;
-        let gp = snap
-            .models
-            .get(base)
-            .and_then(|e| e.info_extras.grammar_profile.clone())?;
-        Some((base.to_string(), gp))
+        let (base, source_profile) = canonical.rsplit_once(':')?;
+        let base_entry = snap.models.get(base)?;
+        let gp = base_entry.info_extras.grammar_profile.clone()?;
+        let target_profile = if base_entry
+            .info_extras
+            .profile_parents
+            .get(source_profile)
+            .is_some_and(|parent| parent == &gp)
+            && Self::profile_is_grammar_compatible(base_entry, source_profile, &gp)
+        {
+            source_profile.to_string()
+        } else {
+            gp
+        };
+        Some((base.to_string(), target_profile))
+    }
+
+    fn profile_is_grammar_compatible(
+        entry: &ModelEntry,
+        profile: &str,
+        grammar_profile: &str,
+    ) -> bool {
+        let (Some(candidate), Some(grammar)) = (
+            entry.profile_configs.get(profile),
+            entry.profile_configs.get(grammar_profile),
+        ) else {
+            return false;
+        };
+        candidate.adapter_path == grammar.adapter_path
+            && Self::profile_explicitly_disables_speculation(candidate)
+            && Self::profile_loadtime_value(candidate, "grammar_backend")
+                == Self::profile_loadtime_value(grammar, "grammar_backend")
+            && Self::profile_extra_launch_args_are_compatible(candidate, grammar)
+    }
+
+    fn profile_explicitly_disables_speculation(profile: &CanonicalProfile) -> bool {
+        matches!(
+            Self::profile_loadtime_value(profile, "speculative")
+                .and_then(|value| value.get("enabled")),
+            Some(serde_json::Value::Bool(false))
+        )
+    }
+
+    fn profile_extra_launch_args_are_compatible(
+        candidate: &CanonicalProfile,
+        grammar: &CanonicalProfile,
+    ) -> bool {
+        let candidate_args = Self::profile_loadtime_value(candidate, "extra_launch_args");
+        if candidate_args == Self::profile_loadtime_value(grammar, "extra_launch_args") {
+            return true;
+        }
+        matches!(
+            candidate_args
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice),
+            Some([
+                serde_json::Value::String(flag),
+                serde_json::Value::String(value),
+            ]) if flag == "--quantization" && value == "fp8"
+        )
+    }
+
+    fn profile_loadtime_value<'a>(
+        profile: &'a CanonicalProfile,
+        key: &str,
+    ) -> Option<&'a serde_json::Value> {
+        profile.adapter_options.as_ref()?.get("loadtime")?.get(key)
     }
 
     /// Resolve a caller-supplied model id to the registry's canonical
@@ -2019,6 +2082,12 @@ impl ModelRegistry {
         // incoming) instead so the published capability map matches what
         // the worker has actually loaded.
         if touches_profiles {
+            for profile_name in config.profiles.keys() {
+                existing.profile_parents.remove(profile_name);
+            }
+            existing
+                .profile_parents
+                .extend(refreshed.profile_parents.clone());
             let mut merged_config = config.clone();
             merged_config.profiles = merged_profiles.clone();
             let lora_refreshed = ModelInfoExtras::from_model_config(&merged_config);
@@ -2199,7 +2268,48 @@ mod tests {
         // profiles that run NEXTN) and the grammar-safe ``no-spec`` target each
         // expand into ``org/g:<profile>`` variant entries.
         profiles.insert("a100-40gb".to_string(), mk());
-        profiles.insert("no-spec".to_string(), mk());
+        let mut no_spec = mk();
+        no_spec.adapter_options = Some(serde_json::json!({
+            "loadtime": {
+                "grammar_backend": "outlines",
+                "speculative": {"enabled": false},
+            },
+        }));
+        profiles.insert("no-spec".to_string(), no_spec);
+        let mut insert_child = |name: &str, loadtime: serde_json::Value| {
+            let mut profile = mk();
+            profile.extends = Some("no-spec".to_string());
+            profile.adapter_options = Some(serde_json::json!({"loadtime": loadtime}));
+            profiles.insert(name.to_string(), profile);
+        };
+        insert_child(
+            "h100-fp8",
+            serde_json::json!({
+                "grammar_backend": "outlines",
+                "speculative": {"enabled": false},
+                "extra_launch_args": ["--quantization", "fp8"],
+            }),
+        );
+        insert_child(
+            "unsafe-inheritor",
+            serde_json::json!({"speculative": {"enabled": true}}),
+        );
+        insert_child(
+            "incompatible-backend",
+            serde_json::json!({"grammar_backend": "xgrammar"}),
+        );
+        insert_child(
+            "malformed-enabled",
+            serde_json::json!({"speculative": {"enabled": "true", "algorithm": "nextn"}}),
+        );
+        insert_child(
+            "raw-speculative-override",
+            serde_json::json!({"extra_launch_args": ["--speculative-algo", "NEXTN"]}),
+        );
+        insert_child(
+            "raw-grammar-override",
+            serde_json::json!({"extra_launch_args": ["--grammar-backend", "xgrammar"]}),
+        );
         // ``tasks.generate.grammar_profile: no-spec`` is the routing hint the
         // gateway reads off the base entry.
         let tasks: serde_yaml::Value =
@@ -2235,6 +2345,31 @@ mod tests {
             registry.grammar_route_variant("org/g:a100-40gb"),
             GrammarRoute::Rewrite("org/g:no-spec".to_string())
         );
+        // A non-speculative profile inheriting ``no-spec`` remains selected,
+        // preserving its own hardware/quantization settings.
+        assert_eq!(
+            registry.grammar_route_variant("org/g:h100-fp8"),
+            GrammarRoute::Keep
+        );
+        assert_eq!(
+            registry.grammar_route_variant("ORG/G:H100-FP8"),
+            GrammarRoute::Keep
+        );
+        // Inheritance is only a signal, not proof: incompatible structured or
+        // raw launch settings must still fall back to ``no-spec``.
+        for profile in [
+            "unsafe-inheritor",
+            "incompatible-backend",
+            "malformed-enabled",
+            "raw-speculative-override",
+            "raw-grammar-override",
+        ] {
+            assert_eq!(
+                registry.grammar_route_variant(&format!("org/g:{profile}")),
+                GrammarRoute::Rewrite("org/g:no-spec".to_string()),
+                "{profile}",
+            );
+        }
         // The grammar-safe target variant itself → no-op (no recursive reroute
         // to ``org/g:no-spec:no-spec``).
         assert_eq!(
@@ -2283,6 +2418,45 @@ mod tests {
             .unwrap();
 
         assert_eq!(registry.grammar_route_variant("org/n"), GrammarRoute::Keep);
+    }
+
+    #[test]
+    fn test_grammar_route_variant_from_filesystem_profile_inheritance() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sentence_transformer\n",
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("grammar.yaml"),
+            r#"
+sie_id: org/filesystem
+tasks:
+  generate:
+    grammar_profile: no-spec
+profiles:
+  default: {adapter_path: "sie_server.adapters.sentence_transformer:Adapter", max_batch_tokens: 4096}
+  no-spec:
+    adapter_path: "sie_server.adapters.sentence_transformer:Adapter"
+    max_batch_tokens: 4096
+    adapter_options: {loadtime: {grammar_backend: outlines, speculative: {enabled: false}}}
+  h100-fp8:
+    extends: no-spec
+    adapter_options: {loadtime: {grammar_backend: outlines, speculative: {enabled: false}, extra_launch_args: [--quantization, fp8]}}
+"#,
+        )
+        .unwrap();
+
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        assert_eq!(
+            registry.grammar_route_variant("org/filesystem"),
+            GrammarRoute::Rewrite("org/filesystem:no-spec".to_string()),
+        );
+        assert_eq!(
+            registry.grammar_route_variant("org/filesystem:h100-fp8"),
+            GrammarRoute::Keep,
+        );
     }
 
     #[test]
@@ -3615,7 +3789,7 @@ adapters:
 
     /// Regression: a delta apply whose new profile ``extends`` a profile that
     /// only lives in ``existing.profile_configs`` (not in the incoming config)
-    /// must still resolve. Pre-fix this hit "Profile 'a100-40gb' has a missing
+    /// must still resolve. Pre-fix this hit "Profile 'h100-fp8' has a missing
     /// parent or an inheritance cycle" because resolution only walked
     /// ``config.profiles``.
     #[test]
@@ -3633,52 +3807,64 @@ adapters:
         .unwrap();
         let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
 
-        // Seed: one config carrying the ``default`` profile.
+        // Seed: ``default`` plus the grammar-safe parent. The later delta only
+        // carries the child, so ``no-spec`` exists solely in stored state.
+        let seed: ModelConfig = serde_yaml::from_str(
+            r#"
+sie_id: test/model
+tasks: {generate: {grammar_profile: no-spec}}
+profiles:
+  default: {adapter_path: "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter", max_batch_tokens: 4096}
+  no-spec:
+    adapter_path: "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"
+    max_batch_tokens: 4096
+    adapter_options: {loadtime: {grammar_backend: outlines, speculative: {enabled: false}}}
+"#,
+        )
+        .unwrap();
         registry
-            .add_model_config(cfg_for_test_model(
-                "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter",
-                4096,
-            ))
-            .expect("seed apply with default profile");
+            .add_model_config(seed)
+            .expect("seed apply with grammar profile");
 
-        // Delta: a second config bringing only ``a100-40gb`` which extends
-        // ``default``. ``default`` lives only in ``existing.profile_configs``
+        // Delta: a second config bringing only ``h100-fp8`` which extends
+        // ``no-spec``. ``no-spec`` lives only in ``existing.profile_configs``
         // at this point.
-        let delta = ModelConfig {
-            name: "test/model".to_string(),
-            hf_revision: None,
-            adapter_module: None,
-            default_bundle: None,
-            pool: None,
-            profiles: {
-                let mut m = HashMap::new();
-                m.insert(
-                    "a100-40gb".to_string(),
-                    crate::types::model::ProfileConfig {
-                        adapter_path: None,
-                        max_batch_tokens: Some(8192),
-                        compute_precision: None,
-                        adapter_options: None,
-                        extends: Some("default".to_string()),
-                    },
-                );
-                m
-            },
-            inputs: None,
-            max_sequence_length: None,
-            tasks: None,
-        };
+        let delta: ModelConfig = serde_yaml::from_str(
+            r#"
+sie_id: test/model
+profiles:
+  h100-fp8:
+    extends: no-spec
+    max_batch_tokens: 8192
+    adapter_options: {loadtime: {grammar_backend: outlines, speculative: {enabled: false}, extra_launch_args: [--quantization, fp8]}}
+"#,
+        )
+        .unwrap();
 
         let (created, _skipped, _bundles) = registry
             .add_model_config(delta.clone())
             .expect("delta apply must resolve extends against existing.profile_configs");
-        assert_eq!(created, vec!["a100-40gb".to_string()]);
+        assert_eq!(created, vec!["h100-fp8".to_string()]);
+        assert_eq!(
+            registry.grammar_route_variant("test/model:h100-fp8"),
+            GrammarRoute::Keep,
+        );
 
         // Same delta under the test-only authoritative path must also succeed
         // because the override path uses the same merged resolution map.
         registry
             .add_model_config_authoritative(delta)
             .expect("authoritative replay of the same delta must also resolve cleanly");
+
+        let base = registry.get_model_info("test/model").expect("base model");
+        assert_eq!(
+            base.info_extras
+                .profile_parents
+                .get("h100-fp8")
+                .map(String::as_str),
+            Some("no-spec"),
+            "delta apply must retain the profile inheritance relationship",
+        );
     }
 
     /// M10 follow-up: a delta-update that adds a profile with new

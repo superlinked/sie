@@ -16,7 +16,7 @@ import zipfile
 from pathlib import Path
 
 MATURIN_VERSION = "1.13.3"
-AUDIO_PREP_VERSION = "0.6.24"  # x-release-please-version
+AUDIO_PREP_VERSION = "0.6.26"  # x-release-please-version
 AUDIO_WHEEL_COMPATIBILITY = "manylinux_2_28"
 AUDIO_WHEEL_FILENAME = f"sie_audio_prep-{AUDIO_PREP_VERSION}-cp312-abi3-{AUDIO_WHEEL_COMPATIBILITY}_x86_64.whl"
 AUDIO_WHEEL_REMOTE = f"/opt/sie/wheels/{AUDIO_WHEEL_FILENAME}"

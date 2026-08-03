@@ -214,6 +214,47 @@ def test_generation_request_runtime_overrides_profile_defaults() -> None:
     assert resolved["top_p"] == 0.8
 
 
+def test_generation_profile_default_min_new_tokens_caps_to_explicit_max() -> None:
+    config = _generation_config()
+    config.profiles["default"].adapter_options.runtime["default_sampling"]["min_new_tokens"] = 10
+
+    resolved = apply_generation_runtime_options(
+        config,
+        None,
+        {"prompt": "hi", "max_new_tokens": 1},
+    )
+
+    assert resolved["max_new_tokens"] == 1
+    assert resolved["min_tokens"] == 1
+
+
+def test_generation_request_sampling_min_new_tokens_above_max_fails() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"options\.default_sampling\.min_new_tokens.*must not exceed max_new_tokens",
+    ):
+        apply_generation_runtime_options(
+            _generation_config(),
+            {"default_sampling": {"min_new_tokens": 10}},
+            {"prompt": "hi", "max_new_tokens": 1},
+        )
+
+
+def test_generation_explicit_min_tokens_above_max_fails() -> None:
+    config = _generation_config()
+    del config.profiles["default"].adapter_options.runtime["default_sampling"]
+
+    with pytest.raises(
+        ValueError,
+        match=r"min_tokens \(10\) must not exceed max_new_tokens \(1\)",
+    ):
+        apply_generation_runtime_options(
+            config,
+            None,
+            {"prompt": "hi", "max_new_tokens": 1, "min_tokens": 10},
+        )
+
+
 def test_generation_non_default_profile_requires_model_variant_identity() -> None:
     with pytest.raises(ValueError, match="model:profile"):
         apply_generation_runtime_options(

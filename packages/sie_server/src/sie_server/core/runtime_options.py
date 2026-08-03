@@ -143,6 +143,20 @@ def apply_generation_runtime_options(
         runtime["default_sampling"] = {**profile_sampling, **request_sampling}
     result = dict(generate_params)
 
+    # The typed request maximum is a hard caller limit. Reject an explicit
+    # minimum that contradicts it even when this profile has no sampler
+    # defaults; the adapter repeats this check before the engine boundary.
+    max_new_tokens = result.get("max_new_tokens")
+    has_integer_max = isinstance(max_new_tokens, int) and not isinstance(max_new_tokens, bool)
+    explicit_min_tokens = result.get("min_tokens")
+    if (
+        has_integer_max
+        and isinstance(explicit_min_tokens, int)
+        and not isinstance(explicit_min_tokens, bool)
+        and explicit_min_tokens > max_new_tokens
+    ):
+        raise ValueError(f"min_tokens ({explicit_min_tokens}) must not exceed max_new_tokens ({max_new_tokens})")
+
     sampling = runtime.get("default_sampling")
     if sampling is not None:
         if not isinstance(sampling, dict):
@@ -165,9 +179,18 @@ def apply_generation_runtime_options(
                 valid = isinstance(value, int) and not isinstance(value, bool) and value >= 0
             if not valid:
                 raise ValueError(f"'options.default_sampling.{key}' has an invalid value")
+
         for source, target in _GENERATION_SAMPLING_KEYS.items():
             if source in sampling and result.get(target) is None:
-                result[target] = sampling[source]
+                value = sampling[source]
+                if source == "min_new_tokens" and has_integer_max and value > max_new_tokens:
+                    if isinstance(request_sampling, dict) and source in request_sampling:
+                        raise ValueError(
+                            f"'options.default_sampling.min_new_tokens' ({value}) "
+                            f"must not exceed max_new_tokens ({max_new_tokens})"
+                        )
+                    value = max_new_tokens
+                result[target] = value
 
     stop_tokens = runtime.get("stop_tokens")
     if stop_tokens is not None:

@@ -87,7 +87,18 @@ export interface JobChunk {
   state?: string;
   ref?: string | null;
   units?: number | null;
-  credits?: number | null;
+  /**
+   * Exact credits committed for this chunk, or `null` until the chunk's
+   * settlement is acknowledged. A job settles per chunk, so these sum to the
+   * job's `settled_credits` exactly. (Wire-shape field, like the rest of this
+   * interface — snake_case as the API sends it.)
+   */
+  credits_charged?: number | null;
+  /**
+   * Immutable rate-book version that rated `credits_charged`. Present exactly
+   * when `credits_charged` is.
+   */
+  rate_book_version?: string | null;
   error?: unknown;
 }
 
@@ -383,7 +394,8 @@ export function jobChunks(jobDoc: JobStatus): JobChunk[] {
     state: chunk.state,
     ref: chunk.ref,
     units: chunk.units,
-    credits: chunk.credits,
+    credits_charged: chunk.credits_charged,
+    rate_book_version: chunk.rate_book_version,
     error: chunk.error ?? null,
   }));
 }

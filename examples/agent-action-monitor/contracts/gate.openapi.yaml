@@ -1,0 +1,98 @@
+openapi: 3.0.3
+info:
+  title: DUSK Gate API
+  version: "1.0.0"
+  description: >
+    Frozen contract for the DUSK agent action gate. The AgentAction schema
+    mirrors docs/action-schema.md and must not drift. SIE model IDs are
+    verified against the Superlinked model catalog: BAAI/bge-m3 for encode,
+    BAAI/bge-reranker-v2-m3 for score, urchade/gliner_multi-v2.1 for extract.
+
+paths:
+  /v1/gate:
+    post:
+      summary: Evaluate a proposed agent action and return a verdict.
+      operationId: evaluateAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentAction"
+      responses:
+        "200":
+          description: Verdict rendered (watch mode always returns 200).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Verdict"
+        "400":
+          description: Invalid AgentAction (bad schema, empty agent_id/target, naive timestamp).
+
+components:
+  schemas:
+    AgentAction:
+      type: object
+      required: [agent_id, timestamp, action_type, target, source]
+      properties:
+        agent_id:
+          type: string
+          description: Acting agent identity. Required, non-empty.
+        timestamp:
+          type: string
+          format: date-time
+          description: Timezone-aware ISO 8601.
+        action_type:
+          type: string
+          enum:
+            - firewall_rule_change
+            - route_change
+            - segment_change
+            - role_assignment
+            - port_change
+            - unknown
+        target:
+          type: string
+          description: Resource acted on. Required, non-empty.
+        change:
+          type: object
+          description: Structured delta; either side may be null.
+          properties:
+            before: {}
+            after: {}
+        source:
+          type: string
+          example: generic
+        raw_ref:
+          type: [string, "null"]
+          description: Opaque reference back to the original record (an id).
+
+    Verdict:
+      type: object
+      required: [trace_id, verdict, score, blast]
+      properties:
+        trace_id: { type: string }
+        verdict:
+          type: string
+          enum: [ALLOW, WOULD-BLOCK, BLOCK]
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+        blast:
+          type: string
+          enum: [low, medium, high]
+        mitre_attack:
+          type: array
+          items: { type: string }
+        mitre_atlas:
+          type: array
+          items: { type: string }
+        reasons:
+          type: array
+          items: { type: string }
+        predicted_next:
+          type: string
+        similar_decision_ids:
+          type: array
+          items: { type: string }

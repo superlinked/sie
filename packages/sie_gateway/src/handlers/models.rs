@@ -237,6 +237,7 @@ fn worker_only_model_info(name: &str, loaded: bool) -> Value {
             max_output_tokens: None,
             grammar_capabilities: None,
             grammar_profile: None,
+            profile_parents: HashMap::new(),
             tools_supported: None,
             code: false,
             sql: false,

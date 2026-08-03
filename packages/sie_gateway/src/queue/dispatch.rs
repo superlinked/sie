@@ -4,7 +4,7 @@
 //! [`WorkDispatcher`] captures the exact handler-facing surface of
 //! [`WorkPublisher`] — publish, cancel, republish, and pending-state
 //! snapshots — so handlers depend on `Arc<dyn WorkDispatcher>` rather
-//! than the concrete NATS-backed publisher. NATS stays the only
+//! than the concrete NATS-backed publisher. NATS stays the default OSS
 //! implementation; lifecycle methods (inbox subscription, backpressure
 //! monitor, cleanup, drain) deliberately stay on the concrete type
 //! owned by `main.rs`.
@@ -24,6 +24,10 @@ use super::publisher::WorkPublisher;
 // this module's own imports for the trait signatures below).
 pub use super::publisher::{PendingGenerationSnapshot, PublishTarget, WorkParams, WorkResult};
 pub use super::streaming::{ChunkEnvelope, StreamOutcome};
+
+fn nats_supports_first_chunk_pool_republish() -> bool {
+    true
+}
 
 /// Transport-neutral completion of the dispatch durability boundary.
 ///
@@ -260,7 +264,71 @@ pub trait WorkDispatcher: Send + Sync {
         reason: &'static str,
     ) -> Result<bool, String>;
 
+    /// Whether a first-chunk deadline can safely cancel the current attempt
+    /// and republish the retained generation work to a pool.
+    ///
+    /// The conservative default is false. A dispatcher with an equivalent
+    /// retained-payload and pool-fallback path must opt in explicitly; all
+    /// other generation drivers keep waiting until the governed overall
+    /// deadline instead of cancelling, republishing, or surfacing a premature
+    /// first-chunk timeout.
+    fn supports_first_chunk_pool_republish(&self) -> bool {
+        false
+    }
+
     fn drop_pending_stream(&self, request_id: &str);
+
+    /// Extra members for the terminal event's `usage` block, contributed by the
+    /// transport, and the per-stream reclamation point for whatever state
+    /// produced them.
+    ///
+    /// A streamed response cannot report anything in headers — they were
+    /// flushed with the first byte — so the terminal usage block is the only
+    /// surface on which a transport that reaches its own per-request accounting
+    /// state at stream end can tell the caller what that state was. The SSE
+    /// driver calls this exactly ONCE per stream, on the worker terminal and
+    /// after the durability wait, and merges the returned members (in the
+    /// returned order) into the usage block it is about to write.
+    ///
+    /// `carries_usage` is the driver's answer to "will this stream emit a usage
+    /// surface at all?" — false for an OpenAI stream that did not opt into
+    /// `stream_options.include_usage`, where no usage event is written and any
+    /// members returned here are discarded unread. Contract for implementors:
+    ///
+    /// * **Never wait when `carries_usage` is false.** The call still happens so
+    ///   per-request state is released on the normal terminal rather than by a
+    ///   leak backstop, but producing a value nobody reads must cost the client
+    ///   nothing — this call sits in front of the terminal content event and
+    ///   `[DONE]`.
+    /// * **Bounded when it is true.** The driver awaits with the terminal event
+    ///   already built; an unbounded wait stalls the client's `[DONE]`.
+    /// * **Terminal-only.** Return members only for state that is final. An
+    ///   empty vec means "nothing final to add" and the usage block is written
+    ///   exactly as the worker reported it — which is also the right answer for
+    ///   a terminal whose accounting never completed.
+    ///
+    /// The default returns nothing, which is correct for every transport that
+    /// does no per-request accounting.
+    async fn stream_terminal_usage_extras(
+        &self,
+        _request_id: &str,
+        _carries_usage: bool,
+    ) -> Vec<(String, serde_json::Value)> {
+        Vec::new()
+    }
+
+    /// Client-disconnect variant of [`Self::drop_pending_stream`]: the caller
+    /// went away, upstream was cancelled, and the bounded grace window for the
+    /// worker's abort terminal expired without one arriving.
+    ///
+    /// Transport teardown is identical; the distinction is for BILLING. A
+    /// metered dispatcher releases the request's hold on this path quietly —
+    /// no compute evidence was lost to a defect, so it must not raise the
+    /// lost-terminal fault alert that ordinary teardown does. The default is
+    /// plain teardown, which is correct for every unmetered transport.
+    fn drop_pending_stream_client_disconnect(&self, request_id: &str) {
+        self.drop_pending_stream(request_id);
+    }
 
     fn pending_generation_snapshot(&self) -> PendingGenerationSnapshot;
 
@@ -396,8 +464,16 @@ impl WorkDispatcher for WorkPublisher {
         WorkPublisher::republish_pending_result_to_pool(self, request_id, reason).await
     }
 
+    fn supports_first_chunk_pool_republish(&self) -> bool {
+        nats_supports_first_chunk_pool_republish()
+    }
+
     fn drop_pending_stream(&self, request_id: &str) {
         WorkPublisher::drop_pending_stream(self, request_id)
+    }
+
+    fn drop_pending_stream_client_disconnect(&self, request_id: &str) {
+        WorkPublisher::drop_pending_stream_client_disconnect(self, request_id)
     }
 
     fn pending_generation_snapshot(&self) -> PendingGenerationSnapshot {
@@ -454,7 +530,12 @@ impl WorkDispatcherExt for Arc<dyn WorkDispatcher> {
 
 #[cfg(test)]
 mod durability_tests {
-    use super::DispatchDurability;
+    use super::{nats_supports_first_chunk_pool_republish, DispatchDurability};
+
+    #[test]
+    fn concrete_nats_publisher_explicitly_opts_into_first_chunk_pool_republish() {
+        assert!(nats_supports_first_chunk_pool_republish());
+    }
 
     #[tokio::test]
     async fn immediate_transport_acceptance_resolves_successfully() {

@@ -20,6 +20,16 @@ def _write_valid_wheel(path: Path) -> None:
         )
 
 
+def _write_minimal_source_tree(project_root: Path) -> Path:
+    crate = project_root / "packages" / "sie_audio_prep"
+    (crate / "src").mkdir(parents=True)
+    (project_root / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+    (crate / "Cargo.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
+    (crate / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    (crate / "src" / "lib.rs").write_text("pub fn test() {}\n", encoding="utf-8")
+    return crate
+
+
 def test_portable_worker_wheel_tag_is_validated(tmp_path: Path) -> None:
     assert audio_prep_wheel.AUDIO_WHEEL_COMPATIBILITY == "manylinux_2_28"
     wheel_path = tmp_path / audio_prep_wheel.AUDIO_WHEEL_FILENAME
@@ -34,13 +44,7 @@ def test_portable_worker_wheel_tag_is_validated(tmp_path: Path) -> None:
 
 
 def test_wheel_cache_digest_includes_build_toolchain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    crate = tmp_path / "packages" / "sie_audio_prep"
-    (crate / "src").mkdir(parents=True)
-    (crate / "Cargo.toml").write_text("[package]\nname = 'test'\n")
-    # Workspace-root lock, one level above packages/<crate> (#2339).
-    (tmp_path / "Cargo.lock").write_text("version = 4\n")
-    (crate / "pyproject.toml").write_text("[build-system]\n")
-    (crate / "src" / "lib.rs").write_text("pub fn test() {}\n")
+    crate = _write_minimal_source_tree(tmp_path)
 
     portable_digest = audio_prep_wheel._source_digest(crate)
     monkeypatch.setattr(audio_prep_wheel, "_BUILD_FINGERPRINT", "different-toolchain")
@@ -54,6 +58,9 @@ def test_wheel_cache_rejects_unsafe_preexisting_root(
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
 ) -> None:
+    _write_minimal_source_tree(tmp_path)
+    monkeypatch.setattr(audio_prep_wheel.sys, "platform", "linux")
+    monkeypatch.setattr(audio_prep_wheel.platform, "machine", lambda: "x86_64")
     cache_parent = tmp_path / "cache"
     cache_parent.mkdir()
     cache_root = cache_parent / f"sie-audio-prep-wheels-{os.getuid()}"
@@ -85,8 +92,9 @@ def test_wheel_cache_reuses_valid_artifact_from_private_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project_root = tmp_path / "project"
-    crate = project_root / "packages" / "sie_audio_prep"
-    (crate / "src").mkdir(parents=True)
+    crate = _write_minimal_source_tree(project_root)
+    monkeypatch.setattr(audio_prep_wheel.sys, "platform", "linux")
+    monkeypatch.setattr(audio_prep_wheel.platform, "machine", lambda: "x86_64")
     cache_parent = tmp_path / "cache"
     cache_parent.mkdir()
     monkeypatch.setattr(audio_prep_wheel.tempfile, "gettempdir", lambda: str(cache_parent))

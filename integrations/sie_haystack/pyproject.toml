@@ -1,6 +1,6 @@
 [project]
 name = "sie-haystack"
-version = "0.6.24"
+version = "0.6.26"
 description = "SIE integration for Haystack"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -58,6 +58,7 @@ from sie_sdk.images import ImageLike, convert_images_for_json, convert_item_imag
 from sie_sdk.jobs import TERMINAL_JOB_STATES, build_job_body, decode_chunk_bytes, job_chunks
 from sie_sdk.types import (
     Batch,
+    BatchList,
     CapacityInfo,
     ChatCompletion,
     ChatCompletionChunk,
@@ -65,14 +66,17 @@ from sie_sdk.types import (
     Connection,
     ConnectionCreated,
     ConnectionRevoked,
+    CostEstimate,
     EncodeResult,
     ExtractResult,
     File,
     FileDeleted,
+    FileList,
     GenerateChunk,
     GenerateGrammar,
     GenerateImage,
     GenerateResult,
+    GenerationUsage,
     Item,
     JobResults,
     JobStatus,
@@ -92,6 +96,7 @@ from sie_sdk.types import (
 from ._shared import (
     DEFAULT_LEASE_RENEWAL_INTERVAL_S,
     DEFAULT_PROVISION_TIMEOUT_S,
+    ESTIMATE_PATH,
     HTTP_CLIENT_ERROR,
     HTTP_GATEWAY_TIMEOUT,
     JSON_CONTENT_TYPE,
@@ -111,6 +116,7 @@ from ._shared import (
     attach_request_metadata,
     base_url_accepts_origin_credentials,
     build_chat_body,
+    build_estimate_envelope,
     build_responses_body,
     check_version_skew,
     compute_oom_backoff,
@@ -130,10 +136,12 @@ from ._shared import (
     parse_score_result,
     parse_terminal_json_object,
     provisioning_retry_delay,
+    raise_if_estimate_unroutable,
     raise_if_input_too_long,
     raise_if_model_load_failed,
     request_matches_base_url_origin,
     retry_after_or_default,
+    settled_charge_from_usage,
     sse_chunk_error,
     sse_headers,
     validate_encode_result_count,
@@ -208,11 +216,15 @@ def _parse_generate_result(
         result["finish_reason"] = finish  # type: ignore[typeddict-item]
     usage = data.get("usage")
     if isinstance(usage, dict):
-        result["usage"] = {
+        parsed_usage: GenerationUsage = {
             "prompt_tokens": _coerce_token_count(usage.get("prompt_tokens")),
             "completion_tokens": _coerce_token_count(usage.get("completion_tokens")),
             "total_tokens": _coerce_token_count(usage.get("total_tokens")),
         }
+        settled = settled_charge_from_usage(usage)
+        if settled is not None:
+            parsed_usage["credits_charged"], parsed_usage["rate_book_version"] = settled
+        result["usage"] = parsed_usage
     attempt_id = data.get("attempt_id")
     if isinstance(attempt_id, str):
         result["attempt_id"] = attempt_id
@@ -1428,7 +1440,7 @@ class SIEClient:
             for result in results:
                 result["timing"] = timing
 
-        attach_request_metadata(results, response.headers)
+        attach_request_metadata(results, response.headers, response_data)
 
         # Return single result if single item was passed
         return results[0] if single_item else results
@@ -1466,6 +1478,90 @@ class SIEClient:
 
         data = response.json()
         return data["models"]
+
+    def estimate(
+        self,
+        endpoint: str,
+        request: Mapping[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> CostEstimate:
+        """Price a request WITHOUT running it (``POST /v1/estimate``).
+
+        The gateway plans the request through the same reservation planner the
+        metered path runs, against the same active rate book, and returns the
+        plan instead of holding it: no dispatch, no reservation, no credits
+        consumed. The quote is the CONSERVATIVE ceiling the live path would
+        hold — settlement bills the authoritative counts against that plan and
+        releases the rest, so the real charge is at most ``estimated_credits``.
+
+        Args:
+            endpoint: The exact target path, e.g. ``"/v1/encode/BAAI/bge-m3"``
+                (native, model in the path) or ``"/v1/chat/completions"``
+                (OpenAI-compatible, model in ``request["model"]``).
+            request: The verbatim body you would send to ``endpoint``. Passed
+                through untouched — a body the SDK reshaped would be a quote
+                for a request you never send.
+            timeout: Per-call timeout override in seconds.
+
+        Returns:
+            :class:`~sie_sdk.types.CostEstimate` with the planned per-dimension
+            units, the applied rational rates, the credits, and the active rate
+            book's version + digest.
+
+        Raises:
+            ValueError: If the envelope arguments are malformed client-side.
+            EstimateUnroutableError: If the active book cannot price the
+                request. This is the same verdict the real request would get —
+                the message names the unpriced identity or the dimension the
+                planner could not bound.
+            RequestError: If the target body is invalid (4xx), with the same
+                status/code the target route itself would return. In particular
+                a ``404 MODEL_NOT_FOUND`` means this data plane does not serve
+                the model at all — the estimate checks routability, not just
+                priceability, so it never quotes a request that would 404.
+            SIEConnectionError: If unable to connect to the server.
+            ServerError: For other 5xx responses.
+
+        Example:
+            >>> quote = client.estimate(
+            ...     "/v1/encode/BAAI/bge-m3",
+            ...     {"items": [{"text": "Hello"}]},
+            ... )
+            >>> quote["estimated_credits"]
+            1
+            >>> quote["rate_book_version"]
+            '2026-07-26-production-bootstrap-v2'
+        """
+        # Every other public method opens with this. Without it `estimate()`
+        # inherits whatever `last_retry_count` / `last_model_revision` the
+        # PREVIOUS call left on this thread, so a quote taken right after a
+        # retried `encode()` reports that encode's retries as its own —
+        # contradicting the properties' own "latest call in this thread".
+        self._reset_retry_count()
+        body = build_estimate_envelope(endpoint, request)
+        try:
+            response = self._client.post(
+                ESTIMATE_PATH,
+                json=body,
+                headers={
+                    "Accept": JSON_CONTENT_TYPE,
+                    "Content-Type": JSON_CONTENT_TYPE,
+                },
+                timeout=timeout if timeout is not None else self._timeout,
+            )
+        except httpx.ConnectError as e:
+            msg = f"Failed to connect to {self._base_url}: {e}"
+            raise SIEConnectionError(msg) from e
+        except httpx.TimeoutException as e:
+            msg = f"Request timed out: {e}"
+            raise SIEConnectionError(msg) from e
+
+        if response.status_code >= HTTP_CLIENT_ERROR:
+            raise_if_estimate_unroutable(response)
+            handle_error(response)
+
+        return cast("CostEstimate", response.json())
 
     def get_model(self, model: str) -> ModelInfo:
         """Get details for a specific model.
@@ -2028,7 +2124,7 @@ class SIEClient:
 
         # Build ScoreResult
         result = parse_score_result(response_data)
-        attach_request_metadata([result], response.headers)
+        attach_request_metadata([result], response.headers, response_data)
         return result
 
     def generate(
@@ -2104,7 +2200,9 @@ class SIEClient:
                 timeout is NOT retried here: generation is non-idempotent
                 and a 504 is a post-publish timeout, so retrying could
                 double-bill an inference. A ``504`` is surfaced as a
-                terminal :class:`ServerError`.
+                terminal :class:`ServerError`. Pass ``False`` to surface
+                pre-execution provisioning and model-loading responses without
+                retrying them.
             provision_timeout_s: Maximum time to wait for capacity.
 
         Returns:
@@ -2222,7 +2320,7 @@ class SIEClient:
                     time.sleep(actual_delay)
                     continue
 
-                if error_code == MODEL_LOADING_ERROR_CODE:
+                if error_code == MODEL_LOADING_ERROR_CODE and wait_for_capacity:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
@@ -2254,7 +2352,8 @@ class SIEClient:
             # surface it as a terminal ServerError instead (same reasoning as
             # the mid-flight transport-error block above). The pre-execution
             # 503 MODEL_LOADING / PROVISIONING retries above remain because
-            # those fire *before* any generation can have started.
+            # those fire *before* any generation can have started and the
+            # caller has opted into capacity waiting.
             if response.status_code == HTTP_GATEWAY_TIMEOUT:
                 msg = (
                     "Gateway timed out (504) after the generate request was published to the "
@@ -2276,8 +2375,8 @@ class SIEClient:
         self._check_server_version(response)
 
         data = parse_terminal_json_object(response, owner="generate")
-        result = _parse_generate_result(data, request=parse_request_metadata(response.headers))
-        attach_request_metadata([result], response.headers)
+        result = _parse_generate_result(data, request=parse_request_metadata(response.headers, data))
+        attach_request_metadata([result], response.headers, data)
         return result
 
     def responses(
@@ -2403,7 +2502,7 @@ class SIEClient:
 
         self._check_server_version(response)
         data = parse_terminal_json_object(response, owner="Responses")
-        attach_request_metadata([data], response.headers)
+        attach_request_metadata([data], response.headers, data)
         return cast("ResponseResult", data)
 
     def chat_completions(
@@ -2539,7 +2638,7 @@ class SIEClient:
 
         self._check_server_version(response)
         data = parse_terminal_json_object(response, owner="chat completion")
-        attach_request_metadata([data], response.headers)
+        attach_request_metadata([data], response.headers, data)
         return cast("ChatCompletion", data)
 
     def stream_chat_completions(
@@ -3132,7 +3231,7 @@ class SIEClient:
             for result in results:
                 result["model"] = response_model
 
-        attach_request_metadata(results, response.headers)
+        attach_request_metadata(results, response.headers, response_data)
 
         # Return single result if single item was passed
         return results[0] if single_item else results
@@ -3423,6 +3522,49 @@ class _SyncFiles(_SyncNamespace):
         """Fetch a file's metadata (``GET /v1/files/{id}``)."""
         return self._request_json("GET", f"/v1/files/{file_id}")
 
+    def list(
+        self,
+        *,
+        after: str | None = None,
+        limit: int | None = None,
+        order: Literal["asc", "desc"] | None = None,
+        purpose: str | None = None,
+    ) -> Sequence[File]:
+        """List the org's live files with OpenAI cursor/filter arguments."""
+        return self.list_page(after=after, limit=limit, order=order, purpose=purpose).get("data", [])
+
+    def list_page(
+        self,
+        *,
+        after: str | None = None,
+        limit: int | None = None,
+        order: Literal["asc", "desc"] | None = None,
+        purpose: str | None = None,
+    ) -> FileList:
+        """Return one file cursor page, including pagination metadata."""
+        params = {
+            key: value
+            for key, value in {
+                "after": after,
+                "limit": limit,
+                "order": order,
+                "purpose": purpose,
+            }.items()
+            if value is not None
+        }
+        path = f"/v1/files?{urlencode(params)}" if params else "/v1/files"
+        data = self._request_json("GET", path)
+        if isinstance(data, dict):
+            return cast("FileList", data)
+        files = data if isinstance(data, list) else []
+        return {
+            "object": "list",
+            "data": files,
+            "first_id": files[0].get("id") if files else None,
+            "last_id": files[-1].get("id") if files else None,
+            "has_more": False,
+        }
+
     def content(self, file_id: str) -> bytes:
         """Download a file's raw bytes (``GET /v1/files/{id}/content``)."""
         try:
@@ -3483,12 +3625,25 @@ class _SyncBatches(_SyncNamespace):
         """Fetch a batch's status (``GET /v1/batches/{id}``)."""
         return self._request_json("GET", f"/v1/batches/{batch_id}")
 
-    def list(self) -> Sequence[Batch]:
-        """List the org's batches (``GET /v1/batches``; additive OpenAI-parity)."""
-        data = self._request_json("GET", "/v1/batches")
+    def list(self, *, after: str | None = None, limit: int | None = None) -> Sequence[Batch]:
+        """List the org's batches while preserving the historical sequence return."""
+        return self.list_page(after=after, limit=limit).get("data", [])
+
+    def list_page(self, *, after: str | None = None, limit: int | None = None) -> BatchList:
+        """Return one batch cursor page, including pagination metadata."""
+        params = {key: value for key, value in {"after": after, "limit": limit}.items() if value is not None}
+        path = f"/v1/batches?{urlencode(params)}" if params else "/v1/batches"
+        data = self._request_json("GET", path)
         if isinstance(data, dict):
-            return data.get("data", [])
-        return data if isinstance(data, list) else []
+            return cast("BatchList", data)
+        batches = data if isinstance(data, list) else []
+        return {
+            "object": "list",
+            "data": batches,
+            "first_id": batches[0].get("id") if batches else None,
+            "last_id": batches[-1].get("id") if batches else None,
+            "has_more": False,
+        }
 
     def cancel(self, batch_id: str) -> Batch:
         """Cancel a batch (``POST /v1/batches/{id}/cancel``; additive OpenAI-parity)."""

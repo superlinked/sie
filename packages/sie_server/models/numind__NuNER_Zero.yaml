@@ -12,6 +12,7 @@ tasks:
   encode: null
   score: null
   extract: {}
+max_sequence_length: 384
 profiles:
   default:
     max_batch_tokens: 16384

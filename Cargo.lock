@@ -3583,7 +3583,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sie-audio-prep"
-version = "0.6.24"
+version = "0.6.26"
 dependencies = [
  "audioadapter-buffers",
  "opusic-sys",
@@ -3597,7 +3597,7 @@ dependencies = [
 
 [[package]]
 name = "sie-gateway"
-version = "0.6.24"
+version = "0.6.26"
 dependencies = [
  "arc-swap",
  "async-nats",
@@ -3610,6 +3610,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "k8s-openapi",
@@ -3654,7 +3655,7 @@ dependencies = [
 
 [[package]]
 name = "sie-server-sidecar"
-version = "0.6.24"
+version = "0.6.26"
 dependencies = [
  "anyhow",
  "async-nats",

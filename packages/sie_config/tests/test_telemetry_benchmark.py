@@ -2,7 +2,7 @@
 
 Run explicitly with::
 
-    SIE_RUN_TELEMETRY_BENCHMARK=1 mise exec -- uv run pytest \
+    SIE_RUN_TELEMETRY_BENCHMARK=1 mise exec -- uv run --frozen --project . --no-sync pytest -c pyproject.toml \
       packages/sie_config/tests/test_telemetry_benchmark.py -s -q
 
 It reports three independently warmed disabled/enabled timing samples and

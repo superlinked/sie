@@ -15,6 +15,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput
+from sie_server.core.video_frames import extract_frames
 from sie_server.types.inputs import media_bytes
 
 if TYPE_CHECKING:
@@ -259,9 +260,16 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
         inst = _normalize_instruction(instruction or "") or _normalize_instruction(self._default_instruction)
 
         embeddings_list: list[np.ndarray] = []
+        # Worker-authoritative §7 "$ per image" counts: submitted images plus
+        # the video frames this call actually sampled and fed to the model.
+        # Travels on ``extra`` (like ``input_token_counts``) so the count is
+        # bound to THIS batch rather than re-derived from the wire item, which
+        # cannot know how many frames a video decoded to.
+        image_counts: list[int] = []
         for item in items:
-            emb = self._encode_single_item(item, instruction=inst)
+            emb, images_processed = self._encode_single_item(item, instruction=inst)
             embeddings_list.append(emb)
+            image_counts.append(images_processed)
 
         # Free GPU memory once after the full batch rather than per item
         if self._device and self._device.startswith("cuda"):
@@ -274,9 +282,10 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
             batch_size=len(items),
             is_query=is_query,
             dense_dim=self._dense_dim,
+            extra={"input_image_counts": image_counts},
         )
 
-    def _encode_single_item(self, item: Any, *, instruction: str) -> np.ndarray:
+    def _encode_single_item(self, item: Any, *, instruction: str) -> tuple[np.ndarray, int]:
         has_text = item.text is not None
         has_images = item.images is not None and len(item.images) > 0
         has_video = item.video is not None
@@ -289,13 +298,16 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
         if has_images:
             pil_images = self._load_images(item)
 
-        # Extract video frames as images
+        # Extract video frames as images. An undecodable video raises
+        # ``VideoDecodeError`` (typed INVALID_INPUT) — it is never dropped, so a
+        # text+video item can no longer return a billed text-only success that
+        # silently ignored the customer's video.
         video_frames: list[Image.Image] | None = None
         if has_video:
             video_frames = self._extract_video_frames(item)
 
-        # If the input was visual-only but all images/frames failed to load,
-        # reject rather than silently embedding an empty prompt.
+        # If the input was visual-only but all images failed to load, reject
+        # rather than silently embedding an empty prompt.
         has_loaded_visuals = bool(pil_images) or bool(video_frames)
         if not has_text and not has_loaded_visuals:
             msg = (
@@ -312,7 +324,15 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
             instruction=instruction,
         )
 
-        return self._forward_conversation(conversation)
+        # Billable images = exactly the visual content parts handed to the
+        # model: the images that LOADED plus the frames actually sampled from
+        # the video. Both halves are processed-based, so an unreadable image
+        # that ``_load_images`` dropped with a warning is not billed — the same
+        # rule the video half establishes. This can only ever be at or below
+        # the wire-derived ``count_input_images`` basis the gateway reserves
+        # against, so it cannot push a settled count over its ceiling.
+        images_processed = len(pil_images or []) + len(video_frames or [])
+        return self._forward_conversation(conversation), images_processed
 
     def _forward_conversation(self, conversation: list[dict[str, Any]]) -> np.ndarray:
         """Apply chat template, tokenize, run forward pass, extract embedding."""
@@ -422,41 +442,63 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
         return pil_images
 
     def _extract_video_frames(self, item: Any) -> list[Image.Image]:
-        """Extract frames from video input and return as PIL images.
+        """Sample frames from the item's video, as image content parts.
 
-        **Limitation**: This is a placeholder that only handles image-decodable
-        inputs (e.g. animated GIF first frame) via ``PIL.Image.open`` /
-        ``io.BytesIO``.  True video files (mp4, webm, avi, etc.) are **not**
-        decoded here and will return an empty list.  Proper video support
-        requires an external decoding library (cv2, av, decord, etc.) to
-        extract and sample frames before passing them to the model.
+        Delegates to the shared :mod:`sie_server.core.video_frames` seam, which
+        owns real mp4/webm decoding, the admission caps, and the
+        :data:`~sie_server.core.video_frames.MAX_SAMPLED_FRAMES` budget the
+        managed reservation ceiling is derived from.
+
+        Raises:
+            VideoDecodeError: The video is undecodable or violates a cap. Never
+                returns an empty list for a present video — that would bill a
+                success for input the model never saw.
         """
-        from PIL import Image
-
         video_input = item.video
         if video_input is None:
             return []
+        return extract_frames(video_input)
 
-        try:
-            video_bytes = media_bytes(video_input, kind="video")
-        except (KeyError, TypeError) as exc:
-            logger.warning("Failed to read video data: %s", exc)
-            return []
+    def count_input_tokens(self, items: list[Item]) -> list[int] | None:
+        """Per-item text-token counts that survive a MIXED batch.
 
-        # Attempt to open as a PIL-decodable image (e.g. animated GIF).
-        # Real video formats (mp4/webm) will fail here and return [].
-        try:
-            pil_img = Image.open(io.BytesIO(video_bytes))
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
-            return [pil_img]
-        except (OSError, ValueError) as exc:
-            logger.warning(
-                "Could not decode video input as image via PIL.Image.open: %s "
-                "(true video decoding requires cv2/av/decord)",
-                exc,
-            )
-            return []
+        The base hook is all-or-nothing: one non-text item and it returns
+        ``None`` for the whole batch. That is fine for a text-only encoder, but
+        this adapter accepts text, images and video, and the queue seam fuses
+        items from different API requests — so a text item co-batched with a
+        video item lost its token count, ``_encode_units`` then yielded no
+        units at all, and the gateway faulted the dispatch ("succeeded without
+        authoritative units") after the GPU was already spent.
+
+        Scatter instead, exactly like ``siglip``: real counts for the items
+        that carry text, ``0`` for the visual-only ones. ``_encode_units``
+        drops a zero rather than reporting it, so a visual-only item still
+        settles on ``images`` alone and the plan/terminal dimensions agree.
+
+        Counts the item's TEXT only — the image placeholder tokens the chat
+        template expands are visual input and bill through ``images``; counting
+        them here would charge the same content on two dimensions.
+        """
+        tokenizer = self._metering_tokenizer()
+        if tokenizer is None:
+            return None
+        texts: list[str] = []
+        positions: list[int] = []
+        for index, item in enumerate(items):
+            text = getattr(item, "text", None)
+            if isinstance(text, str) and text:
+                texts.append(text)
+                positions.append(index)
+        counts = [0] * len(items)
+        if not texts:
+            return counts
+        with self._tokenizer_guard():
+            measured = self._token_counts_or_none(tokenizer, texts, expected_len=len(texts))
+        if measured is None:
+            return None
+        for position, count in zip(positions, measured, strict=True):
+            counts[position] = count
+        return counts
 
     def get_preprocessor(self) -> Any | None:
         # Qwen3-VL processor requires text alongside images (for chat template

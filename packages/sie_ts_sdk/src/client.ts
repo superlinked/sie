@@ -65,6 +65,8 @@ import {
   SERVER_VERSION_HEADER,
 } from "./internal/constants.js";
 import {
+  ESTIMATE_PATH,
+  buildEstimateEnvelope,
   getErrorCode,
   getRetryAfter,
   handleError,
@@ -73,6 +75,8 @@ import {
   parseExtractResults,
   parseGenerateResult,
   parseScoreResult,
+  settledChargeFields,
+  throwIfEstimateUnroutable,
   throwIfInputTooLong,
   throwIfModelLoadFailed,
 } from "./internal/parsing.js";
@@ -93,6 +97,7 @@ import { packMessage, unpackMessage } from "./msgpack.js";
 import { parseSseStream } from "./sse.js";
 import type {
   Batch,
+  BatchList,
   CapacityInfo,
   ChatCompletion,
   ChatCompletionChunk,
@@ -101,6 +106,7 @@ import type {
   Connection,
   ConnectionCreated,
   ConnectionRevoked,
+  CostEstimate,
   CreatePoolOptions,
   EncodeOptions,
   EncodeResult,
@@ -108,6 +114,7 @@ import type {
   ExtractOptions,
   ExtractResult,
   FileDeleted,
+  FileList,
   GenerateChunk,
   GenerateGrammar,
   GenerateOptions,
@@ -173,6 +180,20 @@ export interface FilesNamespace {
   create(options: { file: FileUploadInput; purpose?: string; filename?: string }): Promise<SIEFile>;
   /** Fetch a file's metadata (`GET /v1/files/{id}`). */
   retrieve(fileId: string): Promise<SIEFile>;
+  /** List the org's live files with OpenAI cursor/filter arguments. */
+  list(options?: {
+    after?: string;
+    limit?: number;
+    order?: "asc" | "desc";
+    purpose?: string;
+  }): Promise<SIEFile[]>;
+  /** Return one file cursor page, including pagination metadata. */
+  listPage(options?: {
+    after?: string;
+    limit?: number;
+    order?: "asc" | "desc";
+    purpose?: string;
+  }): Promise<FileList>;
   /** Download a file's raw bytes (`GET /v1/files/{id}/content`). */
   content(fileId: string): Promise<Uint8Array>;
   /** Delete a file (`DELETE /v1/files/{id}`; additive OpenAI-parity surface). */
@@ -196,8 +217,10 @@ export interface BatchesNamespace {
   }): Promise<Batch>;
   /** Fetch a batch's status (`GET /v1/batches/{id}`). */
   retrieve(batchId: string): Promise<Batch>;
-  /** List the org's batches (`GET /v1/batches`; additive OpenAI-parity). */
-  list(): Promise<Batch[]>;
+  /** List the org's batches; the historical array return is preserved. */
+  list(options?: { after?: string; limit?: number }): Promise<Batch[]>;
+  /** Return one batch cursor page, including pagination metadata. */
+  listPage(options?: { after?: string; limit?: number }): Promise<BatchList>;
   /** Cancel a batch (`POST /v1/batches/{id}/cancel`; additive OpenAI-parity). */
   cancel(batchId: string): Promise<Batch>;
 }
@@ -214,8 +237,16 @@ function parseNonnegativeMeterHeader(headers: Headers, name: string): number | u
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
-/** Parse optional request-scoped metadata from one successful terminal response. */
-function parseRequestMetadata(headers: Headers): RequestMetadata | undefined {
+/**
+ * Parse optional request-scoped metadata from one successful terminal response.
+ *
+ * `body` is the decoded response envelope, when the caller has one. The settled
+ * charge is read from its `usage` block FIRST and falls back to the
+ * `x-sie-credits-debited` header, which is the only source on a gateway that
+ * predates in-body surfacing (#2434). The two always agree when both are
+ * present; the body additionally names the rate book, which no header does.
+ */
+function parseRequestMetadata(headers: Headers, body?: unknown): RequestMetadata | undefined {
   const metadata: RequestMetadata = {};
   const requestId = headers.get("x-sie-request-id");
   if (
@@ -248,18 +279,46 @@ function parseRequestMetadata(headers: Headers): RequestMetadata | undefined {
     const value = parseNonnegativeMeterHeader(headers, header);
     if (value !== undefined) usage[field] = value;
   }
-  if (Object.keys(usage).length > 0) metadata.usage = usage;
 
-  const creditsDebited = parseNonnegativeMeterHeader(headers, "x-sie-credits-debited");
-  if (creditsDebited !== undefined) metadata.creditsDebited = creditsDebited;
+  const settled = settledChargeFromBody(body);
+  if (settled !== undefined) {
+    usage.creditsCharged = settled.creditsCharged;
+    usage.rateBookVersion = settled.rateBookVersion;
+    metadata.creditsDebited = settled.creditsCharged;
+    metadata.rateBookVersion = settled.rateBookVersion;
+  } else {
+    const creditsDebited = parseNonnegativeMeterHeader(headers, "x-sie-credits-debited");
+    if (creditsDebited !== undefined) metadata.creditsDebited = creditsDebited;
+  }
+  if (Object.keys(usage).length > 0) metadata.usage = usage;
   return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+/**
+ * The settled charge from a response envelope's `usage` block (#2434).
+ *
+ * Shares `settledChargeFields`' validation so the metadata path and the result
+ * parsers can never disagree about what counts as a publishable charge.
+ * Anything malformed is treated as absent, so the header fallback still
+ * applies.
+ */
+function settledChargeFromBody(
+  body: unknown,
+): { creditsCharged: number; rateBookVersion: string } | undefined {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const { creditsCharged, rateBookVersion } = settledChargeFields(
+    (body as Record<string, unknown>).usage,
+  );
+  if (creditsCharged === undefined || rateBookVersion === undefined) return undefined;
+  return { creditsCharged, rateBookVersion };
 }
 
 function attachRequestMetadata<T extends { request?: RequestMetadata }>(
   results: T[],
   headers: Headers,
+  body?: unknown,
 ): void {
-  const metadata = parseRequestMetadata(headers);
+  const metadata = parseRequestMetadata(headers, body);
   if (metadata === undefined) return;
   for (const result of results) {
     result.request = { ...metadata };
@@ -578,13 +637,16 @@ export class SIEClient {
       upload: (file, options) => this.fileUpload(file, options),
       create: (options) => this.fileUpload(options.file, options),
       retrieve: (fileId) => this.fileRetrieve(fileId),
+      list: (options) => this.fileList(options),
+      listPage: (options) => this.fileListPage(options),
       content: (fileId) => this.fileContent(fileId),
       delete: (fileId) => this.fileDelete(fileId),
     };
     this.batches = {
       create: (options) => this.batchCreate(options),
       retrieve: (batchId) => this.batchRetrieve(batchId),
-      list: () => this.batchList(),
+      list: (options) => this.batchList(options),
+      listPage: (options) => this.batchListPage(options),
       cancel: (batchId) => this.batchCancel(batchId),
     };
   }
@@ -676,7 +738,7 @@ export class SIEClient {
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseEncodeResults(data.items);
-    attachRequestMetadata(results, response.headers);
+    attachRequestMetadata(results, response.headers, data);
 
     if (isSingleItem) {
       const first = results[0];
@@ -686,6 +748,57 @@ export class SIEClient {
       return first;
     }
     return results;
+  }
+
+  /**
+   * Price a request WITHOUT running it (`POST /v1/estimate`).
+   *
+   * The gateway plans the request through the same reservation planner the
+   * metered path runs, against the same active rate book, and returns the plan
+   * instead of holding it: no dispatch, no reservation, no credits consumed.
+   * The quote is the CONSERVATIVE ceiling the live path would hold —
+   * settlement bills the authoritative counts against that plan and releases
+   * the rest, so the real charge is at most `estimated_credits`.
+   *
+   * @param endpoint - The exact target path, e.g. `"/v1/encode/BAAI/bge-m3"`
+   *   (native, model in the path) or `"/v1/chat/completions"`
+   *   (OpenAI-compatible, model in `request.model`).
+   * @param request - The verbatim body you would send to `endpoint`. Passed
+   *   through untouched — a body the SDK reshaped would be a quote for a
+   *   request you never send.
+   * @param options.timeout - Per-call timeout override in milliseconds.
+   * @returns The planned units, applied rates, credits, and the active rate
+   *   book's version + digest.
+   * @throws {EstimateUnroutableError} If the active book cannot price the
+   *   request. Same verdict the real request would get; the message names the
+   *   unpriced identity or the dimension the planner could not bound.
+   * @throws {RequestError} If the target body is invalid, with the same
+   *   status/code the target route itself would return. In particular a
+   *   `404 MODEL_NOT_FOUND` means this data plane does not serve the model at
+   *   all — the estimate checks routability, not just priceability, so it never
+   *   quotes a request that would 404.
+   *
+   * @example
+   * ```typescript
+   * const quote = await client.estimate("/v1/encode/BAAI/bge-m3", {
+   *   items: [{ text: "Hello" }],
+   * });
+   * console.log(quote.estimated_credits, quote.rate_book_version);
+   * ```
+   */
+  async estimate(
+    endpoint: string,
+    request: Record<string, unknown>,
+    options: { timeout?: number } = {},
+  ): Promise<CostEstimate> {
+    const body = buildEstimateEnvelope(endpoint, request);
+    return this.jsonRequest<CostEstimate>(
+      ESTIMATE_PATH,
+      "POST",
+      body,
+      options.timeout ?? this.timeout,
+      throwIfEstimateUnroutable,
+    );
   }
 
   /**
@@ -921,7 +1034,7 @@ export class SIEClient {
       throw new RequestError("Unexpected generate response shape");
     }
     const result = parseGenerateResult(data);
-    attachRequestMetadata([result], response.headers);
+    attachRequestMetadata([result], response.headers, data);
     return result;
   }
 
@@ -1047,7 +1160,7 @@ export class SIEClient {
     if (data === null || typeof data !== "object") {
       throw new RequestError("Unexpected chat.completion response shape");
     }
-    attachRequestMetadata([data], response.headers);
+    attachRequestMetadata([data], response.headers, data);
     return data;
   }
 
@@ -1449,7 +1562,7 @@ export class SIEClient {
     const data = unpackMessage<unknown>(new Uint8Array(await response.arrayBuffer()));
 
     const result = parseScoreResult(data);
-    attachRequestMetadata([result], response.headers);
+    attachRequestMetadata([result], response.headers, data);
     return result;
   }
 
@@ -1542,7 +1655,7 @@ export class SIEClient {
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseExtractResults(data.items);
-    attachRequestMetadata(results, response.headers);
+    attachRequestMetadata(results, response.headers, data);
 
     if (isSingleItem) {
       const first = results[0];
@@ -2305,12 +2418,20 @@ export class SIEClient {
   // (`/v1/jobs`); connections ride the control plane (`/internal/orgs/{org}/…`).
   // ---------------------------------------------------------------------------
 
-  /** One JSON request over `fetch` (bearer auth reused; absolute or base-relative URL). */
+  /**
+   * One JSON request over `fetch` (bearer auth reused; absolute or
+   * base-relative URL).
+   *
+   * `onError` runs BEFORE the generic {@link handleError} dispatch, so a route
+   * with its own typed failure taxonomy (the #2435 cost estimate's unroutable
+   * verdict) can short-circuit without a second copy of this request path.
+   */
   private async jsonRequest<T>(
     target: string,
     method: "GET" | "POST" | "DELETE",
     body?: unknown,
     timeoutMs: number = this.timeout,
+    onError?: (response: Response) => Promise<void>,
   ): Promise<T> {
     const url = target.startsWith("http") ? target : `${this.baseUrl}${target}`;
     const headers: Record<string, string> = {
@@ -2330,6 +2451,7 @@ export class SIEClient {
     try {
       const response = await fetch(url, init);
       if (!response.ok) {
+        if (onError) await onError(response);
         await handleError(response);
       }
       this.checkServerVersion(response);
@@ -2594,6 +2716,38 @@ export class SIEClient {
     return this.jsonRequest<SIEFile>(`/v1/files/${encodeURIComponent(fileId)}`, "GET");
   }
 
+  private async fileList(options?: {
+    after?: string;
+    limit?: number;
+    order?: "asc" | "desc";
+    purpose?: string;
+  }): Promise<SIEFile[]> {
+    return (await this.fileListPage(options)).data ?? [];
+  }
+
+  private async fileListPage(options?: {
+    after?: string;
+    limit?: number;
+    order?: "asc" | "desc";
+    purpose?: string;
+  }): Promise<FileList> {
+    const query = new URLSearchParams();
+    if (options?.after !== undefined) query.set("after", options.after);
+    if (options?.limit !== undefined) query.set("limit", String(options.limit));
+    if (options?.order !== undefined) query.set("order", options.order);
+    if (options?.purpose !== undefined) query.set("purpose", options.purpose);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    const data = await this.jsonRequest<FileList | SIEFile[]>(`/v1/files${suffix}`, "GET");
+    if (!Array.isArray(data)) return data;
+    return {
+      object: "list",
+      data,
+      first_id: data[0]?.id ?? null,
+      last_id: data.at(-1)?.id ?? null,
+      has_more: false,
+    };
+  }
+
   private async fileContent(fileId: string): Promise<Uint8Array> {
     return this.rawGetBytes(`/v1/files/${encodeURIComponent(fileId)}/content`);
   }
@@ -2628,9 +2782,30 @@ export class SIEClient {
     return this.jsonRequest<Batch>(`/v1/batches/${encodeURIComponent(batchId)}`, "GET");
   }
 
-  private async batchList(): Promise<Batch[]> {
-    const data = await this.jsonRequest<{ object?: string; data?: Batch[] }>("/v1/batches", "GET");
-    return Array.isArray(data) ? data : (data.data ?? []);
+  private async batchList(options?: {
+    after?: string;
+    limit?: number;
+  }): Promise<Batch[]> {
+    return (await this.batchListPage(options)).data ?? [];
+  }
+
+  private async batchListPage(options?: {
+    after?: string;
+    limit?: number;
+  }): Promise<BatchList> {
+    const query = new URLSearchParams();
+    if (options?.after !== undefined) query.set("after", options.after);
+    if (options?.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    const data = await this.jsonRequest<BatchList | Batch[]>(`/v1/batches${suffix}`, "GET");
+    if (!Array.isArray(data)) return data;
+    return {
+      object: "list",
+      data,
+      first_id: data[0]?.id ?? null,
+      last_id: data.at(-1)?.id ?? null,
+      has_more: false,
+    };
   }
 
   private async batchCancel(batchId: string): Promise<Batch> {

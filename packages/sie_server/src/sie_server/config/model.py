@@ -197,8 +197,11 @@ class GenerateTask(BaseModel):
     requests (OpenAI ``response_format`` / SIE-native ``grammar``) must run on.
     When set, the gateway rewrites such a request's model id to the
     ``{sie_id}:{grammar_profile}`` variant so it is served by that profile,
-    while unconstrained requests keep the request's resolved profile. This
-    exists because some throughput optimisations are incompatible with
+    while unconstrained requests keep the request's resolved profile. A
+    directly inheriting explicit variant may remain selected only when its
+    resolved adapter/backend and launch settings preserve the gateway's
+    grammar-safe contract; incompatible descendants still rewrite. This exists
+    because some throughput optimisations are incompatible with
     decode-time grammar enforcement — notably NEXTN/MTP speculative decoding
     bypasses SGLang's Outlines FSM (leaks out-of-schema keys, truncates
     mid-JSON), so a model whose default profile is speculative points

@@ -392,13 +392,30 @@ async def encode(
         response = EncodeResponse(model=model, items=response_items, timing=timing_info)
 
         if worker_telemetry_enabled():
-            units = None
+            units: dict[str, int] | None = None
             if timing is not None and timing.input_token_counts is not None:
                 counts = timing.input_token_counts
                 if len(counts) == len(items) and all(
                     isinstance(count, int) and not isinstance(count, bool) for count in counts
                 ):
-                    units = {"input_tokens": sum(counts)}
+                    # Non-zero, exactly like the image branch below. A
+                    # video-only encode scatters `0` text tokens to its items,
+                    # and a reported zero is indistinguishable from "this
+                    # dimension does not apply to this item" — which is why the
+                    # queue seam's `_encode_units` drops it and the gateway's
+                    # `validate_dimensions` faults on one outright. Emitting it
+                    # here made the two ingresses report different dimension
+                    # sets for the same batch.
+                    total_tokens = sum(counts)
+                    if total_tokens > 0:
+                        units = {"input_tokens": total_tokens}
+            # §7 "$ per image": the adapter's authoritative count of images and
+            # sampled video frames it actually processed. Independent of tokens
+            # — a video encode reports images with no token count at all.
+            if timing is not None and timing.input_image_counts is not None:
+                images = sum(timing.input_image_counts)
+                if images > 0:
+                    units = {**(units or {}), "images": images}
             worker_telemetry().item_completed(
                 operation="encode",
                 outcome="success",

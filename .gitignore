@@ -256,6 +256,19 @@ override.tf.json
 # VPC/listener through an operator-local tfvars file.
 !deploy/cloud/terraform/dev-controlplane-https-adoption/dev-us.tfvars
 !deploy/cloud/terraform/dev-controlplane-https-adoption/.terraform.lock.hcl
+# Managed release roots commit their exact provider selections. Release
+# preflights and applies use these read-only instead of selecting a newer
+# compatible provider during a long-running deployment.
+!deploy/cloud/terraform/release-infrastructure/.terraform.lock.hcl
+!deploy/cloud/terraform/aws-controlplane/.terraform.lock.hcl
+!deploy/cloud/terraform/aws-edge/.terraform.lock.hcl
+!deploy/cloud/terraform/s3-state/.terraform.lock.hcl
+!deploy/cloud/terraform/vercel/.terraform.lock.hcl
+!deploy/cloud/terraform/examples/dev/.terraform.lock.hcl
+!deploy/cloud/terraform/examples/dev-eu/.terraform.lock.hcl
+!deploy/cloud/terraform/examples/staging/.terraform.lock.hcl
+!deploy/cloud/terraform/examples/staging-eu/.terraform.lock.hcl
+!deploy/cloud/terraform/examples/prod-us/.terraform.lock.hcl
 # Keep .terraform.lock.hcl for reproducibility (provider versions)
 
 # Node.js
@@ -281,6 +294,7 @@ tmp/
 .local/
 
 .requirements-modal.txt
+.mpa-i6pn-*-requirements-modal.txt
 b6_results.json
 # Raw dev-cloud load-test reports are local artifacts, not source-controlled baselines.
 packages/sie_cloud/bench/results/dev-us-*/
