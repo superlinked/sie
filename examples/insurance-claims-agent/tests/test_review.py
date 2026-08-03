@@ -93,6 +93,7 @@ def test_evaluation_accepts_published_appeal_result() -> None:
             {"category": "excluded_transport"},
             {"category": "price_support"},
             {"category": "prior_claim_overlap"},
+            # Synthetic schema-valid category used only to test evaluator tolerance.
             {"category": "other"},
         ],
     }
