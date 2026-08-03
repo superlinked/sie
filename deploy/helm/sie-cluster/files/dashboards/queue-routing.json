@@ -1515,6 +1515,47 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 101
+      },
+      "id": 114,
+      "type": "timeseries",
+      "title": "Sealed cold-start subsidy seconds by GPU class",
+      "description": "GPU time spent WAKING scaled-to-zero sealed models (fetch + seal + model load). A cold start is free to the customer by design, so this is the platform-subsidised share of sealed GPU time - the signal to watch when tuning SIE_SEALED_MAX_COLD_STARTS_PER_ACCOUNT_HOUR. Broken out by GPU class because that is what converts seconds into dollars. Neither neighbour answers this: sealed staging duration is a latency histogram with no summable total, and sealed sole-tenant GPU seconds covers the whole residency without separating the wake from the serving.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (gpu_class) (rate(sie_dispatcher_sealed_cold_start_seconds_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\"}[$rate_window]))",
+          "legendFormat": "{{gpu_class}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "10s",

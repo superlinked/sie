@@ -31,19 +31,19 @@ profiles:
         normalize: true
         query_max_length: 32
         skip_special_tokens: false
-        query_prefix: '[unused0] '
-        doc_prefix: '[unused1] '
+        query_prefix: '[unused0]'
+        doc_prefix: '[unused1]'
         doc_punctuation_skiplist: true
       runtime:
         query_max_length: 32
-        max_seq_length: 180
+        max_seq_length: 300
         muvera: null
   muvera:
     extends: default
     adapter_options:
       runtime:
         query_max_length: 32
-        max_seq_length: 180
+        max_seq_length: 300
         muvera: {}
         output_types:
         - dense

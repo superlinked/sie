@@ -1,5 +1,124 @@
 # Changelog
 
+## v0.6.26
+
+- chore(release): refresh locks and generated sources
+- chore(main): release 0.6.26
+- fix(cloud): keep prod generation warm and scope spans
+- test(sdk): pin one-shot provisioning
+- fix(cloud): make generation smoke single shot
+- refactor(workspace): split public and private Python projects
+- fix(gateway): preserve grammar-safe FP8 profiles
+- feat(model-catalog): add H100 FP8 generation profiles
+- feat(quality-eval): governed first-baseline mode for official_recipe
+
+## v0.6.25
+
+- chore(main): release 0.6.25
+- docs(gateway): regenerate embeddings OpenAPI
+- fix(server): bill SigLIP padded text work
+- fix(gateway): cap embeddings requests at 256 inputs
+- fix(cloud): close metering GA review findings
+- fix(cloud): scope authoritative zero evidence
+- fix(cloud): close final metering review faults
+- test(cloud): lock the wrapper's other forwards and the refuse-before-seal order (#2542)
+- fix(cloud): make the witnessed zero reach the wire and cover both rails (#2538)
+- feat(telemetry): export the sealed cold-start metric remotely and chart it
+- fix(cloud): make the response cap operative, unbilled, and honest (#2617)
+- fix(cloud): bound the sealed resolver cache and cap proxy response bodies (#2617)
+- fix(cloud): close the CodeRabbit round on the integration head
+- fix(cloud): observe the sealed cold-start metric; scope it to the prometheus path
+- docs(cloud): flag the sealed rate correction at activation; close telemetry contract
+- fix(cloud): address the CodeRabbit round on the metering GA integration
+- docs(design): state the fail-closed rule for a missing video frame count
+- fix(cloud): treat an explicitly null video as absent, not as a video
+- docs(design): state when a video rejection actually precedes the hold
+- fix(cloud): address the second CodeRabbit round on /v1/estimate (#2435)
+- fix(cloud): close the second CodeRabbit round on the credit surfaces (#2434)
+- fix(server): bound isolation fan-out and close the NaN decode escapes
+- fix(cloud): claim the hold before releasing it, and fold case like the registry
+- feat(models): onboard Qwen/Qwen3-Embedding-8B (scaffolded)
+- fix(cloud): address CodeRabbit review on the /v1/estimate dry run (#2435)
+- fix(server): address CodeRabbit review on the video meter
+- fix(cloud): address CodeRabbit review on the settled-charge surfaces (#2434)
+- fix(cloud): route expected no-charge stream releases off the fault alerts
+- fix(cloud): close the gate findings on the resolution-seam verdict (#2542)
+- style(server): ruff formatting for the #2538 test block
+- fix(cloud): admit an image-witnessed authoritative zero at settlement (#2538)
+- docs(design): record the §6.5 verdict at the resolution seam (#2542)
+- test(cloud): lock the alias + serving-selector bypasses at the resolution seam (#2542)
+- test(cloud): cover authoritative-zero settlement across the claim boundary (#2538)
+- docs(sdk): note the routability 404 on estimate() in both SDKs (#2435)
+- fix(cloud): close six gate findings on the /v1/estimate dry run (#2435)
+- feat(cloud): move the license exclusion verdict to the registry resolution seam (#2542)
+- feat(cloud): carry an authoritative-dimension claim set on UnitCounts (#2538)
+- feat(sdk): estimate() on both SDKs for the /v1/estimate dry run (#2435)
+- test(cloud): parity, zero-side-effect, fail-closed and abuse tests for /v1/estimate (#2435)
+- fix(catalog): bound GLiNER sequence lengths
+- feat(cloud): POST /v1/estimate dry-run cost endpoint (#2435)
+- fix(cloud): publish a committed charge even when settlement then faults (#2434)
+- fix(cloud): bind the charge-slot backstop to the stream, not the disconnect grace (#2434)
+- fix(gateway): preserve self-host grammar routing
+- fix(gateway): harden governed generation dispatch
+- feat(cloud): unify the settled-charge name across jobs, batches, and SDKs (#2434)
+- feat(gateway): add optional governed generation routing seam
+- test(cloud): pin the realtime and stream credit surfaces (#2434)
+- feat(cloud): carry the settled charge into realtime usage blocks (#2434)
+- fix(cloud): release the hold when the gateway cannot deliver the result
+- fix(cloud): parse the multipart model under the route's real body limit
+- feat(cloud): unfence OpenAI-compat /v1/audio/transcriptions (#2430)
+- feat(gateway): carry output_tokens on the per-item result-units path
+- test(server): pin the batched-path, sampling and isolation invariants
+- fix(cloud): close three adversarial-review findings on metered streaming
+- fix(server): survive the batched encode path and bound video decode
+- feat(cloud): response-final settlement for streaming generation
+- feat(server): bill sampled video frames as images
+- fix(cloud): cold-start rail review fixes — refunds, honest ceiling, quiet 429
+- fix(gateway): surface the cold-start quota refusal as 429
+- chore(cloud): address combined review feedback
+- fix(generation): reconcile profile minimum with request maximum
+- feat(sdk): add files and batches cursor lifecycle
+- fix(gateway): make first-chunk republish capability explicit
+- feat(cloud): gpu_second sealed billing regime (wip: CP class endpoint pending)
+
+## v0.6.24
+
+- chore(main): release 0.6.24
+- test(config): document tokenizer dependency coverage
+- fix(models): declare tokenizer dependencies
+- fix(quality): stabilize scoped PR quality runs
+- perf(server): cache MUVERA projection state
+- feat(server): pinnable LoRA adapter revisions in lora_paths (#2113)
+- fix(quality): restore Mixedbread query expansion
+- fix(models): restore AnswerAI 512-token document length
+- fix(telemetry): enforce the parity guards in CI; sweep the sie_config redaction twin; char-safe mask_token (#2339)
+- chore(rust): scope the workspace to the public crates; managed gateway keeps its own lock (#2339)
+- chore(docker): build the audio-prep wheel stage at the workspace root (#2339)
+- refactor(telemetry): extract shared sie-telemetry crate; migrate gateway, sidecar, worker (#2339)
+- ci(workspace): repoint lock regeneration, caches, coverage, bake and release paths at the root lock/target (#2339)
+- chore(docker): build gateway + sidecar images at the workspace root (#2339)
+- chore(deny): one cargo-deny sweep over the workspace (#2339)
+- chore(rust): introduce a Cargo workspace over gateway, cloud gateway, sidecar, audio-prep (#2339)
+- refactor(sdk): shared redaction helpers; drop the api_key log-field footgun (#2339)
+- refactor(gateway): single-source bearer parsing, token masking, probe paths (#2339)
+- fix(quality): close post-review concurrency gaps
+- test(quality): lock governed MUVERA similarities
+- fix(adapter): prefer emitted NeMo token width
+- fix(quality): restore GTE MUVERA similarity
+- fix(quality): align NeMo ColEmbed token width
+- fix(quality): restore ColBERTv2 document window
+- fix(quality): restore governed ColBERT recipes
+- fix(quality): align ColBERT recipes with checkpoints
+- fix(server): harden ColBERT-family inference
+- fix(quality): use trained ColBERT markers
+- fix(server): enforce profile output capabilities
+- fix(quality): address review and adapter regressions
+- fix(quality): make nightly eval failures actionable
+- fix(vision): restore Marqo retrieval quality
+- fix(retrieval): restore faithful ColBERT recipes
+- fix(serving): enforce profile-aware encode outputs
+- fix(quality): close standing nightly model gaps
+
 ## v0.6.23
 
 - chore(main): release 0.6.23

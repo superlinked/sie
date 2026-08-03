@@ -1,7 +1,8 @@
 [package]
 name = "sie-server-sidecar"
-version = "0.6.23"
+version = "0.6.26"
 edition = "2021"
+publish = false
 description = "SIE worker sidecar: NATS JetStream consumer, scheduler, IPC client, and GPU-independent prep for sie-server pods."
 
 [lib]
@@ -14,6 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 sie-audio-prep = { path = "../sie_audio_prep", version = "0.6.20", features = ["msgpack"] }
+# Shared OTLP transport/proxy/resource/propagation plumbing (#2339).
+sie-telemetry = { path = "../sie_telemetry" }
 tokio = { version = "1", features = ["full"] }
 async-nats = "0.49"
 futures-util = "0.3"

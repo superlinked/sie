@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import logging
-import string
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from torch.nn import functional
 
 from sie_server.adapters._colbert_projection import load_standalone_colbert_projection
+from sie_server.adapters._colbert_utils import punctuation_token_ids
 from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
-from sie_server.adapters._utils import apply_rotary_pos_emb, grouped_score_pairs, validate_output_types
+from sie_server.adapters._utils import (
+    apply_rotary_pos_emb,
+    grouped_score_pairs,
+    validate_output_types,
+)
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.core.inference_output import EncodeOutput, ScoreOutput
 from sie_server.types.inputs import Item
@@ -42,6 +46,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """
 
     fallback_adapter_path: ClassVar[str | None] = "colbert:ColBERTAdapter"
+    fallback_kwargs_overrides: ClassVar[dict[str, Any]] = {"require_standalone_projection": True}
 
     spec = AdapterSpec(
         inputs=("text",),
@@ -172,10 +177,7 @@ class ColBERTRotaryFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             logger.info("Doc prefix '%s' resolved to token ID %d", self._doc_prefix.strip(), self._doc_prefix_id)
 
         if self._doc_punctuation_skiplist:
-            skiplist_ids: set[int] = set()
-            for character in string.punctuation:
-                skiplist_ids.update(self._tokenizer.encode(character, add_special_tokens=False))
-            self._doc_skiplist_ids = skiplist_ids
+            self._doc_skiplist_ids = punctuation_token_ids(self._tokenizer)
 
         # Load model with eager attention - we handle flash attention manually
         self._model = AutoModel.from_pretrained(

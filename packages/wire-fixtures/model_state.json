@@ -1,0 +1,3 @@
+{
+  "model_states": ["available", "loading", "loaded", "unloading", "failed"]
+}

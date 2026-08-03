@@ -80,4 +80,53 @@ describe("client.batches", () => {
     expect(batches.map((b) => b.id)).toEqual(["batch-1", "batch-2"]);
     expect(mockFetch.mock.calls[0][0]).toBe("http://gw:8080/v1/batches");
   });
+
+  it("list encodes cursor arguments and preserves the array return", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        object: "list",
+        data: [{ id: "batch-2" }],
+        first_id: "batch-2",
+        last_id: "batch-2",
+        has_more: false,
+      }),
+    );
+    const client = new SIEClient(GW);
+    const batches = await client.batches.list({
+      after: 'batch/"a b"&limit=1',
+      limit: 9,
+    });
+    expect(batches.map((batch) => batch.id)).toEqual(["batch-2"]);
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      "http://gw:8080/v1/batches?after=batch%2F%22a+b%22%26limit%3D1&limit=9",
+    );
+  });
+
+  it("listPage exposes cursor metadata", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        object: "list",
+        data: [{ id: "batch-1" }, { id: "batch-2" }],
+        first_id: "batch-1",
+        last_id: "batch-2",
+        has_more: true,
+      }),
+    );
+    const client = new SIEClient(GW);
+    const page = await client.batches.listPage();
+    expect(page.data?.map((batch) => batch.id)).toEqual(["batch-1", "batch-2"]);
+    expect(page.first_id).toBe("batch-1");
+    expect(page.last_id).toBe("batch-2");
+    expect(page.has_more).toBe(true);
+  });
+
+  it("listPage normalizes an empty legacy bare array", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse([]));
+    const client = new SIEClient(GW);
+    const page = await client.batches.listPage();
+    expect(page.data).toEqual([]);
+    expect(page.first_id).toBeNull();
+    expect(page.last_id).toBeNull();
+    expect(page.has_more).toBe(false);
+  });
 });

@@ -11,7 +11,7 @@ GPU-gated: skips in CI (no CUDA / no flash-attn / model not cached). Run on a
 CUDA box with the model cached locally:
 
     SIE_SPLADE_PARITY_MODEL=ibm-granite/granite-embedding-30m-sparse \
-      mise exec -- uv run pytest \
+      mise exec -- uv run --frozen --project . --no-sync pytest -c pyproject.toml \
       packages/sie_server/tests/adapters/test_splade_packed_parity.py -v -s
 """
 

@@ -341,6 +341,53 @@ class TestSyncGenerate:
             assert client.last_retry_count == 0
             client.close()
 
+    def test_generate_wait_for_capacity_false_does_not_retry_model_loading(self) -> None:
+        with (
+            patch("sie_sdk.client.sync.httpx.Client") as mock_client,
+            patch("sie_sdk.client.sync.time.sleep") as mock_sleep,
+        ):
+            mock_client.return_value.post.side_effect = [
+                _resp_503_model_loading(),
+                _ok_response(_ok_envelope()),
+            ]
+            client = SIEClient("http://localhost:8080")
+            with pytest.raises(ServerError, match="loading") as excinfo:
+                client.generate(
+                    "m",
+                    prompt="hi",
+                    max_new_tokens=8,
+                    wait_for_capacity=False,
+                    provision_timeout_s=10,
+                )
+            assert excinfo.value.code == "MODEL_LOADING"
+            assert mock_client.return_value.post.call_count == 1
+            assert client.last_retry_count == 0
+            mock_sleep.assert_not_called()
+            client.close()
+
+    def test_generate_wait_for_capacity_false_does_not_retry_provisioning(self) -> None:
+        with (
+            patch("sie_sdk.client.sync.httpx.Client") as mock_client,
+            patch("sie_sdk.client.sync.time.sleep") as mock_sleep,
+        ):
+            mock_client.return_value.post.side_effect = [
+                _resp_503_provisioning(),
+                _ok_response(_ok_envelope()),
+            ]
+            client = SIEClient("http://localhost:8080")
+            with pytest.raises(ProvisioningError, match="No capacity available"):
+                client.generate(
+                    "m",
+                    prompt="hi",
+                    max_new_tokens=8,
+                    wait_for_capacity=False,
+                    provision_timeout_s=10,
+                )
+            assert mock_client.return_value.post.call_count == 1
+            assert client.last_retry_count == 0
+            mock_sleep.assert_not_called()
+            client.close()
+
     def test_generate_non_dict_response_raises_request_error(self) -> None:
         response = MagicMock()
         response.status_code = 200
@@ -705,6 +752,37 @@ class TestAsyncGenerate:
         assert result["text"] == "ok"
         assert result["request"] == {"id": "async-retry-terminal", "credits_debited": 3}
         assert client._post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_generate_wait_for_capacity_false_does_not_retry_model_loading(self) -> None:
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                _aio_resp(
+                    503,
+                    {"error": {"code": "MODEL_LOADING", "message": "loading"}},
+                    {"X-SIE-Error-Code": "MODEL_LOADING"},
+                ),
+                _aio_resp(200, _ok_envelope()),
+            ]
+        )
+        with patch.object(client, "_ensure_session") as ensure:
+            ensure.return_value.post = _make_session_post(client._post)
+            with patch("sie_sdk.client.async_.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                try:
+                    with pytest.raises(ServerError, match="loading") as excinfo:
+                        await client.generate(
+                            "m",
+                            prompt="hi",
+                            max_new_tokens=8,
+                            wait_for_capacity=False,
+                            provision_timeout_s=10,
+                        )
+                finally:
+                    await client.close()
+        assert excinfo.value.code == "MODEL_LOADING"
+        assert client._post.call_count == 1
+        mock_sleep.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_generate_does_not_retry_mid_flight_transport_error(self) -> None:

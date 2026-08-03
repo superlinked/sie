@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import msgpack
@@ -10,6 +11,7 @@ import numpy as np
 import pytest
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.inference_output import ExtractOutput, ScoreOutput
+from sie_server.core.loader import expand_profile_variants, load_model_config
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.types import WorkerResult
@@ -22,6 +24,12 @@ from sie_server.ipc_types import (
     ScoreBatchItem,
 )
 from sie_server.queue_executor import QueueExecutor, _validate_prepared_audio
+
+_MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
+
+
+def _load_profile_variant(model_file: str, route: str) -> ModelConfig:
+    return expand_profile_variants([load_model_config(_MODELS_DIR / model_file)])[route]
 
 
 def test_prepared_audio_rejects_zero_source_sample_rate() -> None:
@@ -698,6 +706,126 @@ class TestProcessEncodeBatch:
         assert outcome.outcomes[0].raw_output is not None
         assert outcome.outcomes[0].raw_output.sparse is not None
 
+    @pytest.mark.parametrize(
+        ("model_file", "route"),
+        [
+            (
+                "nvidia__llama-nemoretriever-colembed-3b-v1.yaml",
+                "nvidia/llama-nemoretriever-colembed-3b-v1:muvera",
+            ),
+            ("nvidia__nemotron-colembed-vl-4b-v2.yaml", "nvidia/nemotron-colembed-vl-4b-v2:muvera"),
+            ("vidore__colpali-v1.3-hf.yaml", "vidore/colpali-v1.3-hf:muvera"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_multimodal_muvera_route_translates_managed_adapter_output(
+        self,
+        model_file: str,
+        route: str,
+    ) -> None:
+        """Canonical multimodal routes authorize dense while adapters emit multivectors."""
+        config = _load_profile_variant(model_file, route)
+        assert config.inputs.image is True
+        assert config.synthetic_profile_variant_source is not None
+        reg = _make_registry()
+        reg.get_config.return_value = config
+        ex = QueueExecutor(reg)
+
+        with patch(
+            "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+            new_callable=AsyncMock,
+            return_value=([{"dense": [0.1, 0.2]}], RequestTiming()),
+        ) as mock_encode:
+            outcome = await ex.process_encode_batch(ProcessEncodeBatchRequest(model_id=route, items=[_encode_item()]))
+
+        call = mock_encode.await_args.kwargs
+        assert call["model"] == route
+        assert call["output_types"] == ["multivector"]
+        assert call["response_output_types"] == ["dense"]
+        assert outcome.outcomes[0].disposition == "publish_and_ack"
+        assert outcome.outcomes[0].result_msgpack is not None
+        assert msgpack.unpackb(outcome.outcomes[0].result_msgpack, raw=False) == {"dense": [0.1, 0.2]}
+
+    @pytest.mark.asyncio
+    async def test_request_options_cannot_self_authorize_managed_output(self) -> None:
+        """Caller options cannot expand the managed route's output allowlist."""
+        config = ModelConfig(
+            sie_id="test/colbert",
+            hf_id="test/colbert",
+            tasks=Tasks(encode=EncodeTask(multivector=EmbeddingDim(dim=8))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="sie_server.adapters.colbert:ColBERTAdapter",
+                    max_batch_tokens=8192,
+                )
+            },
+        )
+        reg = _make_registry()
+        reg.get_config.return_value = config
+        ex = QueueExecutor(reg)
+
+        outcome = await ex.process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/colbert",
+                items=[_encode_item(options={"muvera": {}, "output_types": ["dense"]})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+        assert "dense" in (outcome.outcomes[0].error or "")
+
+    @pytest.mark.parametrize("output_types", ["dense", [], [{}], ["score"], [1]])
+    @pytest.mark.asyncio
+    async def test_managed_output_types_reject_malformed_values(self, output_types: object) -> None:
+        outcome = await QueueExecutor(_make_registry()).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(options={"output_types": output_types})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+
+    @pytest.mark.parametrize("output_types", [[], ["score"]])
+    @pytest.mark.asyncio
+    async def test_managed_top_level_output_types_fail_closed(self, output_types: list[str]) -> None:
+        outcome = await QueueExecutor(_make_registry()).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(output_types=output_types)],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+
+    @pytest.mark.parametrize("profile", ["", " ", [], {}, 0, False, ["default"], {"name": "default"}])
+    @pytest.mark.asyncio
+    async def test_managed_profile_selector_rejects_malformed_values(self, profile: object) -> None:
+        outcome = await QueueExecutor(_make_registry()).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(options={"profile": profile})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+
+    @pytest.mark.asyncio
+    async def test_managed_unknown_profile_is_invalid_input(self) -> None:
+        outcome = await QueueExecutor(_make_registry()).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(options={"profile": "missing"})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+
     @pytest.mark.asyncio
     async def test_muvera_profile_translates_managed_adapter_output(self) -> None:
         """Managed queue requests must use the same MuVERA contract as HTTP."""
@@ -996,6 +1124,7 @@ class TestProcessScoreBatch:
         by_id = {item.work_item_id: item for item in outcome.outcomes}
         assert by_id["good.0"].disposition == "publish_and_ack"
         assert by_id["bad.0"].disposition == "publish_error_and_ack"
+        assert by_id["bad.0"].error_code == "INVALID_INPUT"
         worker.submit_score_preformed_batch.assert_awaited_once()
         requests = worker.submit_score_preformed_batch.await_args.args[0]
         assert len(requests) == 1
@@ -1224,6 +1353,7 @@ class TestProcessExtractBatch:
         assert by_id["profile.0"].disposition == "publish_and_ack"
         assert by_id["override.0"].disposition == "publish_and_ack"
         assert by_id["invalid.0"].disposition == "publish_error_and_ack"
+        assert by_id["invalid.0"].error_code == "INVALID_INPUT"
 
         assert len(calls) == 2
         by_lora = dict(calls)

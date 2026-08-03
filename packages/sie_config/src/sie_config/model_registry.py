@@ -140,6 +140,80 @@ def _validate_profile_name(profile_name: str) -> None:
         raise ValueError(msg)
 
 
+# Mirror of sie_server's immutable-revision rule (config/model.py, #2113). The
+# config service validates raw dicts before they ever reach a server's pydantic
+# schema, and the two packages deliberately do not import each other's schema
+# modules — the server's rule is the authority; this copy is the early refusal.
+_IMMUTABLE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _validate_profile_lora_pins(profiles: dict) -> None:
+    """Mirror sie_server's pinned-LoRA spelling rules (#2113) on raw dicts.
+
+    The dict form of ``adapter_options.loadtime.lora_paths`` may pin a ref as
+    ``{id, revision}`` where ``revision`` is a 40-hex commit SHA; the list form
+    and the legacy scalar ``runtime.lora_id`` are bare-only. Across profiles one
+    LoRA id maps to one revision (pin beats bare; two different pins conflict).
+    """
+    pinned: dict[str, str] = {}
+    for profile_name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        options = profile.get("adapter_options")
+        if not isinstance(options, dict):
+            continue
+        loadtime = options.get("loadtime")
+        if not isinstance(loadtime, dict):
+            continue
+        paths = loadtime.get("lora_paths")
+        if isinstance(paths, dict):
+            for served, value in paths.items():
+                if not isinstance(value, dict):
+                    continue
+                unknown = set(value) - {"id", "revision"}
+                if unknown:
+                    msg = (
+                        f"Profile '{profile_name}' loadtime.lora_paths[{served!r}] has unknown key(s) "
+                        f"{sorted(unknown)!r}; a pinned LoRA ref is exactly "
+                        "{id: <hf repo>, revision: <40-hex commit SHA>}"
+                    )
+                    raise ValueError(msg)
+                ref_id = value.get("id")
+                if not isinstance(ref_id, str) or not ref_id:
+                    msg = (
+                        f"Profile '{profile_name}' loadtime.lora_paths[{served!r}] must set 'id' to a "
+                        f"non-empty repo id string, got {ref_id!r}"
+                    )
+                    raise ValueError(msg)
+                revision = value.get("revision")
+                if revision is None:
+                    continue
+                if not isinstance(revision, str) or not _IMMUTABLE_REVISION_RE.match(revision):
+                    msg = (
+                        f"Profile '{profile_name}' loadtime.lora_paths[{served!r}] pins revision="
+                        f"{revision!r}, which is not an immutable 40-char commit SHA — branch/tag "
+                        "names drift on the Hub. Pin the resolved commit SHA or omit 'revision'."
+                    )
+                    raise ValueError(msg)
+                if pinned.get(ref_id, revision) != revision:
+                    msg = (
+                        f"LoRA '{ref_id}' is pinned to two different revisions across profiles "
+                        f"({pinned[ref_id]} vs {revision}, latest in profile '{profile_name}'). "
+                        "One id maps to one adapter; pin a single SHA."
+                    )
+                    raise ValueError(msg)
+                pinned[ref_id] = revision
+        elif isinstance(paths, (list, tuple)):
+            for value in paths:
+                if isinstance(value, dict):
+                    msg = (
+                        f"Profile '{profile_name}' loadtime.lora_paths list entries must be bare id "
+                        "strings; the pinned {id, revision} spelling is only valid in the "
+                        "served-name -> ref dict form"
+                    )
+                    raise ValueError(msg)
+
+
 def _effective_adapter_path(profiles: dict, profile_name: str) -> str | None:
     """Return the adapter path for a profile, following ``extends`` if needed."""
     current: str | None = profile_name
@@ -961,6 +1035,8 @@ class ModelRegistry:
             msg = "Field 'profiles' must be a mapping of profile_name -> profile_config"
             raise ValueError(msg)
 
+        _validate_profile_lora_pins(profiles)
+
         for profile_name, profile in profiles.items():
             _validate_profile_name(str(profile_name))
             if not isinstance(profile, dict):
@@ -1257,6 +1333,8 @@ class ModelRegistry:
         if not isinstance(profiles, dict):
             msg = "Field 'profiles' must be a mapping of profile_name -> profile_config"
             raise ValueError(msg)
+
+        _validate_profile_lora_pins(profiles)
 
         for profile_name, profile in profiles.items():
             _validate_profile_name(str(profile_name))

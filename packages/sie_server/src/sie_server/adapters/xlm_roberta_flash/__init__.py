@@ -175,12 +175,16 @@ class XLMRobertaFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         opts = options or {}
         query_template = opts.get("query_template", self._query_template)
         doc_template = opts.get("doc_template", self._doc_template)
+        default_instruction = opts.get("default_instruction", opts.get("instruction"))
+        effective_instruction = instruction
+        if effective_instruction is None and is_query:
+            effective_instruction = default_instruction
         normalize = opts.get("normalize", self._normalize)
         pooling = opts.get("pooling", self._pooling)
 
         texts = extract_texts(
             items,
-            instruction,
+            effective_instruction,
             is_query=is_query,
             query_template=query_template,
             doc_template=doc_template,

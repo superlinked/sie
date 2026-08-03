@@ -32,6 +32,7 @@ from sie_server.adapters._multivector import maxsim_scores
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
+from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
 from sie_server.types.inputs import media_bytes
 
 if TYPE_CHECKING:
@@ -88,7 +89,7 @@ class ColPaliAdapter(BaseAdapter):
                 loading model artifacts. Forwarded to ``from_pretrained(..., revision=...)``.
             max_seq_length: Ignored - ColPali uses dynamic sequence length.
             muvera_config: Optional MUVERA configuration for converting
-                multi-vector to dense representation. Reserved for future use.
+                multi-vector outputs to dense representations.
             token_dim: Optional token dimension override.
         """
         self._model_name_or_path = str(model_name_or_path)
@@ -619,6 +620,11 @@ class ColPaliAdapter(BaseAdapter):
         if unsupported:
             msg = f"Unsupported output types: {unsupported}. ColPaliAdapter only supports 'multivector'."
             raise ValueError(msg)
+
+    def get_postprocessors(self) -> dict[str, Any]:
+        """Return the configured MUVERA multivector-to-dense postprocessor."""
+        config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
+        return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim, config=config)}
 
     def get_preprocessor(self) -> Any | None:
         """Return an ImagePreprocessor for CPU/GPU overlap.

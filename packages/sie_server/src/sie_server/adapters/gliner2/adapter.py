@@ -356,6 +356,22 @@ class GLiNER2Adapter(BaseAdapter):
         span_text_value: object,
     ) -> tuple[int, int, str]:
         """Return exact source offsets, clipping only verified boundary punctuation."""
+
+        def invalid_offsets() -> ValueError:
+            def safe_offset(value: object) -> str:
+                if type(value) in {bool, float, int, type(None)}:
+                    return repr(value)
+                return "<redacted>"
+
+            span_text_length = len(span_text_value) if isinstance(span_text_value, str) else None
+            return ValueError(
+                "GLiNER2 returned invalid character offsets "
+                f"(start={safe_offset(start_value)} [{type(start_value).__name__}], "
+                f"end={safe_offset(end_value)} [{type(end_value).__name__}], "
+                f"text_length={len(text)}, span_text_length={span_text_length}, "
+                f"span_text_type={type(span_text_value).__name__})"
+            )
+
         if (
             not isinstance(start_value, int)
             or isinstance(start_value, bool)
@@ -363,7 +379,7 @@ class GLiNER2Adapter(BaseAdapter):
             or isinstance(end_value, bool)
             or not isinstance(span_text_value, str)
         ):
-            raise ValueError("GLiNER2 returned invalid character offsets")
+            raise invalid_offsets()
 
         start = start_value
         end = end_value
@@ -372,7 +388,7 @@ class GLiNER2Adapter(BaseAdapter):
             return start, end, span_text
 
         if start < 0 or start >= len(text) or end <= start or len(span_text) != end - start or end <= len(text):
-            raise ValueError("GLiNER2 returned invalid character offsets")
+            raise invalid_offsets()
         source_prefix = text[start:]
         overflow = span_text[len(source_prefix) :]
         if (
@@ -380,7 +396,7 @@ class GLiNER2Adapter(BaseAdapter):
             or span_text[: len(source_prefix)] != source_prefix
             or any(not char.isspace() and not unicodedata.category(char).startswith("P") for char in overflow)
         ):
-            raise ValueError("GLiNER2 returned invalid character offsets")
+            raise invalid_offsets()
         return start, len(text), source_prefix
 
     @staticmethod

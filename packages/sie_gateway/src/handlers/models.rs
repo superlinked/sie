@@ -1,5 +1,5 @@
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
@@ -237,6 +237,7 @@ fn worker_only_model_info(name: &str, loaded: bool) -> Value {
             max_output_tokens: None,
             grammar_capabilities: None,
             grammar_profile: None,
+            profile_parents: HashMap::new(),
             tools_supported: None,
             code: false,
             sql: false,
@@ -246,120 +247,6 @@ fn worker_only_model_info(name: &str, loaded: bool) -> Value {
         },
     }
     .to_model_info_value(loaded)
-}
-
-pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
-    let header = headers
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .trim()
-        .to_string();
-    if header.is_empty() {
-        return None;
-    }
-    let token = if header.to_lowercase().starts_with("bearer ") {
-        header[7..].trim().to_string()
-    } else {
-        header
-    };
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
-}
-
-pub fn mask_token(token: &str) -> String {
-    if token.len() <= 4 {
-        "****".to_string()
-    } else {
-        format!(
-            "{}{}",
-            "*".repeat(token.len() - 4),
-            &token[token.len() - 4..]
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── extract_bearer_token ───────────────────────────────────────
-
-    #[test]
-    fn test_extract_bearer_token_with_prefix() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "Bearer my-token-123".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("my-token-123".into()));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_case_insensitive_prefix() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "bearer my-token".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("my-token".into()));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_without_prefix() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "raw-token-value".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("raw-token-value".into()));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_missing_header() {
-        let h = HeaderMap::new();
-        assert_eq!(extract_bearer_token(&h), None);
-    }
-
-    #[test]
-    fn test_extract_bearer_token_empty_value() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), None);
-    }
-
-    #[test]
-    fn test_extract_bearer_token_bearer_only() {
-        // "Bearer " trims to "Bearer", which doesn't start with "bearer " (missing trailing space),
-        // so it's treated as a raw token value.
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "Bearer ".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("Bearer".into()));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_whitespace_trimmed() {
-        let mut h = HeaderMap::new();
-        h.insert("authorization", "  Bearer  my-token  ".parse().unwrap());
-        assert_eq!(extract_bearer_token(&h), Some("my-token".into()));
-    }
-
-    // ── mask_token ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_mask_token_long() {
-        assert_eq!(mask_token("secret-token-123"), "************-123");
-    }
-
-    #[test]
-    fn test_mask_token_short() {
-        assert_eq!(mask_token("abc"), "****");
-        assert_eq!(mask_token(""), "****");
-    }
-
-    #[test]
-    fn test_mask_token_exactly_4() {
-        assert_eq!(mask_token("abcd"), "****");
-    }
-
-    #[test]
-    fn test_mask_token_5_chars() {
-        assert_eq!(mask_token("12345"), "*2345");
-    }
 }
 
 #[cfg(test)]

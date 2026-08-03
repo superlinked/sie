@@ -24,8 +24,36 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any
 
+from sie_server.types.inputs import InvalidInputError
+
 if TYPE_CHECKING:
-    from sie_server.config.model import ModelConfig
+    from sie_server.config.model import ModelConfig, ResolvedProfile
+
+
+def _resolve_profile_or_raise(
+    config: ModelConfig,
+    request_options: dict[str, Any] | None,
+) -> ResolvedProfile:
+    profile_name = request_options.get("profile") if request_options else None
+    if profile_name is not None and (not isinstance(profile_name, str) or not profile_name.strip()):
+        raise InvalidInputError("'options.profile' must be a non-empty string or null")
+
+    try:
+        return config.resolve_profile(profile_name or "default")
+    except ValueError as exc:
+        raise InvalidInputError(str(exc)) from exc
+
+
+def merge_runtime_options_with_profile(
+    config: ModelConfig,
+    request_options: dict[str, Any] | None,
+) -> tuple[dict[str, Any], ResolvedProfile]:
+    """Return merged adapter options and the profile used to derive them."""
+    resolved = _resolve_profile_or_raise(config, request_options)
+    merged: dict[str, Any] = dict(resolved.runtime)
+    if request_options:
+        merged |= {key: value for key, value in request_options.items() if key != "profile"}
+    return merged, resolved
 
 
 def merge_runtime_options(
@@ -47,15 +75,10 @@ def merge_runtime_options(
         The merged options dict ready to hand to the adapter.
 
     Raises:
-        ValueError: If ``request_options`` names a profile that does not exist
-            (propagated from ``config.resolve_profile``).
+        InvalidInputError: If ``request_options`` selects a malformed or
+            unknown profile.
     """
-    profile_name = request_options.get("profile") if request_options else None
-    resolved = config.resolve_profile(profile_name or "default")
-
-    merged: dict[str, Any] = dict(resolved.runtime)
-    if request_options:
-        merged |= {k: v for k, v in request_options.items() if k != "profile"}
+    merged, _ = merge_runtime_options_with_profile(config, request_options)
     return merged
 
 
@@ -120,6 +143,20 @@ def apply_generation_runtime_options(
         runtime["default_sampling"] = {**profile_sampling, **request_sampling}
     result = dict(generate_params)
 
+    # The typed request maximum is a hard caller limit. Reject an explicit
+    # minimum that contradicts it even when this profile has no sampler
+    # defaults; the adapter repeats this check before the engine boundary.
+    max_new_tokens = result.get("max_new_tokens")
+    has_integer_max = isinstance(max_new_tokens, int) and not isinstance(max_new_tokens, bool)
+    explicit_min_tokens = result.get("min_tokens")
+    if (
+        has_integer_max
+        and isinstance(explicit_min_tokens, int)
+        and not isinstance(explicit_min_tokens, bool)
+        and explicit_min_tokens > max_new_tokens
+    ):
+        raise ValueError(f"min_tokens ({explicit_min_tokens}) must not exceed max_new_tokens ({max_new_tokens})")
+
     sampling = runtime.get("default_sampling")
     if sampling is not None:
         if not isinstance(sampling, dict):
@@ -142,9 +179,18 @@ def apply_generation_runtime_options(
                 valid = isinstance(value, int) and not isinstance(value, bool) and value >= 0
             if not valid:
                 raise ValueError(f"'options.default_sampling.{key}' has an invalid value")
+
         for source, target in _GENERATION_SAMPLING_KEYS.items():
             if source in sampling and result.get(target) is None:
-                result[target] = sampling[source]
+                value = sampling[source]
+                if source == "min_new_tokens" and has_integer_max and value > max_new_tokens:
+                    if isinstance(request_sampling, dict) and source in request_sampling:
+                        raise ValueError(
+                            f"'options.default_sampling.min_new_tokens' ({value}) "
+                            f"must not exceed max_new_tokens ({max_new_tokens})"
+                        )
+                    value = max_new_tokens
+                result[target] = value
 
     stop_tokens = runtime.get("stop_tokens")
     if stop_tokens is not None:

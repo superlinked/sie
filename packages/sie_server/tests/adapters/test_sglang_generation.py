@@ -667,6 +667,107 @@ def test_generate_forwards_top_k_and_repetition_penalty(mock_async_client: Magic
     assert body["sampling_params"]["repetition_penalty"] == pytest.approx(1.1)
 
 
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_caps_profile_default_min_new_tokens_to_request_max(mock_async_client: MagicMock) -> None:
+    sse_lines = [
+        'data: {"text": "x", "meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "length"}}}',
+    ]
+    client_instance = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    mock_async_client.return_value = client_instance
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="Qwen/Qwen3.6-27B",
+        served_model_name="Qwen/Qwen3.6-27B",
+        default_sampling={"min_new_tokens": 10},
+    )
+    adapter._server_url = "http://localhost:30005"
+
+    asyncio.run(collect_generation(adapter.generate(prompt="Hi", max_new_tokens=1)))
+
+    sampling_params = client_instance.stream.call_args.kwargs["json"]["sampling_params"]
+    assert sampling_params["max_new_tokens"] == 1
+    assert sampling_params["min_new_tokens"] == 1
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_preserves_profile_default_min_new_tokens_below_request_max(mock_async_client: MagicMock) -> None:
+    sse_lines = [
+        'data: {"text": "ok", "meta_info": {"prompt_tokens": 1, "completion_tokens": 2, "finish_reason": {"type": "stop"}}}',
+    ]
+    client_instance = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    mock_async_client.return_value = client_instance
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="Qwen/Qwen3.6-27B",
+        served_model_name="Qwen/Qwen3.6-27B",
+        default_sampling={"min_new_tokens": 10},
+    )
+    adapter._server_url = "http://localhost:30005"
+
+    asyncio.run(collect_generation(adapter.generate(prompt="Hi", max_new_tokens=64)))
+
+    sampling_params = client_instance.stream.call_args.kwargs["json"]["sampling_params"]
+    assert sampling_params["max_new_tokens"] == 64
+    assert sampling_params["min_new_tokens"] == 10
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_rejects_explicit_min_new_tokens_above_max_before_sglang(
+    mock_async_client: MagicMock,
+) -> None:
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="Qwen/Qwen3.6-27B",
+        served_model_name="Qwen/Qwen3.6-27B",
+        default_sampling={"min_new_tokens": 10},
+    )
+    adapter._server_url = "http://localhost:30005"
+
+    with pytest.raises(
+        ValueError,
+        match=r"min_new_tokens \(10\) must not exceed max_new_tokens \(1\)",
+    ):
+        asyncio.run(
+            collect_generation(
+                adapter.generate(
+                    prompt="Hi",
+                    max_new_tokens=1,
+                    min_new_tokens=10,
+                )
+            )
+        )
+
+    mock_async_client.assert_not_called()
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_explicit_min_new_tokens_overrides_profile_default_when_valid(
+    mock_async_client: MagicMock,
+) -> None:
+    sse_lines = [
+        'data: {"text": "ok", "meta_info": {"prompt_tokens": 1, "completion_tokens": 2, "finish_reason": {"type": "stop"}}}',
+    ]
+    client_instance = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    mock_async_client.return_value = client_instance
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="Qwen/Qwen3.6-27B",
+        served_model_name="Qwen/Qwen3.6-27B",
+        default_sampling={"min_new_tokens": 10},
+    )
+    adapter._server_url = "http://localhost:30005"
+
+    asyncio.run(
+        collect_generation(
+            adapter.generate(
+                prompt="Hi",
+                max_new_tokens=8,
+                min_new_tokens=2,
+            )
+        )
+    )
+
+    sampling_params = client_instance.stream.call_args.kwargs["json"]["sampling_params"]
+    assert sampling_params["max_new_tokens"] == 8
+    assert sampling_params["min_new_tokens"] == 2
+
+
 @pytest.mark.parametrize("seed", [-1, 0, 1])
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
 def test_generate_maps_seed_to_sglang_sampling_seed(mock_async_client: MagicMock, adapter, seed: int) -> None:

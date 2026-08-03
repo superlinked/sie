@@ -319,6 +319,45 @@ def test_entity_offsets_reject_out_of_bounds_lexical_suffix() -> None:
         adapter.extract([Item(text="ACME Inc")], labels=["organization"])
 
 
+def test_invalid_entity_offsets_report_privacy_safe_diagnostics() -> None:
+    adapter, model = _adapter_with_counting_model()
+    source_text = "PRIVATE SOURCE CONTENT"
+    span_text = "PRIVATE SPAN CONTENT"
+    model.extract_entities.return_value = {
+        "entities": {"person": [{"text": span_text, "confidence": 0.8, "start": 4, "end": 24}]}
+    }
+
+    with pytest.raises(ValueError, match="invalid character offsets") as exc_info:
+        adapter.extract([Item(text=source_text)], labels=["person"])
+
+    message = str(exc_info.value)
+    assert "start=4 [int]" in message
+    assert "end=24 [int]" in message
+    assert f"text_length={len(source_text)}" in message
+    assert f"span_text_length={len(span_text)}" in message
+    assert "span_text_type=str" in message
+    assert source_text not in message
+    assert span_text not in message
+
+
+def test_invalid_entity_offsets_redact_non_numeric_offset_values() -> None:
+    adapter, model = _adapter_with_counting_model()
+    source_text = "SOURCE CONTENT MUST NOT LEAK"
+    span_text = "SPAN CONTENT MUST NOT LEAK"
+    model.extract_entities.return_value = {
+        "entities": {"person": [{"text": span_text, "confidence": 0.8, "start": source_text, "end": 4}]}
+    }
+
+    with pytest.raises(ValueError, match="invalid character offsets") as exc_info:
+        adapter.extract([Item(text=source_text)], labels=["person"])
+
+    message = str(exc_info.value)
+    assert "start=<redacted> [str]" in message
+    assert "end=4 [int]" in message
+    assert source_text not in message
+    assert span_text not in message
+
+
 def test_entity_offsets_reject_utf8_byte_indices() -> None:
     adapter, model = _adapter_with_counting_model()
     model.extract_entities.return_value = {

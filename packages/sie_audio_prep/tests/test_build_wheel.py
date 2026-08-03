@@ -20,6 +20,16 @@ def _write_valid_wheel(path: Path) -> None:
         )
 
 
+def _write_minimal_source_tree(project_root: Path) -> Path:
+    crate = project_root / "packages" / "sie_audio_prep"
+    (crate / "src").mkdir(parents=True)
+    (project_root / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+    (crate / "Cargo.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
+    (crate / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    (crate / "src" / "lib.rs").write_text("pub fn test() {}\n", encoding="utf-8")
+    return crate
+
+
 def test_portable_worker_wheel_tag_is_validated(tmp_path: Path) -> None:
     assert audio_prep_wheel.AUDIO_WHEEL_COMPATIBILITY == "manylinux_2_28"
     wheel_path = tmp_path / audio_prep_wheel.AUDIO_WHEEL_FILENAME
@@ -34,12 +44,7 @@ def test_portable_worker_wheel_tag_is_validated(tmp_path: Path) -> None:
 
 
 def test_wheel_cache_digest_includes_build_toolchain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    crate = tmp_path / "sie_audio_prep"
-    (crate / "src").mkdir(parents=True)
-    (crate / "Cargo.toml").write_text("[package]\nname = 'test'\n")
-    (crate / "Cargo.lock").write_text("version = 4\n")
-    (crate / "pyproject.toml").write_text("[build-system]\n")
-    (crate / "src" / "lib.rs").write_text("pub fn test() {}\n")
+    crate = _write_minimal_source_tree(tmp_path)
 
     portable_digest = audio_prep_wheel._source_digest(crate)
     monkeypatch.setattr(audio_prep_wheel, "_BUILD_FINGERPRINT", "different-toolchain")
@@ -53,6 +58,9 @@ def test_wheel_cache_rejects_unsafe_preexisting_root(
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
 ) -> None:
+    _write_minimal_source_tree(tmp_path)
+    monkeypatch.setattr(audio_prep_wheel.sys, "platform", "linux")
+    monkeypatch.setattr(audio_prep_wheel.platform, "machine", lambda: "x86_64")
     cache_parent = tmp_path / "cache"
     cache_parent.mkdir()
     cache_root = cache_parent / f"sie-audio-prep-wheels-{os.getuid()}"
@@ -84,8 +92,9 @@ def test_wheel_cache_reuses_valid_artifact_from_private_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project_root = tmp_path / "project"
-    crate = project_root / "packages" / "sie_audio_prep"
-    (crate / "src").mkdir(parents=True)
+    crate = _write_minimal_source_tree(project_root)
+    monkeypatch.setattr(audio_prep_wheel.sys, "platform", "linux")
+    monkeypatch.setattr(audio_prep_wheel.platform, "machine", lambda: "x86_64")
     cache_parent = tmp_path / "cache"
     cache_parent.mkdir()
     monkeypatch.setattr(audio_prep_wheel.tempfile, "gettempdir", lambda: str(cache_parent))
@@ -117,11 +126,21 @@ def test_optional_build_skips_when_toolchain_missing(
     monkeypatch.setattr(audio_prep_wheel.shutil, "which", lambda name: None)
     project_root = tmp_path / "project"
     (project_root / "packages" / "sie_audio_prep" / "src").mkdir(parents=True)
+    # Workspace-root lock (#2339): the digest fails loudly without it.
+    (project_root / "Cargo.lock").write_text("version = 4\n")
 
     assert audio_prep_wheel.build_audio_prep_wheel(project_root, required=False) is None
     assert "skipped: uvx and zig not on PATH" in capsys.readouterr().err
     with pytest.raises(RuntimeError, match="required to build portable"):
         audio_prep_wheel.build_audio_prep_wheel(project_root)
+
+
+def test_missing_workspace_lock_fails_loudly(tmp_path: Path) -> None:
+    crate = tmp_path / "packages" / "sie_audio_prep"
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text("[package]\nname = 'test'\n")
+    with pytest.raises(RuntimeError, match=r"workspace Cargo\.lock not found"):
+        audio_prep_wheel._source_digest(crate)
 
 
 def test_optional_build_skips_on_non_linux(

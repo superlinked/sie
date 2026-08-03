@@ -12,6 +12,7 @@ For ColBERT/late interaction models, use the scoring module:
 """
 
 from sie_sdk.client import (
+    EstimateUnroutableError,
     InputTooLongError,
     LoraLoadingError,
     ModelLoadFailedError,
@@ -37,6 +38,7 @@ from sie_sdk.files import resolve_upload
 from sie_sdk.jobs import build_job_body, connection_name
 from sie_sdk.types import (
     # Response types
+    AppliedRate,
     AssignedWorkerInfo,
     Batch,
     BatchList,
@@ -51,11 +53,13 @@ from sie_sdk.types import (
     Connection,
     ConnectionCreated,
     ConnectionRevoked,
+    CostEstimate,
     EncodeResult,
     Entity,
     ExtractResult,
     File,
     FileDeleted,
+    FileList,
     GenerateChunk,
     GenerateResult,
     GenerationUsage,
@@ -77,6 +81,7 @@ from sie_sdk.types import (
     PoolSpec,
     PoolSpecResponse,
     PoolStatusInfo,
+    RateIdentity,
     ScoreResult,
     SparseResult,
     StatusMessage,
@@ -88,6 +93,7 @@ from sie_sdk.types import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "AppliedRate",
     "AssignedWorkerInfo",
     "Batch",
     "BatchList",
@@ -102,11 +108,14 @@ __all__ = [
     "Connection",
     "ConnectionCreated",
     "ConnectionRevoked",
+    "CostEstimate",
     "EncodeResult",
     "Entity",
+    "EstimateUnroutableError",
     "ExtractResult",
     "File",
     "FileDeleted",
+    "FileList",
     "GenerateChunk",
     "GenerateResult",
     "GenerationUsage",
@@ -134,6 +143,7 @@ __all__ = [
     "PoolSpecResponse",
     "PoolStatusInfo",
     "ProvisioningError",
+    "RateIdentity",
     "RequestError",
     "SIEAsyncClient",
     "SIEClient",

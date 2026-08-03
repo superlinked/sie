@@ -23,7 +23,7 @@ profiles:
     adapter_options:
       loadtime:
         muvera_config:
-          num_repetitions: 40
+          num_repetitions: 96
           num_simhash_projections: 6
           projection_dim: 8
           final_projection_dim: null
@@ -48,7 +48,7 @@ profiles:
         output_types:
         - dense
         output_similarity:
-          dense: cosine
+          dense: dot
         muvera: {}
   long_context:
     extends: default

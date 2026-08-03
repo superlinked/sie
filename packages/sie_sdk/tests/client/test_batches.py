@@ -112,6 +112,53 @@ def test_list_returns_data_array() -> None:
         client.close()
 
 
+def test_list_encodes_cursor_arguments_and_preserves_sequence_return() -> None:
+    with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+        mock_client.return_value.request = MagicMock(
+            return_value=_resp(
+                200,
+                {
+                    "object": "list",
+                    "data": [{"id": "batch-2"}],
+                    "first_id": "batch-2",
+                    "last_id": "batch-2",
+                    "has_more": False,
+                },
+            )
+        )
+        client = SIEClient(GW, api_key=KEY)
+        batches = client.batches.list(after='batch/"a b"&limit=1', limit=9)
+        assert [batch["id"] for batch in batches] == ["batch-2"]
+        assert mock_client.return_value.request.call_args.args == (
+            "GET",
+            "/v1/batches?after=batch%2F%22a+b%22%26limit%3D1&limit=9",
+        )
+        client.close()
+
+
+def test_list_page_exposes_cursor_metadata() -> None:
+    with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+        mock_client.return_value.request = MagicMock(
+            return_value=_resp(
+                200,
+                {
+                    "object": "list",
+                    "data": [{"id": "batch-1"}, {"id": "batch-2"}],
+                    "first_id": "batch-1",
+                    "last_id": "batch-2",
+                    "has_more": True,
+                },
+            )
+        )
+        client = SIEClient(GW, api_key=KEY)
+        page = client.batches.list_page()
+        assert [batch["id"] for batch in page["data"]] == ["batch-1", "batch-2"]
+        assert page["first_id"] == "batch-1"
+        assert page["last_id"] == "batch-2"
+        assert page["has_more"] is True
+        client.close()
+
+
 # ---------------------------------------------------------------------------
 # async
 # ---------------------------------------------------------------------------
@@ -154,4 +201,41 @@ async def test_async_retrieve_and_cancel() -> None:
     out = await client.batches.cancel("batch-1")
     assert out["status"] == "cancelling"
     assert client._post.call_args.args[0] == "/v1/batches/batch-1/cancel"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_list_and_list_page_share_cursor_arguments() -> None:
+    client = SIEAsyncClient(GW, api_key=KEY)
+    client._get = AsyncMock(
+        return_value=_FakeAio(
+            200,
+            {
+                "object": "list",
+                "data": [{"id": "batch-2"}],
+                "first_id": "batch-2",
+                "last_id": "batch-2",
+                "has_more": True,
+            },
+        )
+    )
+    batches = await client.batches.list(after='batch/"a b"', limit=9)
+    assert [batch["id"] for batch in batches] == ["batch-2"]
+    assert client._get.call_args.args[0] == "/v1/batches?after=batch%2F%22a+b%22&limit=9"
+    page = await client.batches.list_page(limit=1)
+    assert page["first_id"] == "batch-2"
+    assert page["has_more"] is True
+    assert client._get.call_args.args[0] == "/v1/batches?limit=1"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_list_page_normalizes_empty_legacy_bare_array() -> None:
+    client = SIEAsyncClient(GW, api_key=KEY)
+    client._get = AsyncMock(return_value=_FakeAio(200, []))
+    page = await client.batches.list_page()
+    assert page["data"] == []
+    assert page["first_id"] is None
+    assert page["last_id"] is None
+    assert page["has_more"] is False
     await client.close()

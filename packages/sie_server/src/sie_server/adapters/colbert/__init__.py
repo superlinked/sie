@@ -27,7 +27,6 @@ See: https://github.com/stanford-futuredata/ColBERT
 from __future__ import annotations
 
 import logging
-import string
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -35,6 +34,7 @@ from torch.nn import functional
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._colbert_projection import load_standalone_colbert_projection
+from sie_server.adapters._colbert_utils import punctuation_token_ids
 from sie_server.adapters._flash_pack import build_position_ids
 from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._pylate_dense import apply_dense_chain, load_pylate_dense_chain
@@ -117,6 +117,7 @@ class ColBERTAdapter(BaseAdapter):
         muvera_config: dict[str, Any] | None = None,
         revision: str | None = None,
         code_revision: str | None = None,
+        require_standalone_projection: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -152,12 +153,17 @@ class ColBERTAdapter(BaseAdapter):
             code_revision: Optional independent commit SHA for trusted remote
                 code. Forwarded to every ``from_pretrained`` call that may load
                 repository code, including device fallbacks.
+            require_standalone_projection: Require the checkpoint-root
+                ``linear.weight`` head and fail closed if it is missing or has
+                the wrong shape. Used by device fallbacks for models whose
+                published recipe depends on that exact trained projection.
             **kwargs: Additional arguments (ignored, for compatibility).
         """
         _ = kwargs
         self._model_name_or_path = str(model_name_or_path)
         self._revision = revision
         self._code_revision = code_revision
+        self._require_standalone_projection = require_standalone_projection
         self._token_dim = token_dim
         self._normalize = normalize
         self._max_seq_length = max_seq_length
@@ -216,19 +222,19 @@ class ColBERTAdapter(BaseAdapter):
             **shared_kwargs,
         )
 
-        # Register prefix tokens (e.g. [Q], [D]) as special tokens if they are
-        # not already in the vocabulary.  PyLate's ColBERT does the same via
-        # ``tokenizer.add_tokens(["[Q]", "[D]"])``.  Without this, tokens like
-        # "[Q]" are decomposed into multiple sub-word pieces (``[``, ``q``,
-        # ``]``) whose embeddings are meaningless.  After the model is loaded we
-        # call ``model.resize_token_embeddings`` so the new IDs get a randomly-
-        # initialised embedding (overwritten by the checkpoint's trained weights
-        # when the safetensors file already contains them).
+        # Preserve the configured prefix byte-for-byte when resolving trained
+        # checkpoint tokens. Some PyLate checkpoints store ``"[Q] "`` and
+        # ``"[D] "`` (including the trailing space) as vocabulary entries;
+        # stripping those strings would create new, untrained embedding rows.
+        # Older checkpoints instead store markers such as ``"[unused0]"`` and
+        # configure ``"[unused0] "``, so retain a stripped lookup fallback.
+        # Only add the exact configured token when neither representation exists.
         new_tokens: list[str] = []
         for prefix in (self._query_prefix, self._doc_prefix):
-            token = prefix.strip()
-            if token and token not in self._tokenizer.vocab:
-                new_tokens.append(token)
+            if prefix.strip() and not any(
+                token in self._tokenizer.vocab for token in self._prefix_token_candidates(prefix)
+            ):
+                new_tokens.append(prefix)
         if new_tokens:
             num_added = self._tokenizer.add_tokens(new_tokens)
             if num_added:
@@ -258,15 +264,10 @@ class ColBERTAdapter(BaseAdapter):
         # whose token ID is in this set are removed before returning
         # multivectors, preventing punctuation from participating in MaxSim.
         if self._doc_punctuation_skiplist:
-            skiplist_ids: set[int] = set()
-            for ch in string.punctuation:
-                ids = self._tokenizer.encode(ch, add_special_tokens=False)
-                skiplist_ids.update(ids)
-            self._doc_skiplist_ids = skiplist_ids
+            self._doc_skiplist_ids = punctuation_token_ids(self._tokenizer)
             logger.info(
-                "Built document skiplist with %d token IDs from %d punctuation chars",
-                len(skiplist_ids),
-                len(string.punctuation),
+                "Built document skiplist with %d exact punctuation token IDs",
+                len(self._doc_skiplist_ids),
             )
         else:
             logger.info("Document punctuation skiplist disabled (doc_punctuation_skiplist=False)")
@@ -280,12 +281,12 @@ class ColBERTAdapter(BaseAdapter):
 
         if self._native_mode:
             # Use model's native forward with flash_attention_2, or sdpa when
-            # flash-attn is unavailable (exactly the situation that selects the
-            # ColBERTAdapter fallback for e.g. ModernBERT on pre-Ampere CUDA).
+            # flash-attn is unavailable or incompatible with the configured
+            # precision.
             # Import lazily to avoid circular deps (core.inference -> core.loader -> base)
-            from sie_server.core.inference import is_flash_attention_available
+            from sie_server.core.inference import resolve_attention_backend
 
-            attn_impl = "flash_attention_2" if is_flash_attention_available(device) else "sdpa"
+            attn_impl = resolve_attention_backend("flash_attention_2", self._compute_precision, device)
             logger.info("Using native attention mode with attn_implementation=%s", attn_impl)
             self._model = AutoModel.from_pretrained(
                 self._model_name_or_path,
@@ -303,11 +304,7 @@ class ColBERTAdapter(BaseAdapter):
                 **shared_kwargs,
             )
 
-        # Resize token embeddings if we added new prefix tokens above.
-        # The checkpoint's safetensors already contain trained embeddings for
-        # these token IDs (PyLate saves them), so the weights are loaded
-        # correctly — we just need to make sure the embedding matrix is big
-        # enough to hold them.
+        # Resize token embeddings only for prefixes absent from the checkpoint.
         if new_tokens:
             self._model.resize_token_embeddings(len(self._tokenizer))
 
@@ -319,17 +316,21 @@ class ColBERTAdapter(BaseAdapter):
         # run; the loader returns None for a missing modules.json AND for a
         # Dense-less modules.json (e.g. mxbai-colbert-large-v1), so every
         # checkpoint without a chain falls through to the exact same probes.
-        self._dense_chain = load_pylate_dense_chain(
-            self._model_name_or_path,
-            hidden_size=self._model.config.hidden_size,
-            token_dim=self._token_dim,
-            device=self._device,
-            dtype=dtype,
-            revision=self._revision,
-        )
-        # Check for linear projection layer (ColBERT-specific)
-        # Different ColBERT implementations use different names
-        self._linear = None if self._dense_chain is not None else self._find_projection_layer()
+        if self._require_standalone_projection:
+            self._dense_chain = None
+            self._linear = self._load_projection_from_weights()
+        else:
+            self._dense_chain = load_pylate_dense_chain(
+                self._model_name_or_path,
+                hidden_size=self._model.config.hidden_size,
+                token_dim=self._token_dim,
+                device=self._device,
+                dtype=dtype,
+                revision=self._revision,
+            )
+            # Check for linear projection layer (ColBERT-specific)
+            # Different ColBERT implementations use different names
+            self._linear = None if self._dense_chain is not None else self._find_projection_layer()
 
         # Determine actual output dimension
         hidden_size = self._model.config.hidden_size
@@ -430,11 +431,16 @@ class ColBERTAdapter(BaseAdapter):
         Some ColBERT models store the projection layer as 'linear.weight' in the
         safetensors file without registering it as a model attribute.
         """
+        assert self._model is not None
         return load_standalone_colbert_projection(
             self._model_name_or_path,
             revision=self._revision,
             device=self._device,
             dtype=self._resolve_dtype(),
+            expected_in_features=self._model.config.hidden_size if self._require_standalone_projection else None,
+            expected_out_features=self._token_dim if self._require_standalone_projection else None,
+            allow_bias=not self._require_standalone_projection,
+            required=self._require_standalone_projection,
         )
 
     def _resolve_dtype(self) -> torch.dtype:
@@ -454,6 +460,16 @@ class ColBERTAdapter(BaseAdapter):
         }
         return dtype_map.get(self._compute_precision, torch.float16)
 
+    @staticmethod
+    def _prefix_token_candidates(prefix: str) -> tuple[str, ...]:
+        """Return exact-first vocabulary candidates for a configured prefix."""
+        stripped = prefix.strip()
+        if not stripped:
+            return ()
+        if prefix == stripped:
+            return (prefix,)
+        return (prefix, stripped)
+
     def _resolve_prefix_token_id(self, prefix: str) -> int | None:
         """Resolve a prefix string to a single token ID if possible.
 
@@ -469,15 +485,12 @@ class ColBERTAdapter(BaseAdapter):
         if not prefix or self._tokenizer is None:
             return None
 
-        # Strip whitespace to get the token
-        token = prefix.strip()
-        if not token:
-            return None
-
-        # Check if this token exists as a single token in vocab
-        # Use convert_tokens_to_ids which correctly handles vocab tokens
-        # (encode() would split special tokens like [unused0] into multiple pieces)
-        if token in self._tokenizer.vocab:
+        # Prefer the exact configured string, because trailing whitespace can be
+        # part of a trained added token. Fall back to the stripped form for
+        # legacy markers such as ``"[unused0] "``.
+        for token in self._prefix_token_candidates(prefix):
+            if token not in self._tokenizer.vocab:
+                continue
             token_ids = self._tokenizer.convert_tokens_to_ids([token])
             # convert_tokens_to_ids returns int for single token, list for list input
             # isinstance guard for type checker since it returns int | list[int]

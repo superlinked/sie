@@ -8,6 +8,8 @@ use std::time::Instant;
 use tower::{Layer, Service};
 use tracing::info;
 
+use super::auth::mask_token;
+
 #[derive(Clone)]
 pub struct AuditLayer;
 
@@ -135,45 +137,15 @@ where
 }
 
 fn is_infrastructure_path(path: &str) -> bool {
-    matches!(path, "/health" | "/healthz" | "/readyz")
-}
-
-fn mask_token(token: &str) -> String {
-    if token.len() <= 4 {
-        "****".to_string()
-    } else {
-        format!(
-            "{}{}",
-            "*".repeat(token.len() - 4),
-            &token[token.len() - 4..]
-        )
-    }
+    // Audit-specific extra: `/health` (the rich legacy status page) is
+    // infrastructure noise for audit purposes even though it is NOT an
+    // auth-exempt probe (see `auth::EXEMPT_OPERATIONAL_PATHS`).
+    path == "/health" || super::auth::PROBE_PATHS.contains(&path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_mask_token_short() {
-        assert_eq!(mask_token("abc"), "****");
-        assert_eq!(mask_token(""), "****");
-    }
-
-    #[test]
-    fn test_mask_token_long() {
-        assert_eq!(mask_token("secret-token-123"), "************-123");
-    }
-
-    #[test]
-    fn test_mask_token_exact_4() {
-        assert_eq!(mask_token("abcd"), "****");
-    }
-
-    #[test]
-    fn test_mask_token_5_chars() {
-        assert_eq!(mask_token("abcde"), "*bcde");
-    }
 
     #[test]
     fn test_infrastructure_paths() {

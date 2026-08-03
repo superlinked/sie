@@ -1,5 +1,10 @@
 """Tests for postprocessor protocol and implementations."""
 
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import FrozenInstanceError
+from threading import Event
+
 import numpy as np
 import pytest
 from sie_server.core.inference_output import EncodeOutput
@@ -9,6 +14,95 @@ from sie_server.core.postprocessor import (
     _append_to_gray_code,
     _simhash_partition_index_gray,
 )
+
+
+def _legacy_count_sketch(input_vector: np.ndarray, output_dim: int, seed: int) -> np.ndarray:
+    """Faithful serial implementation used before MUVERA streaming."""
+    rng = np.random.default_rng(seed)
+    output = np.zeros(output_dim, dtype=np.float32)
+    indices = rng.integers(0, output_dim, size=input_vector.shape[0])
+    signs = rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=input_vector.shape[0])
+    np.add.at(output, indices, signs * input_vector)
+    return output
+
+
+def _legacy_muvera_single(
+    token_embeddings: np.ndarray,
+    config: MuveraConfig,
+    *,
+    is_query: bool,
+) -> np.ndarray:
+    """Faithful copy of the pre-optimization serial MUVERA algorithm."""
+    num_tokens, token_dim = token_embeddings.shape
+    target_dim = config.fde_dim(token_dim)
+    if num_tokens == 0:
+        return np.zeros(target_dim, dtype=np.float32)
+
+    if config.center_tokens:
+        token_embeddings = token_embeddings - token_embeddings.mean(axis=0, keepdims=True)
+
+    projection_dim = config.projection_dim or token_dim
+    num_partitions = config.num_partitions
+    repetition_size = num_partitions * projection_dim
+    intermediate = np.zeros(config.intermediate_dim(token_dim), dtype=np.float32)
+
+    for repetition in range(config.num_repetitions):
+        seed = config.seed + repetition
+        rng = np.random.default_rng(seed)
+        simhash_matrix = rng.normal(
+            loc=0.0,
+            scale=1.0,
+            size=(token_dim, config.num_simhash_projections),
+        ).astype(np.float32)
+        sketches = token_embeddings @ simhash_matrix
+
+        bits = (sketches > 0).astype(np.int32)
+        partition_indices = np.zeros(num_tokens, dtype=np.int32)
+        for projection in range(config.num_simhash_projections):
+            partition_indices = (partition_indices << 1) + (bits[:, projection] ^ (partition_indices & 1))
+
+        if config.projection_dim is None:
+            projected = token_embeddings
+        else:
+            rng = np.random.default_rng(seed)
+            projection_matrix = np.zeros((token_dim, projection_dim), dtype=np.float32)
+            indices = rng.integers(0, projection_dim, size=token_dim)
+            signs = rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=token_dim)
+            projection_matrix[np.arange(token_dim), indices] = signs
+            projected = token_embeddings @ projection_matrix
+
+        sums = np.zeros((num_partitions, projection_dim), dtype=np.float32)
+        counts = np.zeros(num_partitions, dtype=np.int32)
+        np.add.at(sums, partition_indices, projected)
+        np.add.at(counts, partition_indices, 1)
+        if not is_query:
+            populated = counts > 0
+            sums[populated] /= counts[populated, np.newaxis]
+
+        start = repetition * repetition_size
+        intermediate[start : start + repetition_size] = sums.ravel()
+
+    final_dim = config._effective_final_dim(token_dim)
+    if final_dim is not None:
+        return _legacy_count_sketch(intermediate, final_dim, config.seed)
+    return intermediate
+
+
+def _legacy_muvera_batch(
+    multivectors: Sequence[np.ndarray],
+    token_dim: int,
+    config: MuveraConfig,
+    *,
+    is_query: bool,
+) -> np.ndarray:
+    """Run the legacy algorithm and normalization in the original order."""
+    dense = np.zeros((len(multivectors), config.fde_dim(token_dim)), dtype=np.float32)
+    for index, token_embeddings in enumerate(multivectors):
+        dense[index] = _legacy_muvera_single(token_embeddings, config, is_query=is_query)
+    if config.normalize:
+        norms = np.linalg.norm(dense, axis=1, keepdims=True)
+        dense = dense / np.where(norms > 0, norms, 1.0)
+    return dense
 
 
 class TestGrayCode:
@@ -302,6 +396,379 @@ class TestMuveraPostprocessor:
 
         np.testing.assert_array_almost_equal(result_2d[0], [1.0, 2.0, 3.0, 4.0])
         np.testing.assert_array_almost_equal(result_2d[1], [5.0, 6.0, 7.0, 8.0])
+
+
+class TestMuveraOptimizedEquivalence:
+    """Bit-exact regression coverage for cached and streaming MUVERA."""
+
+    @pytest.mark.parametrize("use_count_sketch", [False, True])
+    @pytest.mark.parametrize("is_query", [False, True])
+    @pytest.mark.parametrize("center_tokens", [False, True])
+    @pytest.mark.parametrize("normalize", [False, True])
+    def test_matches_legacy_serial_for_varied_lengths_and_order(
+        self,
+        use_count_sketch: bool,
+        is_query: bool,
+        center_tokens: bool,
+        normalize: bool,
+    ) -> None:
+        """Optimization preserves every float32 output bit and batch row."""
+        token_dim = 7
+        config = MuveraConfig(
+            num_repetitions=4,
+            num_simhash_projections=3,
+            projection_dim=None if use_count_sketch else 3,
+            final_projection_dim=17 if use_count_sketch else None,
+            seed=29,
+            normalize=normalize,
+            center_tokens=center_tokens,
+        )
+        rng = np.random.default_rng(8675309)
+        multivectors = [rng.standard_normal((length, token_dim)).astype(np.float32) for length in (7, 1, 0, 4)]
+
+        for ordered in (multivectors, list(reversed(multivectors))):
+            expected = _legacy_muvera_batch(ordered, token_dim, config, is_query=is_query)
+            output = EncodeOutput(
+                multivector=[multivector.copy() for multivector in ordered],
+                batch_size=len(ordered),
+            )
+
+            MuveraPostprocessor(token_dim=token_dim, config=config).transform(output, is_query=is_query)
+
+            assert output.dense is not None
+            np.testing.assert_array_equal(output.dense, expected)
+            assert output.dense_dim == expected.shape[1]
+
+    def test_random_cache_is_lazy_for_empty_inputs(self) -> None:
+        """Construction and empty transforms do not allocate random caches."""
+        token_dim = 9
+        config = MuveraConfig(
+            num_repetitions=5,
+            num_simhash_projections=3,
+            projection_dim=None,
+            final_projection_dim=11,
+            seed=101,
+        )
+        postprocessor = MuveraPostprocessor(token_dim=token_dim, config=config)
+        assert postprocessor._random_cache is None
+
+        empty_batch = EncodeOutput(multivector=[], batch_size=0)
+        postprocessor.transform(empty_batch, is_query=False)
+        assert postprocessor._random_cache is None
+
+        empty_item = EncodeOutput(
+            multivector=[np.empty((0, token_dim), dtype=np.float32)],
+            batch_size=1,
+        )
+        postprocessor.transform(empty_item, is_query=False)
+        assert postprocessor._random_cache is None
+
+        nonempty = EncodeOutput(
+            multivector=[np.ones((1, token_dim), dtype=np.float32)],
+            batch_size=1,
+        )
+        postprocessor.transform(nonempty, is_query=False)
+        assert postprocessor._random_cache is not None
+
+    def test_cached_random_structures_match_legacy_generation(self) -> None:
+        """Lazily cached random values retain the legacy draws exactly."""
+        token_dim = 9
+        count_config = MuveraConfig(
+            num_repetitions=5,
+            num_simhash_projections=3,
+            projection_dim=None,
+            final_projection_dim=11,
+            seed=101,
+        )
+        count_postprocessor = MuveraPostprocessor(token_dim=token_dim, config=count_config)
+        assert count_postprocessor._random_cache is None
+        count_postprocessor._compute_fde_single(
+            np.ones((1, token_dim), dtype=np.float32),
+            is_query=False,
+        )
+        count_cache = count_postprocessor._random_cache
+        assert count_cache is not None
+
+        for repetition, cached in enumerate(count_cache.simhash_matrices):
+            rng = np.random.default_rng(count_config.seed + repetition)
+            expected = rng.normal(
+                loc=0.0,
+                scale=1.0,
+                size=(token_dim, count_config.num_simhash_projections),
+            ).astype(np.float32)
+            np.testing.assert_array_equal(cached, expected)
+            assert not cached.flags.writeable
+        assert count_cache.ams_projection_matrices == ()
+
+        rng = np.random.default_rng(count_config.seed)
+        expected_indices = rng.integers(
+            0,
+            count_postprocessor._final_dim,
+            size=count_postprocessor._intermediate_dim,
+        )
+        expected_signs = rng.choice(
+            np.array([-1.0, 1.0], dtype=np.float32),
+            size=count_postprocessor._intermediate_dim,
+        )
+        assert count_cache.count_sketch_indices is not None
+        assert count_cache.count_sketch_signs is not None
+        np.testing.assert_array_equal(count_cache.count_sketch_indices, expected_indices)
+        np.testing.assert_array_equal(count_cache.count_sketch_signs, expected_signs)
+        assert count_cache.count_sketch_indices.dtype == np.uint8
+        assert count_cache.count_sketch_signs.dtype == np.int8
+        assert not count_cache.count_sketch_indices.flags.writeable
+        assert not count_cache.count_sketch_signs.flags.writeable
+        with pytest.raises(ValueError, match="read-only"):
+            count_cache.count_sketch_indices[0] = 0
+        with pytest.raises(FrozenInstanceError):
+            count_cache.count_sketch_indices = None  # type: ignore[misc]
+
+        ams_projection_dim = 4
+        ams_config = MuveraConfig(
+            num_repetitions=5,
+            num_simhash_projections=3,
+            projection_dim=ams_projection_dim,
+            final_projection_dim=None,
+            seed=101,
+        )
+        ams_postprocessor = MuveraPostprocessor(token_dim=token_dim, config=ams_config)
+        ams_postprocessor._compute_fde_single(
+            np.ones((1, token_dim), dtype=np.float32),
+            is_query=False,
+        )
+        ams_cache = ams_postprocessor._random_cache
+        assert ams_cache is not None
+        for repetition, cached in enumerate(ams_cache.ams_projection_matrices):
+            rng = np.random.default_rng(ams_config.seed + repetition)
+            expected = np.zeros((token_dim, ams_projection_dim), dtype=np.float32)
+            indices = rng.integers(0, ams_projection_dim, size=token_dim)
+            signs = rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=token_dim)
+            expected[np.arange(token_dim), indices] = signs
+            np.testing.assert_array_equal(cached, expected)
+            assert not cached.flags.writeable
+        assert ams_cache.count_sketch_indices is None
+        assert ams_cache.count_sketch_signs is None
+
+    def test_count_sketch_cache_uses_uint16_for_production_final_dim(self) -> None:
+        """The 10,240-dimensional production sketch uses exact uint16 indices."""
+        token_dim = 5
+        config = MuveraConfig(
+            num_repetitions=40,
+            num_simhash_projections=6,
+            projection_dim=None,
+            final_projection_dim=10_240,
+            seed=47,
+        )
+        postprocessor = MuveraPostprocessor(token_dim=token_dim, config=config)
+        token_embeddings = np.arange(15, dtype=np.float32).reshape(3, token_dim)
+
+        actual = postprocessor._compute_fde_single(token_embeddings, is_query=False)
+        expected = _legacy_muvera_single(token_embeddings, config, is_query=False)
+
+        np.testing.assert_array_equal(actual, expected)
+        cache = postprocessor._random_cache
+        assert cache is not None
+        assert cache.count_sketch_indices is not None
+        assert cache.count_sketch_signs is not None
+        assert cache.count_sketch_indices.dtype == np.uint16
+        assert cache.count_sketch_signs.dtype == np.int8
+
+    def test_streaming_count_sketch_matches_materialized_legacy_order(self) -> None:
+        """Chunked streaming retains legacy global ``np.add.at`` order."""
+        token_dim = 5
+        config = MuveraConfig(
+            num_repetitions=9,
+            num_simhash_projections=3,
+            projection_dim=None,
+            final_projection_dim=3,
+            seed=73,
+            center_tokens=True,
+        )
+        tokens = np.random.default_rng(144).standard_normal((11, token_dim)).astype(np.float32)
+        expected = _legacy_muvera_single(tokens, config, is_query=False)
+
+        actual = MuveraPostprocessor(token_dim=token_dim, config=config)._compute_fde_single(
+            tokens,
+            is_query=False,
+        )
+
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_single_item_transform_computes_repetitions_in_legacy_order(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The serial path consumes repetitions in exact legacy order."""
+        token_dim = 6
+        config = MuveraConfig(
+            num_repetitions=7,
+            num_simhash_projections=2,
+            projection_dim=3,
+            final_projection_dim=None,
+            seed=9,
+        )
+        postprocessor = MuveraPostprocessor(token_dim=token_dim, config=config)
+        original_compute = postprocessor._compute_repetition
+        computed_repetitions: list[int] = []
+
+        def recording_compute(
+            token_embeddings: np.ndarray,
+            rep_num: int,
+            *,
+            is_query: bool,
+        ) -> np.ndarray:
+            computed_repetitions.append(rep_num)
+            return original_compute(token_embeddings, rep_num, is_query=is_query)
+
+        monkeypatch.setattr(postprocessor, "_compute_repetition", recording_compute)
+        tokens = np.random.default_rng(99).standard_normal((5, token_dim)).astype(np.float32)
+        output = EncodeOutput(multivector=[tokens], batch_size=1)
+        postprocessor.transform(output, is_query=True)
+
+        assert computed_repetitions == list(range(config.num_repetitions))
+        expected = _legacy_muvera_batch([tokens], token_dim, config, is_query=True)
+        np.testing.assert_array_equal(output.dense, expected)
+
+    @pytest.mark.parametrize("use_count_sketch", [False, True])
+    def test_concurrent_first_use_builds_and_publishes_one_cache(
+        self,
+        use_count_sketch: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Concurrent first transforms share one fully initialized cache."""
+        token_dim = 6
+        config = MuveraConfig(
+            num_repetitions=5,
+            num_simhash_projections=3,
+            projection_dim=None if use_count_sketch else 3,
+            final_projection_dim=7 if use_count_sketch else None,
+            seed=41,
+            center_tokens=True,
+        )
+        postprocessor = MuveraPostprocessor(token_dim=token_dim, config=config)
+        tokens = np.random.default_rng(42).standard_normal((9, token_dim)).astype(np.float32)
+        expected = _legacy_muvera_single(tokens, config, is_query=False)
+        original_build = postprocessor._build_random_cache
+        build_entered = Event()
+        release_build = Event()
+        build_calls = 0
+
+        def blocking_build() -> object:
+            nonlocal build_calls
+            build_calls += 1
+            build_entered.set()
+            assert release_build.wait(timeout=5)
+            return original_build()
+
+        monkeypatch.setattr(postprocessor, "_build_random_cache", blocking_build)
+
+        with ThreadPoolExecutor(max_workers=8) as callers:
+            first = callers.submit(postprocessor._compute_fde_single, tokens, is_query=False)
+            assert build_entered.wait(timeout=5)
+            remaining = [callers.submit(postprocessor._compute_fde_single, tokens, is_query=False) for _ in range(7)]
+            release_build.set()
+            results = [first.result(), *(future.result() for future in remaining)]
+
+        assert build_calls == 1
+        published_cache = postprocessor._random_cache
+        assert published_cache is not None
+        for result in results:
+            np.testing.assert_array_equal(result, expected)
+
+    def test_failed_cache_build_is_not_published_and_can_retry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed local cache build leaves no partial state or dense output."""
+        token_dim = 5
+        config = MuveraConfig(
+            num_repetitions=6,
+            num_simhash_projections=2,
+            projection_dim=None,
+            final_projection_dim=7,
+            seed=12,
+        )
+        postprocessor = MuveraPostprocessor(token_dim=token_dim, config=config)
+        original_build = postprocessor._build_random_cache
+        build_calls = 0
+
+        def fail_once() -> object:
+            nonlocal build_calls
+            build_calls += 1
+            cache = original_build()
+            assert postprocessor._random_cache is None
+            if build_calls == 1:
+                raise RuntimeError("cache build failed")
+            return cache
+
+        monkeypatch.setattr(postprocessor, "_build_random_cache", fail_once)
+        tokens = np.random.default_rng(19).standard_normal((4, token_dim)).astype(np.float32)
+        original_dense = np.arange(3, dtype=np.float32).reshape(1, 3)
+        output = EncodeOutput(
+            dense=original_dense,
+            dense_dim=3,
+            multivector=[tokens],
+            batch_size=1,
+        )
+
+        with pytest.raises(RuntimeError, match="cache build failed"):
+            postprocessor.transform(output, is_query=False)
+
+        assert postprocessor._random_cache is None
+        assert output.dense is original_dense
+        assert output.dense_dim == 3
+
+        postprocessor.transform(output, is_query=False)
+
+        assert build_calls == 2
+        assert postprocessor._random_cache is not None
+        expected = _legacy_muvera_batch([tokens], token_dim, config, is_query=False)
+        np.testing.assert_array_equal(output.dense, expected)
+
+    def test_repetition_failure_does_not_publish_partial_output(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A repetition exception leaves pre-existing dense output untouched."""
+        token_dim = 5
+        config = MuveraConfig(
+            num_repetitions=6,
+            num_simhash_projections=2,
+            projection_dim=None,
+            final_projection_dim=7,
+            seed=12,
+        )
+        postprocessor = MuveraPostprocessor(token_dim=token_dim, config=config)
+        original_compute = postprocessor._compute_repetition
+
+        def failing_compute(
+            token_embeddings: np.ndarray,
+            rep_num: int,
+            *,
+            is_query: bool,
+        ) -> np.ndarray:
+            if token_embeddings[0, 0] == 99.0 and rep_num == 1:
+                raise RuntimeError("repetition failed")
+            return original_compute(token_embeddings, rep_num, is_query=is_query)
+
+        monkeypatch.setattr(postprocessor, "_compute_repetition", failing_compute)
+        good = np.ones((4, token_dim), dtype=np.float32)
+        bad = np.ones((4, token_dim), dtype=np.float32)
+        bad[0, 0] = 99.0
+        original_dense = np.arange(6, dtype=np.float32).reshape(2, 3)
+        output = EncodeOutput(
+            dense=original_dense,
+            dense_dim=3,
+            multivector=[good, bad],
+            batch_size=2,
+        )
+
+        with pytest.raises(RuntimeError, match="repetition failed"):
+            postprocessor.transform(output, is_query=False)
+
+        assert output.dense is original_dense
+        np.testing.assert_array_equal(output.dense, np.arange(6, dtype=np.float32).reshape(2, 3))
+        assert output.dense_dim == 3
 
 
 class TestMuveraSameDimCountSketchGuard:

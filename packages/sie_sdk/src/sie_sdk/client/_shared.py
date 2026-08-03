@@ -157,6 +157,7 @@ from sie_sdk.types import (
 )
 
 from .errors import (
+    EstimateUnroutableError,
     InputTooLongError,
     ModelLoadFailedError,
     ModelLoadingError,
@@ -263,6 +264,69 @@ MODEL_LOAD_FAILED_ERROR_CODE = "MODEL_LOAD_FAILED"
 # a typed ``InputTooLongError`` so callers can react without parsing
 # error codes by hand.
 INPUT_TOO_LONG_ERROR_CODE = "INPUT_TOO_LONG"
+
+# ── cost-estimate dry run (POST /v1/estimate, #2435) ──────────────────────
+ESTIMATE_PATH = "/v1/estimate"
+# The gateway answers an unpriced/unroutable identity with the SAME code the
+# live billing path uses for "this request cannot be priced, so it will not be
+# run". Both are mapped to ``EstimateUnroutableError``; a slab-capacity 503
+# (``BILLING_CAPACITY_UNAVAILABLE``) is a retryable gateway condition and stays
+# a plain ``ServerError``.
+ESTIMATE_UNROUTABLE_ERROR_CODES = frozenset({"QUEUE_UNAVAILABLE", "PROVISIONING"})
+
+
+def build_estimate_envelope(endpoint: str, request: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``POST /v1/estimate`` envelope: the target path plus its verbatim body.
+
+    The gateway prices whatever ``request`` would have been sent to ``endpoint``,
+    so the SDK does NOT reshape it. Callers pass the exact body they would pass
+    to the real route; anything the SDK normalized on the way in would be
+    something the quote priced and the request never sent.
+
+    The returned mapping is a SHALLOW copy: rebinding a top-level key on the
+    caller's dict after this returns cannot change what is priced, but nested
+    containers are shared, so mutating one in place still can. Both clients
+    serialize the envelope immediately, so the window is a single call — and a
+    deep copy is deliberately not taken, because these bodies routinely carry
+    megabytes of base64 audio or image payloads.
+
+    Raises:
+        ValueError: If ``endpoint`` is not a non-empty path or ``request`` is
+            not a mapping. Both are caller mistakes about WHAT is being priced,
+            so they fail here rather than as a server-side 400.
+    """
+    if not isinstance(endpoint, str) or not endpoint.startswith("/"):
+        msg = f"estimate endpoint must be the exact target path (got {endpoint!r})"
+        raise ValueError(msg)
+    if not isinstance(request, Mapping):
+        msg = f"estimate request must be the target request body mapping (got {type(request).__name__})"
+        raise ValueError(msg)
+    return {"endpoint": endpoint, "request": dict(request)}
+
+
+def raise_if_estimate_unroutable(response: _HttpResponse) -> None:
+    """Raise :class:`EstimateUnroutableError` for an unpriceable estimate.
+
+    Short-circuits ``handle_error``'s generic 5xx dispatch so callers can catch
+    "this request is not sellable" specifically, without string-matching a code.
+    The message is the planner's own reason — it names the unpriced identity or
+    the dimension it could not bound.
+    """
+    if response.status_code != HTTP_SERVICE_UNAVAILABLE:
+        return
+    code = get_error_code(response)
+    if code not in ESTIMATE_UNROUTABLE_ERROR_CODES:
+        return
+    detail = get_error_detail(response)
+    message = None
+    if isinstance(detail, Mapping):
+        message = detail.get("message")
+    raise EstimateUnroutableError(
+        str(message or "the active rate book cannot price this request"),
+        code=code,
+        request=parse_request_metadata(response.headers),
+    )
+
 
 # Resource-exhausted retry settings (server-side OOM recovery exhausted).
 # Default backoff sequence: 5 -> 10 -> 20 s (capped at 30s). Three attempts
@@ -607,13 +671,45 @@ def _parse_nonnegative_meter_header(headers: Any, name: str) -> int | None:
     return parsed if parsed <= _MAX_METER_VALUE else None
 
 
-def parse_request_metadata(headers: Any) -> RequestMetadata | None:
+def settled_charge_from_usage(usage: Any) -> tuple[int, str] | None:
+    """The settled charge carried by one ``usage`` block (#2434).
+
+    Returns ``(credits_charged, rate_book_version)`` only when the block
+    carries BOTH — a charge with no book version cannot be reconciled, and a
+    version with no charge describes nothing. Anything malformed is treated as
+    absent.
+    """
+    if not isinstance(usage, Mapping):
+        return None
+    credits = usage.get("credits_charged")
+    version = usage.get("rate_book_version")
+    if not isinstance(credits, int) or isinstance(credits, bool) or credits < 0:
+        return None
+    if not isinstance(version, str) or not version:
+        return None
+    return credits, version
+
+
+def _settled_charge_from_body(body: Any) -> tuple[int, str] | None:
+    """The settled charge from a response envelope's ``usage`` block (#2434)."""
+    if not isinstance(body, Mapping):
+        return None
+    return settled_charge_from_usage(body.get("usage"))
+
+
+def parse_request_metadata(headers: Any, body: Any = None) -> RequestMetadata | None:
     """Parse optional metadata from one terminal response.
 
     Malformed fields are omitted independently. Integer meter headers must be
     canonical non-negative unsigned decimal values; request ids must be
     non-empty visible ASCII without surrounding whitespace. If no valid fields
     remain, no metadata is attached.
+
+    ``body`` is the decoded response envelope, when the caller has one. The
+    settled charge is read from its ``usage`` block FIRST and falls back to the
+    ``x-sie-credits-debited`` header, which is the only source on a gateway
+    that predates in-body surfacing (#2434). The two always agree when both are
+    present; the body additionally names the rate book, which no header does.
     """
     metadata: RequestMetadata = {}
 
@@ -646,12 +742,21 @@ def parse_request_metadata(headers: Any) -> RequestMetadata | None:
         usage["output_tokens"] = output_tokens
     if audio_ms is not None:
         usage["audio_ms"] = audio_ms
+
+    settled = _settled_charge_from_body(body)
+    if settled is not None:
+        credits_charged, rate_book_version = settled
+        usage["credits_charged"] = credits_charged
+        usage["rate_book_version"] = rate_book_version
+        metadata["credits_debited"] = credits_charged
+        metadata["rate_book_version"] = rate_book_version
+    else:
+        credits_debited = _parse_nonnegative_meter_header(headers, CREDITS_DEBITED_HEADER)
+        if credits_debited is not None:
+            metadata["credits_debited"] = credits_debited
+
     if usage:
         metadata["usage"] = usage
-
-    credits_debited = _parse_nonnegative_meter_header(headers, CREDITS_DEBITED_HEADER)
-    if credits_debited is not None:
-        metadata["credits_debited"] = credits_debited
 
     execution_identity_sha256 = _header_value(headers, EXECUTION_IDENTITY_SHA256_HEADER)
     if (
@@ -677,9 +782,14 @@ def parse_terminal_json_object(response: _HttpResponse, *, owner: str) -> dict[s
     return data
 
 
-def attach_request_metadata(results: Sequence[Any], headers: Any) -> None:
-    """Attach detached request-scoped metadata to one or more results."""
-    metadata = parse_request_metadata(headers)
+def attach_request_metadata(results: Sequence[Any], headers: Any, body: Any = None) -> None:
+    """Attach detached request-scoped metadata to one or more results.
+
+    ``body`` is the decoded response envelope when the caller has one, so the
+    settled charge comes from its ``usage`` block rather than the header
+    (#2434).
+    """
+    metadata = parse_request_metadata(headers, body)
     if metadata is None:
         return
     for result in results:

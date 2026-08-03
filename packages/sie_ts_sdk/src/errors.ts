@@ -328,3 +328,26 @@ export class InputTooLongError extends RequestError {
     this.model = options?.model;
   }
 }
+
+/**
+ * The gateway cannot PRICE the request, so it will not run it either.
+ *
+ * Thrown by {@link SIEClient.estimate} when the dry run answers `503`: the
+ * active rate book declares no rate for the request's
+ * (model, profile, operation, region) identity, or the planner cannot bound one
+ * of the dimensions that book DOES price (an unbounded generation input, say,
+ * or a sealed lane whose GPU class is unresolved).
+ *
+ * This is deliberately the same verdict the real request would get — the
+ * estimate runs the live planner — so treat it as "this request is not sellable
+ * right now", not as an estimator limitation. `message` is the planner's own
+ * reason, naming the unpriced identity or the dimension it could not bound.
+ *
+ * Subclass of {@link ServerError} so existing 5xx handlers keep working.
+ */
+export class EstimateUnroutableError extends ServerError {
+  constructor(message: string, code?: string) {
+    super(message, code, 503);
+    this.name = "EstimateUnroutableError";
+  }
+}

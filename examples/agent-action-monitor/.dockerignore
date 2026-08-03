@@ -1,0 +1,24 @@
+# Never send secrets or unnecessary files into the Docker build context,
+# even though each Dockerfile only COPYs specific paths -- the whole context
+# is still uploaded to the daemon otherwise.
+.env
+.env.*
+!.env.example
+
+.git/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+.mypy_cache/
+.ruff_cache/
+
+tests/
+
+.idea/
+.vscode/
+.DS_Store

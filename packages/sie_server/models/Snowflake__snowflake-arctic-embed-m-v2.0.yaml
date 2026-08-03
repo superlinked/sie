@@ -19,7 +19,7 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: null
-    adapter_path: sie_server.adapters.rope_flash:RoPEFlashAdapter
+    adapter_path: sie_server.adapters.sentence_transformer:SentenceTransformerDenseAdapter
     adapter_options:
       loadtime: {}
       runtime:

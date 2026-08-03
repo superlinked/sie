@@ -32,6 +32,7 @@ profiles:
     adapter_path: sie_server.adapters.sentence_transformer:SentenceTransformerSparseAdapter
     adapter_options:
       loadtime:
+        max_seq_length: 128
         trust_remote_code: false
       runtime: {}
   candle:

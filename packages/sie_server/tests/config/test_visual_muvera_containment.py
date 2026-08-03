@@ -15,20 +15,22 @@ VISUAL_MODELS = (
 )
 
 
-def test_unimplemented_visual_muvera_routes_are_not_advertised() -> None:
+def test_implemented_visual_muvera_routes_are_advertised() -> None:
     configs = load_model_configs(MODELS_DIR)
 
     for model_id in VISUAL_MODELS:
         assert model_id in configs
-        assert f"{model_id}:muvera" not in configs
-        assert "muvera" not in configs[model_id].profiles
+        assert f"{model_id}:muvera" in configs
+        assert "muvera" in configs[model_id].profiles
         default_profile = configs[model_id].resolve_profile("default")
-        assert "muvera" not in default_profile.runtime
-        assert "muvera" not in default_profile.loadtime
-        assert "muvera_config" not in default_profile.loadtime
+        assert "muvera_config" in default_profile.loadtime
+        muvera_profile = configs[model_id].resolve_profile("muvera")
+        assert muvera_profile.runtime["muvera"] == {}
+        assert muvera_profile.runtime["output_types"] == ["dense"]
+        assert muvera_profile.runtime["output_similarity"] == {"dense": "dot"}
 
 
-def test_contained_visual_models_remain_available_as_multivector_defaults() -> None:
+def test_visual_muvera_models_remain_available_as_multivector_defaults() -> None:
     configs = load_model_configs(MODELS_DIR)
 
     for model_id in VISUAL_MODELS:

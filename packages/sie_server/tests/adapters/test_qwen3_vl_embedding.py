@@ -8,11 +8,14 @@ from typing import Any
 
 import pytest
 import torch
+from PIL import Image
 from sie_server.adapters.qwen3_vl_embedding import (
     _DEFAULT_INSTRUCTION,
     Qwen3VLEmbeddingAdapter,
     _normalize_instruction,
 )
+from sie_server.core.video_frames import MAX_SAMPLED_FRAMES, VideoDecodeError
+from sie_server.types.inputs import InvalidInputError
 
 
 class TestNormalizeInstruction:
@@ -94,6 +97,32 @@ class _FakeProcessor:
 
     def __call__(self, **_kwargs: Any) -> dict[str, torch.Tensor]:
         return self._inputs
+
+
+class _WordTokenizer:
+    """Deterministic HF-shaped tokenizer: one token per word plus two specials.
+
+    The real ``AutoProcessor`` for Qwen3-VL bundles a tokenizer, which
+    ``_metering_tokenizer`` reaches through ``processor.tokenizer``; the fake
+    processor above has none, so the metering tests attach this.
+    """
+
+    model_max_length = 512
+
+    def __call__(
+        self,
+        text: list[str],
+        text_pair: list[str] | None = None,
+        *,
+        truncation: bool = False,
+        max_length: int | None = None,
+        **_: Any,
+    ) -> dict[str, list[list[int]]]:
+        _ = text_pair
+        lengths = [len(t.split()) + 2 for t in text]
+        if truncation and max_length is not None:
+            lengths = [min(n, max_length) for n in lengths]
+        return {"input_ids": [[0] * n for n in lengths]}
 
 
 class _RaceDetectingProcessor(_FakeProcessor):
@@ -235,3 +264,178 @@ class TestInstructionResolution:
 
     def test_non_empty_is_normalized_and_forwarded(self) -> None:
         assert self._run("Find relevant passages") == "Find relevant passages."
+
+
+class TestVideoFramesBillAsImages:
+    """Sampled video frames are the model's real visual input, so they bill as
+    §7 ``images`` on a worker-authoritative count (issue #2433).
+
+    The count travels on ``EncodeOutput.extra["input_image_counts"]`` because
+    the wire item carries only compressed bytes — nothing downstream can derive
+    how many frames those bytes decoded to.
+    """
+
+    def _adapter(self) -> Qwen3VLEmbeddingAdapter:
+        adapter = Qwen3VLEmbeddingAdapter("Qwen/Qwen3-VL-Embedding-2B")
+        adapter._device = "cpu"
+        inputs = {"input_ids": torch.tensor([[1]]), "attention_mask": torch.tensor([[1]])}
+        adapter._model = _FakeCausalLM(torch.tensor([[[1.0, 0.0]]]))  # ty: ignore[invalid-assignment]
+        adapter._processor = _FakeProcessor(inputs)  # ty: ignore[invalid-assignment]
+        return adapter
+
+    @staticmethod
+    def _frames(count: int) -> list[Any]:
+        return [Image.new("RGB", (4, 4)) for _ in range(count)]
+
+    def test_video_only_item_bills_the_frames_it_processed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        adapter = self._adapter()
+        monkeypatch.setattr(
+            "sie_server.adapters.qwen3_vl_embedding.extract_frames",
+            lambda _video: self._frames(7),
+        )
+        item = SimpleNamespace(text=None, images=None, video={"data": b"mp4-bytes", "format": "mp4"})
+
+        out = adapter.encode([item], ["dense"])
+
+        # Seven frames processed -> seven billable images, not one video blob.
+        assert out.extra["input_image_counts"] == [7]
+
+    def test_frames_reach_the_model_as_image_content_parts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        adapter = self._adapter()
+        monkeypatch.setattr(
+            "sie_server.adapters.qwen3_vl_embedding.extract_frames",
+            lambda _video: self._frames(3),
+        )
+        item = SimpleNamespace(text="a caption", images=None, video={"data": b"mp4-bytes"})
+
+        adapter.encode([item], ["dense"])
+
+        processor: Any = adapter._processor
+        user_turn = processor.conversations[0][1]["content"]
+        assert sum(1 for part in user_turn if part["type"] == "image") == 3
+
+    def test_mixed_images_and_frames_sum_into_one_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        adapter = self._adapter()
+        monkeypatch.setattr(
+            "sie_server.adapters.qwen3_vl_embedding.extract_frames",
+            lambda _video: self._frames(4),
+        )
+        png = b"\x89PNG\r\n\x1a\n"
+        monkeypatch.setattr(
+            Qwen3VLEmbeddingAdapter,
+            "_load_images",
+            lambda _self, _item: self._frames(2),
+        )
+        item = SimpleNamespace(text=None, images=[{"data": png}, {"data": png}], video={"data": b"mp4"})
+
+        out = adapter.encode([item], ["dense"])
+
+        assert out.extra["input_image_counts"] == [6]
+
+    def test_text_only_item_bills_no_images(self) -> None:
+        adapter = self._adapter()
+        item = SimpleNamespace(text="hi", images=None, video=None)
+        assert adapter.encode([item], ["dense"]).extra["input_image_counts"] == [0]
+
+    def test_per_item_counts_align_with_the_batch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        adapter = self._adapter()
+        monkeypatch.setattr(
+            "sie_server.adapters.qwen3_vl_embedding.extract_frames",
+            lambda _video: self._frames(5),
+        )
+        items = [
+            SimpleNamespace(text="text only", images=None, video=None),
+            SimpleNamespace(text=None, images=None, video={"data": b"mp4"}),
+        ]
+        assert adapter.encode(items, ["dense"]).extra["input_image_counts"] == [0, 5]
+
+    def test_undecodable_video_faults_instead_of_being_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Regression: a text+video item used to embed the text alone and return
+        # a billed success that silently ignored the video.
+        adapter = self._adapter()
+
+        def boom(_video: Any) -> list[Any]:
+            raise VideoDecodeError("video input could not be opened by the decoder")
+
+        monkeypatch.setattr("sie_server.adapters.qwen3_vl_embedding.extract_frames", boom)
+        item = SimpleNamespace(text="a caption", images=None, video={"data": b"garbage"})
+
+        with pytest.raises(VideoDecodeError):
+            adapter.encode([item], ["dense"])
+
+    def test_unreadable_images_are_not_billed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ``_load_images`` drops an image it cannot decode with only a warning,
+        # so counting SUBMITTED images would bill three for the one the model
+        # actually saw — the same silent over-bill the video half forbids. Both
+        # halves of the count are processed-based.
+        adapter = self._adapter()
+        monkeypatch.setattr(
+            Qwen3VLEmbeddingAdapter,
+            "_load_images",
+            lambda _self, _item: self._frames(1),  # two of the three failed to load
+        )
+        png = b"\x89PNG\r\n\x1a\n"
+        item = SimpleNamespace(text=None, images=[{"data": png}] * 3, video=None)
+
+        out = adapter.encode([item], ["dense"])
+
+        assert out.extra["input_image_counts"] == [1]
+
+    def test_the_processed_count_never_exceeds_the_reserved_basis(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The gateway reserves `submitted_images + videos * 32`. A count built
+        # from loaded images plus sampled frames is bounded by that basis, so it
+        # can never push settlement over its ceiling.
+        adapter = self._adapter()
+        monkeypatch.setattr(
+            "sie_server.adapters.qwen3_vl_embedding.extract_frames",
+            lambda _video: self._frames(MAX_SAMPLED_FRAMES),
+        )
+        monkeypatch.setattr(
+            Qwen3VLEmbeddingAdapter,
+            "_load_images",
+            lambda _self, _item: self._frames(1),
+        )
+        png = b"\x89PNG\r\n\x1a\n"
+        item = SimpleNamespace(text=None, images=[{"data": png}] * 2, video={"data": b"mp4"})
+
+        processed = adapter.encode([item], ["dense"]).extra["input_image_counts"][0]
+
+        reserved = len(item.images) + 1 * MAX_SAMPLED_FRAMES
+        assert processed <= reserved
+        assert processed == 1 + MAX_SAMPLED_FRAMES
+
+    def test_token_counts_scatter_across_a_mixed_batch(self) -> None:
+        # The base hook is all-or-nothing: one non-text item and the WHOLE
+        # batch loses its token counts, which left the text item with no units
+        # at all and faulted the dispatch at the gateway. Video items are
+        # non-text by construction and the queue seam fuses requests, so this
+        # adapter scatters instead — real counts for text, 0 for visual-only.
+        adapter = self._adapter()
+        adapter._processor.tokenizer = _WordTokenizer()  # ty: ignore[unresolved-attribute]
+        items = [
+            SimpleNamespace(text="alpha beta", images=None, video=None),
+            SimpleNamespace(text=None, images=None, video={"data": b"mp4"}),
+            SimpleNamespace(text="one two three", images=None, video=None),
+        ]
+
+        counts = adapter.count_input_tokens(items)
+
+        assert counts is not None
+        assert len(counts) == len(items)
+        assert counts[1] == 0  # visual-only item contributes no text tokens
+        assert counts[0] > 0
+        assert counts[2] > counts[0]  # more words -> more tokens
+
+    def test_a_video_only_batch_reports_no_text_tokens(self) -> None:
+        # Nothing tokenizable: every count is zero, which ``_encode_units``
+        # drops, so the request settles on ``images`` alone — matching a plan
+        # that never reserved ``input_tokens`` for it.
+        adapter = self._adapter()
+        adapter._processor.tokenizer = _WordTokenizer()  # ty: ignore[unresolved-attribute]
+        items = [SimpleNamespace(text=None, images=None, video={"data": b"mp4"})]
+        assert adapter.count_input_tokens(items) == [0]
+
+    def test_decode_failure_is_typed_invalid_input(self) -> None:
+        # Both ingress paths map InvalidInputError to INVALID_INPUT / HTTP 400,
+        # so an undecodable video is a 4xx and never a generic 500.
+        assert issubclass(VideoDecodeError, InvalidInputError)
