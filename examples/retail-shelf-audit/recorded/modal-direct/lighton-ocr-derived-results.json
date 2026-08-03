@@ -1,0 +1,75 @@
+{
+  "record_type": "direct_model_run_matching_sie_adapter",
+  "run_at": "2026-08-03T04:50:34.192840Z",
+  "selection": "DINO-derived vertical pair; upper notice and lower shelf label assigned before OCR",
+  "model": {
+    "id": "lightonai/LightOnOCR-2-1B",
+    "revision": "c97bd377f04481830395218fa8951df9deaba756",
+    "adapter": "sie_server.adapters.lighton_ocr.adapter:LightOnOCRAdapter",
+    "compute_precision": "bfloat16",
+    "system_prompt": "You are an OCR engine. Return the markdown representation of the document.",
+    "max_new_tokens": 64,
+    "num_beams": 1,
+    "attention": "sdpa"
+  },
+  "runtime": {
+    "gpu": "NVIDIA L4",
+    "torch": "2.9.1+cu128",
+    "transformers": "5.14.1"
+  },
+  "duration_ms": 5270.533,
+  "cases": [
+    {
+      "case_id": "upper-notice",
+      "input_path": "candidate-1.jpg",
+      "input_sha256": "ebd695074a316e8b857aa7f5f1fda88ebc19ac6fc2ad3599d51df5ff3db30e0f",
+      "display_scale": 3,
+      "source_detection": {
+        "label": "price tag",
+        "score": 0.231093,
+        "bbox_xywh": [
+          2300.1,
+          2318.7,
+          335.8,
+          244.5
+        ]
+      },
+      "source_crop_xyxy": [
+        2233,
+        2258,
+        2703,
+        2624
+      ],
+      "selection_role": "upper_by_geometry",
+      "image_width": 1410,
+      "image_height": 1098,
+      "text": "I am temporarily  \nout-of-stock  \nfrom our supplier  \n\nPlease ask our friendly staff  \ntive.\n\nPandol chil"
+    },
+    {
+      "case_id": "lower-shelf-label",
+      "input_path": "candidate-2.jpg",
+      "input_sha256": "cd86541f98be97ead3120c16c51c1fbba0ab9d8d83c7e0211b04f1b4045baf7b",
+      "display_scale": 3,
+      "source_detection": {
+        "label": "price tag",
+        "score": 0.259638,
+        "bbox_xywh": [
+          2235.5,
+          2559.4,
+          399.2,
+          186.3
+        ]
+      },
+      "source_crop_xyxy": [
+        2156,
+        2513,
+        2715,
+        2792
+      ],
+      "selection_role": "lower_by_geometry",
+      "image_width": 1677,
+      "image_height": 837,
+      "text": "Please ask our friendly staff\n\nPanadol Child  \n5-12Yrs Elixir 100ml  \n101760  \n10\u2079\u2079  \n10  \n10\u2079\u2079  \n10  \n10\u2079\u2079  \n10  \n10\ufffd"
+    }
+  ]
+}
