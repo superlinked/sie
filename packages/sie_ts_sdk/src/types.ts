@@ -32,6 +32,16 @@ export interface DocumentInput {
   format?: string;
 }
 
+/** Encoded audio bytes and optional decoder metadata. */
+export interface AudioInput {
+  /** Encoded audio bytes (WAV, MP3, FLAC, etc.) */
+  data: Uint8Array;
+  /** Audio container/codec format hint */
+  format?: string;
+  /** Source sample rate in Hz, when known */
+  sampleRate?: number;
+}
+
 /**
  * A single item to encode, score, or extract from.
  *
@@ -68,6 +78,12 @@ export interface Item {
   metadata?: Record<string, unknown>;
 }
 
+/** An item accepted by extract(), including optional encoded audio. */
+export interface ExtractItem extends Item {
+  /** Encoded audio for speech extraction, optionally with decoder metadata. */
+  audio?: AudioInput | Uint8Array;
+}
+
 /**
  * Sparse vector result with non-zero indices and values.
  * Used by SPLADE-type models.
@@ -90,6 +106,57 @@ export interface TimingInfo {
 }
 
 /**
+ * Authoritative units settled for one completed HTTP request.
+ *
+ * `creditsCharged`/`rateBookVersion` are the SETTLED charge as this response
+ * BODY reported it — never an estimate, never a reservation, and never
+ * fabricated. They are published whenever the gateway could write them into
+ * this body, including on a billing-fault response, where dispatches that rated
+ * cleanly are burned before the fault is returned, so the charge is real even
+ * though the result was not delivered. An explicit `0` is a settlement that
+ * cost nothing.
+ *
+ * Their ABSENCE means the body did not carry a settled charge — NOT that
+ * nothing was charged. A body the gateway must leave byte-for-byte intact (an
+ * opaque content type, one it cannot safely rewrite or buffer) still settles
+ * and still charges, and reports the debit only in the `x-sie-credits-debited`
+ * header. Read `RequestMetadata.creditsDebited` for the authoritative answer:
+ * the SDK fills it from this block when present and from that header
+ * otherwise, so it is absent only when nothing was charged.
+ */
+export interface RequestUsage {
+  inputTokens?: number;
+  pairs?: number;
+  images?: number;
+  pages?: number;
+  outputTokens?: number;
+  audioMs?: number;
+  creditsCharged?: number;
+  rateBookVersion?: string;
+}
+
+/** Optional gateway metadata from the successful terminal response. */
+export interface RequestMetadata {
+  id?: string;
+  /** Worker-origin immutable release/runtime identity digest. */
+  executionIdentitySha256?: string;
+  usage?: RequestUsage;
+  /**
+   * Exact committed debit — the authoritative charge for this request.
+   * Body-first (`usage.credits_charged`), falling back to the
+   * `x-sie-credits-debited` header, which the gateway sets on every
+   * non-streamed response whose settlement committed (including billing-fault
+   * responses and bodies it left untouched). The two always agree when both
+   * are present. Absence here — unlike absence inside `usage` — does mean
+   * nothing was charged. Streamed responses carry no headers at all: their
+   * charge rides the terminal usage chunk.
+   */
+  creditsDebited?: number;
+  /** Immutable rate-book version that rated `creditsDebited`, when reported. */
+  rateBookVersion?: string;
+}
+
+/**
  * Result of encoding a single item.
  *
  * Contains the item ID (if provided) and one or more output representations
@@ -106,6 +173,8 @@ export interface EncodeResult {
   multivector?: Float32Array[];
   /** Server-side timing breakdown */
   timing?: TimingInfo;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 /**
@@ -181,6 +250,13 @@ export interface ScoreEntry {
   rank: number;
 }
 
+export interface ScoreUsage {
+  /** Post-truncation input tokens processed */
+  inputTokens: number;
+  /** Images processed across query-document pairs */
+  images?: number;
+}
+
 /**
  * Result of scoring items against a query.
  */
@@ -191,6 +267,10 @@ export interface ScoreResult {
   queryId?: string;
   /** Score entries, sorted by relevance (descending) */
   scores: ScoreEntry[];
+  /** Authoritative usage when emitted by the score adapter */
+  usage?: ScoreUsage;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 /**
@@ -247,6 +327,14 @@ export interface DetectedObject {
   bbox: number[];
 }
 
+/** Stable per-item extraction failure. */
+export interface ExtractItemError {
+  /** Stable extraction error code */
+  code: string;
+  /** Sanitized extraction error message */
+  message: string;
+}
+
 /**
  * Result of extraction for a single item.
  */
@@ -261,6 +349,12 @@ export interface ExtractResult {
   classifications: Classification[];
   /** List of detected objects */
   objects: DetectedObject[];
+  /** Additional structured extraction data */
+  data?: Record<string, unknown>;
+  /** Stable per-item failure when extraction did not complete */
+  error?: ExtractItemError;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 /**
@@ -330,8 +424,9 @@ export interface CreatePoolOptions {
   /** Optional bundle filter. When set, only workers running this bundle will be assigned to the pool. */
   bundle?: string;
   /**
-   * Per-pool warm floor (minimum machines kept warm). The gateway publishes
-   * it as `sie_gateway_pool_warm_floor` for KEDA. Defaults to 0 (scale to zero).
+   * Per-pool warm floor (minimum machines kept warm). The gateway emits
+   * canonical `sie.gateway.pool.warm_floor` telemetry; the collector exposes
+   * `sie_gateway_pool_warm_floor` to KEDA. Defaults to 0 (scale to zero).
    */
   minimumWorkerCount?: number;
   /**
@@ -468,6 +563,10 @@ export interface ModelStatus {
   queue_pending_items: number;
 }
 
+/**
+ * Worker status snapshot. Request-rate and latency telemetry is exported
+ * through the configured OTel destination instead of this message.
+ */
 export interface WorkerStatusMessage {
   timestamp: number;
   name: string;
@@ -479,8 +578,6 @@ export interface WorkerStatusMessage {
   server: ServerInfo;
   gpus: GPUMetrics[];
   models: ModelStatus[];
-  counters: Record<string, Record<string, number>>;
-  histograms: Record<string, Record<string, Record<string, unknown>>>;
 }
 
 export interface ClusterStatusMessage {
@@ -568,6 +665,15 @@ export interface File {
   expires_at?: number;
 }
 
+/** The listing envelope from `GET /v1/files` (OpenAI cursor page). */
+export interface FileList {
+  object?: string;
+  data?: File[];
+  first_id?: string | null;
+  last_id?: string | null;
+  has_more?: boolean;
+}
+
 /** The envelope from deleting a file (OpenAI `FileDeleted`). */
 export interface FileDeleted {
   id?: string;
@@ -615,8 +721,8 @@ export interface Batch {
 export interface BatchList {
   object?: string;
   data?: Batch[];
-  first_id?: string;
-  last_id?: string;
+  first_id?: string | null;
+  last_id?: string | null;
   has_more?: boolean;
 }
 
@@ -655,27 +761,111 @@ export interface ScoreOptions {
 /** Reason the generation terminated. */
 export type FinishReason = "stop" | "length" | "cancelled" | "content_filter" | "error";
 
-/** Token usage for a single generation call. */
+/**
+ * Token usage for a single generation call.
+ *
+ * `creditsCharged`/`rateBookVersion` ride the same block on a settled response.
+ * An explicit `0` is a settlement that cost nothing; nothing here is ever an
+ * estimate or a fabricated zero. Absence means this block did not carry the
+ * charge, NOT that nothing was charged — read `RequestMetadata.creditsDebited`,
+ * which also covers responses whose body the gateway left untouched.
+ */
 export interface GenerationUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  creditsCharged?: number;
+  rateBookVersion?: string;
 }
+
+interface GrammarMetadata {
+  /** Optional schema/grammar label used by structured-output backends. */
+  label?: string | null;
+  /** Optional strictness hint for structured-output backends. */
+  strict?: boolean | null;
+}
+
+/** Constrain native generation to a JSON Schema. */
+export type JsonSchemaGrammar = GrammarMetadata & {
+  json_schema: Record<string, unknown>;
+  regex?: never;
+  ebnf?: never;
+};
+
+/** Constrain native generation to a regular expression. */
+export type RegexGrammar = GrammarMetadata & {
+  json_schema?: never;
+  regex: string;
+  ebnf?: never;
+};
+
+/** Constrain native generation to an EBNF grammar. */
+export type EbnfGrammar = GrammarMetadata & {
+  json_schema?: never;
+  regex?: never;
+  ebnf: string;
+};
+
+/** Native structured-output grammar. Exactly one grammar variant is set. */
+export type GenerateGrammar = JsonSchemaGrammar | RegexGrammar | EbnfGrammar;
 
 /** Options for the generate operation. */
 export interface GenerateOptions {
   /** Hard cap on output tokens. Required. */
   maxNewTokens: number;
+  /** Optional native image inputs rendered with the prompt for vision-capable models. */
+  images?: (ImageInput | ImageWireFormat)[];
   /** Sampling temperature. */
   temperature?: number;
   /** Nucleus sampling cutoff. */
   topP?: number;
   /** Optional list of stop strings. */
   stop?: string[];
+  /** OpenAI-compatible frequency penalty in [-2, 2]. */
+  frequencyPenalty?: number;
+  /** OpenAI-compatible presence penalty in [-2, 2]. */
+  presencePenalty?: number;
+  /**
+   * Native structured-output grammar.
+   *
+   * The broad record arm preserves the pre-existing SDK input contract for
+   * callers that keep valid grammar objects in `Record<string, unknown>`
+   * variables. The SDK still validates the exact three-arm shape at runtime.
+   */
+  grammar?: GenerateGrammar | Record<string, unknown>;
+  /**
+   * Optional per-request sampling seed. Must be a JavaScript safe integer
+   * (-(2^53 - 1) through 2^53 - 1) so JSON serialization preserves it exactly.
+   * Reproducibility depends on the active backend and deployment configuration.
+   */
+  seed?: number;
+  /** Token-id-to-bias map. */
+  logitBias?: Record<string, number>;
+  /** Stable request routing key. */
+  routingKey?: string;
+  /** Prompt cache affinity key. */
+  promptCacheKey?: string;
+  /** Opaque privacy-preserving safety identifier. */
+  safetyIdentifier?: string;
+  /** Served LoRA adapter name. */
+  loraAdapter?: string;
+  /**
+   * Governed generation runtime options forwarded as `options`. Typed native
+   * fields still win when both surfaces provide the same sampler control.
+   */
+  adapterOptions?: Record<string, unknown>;
   /** GPU type / pool spec, e.g. ``"l4"`` or ``"eval-bench/l4"``. */
   gpu?: string;
   /** Auto-retry under provisioning. */
   waitForCapacity?: boolean;
+}
+
+/** Options for streaming native generation. */
+export interface StreamGenerateOptions extends GenerateOptions {
+  /** Include per-token log probabilities in streamed chunks. */
+  logprobs?: boolean;
+  /** Number of alternate token log probabilities to return, in [0, 20]. */
+  topLogprobs?: number;
 }
 
 /** Aggregated generation result. */
@@ -694,6 +884,8 @@ export interface GenerateResult {
   ttftMs?: number;
   /** Average time per output token in milliseconds. */
   tpotMs?: number;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 // ---------------------------------------------------------------------------
@@ -846,6 +1038,12 @@ export interface ChatCompletionRequest {
    * `[-100, 100]` and caps map size.
    */
   logit_bias?: Record<string, number>;
+  /**
+   * Optional per-request sampling seed. Must be a JavaScript safe integer
+   * (`-(2^53 - 1)` through `2^53 - 1`) so the caller's integer is represented
+   * exactly. The SDK throws `RangeError` before network I/O for invalid values.
+   * Reproducibility depends on the active backend and deployment configuration.
+   */
   seed?: number;
   /**
    * OpenAI's free-text end-user identifier. Accepted and logged at debug
@@ -869,11 +1067,30 @@ export interface ChatCompletionRequest {
   prompt_cache_key?: string;
 }
 
-/** Token usage block (snake_case, matches the wire shape). */
+/**
+ * Token usage block (snake_case, matches the wire shape).
+ *
+ * On a settled managed response this block also carries the exact committed
+ * debit and the immutable book that rated it (#2434) — including on the
+ * terminal chunk of a stream that opted into `stream_options.include_usage`,
+ * which is the only place a streamed request can report what it cost. An
+ * explicit `0` is a settlement that cost nothing; nothing here is ever an
+ * estimate or a fabricated zero.
+ *
+ * Absence means this block did not carry the charge, NOT that nothing was
+ * charged. On a buffered call read `RequestMetadata.creditsDebited`. On a
+ * stream there is no header to fall back to: without
+ * `stream_options.include_usage` there is no usage chunk at all, and a stream
+ * whose terminal settle did not commit in time reports its tokens without a
+ * charge rather than guessing one. `GET /me/usage` remains the balance
+ * authority.
+ */
 export interface ChatUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  credits_charged?: number;
+  rate_book_version?: string;
 }
 
 /** A single choice in a `ChatCompletion` (non-streaming). */
@@ -893,6 +1110,8 @@ export interface ChatCompletion {
   system_fingerprint: string | null;
   choices: ChatChoice[];
   usage: ChatUsage;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
 }
 
 /** Incremental delta emitted on each streaming chunk. */
@@ -978,6 +1197,8 @@ export interface GenerateChunk {
   request_id: string;
   seq: number;
   text_delta: string;
+  /** Per-token log probabilities aligned with `text_delta`. */
+  logprobs?: Array<Record<string, unknown>>;
   done: boolean;
   finish_reason?: "stop" | "length" | "cancelled" | "error";
   usage?: ChatUsage;
@@ -1012,6 +1233,64 @@ export interface ExtractOptions {
 // ---------------------------------------------------------------------------
 // Utility Types
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Cost-estimate dry run (`POST /v1/estimate`, #2435)
+// ---------------------------------------------------------------------------
+
+/**
+ * One priced dimension's exact rational rate from the active rate book.
+ *
+ * Credits are integers, so rates are exact rationals rather than floats:
+ * `rate_numerator / rate_denominator` credits per unit. If you re-derive a
+ * total client-side, multiply and round ONCE — never per unit.
+ *
+ * Wire-shaped (snake_case) like {@link JobPreflight}: this is the gateway's
+ * `ReservationPlan` projection, echoed verbatim.
+ */
+export interface AppliedRate {
+  unit: string;
+  rate_numerator: number;
+  rate_denominator: number;
+}
+
+/** The rate-book row set a request is priced under. */
+export interface RateIdentity {
+  model: string;
+  profile: string;
+  operation: string;
+  region: string;
+}
+
+/**
+ * A dispatch-free quote from `POST /v1/estimate`.
+ *
+ * The gateway prices the request through the SAME reservation planner the
+ * metered path runs, against the SAME active rate book, and returns the plan
+ * instead of holding it — no dispatch, no reservation, no credits consumed.
+ *
+ * `estimated_credits` is the CONSERVATIVE ceiling the live path would hold.
+ * Settlement bills the worker-authoritative counts against that plan and
+ * releases the remainder, so the real charge is at most this number.
+ *
+ * `minimum_billed_units` is present only for duration-priced (sealed custom
+ * lane, `gpu_second`) identities, where a dry run cannot know the request's
+ * duration: there the quote is a rate card — `applied_rates` plus this
+ * per-request floor — and `unit_ceilings` is the whole-window hold, not a
+ * prediction. `estimate_basis` says which of the two you are reading.
+ */
+export interface CostEstimate {
+  endpoint: string;
+  identity: RateIdentity;
+  estimated_credits: number;
+  unit_ceilings: Record<string, number>;
+  applied_rates: AppliedRate[];
+  rate_book_version: string;
+  rate_book_sha256: string;
+  rounding_rule: string;
+  estimate_basis: string;
+  minimum_billed_units?: Record<string, number> | null;
+}
 
 /**
  * Helper to convert typed arrays to regular number array.

@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import logging
 import socket
-import sys
 from collections.abc import Generator
-from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -20,9 +18,6 @@ pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Stablebridge tests require CUDA (flash-attn + bf16 inference)",
 )
-
-_project_root = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(_project_root / "packages" / "sie_bench" / "src"))
 
 ENCODER_MODEL = "answerdotai/ModernBERT-base"
 PRUNER_MODEL = "sugiv/stablebridge-pruner-highlighter"
@@ -41,13 +36,14 @@ def _find_free_port(start: int = 8400, end: int = 8500) -> int:
 
 
 @pytest.fixture(scope="module")
-def stablebridge_server(device: str) -> Generator[str]:
-    from sie_bench.servers.sie import SIEServer
-
-    models_dir = _project_root / "packages" / "sie_server" / "models"
+def stablebridge_server(device: str, sie_server_process_factory: type[Any]) -> Generator[str]:
     port = _find_free_port()
 
-    server = SIEServer(port=port, models_dir=str(models_dir), instrumentation=True)
+    server = sie_server_process_factory(
+        port=port,
+        models_dir="packages/sie_server/models",
+        instrumentation=True,
+    )
 
     try:
         server.start(f"{ENCODER_MODEL},{PRUNER_MODEL}", device)

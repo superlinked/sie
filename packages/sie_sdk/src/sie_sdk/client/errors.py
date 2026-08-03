@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sie_sdk.types import RequestMetadata
+
 
 class SIEError(Exception):
     """Base exception for SIE SDK errors."""
@@ -12,21 +17,45 @@ class SIEConnectionError(SIEError):
 
 
 class RequestError(SIEError):
-    """Error in the request (4xx responses)."""
+    """Error in the request (4xx responses).
 
-    def __init__(self, message: str, code: str | None = None, status_code: int | None = None) -> None:
+    ``request`` contains canonical request, usage, and debit metadata parsed
+    from the terminal response headers when the server supplied any.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: str | None = None,
+        status_code: int | None = None,
+        *,
+        request: RequestMetadata | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        self.request = request
 
 
 class ServerError(SIEError):
-    """Error from the server (5xx responses)."""
+    """Error from the server (5xx responses).
 
-    def __init__(self, message: str, code: str | None = None, status_code: int | None = None) -> None:
+    ``request`` contains canonical request, usage, and debit metadata parsed
+    from the terminal response headers when the server supplied any.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: str | None = None,
+        status_code: int | None = None,
+        *,
+        request: RequestMetadata | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        self.request = request
 
 
 class ProvisioningError(SIEError):
@@ -173,8 +202,9 @@ class ModelLoadFailedError(ServerError):
         error_class: str | None = None,
         permanent: bool = True,
         attempts: int = 1,
+        request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code="MODEL_LOAD_FAILED", status_code=502)
+        super().__init__(message, code="MODEL_LOAD_FAILED", status_code=502, request=request)
         self.model = model
         self.error_class = error_class
         self.permanent = permanent
@@ -203,9 +233,38 @@ class InputTooLongError(RequestError):
         message: str,
         *,
         model: str | None = None,
+        request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code="INPUT_TOO_LONG", status_code=400)
+        super().__init__(message, code="INPUT_TOO_LONG", status_code=400, request=request)
         self.model = model
+
+
+class EstimateUnroutableError(ServerError):
+    """The gateway cannot PRICE the request, so it will not run it either.
+
+    Raised by :meth:`SIEClient.estimate` when the dry run answers ``503``:
+    the active rate book declares no rate for the request's
+    (model, profile, operation, region) identity, or the planner cannot bound
+    one of the dimensions that book DOES price (an unbounded generation input,
+    say, or a sealed lane whose GPU class is unresolved).
+
+    This is deliberately the same verdict the real request would get — the
+    estimate runs the live planner — so treat it as "this request is not
+    sellable right now", not as an estimator limitation. :attr:`args` carries
+    the planner's own reason, which names the unpriced identity or the
+    dimension it could not bound.
+
+    Subclass of :class:`ServerError` so existing 5xx handlers keep working.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        request: RequestMetadata | None = None,
+    ) -> None:
+        super().__init__(message, code=code, status_code=503, request=request)
 
 
 class ResourceExhaustedError(ServerError):
@@ -231,7 +290,8 @@ class ResourceExhaustedError(ServerError):
         *,
         model: str | None = None,
         retries: int = 0,
+        request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code="RESOURCE_EXHAUSTED", status_code=503)
+        super().__init__(message, code="RESOURCE_EXHAUSTED", status_code=503, request=request)
         self.model = model
         self.retries = retries

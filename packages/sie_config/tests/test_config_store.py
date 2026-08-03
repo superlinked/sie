@@ -46,6 +46,13 @@ class TestConfigStore:
     def test_read_missing_model_returns_none(self) -> None:
         assert self.store.read_model("nonexistent/model") is None
 
+    def test_delete_model_is_idempotent(self) -> None:
+        self.store.write_model("org/model", "sie_id: org/model\n")
+
+        assert self.store.delete_model("org/model") is True
+        assert self.store.read_model("org/model") is None
+        assert self.store.delete_model("org/model") is False
+
     def test_list_models_empty(self) -> None:
         assert self.store.list_models() == []
 

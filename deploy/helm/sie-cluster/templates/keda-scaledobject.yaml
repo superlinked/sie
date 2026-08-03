@@ -1,5 +1,31 @@
-{{- if or .Values.autoscaling.enabled .Values.keda.install }}
 {{- $root := . -}}
+{{- $gatewayReplicas := int .Values.gateway.replicas -}}
+{{- $metricsEnabled := eq (include "sie-cluster.otel.metricsEnabled" .) "true" -}}
+{{- if and $metricsEnabled (or (lt $gatewayReplicas 1) (gt $gatewayReplicas 10)) -}}
+{{- fail "canonical metrics require gateway.replicas between 1 and 10" -}}
+{{- end -}}
+{{- if .Values.autoscaling.enabled }}
+{{- $_ := include "sie-cluster.worker.validateLanes" $root -}}
+{{- $fallbackReplicas := int .Values.autoscaling.fallbackReplicas -}}
+{{- if lt $fallbackReplicas 1 -}}
+{{- fail "autoscaling.enabled=true requires autoscaling.fallbackReplicas >= 1" -}}
+{{- end -}}
+{{- $queueDepthActivationText := .Values.autoscaling.queueDepthActivation | toString | trim -}}
+{{- if not (regexMatch "^(0|[1-9][0-9]*)$" $queueDepthActivationText) -}}
+{{- fail "autoscaling.enabled=true requires autoscaling.queueDepthActivation to be a canonical non-negative integer (0 or [1-9][0-9]*)" -}}
+{{- end -}}
+{{- $queueDepthActivation := int $queueDepthActivationText -}}
+{{- $collectorReady := printf `(max(up{namespace="%s", service="%s-otel-collector", endpoint="prometheus"}) == 1)` (include "sie-cluster.namespace" .) (include "sie-cluster.fullname" .) -}}
+{{- $gatewayTarget := printf `namespace="%s", service="%s-otel-collector", endpoint="prometheus", producer_service="sie-gateway"` (include "sie-cluster.namespace" .) (include "sie-cluster.fullname" .) -}}
+{{- $freshGatewayInstances := printf `(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{%s}) < 20)` $gatewayTarget -}}
+{{- $producerFresh := printf `(max%s)` $freshGatewayInstances -}}
+{{- $controlReady := printf `(%s and on() %s)` $collectorReady $producerFresh -}}
+{{- /*
+  Counters have no series before their first event. Derive their semantic zero
+  from the fresh producer snapshot instead of an unconditional vector(0), so a
+  broken gateway-to-collector path remains an empty query and KEDA fails over.
+*/ -}}
+{{- $freshGatewayZero := printf `(0 * max(sie_gateway_capacity_snapshot_timestamp_seconds{%s} and on(producer_instance,collector_generation) %s))` $gatewayTarget $freshGatewayInstances -}}
 {{- /*
   Auto-derive Prometheus address when kube-prometheus-stack is installed as a sub-chart.
   The sub-chart runs in the release namespace, not a hardcoded "monitoring" namespace.
@@ -29,7 +55,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ printf "%s-keda-apply" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+  name: {{ include "sie-cluster.keda.apply.serviceAccountName" . }}
   namespace: {{ include "sie-cluster.namespace" . }}
   labels:
     app.kubernetes.io/component: keda-apply
@@ -38,6 +64,9 @@ metadata:
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     helm.sh/hook-weight: "1"
 rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
   - apiGroups: ["keda.sh"]
     resources: ["scaledobjects"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
@@ -45,7 +74,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ printf "%s-keda-apply" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+  name: {{ include "sie-cluster.keda.apply.serviceAccountName" . }}
   namespace: {{ include "sie-cluster.namespace" . }}
   labels:
     app.kubernetes.io/component: keda-apply
@@ -56,60 +85,101 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ printf "%s-keda-apply" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" }}
+  name: {{ include "sie-cluster.keda.apply.serviceAccountName" . }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "sie-cluster.keda.apply.serviceAccountName" . }}
     namespace: {{ include "sie-cluster.namespace" . }}
----
-# ConfigMap containing rendered ScaledObject manifests (weight 1; mounted by Job at weight 2)
-# Each key is a separate YAML file applied by the hook Job via kubectl apply -f /config/
+{{- /*
+  Keep every ordinary Helm-owned manifest ConfigMap comfortably below the
+  Kubernetes 1 MiB object limit. The chart therefore renders at most 32 worker
+  manifests per deterministic shard plus one gateway shard.
+  The apply hook discovers all shards by exact release/revision labels, so it
+  does not need an unbounded projected volume list.
+*/ -}}
+{{- $manifestShardSize := 32 -}}
+{{- $manifestState := dict "laneIndex" 0 -}}
+{{- range $poolName, $pool := .Values.workers.pools }}
+{{- if $pool.enabled }}
+{{- range $bundleName, $bundleCfg := $pool.bundles }}
+{{- if dig "enabled" true $bundleCfg }}
+{{- $lane := include "sie-cluster.worker.lane" (dict "root" $root "poolName" $poolName "pool" $pool "bundleName" $bundleName) | fromJson }}
+{{- $queuePool := $lane.queuePool }}
+{{- $machineProfile := $lane.machineProfile }}
+{{- $bundle := $lane.bundle }}
+{{- $scaledObjectName := include "sie-cluster.keda.worker.scaledObjectName" (dict "root" $root "poolName" $poolName "bundleName" $bundleName) }}
+{{- $hpaName := include "sie-cluster.keda.hpaName" (dict "scaledObjectName" $scaledObjectName) }}
+{{- $laneGatewayTarget := printf `%s, pool="%s", machine_profile="%s", bundle="%s"` $gatewayTarget $queuePool $machineProfile $bundle -}}
+{{- $freshLaneQueueInstances := printf `(abs(time() - sie_gateway_lane_queue_snapshot_timestamp_seconds{%s}) < 20)` $laneGatewayTarget -}}
+{{- $laneQueueSampleReady := printf `(count(sie_gateway_lane_queue_depth{%s} and on(producer_instance,collector_generation) %s) > 0)` $laneGatewayTarget $freshLaneQueueInstances -}}
+{{- $laneQueueControlReady := printf `(%s and on() %s)` $collectorReady $laneQueueSampleReady -}}
+{{- $configuredMin := int $bundleCfg.minReplicas }}
+{{- $maxReplicas := int $bundleCfg.maxReplicas }}
+{{- $fallbackFloor := min $maxReplicas (max $configuredMin $fallbackReplicas) }}
+{{- $hpaMin := $configuredMin }}
+{{- if eq $configuredMin 0 }}{{- $hpaMin = $fallbackFloor }}{{- end }}
+{{- if and (eq $configuredMin 0) (ne $queueDepthActivation 0) -}}
+{{- fail (printf "%s: minReplicas=0 requires autoscaling.queueDepthActivation=0 so the first durable queue item activates KEDA" $lane.ownerPath) -}}
+{{- end -}}
+{{- $laneIndex := int (get $manifestState "laneIndex") -}}
+{{- if eq (mod $laneIndex $manifestShardSize) 0 }}
+{{- $shardIndex := div $laneIndex $manifestShardSize -}}
+{{- $shardSuffix := printf "-keda-so-%04d" $shardIndex -}}
+{{ printf "\n---\n" -}}
+# Ordinary Helm-owned shard of worker ScaledObject manifests. Keeping this
+# resource out of the hook lifecycle lets Helm remove obsolete shards on
+# upgrade, disable, and uninstall.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "sie-cluster.fullname" . }}-keda-scaledobjects
-  namespace: {{ include "sie-cluster.namespace" . }}
+  name: {{ printf "%s%s" (include "sie-cluster.fullname" $root | trunc (int (sub 63 (len $shardSuffix))) | trimSuffix "-") $shardSuffix }}
+  namespace: {{ include "sie-cluster.namespace" $root }}
   labels:
-    app.kubernetes.io/component: keda-apply
-  annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation
-    helm.sh/hook-weight: "1"
+    {{- include "sie-cluster.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: keda-manifests
+    sie.superlinked.com/scaler-revision: {{ $root.Release.Revision | quote }}
 data:
-  # Worker pool ScaledObjects (one per enabled queuePool/machineProfile/bundle lane)
-{{- range $poolName, $pool := .Values.workers.pools }}
-{{- if $pool.enabled }}
-{{- $machineProfile := default $poolName $pool.machineProfile }}
-{{- $queuePool := default (default "default" $root.Values.workers.common.queuePool) $pool.queuePool | lower }}
-{{- range $bundleName, $bundleCfg := $pool.bundles }}
-{{- if dig "enabled" true $bundleCfg }}
-{{- $bundle := $bundleName }}
-{{- $bundleProfiles := splitList "," (include "sie-cluster.bundle.machineProfiles" (dict "root" $root "queuePool" $queuePool "bundle" $bundle)) }}
-{{- $singleProfileBundle := eq (len $bundleProfiles) 1 }}
-  scaledobject-worker-{{ $poolName }}-{{ $bundleName }}.yaml: |
+  scaledobjects.yaml: |
+{{- end }}
+    ---
     apiVersion: keda.sh/v1alpha1
     kind: ScaledObject
     metadata:
-      name: {{ include "sie-cluster.fullname" $root }}-worker-{{ $poolName }}-{{ $bundleName }}-scaler
+      name: {{ $scaledObjectName }}
       namespace: {{ include "sie-cluster.namespace" $root }}
       labels:
         {{- include "sie-cluster.worker.labels" $root | nindent 8 }}
-        sie.superlinked.com/pool: {{ $poolName | quote }}
+        sie.superlinked.com/pool: {{ $queuePool | quote }}
+        sie.superlinked.com/machine-profile: {{ $machineProfile | quote }}
         sie.superlinked.com/bundle: {{ $bundle | quote }}
+        sie.superlinked.com/scaler-managed: "true"
+        sie.superlinked.com/scaler-revision: {{ $root.Release.Revision | quote }}
+        sie.superlinked.com/helm-namespace: {{ $root.Release.Namespace | quote }}
     spec:
       scaleTargetRef:
         apiVersion: apps/v1
         kind: StatefulSet
         name: {{ include "sie-cluster.fullname" $root }}-worker-{{ $poolName }}-{{ $bundleName }}
-      minReplicaCount: {{ $bundleCfg.minReplicas }}
-      maxReplicaCount: {{ $bundleCfg.maxReplicas }}
+      # KEDA 2.14 drives fallback through the HPA, while its activation loop
+      # owns 0<->1. Give scale-to-zero lanes a non-zero HPA safety floor and
+      # use the supported idle override for healthy inactivity. This prevents
+      # an upstream metrics outage from racing fallback back to zero.
+      minReplicaCount: {{ $hpaMin }}
+      {{- if eq $configuredMin 0 }}
+      idleReplicaCount: 0
+      {{- end }}
+      maxReplicaCount: {{ $maxReplicas }}
       pollingInterval: {{ $root.Values.autoscaling.pollingInterval }}
       cooldownPeriod: {{ $root.Values.autoscaling.cooldownPeriod }}
       fallback:
         failureThreshold: 3
-        replicas: {{ $root.Values.autoscaling.fallbackReplicas }}
+        # Keep fallback inside this lane's declared bounds. A global fallback
+        # larger than maxReplicas is impossible for the generated HPA to honor;
+        # one smaller than minReplicas must not weaken the static warm floor.
+        replicas: {{ $fallbackFloor }}
       advanced:
         horizontalPodAutoscalerConfig:
+          name: {{ $hpaName }}
           behavior:
             scaleUp:
               stabilizationWindowSeconds: 0
@@ -136,29 +206,30 @@ data:
           metadata:
             serverAddress: {{ $promAddr }}
             metricName: sie_gateway_pending_demand_{{ $poolName }}_{{ $bundleName }}
-            {{- if $singleProfileBundle }}
-            # Single-profile bundle: keep counting the legacy gpu-agnostic
-            # empty-profile demand bucket for older gateways. Current gateways
-            # emit concrete profile demand at the source; each term is guarded
-            # with `or vector(0)` so one absent series cannot void the sum.
-            query: (sum(sie_gateway_pending_demand{pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)) + (sum(sie_gateway_pending_demand{pool="{{ $queuePool }}", machine_profile="", bundle="{{ $bundle }}"}) or vector(0))
-            {{- else }}
-            query: sum(sie_gateway_pending_demand{pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
-            {{- end }}
+            query: (max(sie_gateway_pending_demand{ {{- $gatewayTarget -}}, pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"} and on(producer_instance,collector_generation) {{ $freshGatewayInstances }}) and on() {{ $controlReady }})
+            ignoreNullValues: "false"
             threshold: "1"
             activationThreshold: "0"
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
             metricName: sie_gateway_queue_depth_{{ $poolName }}_{{ $bundleName }}
-            query: sum(sie_gateway_worker_queue_depth{pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
+            # Each gateway reads the exact durable JetStream consumer backlog.
+            # Max removes replicated gateway observations; the lane-scoped
+            # timestamp makes a missing sample an error while preserving a
+            # successfully read explicit zero.
+            query: (max(sie_gateway_lane_queue_depth{ {{- $laneGatewayTarget -}}} and on(producer_instance,collector_generation) {{ $freshLaneQueueInstances }}) and on() {{ $laneQueueControlReady }})
+            ignoreNullValues: "false"
             threshold: {{ $root.Values.autoscaling.queueDepthThreshold | quote }}
-            activationThreshold: {{ $root.Values.autoscaling.queueDepthActivation | quote }}
+            activationThreshold: {{ $queueDepthActivation | quote }}
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
             metricName: sie_gateway_active_lease_gpus_{{ $poolName }}_{{ $bundleName }}
-            query: sum(sie_gateway_active_lease_gpus{pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
+            # The gateway has already deduplicated assigned workers for this
+            # physical lane; max only removes replicated gateway observations.
+            query: (max(sie_gateway_active_lease_gpus{ {{- $gatewayTarget -}}, pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"} and on(producer_instance,collector_generation) {{ $freshGatewayInstances }}) and on() {{ $controlReady }})
+            ignoreNullValues: "false"
             threshold: "1"
             activationThreshold: "0"
         - type: prometheus
@@ -166,58 +237,57 @@ data:
             serverAddress: {{ $promAddr }}
             # Per-pool warm floor (PoolSpec.minimum_worker_count): the gateway emits N
             # here so KEDA keeps N machines warm even with zero pending demand.
-            # `or vector(0)` + activationThreshold "0" means an unset floor
-            # contributes 0, so scale-to-zero is preserved; rendered per lane
-            # unconditionally (NOT gated on the static minReplicas floor).
+            # The producer emits an explicit zero for an unset floor, so a
+            # missing series is a telemetry failure rather than idle demand.
             metricName: sie_gateway_pool_warm_floor_{{ $poolName }}_{{ $bundleName }}
-            query: sum(sie_gateway_pool_warm_floor{pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"}) or vector(0)
+            # Every gateway replica reconciles the same physical-lane floor.
+            query: (max(sie_gateway_pool_warm_floor{ {{- $gatewayTarget -}}, pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"} and on(producer_instance,collector_generation) {{ $freshGatewayInstances }}) and on() {{ $controlReady }})
+            ignoreNullValues: "false"
             threshold: "1"
             activationThreshold: "0"
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
             metricName: sie_gateway_rejected_rate_{{ $poolName }}_{{ $bundleName }}
-            # Filter out reasons the SDK already retries against the same
-            # worker pool; they are per-request transient signals, not
-            # "we need more workers" signals:
-            #   - resource_exhausted: worker hit GPU OOM after recovery
-            #     (cache_clear -> evict_lru -> split_batch). The SDK retries
-            #     with bounded exponential backoff; scaling up here would
-            #     cold-start a new GPU pod for what is a transient memory
-            #     pressure event on an otherwise-healthy worker.
-            #   - upstream_model_loading: worker is cold-loading the
-            #     target model on demand (explicit MODEL_LOADING result).
-            #     The SDK retries under `provision_timeout_s`.
-            #   - upstream_timeout_model_loading: legacy gateway-synthesised
-            #     MODEL_LOADING timeout reason from older releases.
-            #   - upstream_lora_loading: worker is loading a LoRA adapter
-            #     on demand. SDK retries with LORA_LOADING budget.
-            # Genuine "the gateway is dropping requests because the pool
-            # is undersized" signals (timeout/capacity/no_workers) still
-            # drive scale-up via this trigger.
-            #
-            # Note on regex anchoring: PromQL ``=~`` / ``!~`` are RE2 with
-            # implicit full-string anchors. The list below matches
-            # exact reason values only; a future suffixed reason like
-            # ``resource_exhausted_extended`` would NOT be excluded and
-            # would drive scale-up. If new retryable reasons are added in
-            # ``proxy.rs::record_rejected_request``, append them here.
-            query: sum(rate(sie_gateway_rejected_requests_total{pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}", reason!~"resource_exhausted|upstream_model_loading|upstream_timeout_model_loading|upstream_lora_loading"}[2m])) or vector(0)
+            # The gateway emits only the four declared scale-worthy reasons
+            # into this control counter; every other rejection is omitted.
+            query: ((sum(rate(sie_gateway_rejected_requests_total{ {{- $gatewayTarget -}}, pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}", scaling_action="scale_up"}[2m]) and on(producer_instance,collector_generation) {{ $freshGatewayInstances }}) or on() {{ $freshGatewayZero }}) and on() {{ $controlReady }})
+            ignoreNullValues: "false"
             threshold: "1"
             activationThreshold: "0"
+{{- $_ := set $manifestState "laneIndex" (add1 $laneIndex) }}
 {{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
-  # Gateway ScaledObject
-  scaledobject-gateway.yaml: |
+{{- $gatewayShardSuffix := "-keda-so-gateway" -}}
+{{- $gatewayScaledObjectName := include "sie-cluster.keda.gateway.scaledObjectName" . -}}
+{{- $gatewayHpaName := include "sie-cluster.keda.hpaName" (dict "scaledObjectName" $gatewayScaledObjectName) -}}
+{{ printf "\n---\n" -}}
+# Gateway ScaledObject manifest has its own bounded shard so worker shard
+# boundaries remain deterministic as lanes are added and removed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s%s" (include "sie-cluster.fullname" . | trunc (int (sub 63 (len $gatewayShardSuffix))) | trimSuffix "-") $gatewayShardSuffix }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keda-manifests
+    sie.superlinked.com/scaler-revision: {{ .Release.Revision | quote }}
+data:
+  scaledobjects.yaml: |
+    ---
     apiVersion: keda.sh/v1alpha1
     kind: ScaledObject
     metadata:
-      name: {{ include "sie-cluster.fullname" . }}-gateway-scaler
+      name: {{ $gatewayScaledObjectName }}
       namespace: {{ include "sie-cluster.namespace" . }}
       labels:
         {{- include "sie-cluster.gateway.labels" . | nindent 8 }}
+        sie.superlinked.com/scaler-managed: "true"
+        sie.superlinked.com/scaler-revision: {{ .Release.Revision | quote }}
+        sie.superlinked.com/helm-namespace: {{ .Release.Namespace | quote }}
     spec:
       scaleTargetRef:
         apiVersion: apps/v1
@@ -227,19 +297,27 @@ data:
       maxReplicaCount: 10
       pollingInterval: 30
       cooldownPeriod: 300
+      fallback:
+        failureThreshold: 3
+        # A broken collector/query path retains the validated serving floor.
+        replicas: {{ $gatewayReplicas }}
+      advanced:
+        horizontalPodAutoscalerConfig:
+          name: {{ $gatewayHpaName }}
       triggers:
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
             metricName: sie_gateway_request_rate
-            query: sum(rate(sie_gateway_requests_total[1m])) or vector(0)
+            query: ((sum(rate(sie_gateway_requests_total{ {{- $gatewayTarget -}}}[1m]) and on(producer_instance,collector_generation) {{ $freshGatewayInstances }}) or on() {{ $freshGatewayZero }}) and on() {{ $controlReady }})
+            ignoreNullValues: "false"
             threshold: "100"
 ---
 # Hook Job: wait for KEDA CRDs then apply ScaledObjects
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ printf "%s-keda-apply-%d" (include "sie-cluster.fullname" .) .Release.Revision | trunc 63 | trimSuffix "-" }}
+  name: {{ include "sie-cluster.keda.apply.jobName" . }}
   namespace: {{ include "sie-cluster.namespace" . }}
   labels:
     app.kubernetes.io/component: keda-apply
@@ -249,7 +327,11 @@ metadata:
     helm.sh/hook-weight: "2"
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 240
+  # Allow the declared 192-lane maximum to spend up to three minutes waiting
+  # for a newly installed KEDA CRD and still retain twelve minutes for the seven
+  # bounded manifest shards plus pruning. Operators deploying that maximum should
+  # give Helm a larger client timeout as documented in the chart README.
+  activeDeadlineSeconds: 900
   ttlSecondsAfterFinished: 300
   template:
     metadata:
@@ -260,14 +342,21 @@ spec:
       restartPolicy: Never
       containers:
         - name: apply
-          image: alpine/k8s:1.29.10
+          image: {{ include "sie-cluster.keda.hookImage" . }}
           command: ["/bin/sh", "-c"]
           args:
             - |
-              set -e
+              set -eu
               NAMESPACE="{{ include "sie-cluster.namespace" . }}"
+              {{- include "sie-cluster.kubernetes.inClusterKubeconfig" . | nindent 14 }}
+              HELM_NAMESPACE="{{ .Release.Namespace }}"
+              CURRENT_REVISION="{{ .Release.Revision }}"
+              RELEASE_INSTANCE="{{ .Release.Name }}"
+              EXPECTED_APP_NAME="{{ include "sie-cluster.name" . }}"
               TIMEOUT=180
               INTERVAL=5
+              TARGET_NAMES=/tmp/target-scaledobjects
+              : > "$TARGET_NAMES"
 
               echo "=== KEDA ScaledObject Apply ==="
 
@@ -289,14 +378,106 @@ spec:
                 exit 1
               fi
 
-              # Step 2: Apply ScaledObjects from mounted ConfigMap
+              # Step 2: Discover and apply every ordinary Helm-owned manifest
+              # shard for this exact release revision. One data key per shard
+              # keeps extraction deterministic and avoids projected-volume
+              # limits as the lane catalog grows.
               echo "Applying ScaledObjects..."
-              kubectl apply -f /config/ -n "$NAMESPACE"
-              echo "SUCCESS: ScaledObjects applied"
-          volumeMounts:
-            - name: config
-              mountPath: /config
-              readOnly: true
+              MANIFEST_SELECTOR="app.kubernetes.io/name={{ include "sie-cluster.name" . }},app.kubernetes.io/instance=$RELEASE_INSTANCE,app.kubernetes.io/part-of=sie,app.kubernetes.io/managed-by=Helm,app.kubernetes.io/component=keda-manifests,sie.superlinked.com/scaler-revision=$CURRENT_REVISION"
+              CONFIG_MAPS="$(kubectl get configmaps -n "$NAMESPACE" -l "$MANIFEST_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+              if [ -z "$CONFIG_MAPS" ]; then
+                echo "FAILED: no KEDA manifest shards found for release revision $CURRENT_REVISION" >&2
+                exit 1
+              fi
+              for config_map in $CONFIG_MAPS; do
+                echo "  Applying $config_map"
+                kubectl get configmap "$config_map" -n "$NAMESPACE" \
+                  -o jsonpath='{.data.scaledobjects\.yaml}' > /tmp/scaledobjects.yaml
+                if [ ! -s /tmp/scaledobjects.yaml ]; then
+                  echo "FAILED: $config_map has no scaledobjects.yaml payload" >&2
+                  exit 1
+                fi
+                # Refuse to adopt a same-name object unless it is either an
+                # exact current-release object or a canonical v0.6.20 object
+                # for this release. This protects fresh installs from silently
+                # taking over user-owned autoscalers.
+                targets="$(kubectl apply --dry-run=server -f /tmp/scaledobjects.yaml \
+                  -n "$NAMESPACE" -o name)"
+                for target in $targets; do
+                  name="${target##*/}"
+                  if ! existing="$(kubectl get scaledobject "$name" -n "$NAMESPACE" \
+                    --ignore-not-found -o json)"; then
+                    echo "FAILED: could not verify ownership of ScaledObject $name" >&2
+                    exit 1
+                  fi
+                  if [ -n "$existing" ] && ! printf '%s' "$existing" | jq -e \
+                    --arg instance "$RELEASE_INSTANCE" --arg app_name "$EXPECTED_APP_NAME" \
+                    --arg helm_namespace "$HELM_NAMESPACE" '
+                      .metadata.labels as $labels |
+                      $labels["app.kubernetes.io/name"] == $app_name and
+                      $labels["app.kubernetes.io/instance"] == $instance and
+                      $labels["app.kubernetes.io/part-of"] == "sie" and
+                      $labels["app.kubernetes.io/managed-by"] == "Helm" and
+                      (
+                        (
+                          $labels["sie.superlinked.com/scaler-managed"] == "true" and
+                          $labels["sie.superlinked.com/helm-namespace"] == $helm_namespace
+                        ) or
+                        (
+                          ($labels["sie.superlinked.com/scaler-managed"] // "") == "" and
+                          $labels["helm.sh/chart"] == "sie-cluster-0.6.20" and
+                          $labels["app.kubernetes.io/version"] == "v0.6.20" and
+                          ($labels["app.kubernetes.io/component"] == "worker" or
+                           $labels["app.kubernetes.io/component"] == "gateway")
+                        )
+                      )
+                    ' >/dev/null; then
+                    echo "FAILED: refusing to adopt foreign ScaledObject $name" >&2
+                    exit 1
+                  fi
+                done
+                applied="$(kubectl apply -f /tmp/scaledobjects.yaml -n "$NAMESPACE" -o name)"
+                printf '%s\n' "$applied" | sed '/^$/d; s#^.*/##' >> "$TARGET_NAMES"
+              done
+              sort -u -o "$TARGET_NAMES" "$TARGET_NAMES"
+
+              # Step 3: Prune hook-created objects removed by this revision
+              # (for example, a disabled lane or renamed bundle). Only objects
+              # carrying both the exact release identity and our managed label
+              # are eligible; compare their names with the authoritative set
+              # that applied successfully instead of assuming Helm revisions
+              # stay unique across uninstall/reinstall. User-owned ScaledObjects
+              # are never touched.
+              echo "Pruning ScaledObjects from older revisions..."
+              MANAGED_SELECTOR="app.kubernetes.io/instance=$RELEASE_INSTANCE,app.kubernetes.io/part-of=sie,app.kubernetes.io/managed-by=Helm,sie.superlinked.com/scaler-managed=true,sie.superlinked.com/helm-namespace=$HELM_NAMESPACE"
+              managed_names="$(kubectl get scaledobjects -n "$NAMESPACE" -l "$MANAGED_SELECTOR" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+              stale_names=""
+              for managed_name in $managed_names; do
+                if ! grep -Fqx "$managed_name" "$TARGET_NAMES"; then
+                  stale_names="$stale_names $managed_name"
+                fi
+              done
+              if [ -n "$stale_names" ]; then
+                # Kubernetes object names contain no shell whitespace, and the
+                # 193-object catalog bound keeps this below argv limits.
+                kubectl delete scaledobjects -n "$NAMESPACE" $stale_names \
+                  --ignore-not-found --wait=true
+              fi
+              # Every canonical v0.6.20 survivor was just adopted and now has
+              # scaler-managed=true. A remaining legacy object therefore
+              # belongs to a retired/missed lane; fail instead of declaring a
+              # removed workload's old HPA safe.
+              LEGACY_SELECTOR="app.kubernetes.io/instance=$RELEASE_INSTANCE,app.kubernetes.io/part-of=sie,app.kubernetes.io/managed-by=Helm,app.kubernetes.io/component in (worker,gateway),helm.sh/chart=sie-cluster-0.6.20,app.kubernetes.io/version=v0.6.20,!sie.superlinked.com/scaler-managed"
+              legacy_names="$(kubectl get scaledobjects -n "$NAMESPACE" -l "$LEGACY_SELECTOR" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+              if [ -n "$legacy_names" ]; then
+                echo "FAILED: canonical v0.6.20 ScaledObjects remain outside the target catalog:" >&2
+                printf '%s\n' "$legacy_names" >&2
+                echo "Drain those lanes, delete their exact ScaledObjects, and retry forward" >&2
+                exit 1
+              fi
+              echo "SUCCESS: ScaledObjects applied and obsolete release objects pruned"
           resources:
             requests:
               cpu: 100m
@@ -304,10 +485,6 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
-      volumes:
-        - name: config
-          configMap:
-            name: {{ include "sie-cluster.fullname" . }}-keda-scaledobjects
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists

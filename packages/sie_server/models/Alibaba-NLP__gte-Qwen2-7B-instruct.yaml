@@ -1,5 +1,9 @@
 sie_id: Alibaba-NLP/gte-Qwen2-7B-instruct
 hf_id: Alibaba-NLP/gte-Qwen2-7B-instruct
+# Immutable pin (repo main as of the PR #2104 g7e validation, last modified
+# 2025-03-24): trust_remote_code executes modeling_qwen.py from the Hub, so
+# the revision must not float with the mutable main branch.
+hf_revision: a8d08b36ada9cacfe34c4d6f80957772a025daf2
 inputs:
   text: true
   image: false
@@ -17,20 +21,37 @@ max_sequence_length: 32000
 profiles:
   default:
     max_batch_tokens: 16384
-    compute_precision: bfloat16
-    adapter_path: sie_server.adapters.sglang.embedding:SGLangEmbeddingAdapter
+    # The sentence_transformer adapter ignores compute_precision: the model
+    # loads in its stored checkpoint dtype, which is float32 here (fp32
+    # safetensors, config.json torch_dtype float32). ~28 GiB of weights — the
+    # heavy quality lane (g7e, 96 GiB) has ample headroom.
+    compute_precision: null
+    # gte-Qwen2 is a decoder converted to BIDIRECTIONAL attention (config
+    # is_causal=false) with last-token pooling; that recipe exists only in the
+    # model's custom trust_remote_code modeling (auto_map modeling_qwen.py).
+    # sglang's native Qwen2 implementation keys on architectures
+    # (Qwen2ForCausalLM), never reads the non-standard is_causal flag, and
+    # served the model CAUSAL — collapsing retrieval (NFCorpus 0.132 vs floor
+    # 0.406, #2097; the 1.5B collapsed the same way on qwen2_flash, #1593).
+    # Use the sentence_transformer adapter, which runs the model's own
+    # forward + pooling (the official recipe) — the same fix PR #1626 applied
+    # to the 1.5B. Forfeits sglang's KV-cache/OOM protection; acceptable on
+    # the 96 GiB heavy lane (nvidia/llama-embed-nemotron-8b precedent).
+    adapter_path: sie_server.adapters.sentence_transformer:SentenceTransformerDenseAdapter
     adapter_options:
       loadtime:
-        mem_fraction_static: 0.85
-        # The model's remote-code tokenizer only re-exports the stock Qwen2
-        # tokenizer through a hardcoded transformers submodule import that is
-        # fragile across transformers versions. sglang serves the weights with
-        # its own native Qwen2 implementation (the config's remote auto_map is
-        # only for HF AutoModel), so disable remote code and load the stock
-        # tokenizer — functionally identical and version-robust.
-        trust_remote_code: false
+        # Also loads the remote tokenizer (tokenization_qwen.py — identical
+        # auto_map to the 1.5B, green on this adapter since #1626). The #1483
+        # tokenizer crash was specific to the sglang worker's loading context.
+        trust_remote_code: true
+        # gte-Qwen2's custom modeling uses the legacy (<4.54) transformers cache
+        # API (DynamicCache.get_usable_length), removed in the bundle's newer
+        # transformers. Disabling the KV cache skips that path (embeddings need
+        # no cache); mirrors the old uses_legacy_transformers_cache workaround.
+        config_kwargs:
+          use_cache: false
       runtime:
-        pooling: last_token
+        pooling: last
         normalize: true
         query_template: |-
           Instruct: {instruction}

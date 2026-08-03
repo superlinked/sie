@@ -1,0 +1,38 @@
+[package]
+name = "sie-audio-prep"
+version = "0.6.26"
+edition = "2021"
+license = "Apache-2.0"
+description = "Bounded, shared audio decoding and resampling for SIE workers."
+
+[lib]
+name = "sie_audio_prep"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+evaluation = ["python"]
+msgpack = ["dep:rmpv"]
+
+[dependencies]
+audioadapter-buffers = "4.0"
+pyo3 = { version = "0.29", optional = true, features = ["abi3-py312", "extension-module"] }
+rubato = "4.0"
+rmpv = { version = "1", optional = true }
+symphonia = { version = "0.6", default-features = false, features = [
+    "aac",
+    "alac",
+    "flac",
+    "isomp4",
+    "mkv",
+    "mp3",
+    "ogg",
+    "opt-simd",
+    "pcm",
+    "vorbis",
+    "wav",
+] }
+symphonia-adapter-libopus = { version = "=0.3.0", features = ["bundled"] }
+opusic-sys = { version = "=0.7.3", default-features = false, features = ["bundled"] }
+thiserror = "2"

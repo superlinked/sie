@@ -10,13 +10,30 @@ tasks:
   encode: null
   score: null
   extract: {}
+max_sequence_length: 16384
 profiles:
-  default:
+  transformers:
     max_batch_tokens: 16384
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.glm_ocr:GlmOcrAdapter
     adapter_options:
       loadtime: {}
+      runtime:
+        max_new_tokens: 8192
+        num_beams: 1
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.85
+        served_model_name: zai-org/GLM-OCR
+        max_concurrent_requests: 16
+        processor_use_fast: false
+        extra_launch_args:
+          - --disable-fast-image-processor
+        default_prompt: "Text Recognition:"
       runtime:
         max_new_tokens: 8192
         num_beams: 1

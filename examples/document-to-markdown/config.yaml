@@ -1,0 +1,84 @@
+cluster:
+  url: "http://localhost:8080"
+  api_key: ""
+  model: "docling"
+  profile: "default"
+  request_timeout_s: 900
+  provision_timeout_s: 900
+
+documents:
+  - slug: "nvidia-cfo-commentary"
+    title: "NVIDIA Q4 FY2025 CFO Commentary"
+    publisher: "NVIDIA"
+    file_name: "nvidia-q4-fy2025-cfo-commentary.pdf"
+    url: "https://investor.nvidia.com/files/doc_financials/2025/Q425/Q4FY25-CFO-Commentary.pdf"
+    source_page: "https://investor.nvidia.com/financial-info/quarterly-results/default.aspx"
+    rights: "Public investor document. Fetch at run time; do not redistribute the complete PDF."
+    checks:
+      required_text:
+        - "CFO Commentary on Fourth Quarter and Fiscal 2025 Results"
+        - "Revenue by Market Platform"
+        - "Data Center"
+        - "$39,331"
+      ordered_text:
+        - "Q4 Fiscal 2025 Summary"
+        - "Fiscal 2025 Summary"
+        - "Revenue"
+        - "Gross Margin"
+      minimum_markdown_tables: 4
+
+  - slug: "siriuspoint-investor-deck"
+    title: "SiriusPoint Q1 2025 Investor Presentation"
+    publisher: "SiriusPoint"
+    file_name: "siriuspoint-q1-2025-investor-presentation.pdf"
+    url: "https://s27.q4cdn.com/660241321/files/doc_financials/2025/q1/Q1-2025-SPNT-Investor-Presentation_vFinal.pdf"
+    source_page: "https://investors.siriuspt.com/financials/quarterly-results/default.aspx"
+    rights: "Public investor presentation. Fetch at run time; do not redistribute the complete PDF."
+    checks:
+      required_text:
+        - "SIRIUSPOINT OVERVIEW"
+        - "Gross Premiums Written"
+        - "Financial Strength Rating"
+        - "Core Underwriting Income"
+      ordered_text:
+        - "Highlights & Strategic Update"
+        - "First Quarter Results Update"
+      minimum_markdown_tables: 1
+
+  - slug: "docling-paper"
+    title: "Docling Technical Report"
+    publisher: "Docling project authors"
+    file_name: "docling-technical-report.pdf"
+    url: "https://arxiv.org/pdf/2408.09869"
+    source_page: "https://arxiv.org/abs/2408.09869"
+    rights: "Paper copyright remains with its authors. Fetch at run time; use short excerpts with attribution."
+    checks:
+      required_text:
+        - "Docling Technical Report"
+        - "DocLayNet"
+        - "TableFormer"
+        - "Document Conversion"
+      ordered_text:
+        - "Abstract"
+        - "Introduction"
+        - "Architecture"
+      minimum_markdown_tables: 1
+
+  - slug: "fema-proof-of-loss"
+    title: "FEMA Hermit's Peak/Calf Canyon Proof of Loss Form"
+    publisher: "Federal Emergency Management Agency"
+    file_name: "fema-proof-of-loss-form.pdf"
+    url: "https://www.fema.gov/sites/default/files/documents/fema_hpcc-proof-of-loss-form-english-exp-11.30.2026.pdf"
+    source_page: "https://www.fema.gov/flood-insurance/find-form/underwriting"
+    rights: "U.S. federal government work. Do not imply FEMA or DHS endorsement."
+    fixture_file: "fixtures/sources/fema-proof-of-loss-form.pdf"
+    checks:
+      required_text:
+        - "PROOF OF LOSS"
+        - "CLAIMANT CONTACT INFORMATION"
+        - "TYPE OF PROOF OF LOSS"
+        - "AMOUNTS CLAIMED"
+        - "Individual or Household"
+        - "YOU MUST SIGN THE CERTIFICATION"
+      ordered_text: []
+      minimum_markdown_tables: 0

@@ -21,12 +21,20 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use crate::metrics;
+use crate::observability::metrics::{self as telemetry, ConfigOperation, ConfigOutcome};
 use crate::state::config_epoch::ConfigEpoch;
 use crate::state::model_registry::ModelRegistry;
 use crate::types::model::ModelConfig;
 
 const SUBJECT_ALL: &str = "sie.config.models._all";
+
+fn notification_operation(notification: &ConfigNotification) -> ConfigOperation {
+    if notification.model_config.trim().is_empty() {
+        ConfigOperation::DeltaEpoch
+    } else {
+        ConfigOperation::DeltaModel
+    }
+}
 
 /// Default trusted-producer allowlist for `sie.config.models._all`. Only
 /// `sie-config` is expected to publish on these subjects; every other
@@ -111,6 +119,7 @@ impl NatsManager {
         config_epoch: ConfigEpoch,
         trusted_producers: Vec<String>,
     ) -> Self {
+        telemetry::set_messaging_client_ready(false);
         Self {
             client: RwLock::new(None),
             gateway_id,
@@ -140,9 +149,12 @@ impl NatsManager {
 
     pub async fn connect(self: &Arc<Self>) -> Result<(), async_nats::ConnectError> {
         if self.nats_url.is_empty() {
+            telemetry::set_messaging_client_ready(false);
             info!("NATS URL not configured, skipping connection");
             return Ok(());
         }
+
+        telemetry::set_messaging_client_ready(false);
 
         let reconnect_notify_clone = Arc::clone(&self.reconnect_notify);
 
@@ -155,12 +167,12 @@ impl NatsManager {
                 async move {
                     match event {
                         async_nats::Event::Disconnected => {
+                            telemetry::set_messaging_client_ready(false);
                             warn!("NATS disconnected");
-                            metrics::set_nats_connected(false);
                         }
                         async_nats::Event::Connected => {
+                            telemetry::set_messaging_client_ready(true);
                             info!("NATS reconnected");
-                            metrics::set_nats_connected(true);
                             notify.notify_waiters();
                         }
                         async_nats::Event::SlowConsumer(id) => {
@@ -182,10 +194,7 @@ impl NatsManager {
             .await?;
 
         info!(url = %self.nats_url, gateway_id = %self.gateway_id, "connected to NATS");
-        // Initial connect: flip the gauge to 1. Subsequent
-        // `Disconnected` / `Connected` events update it via the
-        // event callback above.
-        metrics::set_nats_connected(true);
+        telemetry::set_messaging_client_ready(true);
         *self.client.write().await = Some(client);
 
         Ok(())
@@ -224,6 +233,10 @@ impl NatsManager {
             let notification: ConfigNotification = match serde_json::from_slice(&msg.payload) {
                 Ok(n) => n,
                 Err(e) => {
+                    telemetry::record_config_operation(
+                        ConfigOperation::DeltaModel,
+                        ConfigOutcome::ParseError,
+                    );
                     warn!(error = %e, "failed to parse config notification");
                     continue;
                 }
@@ -288,13 +301,10 @@ impl NatsManager {
         // branch attaches the same, accurate kind to its counter:
         // an empty `model_config` is a pure epoch bump regardless of
         // which branch we end up in.
-        let kind = if notification.model_config.trim().is_empty() {
-            "epoch_bump"
-        } else {
-            "model_added"
-        };
+        let operation = notification_operation(notification);
 
         if !self.is_trusted_producer(&notification.producer_id) {
+            telemetry::record_config_operation(operation, ConfigOutcome::RejectedUntrusted);
             warn!(
                 producer_id = %notification.producer_id,
                 trusted_producers = ?self.trusted_producers,
@@ -302,34 +312,27 @@ impl NatsManager {
                 model = %notification.model_id,
                 "rejecting config notification from untrusted producer; epoch NOT advanced"
             );
-            metrics::CONFIG_DELTAS
-                .with_label_values(&[kind, "rejected_untrusted"])
-                .inc();
             return;
         }
 
-        if kind == "epoch_bump" {
+        if operation == ConfigOperation::DeltaEpoch {
             // Pure epoch bump (no config body to apply). Advance the
             // counter so the poller doesn't treat this as drift.
             self.config_epoch.set_max(notification.epoch);
-            metrics::CONFIG_DELTAS
-                .with_label_values(&[kind, "applied"])
-                .inc();
+            telemetry::record_config_operation(operation, ConfigOutcome::Success);
             return;
         }
 
         let config: ModelConfig = match serde_yaml::from_str(&notification.model_config) {
             Ok(config) => config,
             Err(e) => {
+                telemetry::record_config_operation(operation, ConfigOutcome::ParseError);
                 warn!(
                     error = %e,
                     model = %notification.model_id,
                     epoch = notification.epoch,
                     "failed to parse model_config from config notification; epoch NOT advanced (poller will recover)"
                 );
-                metrics::CONFIG_DELTAS
-                    .with_label_values(&[kind, "parse_error"])
-                    .inc();
                 return;
             }
         };
@@ -349,20 +352,16 @@ impl NatsManager {
                     );
                 }
                 self.config_epoch.set_max(notification.epoch);
-                metrics::CONFIG_DELTAS
-                    .with_label_values(&[kind, "applied"])
-                    .inc();
+                telemetry::record_config_operation(operation, ConfigOutcome::Success);
             }
             Err(e) => {
+                telemetry::record_config_operation(operation, ConfigOutcome::ApplyError);
                 warn!(
                     error = %e,
                     model = %notification.model_id,
                     epoch = notification.epoch,
                     "failed to apply model_config from config notification; epoch NOT advanced (poller will recover)"
                 );
-                metrics::CONFIG_DELTAS
-                    .with_label_values(&[kind, "apply_error"])
-                    .inc();
             }
         }
     }
@@ -410,6 +409,31 @@ mod tests {
                 .and_then(|hashes| hashes.get("default"))
                 .map(String::as_str),
             Some("pool-hash")
+        );
+    }
+
+    #[test]
+    fn config_notification_shape_selects_bounded_telemetry_operation() {
+        let mut notification = ConfigNotification {
+            producer_id: "sie-config".to_string(),
+            bundle_id: "default".to_string(),
+            epoch: 1,
+            bundle_config_hash: String::new(),
+            model_id: String::new(),
+            profiles_added: Vec::new(),
+            model_config: " \n\t".to_string(),
+            affected_bundles: Vec::new(),
+            pool: None,
+            bundle_pool_config_hashes: HashMap::new(),
+        };
+        assert_eq!(
+            notification_operation(&notification),
+            ConfigOperation::DeltaEpoch
+        );
+        notification.model_config = "sie_id: example/model".to_string();
+        assert_eq!(
+            notification_operation(&notification),
+            ConfigOperation::DeltaModel
         );
     }
 
@@ -665,6 +689,7 @@ adapters:
         // for the append-only pathway.
         let seed = ModelConfig {
             name: "test/model".to_string(),
+            hf_revision: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,

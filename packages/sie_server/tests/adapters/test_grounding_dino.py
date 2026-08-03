@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import io
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
-from sie_server.adapters.grounding_dino import GroundingDINOAdapter
+import torch
+from PIL import Image
+from sie_server.adapters.grounding_dino.adapter import GroundingDINOAdapter
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import ImageInput, Item
 
@@ -55,14 +58,139 @@ class TestGroundingDINOAdapter:
         with pytest.raises(NotImplementedError, match="does not support encode"):
             adapter.encode([], [])
 
-    def test_extract_requires_labels(self) -> None:
-        """Test that extract requires labels."""
+    def test_extract_requires_labels_or_instruction(self) -> None:
         adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
         adapter._model = MagicMock()
         adapter._processor = MagicMock()
 
-        with pytest.raises(ValueError, match="requires labels"):
+        with pytest.raises(ValueError, match="requires labels or an instruction"):
             adapter.extract([Item(images=[ImageInput(data=b"test", format="jpeg")])])
+
+    @pytest.mark.parametrize(
+        ("labels", "instruction", "expected_prompt"),
+        [
+            (["Person", " car "], "ignored instruction", "person. car."),
+            (None, "find the damaged screen", "find the damaged screen"),
+        ],
+    )
+    def test_extract_uses_labels_or_instruction_prompt(
+        self,
+        labels: list[str] | None,
+        instruction: str,
+        expected_prompt: str,
+    ) -> None:
+        adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
+        adapter._model = MagicMock()
+        adapter._processor = MagicMock()
+        adapter._device = "cpu"
+        adapter._detect_batch = MagicMock(return_value=[[]])  # type: ignore[method-assign]
+        prepared = SimpleNamespace(
+            original_index=0,
+            payload=SimpleNamespace(
+                pixel_values=torch.zeros(3, 8, 8),
+                original_size=(8, 8),
+            ),
+        )
+
+        result = adapter.extract(
+            [Item()],
+            labels=labels,
+            instruction=instruction,
+            prepared_items=[prepared],
+        )
+
+        assert result.objects == [[]]
+        assert adapter._detect_batch.call_args.kwargs["text_prompt"] == expected_prompt
+
+    def test_fused_requests_map_prepared_results_positionally(self) -> None:
+        adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
+        adapter._model = MagicMock()
+        adapter._processor = MagicMock()
+        first = [{"label": "first", "score": 1.0, "bbox": [0, 0, 1, 1]}]
+        second = [{"label": "second", "score": 1.0, "bbox": [1, 1, 1, 1]}]
+        adapter._detect_batch = MagicMock(return_value=[first, second])  # type: ignore[method-assign]
+        prepared = [
+            SimpleNamespace(
+                original_index=0,
+                payload=SimpleNamespace(
+                    pixel_values=torch.full((3, 2, 2), value),
+                    original_size=(2, 2),
+                ),
+            )
+            for value in (1.0, 2.0)
+        ]
+
+        result = adapter.extract([Item(), Item()], labels=["object"], prepared_items=prepared)
+
+        assert result.objects == [first, second]
+        assert torch.equal(
+            adapter._detect_batch.call_args.kwargs["pixel_values"],
+            torch.stack([prepared[0].payload.pixel_values, prepared[1].payload.pixel_values]),
+        )
+
+    def test_fused_requests_pad_variable_image_shapes_with_pixel_mask(self) -> None:
+        adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
+        adapter._model = MagicMock()
+        adapter._processor = MagicMock()
+        adapter._detect_batch = MagicMock(return_value=[[], []])  # type: ignore[method-assign]
+        prepared = [
+            SimpleNamespace(
+                original_index=0,
+                payload=SimpleNamespace(
+                    pixel_values=torch.full((3, 2, 3), 1.0),
+                    original_size=(3, 2),
+                ),
+            ),
+            SimpleNamespace(
+                original_index=0,
+                payload=SimpleNamespace(
+                    pixel_values=torch.full((3, 4, 2), 2.0),
+                    original_size=(2, 4),
+                ),
+            ),
+        ]
+
+        adapter.extract([Item(), Item()], labels=["object"], prepared_items=prepared)
+
+        pixel_values = adapter._detect_batch.call_args.kwargs["pixel_values"]
+        pixel_mask = adapter._detect_batch.call_args.kwargs["pixel_mask"]
+        assert pixel_values.shape == (2, 3, 4, 3)
+        assert torch.equal(pixel_values[0, :, :2, :3], prepared[0].payload.pixel_values)
+        assert torch.equal(pixel_values[1, :, :4, :2], prepared[1].payload.pixel_values)
+        assert torch.equal(pixel_mask[0], torch.tensor([[1, 1, 1], [1, 1, 1], [0, 0, 0], [0, 0, 0]]))
+        assert torch.equal(pixel_mask[1], torch.tensor([[1, 1, 0], [1, 1, 0], [1, 1, 0], [1, 1, 0]]))
+
+    def test_prepared_detection_forwards_pixel_mask(self) -> None:
+        adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
+        adapter._model = MagicMock(return_value=MagicMock())
+        adapter._processor = MagicMock()
+        adapter._processor.tokenizer.return_value = {
+            "input_ids": torch.zeros((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+        }
+        adapter._processor.post_process_grounded_object_detection.return_value = [{}, {}]
+        adapter._device = "cpu"
+        adapter._device_type = "cpu"
+        adapter._model_dtype = torch.float32
+        pixel_values = torch.zeros((2, 3, 4, 5))
+        pixel_mask = torch.tensor(
+            [
+                [[1, 1, 1, 1, 1]] * 4,
+                [[1, 1, 1, 0, 0]] * 4,
+            ]
+        )
+
+        with patch.object(adapter, "_results_to_objects", return_value=[]):
+            adapter._detect_batch(
+                "object.",
+                0.25,
+                0.25,
+                pixel_values=pixel_values,
+                pixel_mask=pixel_mask,
+                original_sizes=[(5, 4), (3, 4)],
+            )
+
+        assert torch.equal(adapter._model.call_args.kwargs["pixel_mask"], pixel_mask)
 
     def test_text_prompt_format(self) -> None:
         """Test that labels are formatted correctly for GroundingDINO.
@@ -91,8 +219,6 @@ class TestGroundingDINOAdapter:
 
     def test_extract_output_format(self) -> None:
         """Test that extract returns properly formatted ExtractOutput."""
-        import torch
-
         adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
 
         # Mock the model and processor
@@ -103,8 +229,6 @@ class TestGroundingDINOAdapter:
         adapter._model_dtype = torch.float32
 
         # Create a mock image
-        from PIL import Image
-
         mock_image = Image.new("RGB", (100, 100))
         img_bytes = io.BytesIO()
         mock_image.save(img_bytes, format="JPEG")
@@ -161,6 +285,70 @@ class TestGroundingDINOAdapter:
         assert obj["score"] == pytest.approx(0.85, rel=1e-5)
         assert obj["bbox"] == [10, 20, 100, 200]  # x, y, width, height
 
+    def test_results_to_objects_bulk_converts_tensors_once(self) -> None:
+        adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
+        boxes = MagicMock()
+        boxes.__len__.return_value = 2
+        boxes.detach.return_value.cpu.return_value.tolist.return_value = [
+            [10.9, 20.1, 110.7, 220.8],
+            [-2.9, 3.9, 7.8, 13.2],
+        ]
+        scores = MagicMock()
+        scores.detach.return_value.cpu.return_value.tolist.return_value = [0.85, 0.125]
+
+        objects = adapter._results_to_objects(
+            {
+                "boxes": boxes,
+                "scores": scores,
+                "text_labels": ["cat", "dog"],
+            }
+        )
+
+        assert objects == [
+            {"label": "cat", "score": 0.85, "bbox": [10, 20, 99, 200]},
+            {"label": "dog", "score": 0.125, "bbox": [-2, 3, 10, 9]},
+        ]
+        boxes.detach.assert_called_once_with()
+        boxes.detach.return_value.cpu.assert_called_once_with()
+        boxes.detach.return_value.cpu.return_value.tolist.assert_called_once_with()
+        scores.detach.assert_called_once_with()
+        scores.detach.return_value.cpu.assert_called_once_with()
+        scores.detach.return_value.cpu.return_value.tolist.assert_called_once_with()
+
+    def test_results_to_objects_empty_does_not_transfer_scores(self) -> None:
+        adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-tiny")
+        scores = MagicMock()
+
+        objects = adapter._results_to_objects(
+            {
+                "boxes": torch.empty((0, 4)),
+                "scores": scores,
+                "text_labels": [],
+            }
+        )
+
+        assert objects == []
+        scores.detach.assert_not_called()
+
+    def test_load_preserves_default_processor_protocol(self) -> None:
+        adapter = GroundingDINOAdapter("IDEA-Research/grounding-dino-base", revision="deadbeef")
+        mock_model = MagicMock()
+        mock_model.parameters.return_value = iter([MagicMock(dtype="float32")])
+
+        with (
+            patch("transformers.AutoProcessor.from_pretrained") as mock_processor_load,
+            patch("transformers.AutoModelForZeroShotObjectDetection.from_pretrained") as mock_model_load,
+        ):
+            mock_model_load.return_value = mock_model
+            adapter.load("cpu")
+
+        kwargs = mock_processor_load.call_args.kwargs
+        assert kwargs["revision"] == "deadbeef"
+        assert "use_fast" not in kwargs
+        model_kwargs = mock_model_load.call_args.kwargs
+        assert model_kwargs["dtype"] is torch.float32
+        assert "torch_dtype" not in model_kwargs
+
 
 @pytest.mark.integration
 class TestGroundingDINOIntegration:
@@ -176,8 +364,6 @@ class TestGroundingDINOIntegration:
 
     def test_extract_real_image(self, adapter: GroundingDINOAdapter) -> None:
         """Test extraction on a real image."""
-        from PIL import Image
-
         # Create a simple test image (100x100 red square)
         img = Image.new("RGB", (100, 100), color="red")
         img_bytes = io.BytesIO()

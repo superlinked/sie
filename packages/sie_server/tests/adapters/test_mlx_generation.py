@@ -221,6 +221,12 @@ async def test_generate_rejects_images(adapter: MLXGenerationAdapter) -> None:
         await gen.__anext__()
 
 
+async def test_generate_rejects_unsupported_min_new_tokens(adapter: MLXGenerationAdapter) -> None:
+    with pytest.raises(ValueError, match="min_new_tokens is not supported"):
+        gen = adapter.generate(prompt="hi", max_new_tokens=8, min_new_tokens=2)
+        await gen.__anext__()
+
+
 async def test_generate_unloaded_raises() -> None:
     a = MLXGenerationAdapter(model_name_or_path="m", mlx_repo="r")  # not loaded (no _server_url)
     with pytest.raises(RuntimeError):
@@ -264,3 +270,58 @@ def test_build_sampling_body_merges_defaults() -> None:
     assert "<|im_end|>" in body["stop"]
     # SGLang/OpenAI-only default sampling keys are filtered out for the MLX child.
     assert "presence_penalty" not in body
+
+
+@pytest.mark.parametrize(
+    ("seed", "expected"),
+    [
+        (-1, (1 << 64) - 1),
+        (0, 0),
+        ((1 << 63) - 1, (1 << 63) - 1),
+    ],
+)
+def test_build_sampling_body_converts_signed_seed_for_mlx(seed: int, expected: int) -> None:
+    adapter = MLXGenerationAdapter(model_name_or_path="m", mlx_repo="repo")
+    body = adapter._build_sampling_body(
+        "prompt",
+        max_new_tokens=16,
+        temperature=1.0,
+        top_p=1.0,
+        top_k=None,
+        stop=None,
+        seed=seed,
+    )
+    assert body["seed"] == expected
+
+
+def test_build_sampling_body_converts_default_seed_for_mlx() -> None:
+    adapter = MLXGenerationAdapter(
+        model_name_or_path="m",
+        mlx_repo="repo",
+        default_sampling={"seed": -1},
+    )
+    body = adapter._build_sampling_body(
+        "prompt",
+        max_new_tokens=16,
+        temperature=1.0,
+        top_p=1.0,
+        top_k=None,
+        stop=None,
+        seed=None,
+    )
+    assert body["seed"] == (1 << 64) - 1
+
+
+@pytest.mark.parametrize("seed", [True, 1 << 63, -(1 << 63) - 1])
+def test_build_sampling_body_rejects_invalid_seed_for_mlx(seed: int) -> None:
+    adapter = MLXGenerationAdapter(model_name_or_path="m", mlx_repo="repo")
+    with pytest.raises(ValueError, match="signed 64-bit"):
+        adapter._build_sampling_body(
+            "prompt",
+            max_new_tokens=16,
+            temperature=1.0,
+            top_p=1.0,
+            top_k=None,
+            stop=None,
+            seed=seed,
+        )

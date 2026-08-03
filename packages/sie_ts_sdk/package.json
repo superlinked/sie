@@ -1,6 +1,6 @@
 {
   "name": "@superlinked/sie-sdk",
-  "version": "0.6.19",
+  "version": "0.6.26",
   "description": "Official TypeScript SDK for SIE (Search Inference Engine)",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -34,7 +34,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.type-tests.json",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "vitest run",

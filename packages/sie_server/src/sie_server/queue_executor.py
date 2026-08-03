@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
@@ -13,11 +14,12 @@ import yaml
 
 from sie_server.api.ws import compute_bundle_config_hash_cached
 from sie_server.config.model import ModelConfig
+from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
 from sie_server.core.oom import is_oom_error
-from sie_server.core.prepared import ExtractPreparedItem
+from sie_server.core.prepared import AudioPayload, AudioPreparedItem, ExtractPreparedItem
 from sie_server.core.registry import ModelRegistry
-from sie_server.core.runtime_options import merge_runtime_options
-from sie_server.core.score_cost import build_score_prepared_items
+from sie_server.core.runtime_options import merge_runtime_options, merge_runtime_options_with_profile
+from sie_server.core.score_cost import build_score_prepared_items_timed
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers.extract import ExtractHandler
 from sie_server.core.worker.model_worker import PreformedExtractRequest, PreformedScoreRequest
@@ -45,8 +47,11 @@ from sie_server.ipc_types import (
     SparseOutput,
     UnitCounts,
 )
-from sie_server.observability.metrics import record_ipc_batch_shape
-from sie_server.types.inputs import InvalidMediaError, Item, decode_item
+from sie_server.observability.worker_telemetry import (
+    worker_telemetry,
+    worker_telemetry_enabled,
+)
+from sie_server.types.inputs import InvalidInputError, InvalidMediaError, Item, decode_item
 from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -66,6 +71,26 @@ logger = logging.getLogger(__name__)
 # do not "align" it to the HTTP enum or the gateway will fall through to its
 # generic arm with a mismatched code.
 _INFERENCE_ERROR_CODE: Final[str] = "inference_error"
+# Re-encode passes one encode batch may spend isolating malformed input before
+# it stops bisecting. Isolation exists for the INPUT-SPECIFIC failure — one
+# caller's undecodable video among many healthy requests — which costs about
+# 2*log2(R) passes and never comes near this budget. But the same
+# ``InvalidInputError`` is also raised by an ENVIRONMENTAL failure: a GPU image
+# whose OpenCV wheel is broken fails ``_load_decoder`` for EVERY video-carrying
+# request (#2433). Then both halves of every split fail, bisection degenerates
+# to ~2R passes, and an image-wide outage multiplies occupancy of the
+# single-threaded inference executor at exactly the moment the node is already
+# broken. Past this budget the remaining requests take the error directly —
+# which under a systemic failure is also the correct answer, because every one
+# of them was going to fail anyway.
+_MAX_ENCODE_ISOLATION_PASSES: Final[int] = 24
+_CANONICAL_AUDIO_SAMPLE_RATE: Final[int] = 16_000
+_MAX_AUDIO_CHANNELS: Final[int] = 2
+_MIN_AUDIO_SAMPLE_RATE: Final[int] = 8_000
+_MAX_AUDIO_SAMPLE_RATE: Final[int] = 48_000
+_MAX_AUDIO_DURATION_MS: Final[int] = 12 * 60 * 1_000
+_MAX_AUDIO_CANONICAL_SAMPLES: Final[int] = _MAX_AUDIO_DURATION_MS * _CANONICAL_AUDIO_SAMPLE_RATE // 1_000 + 2_048
+_AUDIO_CONTAINERS: Final[frozenset[str]] = frozenset({"wav", "mp3", "flac", "ogg", "m4a", "webm"})
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +100,7 @@ _INFERENCE_ERROR_CODE: Final[str] = "inference_error"
 # Per-request safety rules in ``_maybe_dense_raw_output`` /
 # ``_maybe_sparse_raw_output`` / ``_maybe_multivector_raw_output`` emit
 # ``RawOutput`` only when the adapter's output is the exact (single-key,
-# float32, well-shaped) form Rust knows how to frame byte-identically;
+# supported-dtype, well-shaped) form Rust knows how to frame byte-identically;
 # everything else still falls back to the legacy
 # ``msgpack.packb(_wrap_encode_output(...))`` path.
 #
@@ -89,8 +114,8 @@ _INFERENCE_ERROR_CODE: Final[str] = "inference_error"
 #     ``SparseVector(indices=..., values=...)`` shape every in-tree
 #     sparse adapter produces). float16 values fall back.
 #   * Multivector: ONLY for a single ``multivector`` output key with
-#     a float32 ``[num_tokens, token_dims]`` ndarray. Bit-packed
-#     binary multivector (``shape[1] < mv_dim``) and float16 fall back.
+#     a float32/float16 ``[num_tokens, token_dims]`` ndarray. Bit-packed
+#     binary multivector (``shape[1] < mv_dim``) falls back.
 #   * Score: always eligible — Rust mirrors the Python sort + rank
 #     assignment byte-for-byte.
 #   * Multi-output items (e.g. dense + sparse in one response) always
@@ -328,7 +353,7 @@ def _maybe_multivector_raw_output(
     ``_wrap_encode_output``:
 
       * Single output key == ``multivector``.
-      * ``np.float32`` 2-D ``[num_tokens, token_dims]`` ndarray.
+      * ``np.float32`` or ``np.float16`` 2-D ``[num_tokens, token_dims]`` ndarray.
       * NOT bit-packed binary (``shape[1] < mv_dim`` with uint8
         dtype) — the binary path stays in Python for v1 because the
         Rust shaper does not know the ``"binary"`` dtype tag yet.
@@ -347,7 +372,7 @@ def _maybe_multivector_raw_output(
     arr = formatted.get("multivector")
     if not isinstance(arr, np.ndarray):
         return None
-    if arr.dtype != np.float32:
+    if arr.dtype not in (np.float32, np.float16):
         return None
     if arr.ndim != _MV_NDIM:
         return None
@@ -378,6 +403,7 @@ def _maybe_multivector_raw_output(
             values=arr.ravel(order="C").tolist(),
             num_tokens=num_tokens,
             token_dims=token_dims,
+            dtype=str(arr.dtype),
         ),
     )
 
@@ -476,6 +502,25 @@ def _wrap_encode_output(output: dict, config: Any) -> dict:
 # ---------------------------------------------------------------------------
 # QueueExecutor
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class _IsolationBudget:
+    """Re-run passes one encode batch may still spend isolating bad input.
+
+    Shared across the batch's sub-groups so a systemic failure cannot pay the
+    bisection cost afresh in each one. See
+    :data:`_MAX_ENCODE_ISOLATION_PASSES`.
+    """
+
+    remaining: int
+
+    def spend(self) -> bool:
+        """Consume one split, or report that the budget is gone."""
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
 
 
 class QueueExecutor:
@@ -579,12 +624,20 @@ class QueueExecutor:
         for model_id in invalidated:
             self.invalidate_model_descriptor(model_id)
         bundle_hash = compute_bundle_config_hash_cached(self._registry, req.bundle_id)
-        applied_models = sorted(self._registry.get_configs_snapshot(req.bundle_id))
+        applied_configs = self._registry.get_configs_snapshot(req.bundle_id)
+        applied_models = sorted(applied_configs)
+        applied_profiles = sorted(
+            {
+                variant_source[1] if (variant_source := config.synthetic_profile_variant_source) else "default"
+                for config in applied_configs.values()
+            }
+        )
         return ReplaceModelConfigsResponse(
             applied=True,
             bundle_config_hash=bundle_hash,
             config_version=int(getattr(self._registry, "_config_version", 0)),
             applied_models=applied_models,
+            applied_profiles=applied_profiles,
         )
 
     async def set_pinned_models(self, req: SetPinnedModelsRequest) -> SetPinnedModelsResponse:
@@ -805,6 +858,11 @@ class QueueExecutor:
     def _options_key(options: dict[str, Any] | None) -> bytes:
         return msgpack.packb(options, use_bin_type=True) if options else b""
 
+    @staticmethod
+    def _batch_profile(items: list[Any]) -> str:
+        profiles = {str(item.profile_id or "default") for item in items}
+        return profiles.pop() if len(profiles) == 1 else "other"
+
     @classmethod
     def _score_sub_group_sizes(cls, items: list[ScoreBatchItem]) -> list[int]:
         groups: dict[tuple[Any, ...], int] = {}
@@ -844,8 +902,6 @@ class QueueExecutor:
         ``instruction``, ``is_query``, or ``options`` — these cannot share a
         single ``EncodePipeline.run_encode()`` call.
         """
-        from sie_server.core.encode_pipeline import EncodePipeline  # noqa: PLC0415
-
         model_id = req.model_id
         items = req.items
 
@@ -865,7 +921,10 @@ class QueueExecutor:
         # actually reads; add more fields here if it grows.
         groups: dict[tuple, list[EncodeBatchItem]] = {}
         for bi in items:
-            output_types = tuple(bi.output_types or ["dense"])
+            # Preserve an explicit empty list so the shared output validator
+            # rejects it just like the HTTP ingress. Only an absent value
+            # receives the public dense default.
+            output_types = tuple(bi.output_types) if bi.output_types is not None else ("dense",)
             options_key = msgpack.packb(bi.options, use_bin_type=True) if bi.options else b""
             key = (
                 output_types,
@@ -877,203 +936,362 @@ class QueueExecutor:
             )
             groups.setdefault(key, []).append(bi)
 
-        # Record IPC-batch shape so operators can see the fragmentation
-        # ratio (items per IPC batch vs items per GPU forward pass).
-        # Emitted once per batch *after* grouping but *before* running
-        # any forward pass, so batches whose inference throws are still
-        # accounted for in the histogram. Model-eviction NAKs above
-        # are intentionally not recorded — no real work was attempted.
-        record_ipc_batch_shape(
-            model=model_id,
-            endpoint="encode",
-            total_items=len(items),
-            sub_group_sizes=[len(g) for g in groups.values()],
-        )
+        if worker_telemetry_enabled():
+            worker_telemetry().runtime_batch_dispatched(
+                operation="encode",
+                model=model_id,
+                profile=self._batch_profile(items),
+                total_items=len(items),
+                subgroup_sizes=(len(group) for group in groups.values()),
+            )
 
+        # One isolation budget for the whole batch: a systemic decoder failure
+        # would otherwise pay the bisection cost again in every sub-group.
+        isolation = _IsolationBudget(remaining=_MAX_ENCODE_ISOLATION_PASSES)
         for group_key, group in groups.items():
-            (output_types_t, instruction, is_query, options_key, _profile_id, _bundle_hash) = group_key
-            output_types = list(output_types_t)
-            options = msgpack.unpackb(options_key, raw=False) if options_key else {}
-            # Validate each item against the typed Item contract at the seam
-            # (parity with the HTTP path). A per-item decode failure is isolated
-            # as an INVALID_INPUT outcome so one malformed item cannot fail its
-            # whole sub-group. See decode_item / issue #1537.
-            good_group: list[EncodeBatchItem] = []
-            server_items: list[Item] = []
-            for bi in group:
-                try:
-                    server_items.append(decode_item(bi.item))
-                except (msgspec.ValidationError, InvalidMediaError) as decode_exc:
-                    outcomes[bi.work_item_id] = _inference_exception_outcome(bi, decode_exc)
-                    continue
-                good_group.append(bi)
-            if not good_group:
-                continue
-            # Collect worker-sidecar prepared_tokens aligned with
-            # ``server_items``. ``None`` per item is expected for the
-            # v1 safety-rule skips (`is_query`, `instruction`,
-            # non-text, empty text). The pipeline accepts the mix
-            # per-item: items with usable Rust bytes skip Python
-            # tokenisation, items with ``None`` are tokenised in
-            # Python and spliced back — see
-            # ``TextPreprocessor.try_prepare_from_prepared_tokens``
-            # for the hybrid policy. Whole-batch fallback only fires
-            # on correctness-critical drift (tokenizer_id mismatch,
-            # malformed wire shape).
-            prepared_tokens_per_item = [bi.prepared_tokens for bi in good_group]
-            if not any(pt is not None for pt in prepared_tokens_per_item):
-                # Not a single fast-path candidate — pass None so the
-                # pipeline doesn't even bother looking up the
-                # preprocessor's cached tokenizer_id.
-                prepared_tokens_per_item = None
-
-            try:
-                # The Rust gateway publishes only the raw SDK options to the
-                # queue, so — unlike the single-server HTTP path (api.encode) —
-                # profile ``adapter_options.runtime`` defaults (query_template,
-                # default_instruction, pooling, normalize, …) are not yet merged
-                # in. Merge them here so the adapter sees the same effective
-                # options regardless of ingress; without this, instruction-tuned
-                # embedders silently lose their query template on the cluster
-                # path (#1489). An unknown profile name raises ValueError, which
-                # the surrounding except turns into per-item failures.
-                options = merge_runtime_options(config, options)
-                # Profile-default ``output_types`` parity with the OSS HTTP path
-                # (api.encode resolves ``profile > request > default``). The
-                # gateway forwards only the request-level output_types, so a
-                # profile whose runtime declares an output_types default (e.g.
-                # the ``bge-m3:sparse`` variant, whose promoted "default" profile
-                # carries ``output_types: [sparse]``) would otherwise be served
-                # dense-only here — the managed path silently dropped it. Reuse
-                # the merged profile runtime (same resolver, no duplicated
-                # precedence) and apply it exactly as api.encode does. The group
-                # key already folded request→``["dense"]``, so this is precisely
-                # ``profile or request or default``, keeping managed == OSS (P6.6).
-                profile_output_types = options.get("output_types")
-                if profile_output_types:
-                    output_types = list(profile_output_types)
-                formatted_outputs, timing = await EncodePipeline.run_encode(
-                    registry=self._registry,
-                    model=model_id,
-                    items=server_items,
-                    output_types=output_types,
-                    instruction=instruction,
-                    config=config,
-                    is_query=is_query,
-                    options=options,
-                    prepared_tokens_per_item=prepared_tokens_per_item,
-                    preformed_batch=True,
-                )
-
-                if len(formatted_outputs) != len(good_group):
-                    # Output/input length mismatch means the adapter
-                    # silently dropped items. Surface as a per-item error
-                    # rather than publishing empty success results.
-                    logger.warning(
-                        "Encode sub-batch for %s returned %d outputs for %d items — emitting per-item errors",
-                        model_id,
-                        len(formatted_outputs),
-                        len(good_group),
-                    )
-                    for bi in good_group:
-                        outcomes[bi.work_item_id] = _error_outcome(
-                            bi,
-                            _INFERENCE_ERROR_CODE,
-                            "adapter returned fewer outputs than items",
-                        )
-                else:
-                    # Authoritative unit counts for metering: per-item real
-                    # tokenizer counts recorded by the pipeline during
-                    # tokenization (see ``RequestTiming.input_token_counts``).
-                    # ``None`` (image path / char-count estimators) leaves
-                    # ``ItemOutcome.units`` unset — metering edges fall back
-                    # to their reserve estimate rather than bill an estimate
-                    # as a count.
-                    token_counts = timing.input_token_counts
-                    if token_counts is not None and len(token_counts) != len(good_group):
-                        token_counts = None  # misaligned — never mis-attribute counts
-                    # Authoritative per-image counts for the §7 "$ per image"
-                    # dimension: any vision adapter (CLIP/SigLIP) inherits the
-                    # base ``count_input_images`` hook, so an image-input encode
-                    # bills per image the same way a text encode bills per
-                    # token. ``None`` (adapter evicted, or an all-text batch)
-                    # leaves ``images`` unset. Aligned 1:1 with ``server_items``
-                    # (== ``good_group`` order).
-                    try:
-                        encode_adapter = self._registry.get(model_id)
-                    except KeyError:
-                        encode_adapter = None
-                    image_counts = _per_item_image_counts(encode_adapter, server_items, len(good_group))
-                    for idx, bi in enumerate(good_group):
-                        raw_output: RawOutput | None = None
-                        result_msgpack: bytes | None = None
-                        # Dispatch by the single declared output type —
-                        # the v1 wire contract is exactly one variant
-                        # per ``RawOutput``. Multi-output items (no
-                        # single key matches) and adapter outputs that
-                        # don't pass the per-helper safety rules drop
-                        # to the legacy ``_wrap_encode_output`` path
-                        # below.
-                        if output_types == ["dense"]:
-                            raw_output = _maybe_dense_raw_output(
-                                formatted_outputs[idx],
-                                config,
-                                output_types,
-                            )
-                        elif output_types == ["sparse"]:
-                            raw_output = _maybe_sparse_raw_output(
-                                formatted_outputs[idx],
-                                config,
-                                output_types,
-                            )
-                        elif output_types == ["multivector"]:
-                            raw_output = _maybe_multivector_raw_output(
-                                formatted_outputs[idx],
-                                config,
-                                output_types,
-                            )
-                        if raw_output is None:
-                            output = _wrap_encode_output(formatted_outputs[idx], config)
-                            # Echo the caller's item id (G2b, P2.8 finding): the
-                            # HTTP path stamps ``result["id"] = item.id`` in
-                            # ``api.encode._build_response_items`` and the SDK
-                            # copies it back (``parse_encode_results``), but the
-                            # queue-path result blob dropped it. Bake it into the
-                            # legacy blob here so it round-trips like SCORE's
-                            # ``item_id``. The RawOutput fast paths carry the id
-                            # at framing time instead (frame_raw_output on the
-                            # lane); this branch is the multi-output / non-f32
-                            # fallback.
-                            item_id = server_items[idx].id
-                            if item_id is not None:
-                                output = {"id": item_id, **output}
-                            result_msgpack = msgpack.packb(output, use_bin_type=True)
-                        outcomes[bi.work_item_id] = ItemOutcome(
-                            work_item_id=bi.work_item_id,
-                            request_id=bi.request_id,
-                            item_index=bi.item_index,
-                            disposition="publish_and_ack",
-                            result_msgpack=result_msgpack,
-                            raw_output=raw_output,
-                            inference_ms=timing.inference_ms,
-                            tokenization_ms=timing.tokenization_ms if timing.tokenization_ms > 0 else None,
-                            postprocessing_ms=timing.postprocessing_ms if timing.postprocessing_ms > 0 else None,
-                            units=_encode_units(
-                                token_counts[idx] if token_counts is not None else None,
-                                image_counts[idx] if image_counts is not None else None,
-                            ),
-                        )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Encode sub-batch failed for model %s: %s", model_id, e)
-                for bi in good_group:
-                    outcomes[bi.work_item_id] = _inference_exception_outcome(bi, e)
+            (output_types_t, instruction, is_query, _packed_options, _profile_id, _bundle_hash) = group_key
+            await self._run_encode_group(
+                model_id=model_id,
+                config=config,
+                group=group,
+                output_types=list(output_types_t),
+                instruction=instruction,
+                is_query=is_query,
+                # The group's own options, not a msgpack round-trip of the
+                # grouping key: every item in the group packed to the same
+                # bytes by construction, and re-decoding would turn any tuple
+                # into a list on the way back.
+                request_options=group[0].options or {},
+                outcomes=outcomes,
+                isolation=isolation,
+            )
 
         return BatchOutcome(outcomes=[outcomes[bi.work_item_id] for bi in items])
+
+    async def _run_encode_group(
+        self,
+        *,
+        model_id: str,
+        config: Any,
+        group: list[EncodeBatchItem],
+        output_types: list[str],
+        instruction: str | None,
+        is_query: bool,
+        request_options: dict[str, Any],
+        outcomes: dict[str, ItemOutcome],
+        isolation: _IsolationBudget,
+        depth: int = 0,
+    ) -> None:
+        """Run one encode sub-group and record its per-item outcomes.
+
+        Split out of :meth:`process_encode_batch` so an adapter-level
+        ``InvalidInputError`` can be isolated by re-running narrower groups —
+        see :meth:`_isolate_encode_invalid_input`. ``isolation`` is the batch's
+        shared re-run budget and ``depth`` the current bisection depth, both
+        carried only for that path.
+        """
+        # Validate each item against the typed Item contract at the seam
+        # (parity with the HTTP path). A per-item decode failure is isolated
+        # as an INVALID_INPUT outcome so one malformed item cannot fail its
+        # whole sub-group. See decode_item / issue #1537.
+        good_group: list[EncodeBatchItem] = []
+        server_items: list[Item] = []
+        for bi in group:
+            try:
+                server_items.append(decode_item(bi.item))
+            except (msgspec.ValidationError, InvalidMediaError) as decode_exc:
+                outcomes[bi.work_item_id] = _inference_exception_outcome(bi, decode_exc)
+                continue
+            good_group.append(bi)
+        if not good_group:
+            return
+        # Collect worker-sidecar prepared_tokens aligned with
+        # ``server_items``. ``None`` per item is expected for the
+        # v1 safety-rule skips (`is_query`, `instruction`,
+        # non-text, empty text). The pipeline accepts the mix
+        # per-item: items with usable Rust bytes skip Python
+        # tokenisation, items with ``None`` are tokenised in
+        # Python and spliced back — see
+        # ``TextPreprocessor.try_prepare_from_prepared_tokens``
+        # for the hybrid policy. Whole-batch fallback only fires
+        # on correctness-critical drift (tokenizer_id mismatch,
+        # malformed wire shape).
+        prepared_tokens_per_item = [bi.prepared_tokens for bi in good_group]
+        if not any(pt is not None for pt in prepared_tokens_per_item):
+            # Not a single fast-path candidate — pass None so the
+            # pipeline doesn't even bother looking up the
+            # preprocessor's cached tokenizer_id.
+            prepared_tokens_per_item = None
+
+        try:
+            # The Rust gateway publishes only the raw SDK options to the
+            # queue, so — unlike the single-server HTTP path (api.encode) —
+            # profile ``adapter_options.runtime`` defaults (query_template,
+            # default_instruction, pooling, normalize, …) are not yet merged
+            # in. Merge them here so the adapter sees the same effective
+            # options regardless of ingress; without this, instruction-tuned
+            # embedders silently lose their query template on the cluster
+            # path (#1489). An unknown profile name raises ValueError, which
+            # the surrounding except turns into per-item failures.
+            # The PROFILE, not the raw request options, is what
+            # `resolve_encode_output_types` needs: a profile may expose a
+            # postprocessed response type the adapter never emits (MuVERA
+            # returns dense over multivector). Resolving it here keeps the
+            # queue path identical to the HTTP one.
+            options, selected_profile = merge_runtime_options_with_profile(config, request_options)
+            adapter_output_types, response_output_types = resolve_encode_output_types(
+                config,
+                output_types,
+                selected_profile,
+                options,
+            )
+            formatted_outputs, timing = await EncodePipeline.run_encode(
+                registry=self._registry,
+                model=model_id,
+                items=server_items,
+                output_types=adapter_output_types,
+                instruction=instruction,
+                config=config,
+                is_query=is_query,
+                options=options,
+                prepared_tokens_per_item=prepared_tokens_per_item,
+                response_output_types=response_output_types,
+                preformed_batch=True,
+            )
+
+            if len(formatted_outputs) != len(good_group):
+                # Output/input length mismatch means the adapter
+                # silently dropped items. Surface as a per-item error
+                # rather than publishing empty success results.
+                logger.warning(
+                    "Encode sub-batch for %s returned %d outputs for %d items — emitting per-item errors",
+                    model_id,
+                    len(formatted_outputs),
+                    len(good_group),
+                )
+                for bi in good_group:
+                    outcomes[bi.work_item_id] = _error_outcome(
+                        bi,
+                        _INFERENCE_ERROR_CODE,
+                        "adapter returned fewer outputs than items",
+                    )
+            else:
+                # Authoritative unit counts for metering: per-item real
+                # tokenizer counts recorded by the pipeline during
+                # tokenization (see ``RequestTiming.input_token_counts``).
+                # ``None`` (image path / char-count estimators) leaves
+                # ``ItemOutcome.units`` unset so downstream usage consumers
+                # can reject missing evidence rather than consume estimates.
+                token_counts = timing.input_token_counts
+                if token_counts is not None and len(token_counts) != len(good_group):
+                    token_counts = None  # misaligned — never mis-attribute counts
+                # Authoritative per-image counts for the §7 "$ per image"
+                # dimension: any vision adapter (CLIP/SigLIP) inherits the
+                # base ``count_input_images`` hook, so an image-input encode
+                # bills per image the same way a text encode bills per
+                # token. ``None`` (adapter evicted, or an all-text batch)
+                # leaves ``images`` unset. Aligned 1:1 with ``server_items``
+                # (== ``good_group`` order).
+                try:
+                    encode_adapter = self._registry.get(model_id)
+                except KeyError:
+                    encode_adapter = None
+                image_counts = _encode_image_counts(
+                    timing,
+                    encode_adapter,
+                    server_items,
+                    len(good_group),
+                )
+                for idx, bi in enumerate(good_group):
+                    raw_output: RawOutput | None = None
+                    result_msgpack: bytes | None = None
+                    # Dispatch by the single declared output type —
+                    # the v1 wire contract is exactly one variant
+                    # per ``RawOutput``. Multi-output items (no
+                    # single key matches) and adapter outputs that
+                    # don't pass the per-helper safety rules drop
+                    # to the legacy ``_wrap_encode_output`` path
+                    # below.
+                    if response_output_types == ["dense"]:
+                        raw_output = _maybe_dense_raw_output(
+                            formatted_outputs[idx],
+                            config,
+                            response_output_types,
+                        )
+                    elif response_output_types == ["sparse"]:
+                        raw_output = _maybe_sparse_raw_output(
+                            formatted_outputs[idx],
+                            config,
+                            response_output_types,
+                        )
+                    elif response_output_types == ["multivector"]:
+                        raw_output = _maybe_multivector_raw_output(
+                            formatted_outputs[idx],
+                            config,
+                            response_output_types,
+                        )
+                    if raw_output is None:
+                        output = _wrap_encode_output(formatted_outputs[idx], config)
+                        # Echo the caller's item id (G2b, P2.8 finding): the
+                        # HTTP path stamps ``result["id"] = item.id`` in
+                        # ``api.encode._build_response_items`` and the SDK
+                        # copies it back (``parse_encode_results``), but the
+                        # queue-path result blob dropped it. Bake it into the
+                        # legacy blob here so it round-trips like SCORE's
+                        # ``item_id``. The RawOutput fast paths carry the id
+                        # at framing time instead (frame_raw_output on the
+                        # lane); this branch is the multi-output / non-f32
+                        # fallback.
+                        item_id = server_items[idx].id
+                        if item_id is not None:
+                            output = {"id": item_id, **output}
+                        result_msgpack = msgpack.packb(output, use_bin_type=True)
+                    outcomes[bi.work_item_id] = ItemOutcome(
+                        work_item_id=bi.work_item_id,
+                        request_id=bi.request_id,
+                        item_index=bi.item_index,
+                        disposition="publish_and_ack",
+                        result_msgpack=result_msgpack,
+                        raw_output=raw_output,
+                        inference_ms=timing.inference_ms,
+                        tokenization_ms=timing.tokenization_ms if timing.tokenization_ms > 0 else None,
+                        postprocessing_ms=timing.postprocessing_ms if timing.postprocessing_ms > 0 else None,
+                        units=_encode_units(
+                            token_counts[idx] if token_counts is not None else None,
+                            image_counts[idx] if image_counts is not None else None,
+                        ),
+                    )
+        except InvalidInputError as e:
+            # One caller's malformed input must not fail its co-batched
+            # siblings. A dynamic sub-group fuses items from DIFFERENT API
+            # requests, and an adapter-level validation error (an undecodable
+            # video, a broken decoder wheel) is raised for the whole
+            # ``run_encode`` call, so attributing it to every item would 400
+            # tenants whose input was fine.
+            await self._isolate_encode_invalid_input(
+                model_id=model_id,
+                config=config,
+                good_group=good_group,
+                output_types=output_types,
+                instruction=instruction,
+                is_query=is_query,
+                request_options=request_options,
+                outcomes=outcomes,
+                error=e,
+                isolation=isolation,
+                depth=depth,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Encode sub-batch failed for model %s: %s", model_id, e)
+            for bi in good_group:
+                outcomes[bi.work_item_id] = _inference_exception_outcome(bi, e)
+
+    async def _isolate_encode_invalid_input(
+        self,
+        *,
+        model_id: str,
+        config: Any,
+        good_group: list[EncodeBatchItem],
+        output_types: list[str],
+        instruction: str | None,
+        is_query: bool,
+        request_options: dict[str, Any],
+        outcomes: dict[str, ItemOutcome],
+        error: InvalidInputError,
+        isolation: _IsolationBudget,
+        depth: int,
+    ) -> None:
+        """Fail only the request that supplied the malformed input.
+
+        Mirrors ``BatchExecutor._isolate_invalid_input`` (core/worker/
+        oom_recovery.py), which gives the worker-batched path exactly this
+        guarantee. The direct-adapter path had no equivalent, so a single
+        undecodable video 400'd every co-batched tenant.
+
+        Split by request identity — a multi-item request stays atomic, matching
+        the worker-batched semantics — and re-run each half. The recursion
+        narrows onto the offending request, which alone takes the typed
+        INVALID_INPUT outcome; a group that is already one request is failed
+        directly, which is the terminal case.
+
+        Cost depends on WHY the input was rejected, and the two cases differ by
+        an order of magnitude:
+
+        * **Input-specific** (one caller's undecodable video) — only the half
+          containing it fails, so the recursion is a true binary search and
+          isolating one bad request out of ``R`` costs ~2*log2(R) passes. This
+          is the case isolation exists for.
+        * **Environmental** (``_load_decoder`` raising because the GPU image's
+          OpenCV wheel is broken) — EVERY video-carrying request fails, so both
+          halves fail at every level and unbounded bisection would degenerate
+          to ~2R passes, all serialized on the single-threaded inference
+          executor. Multiplying occupancy during an image-wide outage is the
+          opposite of useful.
+
+        ``isolation`` bounds that: the batch shares one re-run budget, and once
+        it is spent the remaining requests take the error directly. Under a
+        systemic failure that is also the correct outcome — every one of them
+        was going to fail — while the input-specific case never approaches the
+        budget. Each split logs its depth and the budget left, so the
+        amplification is measurable in production.
+        """
+        request_ids = list(dict.fromkeys(bi.request_id for bi in good_group))
+        if len(request_ids) <= 1:
+            for bi in good_group:
+                outcomes[bi.work_item_id] = _inference_exception_outcome(bi, error)
+            return
+
+        logger.warning(
+            "Invalid input in a fused encode sub-group for %s (%d requests, %d items, depth %d, "
+            "%d isolation passes left) — re-running both halves to isolate the offending "
+            "request: %s",
+            model_id,
+            len(request_ids),
+            len(good_group),
+            depth,
+            isolation.remaining,
+            error,
+        )
+        left_ids = set(request_ids[: len(request_ids) // 2])
+        halves = (
+            [bi for bi in good_group if bi.request_id in left_ids],
+            [bi for bi in good_group if bi.request_id not in left_ids],
+        )
+        for half in halves:
+            # One unit per RE-ENCODE PASS, which is the quantity that occupies
+            # the inference executor — not per split, which would licence twice
+            # as many.
+            if not isolation.spend():
+                logger.warning(
+                    "Encode isolation budget exhausted for %s at depth %d — failing %d "
+                    "request(s) (%d items) directly without re-encoding; the failure is not "
+                    "input-specific: %s",
+                    model_id,
+                    depth,
+                    len({bi.request_id for bi in half}),
+                    len(half),
+                    error,
+                )
+                for bi in half:
+                    outcomes[bi.work_item_id] = _inference_exception_outcome(bi, error)
+                continue
+            await self._run_encode_group(
+                model_id=model_id,
+                config=config,
+                group=half,
+                output_types=output_types,
+                instruction=instruction,
+                is_query=is_query,
+                request_options=request_options,
+                outcomes=outcomes,
+                isolation=isolation,
+                depth=depth + 1,
+            )
 
     # -- Score -------------------------------------------------------------
 
     async def process_score_batch(self, req: ProcessScoreBatchRequest) -> BatchOutcome:
-        """Run score work items from the sidecar IPC path.
+        """Run one caller-formed score batch from sidecar IPC or Modal-native execution.
 
         The worker-sidecar owns queue batching and scheduling. Python prepares
         each score work item and executes it through ModelWorker's pre-formed
@@ -1083,15 +1301,18 @@ class QueueExecutor:
         if not req.items:
             return BatchOutcome(outcomes=[])
 
-        record_ipc_batch_shape(
-            model=model_id,
-            endpoint="score",
-            total_items=len(req.items),
-            sub_group_sizes=self._score_sub_group_sizes(req.items),
-        )
+        if worker_telemetry_enabled():
+            worker_telemetry().runtime_batch_dispatched(
+                operation="score",
+                model=model_id,
+                profile=self._batch_profile(req.items),
+                total_items=len(req.items),
+                subgroup_sizes=self._score_sub_group_sizes(req.items),
+            )
 
         try:
             worker = await self._registry.start_worker(model_id)
+            config = self._registry.get_config(model_id)
         except (KeyError, RuntimeError) as e:
             logger.info("Model %s not available for score: %s — NAKing", model_id, e)
             return BatchOutcome(outcomes=[_nak_outcome(bi) for bi in req.items])
@@ -1102,18 +1323,11 @@ class QueueExecutor:
 
         for bi in req.items:
             try:
+                options = merge_runtime_options(config, bi.options)
                 query_item = decode_item(bi.query_item)
                 score_items = [decode_item(it) for it in bi.score_items]
 
-                timing = RequestTiming()
-                timing.start_tokenization()
-                # ``score_pair_cost`` here is the char-count BATCHING proxy
-                # only. Authoritative billable counts (§7.3) are the reranker's
-                # real per-pair tokenizer lengths, surfaced on the resulting
-                # ScoreOutput and summed into ``ItemOutcome.units`` in
-                # ``_score_success_outcome`` — never this proxy.
-                prepared_items = build_score_prepared_items(query_item, score_items)
-                timing.end_tokenization()
+                prepared_items, timing = build_score_prepared_items_timed(query_item, score_items)
 
                 requests.append(
                     PreformedScoreRequest(
@@ -1121,7 +1335,7 @@ class QueueExecutor:
                         query=query_item,
                         items=score_items,
                         instruction=bi.instruction,
-                        options=bi.options or {},
+                        options=options,
                         request_id=bi.request_id,
                         timing=timing,
                     )
@@ -1156,7 +1370,9 @@ class QueueExecutor:
                     else:
                         _backfill_score_units(score_adapter, bi, query_item, score_items, result)
                         outcomes[bi.work_item_id] = _score_success_outcome(
+                            score_adapter,
                             bi,
+                            query_item,
                             score_items,
                             result,
                         )
@@ -1166,20 +1382,23 @@ class QueueExecutor:
     # -- Extract -----------------------------------------------------------
 
     async def process_extract_batch(self, req: ProcessExtractBatchRequest) -> BatchOutcome:
-        """Run extract work items from the sidecar IPC path."""
+        """Run one caller-formed extract batch from sidecar IPC or Modal-native execution."""
         model_id = req.model_id
         if not req.items:
             return BatchOutcome(outcomes=[])
 
-        record_ipc_batch_shape(
-            model=model_id,
-            endpoint="extract",
-            total_items=len(req.items),
-            sub_group_sizes=self._extract_sub_group_sizes(req.items),
-        )
+        if worker_telemetry_enabled():
+            worker_telemetry().runtime_batch_dispatched(
+                operation="extract",
+                model=model_id,
+                profile=self._batch_profile(req.items),
+                total_items=len(req.items),
+                subgroup_sizes=self._extract_sub_group_sizes(req.items),
+            )
 
         try:
             worker = await self._registry.start_worker(model_id)
+            config = self._registry.get_config(model_id)
         except (KeyError, RuntimeError) as e:
             logger.info("Model %s not available for extract: %s — NAKing", model_id, e)
             return BatchOutcome(outcomes=[_nak_outcome(bi) for bi in req.items])
@@ -1201,21 +1420,34 @@ class QueueExecutor:
 
         for bi in req.items:
             try:
+                options = merge_runtime_options(config, bi.options)
                 server_item = decode_item(bi.item)
-
                 timing = RequestTiming()
                 timing.start_tokenization()
-                # ``char_count`` here is the BATCHING cost proxy only.
-                # Authoritative billable counts (§7.3) are the extractor's real
-                # per-doc tokenizer length, surfaced on the resulting
-                # ExtractOutput and stamped into ``ItemOutcome.units`` in
-                # ``_extract_success_outcome`` — never this proxy. (``pages``
-                # for future docling/OCR inputs stays a separate seam.)
-                char_count = len(server_item.text) if server_item.text else 0
-                prepared_items = [ExtractPreparedItem(cost=char_count, original_index=0)]
+                if bi.prepared_audio is not None:
+                    audio = bi.prepared_audio
+                    _validate_prepared_audio(audio)
+                    payload = AudioPayload(
+                        pcm_s16le=audio.pcm_s16le,
+                        sample_rate=audio.sample_rate,
+                        sample_count=audio.sample_count,
+                        duration_ms=audio.duration_ms,
+                        source_sample_rate=audio.source_sample_rate,
+                        source_sample_count=audio.source_sample_count,
+                        source_channels=audio.source_channels,
+                        container=audio.container,
+                    )
+                    prepared_items = [
+                        AudioPreparedItem(payload=payload, cost=payload.duration_cost_ms, original_index=0)
+                    ]
+                else:
+                    # Batching proxy only; authoritative text billing comes
+                    # from the adapter's real tokenizer count on ExtractOutput.
+                    char_count = len(server_item.text) if server_item.text else 0
+                    prepared_items = [ExtractPreparedItem(cost=char_count, original_index=0)]
                 timing.end_tokenization()
 
-                lora = self._extract_lora(bi.options)
+                lora = self._extract_lora(options)
                 grouped_requests.setdefault(lora, []).append(
                     PreformedExtractRequest(
                         prepared_items=prepared_items,
@@ -1223,7 +1455,7 @@ class QueueExecutor:
                         labels=bi.labels,
                         output_schema=bi.output_schema,
                         instruction=bi.instruction,
-                        options=bi.options or {},
+                        options=options,
                         request_id=bi.request_id,
                         timing=timing,
                     )
@@ -1253,6 +1485,39 @@ class QueueExecutor:
         return BatchOutcome(outcomes=[outcomes[bi.work_item_id] for bi in req.items])
 
 
+def _validate_prepared_audio(audio: Any) -> None:
+    if audio.sample_rate != _CANONICAL_AUDIO_SAMPLE_RATE:
+        msg = f"prepared audio sample_rate must be 16000, got {audio.sample_rate}"
+        raise ValueError(msg)
+    if not _MIN_AUDIO_SAMPLE_RATE <= audio.source_sample_rate <= _MAX_AUDIO_SAMPLE_RATE:
+        msg = "prepared audio source_sample_rate must be between 8000 and 48000"
+        raise ValueError(msg)
+    if not 1 <= audio.source_channels <= _MAX_AUDIO_CHANNELS:
+        msg = "prepared audio source_channels must be 1 or 2"
+        raise ValueError(msg)
+    if audio.container not in _AUDIO_CONTAINERS:
+        msg = f"prepared audio container is unsupported: {audio.container!r}"
+        raise ValueError(msg)
+    if audio.sample_count <= 0 or audio.source_sample_count <= 0 or audio.duration_ms <= 0:
+        msg = "prepared audio sample counts and duration_ms must be positive"
+        raise ValueError(msg)
+    if audio.duration_ms > _MAX_AUDIO_DURATION_MS:
+        msg = f"prepared audio duration_ms exceeds {_MAX_AUDIO_DURATION_MS}"
+        raise ValueError(msg)
+    if audio.sample_count > _MAX_AUDIO_CANONICAL_SAMPLES:
+        msg = "prepared audio canonical sample_count exceeds the bounded duration"
+        raise ValueError(msg)
+    if len(audio.pcm_s16le) != audio.sample_count * 2:
+        msg = "prepared audio PCM byte length does not match sample_count"
+        raise ValueError(msg)
+    expected_duration_ms = (
+        audio.source_sample_count * 1_000 + audio.source_sample_rate - 1
+    ) // audio.source_sample_rate
+    if audio.duration_ms != expected_duration_ms:
+        msg = "prepared audio duration_ms does not match source_sample_count"
+        raise ValueError(msg)
+
+
 def _per_item_image_counts(adapter: Any, items: list[Item], expected_len: int) -> list[int] | None:
     """Per-item authoritative input-image counts via the adapter's shared
     ``count_input_images`` hook (§7 "$ per image").
@@ -1277,20 +1542,89 @@ def _per_item_image_counts(adapter: Any, items: list[Item], expected_len: int) -
     return None
 
 
+def _encode_image_counts(
+    timing: RequestTiming,
+    adapter: Any,
+    items: list[Item],
+    expected_len: int,
+) -> list[int | None] | None:
+    """Per-item billable image counts for one encode sub-batch (§7).
+
+    Prefers the count the adapter recorded for the frames/images it ACTUALLY
+    processed (``RequestTiming.input_image_counts``, stamped by the pipeline
+    from ``EncodeOutput.extra``): sampled video frames bill as ``images``, and
+    only the adapter knows how many frames compressed video bytes decoded to.
+    Falls back to the wire-derived ``count_input_images`` hook, which is exact
+    for every adapter whose billable images are its submitted images.
+
+    A video-carrying item is NOT such an item: the hook sees opaque compressed
+    bytes and would score the sampled frames as zero. So when the authoritative
+    stamp is missing, video items are left ``None`` (fail closed — settlement
+    then refuses the item for want of evidence) while every other item keeps
+    its exact wire-derived count.
+
+    A ZERO stamped for a video item is treated the same way, on BOTH branches.
+    Zero frames is not a billable count for a clip that was admitted against a
+    32-frame budget — it is the absence of evidence, and it reaches
+    ``_encode_units`` as a dropped ``images`` dimension, which is exactly what
+    the reservation planned for. The two branches therefore state ONE rule
+    rather than two: "a video item bills only on a positive authoritative frame
+    count". The managed gateway happens to fault such a result closed anyway
+    (``meter.rs`` rejects a successful result with no authoritative units), but
+    this function must not lean on a guard that lives one process away and does
+    not cover every consumer of these counts.
+    """
+    counts = timing.input_image_counts
+    if counts is not None and len(counts) == expected_len:
+        return [
+            None if (count == 0 and item.video is not None) else count
+            for item, count in zip(items, counts, strict=True)
+        ]
+    wire_counts = _per_item_image_counts(adapter, items, expected_len)
+    if wire_counts is None:
+        return None
+    return [None if item.video is not None else count for item, count in zip(items, wire_counts, strict=True)]
+
+
 def _encode_units(token_count: int | None, image_count: int | None) -> UnitCounts | None:
     """Assemble one encode item's ``UnitCounts`` from its authoritative token
     and image counts.
 
-    Each dimension is set only when present, and ``images`` only when ``> 0``
-    (a text-only item never emits ``images=0``). An item with neither yields
-    ``None`` so the metering edge falls back to its reserve estimate. Kept
-    byte-identical to the prior ``UnitCounts(input_tokens=...)`` emitter when
-    there are no images: ``images`` defaults to ``None`` on the struct.
+    ``images`` is set only when present and positive. ``input_tokens`` is set
+    when positive, and ALSO when it is an authoritative ZERO — a ``0`` on an
+    item that reports a positive image count (#2538).
+
+    That zero is the emitter half of the settlement witness. SigLIP/CLIP let
+    ``has_images`` win over ``has_text``, so an item carrying BOTH takes the
+    image tower and consumes exactly zero text tokens; but the gateway reserved
+    ``input_tokens`` for it off text PRESENCE
+    (``dispatcher::carries_tokenizable_text``). Dropping the zero here leaves
+    the dimension ABSENT from the terminal, and settlement then faults the whole
+    dispatch as reserved-but-missing — a 500 with zero debit after the GPU
+    already ran, which is the defect in #2538.
+
+    The zero is emitted ONLY under the image witness, byte for byte the rule
+    ``meter::zero_is_authoritative`` and the control plane's
+    ``_zero_is_authoritative`` apply on the other side of the boundary. A zero
+    with no images is still dropped, so a tokenizer that counted nothing on a
+    text item keeps failing closed exactly as before.
+
+    Nothing bills less: a zero contributes no credits either way, and the only
+    behaviour that changes is a settlement that used to FAULT (billing nothing)
+    now releasing that dimension and billing the images. An item with neither
+    dimension yields ``None`` so the metering edge falls back to its reserve
+    estimate.
     """
     images = image_count if (image_count is not None and image_count > 0) else None
-    if token_count is None and images is None:
+    if token_count is not None and token_count > 0:
+        tokens: int | None = token_count
+    elif token_count == 0 and images is not None:
+        tokens = 0
+    else:
+        tokens = None
+    if tokens is None and images is None:
         return None
-    return UnitCounts(input_tokens=token_count, images=images)
+    return UnitCounts(input_tokens=tokens, images=images)
 
 
 def _with_images(units: UnitCounts | None, image_count: int | None) -> UnitCounts | None:
@@ -1304,7 +1638,13 @@ def _with_images(units: UnitCounts | None, image_count: int | None) -> UnitCount
         return units
     if units is None:
         return UnitCounts(images=image_count)
-    return UnitCounts(input_tokens=units.input_tokens, pages=units.pages, images=image_count)
+    return UnitCounts(
+        input_tokens=units.input_tokens,
+        pairs=units.pairs,
+        pages=units.pages,
+        images=image_count,
+        audio_ms=units.audio_ms,
+    )
 
 
 def _with_pages(units: UnitCounts | None, page_count: int | None) -> UnitCounts | None:
@@ -1312,15 +1652,45 @@ def _with_pages(units: UnitCounts | None, page_count: int | None) -> UnitCounts 
     canonical parse/OCR dimension ("$ per 1k pages") — minting one when only
     pages are present.
 
-    ``page_count`` of ``None`` / ``<= 0`` is a no-op (never emits ``pages=0``)
-    so token/vision extract is unchanged. Preserves the token and image
-    dimensions so folds compose in any order.
+    ``None`` is a no-op; authoritative zero remains present so a parser that
+    failed before processing its first page releases the admission reserve.
+    Preserves the token and image dimensions so folds compose in any order.
     """
-    if page_count is None or page_count <= 0:
+    if page_count is None:
         return units
     if units is None:
         return UnitCounts(pages=page_count)
-    return UnitCounts(input_tokens=units.input_tokens, pages=page_count, images=units.images)
+    return UnitCounts(
+        input_tokens=units.input_tokens,
+        pairs=units.pairs,
+        pages=page_count,
+        images=units.images,
+        audio_ms=units.audio_ms,
+    )
+
+
+def _with_audio_ms(units: UnitCounts | None, audio_ms: int | None) -> UnitCounts | None:
+    """Fold an authoritative accepted-audio duration into ``UnitCounts``.
+
+    The duration is exact integer milliseconds produced by the media
+    preprocessing boundary, not a container-duration estimate. ``None`` means
+    the item is not audio; every supplied value must fit the unsigned wire
+    domain and be positive. Invalid values fail closed before a successful
+    result can leave the worker.
+    """
+    if audio_ms is None:
+        return units
+    if not isinstance(audio_ms, int) or isinstance(audio_ms, bool) or audio_ms <= 0 or audio_ms > (1 << 64) - 1:
+        raise ValueError("audio_ms must be a positive u64 integer")
+    if units is None:
+        return UnitCounts(audio_ms=audio_ms)
+    return UnitCounts(
+        input_tokens=units.input_tokens,
+        pairs=units.pairs,
+        pages=units.pages,
+        images=units.images,
+        audio_ms=audio_ms,
+    )
 
 
 def _page_total(pages: Any, expected_len: int) -> int | None:
@@ -1329,14 +1699,23 @@ def _page_total(pages: Any, expected_len: int) -> int | None:
 
     Returns ``None`` — leaving the pages dimension unset so the meter falls back
     to its reserve estimate — unless the list is well-formed (aligned 1:1 with
-    the item's outputs, non-negative ints) and sums to ``> 0``. A misaligned or
-    malformed list is dropped rather than mis-attributed.
+    the item's outputs and non-negative ints). A valid zero remains authoritative;
+    malformed data is dropped rather than mis-attributed.
     """
     if not isinstance(pages, list) or len(pages) != expected_len:
         return None
     if not all(isinstance(p, int) and not isinstance(p, bool) and p >= 0 for p in pages):
         return None
-    total = sum(pages)
+    return sum(pages)
+
+
+def _image_total(images: Any, expected_len: int) -> int | None:
+    """Sum authoritative per-pair image counts for one score work item."""
+    if not isinstance(images, list) or len(images) != expected_len:
+        return None
+    if not all(isinstance(image, int) and not isinstance(image, bool) and image >= 0 for image in images):
+        return None
+    total = sum(images)
     return total if total > 0 else None
 
 
@@ -1351,7 +1730,7 @@ def _units_from_token_counts(counts: Any, expected_len: int) -> UnitCounts | Non
     """
     if not isinstance(counts, list) or len(counts) != expected_len:
         return None
-    if not all(isinstance(c, int) and not isinstance(c, bool) for c in counts):
+    if not all(isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in counts):
         return None
     return UnitCounts(input_tokens=sum(int(c) for c in counts))
 
@@ -1392,8 +1771,40 @@ def _backfill_score_units(
         output.input_token_counts = counts
 
 
+def _per_pair_image_counts(
+    adapter: Any,
+    query_item: Item,
+    score_items: list[Item],
+    expected_len: int,
+    *,
+    instruction: str | None = None,
+) -> list[int] | None:
+    """Return exact adapter-owned image counts for scored query/doc pairs.
+
+    A vision reranker may consume only a subset of supplied images. Missing,
+    misaligned, or malformed evidence leaves the images dimension unset so a
+    count can never be attributed to the wrong pair. Metering must not fail an
+    otherwise successful inference.
+    """
+    if adapter is None:
+        return None
+    try:
+        counts = adapter.count_pair_input_images(query_item, score_items, instruction=instruction)
+    except Exception:  # noqa: BLE001 — metering must never fail inference
+        return None
+    if (
+        isinstance(counts, list)
+        and len(counts) == expected_len
+        and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
+    ):
+        return counts
+    return None
+
+
 def _score_success_outcome(
+    adapter: Any,
     bi: ScoreBatchItem,
+    query_item: Item,
     score_items: list[Item],
     worker_result: Any,
 ) -> ItemOutcome:
@@ -1406,12 +1817,37 @@ def _score_success_outcome(
     # pair, and the score handler carries those real per-pair counts on the
     # assembled ScoreOutput. Bill their sum — the total input tokens the model
     # processed for this query × N-docs work item — as $/1M input tokens
-    # (§7.1). ``None`` (char-proxy rerankers) leaves units unset → reserve
-    # fallback, never an estimate billed as a count.
+    # (§7.1). ``None`` (char-proxy rerankers) leaves units unset so downstream
+    # usage consumers can reject missing evidence rather than consume estimates.
     units = _units_from_token_counts(
         getattr(score_output, "input_token_counts", None),
         score_output.batch_size,
     )
+    units = _with_images(
+        units,
+        _image_total(getattr(score_output, "input_image_counts", None), score_output.batch_size),
+    )
+    # One successful score output contains exactly one result for each
+    # query-document pair the reranker processed. This cardinality is
+    # authoritative even when the adapter cannot surface tokenizer counts.
+    if units is None:
+        units = UnitCounts(pairs=score_output.batch_size)
+    else:
+        units = UnitCounts(
+            input_tokens=units.input_tokens,
+            pairs=score_output.batch_size,
+            pages=units.pages,
+            images=units.images,
+            audio_ms=units.audio_ms,
+        )
+    image_counts = _per_pair_image_counts(
+        adapter,
+        query_item,
+        score_items,
+        score_output.batch_size,
+        instruction=bi.instruction,
+    )
+    units = _with_images(units, sum(image_counts) if image_counts is not None else None)
 
     # Score output is always Rust-frameable: the Python and Rust
     # sort/rank paths produce byte-identical results (see the
@@ -1447,20 +1883,13 @@ def _extract_success_outcome(
     worker_result: Any,
 ) -> ItemOutcome:
     extract_output = worker_result.output
-    extraction_results = ExtractHandler.format_output(extract_output)
-    if not extraction_results:
-        # Adapter returned no results for a single-item request —
-        # surface as an error instead of silently publishing an
-        # empty object (which the client would parse as "success
-        # with no fields").
-        return _error_outcome(bi, "inference_error", "adapter returned no extraction results")
-    result_msgpack = msgpack.packb(extraction_results[0], use_bin_type=True)
 
     # Authoritative unit counts (§7.3): the extractor tokenizes the document
     # and the extract handler carries that real per-doc count on the assembled
     # ExtractOutput. Extract work items are single-doc, so ``batch_size == 1``;
-    # bill the count as $/1M input tokens (§7.1). ``None`` leaves units unset →
-    # reserve fallback, never an estimate billed as a count.
+    # bill the count as $/1M input tokens (§7.1). ``None`` leaves units unset so
+    # downstream usage consumers can reject missing evidence rather than use an
+    # estimate.
     units = _units_from_token_counts(
         getattr(extract_output, "input_token_counts", None),
         extract_output.batch_size,
@@ -1476,6 +1905,18 @@ def _extract_success_outcome(
     # text extract (GLiNER, single text doc, no images) is unchanged.
     image_counts = _per_item_image_counts(adapter, [server_item], 1)
     units = _with_images(units, image_counts[0] if image_counts is not None else None)
+    # ASR extract publishes the exact source-derived integer duration carried
+    # by the Rust audio boundary. It is already validated above and is never
+    # rounded to seconds or minutes.
+    if bi.prepared_audio is not None:
+        units = _with_audio_ms(units, bi.prepared_audio.duration_ms)
+
+    extraction_results = ExtractHandler.format_output(extract_output)
+    if not extraction_results:
+        # Adapter returned no results for a single-item request — surface an
+        # error instead of publishing an object the client reads as success.
+        return _error_outcome(bi, _INFERENCE_ERROR_CODE, "adapter returned no extraction results")
+    result_msgpack = msgpack.packb(extraction_results[0], use_bin_type=True)
 
     return ItemOutcome(
         work_item_id=bi.work_item_id,
@@ -1523,7 +1964,7 @@ def _inference_exception_outcome(
 ) -> ItemOutcome:
     if is_oom_error(exc):
         return _oom_nak_outcome(bi)
-    if isinstance(exc, (InvalidMediaError, msgspec.ValidationError)):
+    if isinstance(exc, (InvalidInputError, msgspec.ValidationError)):
         # A typed-decode failure (decode_item) or a media contract violation;
         # both surface as INVALID_INPUT (HTTP 400), matching the HTTP path.
         return _error_outcome(bi, ErrorCode.INVALID_INPUT.value, str(exc))

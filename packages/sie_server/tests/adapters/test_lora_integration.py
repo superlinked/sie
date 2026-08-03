@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import logging
 import socket
-import sys
 from collections.abc import Generator
-from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -31,10 +29,6 @@ pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="LoRA tests require CUDA (BAAI/bge-m3 uses flash-attn)",
 )
-
-# Add sie_bench to path for server management
-_project_root = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(_project_root / "packages" / "sie_bench" / "src"))
 
 # LoRA paths matching the profiles in baai-bge-m3.yaml
 BANKING_LORA = "saivamshiatukuri/bge-m3-banking77-lora"
@@ -55,22 +49,18 @@ def _find_free_port(start: int = 8200, end: int = 8300) -> int:
 
 
 @pytest.fixture(scope="module")
-def lora_server(device: str) -> Generator[str]:
+def lora_server(device: str, sie_server_process_factory: type[Any]) -> Generator[str]:
     """Start a SIE server with BGE-M3 for LoRA testing.
 
     The server loads model profiles including banking and medical-vn LoRAs.
     Skipped when cuda is not available (BAAI/bge-m3 requires flash-attn which needs CUDA).
     """
-    from sie_bench.servers.sie import SIEServer
-
-    models_dir = _project_root / "packages" / "sie_server" / "models"
-
     # Use dynamic port to avoid conflicts with other test modules
     port = _find_free_port(8200, 8300)
 
-    server = SIEServer(
+    server = sie_server_process_factory(
         port=port,
-        models_dir=str(models_dir),
+        models_dir="packages/sie_server/models",
         instrumentation=True,
     )
 

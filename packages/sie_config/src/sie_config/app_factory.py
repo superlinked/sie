@@ -14,7 +14,7 @@ from sie_config import metrics as sie_metrics
 from sie_config.config_api import router as config_router
 from sie_config.config_store import ConfigStore
 from sie_config.health import router as health_router
-from sie_config.metrics_endpoint import router as metrics_router
+from sie_config.managed_metrics import setup_managed_metrics
 from sie_config.model_registry import ModelRegistry
 from sie_config.nats_publisher import NatsPublisher
 
@@ -25,23 +25,20 @@ logger = logging.getLogger(__name__)
 # In development, fall back to the sibling sie_server package in the source tree.
 _DEFAULT_BUNDLES_DIR = Path(__file__).parent.parent.parent.parent / "sie_server" / "bundles"
 _DEFAULT_MODELS_DIR = Path(__file__).parent.parent.parent.parent / "sie_server" / "models"
+_BOUNDED_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 
 
-class _PrometheusHTTPMiddleware(BaseHTTPMiddleware):
-    # Increment `sie_config_http_requests_total` and observe
-    # `sie_config_http_request_duration_seconds` for every request.
+class _TelemetryHTTPMiddleware(BaseHTTPMiddleware):
+    # Record one backend-neutral config HTTP observation for every request.
     #
     # The `path` label is the FastAPI route template (e.g.
     # `/v1/configs/models/{model_id}`) rather than the raw URL so
     # per-model reads do not explode the label cardinality. We resolve
     # the route after the downstream handler runs -- Starlette only
-    # populates `request.scope["route"]` once routing has matched. If
-    # no route matched (unknown URL -> 404), we fall back to the literal
-    # path, which is acceptable because unmatched paths from a known
-    # caller set (gateway + admin tooling) are few.
-    #
-    # We also skip recording for the `/metrics` endpoint itself so the
-    # scrape traffic does not pollute the metric it's scraping.
+    # populates `request.scope["route"]` once routing has matched. Unknown
+    # URLs collapse to the contract's bounded `other` label; the Modal URL is
+    # externally reachable, so retaining arbitrary request paths would let a
+    # caller create unbounded time series.
     #
     # The exception path matters as much as the success one. If
     # `call_next(...)` raises, Starlette converts the exception into a
@@ -61,35 +58,32 @@ class _PrometheusHTTPMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: RequestResponseEndpoint,
     ) -> Response:
-        if request.url.path == "/metrics":
-            return await call_next(request)
-
-        # `status_label` is seeded at "500" so an exception raised
+        # `status_code` is seeded at 500 so an exception raised
         # inside `call_next` (before we can read `response.status_code`)
         # still attributes the failure correctly in the `finally` block.
         # FastAPI/Starlette's outer exception handler turns the raised
         # exception into a 500 for the client, so counting it as a 500
         # matches what the caller actually sees.
         start = time.monotonic()
-        status_label = "500"
+        status_code = 500
         try:
             response = await call_next(request)
-            status_label = str(response.status_code)
+            status_code = response.status_code
             return response
         finally:
             elapsed = time.monotonic() - start
             route = request.scope.get("route")
-            path_label = getattr(route, "path", None) or request.url.path
+            path_label = getattr(route, "path", None) or "other"
+            method_label = request.method if request.method in _BOUNDED_HTTP_METHODS else "other"
 
-            sie_metrics.HTTP_REQUESTS_TOTAL.labels(
-                method=request.method,
+            sie_metrics.record_http_request(
+                method=method_label,
                 path=path_label,
-                status=status_label,
-            ).inc()
-            sie_metrics.HTTP_REQUEST_DURATION.labels(
-                method=request.method,
-                path=path_label,
-            ).observe(elapsed)
+                status=status_code,
+                duration_s=elapsed,
+            )
+            if path_label == "/v1/configs/export":
+                sie_metrics.record_snapshot_publish(success=200 <= status_code < 300)
 
 
 class AppFactory:
@@ -102,6 +96,7 @@ class AppFactory:
         Returns:
             Configured FastAPI application instance.
         """
+        setup_managed_metrics()
         app = FastAPI(
             title="SIE Config Service",
             description="Config control plane for SIE clusters",
@@ -109,16 +104,20 @@ class AppFactory:
             lifespan=cls._create_lifespan(),
         )
 
-        # Prometheus HTTP middleware must wrap the app BEFORE the
-        # routers mount so it observes every request (including
-        # errors raised before a route matches, e.g. body-size
-        # rejections). Starlette applies middleware in outer-to-inner
-        # order, so adding it first means it's the outermost layer.
-        app.add_middleware(_PrometheusHTTPMiddleware)
+        # Do not install request instrumentation at all when telemetry is
+        # disabled. A no-op OTel meter still leaves clock reads, route
+        # resolution and attribute preparation on every request; omitting the
+        # middleware makes the public disabled path a true pass-through.
+        #
+        # When enabled, telemetry must wrap the app BEFORE the routers mount
+        # so it observes every request (including errors raised before a route
+        # matches, e.g. body-size rejections). Starlette applies middleware in
+        # outer-to-inner order, so adding it first makes it the outermost layer.
+        if sie_metrics.telemetry_enabled():
+            app.add_middleware(_TelemetryHTTPMiddleware)
 
         app.include_router(health_router)
         app.include_router(config_router)
-        app.include_router(metrics_router)
 
         return app
 
@@ -182,8 +181,8 @@ class AppFactory:
             app.state.config_store = store
             initial_epoch = store.read_epoch()
             logger.info("Config store initialized at %s (epoch=%d)", config_dir, initial_epoch)
-            # Mirror the persisted epoch into Prometheus so the
-            # `sie_config_epoch` gauge reflects reality immediately on
+            # Mirror the persisted epoch into telemetry so the
+            # `sie.config.epoch` gauge reflects reality immediately on
             # startup. Without this, dashboards would read 0 until the
             # first successful `POST /v1/configs/models` call bumped
             # the counter — which, crucially, never happens in a
@@ -214,6 +213,10 @@ class AppFactory:
                     )
         else:
             app.state.config_store = None
+            # Epoch zero is authoritative in no-store deployments. Seed the
+            # synchronous gauge explicitly so dashboards distinguish that
+            # state from a producer that never emitted telemetry.
+            sie_metrics.set_epoch(0)
 
         yield
 
@@ -223,6 +226,11 @@ class AppFactory:
         """Initialize NATS publisher for config distribution."""
         nats_url = os.environ.get("SIE_NATS_URL")
         nats_publisher: NatsPublisher | None = None
+
+        # The asynchronous dial may take the full startup retry budget, and a
+        # deployment without NATS never dials at all. In both cases false is an
+        # authoritative current value rather than an absent series.
+        sie_metrics.set_nats_connected(False)
 
         if nats_url:
             nats_publisher = NatsPublisher(nats_url=nats_url)

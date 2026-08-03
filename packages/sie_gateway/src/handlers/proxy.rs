@@ -5,31 +5,285 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
 use dashmap::DashMap;
-use percent_encoding::percent_decode_str;
+use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use rmp_serde;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 
 use crate::endpoint::InferenceEndpoint;
 use crate::http_error::{
     code as err_code, embeddings_error, json_detail, json_detail_merge, json_openai_error,
-    openai_code as oai_code, openai_type as oai_type,
+    openai_code as oai_code, openai_type as oai_type, GatewayOwnedFault,
 };
-use crate::metrics;
-use crate::queue::dispatch::{WorkDispatcher, WorkDispatcherExt};
+use crate::observability::metrics as telemetry;
+use crate::queue::dispatch::{
+    DispatchDurability, DispatchError, PendingDispatchKind, WorkDispatcher, WorkDispatcherExt,
+};
 use crate::queue::publisher;
+use crate::queue::streaming::is_lower_sha256;
 
-use crate::server::AppState;
+use crate::server::{
+    AppState, GenerationRequestIntent, GovernedGenerationRoute, ModelAccessPolicy,
+};
+use crate::state::demand_tracker::PhysicalLane;
 use crate::state::model_registry::{ModelRegistry, ResolveError};
 use crate::state::pool_manager::{normalize_pool_name, PoolManager, DEFAULT_POOL_NAME};
 use crate::state::worker_registry::{QueueRoute, WorkerRegistry};
 use crate::types::AuditEntry;
 
-use super::models::{extract_bearer_token, mask_token};
+use crate::middleware::auth::{extract_bearer_token, mask_token};
 
 const GATEWAY_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The ONE ingress bound every JSON body-bearing route accepts.
+///
+/// 16 MiB: enough headroom for multimodal content parts (base64 images) while
+/// closing the trivial OOM-under-concurrency vector the legacy 256 MiB cap left
+/// open. `/v1/encode`, `/v1/score`, `/v1/embeddings`, `/v1/chat/completions`,
+/// `/v1/completions` and `/v1/responses` all derive from it; only the two
+/// routes that carry inline native MEDIA (`generate`'s images, `extract`'s
+/// audio) raise it, and they say why below.
+///
+/// `pub` and singular on purpose: a gate, a probe, or a second surface that
+/// buffers a body on a route's behalf must pin to the route's own number.
+/// Smaller and it denies legitimate traffic the route would have served; larger
+/// and it is a way around the rail. Both mistakes have shipped here before.
+pub const MAX_JSON_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+const MAX_PROXY_BODY: usize = MAX_JSON_BODY_BYTES;
+// Native generate accepts bounded inline images. A 16 MiB decoded image grows
+// to ~21.4 MiB in base64; leave room for the prompt and JSON envelope while
+// still bounding aggregate request memory at ingress.
+const MAX_GENERATE_BODY: usize = 24 * 1024 * 1024;
+const MAX_GENERATE_IMAGES: usize = 16;
+const MAX_GENERATE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GENERATE_IMAGE_BASE64_CHARS: usize = 4 * MAX_GENERATE_IMAGE_BYTES.div_ceil(3);
+// The audio preprocessor accepts 24 MiB of encoded media. Base64 expands that
+// to exactly 32 MiB; leave bounded room for the surrounding native JSON item.
+const MAX_EXTRACT_BODY: usize = 34 * 1024 * 1024;
+
+/// The ingress body cap for ONE native queue endpoint (`encode` / `score` /
+/// `extract` / `generate`).
+///
+/// Public so a surface that carries a native body without being the native
+/// route — the managed cost-estimate dry run's `{endpoint, request}` envelope
+/// (#2435) — bounds that body at the SAME number the route itself does. The
+/// caps are abuse rails on planner/ingress work; a second surface that accepts
+/// a larger body than the route it prices is a way around the rail.
+pub fn native_request_body_limit(endpoint: &str) -> usize {
+    match endpoint {
+        "generate" => MAX_GENERATE_BODY,
+        "extract" => MAX_EXTRACT_BODY,
+        _ => MAX_PROXY_BODY,
+    }
+}
+
+/// The ingress body cap for ONE OpenAI-compatible route.
+///
+/// Public for the same reason as [`native_request_body_limit`], and separate
+/// from it because the compat generation routes do NOT take the 24 MiB native
+/// `generate` cap: their bodies carry no inline native media array, so they sit
+/// on the shared [`MAX_JSON_BODY_BYTES`] bound. An estimate that bounded a chat
+/// body at the native number would accept 1.5x what the route it prices
+/// accepts — the exact way around the rail this helper exists to prevent
+/// (#2435).
+pub fn compat_request_body_limit(_path: &str) -> usize {
+    MAX_JSON_BODY_BYTES
+}
+
+/// The bound on an inner NATIVE response an OpenAI-compatible wrapper must
+/// buffer whole before it can reshape it.
+///
+/// # Why it is separate from the request cap
+///
+/// This bound used to be `compat_request_body_limit("/v1/embeddings")`. Reusing
+/// a REQUEST cap for a RESPONSE is wrong regardless of the number: `/v1/embeddings`
+/// is the one compat surface whose reply is an *amplification* of its request —
+/// N short texts in, N × `dim` floats out — so the two quantities are unrelated,
+/// and a future change to the ingress cap would silently move this bound.
+/// Owning the constant separately is the actual fix; the value below is a second,
+/// independent decision.
+///
+/// # Why the value is 16 MiB, and why it is CHOSEN rather than derived
+///
+/// An earlier revision of this constant set 64 MiB and claimed it was "anchored"
+/// to `queue::publisher::MAX_RESULT_CHUNK_RESERVED_BYTES_PER_REQUEST`. That was
+/// wrong twice over, and the corrected reasoning is recorded here so it is not
+/// re-derived the same way (#2617):
+///
+/// 1. That constant bounds a RESERVATION, not a payload. `result_chunk_reservation_bytes`
+///    computes `payload × 3 + 4 KiB` and checks the PRODUCT against the 64 MiB
+///    limit, so the payload it authorises is ~21.3 MiB, not 64 MiB.
+/// 2. The rail is not even on this path. Embedding item results are ~4 KiB, far
+///    under `PAYLOAD_OFFLOAD_THRESHOLD` (1 MiB), so they never chunk. The
+///    per-request number is also only safe because of a process-wide budget that
+///    has no analogue here — nothing counts the compat wrapper's allocation.
+///
+/// There is no honest derivation available, because **no bound both admits every
+/// reply this surface can produce AND fits the container.** At the queue maximum
+/// (`MAX_QUEUE_REQUEST_ITEMS` = 4096) a float reply is ~90 MB at 1024 dims and
+/// ~224 MB at 2560 dims (`Qwen/Qwen3-Embedding-4B`, shipped on this very surface
+/// in `beta-launch-v1.yaml`). The handler holds roughly four copies at once (the
+/// buffer, the parsed tree, the projected `data`, the re-serialised body), and
+/// the deployed gateway is a **1 GiB container running 4 requests concurrently**
+/// (`sie_cloud/deploy/gateway_app.py`, `GATEWAY_MEMORY_MIB=1024`,
+/// `GATEWAY_MAX_INPUTS=4`). Admitting the largest real reply would need several
+/// gigabytes. So this is a CHOSEN bound with a stated rationale, not a derived one.
+///
+/// The choice is to hold today's effective bound exactly. 16 MiB is what the
+/// surface enforces in production right now, so it is provably non-breaking in
+/// BOTH directions: it refuses nothing that is served today, and it raises
+/// per-request heap on that 1 GiB container by nothing. Raising it would trade a
+/// clean, diagnosable 413 for an OOM kill that also destroys the three unrelated
+/// requests sharing the container — strictly worse than the refusal it removes.
+///
+/// # What this deliberately does NOT fix
+///
+/// The 256-item ingress cap on `/v1/embeddings` prevents known-undeliverable
+/// large batches from reaching this post-dispatch rail. This cap remains the
+/// fail-closed backstop for output amplification, unexpected model dimensions,
+/// and any future response-shape growth.
+const MAX_COMPAT_RESPONSE_BODY: usize = 16 * 1024 * 1024;
+
+/// Outcome of buffering an inner native response under
+/// [`MAX_COMPAT_RESPONSE_BODY`].
+///
+/// The two failure arms are deliberately distinct because they earn different
+/// caller-facing verdicts — but note that both are GATEWAY-OWNED faults for
+/// billing: the worker has already run and reported its units by the time this
+/// runs, and the customer receives no embeddings either way.
+#[derive(Debug)]
+pub(crate) enum CompatResponseBody {
+    Buffered(axum::body::Bytes),
+    /// The reply exceeded [`MAX_COMPAT_RESPONSE_BODY`]. Carries the observed
+    /// length when the body announced one, so the caller can scale their batch
+    /// by a known factor instead of guessing.
+    TooLarge {
+        observed: Option<u64>,
+    },
+    /// The body could not be read at all — a genuine stream failure, NOT a size
+    /// condition.
+    Unreadable,
+}
+
+/// Buffer an inner native response, classifying over-cap separately from
+/// unreadable.
+///
+/// # Why this is not simply `to_bytes(body, CAP + 1)` and a length comparison
+///
+/// That was the first attempt and it was inoperative (#2617). `axum::body::to_bytes`
+/// IS `Limited::new(body, limit).collect()`, and `Limited` yields
+/// `LengthLimitError` the moment a frame would push the running total past the
+/// limit — it does not collect the body and then check. So `Ok` can never carry
+/// a length ABOVE the limit, and a `len() > CAP` guard over a `CAP + 1` limit
+/// matches at exactly ONE size: `CAP + 1`. Every genuinely oversized reply took
+/// the error arm and returned the opaque 500 the change existed to replace.
+/// `compat_response_cap_classifies_sizes_past_the_boundary` pins `CAP + 2` and a
+/// 4× oversize precisely because the old shape passed a `CAP`/`CAP + 1` test
+/// while the branch was dead.
+///
+/// Two stages, so every body shape lands correctly:
+///
+/// 1. **Size hint first.** An in-process reply (which is what `proxy_request`
+///    returns — a complete `Vec<u8>`) announces its exact length, so an oversized
+///    body is refused WITHOUT allocating it. That is the whole point of checking
+///    first: buffering 90 MB in order to discard it is the memory spike this cap
+///    exists to prevent.
+/// 2. **Downcast the limit error.** For a body that announces nothing, buffer to
+///    the cap and recover the distinction from the error's source chain. This is
+///    why `http-body-util` is a direct dependency.
+pub(crate) async fn buffer_compat_response_body(body: Body) -> CompatResponseBody {
+    use hyper::body::Body as _;
+
+    // `lower()` is a guaranteed minimum, so exceeding the cap here is proof, not
+    // an estimate. Unknown-length bodies report 0 and fall through to stage 2.
+    let announced = body.size_hint().lower();
+    if announced > MAX_COMPAT_RESPONSE_BODY as u64 {
+        return CompatResponseBody::TooLarge {
+            observed: Some(announced),
+        };
+    }
+    match to_bytes(body, MAX_COMPAT_RESPONSE_BODY).await {
+        Ok(bytes) => CompatResponseBody::Buffered(bytes),
+        Err(error) if is_length_limit_error(&error) => {
+            CompatResponseBody::TooLarge { observed: None }
+        }
+        Err(_) => CompatResponseBody::Unreadable,
+    }
+}
+
+/// A terminal `/v1/embeddings` error for a POST-DISPATCH failure, marked as
+/// gateway-owned so a metered composition releases the hold.
+///
+/// The worker already ran and the meter already holds its units by the time any
+/// caller of this runs (the dispatcher records authoritative units *before*
+/// fulfilling the result channel). Without the marker, the managed edge falls
+/// through to `settle_planned_request`, which bills every recorded dispatch
+/// regardless of the response status — so the customer pays in full for a
+/// response carrying zero embeddings. That is the defect class of #2641, and it
+/// is what [`GatewayOwnedFault`]'s own doc names: "a response body larger than
+/// the read bound".
+///
+/// The status is the CALLER's verdict (retry or don't); the marker is the
+/// BILLING verdict (charge or don't). A terminal 4xx and a gateway-owned fault
+/// are not in tension: the caller must change their request, and they still owe
+/// nothing for the batch that produced no output.
+fn compat_translation_fault(
+    stage: &'static str,
+    status: StatusCode,
+    code: &str,
+    param: Option<&str>,
+    message: String,
+) -> Response {
+    GatewayOwnedFault::new(stage)
+        .mark((status, Json(embeddings_error(code, param, message))).into_response())
+}
+
+/// Is this `axum::Error` the length-limit condition rather than a broken stream?
+///
+/// `to_bytes` boxes `LengthLimitError` behind `axum::Error`, so the discriminator
+/// is only reachable by walking the source chain. Matching on the Display string
+/// would work today and rot silently on any upstream wording change; the downcast
+/// cannot.
+///
+/// `pub` so the managed composition's own `to_bytes` call sites reuse this exact
+/// discriminator rather than restating the downcast — the same reason the size
+/// bounds themselves are imported rather than copied.
+pub fn is_length_limit_error(error: &axum::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<http_body_util::LengthLimitError>()
+            .is_some()
+        {
+            return true;
+        }
+        source = std::error::Error::source(current);
+    }
+    false
+}
+
+/// The largest [`native_request_body_limit`] across every native endpoint —
+/// the bound an envelope that can carry ANY of them must buffer to.
+///
+/// `dead_code`-allowed because the `sie-gateway` BINARY compiles this module
+/// tree independently of the library (see the note in `lib.rs`), and only the
+/// downstream composition crate reads this constant.
+#[allow(dead_code)]
+pub const MAX_NATIVE_REQUEST_BODY: usize = {
+    let generate_or_proxy = if MAX_GENERATE_BODY > MAX_PROXY_BODY {
+        MAX_GENERATE_BODY
+    } else {
+        MAX_PROXY_BODY
+    };
+    if MAX_EXTRACT_BODY > generate_or_proxy {
+        MAX_EXTRACT_BODY
+    } else {
+        generate_or_proxy
+    }
+};
 static GATEWAY_VERSION_MINOR: std::sync::LazyLock<u32> =
     std::sync::LazyLock::new(|| env!("CARGO_PKG_VERSION_MINOR").parse().unwrap_or(0));
 
@@ -96,6 +350,12 @@ const BACKPRESSURE_RETRY_AFTER: &str = RetryAfter::DEFAULT.backpressure;
 const GATEWAY_TIMEOUT_RETRY_AFTER: &str = RetryAfter::DEFAULT.gateway_timeout;
 const MODEL_LOADING_RETRY_AFTER: &str = RetryAfter::DEFAULT.model_loading;
 const MODEL_LOADING_ERROR_CODE: &str = "MODEL_LOADING";
+/// Sealed cold-start wake quota refused (#2426): the org exceeded its
+/// cold-starts-per-hour ceiling, so the dispatcher declined to buy a wake.
+/// A deliberate quota refusal, surfaced as 429 — terminal, and deliberately
+/// absent from the retryable lists: an hourly quota must not invite SDK
+/// auto-retry storms the way MODEL_LOADING's short Retry-After does.
+const COLD_START_RATE_LIMITED_ERROR_CODE: &str = "COLD_START_RATE_LIMITED";
 /// Server-side OOM recovery exhausted. Workers stamp this on
 /// ``WorkResult.error_code`` when the per-batch ``cache_clear → evict_lru
 /// → split_batch`` strategy still runs out of GPU memory; the gateway
@@ -113,6 +373,8 @@ const LORA_LOADING_RETRY_AFTER: &str = RetryAfter::DEFAULT.lora_loading;
 /// contract so ``sie_sdk`` can short-circuit before the ``MODEL_LOADING`` retry
 /// budget (see ``raise_if_model_load_failed``).
 const MODEL_LOAD_FAILED_ERROR_CODE: &str = "MODEL_LOAD_FAILED";
+const INVALID_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
+const PAYLOAD_TOO_LARGE_ERROR_CODE: &str = err_code::PAYLOAD_TOO_LARGE;
 
 /// Fallback `max_tokens` applied to a chat-completions request that
 /// omits both `max_completion_tokens` and `max_tokens`.
@@ -381,12 +643,9 @@ async fn resolve_effective_pool(
                 pending_demand_profiles: Vec::new(),
             };
         };
-        // Caller pinned a pool. With the new subject shape, a pool-only
-        // pin is not enough to publish cold unless we can infer a single
-        // machine-profile token from the pool spec. A pool+GPU pin names the
-        // exact cold lane KEDA is expected to scale, but we still return a
-        // retryable provisioning error until a healthy worker is present so
-        // the gateway does not publish to a stream with no active consumer.
+        // Caller-pinned cold demand may only name profiles from the resolved
+        // pool catalog. A syntactically valid caller header is not evidence
+        // that a KEDA target exists.
         if gpu.is_empty() {
             let profiles = demand_profiles_for_pool(pool_manager, pool_name).await;
             // Probe the exact cold lane when the pool has a single profile;
@@ -416,6 +675,10 @@ async fn resolve_effective_pool(
             };
         }
 
+        let profiles = demand_profiles_for_pool(pool_manager, pool_name).await;
+        let configured_profile = profiles
+            .into_iter()
+            .find(|profile| profile.eq_ignore_ascii_case(gpu));
         let route = registry
             .resolve_queue_route_in_pool(bundle, gpu, &queue_pool, bundle_config_hash)
             .await;
@@ -431,7 +694,7 @@ async fn resolve_effective_pool(
             pending_demand_profiles: if exact_gpu_match {
                 Vec::new()
             } else {
-                vec![gpu.to_lowercase()]
+                configured_profile.into_iter().collect()
             },
         };
     }
@@ -448,7 +711,12 @@ async fn resolve_effective_pool(
         None => PoolResolution::Provisioning,
     };
     let pending_demand_profiles = if !gpu.is_empty() && !exact_gpu_match {
-        vec![gpu.to_lowercase()]
+        demand_profiles_for_pool(pool_manager, DEFAULT_POOL_NAME)
+            .await
+            .into_iter()
+            .find(|profile| profile.eq_ignore_ascii_case(gpu))
+            .into_iter()
+            .collect()
     } else if matches!(resolution, PoolResolution::Provisioning) {
         demand_profiles_for_pool(pool_manager, DEFAULT_POOL_NAME).await
     } else {
@@ -516,17 +784,17 @@ fn add_provisioning_headers(resp: &mut Response, retry_after: &'static str) {
     );
 }
 
-fn record_provisioning_response(gpu: &str, bundle: &str, status: StatusCode) {
-    let gpu_label = if gpu.is_empty() { "any" } else { gpu };
+fn record_provisioning_response(surface: ProvisioningSurface, status: StatusCode) {
+    let (surface_label, telemetry_surface) = match surface {
+        ProvisioningSurface::Native => ("native", telemetry::ProvisioningSurface::Native),
+        ProvisioningSurface::OpenAiCompat => ("openai", telemetry::ProvisioningSurface::OpenAi),
+    };
     info!(
-        gpu = %gpu_label,
-        bundle = %bundle,
+        surface = surface_label,
         http_status = status.as_u16(),
         "no queue worker available, returning provisioning response",
     );
-    metrics::PROVISIONING_RESPONSES
-        .with_label_values(&[gpu_label])
-        .inc();
+    telemetry::record_provisioning_response(telemetry_surface, status.as_u16());
 }
 
 /// Record metrics for a failed publish attempt and, for backpressure, also
@@ -544,19 +812,137 @@ fn record_provisioning_response(gpu: &str, bundle: &str, status: StatusCode) {
 /// caller — it needs a provisioning response / surface-specific retry.
 fn record_publish_failure(
     state: &AppState,
-    pool: &str,
-    gpu: &str,
-    bundle: &str,
+    physical_lane: &PhysicalLane,
     err_lower: &str,
 ) -> Option<&'static str> {
     if err_lower.contains("backpressure") {
-        metrics::record_rejected_request_for_pool(pool, gpu, bundle, "backpressure");
-        state.demand_tracker.record(pool, gpu, bundle);
+        telemetry::record_rejected_request(
+            state.demand_tracker.as_ref(),
+            physical_lane,
+            "backpressure",
+        );
+        state.demand_tracker.record(physical_lane);
         Some(BACKPRESSURE_RETRY_AFTER)
     } else {
-        metrics::record_rejected_request_for_pool(pool, gpu, bundle, "queue_publish_failed");
         None
     }
+}
+
+const DISPATCH_FAILURE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct DispatchHandoffGuard {
+    demand_tracker: Arc<crate::state::demand_tracker::DemandTracker>,
+    physical_lane: PhysicalLane,
+    handoff: crate::state::demand_tracker::DispatchHandoff,
+    finished: bool,
+}
+
+impl DispatchHandoffGuard {
+    fn new(
+        demand_tracker: Arc<crate::state::demand_tracker::DemandTracker>,
+        physical_lane: PhysicalLane,
+    ) -> Option<Self> {
+        demand_tracker
+            .begin_dispatch_handoff(&physical_lane)
+            .map(|handoff| Self {
+                demand_tracker,
+                physical_lane,
+                handoff,
+                finished: false,
+            })
+    }
+
+    fn finish(mut self, durable: bool) {
+        self.demand_tracker
+            .finish_dispatch_handoff(&self.physical_lane, self.handoff, durable);
+        self.finished = true;
+    }
+}
+
+impl Drop for DispatchHandoffGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.demand_tracker
+                .finish_dispatch_handoff(&self.physical_lane, self.handoff, false);
+        }
+    }
+}
+
+/// Bridge one submitted request from transient exact-lane demand to the
+/// transport's durable backlog without adding broker RTT to successful HTTP
+/// responses.
+///
+/// Exactly one bounded task owns the ACK future(s). It records request-scoped
+/// KEDA demand before it starts, clears only its own lease on success, retains
+/// a 120-second failure marker on error/abort, and notifies the request driver
+/// so a late rejection becomes a prompt typed transport failure instead of a
+/// full result timeout. Failure cleanup is best-effort and separately bounded.
+pub(crate) fn monitor_dispatch_durability(
+    demand_tracker: Arc<crate::state::demand_tracker::DemandTracker>,
+    physical_lane: PhysicalLane,
+    durability: DispatchDurability,
+    work_publisher: Arc<dyn WorkDispatcher>,
+    request_id: String,
+    kind: PendingDispatchKind,
+) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+    let handoff = DispatchHandoffGuard::new(Arc::clone(&demand_tracker), physical_lane.clone());
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = durability.wait().await;
+        if let Some(handoff) = handoff {
+            handoff.finish(result.is_ok());
+        }
+
+        if let Err(error) = &result {
+            telemetry::record_rejected_request(
+                demand_tracker.as_ref(),
+                &physical_lane,
+                "publish_ack_failed",
+            );
+            warn!(
+                request_id = %request_id,
+                lane = %physical_lane,
+                error = %error,
+                "dispatch durability was not confirmed; retaining pending demand and aborting request"
+            );
+        }
+
+        // Notify the inline request/stream driver first. Cleanup must never
+        // delay the client-visible transport failure.
+        let _ = completion_tx.send(result.clone());
+
+        if result.is_err() {
+            // Poll teardown and worker cancellation concurrently under
+            // independent bounds. `abort_pending_dispatch` removes the local
+            // collector before its first payload-store await, so a stalled
+            // Core-NATS cancel can never keep stream state alive indefinitely.
+            let (cleanup, cancel) = tokio::join!(
+                tokio::time::timeout(
+                    DISPATCH_FAILURE_CLEANUP_TIMEOUT,
+                    work_publisher.abort_pending_dispatch(&request_id, kind),
+                ),
+                tokio::time::timeout(
+                    DISPATCH_FAILURE_CLEANUP_TIMEOUT,
+                    work_publisher.publish_cancel(&request_id),
+                ),
+            );
+            if cleanup.is_err() {
+                warn!(
+                    request_id = %request_id,
+                    timeout_ms = DISPATCH_FAILURE_CLEANUP_TIMEOUT.as_millis(),
+                    "dispatch durability failure payload cleanup timed out; periodic cleanup will retry"
+                );
+            }
+            if cancel.is_err() {
+                warn!(
+                    request_id = %request_id,
+                    timeout_ms = DISPATCH_FAILURE_CLEANUP_TIMEOUT.as_millis(),
+                    "dispatch durability failure cancel timed out"
+                );
+            }
+        }
+    });
+    completion_rx
 }
 
 fn build_provisioning_response_for_surface(
@@ -567,7 +953,7 @@ fn build_provisioning_response_for_surface(
     let message = provisioning_message(gpu, bundle);
     match surface {
         ProvisioningSurface::Native => {
-            record_provisioning_response(gpu, bundle, StatusCode::SERVICE_UNAVAILABLE);
+            record_provisioning_response(surface, StatusCode::SERVICE_UNAVAILABLE);
             let mut resp = (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({
@@ -586,7 +972,7 @@ fn build_provisioning_response_for_surface(
             resp
         }
         ProvisioningSurface::OpenAiCompat => {
-            record_provisioning_response(gpu, bundle, StatusCode::SERVICE_UNAVAILABLE);
+            record_provisioning_response(surface, StatusCode::SERVICE_UNAVAILABLE);
             let mut resp = (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json_openai_error(
@@ -658,12 +1044,6 @@ async fn capped_lane_admission_response(
         .await?;
 
     if admission.cap == 0 {
-        metrics::record_rejected_request_for_pool(
-            admission_pool,
-            machine_profile,
-            bundle,
-            "pool_cap_zero",
-        );
         let message = format!(
             "Pool '{}' admits zero workers for GPU type '{}' and bundle '{}'.",
             admission_pool, machine_profile, bundle
@@ -710,9 +1090,12 @@ async fn capped_lane_admission_response(
     }
 
     if admission.assigned_count == 0 {
-        state
+        if let Some(lane) = state
             .demand_tracker
-            .record(demand_pool, machine_profile, bundle);
+            .resolve_lane(demand_pool, machine_profile, bundle)
+        {
+            state.demand_tracker.record(&lane);
+        }
         return Some(build_provisioning_response_for_surface(
             machine_profile,
             bundle,
@@ -839,7 +1222,7 @@ pub async fn proxy_score(state: State<Arc<AppState>>, req: Request) -> impl Into
     post,
     path = "/v1/extract/{model}",
     tag = "inference",
-    description = "Mixed-success batches return 200 with only successful items; the response carries no per-item error envelope. For per-item error visibility, send single-item batches.",
+    description = "Successful extract work results may carry an aligned per-item error alongside partial data. Transport-level mixed failures retain generic batch behavior: the 200 response includes only successful work results.",
     params(
         ("model" = String, Path, description = "Model id; percent-encode slashes when using OpenAPI-generated clients"),
         ("X-SIE-MACHINE-PROFILE" = Option<String>, Header, description = "Preferred GPU or machine profile"),
@@ -868,8 +1251,9 @@ pub async fn proxy_extract(state: State<Arc<AppState>>, req: Request) -> impl In
     post,
     path = "/v1/generate/{model}",
     tag = "inference",
-    description = "Blocking text generation (walking-skeleton surface). \
-                   The model path parameter must use the SIE-safe ID \
+    description = "SIE-native text generation. Omit ``stream`` or set it to false for a blocking \
+                   JSON response; set ``stream: true`` for Server-Sent Events terminated by \
+                   ``data: [DONE]``. The model path parameter must use the SIE-safe ID \
                    (e.g. ``Qwen__Qwen3-4B-Instruct``); HF-style slashes are rejected with 400.",
     request_body = crate::openapi::GenerateRequest,
     params(
@@ -879,10 +1263,12 @@ pub async fn proxy_extract(state: State<Arc<AppState>>, req: Request) -> impl In
         ("X-SIE-SDK-Version" = Option<String>, Header, description = "Client SDK version for skew warnings")
     ),
     responses(
-        (status = 200, description = "Generated text response", body = crate::openapi::GenerateResponse),
+        (status = 200, description = "Generated text as blocking JSON or SIE-native SSE events", body = crate::openapi::GenerateResponse),
         (status = 400, description = "Invalid request", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 404, description = "Model not found", body = crate::openapi::OpenAIErrorEnvelope),
+        (status = 413, description = "Request body too large", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 500, description = "Worker emitted malformed response", body = crate::openapi::OpenAIErrorEnvelope),
+        (status = 502, description = "Terminal model load failure (MODEL_LOAD_FAILED)", body = crate::openapi::GatewayModelLoadFailedResponse),
         (status = 503, description = "Provisioning in progress, queue unavailable, or model loading", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 504, description = "Generation timeout", body = crate::openapi::OpenAIErrorEnvelope),
     )
@@ -950,9 +1336,17 @@ pub async fn proxy_generate(state: State<Arc<AppState>>, req: Request) -> impl I
 /// inline code produced — model-not-found 404, bundle-routing-conflict 409, or
 /// the unknown-model 404 when the registry is populated. With an empty registry
 /// it falls back to the caller's bundle override (or `"default"`).
+///
+/// `requested` is the string the CALLER sent; `model_name` is what it resolved
+/// to. The unknown-model 404 echoes `requested`, never `model_name` (#2542): a
+/// resolved id can be a registry alias's target, and a 404 that names it hands
+/// every caller a read of the alias table — including targets in another org's
+/// reserved namespace. It also makes this 404 byte-identical to the #1841
+/// cross-org one, which is the whole point of answering "not found" there.
 fn resolve_bundle_for_request(
     registry: &ModelRegistry,
     model_name: &str,
+    requested: &str,
     bundle_override: &str,
     engine_pin: Option<&str>,
     endpoint: &str,
@@ -1006,7 +1400,7 @@ fn resolve_bundle_for_request(
             oai_type::MODEL_NOT_FOUND,
             oai_code::MODEL_NOT_FOUND,
             Some("model"),
-            format!("Model '{}' not found", model_name),
+            format!("Model '{}' not found", requested),
         )));
     } else if bundle_override.is_empty() {
         "default".to_string()
@@ -1033,17 +1427,91 @@ struct ProfilePoolRoute {
 /// their exact status / code / param wire shape; this enum only carries the
 /// labels both callers need for the rejection metric.
 enum ProfilePoolError {
+    /// A caller-supplied routing header is not valid UTF-8.
+    InvalidHeader { header: &'static str },
     /// Caller-supplied pool failed the strict `[A-Za-z0-9_-]` allowlist.
-    /// Carries the post-split machine profile for the metric label.
-    InvalidPool { gpu: String },
+    InvalidPool,
     /// Model is assigned to a different pool than the request targeted.
-    /// Carries the metric labels (machine profile + normalized pool) and the
-    /// caller-facing explanation.
-    PoolMismatch {
-        gpu: String,
-        pool_name: String,
-        message: String,
-    },
+    PoolMismatch { message: String },
+}
+
+/// Parse only caller-supplied profile/pool overrides.
+///
+/// Deployment-governed generation uses this raw override view to validate a
+/// caller pin against the exact compiled route. Registry-driven routing calls
+/// [`resolve_profile_and_pool`] below, which additionally applies the model's
+/// default pool. Keeping those steps separate prevents an absent header from
+/// being mistaken for an explicit request that conflicts with desired state.
+fn parse_profile_and_pool_overrides(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<ProfilePoolRoute, ProfilePoolError> {
+    let mut gpu = match headers.get("x-sie-machine-profile") {
+        Some(value) => {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| ProfilePoolError::InvalidHeader {
+                    header: "X-SIE-MACHINE-PROFILE",
+                })?
+        }
+        None => String::new(),
+    };
+    let mut pool_name = match headers.get("x-sie-pool") {
+        Some(value) => {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| ProfilePoolError::InvalidHeader {
+                    header: "X-SIE-Pool",
+                })?
+        }
+        None => String::new(),
+    };
+
+    // Parse pool from GPU param (e.g., "eval-l4/l4").
+    if let Some((inline_pool, inline_gpu)) = gpu
+        .split_once('/')
+        .map(|(pool, profile)| (pool.to_string(), profile.to_string()))
+    {
+        if inline_pool.is_empty() || inline_gpu.is_empty() {
+            return Err(ProfilePoolError::InvalidPool);
+        }
+        if !pool_name.is_empty() && !pool_name.eq_ignore_ascii_case(&inline_pool) {
+            return Err(ProfilePoolError::PoolMismatch {
+                message: format!(
+                    "X-SIE-Pool '{}' conflicts with pool '{}' in X-SIE-MACHINE-PROFILE",
+                    pool_name, inline_pool
+                ),
+            });
+        }
+        pool_name = inline_pool;
+        gpu = inline_gpu;
+    }
+
+    if !pool_name.is_empty() && !is_valid_pool_name(&pool_name) {
+        return Err(ProfilePoolError::InvalidPool);
+    }
+    if !pool_name.is_empty() {
+        pool_name = normalize_pool_name(&pool_name);
+    }
+
+    if !gpu.is_empty() {
+        gpu = resolve_machine_profile(&gpu, &state.config.gpu_profile_map);
+    }
+
+    let gpu_configured = gpu.is_empty()
+        || state
+            .config
+            .configured_gpus
+            .iter()
+            .any(|configured| configured.eq_ignore_ascii_case(&gpu));
+
+    Ok(ProfilePoolRoute {
+        gpu,
+        pool_name,
+        gpu_configured,
+    })
 }
 
 /// Resolve the machine-profile + pool routing carried by the request headers.
@@ -1064,32 +1532,11 @@ async fn resolve_profile_and_pool(
     headers: &HeaderMap,
     model_name: &str,
 ) -> Result<ProfilePoolRoute, ProfilePoolError> {
-    // Parse GPU from X-SIE-MACHINE-PROFILE header
-    let mut gpu = headers
-        .get("x-sie-machine-profile")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    let mut pool_name = headers
-        .get("x-sie-pool")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    // Parse pool from GPU param (e.g., "eval-l4/l4")
-    if !gpu.is_empty() && gpu.contains('/') {
-        let parts: Vec<&str> = gpu.splitn(2, '/').collect();
-        pool_name = parts[0].to_string();
-        gpu = parts[1].to_string();
-    }
-
-    if !pool_name.is_empty() && !is_valid_pool_name(&pool_name) {
-        return Err(ProfilePoolError::InvalidPool { gpu });
-    }
-    if !pool_name.is_empty() {
-        pool_name = normalize_pool_name(&pool_name);
-    }
+    let ProfilePoolRoute {
+        gpu,
+        mut pool_name,
+        gpu_configured,
+    } = parse_profile_and_pool_overrides(state, headers)?;
 
     let model_pool = state.model_registry.get_model_pool_name(model_name);
     if let Err(message) = apply_model_pool_default(
@@ -1099,28 +1546,8 @@ async fn resolve_profile_and_pool(
     )
     .await
     {
-        return Err(ProfilePoolError::PoolMismatch {
-            gpu,
-            pool_name,
-            message,
-        });
+        return Err(ProfilePoolError::PoolMismatch { message });
     }
-
-    // Resolve bare GPU to spot variant
-    if !gpu.is_empty() && !state.config.configured_gpus.is_empty() {
-        gpu = resolve_machine_profile(&gpu, &state.config.gpu_profile_map);
-    }
-
-    // Validate GPU is configured. Compute this *before* tagging the metric
-    // label slot so an arbitrary, unconfigured, caller-supplied GPU never
-    // reaches a Prometheus label (unbounded cardinality / DoS).
-    let gpu_configured = gpu.is_empty()
-        || state.config.configured_gpus.is_empty()
-        || state
-            .config
-            .configured_gpus
-            .iter()
-            .any(|cg| cg.eq_ignore_ascii_case(&gpu));
 
     Ok(ProfilePoolRoute {
         gpu,
@@ -1129,10 +1556,182 @@ async fn resolve_profile_and_pool(
     })
 }
 
+fn governed_generation_route_failure(
+    customer_model: &str,
+    intent: GenerationRequestIntent,
+    detail: &str,
+) -> Response {
+    error!(
+        customer_model,
+        intent = ?intent,
+        detail,
+        "deployment-governed generation route is unavailable"
+    );
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json_openai_error(
+            "Generation route is unavailable for this deployment".to_string(),
+            oai_type::SERVER_ERROR,
+            None,
+            oai_code::TRANSPORT_FAILURE,
+        )),
+    )
+        .into_response()
+}
+
+/// Resolve the optional deployment-owned generation route.
+///
+/// `None` means the OSS composition installed no policy. Once a policy is
+/// present, every model/intent pair must resolve and the returned route must be
+/// self-consistent; any miss or drift fails closed instead of falling back to
+/// registry insertion order or a sibling GPU lane.
+#[allow(clippy::result_large_err)]
+fn governed_generation_route(
+    state: &AppState,
+    customer_model: &str,
+    dispatch_model: &str,
+    intent: GenerationRequestIntent,
+) -> Result<Option<GovernedGenerationRoute>, Response> {
+    let Some(policy) = state
+        .model_access_policy
+        .as_deref()
+        .and_then(ModelAccessPolicy::generation_route_policy)
+    else {
+        return Ok(None);
+    };
+    let Some(route) = policy.resolve(customer_model, intent) else {
+        return Err(governed_generation_route_failure(
+            customer_model,
+            intent,
+            "missing model/intent mapping",
+        ));
+    };
+    if route.model != dispatch_model {
+        return Err(governed_generation_route_failure(
+            customer_model,
+            intent,
+            "compiled physical model disagrees with registry intent rewrite",
+        ));
+    }
+    if route.bundle.trim().is_empty()
+        || route.pool.trim().is_empty()
+        || route.machine_profile.trim().is_empty()
+    {
+        return Err(governed_generation_route_failure(
+            customer_model,
+            intent,
+            "route contains an empty physical coordinate",
+        ));
+    }
+    if !state
+        .config
+        .configured_gpus
+        .iter()
+        .any(|configured| configured.eq_ignore_ascii_case(&route.machine_profile))
+    {
+        return Err(governed_generation_route_failure(
+            customer_model,
+            intent,
+            "route machine profile is absent from the configured GPU catalog",
+        ));
+    }
+    Ok(Some(route))
+}
+
+/// Validate caller overrides against one exact deployment-owned route.
+///
+/// An omitted header adopts the governed coordinate. An explicit, conflicting
+/// header is a client error; it never causes a registry search that could pick
+/// a sibling lane for the same model.
+#[allow(clippy::result_large_err)]
+fn governed_profile_and_pool(
+    state: &AppState,
+    headers: &HeaderMap,
+    route: &GovernedGenerationRoute,
+) -> Result<ProfilePoolRoute, Response> {
+    let overrides = match parse_profile_and_pool_overrides(state, headers) {
+        Ok(overrides) => overrides,
+        Err(ProfilePoolError::InvalidHeader { header }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json_openai_error(
+                    format!("{header} header must be valid UTF-8"),
+                    oai_type::INVALID_REQUEST,
+                    Some(header),
+                    oai_code::INVALID_REQUEST,
+                )),
+            )
+                .into_response());
+        }
+        Err(ProfilePoolError::InvalidPool) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json_openai_error(
+                    "Invalid pool name: only [A-Za-z0-9_-] are allowed (max 128 chars)".to_string(),
+                    oai_type::INVALID_REQUEST,
+                    Some("X-SIE-Pool"),
+                    oai_code::INVALID_REQUEST,
+                )),
+            )
+                .into_response());
+        }
+        Err(ProfilePoolError::PoolMismatch { message }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json_openai_error(
+                    message,
+                    oai_type::INVALID_REQUEST,
+                    Some("X-SIE-Pool"),
+                    oai_code::INVALID_REQUEST,
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    if !overrides.pool_name.is_empty() && !overrides.pool_name.eq_ignore_ascii_case(&route.pool) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json_openai_error(
+                format!(
+                    "X-SIE-Pool '{}' conflicts with the deployment route for this model",
+                    overrides.pool_name
+                ),
+                oai_type::INVALID_REQUEST,
+                Some("X-SIE-Pool"),
+                oai_code::INVALID_REQUEST,
+            )),
+        )
+            .into_response());
+    }
+    if !overrides.gpu.is_empty() && !overrides.gpu.eq_ignore_ascii_case(&route.machine_profile) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json_openai_error(
+                format!(
+                    "X-SIE-MACHINE-PROFILE '{}' conflicts with the deployment route for this model",
+                    overrides.gpu
+                ),
+                oai_type::INVALID_REQUEST,
+                Some("X-SIE-MACHINE-PROFILE"),
+                oai_code::INVALID_REQUEST,
+            )),
+        )
+            .into_response());
+    }
+
+    Ok(ProfilePoolRoute {
+        gpu: route.machine_profile.clone(),
+        pool_name: route.pool.clone(),
+        gpu_configured: true,
+    })
+}
+
 /// The routing decision for a request: canonical model name, serving bundle,
 /// and engine. Produced by [`resolve_routing`].
 struct RoutingResult {
     model_name: String,
+    dispatch_model: String,
     bundle: String,
     engine: String,
     gpu: String,
@@ -1150,8 +1749,10 @@ struct RoutingResult {
 async fn resolve_routing(
     state: &AppState,
     headers: &HeaderMap,
+    ext: &axum::http::Extensions,
     path: &str,
     endpoint: &str,
+    generation_intent: Option<GenerationRequestIntent>,
 ) -> Result<RoutingResult, Box<Response>> {
     // Extract model from path: /v1/{endpoint}/{model...}
     let prefix = format!("/v1/{}/", endpoint);
@@ -1172,11 +1773,6 @@ async fn resolve_routing(
     };
 
     if model.is_empty() {
-        // Early exit, headers haven't been parsed yet — pass through
-        // placeholder labels. `record_rejected_request` normalizes
-        // empty `machine_profile` to `"unknown"` internally; `bundle`
-        // gets the same treatment here for cardinality discipline.
-        metrics::record_rejected_request_for_pool("unknown", "", "unknown", "model_required");
         return Err(Box::new(endpoint_error_response(
             endpoint,
             StatusCode::BAD_REQUEST,
@@ -1195,6 +1791,75 @@ async fn resolve_routing(
         resolve_model_spec_with_aliases(&state.config.model_aliases, &model, |m| {
             state.model_registry.resolve_canonical_model_name(m)
         });
+    // #1841 org-scoped visibility: a custom model hidden from this caller is
+    // treated as ABSENT — the identical MODEL_NOT_FOUND 404 the dispatcher emits
+    // for an unknown model — so there is no cross-org existence oracle. Decided on
+    // the RESOLVED id (alias/`__`/case already folded), so the gate can never
+    // diverge from the dispatcher. No-op in OSS self-host (policy is None).
+    //
+    // The body echoes the CALLER's string and uses the unknown-model template
+    // verbatim (#2542). Rendering `model_name` here was a naming oracle: an
+    // operator alias whose target sits in another org's reserved namespace made
+    // `POST /v1/encode/<alias>` answer with that org's custom-model id, to a
+    // caller who owns nothing. It also gave the refusal its own wording, which
+    // by itself distinguished "hidden from you" from "does not exist" — the one
+    // thing this 404 exists to prevent.
+    if state
+        .model_access_policy
+        .as_ref()
+        .is_some_and(|p| !p.visible(&model_name, ext))
+    {
+        return Err(Box::new(endpoint_error_response(
+            endpoint,
+            StatusCode::NOT_FOUND,
+            err_code::MODEL_NOT_FOUND,
+            oai_type::MODEL_NOT_FOUND,
+            oai_code::MODEL_NOT_FOUND,
+            Some("model"),
+            format!("Model '{}' not found", model),
+        )));
+    }
+    // #2542 deployment serving policy on the RESOLVED id: the authoritative
+    // "we do not serve this model here" verdict (the managed service's §6.5
+    // licence exclusion). It runs HERE, not only at the edge, because an edge
+    // gate compares the caller's raw string and a registry ALIAS can point that
+    // string at a refused model — post-resolution is the only place the refusal
+    // sees what will actually dispatch. Ordered after the visibility gate so the
+    // no-oracle 404 still wins, and before the sealed branch so a refused model
+    // cannot reach a lane. The policy owns the whole response (status, code,
+    // envelope). No-op in OSS self-host (policy is None / default `None`).
+    if let Some(refusal) = state
+        .model_access_policy
+        .as_ref()
+        .and_then(|p| p.serving_refusal(&model_name, ext))
+    {
+        return Err(Box::new(refusal));
+    }
+    // #1841 bundle-less sealed dispatch: an org-registered custom model is served
+    // from its own sealed sandbox, not a catalog bundle, so there is no bundle to
+    // resolve — the normal path below would dead-end at MODEL_NOT_FOUND. The
+    // visibility gate above already proved this caller OWNS the id, so the policy's
+    // `sealed_route` decides purely on id shape; we return the synthetic sealed lane
+    // tuple and SKIP bundle + profile resolution. `engine == "sealed"` is the sole
+    // discriminator the dispatcher co-process routes on. A client can never reach
+    // this via the `X-SIE-Engine` pin below — `"sealed"` is server-derived only and
+    // is not in `KNOWN_ENGINES`. No-op in OSS self-host (policy is None).
+    if let Some(route) = state
+        .model_access_policy
+        .as_ref()
+        .and_then(|p| p.sealed_route(&model_name, ext))
+    {
+        debug_assert_eq!(route.engine, "sealed");
+        return Ok(RoutingResult {
+            dispatch_model: model_name.clone(),
+            model_name,
+            bundle: route.bundle,
+            engine: route.engine,
+            gpu: route.machine_profile,
+            pool_name: route.pool,
+            gpu_configured: true,
+        });
+    }
     // Hidden operator/debug header: normal clients should select explicit
     // model profile variants (for example ``model:candle``) or compatible
     // bundle overrides. Lowercase normalisation + UTF-8 validation lives in
@@ -1230,6 +1895,52 @@ async fn resolve_routing(
         }
     };
 
+    let mut dispatch_model = model_name.clone();
+    if generation_intent == Some(GenerationRequestIntent::Grammar) {
+        route_grammar_to_profile(&state.model_registry, &mut dispatch_model);
+    }
+    let governed_route = if let Some(intent) = generation_intent {
+        match governed_generation_route(state, &model_name, &dispatch_model, intent) {
+            Ok(route) => route,
+            Err(response) => return Err(Box::new(response)),
+        }
+    } else {
+        None
+    };
+
+    if let Some(route) = governed_route.as_ref() {
+        if !bundle_override.is_empty() && bundle_override != route.bundle {
+            return Err(Box::new(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        format!(
+                            "Bundle override '{}' conflicts with the deployment route for this model",
+                            bundle_override
+                        ),
+                        oai_type::INVALID_REQUEST,
+                        Some("model"),
+                        oai_code::INVALID_REQUEST,
+                    )),
+                )
+                    .into_response(),
+                ));
+        }
+        match state
+            .model_registry
+            .resolve_bundle(&route.model, Some(&route.bundle))
+        {
+            Ok(resolved) if resolved == route.bundle => {}
+            _ => {
+                return Err(Box::new(governed_generation_route_failure(
+                    &model_name,
+                    generation_intent.expect("governed generation has request intent"),
+                    "compiled bundle is incompatible with the physical model",
+                )));
+            }
+        }
+    }
+
     // Try model registry resolution. Three cases:
     //   1. Model is known        → resolve bundle (404 on BundleConflict, etc.)
     //   2. Model unknown, registry populated → 404 (fail fast; avoids queueing
@@ -1237,10 +1948,20 @@ async fn resolve_routing(
     //   3. Model unknown, registry empty     → fall back to caller's bundle
     //      override or "default". This is the pre-bootstrap / no-config
     //      deployment path; workers may still match on bundle+gpu alone.
+    let bundle_model = governed_route
+        .as_ref()
+        .map_or(model_name.as_str(), |route| route.model.as_str());
+    let effective_bundle_override = governed_route
+        .as_ref()
+        .map_or(bundle_override.as_str(), |route| route.bundle.as_str());
     let bundle = resolve_bundle_for_request(
         &state.model_registry,
-        &model_name,
-        &bundle_override,
+        bundle_model,
+        // The CALLER's string, for the not-found body only (#2542) — never the
+        // resolved/governed id, which can be an alias target in another org's
+        // reserved namespace.
+        &model,
+        effective_bundle_override,
         engine_pin.as_deref(),
         endpoint,
     )?;
@@ -1259,40 +1980,53 @@ async fn resolve_routing(
         gpu,
         pool_name,
         gpu_configured,
-    } = match resolve_profile_and_pool(state, headers, &model_name).await {
-        Ok(route) => route,
-        Err(ProfilePoolError::InvalidPool { gpu }) => {
-            metrics::record_rejected_request_for_pool("unknown", &gpu, &bundle, "invalid_pool");
-            return Err(Box::new(endpoint_error_response(
-                endpoint,
-                StatusCode::BAD_REQUEST,
-                err_code::INVALID_REQUEST,
-                oai_type::INVALID_REQUEST,
-                oai_code::INVALID_REQUEST,
-                Some("pool"),
-                "Invalid pool name: only [A-Za-z0-9_-] are allowed (max 128 chars)",
-            )));
+    } = if let Some(route) = governed_route.as_ref() {
+        match governed_profile_and_pool(state, headers, route) {
+            Ok(route) => route,
+            Err(response) => return Err(Box::new(response)),
         }
-        Err(ProfilePoolError::PoolMismatch {
-            gpu,
-            pool_name,
-            message,
-        }) => {
-            metrics::record_rejected_request_for_pool(&pool_name, &gpu, &bundle, "pool_mismatch");
-            return Err(Box::new(endpoint_error_response(
-                endpoint,
-                StatusCode::BAD_REQUEST,
-                err_code::INVALID_REQUEST,
-                oai_type::INVALID_REQUEST,
-                oai_code::INVALID_REQUEST,
-                Some("pool"),
-                message,
-            )));
+    } else {
+        match resolve_profile_and_pool(state, headers, &model_name).await {
+            Ok(route) => route,
+            Err(ProfilePoolError::InvalidHeader { header }) => {
+                return Err(Box::new(endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    err_code::INVALID_REQUEST,
+                    oai_type::INVALID_REQUEST,
+                    oai_code::INVALID_REQUEST,
+                    Some(header),
+                    format!("{header} header must be valid UTF-8"),
+                )));
+            }
+            Err(ProfilePoolError::InvalidPool) => {
+                return Err(Box::new(endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    err_code::INVALID_REQUEST,
+                    oai_type::INVALID_REQUEST,
+                    oai_code::INVALID_REQUEST,
+                    Some("pool"),
+                    "Invalid pool name: only [A-Za-z0-9_-] are allowed (max 128 chars)",
+                )));
+            }
+            Err(ProfilePoolError::PoolMismatch { message }) => {
+                return Err(Box::new(endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    err_code::INVALID_REQUEST,
+                    oai_type::INVALID_REQUEST,
+                    oai_code::INVALID_REQUEST,
+                    Some("pool"),
+                    message,
+                )));
+            }
         }
     };
 
     Ok(RoutingResult {
         model_name,
+        dispatch_model,
         bundle,
         engine,
         gpu,
@@ -1301,7 +2035,7 @@ async fn resolve_routing(
     })
 }
 
-async fn proxy_request(
+pub(crate) async fn proxy_request(
     State(state): State<Arc<AppState>>,
     req: Request,
     endpoint: &str,
@@ -1315,8 +2049,7 @@ async fn proxy_request(
     // through this helper that needs gateway-side trace propagation;
     // OpenAI generation routes have their own tracing blocks.
     let proxy_span = if should_trace_proxy_request(endpoint) {
-        let parent_cx =
-            crate::observability::propagation::extract_context_from_headers(req.headers());
+        let parent_cx = managed_request_parent(&req);
         let proxy_span = tracing::info_span!(
             "gateway.proxy",
             otel.name = "gateway.proxy_generate",
@@ -1332,8 +2065,6 @@ async fn proxy_request(
     } else {
         None
     };
-    let _proxy_span_guard = proxy_span.as_ref().map(|span| span.enter());
-
     // #1500: non-generation endpoints (encode / score / extract /
     // embeddings) do not open a billed gateway span, but the
     // queue-publish path still needs the inbound W3C context so
@@ -1343,23 +2074,108 @@ async fn proxy_request(
     // context here and scope it over the publish future via
     // `with_context` (Send- and thread-hop-safe, unlike attaching a
     // `!Send` `ContextGuard` across the handler's awaits). The generation
-    // branch already establishes the context via its proxy span.
-    // Borrow `proxy_span` (don't move it) — `_proxy_span_guard` holds a
-    // live borrow of it via `span.enter()` for the rest of the handler.
+    // branch establishes the context through the poll-scoped proxy span
+    // instrumentation below.
     let inbound_publish_cx = if proxy_span.is_some() {
         None
     } else {
-        Some(crate::observability::propagation::extract_context_from_headers(req.headers()))
+        Some(managed_request_parent(&req))
+    };
+    let proxy_span = proxy_span.unwrap_or_else(tracing::Span::none);
+
+    // `Span::enter()` guards must never live across `.await`: Tokio may resume
+    // the task on another worker, stranding tracing-opentelemetry's context
+    // guard in the first worker's TLS until thread teardown. Instrumenting the
+    // future enters and exits the span around each poll instead.
+    async move {
+        proxy_request_inner(
+            state,
+            req,
+            endpoint,
+            provisioning_surface,
+            inbound_publish_cx,
+        )
+        .await
+    }
+    .instrument(proxy_span)
+    .await
+}
+
+async fn proxy_request_inner(
+    state: Arc<AppState>,
+    mut req: Request,
+    endpoint: &str,
+    provisioning_surface: ProvisioningSurface,
+    inbound_publish_cx: Option<opentelemetry::Context>,
+) -> Response {
+    // Native generation routing depends on request intent (default vs grammar),
+    // including in the no-policy OSS composition where grammar selects a
+    // profile-qualified model. Inspect the bounded body once before worker
+    // lookup and preserve the typed parse for the dispatch driver.
+    let mut governed_generate_body = None;
+    let mut governed_generate_parsed = None;
+    let generation_intent = if endpoint == "generate" {
+        let is_msgpack = req
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|content_type| content_type.contains("msgpack"));
+        let (parts, body) = req.into_parts();
+        let body_bytes = match axum::body::to_bytes(body, MAX_GENERATE_BODY).await {
+            Ok(body) => body,
+            Err(error) => {
+                warn!(error = %error, limit = MAX_GENERATE_BODY, "request body too large or read error");
+                return endpoint_error_response(
+                    endpoint,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    err_code::PAYLOAD_TOO_LARGE,
+                    oai_type::INVALID_REQUEST,
+                    oai_code::INVALID_REQUEST,
+                    None,
+                    format!("Request body too large (max {} bytes)", MAX_GENERATE_BODY),
+                );
+            }
+        };
+        req = Request::from_parts(parts, Body::empty());
+        let (items, params) = match parse_queue_request(&body_bytes, is_msgpack, endpoint) {
+            Ok(parsed) => parsed,
+            Err(error) => return queue_parse_error_response(endpoint, error),
+        };
+        let intent = if params
+            .generate
+            .as_ref()
+            .and_then(|generate| generate.grammar.as_ref())
+            .is_some()
+        {
+            GenerationRequestIntent::Grammar
+        } else {
+            GenerationRequestIntent::Default
+        };
+        governed_generate_body = Some(body_bytes);
+        governed_generate_parsed = Some((items, params));
+        Some(intent)
+    } else {
+        None
     };
 
     let RoutingResult {
         model_name,
+        dispatch_model,
         bundle,
         engine,
         gpu,
         pool_name,
         gpu_configured,
-    } = match resolve_routing(&state, req.headers(), req.uri().path(), endpoint).await {
+    } = match resolve_routing(
+        &state,
+        req.headers(),
+        req.extensions(),
+        req.uri().path(),
+        endpoint,
+        generation_intent,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
@@ -1373,8 +2189,8 @@ async fn proxy_request(
     // having to remember to tag its response. A fallback of
     // `"unknown"` kicks in at the middleware if we never set the slot
     // (e.g. the `model is required` exit above, which has no GPU).
-    if let Some(slot) = req.extensions().get::<metrics::MetricLabelsSlot>() {
-        slot.set(metrics::MetricLabels {
+    if let Some(slot) = req.extensions().get::<telemetry::MetricLabelsSlot>() {
+        slot.set(telemetry::MetricLabels {
             machine_profile: if gpu.is_empty() {
                 "unknown".to_string()
             } else if gpu_configured {
@@ -1391,20 +2207,6 @@ async fn proxy_request(
     // configured set (see how `gpu_configured` is computed), so no outer
     // guard is needed.
     if !gpu_configured {
-        // Bucket the rejected GPU under a fixed sentinel for the
-        // metric; the actual value is still surfaced in the response
-        // body below for operator debugging.
-        let metric_pool = if pool_name.is_empty() {
-            DEFAULT_POOL_NAME
-        } else {
-            pool_name.as_str()
-        };
-        metrics::record_rejected_request_for_pool(
-            metric_pool,
-            "invalid",
-            &bundle,
-            "gpu_not_configured",
-        );
         let mut m = Map::new();
         m.insert("gpu".to_string(), json!(&gpu));
         m.insert(
@@ -1423,12 +2225,6 @@ async fn proxy_request(
     }
 
     let Some(work_publisher) = state.work_publisher.as_ref() else {
-        let metric_pool = if pool_name.is_empty() {
-            DEFAULT_POOL_NAME
-        } else {
-            pool_name.as_str()
-        };
-        metrics::record_rejected_request_for_pool(metric_pool, &gpu, &bundle, "queue_unavailable");
         return endpoint_error_response(
             endpoint,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1443,12 +2239,12 @@ async fn proxy_request(
     let Some(hash_pool) = queue_pool_for_request(Some(&state.pool_manager), &pool_name).await
     else {
         let requested_pool = normalize_pool_name(&pool_name);
-        metrics::record_rejected_request_for_pool(&requested_pool, &gpu, &bundle, "pool_not_found");
         return build_pool_not_found_response_for_surface(&requested_pool, provisioning_surface);
     };
-    let bundle_config_hash = state
-        .model_registry
-        .compute_bundle_config_hash_for_pool(&bundle, &hash_pool);
+    let (bundle_config_hash, model_revision) =
+        state
+            .model_registry
+            .bundle_execution_evidence(&bundle, &hash_pool, &dispatch_model);
 
     // Resolve the effective pool in one shot. `resolve_effective_pool`
     // folds the demand-tracking probe ("was there an exact
@@ -1471,28 +2267,46 @@ async fn proxy_request(
     let admission_pool = lookup.admission_pool.clone();
     let pending_demand_profiles = lookup.pending_demand_profiles.clone();
     for profile in &pending_demand_profiles {
-        state.demand_tracker.record(&demand_pool, profile, &bundle);
+        if let Some(lane) = state
+            .demand_tracker
+            .resolve_lane(&demand_pool, profile, &bundle)
+        {
+            state.demand_tracker.record(&lane);
+        }
     }
 
     let effective_route = match lookup.resolution {
         PoolResolution::Route(route) => route,
         PoolResolution::PoolNotFound(pool) => {
-            metrics::record_rejected_request_for_pool(&pool, &gpu, &bundle, "pool_not_found");
             return build_pool_not_found_response_for_surface(&pool, provisioning_surface);
         }
         PoolResolution::Provisioning => {
-            // If route resolution named concrete cold lanes, demand was
-            // recorded above with those machine-profile labels. Otherwise keep
-            // the legacy empty/unknown-profile series for observability even
-            // though KEDA cannot scale a lane without a profile token.
-            if pending_demand_profiles.is_empty() {
-                state.demand_tracker.record(&demand_pool, &gpu, &bundle);
-            }
             return build_provisioning_response_for_surface(&gpu, &bundle, provisioning_surface);
         }
     };
     let effective_pool = &effective_route.pool_name;
     let effective_machine_profile = &effective_route.machine_profile;
+    let Some(physical_lane) =
+        state
+            .demand_tracker
+            .resolve_lane(&demand_pool, effective_machine_profile, &bundle)
+    else {
+        error!(
+            pool = %demand_pool,
+            machine_profile = %effective_machine_profile,
+            bundle = %bundle,
+            "resolved worker route is absent from configured physical KEDA lane catalog"
+        );
+        return endpoint_error_response(
+            endpoint,
+            StatusCode::SERVICE_UNAVAILABLE,
+            err_code::QUEUE_UNAVAILABLE,
+            oai_type::SERVER_ERROR,
+            oai_code::TRANSPORT_FAILURE,
+            None,
+            "Resolved worker lane is not configured for autoscaling",
+        );
+    };
 
     if let Some(resp) = capped_lane_admission_response(
         &state,
@@ -1523,9 +2337,7 @@ async fn proxy_request(
         {
             Ok(target) => Some(target),
             Err(()) => {
-                state
-                    .demand_tracker
-                    .record(&demand_pool, effective_machine_profile, &bundle);
+                state.demand_tracker.record(&physical_lane);
                 return build_provisioning_response_for_surface(
                     effective_machine_profile,
                     &bundle,
@@ -1557,60 +2369,56 @@ async fn proxy_request(
         .unwrap_or(false);
     let use_msgpack_out = publisher::wants_msgpack(req.headers());
 
-    // Per-endpoint body cap. `generate` is pure text — Qwen3.5's 32k
-    // context is ~128 KiB of UTF-8, so 4 MiB gives ~30× headroom and
-    // closes the trivial-OOM-under-concurrency vector that the legacy
-    // 256 MiB cap left open. The remaining endpoints routed here
-    // (encode / score / extract) are also text-shaped on this path, so
-    // they get the same text-appropriate 16 MiB cap as the chat /
-    // embeddings paths rather than the legacy 256 MiB.
-    const MAX_PROXY_BODY: usize = 16 * 1024 * 1024;
-    const MAX_GENERATE_BODY: usize = 4 * 1024 * 1024;
-    let body_limit = if endpoint == "generate" {
-        MAX_GENERATE_BODY
+    // Per-endpoint body cap. `generate` allows one 16 MiB decoded inline
+    // image after JSON base64 expansion, so its 24 MiB cap closes the
+    // trivial-OOM-under-concurrency vector while admitting the maximum
+    // legal image. The remaining endpoints routed here
+    // (encode / score) get the same text-appropriate 16 MiB cap as the
+    // chat / embeddings paths. Extract accepts bounded binary media, so
+    // its cap covers the maximum legal audio after JSON base64 expansion.
+    let body_limit = native_request_body_limit(endpoint);
+    let body_bytes = if let Some(body) = governed_generate_body {
+        body
     } else {
-        MAX_PROXY_BODY
-    };
-    let body_bytes = match axum::body::to_bytes(req.into_body(), body_limit).await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, limit = body_limit, "request body too large or read error");
-            metrics::record_rejected_request_for_pool(
-                effective_pool,
-                &gpu,
-                &bundle,
-                "body_too_large",
-            );
-            return endpoint_error_response(
-                endpoint,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                err_code::PAYLOAD_TOO_LARGE,
-                oai_type::INVALID_REQUEST,
-                oai_code::INVALID_REQUEST,
-                None,
-                format!("Request body too large (max {} bytes)", body_limit),
-            );
+        match axum::body::to_bytes(req.into_body(), body_limit).await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, limit = body_limit, "request body too large or read error");
+                return endpoint_error_response(
+                    endpoint,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    err_code::PAYLOAD_TOO_LARGE,
+                    oai_type::INVALID_REQUEST,
+                    oai_code::INVALID_REQUEST,
+                    None,
+                    format!("Request body too large (max {} bytes)", body_limit),
+                );
+            }
         }
     };
 
     let publish_fut = queue_mode_proxy(
         &state,
-        work_publisher.as_ref(),
+        Arc::clone(work_publisher),
         endpoint,
         &model_name,
+        &dispatch_model,
         &bundle,
         &engine,
         effective_machine_profile,
         effective_pool,
         &admission_pool,
         &body_bytes,
+        governed_generate_parsed,
         is_msgpack_in,
         use_msgpack_out,
         &token_id,
         content_length,
         Instant::now(),
         &bundle_config_hash,
+        model_revision.as_deref(),
         batch_target,
+        &physical_lane,
     );
     // Scope an OTel context over the publish so the work-item envelope
     // carries it (#1500): when the exporter is on we open a `gateway.publish`
@@ -1620,7 +2428,6 @@ async fn proxy_request(
     // `.await`s and tokio thread hops — and the future stays `Send`, unlike
     // holding a `!Send` `ContextGuard` across awaits.
     use opentelemetry::trace::FutureExt;
-    use tracing::Instrument;
     let cls = crate::endpoint::InferenceEndpoint::from_label(endpoint);
     match inbound_publish_cx {
         Some(inbound_cx)
@@ -1657,6 +2464,18 @@ fn should_trace_proxy_request(endpoint: &str) -> bool {
     InferenceEndpoint::from_label(endpoint).uses_generation_gateway_tracing()
 }
 
+/// Parent handler-local spans to the managed request span installed by the
+/// metrics middleware. The header extraction fallback preserves direct handler
+/// tests and any future router that intentionally omits that middleware.
+fn managed_request_parent(req: &Request) -> opentelemetry::Context {
+    req.extensions()
+        .get::<telemetry::RequestTraceContext>()
+        .map(|context| context.get().clone())
+        .unwrap_or_else(|| {
+            crate::observability::propagation::extract_context_from_headers(req.headers())
+        })
+}
+
 /// Route request through the queue-only JetStream path.
 ///
 /// `pool` is always pre-resolved by the caller via
@@ -1667,11 +2486,27 @@ fn should_trace_proxy_request(endpoint: &str) -> bool {
 /// harvested from the registry snapshot — route resolution filters out
 /// empty pool names and machine profiles). We therefore don't need to
 /// re-query the registry inside this function.
+fn queue_parse_error_response(endpoint: &str, error: QueueParseError) -> Response {
+    match error {
+        QueueParseError::Generic(message) => endpoint_error_response(
+            endpoint,
+            StatusCode::BAD_REQUEST,
+            err_code::INVALID_REQUEST,
+            oai_type::INVALID_REQUEST,
+            oai_code::INVALID_REQUEST,
+            None,
+            format!("Failed to parse request body: {message}"),
+        ),
+        QueueParseError::PreBuilt(response) => response,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn queue_mode_proxy(
     state: &AppState,
-    work_publisher: &dyn WorkDispatcher,
+    work_publisher: Arc<dyn WorkDispatcher>,
     endpoint: &str,
+    display_model: &str,
     model: &str,
     bundle: &str,
     engine: &str,
@@ -1679,41 +2514,27 @@ async fn queue_mode_proxy(
     pool: &str,
     admission_pool: &str,
     body_bytes: &[u8],
+    preparsed: Option<(Vec<rmpv::Value>, publisher::WorkParams)>,
     is_msgpack_in: bool,
     use_msgpack_out: bool,
     token_id: &str,
     content_length: i64,
     start: Instant,
     bundle_config_hash: &str,
+    model_revision: Option<&str>,
     batch_target: Option<publisher::PublishTarget>,
+    physical_lane: &PhysicalLane,
 ) -> Response {
     // Parse body once, extract items + params (avoids double parse)
-    let (items, params) = match parse_queue_request(body_bytes, is_msgpack_in, endpoint) {
-        Ok(r) => r,
-        Err(QueueParseError::Generic(e)) => {
-            metrics::record_rejected_request_for_pool(pool, gpu, bundle, "body_parse_error");
-            return endpoint_error_response(
-                endpoint,
-                StatusCode::BAD_REQUEST,
-                err_code::INVALID_REQUEST,
-                oai_type::INVALID_REQUEST,
-                oai_code::INVALID_REQUEST,
-                None,
-                format!("Failed to parse request body: {}", e),
-            );
-        }
-        Err(QueueParseError::PreBuilt(resp)) => {
-            // The pre-built path is currently grammar-only
-            // — surface a precise rejection reason so dashboards can
-            // separate it from generic body-parse failures. Future
-            // pre-built paths should pick their own reason code.
-            metrics::record_rejected_request_for_pool(pool, gpu, bundle, "grammar_invalid");
-            return resp;
-        }
+    let (items, params) = match preparsed {
+        Some(parsed) => parsed,
+        None => match parse_queue_request(body_bytes, is_msgpack_in, endpoint) {
+            Ok(parsed) => parsed,
+            Err(error) => return queue_parse_error_response(endpoint, error),
+        },
     };
 
     if items.is_empty() && endpoint != "score" && endpoint != "generate" {
-        metrics::record_rejected_request_for_pool(pool, gpu, bundle, "empty_items");
         return endpoint_error_response(
             endpoint,
             StatusCode::BAD_REQUEST,
@@ -1725,12 +2546,23 @@ async fn queue_mode_proxy(
         );
     }
 
+    if let Err(message) = publisher::validate_queue_request_item_count(items.len()) {
+        return endpoint_error_response(
+            endpoint,
+            StatusCode::BAD_REQUEST,
+            err_code::INVALID_REQUEST,
+            oai_type::INVALID_REQUEST,
+            oai_code::INVALID_REQUEST,
+            None,
+            message,
+        );
+    }
+
     // Generate requires the typed ``params.generate`` block from the parser.
     // The parser returns ``None`` for missing/invalid prompt / max_new_tokens
     // and we translate that to a 400 with an instructive message here. This
     // is the gateway-side enforcement called out in §4.5.1.1 of the POC plan.
     if endpoint == "generate" && params.generate.is_none() {
-        metrics::record_rejected_request_for_pool(pool, gpu, bundle, "invalid_generate_body");
         return (
             StatusCode::BAD_REQUEST,
             Json(json_openai_error(
@@ -1742,34 +2574,6 @@ async fn queue_mode_proxy(
         )
             .into_response();
     }
-
-    // Grammar routing: a grammar-constrained generate request runs on the
-    // model's declared non-speculative ``grammar_profile`` variant (see
-    // ``route_grammar_to_profile``). Resolve it HERE — before the capability and
-    // profile-scoped LoRA gates below and the dispatch — and shadow ``model`` so
-    // every gate validates against, and the work item dispatches to, the profile
-    // the request will actually execute on. Non-generate / non-grammar requests
-    // leave ``model`` unchanged (no allocation).
-    let routed_model: Option<String> = if endpoint == "generate"
-        && params
-            .generate
-            .as_ref()
-            .and_then(|p| p.grammar.as_ref())
-            .is_some()
-    {
-        let mut routed = model.to_string();
-        route_grammar_to_profile(&state.model_registry, &mut routed);
-        Some(routed)
-    } else {
-        None
-    };
-    // Preserve the requested (base) id for the DISPLAY surfaces — response body,
-    // ``record_generation_success``, audit log. ``model`` below shadows to the
-    // DISPATCH id (the routed variant); only that id changes which worker-loaded
-    // model serves the request (NATS subject + work item). They are equal unless
-    // routing fired.
-    let display_model = model.to_string();
-    let model: &str = routed_model.as_deref().unwrap_or(model);
 
     // Grammar capability gate. After ``parse_grammar`` has accepted
     // the wire shape and enforced the safety caps, check the model's
@@ -1787,9 +2591,7 @@ async fn queue_mode_proxy(
             // Look the capabilities up on the DISPATCH variant, but name the
             // requested (DISPLAY) model in the rejection so the client never
             // sees the internal ``:no-spec`` id (mirrors the chat path).
-            if let Err(resp) = super::grammar::check_capability(g, caps.as_deref(), &display_model)
-            {
-                metrics::record_rejected_request_for_pool(pool, gpu, bundle, "grammar_capability");
+            if let Err(resp) = super::grammar::check_capability(g, caps.as_deref(), display_model) {
                 return resp;
             }
         }
@@ -1817,12 +2619,6 @@ async fn queue_mode_proxy(
                 match validate_lora_for_profile(&info, profile_name, req_lora) {
                     LoraValidation::Ok => {}
                     LoraValidation::UnknownProfile => {
-                        metrics::record_rejected_request_for_pool(
-                            pool,
-                            gpu,
-                            bundle,
-                            "unknown_profile",
-                        );
                         return (
                             StatusCode::BAD_REQUEST,
                             Json(json_openai_error(
@@ -1837,12 +2633,6 @@ async fn queue_mode_proxy(
                             .into_response();
                     }
                     LoraValidation::UnknownAdapter => {
-                        metrics::record_rejected_request_for_pool(
-                            pool,
-                            gpu,
-                            bundle,
-                            "unknown_lora_adapter",
-                        );
                         return (
                             StatusCode::BAD_REQUEST,
                             Json(json_openai_error(
@@ -1859,6 +2649,28 @@ async fn queue_mode_proxy(
                 }
             }
         }
+        let has_images = params
+            .generate
+            .as_ref()
+            .is_some_and(generate_params_have_images);
+        if has_images {
+            let image_supported = state
+                .model_registry
+                .get_model_info(model)
+                .is_some_and(|info| info.info_extras.supports_vision_generation());
+            if !native_generate_image_input_allowed(params.generate.as_ref(), image_supported) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        format!("Model '{display_model}' does not support image input"),
+                        oai_type::INVALID_REQUEST,
+                        Some("images"),
+                        oai_code::UNSUPPORTED_FIELD,
+                    )),
+                )
+                    .into_response();
+            }
+        }
     }
 
     // Generate has its own publish + result-collection path
@@ -1867,7 +2679,6 @@ async fn queue_mode_proxy(
         // Take an Arc clone so the cancel-on-drop guard can outlive the
         // borrow checker without a 'static lifetime tangle.
         let Some(work_publisher_arc) = state.work_publisher.clone() else {
-            metrics::record_rejected_request_for_pool(pool, gpu, bundle, "queue_unavailable");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json_openai_error(
@@ -1879,41 +2690,29 @@ async fn queue_mode_proxy(
             )
                 .into_response();
         };
-        // Streaming branch — when the SIE-native generate body carries
-        // `stream: true`, switch to the SSE response builder. The body
-        // was already parsed once above; we re-decode the small
-        // `stream` flag here rather than thread a new parameter
-        // through `parse_queue_request` (which is shared with
-        // encode/score/extract, where `stream` has no meaning).
-        // The reject-on-bad-type path is handled here too: an unparsable
-        // body falls back to the existing non-streaming code path,
-        // which surfaces the same 400 as before.
-        let stream_flag = stream_flag_from_body(body_bytes, is_msgpack_in);
-        match stream_flag {
-            Ok(true) => {
-                return super::sse::build_sse_response(super::sse::SseParams {
-                    state,
-                    work_publisher: work_publisher_arc,
-                    model: display_model.clone(),
-                    dispatch_model: model.to_string(),
-                    bundle: bundle.to_string(),
-                    engine: engine.to_string(),
-                    gpu: gpu.to_string(),
-                    pool: pool.to_string(),
-                    admission_pool: admission_pool.to_string(),
-                    bundle_config_hash: bundle_config_hash.to_string(),
-                    work_params: params,
-                    endpoint: super::sse::SseEndpoint::Generate,
-                })
-                .await;
-            }
-            Ok(false) => {}
-            Err(resp) => return resp,
+        if params.generate.as_ref().is_some_and(|params| params.stream) {
+            return super::sse::build_sse_response(super::sse::SseParams {
+                state,
+                work_publisher: work_publisher_arc,
+                physical_lane: physical_lane.clone(),
+                model: display_model.to_string(),
+                dispatch_model: model.to_string(),
+                bundle: bundle.to_string(),
+                engine: engine.to_string(),
+                gpu: gpu.to_string(),
+                pool: pool.to_string(),
+                admission_pool: admission_pool.to_string(),
+                bundle_config_hash: bundle_config_hash.to_string(),
+                work_params: params,
+                endpoint: super::sse::SseEndpoint::Generate,
+            })
+            .await;
         }
         return queue_mode_streaming_generate(
             state,
             work_publisher_arc,
-            display_model.as_str(),
+            physical_lane,
+            display_model,
             model,
             bundle,
             engine,
@@ -1921,6 +2720,7 @@ async fn queue_mode_proxy(
             pool,
             admission_pool,
             bundle_config_hash,
+            model_revision,
             &params,
             use_msgpack_out,
             token_id,
@@ -1939,7 +2739,7 @@ async fn queue_mode_proxy(
     });
     let direct_batch_fallback =
         matches!(target, publisher::PublishTarget::Worker { .. }) && endpoint != "generate";
-    let (request_id, rx) = match work_publisher
+    let (request_id, rx, durability) = match Arc::clone(&work_publisher)
         .publish_work(
             target,
             admission_pool,
@@ -1955,18 +2755,32 @@ async fn queue_mode_proxy(
         Ok(r) => r,
         Err(e) => {
             error!(error = %e, "failed to publish work");
-            let lower = e.to_lowercase();
+            let lower = e.to_string().to_lowercase();
+            if let Some(response) = dispatch_rejection_response(endpoint, &e) {
+                if matches!(e, DispatchError::Backpressure(_)) {
+                    telemetry::record_rejected_request(
+                        state.demand_tracker.as_ref(),
+                        physical_lane,
+                        "backpressure",
+                    );
+                    state.demand_tracker.record(physical_lane);
+                }
+                return response;
+            }
             if lower.contains("score request missing query item") {
-                metrics::record_rejected_request_for_pool(pool, gpu, bundle, "score_missing_query");
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json_detail(err_code::INVALID_REQUEST, e)),
+                    Json(json_detail(err_code::INVALID_REQUEST, e.to_string())),
                 )
                     .into_response();
             }
 
             if lower.contains("no consumers") {
-                metrics::record_rejected_request_for_pool(pool, gpu, bundle, "no_consumers");
+                telemetry::record_rejected_request(
+                    state.demand_tracker.as_ref(),
+                    physical_lane,
+                    "no_consumers",
+                );
                 return build_provisioning_response_for_surface(
                     gpu,
                     bundle,
@@ -1983,7 +2797,7 @@ async fn queue_mode_proxy(
             )
                 .into_response();
 
-            if let Some(retry_after) = record_publish_failure(state, pool, gpu, bundle, &lower) {
+            if let Some(retry_after) = record_publish_failure(state, physical_lane, &lower) {
                 response.headers_mut().insert(
                     HeaderName::from_static("retry-after"),
                     HeaderValue::from_static(retry_after),
@@ -2001,6 +2815,9 @@ async fn queue_mode_proxy(
             return response;
         }
     };
+    let mut abandonment_guard =
+        PendingWorkAbandonGuard::new(Arc::clone(&work_publisher), request_id.clone());
+
     if direct_batch_fallback {
         if let Some(work_publisher_arc) = state.work_publisher.clone() {
             work_publisher_arc.spawn_batch_direct_fallback(
@@ -2010,6 +2827,19 @@ async fn queue_mode_proxy(
         }
     }
     let publish_elapsed = publish_start.elapsed();
+    let mut durability_completion = monitor_dispatch_durability(
+        Arc::clone(&state.demand_tracker),
+        physical_lane.clone(),
+        durability,
+        Arc::clone(
+            state
+                .work_publisher
+                .as_ref()
+                .expect("queue-mode publisher checked before dispatch"),
+        ),
+        request_id.clone(),
+        PendingDispatchKind::Result,
+    );
     tracing::Span::current().record("sie.publish_ms", publish_elapsed.as_millis() as i64);
 
     // Wait for results (use configured request_timeout instead of hardcoded 300s).
@@ -2017,39 +2847,165 @@ async fn queue_mode_proxy(
     let timeout = Duration::from_secs_f64(state.config.request_timeout.max(0.001));
     let timeout_secs = timeout.as_secs_f64();
     let wait_start = Instant::now();
-    let results = match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(results)) => results,
-        Ok(Err(_)) => {
-            metrics::record_rejected_request_for_pool(pool, gpu, bundle, "result_channel_closed");
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(json_detail(
-                    err_code::GATEWAY_TIMEOUT,
-                    "Result channel closed",
-                )),
-            )
-                .into_response();
-        }
-        Err(_) => {
-            // The gateway accepted and published work, but no worker result
-            // arrived before the request deadline. This is not the same signal
-            // as worker-emitted MODEL_LOADING: under heavy load it usually
-            // means queue/head-of-line delay or a lost NATS Core result, and
-            // reporting it as MODEL_LOADING hides the real bottleneck.
-            metrics::record_rejected_request_for_pool(pool, gpu, bundle, "upstream_result_timeout");
-            return build_queue_result_timeout_response(model, timeout_secs);
+    let wait_deadline = tokio::time::Instant::now() + timeout;
+    let mut result_rx = rx;
+    let mut buffered_results = None;
+    let mut durability_confirmed = false;
+    let results = loop {
+        tokio::select! {
+            biased;
+            completion = &mut durability_completion, if !durability_confirmed => {
+                match completion {
+                    Ok(Ok(())) => {
+                        durability_confirmed = true;
+                        if let Some(results) = buffered_results.take() {
+                            break results;
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        telemetry::record_queue_result_wait(
+                            endpoint,
+                            telemetry::QueueResultOutcome::DurabilityError,
+                            wait_start.elapsed(),
+                        );
+                        return endpoint_error_response(
+                            endpoint,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            err_code::QUEUE_UNAVAILABLE,
+                            oai_type::SERVER_ERROR,
+                            oai_code::TRANSPORT_FAILURE,
+                            None,
+                            format!("Queue durability confirmation failed: {error}"),
+                        );
+                    }
+                    Err(_) => {
+                        telemetry::record_queue_result_wait(
+                            endpoint,
+                            telemetry::QueueResultOutcome::DurabilityError,
+                            wait_start.elapsed(),
+                        );
+                        return endpoint_error_response(
+                            endpoint,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            err_code::QUEUE_UNAVAILABLE,
+                            oai_type::SERVER_ERROR,
+                            oai_code::TRANSPORT_FAILURE,
+                            None,
+                            "Queue durability monitor stopped before completion",
+                        );
+                    }
+                }
+            }
+            result = &mut result_rx, if buffered_results.is_none() => {
+                match result {
+                    Ok(results) if durability_confirmed => break results,
+                    Ok(results) => buffered_results = Some(results),
+                    Err(_) => {
+                        telemetry::record_queue_result_wait(
+                            endpoint,
+                            telemetry::QueueResultOutcome::ChannelClosed,
+                            wait_start.elapsed(),
+                        );
+                        return (
+                            StatusCode::GATEWAY_TIMEOUT,
+                            Json(json_detail(
+                                err_code::GATEWAY_TIMEOUT,
+                                "Result channel closed",
+                            )),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(wait_deadline) => {
+                telemetry::record_queue_result_wait(
+                    endpoint,
+                    telemetry::QueueResultOutcome::Timeout,
+                    wait_start.elapsed(),
+                );
+                // The gateway accepted and published work, but no worker result
+                // arrived before the request deadline. This is not the same signal
+                // as worker-emitted MODEL_LOADING: under heavy load it usually
+                // means queue/head-of-line delay or a lost NATS Core result, and
+                // reporting it as MODEL_LOADING hides the real bottleneck.
+                telemetry::record_rejected_request(
+                    state.demand_tracker.as_ref(),
+                    physical_lane,
+                    "upstream_result_timeout",
+                );
+                return build_queue_result_timeout_response(model, timeout_secs);
+            }
         }
     };
+    abandonment_guard.defuse();
     let wait_elapsed = wait_start.elapsed();
+    telemetry::record_queue_result_wait(
+        endpoint,
+        if results.iter().any(|result| result.success) {
+            telemetry::QueueResultOutcome::Success
+        } else {
+            telemetry::QueueResultOutcome::WorkerError
+        },
+        wait_elapsed,
+    );
 
     let elapsed = start.elapsed();
     let use_msgpack = use_msgpack_out;
+
+    // A result that cannot fit the negotiated NATS payload ceiling means the
+    // response is incomplete. Reject the whole request even when sibling items
+    // succeeded; returning a shortened 200 would silently break positional and
+    // id correspondence for multi-item encode calls.
+    if let Some(oversized) = result_payload_too_large_error(&results) {
+        let message = oversized
+            .error
+            .as_deref()
+            .unwrap_or("Encoded worker result exceeds the transport limit");
+        return build_result_payload_too_large_response(endpoint, message);
+    }
+    if result_transport_failure_error(&results).is_some() {
+        return build_result_transport_failure_response(endpoint);
+    }
 
     // Assemble response matching Python's envelope: {"model": "...", "items": [...]}
     let successful: Vec<&publisher::WorkResult> = results.iter().filter(|r| r.success).collect();
     let errors: Vec<&publisher::WorkResult> = results.iter().filter(|r| !r.success).collect();
 
+    // Input validation is request-wide: returning a partial 200 after one
+    // malformed item would hide the caller-fixable error and make native and
+    // local execution disagree. Only a homogeneous INVALID_INPUT failure set
+    // is translated; mixed worker failures retain the existing error handling.
+    if let Some(message) = unanimous_worker_error_message(&errors, INVALID_INPUT_ERROR_CODE) {
+        telemetry::record_rejected_request(
+            state.demand_tracker.as_ref(),
+            physical_lane,
+            "invalid_input",
+        );
+        return build_invalid_input_response(&message);
+    }
+
     if successful.is_empty() && !errors.is_empty() {
+        if let Some(code) = unanimous_client_error_code(&errors) {
+            let first_msg = errors
+                .first()
+                .and_then(|result| result.error.as_deref())
+                .unwrap_or("Worker rejected invalid input");
+            let openai_code = if code == "unsupported_field" {
+                oai_code::UNSUPPORTED_FIELD
+            } else {
+                oai_code::INVALID_REQUEST
+            };
+            return endpoint_error_response(
+                endpoint,
+                StatusCode::BAD_REQUEST,
+                err_code::INVALID_REQUEST,
+                oai_type::INVALID_REQUEST,
+                openai_code,
+                None,
+                first_msg,
+            );
+        }
+
         if errors
             .iter()
             .all(|r| r.error_code.as_deref() == Some(MODEL_LOAD_FAILED_ERROR_CODE))
@@ -2058,12 +3014,6 @@ async fn queue_mode_proxy(
                 .first()
                 .and_then(|r| r.error.as_deref())
                 .unwrap_or("Model load failed");
-            metrics::record_rejected_request_for_pool(
-                pool,
-                gpu,
-                bundle,
-                "model_load_failed_terminal",
-            );
             return build_model_load_failed_response(model, first_msg);
         }
         // Translate retryable worker error codes into the SDK-expected 503
@@ -2077,13 +3027,14 @@ async fn queue_mode_proxy(
                 .first()
                 .and_then(|r| r.error.as_deref())
                 .unwrap_or("Worker reported a retryable error");
-            metrics::record_rejected_request_for_pool(
-                pool,
-                gpu,
-                bundle,
-                retryable_metric_reason(code),
-            );
             return build_retryable_error_response(code, first_msg);
+        }
+        if let Some((status, code)) = unanimous_terminal_client_error(&errors) {
+            let first_msg = errors
+                .first()
+                .and_then(|r| r.error.as_deref())
+                .unwrap_or("Worker rejected the request");
+            return build_terminal_client_error_response(status, code, first_msg);
         }
 
         let error_details: Vec<serde_json::Value> = errors
@@ -2099,7 +3050,29 @@ async fn queue_mode_proxy(
                 entry
             })
             .collect();
-        metrics::record_rejected_request_for_pool(pool, gpu, bundle, "all_items_failed");
+        // 2026-07-15 cold-start investigation: retryable codes (MODEL_LOADING
+        // et al.) correctly 503 above, so reaching this 500 means a unanimous
+        // NON-retryable worker code (or a mixed batch) that was previously
+        // invisible in logs — name it so the next occurrence is diagnosable.
+        // Log-only: worker-emitted codes are an unbounded set, so folding
+        // them into the bounded reject-metric reason label would risk
+        // cardinality; the label stays the static "all_items_failed".
+        let unanimous_code = errors
+            .first()
+            .and_then(|r| r.error_code.as_deref())
+            .filter(|first| {
+                errors
+                    .iter()
+                    .all(|r| r.error_code.as_deref() == Some(first))
+            });
+        warn!(
+            request_id = %request_id,
+            model = %model,
+            error_code = unanimous_code.unwrap_or("<mixed>"),
+            failed_items = errors.len(),
+            first_error = errors.first().and_then(|r| r.error.as_deref()).unwrap_or(""),
+            "all items failed (500 all_items_failed)"
+        );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "all_items_failed", "details": error_details})),
@@ -2111,7 +3084,11 @@ async fn queue_mode_proxy(
 
     let resp_body = build_queue_success_body(endpoint, model, &successful, use_msgpack);
 
-    debug!(
+    // §10 spine: emit at INFO so there is ONE greppable per-request success line
+    // (carrying request_id) at the prod default RUST_LOG=info — the log anchor
+    // that pairs with the linked gateway↔lane trace. Error/early-return paths
+    // already log at info/warn; this closes the success path.
+    info!(
         request_id = %request_id,
         endpoint = endpoint,
         model = %model,
@@ -2164,6 +3141,13 @@ async fn queue_mode_proxy(
         HeaderName::from_static("x-sie-server-version"),
         HeaderValue::from_static(GATEWAY_VERSION),
     );
+    insert_model_revision_header(
+        response.headers_mut(),
+        model_revision,
+        bundle_config_hash,
+        &successful,
+    );
+    insert_execution_identity_header(response.headers_mut(), &successful);
     response.headers_mut().insert(
         HeaderName::from_static("x-sie-request-id"),
         HeaderValue::from_str(&request_id).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -2184,6 +3168,67 @@ async fn queue_mode_proxy(
     response
 }
 
+/// RAII guard for non-streaming queue work. A normal result defuses it; timeout
+/// and result-channel failure call [`Self::abandon`] explicitly, while an HTTP
+/// task drop reaches the same path through [`Drop`]. Collector removal is
+/// synchronous so late results and the direct-fallback timer lose the race
+/// immediately. The Core NATS tombstone and exact-key offload cleanup run in a
+/// detached task so a storage delete cannot delay the timeout response.
+struct PendingWorkAbandonGuard {
+    publisher: Arc<dyn WorkDispatcher>,
+    request_id: String,
+    defused: bool,
+}
+
+impl PendingWorkAbandonGuard {
+    fn new(publisher: Arc<dyn WorkDispatcher>, request_id: String) -> Self {
+        Self {
+            publisher,
+            request_id,
+            defused: false,
+        }
+    }
+
+    fn defuse(&mut self) {
+        self.defused = true;
+    }
+
+    fn abandon(&mut self) {
+        if self.defused {
+            return;
+        }
+        self.defused = true;
+        if !self.publisher.begin_work_abandonment(&self.request_id) {
+            return;
+        }
+
+        let publisher = Arc::clone(&self.publisher);
+        let request_id = self.request_id.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    publisher.finish_work_abandonment(&request_id).await;
+                });
+            }
+            Err(_) => {
+                // Collector/result-chunk memory is already released. Any
+                // tracked offload remains eligible for the ordinary orphan
+                // reconcile when a runtime is available again.
+                debug!(
+                    request_id = %request_id,
+                    "runtime unavailable while finishing abandoned work"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for PendingWorkAbandonGuard {
+    fn drop(&mut self) {
+        self.abandon();
+    }
+}
+
 /// RAII guard that fires a streaming cancel signal when dropped without
 /// being defused. The HTTP handler defuses it on every normal exit (terminal
 /// chunk received, worker error surfaced, timeout fired) — leaving only
@@ -2192,23 +3237,14 @@ async fn queue_mode_proxy(
 pub(crate) struct StreamCancelGuard {
     publisher: Arc<dyn WorkDispatcher>,
     request_id: String,
-    model: String,
-    pool: String,
     defused: bool,
 }
 
 impl StreamCancelGuard {
-    pub(crate) fn new(
-        publisher: Arc<dyn WorkDispatcher>,
-        request_id: String,
-        model: String,
-        pool: String,
-    ) -> Self {
+    pub(crate) fn new(publisher: Arc<dyn WorkDispatcher>, request_id: String) -> Self {
         Self {
             publisher,
             request_id,
-            model,
-            pool,
             defused: false,
         }
     }
@@ -2223,19 +3259,17 @@ impl Drop for StreamCancelGuard {
         if self.defused {
             return;
         }
-        let observed = self.publisher.stream_observed_first_chunk(&self.request_id);
-        let stage = if observed {
-            "mid_stream"
+        let observed_first_chunk = self.publisher.stream_observed_first_chunk(&self.request_id);
+        let reason = if observed_first_chunk {
+            telemetry::GenerationEventReason::MidStream
         } else {
-            "before_first_chunk"
+            telemetry::GenerationEventReason::BeforeFirstChunk
         };
-        metrics::GENERATION_CANCELLED
-            .with_label_values(&[
-                &metrics::sanitize_model_label(self.model.as_str()),
-                &metrics::sanitize_label(self.pool.as_str()),
-                stage,
-            ])
-            .inc();
+        telemetry::record_generation_event(
+            telemetry::GenerationEvent::Cancellation,
+            reason,
+            telemetry::GenerationEventOutcome::Cancelled,
+        );
         // Drop is synchronous; spawn a detached task to emit the cancel
         // signal and clean up the collector. Both are best-effort.
         //
@@ -2310,6 +3344,46 @@ fn endpoint_error_response(
     }
 }
 
+fn dispatch_rejection_response(endpoint: &str, error: &DispatchError) -> Option<Response> {
+    let mut response = match error {
+        DispatchError::PayloadTooLarge(error) => endpoint_error_response(
+            endpoint,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            err_code::PAYLOAD_TOO_LARGE,
+            oai_type::INVALID_REQUEST,
+            oai_code::INVALID_REQUEST,
+            None,
+            error.message(),
+        ),
+        DispatchError::InvalidInput(error) => endpoint_error_response(
+            endpoint,
+            StatusCode::BAD_REQUEST,
+            err_code::INVALID_REQUEST,
+            oai_type::INVALID_REQUEST,
+            oai_code::INVALID_REQUEST,
+            None,
+            error.message(),
+        ),
+        DispatchError::Backpressure(error) => endpoint_error_response(
+            endpoint,
+            StatusCode::SERVICE_UNAVAILABLE,
+            err_code::QUEUE_UNAVAILABLE,
+            oai_type::SERVER_ERROR,
+            oai_code::TRANSPORT_FAILURE,
+            None,
+            error.message(),
+        ),
+        DispatchError::Other(_) => return None,
+    };
+    if matches!(error, DispatchError::Backpressure(_)) {
+        response.headers_mut().insert(
+            HeaderName::from_static("retry-after"),
+            HeaderValue::from_static(BACKPRESSURE_RETRY_AFTER),
+        );
+    }
+    Some(response)
+}
+
 /// Result of a streaming-generate driver run, handed back to the
 /// endpoint-specific caller.
 ///
@@ -2342,6 +3416,9 @@ pub(crate) enum StreamingDriverErr {
         message: String,
         retry_after: Option<&'static str>,
     },
+    /// Initial publish submission returned, but the transport later rejected
+    /// or abandoned its durable-acceptance acknowledgement.
+    DurabilityFailed { message: String },
     /// The result channel was dropped before any chunk arrived (worker
     /// reset, gateway shutting down, …). Maps to 504 Gateway Timeout.
     ResultChannelClosed,
@@ -2359,6 +3436,31 @@ pub(crate) enum StreamingDriverErr {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FirstChunkDeadlineAction {
+    RepublishToPool,
+    WaitForOverall,
+    SurfaceTimeout,
+}
+
+pub(crate) fn first_chunk_deadline_action(
+    supports_pool_republish: bool,
+    was_direct_dispatched: bool,
+    republish_already_attempted: bool,
+    single_consumer_lane_at_dispatch: bool,
+) -> FirstChunkDeadlineAction {
+    if !supports_pool_republish {
+        return FirstChunkDeadlineAction::WaitForOverall;
+    }
+    if was_direct_dispatched && !republish_already_attempted && !single_consumer_lane_at_dispatch {
+        return FirstChunkDeadlineAction::RepublishToPool;
+    }
+    if was_direct_dispatched && !republish_already_attempted && single_consumer_lane_at_dispatch {
+        return FirstChunkDeadlineAction::WaitForOverall;
+    }
+    FirstChunkDeadlineAction::SurfaceTimeout
+}
+
 /// Streaming driver: publish a generate work item, wait
 /// for a terminal aggregated :class:`StreamOutcome` under the three-tier
 /// timeout taxonomy, and propagate cancel signals on client disconnect.
@@ -2369,6 +3471,7 @@ pub(crate) enum StreamingDriverErr {
 pub(crate) async fn run_streaming_generate(
     state: &AppState,
     work_publisher: Arc<dyn WorkDispatcher>,
+    physical_lane: &PhysicalLane,
     // DISPLAY id (the requested model) — drives metric labels + the cancel
     // guard. ``dispatch_model`` below is the id actually published to NATS /
     // the work item (the grammar ``:no-spec`` variant when routing fired);
@@ -2391,9 +3494,6 @@ pub(crate) async fn run_streaming_generate(
     //   / prompt — should be rare; pool round-robin is the right default).
     // - the ring is empty (no eligible workers loaded for this model/pool).
     //
-    // Each fallback path increments
-    // `sie_gateway_routing_fallback_total{reason=...}` so dashboards
-    // can split degradation by cause.
     let resolved_key = match params.generate.as_ref() {
         Some(g) => crate::routing::key::resolve_from_generate(g),
         None => crate::routing::key::RoutingKeyResolved {
@@ -2403,16 +3503,6 @@ pub(crate) async fn run_streaming_generate(
             raw_for_debug: None,
         },
     };
-    // Bounded copies of the (caller-influenced) model + pool for metric
-    // labels; `model` / `pool` themselves stay raw for routing / NATS
-    // subjects. Known models are already canonicalised at the request
-    // boundary; `sanitize_label` is the backstop against unknown /
-    // oversized / junk-charset ids minting unbounded label series.
-    let pool_label = metrics::sanitize_label(pool);
-    let model_label = metrics::sanitize_model_label(model);
-    metrics::ROUTING_KEY_SOURCE
-        .with_label_values(&[&model_label, &pool_label, resolved_key.source.as_label()])
-        .inc();
     // Short-circuit when the key resolution yielded nothing to hash
     // with. There's no point building the ring snapshot or invoking
     // HRW: the pick would always be `None` and the fallback reason
@@ -2421,9 +3511,6 @@ pub(crate) async fn run_streaming_generate(
     // skip the gauge update here — the ring isn't consulted, so
     // recording a size for it would be misleading.
     let (target, pool_fallback_lane_worker_count) = if resolved_key.hash.is_none() {
-        metrics::ROUTING_FALLBACK_TOTAL
-            .with_label_values(&[&model_label, &pool_label, "no_key"])
-            .inc();
         (
             publisher::PublishTarget::Pool {
                 pool: pool.to_string(),
@@ -2453,10 +3540,6 @@ pub(crate) async fn run_streaming_generate(
             bundle_config_hash,
             admitted_worker_names.as_ref(),
         );
-        let ring_len = ring.len();
-        metrics::ROUTING_HRW_RING_SIZE
-            .with_label_values(&[&model_label, &pool_label])
-            .set(ring_len as f64);
         let picked = crate::routing::pick_worker(&ring, &resolved_key);
         match picked {
             Some(worker_id) => {
@@ -2479,31 +3562,20 @@ pub(crate) async fn run_streaming_generate(
                     fallback_lane_worker_count,
                 )
             }
-            None => {
-                // We had a key but the ring is empty. The registry-side
-                // dispatch filter excludes both saturated and unhealthy
-                // workers, plus "no worker has this model loaded";
-                // disambiguating between the three needs cross-referencing
-                // `sie_gateway_workers_total` and the saturation gauge,
-                // so we bucket here as `unhealthy_skipped`.
-                metrics::ROUTING_FALLBACK_TOTAL
-                    .with_label_values(&[&model_label, &pool_label, "unhealthy_skipped"])
-                    .inc();
-                (
-                    publisher::PublishTarget::Pool {
-                        pool: pool.to_string(),
-                        machine_profile: gpu.to_string(),
-                        bundle: bundle.to_string(),
-                        model: dispatch_model.to_string(),
-                    },
-                    fallback_lane_worker_count,
-                )
-            }
+            None => (
+                publisher::PublishTarget::Pool {
+                    pool: pool.to_string(),
+                    machine_profile: gpu.to_string(),
+                    bundle: bundle.to_string(),
+                    model: dispatch_model.to_string(),
+                },
+                fallback_lane_worker_count,
+            ),
         }
     };
     // Capture this before the move into `publish_generate_streaming`.
     let was_direct_dispatched = matches!(target, publisher::PublishTarget::Worker { .. });
-    let (request_id, rx, activity) = match work_publisher
+    let (request_id, rx, activity, durability) = match work_publisher
         .publish_generate_streaming(
             target,
             model,
@@ -2519,11 +3591,15 @@ pub(crate) async fn run_streaming_generate(
             error!(error = %e, "failed to publish generate work");
             let lower = e.to_lowercase();
             let retry_after = if lower.contains("no consumers") {
-                metrics::record_rejected_request_for_pool(pool, gpu, bundle, "no_consumers");
+                telemetry::record_rejected_request(
+                    state.demand_tracker.as_ref(),
+                    physical_lane,
+                    "no_consumers",
+                );
                 Some(PROVISIONING_RETRY_AFTER)
             } else {
                 // backpressure (records demand for KEDA) / generic failure. #1568
-                record_publish_failure(state, pool, gpu, bundle, &lower)
+                record_publish_failure(state, physical_lane, &lower)
             };
             return Err(StreamingDriverErr::PublishFailed {
                 message: e,
@@ -2532,16 +3608,19 @@ pub(crate) async fn run_streaming_generate(
         }
     };
     let publish_elapsed = publish_start.elapsed();
+    let mut durability_completion = monitor_dispatch_durability(
+        Arc::clone(&state.demand_tracker),
+        physical_lane.clone(),
+        durability,
+        Arc::clone(&work_publisher),
+        request_id.clone(),
+        PendingDispatchKind::Stream,
+    );
 
     // Install the cancel-on-drop guard so an axum task abort (HTTP
     // client disconnect) fires a cancel signal to the worker. The
     // guard is defused on every normal completion path below.
-    let cancel_guard = StreamCancelGuard::new(
-        Arc::clone(&work_publisher),
-        request_id.clone(),
-        model.to_string(),
-        pool.to_string(),
-    );
+    let cancel_guard = StreamCancelGuard::new(Arc::clone(&work_publisher), request_id.clone());
 
     // §4.4.3 three-tier timeout taxonomy. Defaults:
     //   first_chunk : 30s   (cold-start, grammar compile, queue depth)
@@ -2581,6 +3660,7 @@ pub(crate) async fn run_streaming_generate(
     // `republished` field on `StreamCollector`) so the two paths
     // cannot double-publish.
     let mut republished_for_first_chunk = false;
+    let supports_first_chunk_pool_republish = work_publisher.supports_first_chunk_pool_republish();
     // Capture the exact pool-fallback lane size at dispatch time so
     // the H9 single-worker suppression below is scoped to
     // `(pool,machine_profile,bundle)` and still counts healthy cold
@@ -2600,10 +3680,21 @@ pub(crate) async fn run_streaming_generate(
     // deadlines are fixed at publish time; the inter-chunk deadline is
     // recomputed every iteration from ``last_chunk_at``.
     tokio::pin!(rx);
+    let mut durability_confirmed = false;
+    let mut buffered_outcome = None;
     let outcome_or_error: Result<crate::queue::streaming::StreamOutcome, &'static str> = loop {
-        let (first_at, last_at) = work_publisher
-            .stream_chunk_timing(&request_id)
-            .unwrap_or((None, None));
+        // A terminal outcome can race ahead of the initial dispatch ACK. Once
+        // that happens the generation itself is complete: first/inter-chunk
+        // progress deadlines are no longer meaningful, and the only valid
+        // wait is durability confirmation bounded by the overall deadline.
+        let terminal_outcome_buffered = buffered_outcome.is_some();
+        let (first_at, last_at) = if terminal_outcome_buffered {
+            (None, None)
+        } else {
+            work_publisher
+                .stream_chunk_timing(&request_id)
+                .unwrap_or((None, None))
+        };
 
         // Cheap early-fire: if a deadline has already passed at this
         // iteration's start, surface it immediately. This catches the
@@ -2613,7 +3704,7 @@ pub(crate) async fn run_streaming_generate(
         if now >= overall_deadline {
             break Err("overall");
         }
-        if first_at.is_none() && now >= first_chunk_deadline {
+        if !terminal_outcome_buffered && first_at.is_none() && now >= first_chunk_deadline {
             // One-shot republish to pool if we direct-dispatched
             // and haven't already republished. Only extend the deadline
             // when a republish actually happened — `Ok(false)` means the
@@ -2635,10 +3726,13 @@ pub(crate) async fn run_streaming_generate(
             // the original attempt gets the legitimate end-to-end
             // budget; if the worker really is dead the
             // overall_timeout path will surface that.
-            if was_direct_dispatched
-                && !republished_for_first_chunk
-                && !single_consumer_lane_at_dispatch
-            {
+            let deadline_action = first_chunk_deadline_action(
+                supports_first_chunk_pool_republish,
+                was_direct_dispatched,
+                republished_for_first_chunk,
+                single_consumer_lane_at_dispatch,
+            );
+            if deadline_action == FirstChunkDeadlineAction::RepublishToPool {
                 republished_for_first_chunk = true;
                 // At-least-once-execution hazard: the original
                 // direct-dispatched worker may simply be SLOW (cold
@@ -2671,6 +3765,12 @@ pub(crate) async fn run_streaming_generate(
                         break Err("first_chunk");
                     }
                     Err(e) => {
+                        telemetry::record_rejected_request(
+                            state.demand_tracker.as_ref(),
+                            physical_lane,
+                            "publish_ack_failed",
+                        );
+                        state.demand_tracker.record(physical_lane);
                         tracing::warn!(
                             request_id = %request_id,
                             error = %e,
@@ -2680,72 +3780,106 @@ pub(crate) async fn run_streaming_generate(
                     }
                 }
             }
-            if single_consumer_lane_at_dispatch
-                && was_direct_dispatched
-                && !republished_for_first_chunk
-            {
-                // Single-worker fallback skip: don't surface
-                // first_chunk_timeout to the client — the only worker
-                // is the one we're already waiting on, and the
-                // overall_timeout path will catch a genuinely dead
-                // worker. Mark republished so this branch doesn't
-                // re-trigger on subsequent ticks, and push the
-                // first_chunk_deadline to the overall_deadline so
-                // tokio's select arm at line ~1824 stops firing.
+            if deadline_action == FirstChunkDeadlineAction::WaitForOverall {
+                // A single-worker NATS lane has no alternate worker, and a
+                // dispatcher may declare that it has no safe retained
+                // payload / pool fallback at all. In either case, keep the
+                // original attempt alive for its governed overall budget.
+                // No cancel is sent at the first-chunk boundary.
                 republished_for_first_chunk = true;
                 first_chunk_deadline = overall_deadline;
                 tracing::debug!(
-                    request_id = %request_id,
-                    pool = %pool,
-                    machine_profile = %gpu,
-                    bundle = %bundle,
-                    "first_chunk_timeout - single-worker lane, suppressing republish; continuing on overall_timeout"
+                        request_id = %request_id,
+                        pool = %pool,
+                        machine_profile = %gpu,
+                        bundle = %bundle,
+                        supports_pool_republish = supports_first_chunk_pool_republish,
+                        "first_chunk_timeout - pool republish unavailable; continuing on overall_timeout"
                 );
                 continue;
             }
             break Err("first_chunk");
         }
-        if let Some(la) = last_at {
-            if la.elapsed() >= inter_chunk_timeout {
-                break Err("inter_chunk");
+        if !terminal_outcome_buffered {
+            if let Some(la) = last_at {
+                if la.elapsed() >= inter_chunk_timeout {
+                    break Err("inter_chunk");
+                }
             }
         }
 
-        let inter_chunk_deadline = last_at.map(|la| {
-            let elapsed = la.elapsed();
-            if elapsed >= inter_chunk_timeout {
-                now
-            } else {
-                now + (inter_chunk_timeout - elapsed)
-            }
-        });
+        let inter_chunk_deadline = if terminal_outcome_buffered {
+            None
+        } else {
+            last_at.map(|la| {
+                let elapsed = la.elapsed();
+                if elapsed >= inter_chunk_timeout {
+                    now
+                } else {
+                    now + (inter_chunk_timeout - elapsed)
+                }
+            })
+        };
 
-        let result = tokio::select! {
+        tokio::select! {
             biased;
-            res = &mut rx => Some(res),
+            completion = &mut durability_completion, if !durability_confirmed => {
+                match completion {
+                    Ok(Ok(())) => {
+                        durability_confirmed = true;
+                        if let Some(outcome) = buffered_outcome.take() {
+                            break Ok(outcome);
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        cancel_guard.defuse();
+                        telemetry::record_queue_result_wait(
+                            "generate",
+                            telemetry::QueueResultOutcome::DurabilityError,
+                            wait_start.elapsed(),
+                        );
+                        return Err(StreamingDriverErr::DurabilityFailed { message: error });
+                    }
+                    Err(_) => {
+                        cancel_guard.defuse();
+                        telemetry::record_queue_result_wait(
+                            "generate",
+                            telemetry::QueueResultOutcome::DurabilityError,
+                            wait_start.elapsed(),
+                        );
+                        return Err(StreamingDriverErr::DurabilityFailed {
+                            message: "dispatch durability monitor stopped before completion"
+                                .to_string(),
+                        });
+                    }
+                }
+            }
+            res = &mut rx, if buffered_outcome.is_none() => {
+                match res {
+                    Ok(outcome) if durability_confirmed => break Ok(outcome),
+                    Ok(outcome) => {
+                        buffered_outcome = Some(outcome);
+                    }
+                    Err(_) => break Err("result_channel_closed"),
+                }
+            },
             _ = tokio::time::sleep_until(overall_deadline) => {
                 break Err("overall");
             }
-            _ = tokio::time::sleep_until(first_chunk_deadline), if first_at.is_none() => {
+            _ = tokio::time::sleep_until(first_chunk_deadline),
+                if !terminal_outcome_buffered && first_at.is_none() => {
                 // Deferred to next loop iteration where the
                 // republish-once-on-first-chunk-timeout branch above
                 // owns the decision. Breaking here would skip the
                 // republish; falling through with `None` re-enters the
                 // loop, the early-fire block runs, and the republish
                 // decision happens with the freshest state.
-                None
             }
             _ = tokio::time::sleep_until(inter_chunk_deadline.unwrap_or(overall_deadline)),
-                if first_at.is_some() => {
+                if !terminal_outcome_buffered && first_at.is_some() => {
                 break Err("inter_chunk");
             }
-            _ = activity.notified() => None,
-        };
-        if let Some(res) = result {
-            break match res {
-                Ok(outcome) => Ok(outcome),
-                Err(_) => Err("result_channel_closed"),
-            };
+            _ = activity.notified(), if !terminal_outcome_buffered => {},
         }
     };
 
@@ -2756,29 +3890,23 @@ pub(crate) async fn run_streaming_generate(
         }
         Err("result_channel_closed") => {
             cancel_guard.defuse();
-            metrics::record_rejected_request_for_pool(pool, gpu, bundle, "result_channel_closed");
+            telemetry::record_queue_result_wait(
+                "generate",
+                telemetry::QueueResultOutcome::ChannelClosed,
+                wait_start.elapsed(),
+            );
             work_publisher.drop_pending_stream(&request_id);
             return Err(StreamingDriverErr::ResultChannelClosed);
         }
         Err(kind) => {
             // One of the three generation timeouts fired. This is not a
             // client-disconnect cancellation, so defuse the Drop guard and
-            // send the worker cancel explicitly. Timeout telemetry is tracked
-            // by GENERATION_TIMEOUTS only; GENERATION_CANCELLED remains
-            // reserved for client disconnects.
+            // send the worker cancel explicitly.
             cancel_guard.defuse();
-            metrics::GENERATION_TIMEOUTS
-                .with_label_values(&[&model_label, &metrics::sanitize_label(pool), kind])
-                .inc();
-            metrics::record_rejected_request_for_pool(
-                pool,
-                gpu,
-                bundle,
-                match kind {
-                    "first_chunk" => "generation_first_chunk_timeout",
-                    "inter_chunk" => "generation_inter_chunk_timeout",
-                    _ => "generation_overall_timeout",
-                },
+            telemetry::record_queue_result_wait(
+                "generate",
+                telemetry::QueueResultOutcome::Timeout,
+                wait_start.elapsed(),
             );
             work_publisher.publish_cancel(&request_id).await;
             work_publisher.drop_pending_stream(&request_id);
@@ -2786,16 +3914,19 @@ pub(crate) async fn run_streaming_generate(
         }
     };
     let wait_elapsed = wait_start.elapsed();
+    telemetry::record_queue_result_wait(
+        "generate",
+        if outcome.error.is_some() {
+            telemetry::QueueResultOutcome::WorkerError
+        } else {
+            telemetry::QueueResultOutcome::Success
+        },
+        wait_elapsed,
+    );
 
     // If the worker emitted an error terminal, surface it as a typed
     // failure. The caller chooses the HTTP status / wire envelope.
     if let Some(err) = outcome.error.as_ref() {
-        metrics::record_rejected_request_for_pool(
-            pool,
-            gpu,
-            bundle,
-            generation_worker_error_metric_reason(&err.code),
-        );
         return Err(StreamingDriverErr::WorkerError {
             code: err.code.clone(),
             message: err.message.clone(),
@@ -2821,12 +3952,14 @@ pub(crate) fn worker_error_http_status(code: &str) -> StatusCode {
     match code {
         "invalid_request" | "unsupported_field" => StatusCode::BAD_REQUEST,
         "context_exceeded" => StatusCode::BAD_REQUEST,
+        PAYLOAD_TOO_LARGE_ERROR_CODE => StatusCode::PAYLOAD_TOO_LARGE,
         RESOURCE_EXHAUSTED_ERROR_CODE | MODEL_LOADING_ERROR_CODE | LORA_LOADING_ERROR_CODE => {
             StatusCode::SERVICE_UNAVAILABLE
         }
         "transport_failure" => StatusCode::SERVICE_UNAVAILABLE,
         "cancelled" => StatusCode::REQUEST_TIMEOUT,
         "rate_limit_exceeded" => StatusCode::TOO_MANY_REQUESTS,
+        COLD_START_RATE_LIMITED_ERROR_CODE => StatusCode::TOO_MANY_REQUESTS,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -2835,9 +3968,12 @@ pub(crate) fn worker_error_http_status(code: &str) -> StatusCode {
 /// code. Pairs with :func:`worker_error_http_status`.
 pub(crate) fn worker_error_openai_type(code: &str) -> &'static str {
     match code {
-        "invalid_request" | "unsupported_field" => oai_type::INVALID_REQUEST,
+        "invalid_request" | "unsupported_field" | PAYLOAD_TOO_LARGE_ERROR_CODE => {
+            oai_type::INVALID_REQUEST
+        }
         "context_exceeded" => oai_type::CONTEXT_LENGTH_EXCEEDED,
         "rate_limit_exceeded" => oai_type::RATE_LIMIT,
+        COLD_START_RATE_LIMITED_ERROR_CODE => oai_type::RATE_LIMIT,
         _ => oai_type::SERVER_ERROR,
     }
 }
@@ -2915,6 +4051,16 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             );
             resp
         }
+        StreamingDriverErr::DurabilityFailed { message } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json_openai_error(
+                format!("Queue durability confirmation failed: {message}"),
+                oai_type::SERVER_ERROR,
+                None,
+                oai_code::TRANSPORT_FAILURE,
+            )),
+        )
+            .into_response(),
         StreamingDriverErr::ResultChannelClosed => (
             StatusCode::GATEWAY_TIMEOUT,
             Json(json_openai_error(
@@ -2965,12 +4111,14 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
                 "invalid_request" => oai_code::INVALID_REQUEST,
                 "unsupported_field" => oai_code::UNSUPPORTED_FIELD,
                 "context_exceeded" => oai_code::CONTEXT_EXCEEDED,
+                PAYLOAD_TOO_LARGE_ERROR_CODE => oai_code::INVALID_REQUEST,
                 RESOURCE_EXHAUSTED_ERROR_CODE => RESOURCE_EXHAUSTED_ERROR_CODE,
                 MODEL_LOADING_ERROR_CODE => MODEL_LOADING_ERROR_CODE,
                 LORA_LOADING_ERROR_CODE => LORA_LOADING_ERROR_CODE,
                 "transport_failure" => oai_code::TRANSPORT_FAILURE,
                 "cancelled" => oai_code::CANCELLED,
                 "rate_limit_exceeded" => oai_code::RATE_LIMIT_EXCEEDED,
+                COLD_START_RATE_LIMITED_ERROR_CODE => COLD_START_RATE_LIMITED_ERROR_CODE,
                 _ => "inference_error",
             };
             let mut body = json_openai_error(message.clone(), err_type, None, stable_code);
@@ -2990,9 +4138,13 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
                 HeaderValue::from_str(request_id).unwrap_or_else(|_| HeaderValue::from_static("")),
             );
             // 429 responses get a ``Retry-After: 1`` header per the
-            // OpenAI contract so SDKs retry with bounded backoff
-            // instead of hammering the still-saturated pool.
-            if status == StatusCode::TOO_MANY_REQUESTS {
+            // OpenAI contract so SDKs retry with bounded backoff instead of
+            // hammering the still-saturated pool — EXCEPT the cold-start
+            // quota refusal, whose whole point is an HOURLY ceiling: a
+            // 1-second retry hint would re-create the auto-retry hot loop
+            // the rail exists to prevent (review finding).
+            if status == StatusCode::TOO_MANY_REQUESTS && code != COLD_START_RATE_LIMITED_ERROR_CODE
+            {
                 resp.headers_mut().insert(
                     HeaderName::from_static("retry-after"),
                     HeaderValue::from_static("1"),
@@ -3007,6 +4159,11 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
                 resp.headers_mut().insert(
                     HeaderName::from_static("x-sie-error-code"),
                     HeaderValue::from_static(error_code),
+                );
+            } else if code == PAYLOAD_TOO_LARGE_ERROR_CODE {
+                resp.headers_mut().insert(
+                    HeaderName::from_static("x-sie-error-code"),
+                    HeaderValue::from_static(PAYLOAD_TOO_LARGE_ERROR_CODE),
                 );
             }
             resp
@@ -3067,6 +4224,7 @@ pub(crate) fn build_streaming_publish_failed_for_sse(
 async fn queue_mode_streaming_generate(
     state: &AppState,
     work_publisher: Arc<dyn WorkDispatcher>,
+    physical_lane: &PhysicalLane,
     // DISPLAY id (requested model) — response body, success metrics, audit log.
     model: &str,
     // DISPATCH id (grammar ``:no-spec`` variant when routed) — NATS subject +
@@ -3078,6 +4236,7 @@ async fn queue_mode_streaming_generate(
     pool: &str,
     admission_pool: &str,
     bundle_config_hash: &str,
+    model_revision: Option<&str>,
     params: &publisher::WorkParams,
     use_msgpack_out: bool,
     token_id: &str,
@@ -3087,6 +4246,7 @@ async fn queue_mode_streaming_generate(
     let driver = run_streaming_generate(
         state,
         work_publisher,
+        physical_lane,
         model,
         dispatch_model,
         bundle,
@@ -3109,21 +4269,6 @@ async fn queue_mode_streaming_generate(
         Err(err) => return build_streaming_error_response(&err),
     };
     let elapsed = start.elapsed();
-
-    // Record gateway-observed TTFT/TPOT and token counters
-    // for the success path. Failure paths (timeout / cancel / worker
-    // error) are covered by GENERATION_TIMEOUTS / GENERATION_CANCELLED
-    // earlier in this function. The `grammar` label distinguishes
-    // structured-output traffic from free-form generation so the
-    // dashboard can slice latency by mode.
-    metrics::record_generation_success(
-        model,
-        pool,
-        metrics::grammar_label(params.generate.as_ref().and_then(|p| p.grammar.as_ref())),
-        outcome.ttft_ms,
-        outcome.tpot_ms,
-        outcome.usage.as_ref(),
-    );
 
     let body_bytes = build_generate_success_body_v2(model, &outcome, use_msgpack_out);
 
@@ -3164,6 +4309,13 @@ async fn queue_mode_streaming_generate(
         HeaderName::from_static("x-sie-server-version"),
         HeaderValue::from_static(GATEWAY_VERSION),
     );
+    insert_stream_model_revision_header(
+        response.headers_mut(),
+        model_revision,
+        bundle_config_hash,
+        &outcome,
+    );
+    insert_stream_execution_identity_header(response.headers_mut(), &outcome);
     response.headers_mut().insert(
         HeaderName::from_static("x-sie-request-id"),
         HeaderValue::from_str(&request_id).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -3249,9 +4401,10 @@ struct ChatRequestParams {
     tool_choice: Option<serde_json::Value>,
     /// OpenAI ``parallel_tool_calls`` (default ``true``).
     parallel_tool_calls: Option<bool>,
-    /// OpenAI ``seed``: best-effort sampler determinism. Validated as
-    /// a u64; forwarded to the worker → SGLang ``sampling_params.seed``.
-    seed: Option<u64>,
+    /// OpenAI ``seed``: optional signed 64-bit per-request sampling seed.
+    /// Forwarded unchanged; reproducibility semantics depend on the active
+    /// generation backend and deployment configuration.
+    seed: Option<i64>,
     /// OpenAI ``logit_bias``: ``{token_id: bias_float}`` map. Gateway
     /// validates per-value range ``[-100.0, 100.0]`` and caps map size.
     logit_bias: Option<std::collections::BTreeMap<String, f64>>,
@@ -3274,6 +4427,60 @@ struct ChatRequestParams {
     lora_adapter: Option<String>,
 }
 
+impl ChatRequestParams {
+    /// The EXACT `WorkParams` a validated chat body dispatches with.
+    ///
+    /// Extracted from the handler body (not copied) so the managed
+    /// cost-estimate dry run (#2435) can derive a chat request's dispatch
+    /// params through the same mapping the live route uses. Anything that
+    /// influences the reservation ceiling — the messages, the output cap, the
+    /// `n`/`best_of` fan-out, the tool schemas, the template kwargs — is
+    /// therefore produced ONCE, and an estimate cannot drift from the price the
+    /// same body is admitted at.
+    ///
+    /// Thread the routing hints into both `GenerateParams` (where the HRW
+    /// resolver reads them) and `WorkParams` (where they were already carried
+    /// since the chat/grammar surfaces for the worker's inert hint path). Clone
+    /// is one allocation each and avoids either reader having to fall back on
+    /// the other.
+    fn into_work_params(self) -> publisher::WorkParams {
+        publisher::WorkParams {
+            generate: Some(publisher::GenerateParams {
+                input: publisher::GenerateInput::Messages {
+                    messages: self.messages,
+                },
+                max_new_tokens: self.max_new_tokens,
+                temperature: self.temperature,
+                top_p: self.top_p,
+                stop: self.stop,
+                frequency_penalty: self.frequency_penalty,
+                presence_penalty: self.presence_penalty,
+                top_k: self.top_k,
+                repetition_penalty: self.repetition_penalty,
+                min_tokens: self.min_tokens,
+                chat_template_kwargs: self.chat_template_kwargs,
+                grammar: self.grammar,
+                routing_key: self.routing_key.clone(),
+                prompt_cache_key: self.prompt_cache_key.clone(),
+                tools: self.tools,
+                tool_choice: self.tool_choice,
+                parallel_tool_calls: self.parallel_tool_calls,
+                seed: self.seed,
+                logit_bias: self.logit_bias,
+                logprobs: self.logprobs,
+                top_logprobs: self.top_logprobs,
+                n: self.n,
+                best_of: self.best_of,
+                stream: self.stream,
+                lora_adapter: self.lora_adapter.clone(),
+            }),
+            routing_key: self.routing_key,
+            prompt_cache_key: self.prompt_cache_key,
+            ..Default::default()
+        }
+    }
+}
+
 /// Outcome of :func:`chat_params_from_json`. Errors carry an
 /// already-built OpenAI-envelope response so the caller can return
 /// directly.
@@ -3281,6 +4488,32 @@ struct ChatRequestParams {
 enum ChatParamsResult {
     Ok(ChatRequestParams),
     Err(Response),
+}
+
+/// The `(model, WorkParams)` a `/v1/chat/completions` body dispatches with —
+/// the read-only seam the managed cost-estimate dry run (#2435) prices from.
+///
+/// A composition of the two pieces the live handler itself runs
+/// ([`chat_params_from_json`] then [`ChatRequestParams::into_work_params`]), so
+/// there is no second parser to keep in sync: a body the estimate prices is
+/// validated and normalized by exactly the code that would admit it. Errors are
+/// the handler's own pre-built OpenAI envelopes, so a malformed body estimates
+/// with the same status/`param`/`code` it would be rejected with.
+///
+/// `dead_code`-allowed because the `sie-gateway` BINARY compiles this module
+/// tree independently of the library (see the note in `lib.rs`), and only the
+/// downstream composition crate calls this seam.
+#[allow(clippy::result_large_err, dead_code)]
+pub fn chat_completions_dispatch_inputs(
+    body: &serde_json::Value,
+) -> Result<(String, publisher::WorkParams), Response> {
+    match chat_params_from_json(body) {
+        ChatParamsResult::Ok(params) => {
+            let model = params.model.clone();
+            Ok((model, params.into_work_params()))
+        }
+        ChatParamsResult::Err(response) => Err(response),
+    }
 }
 
 /// Extract an inline OpenAI ``image_url`` value into ``(base64, format)``.
@@ -3361,8 +4594,9 @@ fn decode_image_data_uri(value: &serde_json::Value) -> Result<(String, Option<St
 /// * ``logprobs`` / ``top_logprobs`` — validated and forwarded; the worker
 ///   emits per-token log-probabilities via SGLang ``return_logprob`` and
 ///   the gateway plumbs them onto each chunk / the aggregate body.
-/// * ``seed`` — validated as a u64 and forwarded to the worker → SGLang
-///   ``sampling_params.seed`` (best-effort determinism).
+/// * ``seed`` — validated as a signed 64-bit integer and forwarded unchanged;
+///   reproducibility semantics depend on the active generation backend and
+///   deployment configuration.
 /// * ``logit_bias`` (range/size-validated, forwarded), ``n`` (default
 ///   ``1``; both ``n>1`` non-streaming and streaming paths supported),
 ///   ``stream`` / ``stream_options``.
@@ -4101,28 +5335,11 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
     // (decision 0.2 in plan §0). We just acknowledge its presence by
     // not rejecting it.
     let _ = obj.get("safety_identifier");
-    // ``seed`` — OpenAI best-effort determinism. Validated as a u64
-    // and plumbed through ``ChatRequestParams.seed`` → worker → SGLang
-    // ``sampling_params.seed``. ``null`` and absent are both no-ops.
-    let seed: Option<u64> = match obj.get("seed") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(v) => match v.as_u64() {
-            Some(s) => Some(s),
-            None => {
-                // Allow negative seeds by reinterpreting as u64 (OpenAI's
-                // examples use i64; some clients send -1 etc.).
-                match v.as_i64() {
-                    Some(i) => Some(i as u64),
-                    None => {
-                        return bad(
-                            "'seed' must be an integer",
-                            Some("seed"),
-                            oai_code::INVALID_REQUEST,
-                        );
-                    }
-                }
-            }
-        },
+    // ``seed`` — validate once across every generation route and preserve the
+    // signed value on the worker wire. ``null`` and absent are both no-ops.
+    let seed = match parse_seed_field(obj.get("seed")) {
+        Ok(seed) => seed,
+        Err(resp) => return ChatParamsResult::Err(resp),
     };
     // ``logprobs`` / ``top_logprobs`` — when ``logprobs: true`` the
     // worker forwards SGLang's ``return_logprob`` flag. ``top_logprobs``
@@ -5008,6 +6225,7 @@ fn map_chat_finish_reason(sie: &str) -> &'static str {
 pub(crate) fn resolve_model_and_bundle(
     state: &AppState,
     model_spec: &str,
+    ext: &axum::http::Extensions,
 ) -> Result<(String, String), Response> {
     let (bundle_override, model_name) =
         resolve_model_spec_with_aliases(&state.config.model_aliases, model_spec, |m| {
@@ -5018,6 +6236,53 @@ pub(crate) fn resolve_model_and_bundle(
     } else {
         Some(bundle_override.as_str())
     };
+    // #1841 org-scoped visibility (mirrors resolve_routing for the OpenAI body
+    // routes): a custom model hidden from this caller is treated as absent — the
+    // identical MODEL_NOT_FOUND 404 the block below emits, echoing the CALLER's
+    // string under the same template so neither the id nor the wording can tell
+    // "hidden from you" apart from "does not exist" (#2542). Gates the RESOLVED
+    // id. No-op in OSS (policy None).
+    if state
+        .model_access_policy
+        .as_ref()
+        .is_some_and(|p| !p.visible(&model_name, ext))
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json_openai_error(
+                format!("Model '{model_spec}' not found"),
+                oai_type::MODEL_NOT_FOUND,
+                Some("model"),
+                oai_code::MODEL_NOT_FOUND,
+            )),
+        )
+            .into_response());
+    }
+    // #2542 deployment serving policy on the RESOLVED id (mirrors `resolve_routing`
+    // for the OpenAI body routes): the authoritative refusal for a model this
+    // deployment does not serve. Decided post-alias/`__`/case, so a registry alias
+    // pointing at a refused model cannot slip past an edge gate that only ever saw
+    // the caller's raw string. After `visible` (the no-oracle 404 wins), before the
+    // sealed branch. No-op in OSS (policy None).
+    if let Some(refusal) = state
+        .model_access_policy
+        .as_ref()
+        .and_then(|p| p.serving_refusal(&model_name, ext))
+    {
+        return Err(refusal);
+    }
+    // #1841 sealed dispatch (OpenAI body routes): an org-registered custom model
+    // has no catalog bundle, so short-circuit with the synthetic sealed bundle
+    // rather than dead-ending at MODEL_NOT_FOUND below. The engine/pool override
+    // happens in `resolve_generation_route`, which re-consults the same policy on
+    // the same id. Ownership is already proven by `visible()` above.
+    if let Some(route) = state
+        .model_access_policy
+        .as_ref()
+        .and_then(|p| p.sealed_route(&model_name, ext))
+    {
+        return Ok((model_name, route.bundle));
+    }
     let bundle = if state.model_registry.model_exists(&model_name) {
         match state
             .model_registry
@@ -5025,12 +6290,6 @@ pub(crate) fn resolve_model_and_bundle(
         {
             Ok(b) => b,
             Err(ResolveError::ModelNotFound(e)) => {
-                metrics::record_rejected_request_for_pool(
-                    "unknown",
-                    "",
-                    "unknown",
-                    "model_not_found",
-                );
                 return Err((
                     StatusCode::NOT_FOUND,
                     Json(json_openai_error(
@@ -5043,12 +6302,6 @@ pub(crate) fn resolve_model_and_bundle(
                     .into_response());
             }
             Err(ResolveError::BundleConflict(e)) => {
-                metrics::record_rejected_request_for_pool(
-                    "unknown",
-                    "",
-                    "unknown",
-                    "bundle_routing_conflict",
-                );
                 return Err((
                     StatusCode::CONFLICT,
                     Json(json_openai_error(
@@ -5062,11 +6315,12 @@ pub(crate) fn resolve_model_and_bundle(
             }
         }
     } else if state.model_registry.has_any_models() {
-        metrics::record_rejected_request_for_pool("unknown", "", "unknown", "model_not_found");
         return Err((
             StatusCode::NOT_FOUND,
             Json(json_openai_error(
-                format!("Model '{model_name}' not found"),
+                // The caller's string, never the resolved one — see the
+                // visibility gate above (#2542).
+                format!("Model '{model_spec}' not found"),
                 oai_type::MODEL_NOT_FOUND,
                 Some("model"),
                 oai_code::MODEL_NOT_FOUND,
@@ -5085,12 +6339,15 @@ pub(crate) fn resolve_model_and_bundle(
 /// machine profile, effective pool, bundle config hash, the bound work
 /// publisher, plus audit fields. Produced by [`resolve_generation_route`].
 struct ResolvedRoute {
+    physical_lane: PhysicalLane,
+    bundle: String,
     gpu: String,
     engine: String,
     admission_pool: String,
     effective_pool: String,
     effective_machine_profile: String,
     bundle_config_hash: String,
+    model_revision: Option<String>,
     work_publisher: Arc<dyn WorkDispatcher>,
     token_id: String,
     content_length: i64,
@@ -5100,66 +6357,128 @@ struct ResolvedRoute {
 /// pool (or surface an OpenAI-shaped 503 provisioning response), and bind the
 /// work publisher. Shared by the chat + completions handlers; the OpenAI-shaped
 /// errors are identical across both.
-#[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
 async fn resolve_generation_route(
     state: &AppState,
     hdr: &HeaderMap,
     bundle: &str,
-    model_name: &str,
+    customer_model: &str,
+    dispatch_model: &str,
+    request_intent: GenerationRequestIntent,
+    explicit_bundle_override: &str,
+    ext: &axum::http::Extensions,
+    metric_labels_slot: Option<&telemetry::MetricLabelsSlot>,
 ) -> Result<ResolvedRoute, Response> {
-    // Machine-profile + pool resolution, shared with the primitive path via
-    // `resolve_profile_and_pool`. Errors are rendered here in the OpenAI
-    // envelope (`json_openai_error`), preserving the compat surface.
-    let ProfilePoolRoute {
-        gpu,
-        pool_name,
-        gpu_configured,
-    } = match resolve_profile_and_pool(state, hdr, model_name).await {
-        Ok(route) => route,
-        Err(ProfilePoolError::InvalidPool { gpu }) => {
-            metrics::record_rejected_request_for_pool("unknown", &gpu, bundle, "invalid_pool");
+    // #1841 sealed dispatch: an org-registered custom model routes to its own
+    // sealed sandbox, not a catalog bundle. Force the synthetic (gpu, pool) =
+    // ("sealed", "sealed") so `resolve_effective_pool` below matches the registered
+    // sealed worker lane (header-based profile/pool resolution would pick a catalog
+    // pool), and pin `engine = "sealed"` (the dispatcher's sole routing
+    // discriminator) instead of the bundle-derived engine — a bundle-less "sealed"
+    // would otherwise fall back to DEFAULT_ENGINE and mis-route to the shared
+    // catalog lane, a silent isolation failure. Ownership is already proven by the
+    // visibility gate in `resolve_model_and_bundle`; re-consulting the same policy
+    // on the same id is a pure, cheap id-shape check.
+    let sealed = state
+        .model_access_policy
+        .as_ref()
+        .and_then(|p| p.sealed_route(customer_model, ext));
+    let governed = if sealed.is_none() {
+        governed_generation_route(state, customer_model, dispatch_model, request_intent)?
+    } else {
+        None
+    };
+    if let Some(route) = governed.as_ref() {
+        if !explicit_bundle_override.is_empty() && explicit_bundle_override != route.bundle {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json_openai_error(
-                    "Invalid pool name: only [A-Za-z0-9_-] are allowed (max 128 chars)".to_string(),
+                    format!(
+                        "Bundle override '{}' conflicts with the deployment route for this model",
+                        explicit_bundle_override
+                    ),
                     oai_type::INVALID_REQUEST,
-                    Some("X-SIE-Pool"),
+                    Some("model"),
                     oai_code::INVALID_REQUEST,
                 )),
             )
                 .into_response());
         }
-        Err(ProfilePoolError::PoolMismatch {
-            gpu,
-            pool_name,
-            message,
-        }) => {
-            metrics::record_rejected_request_for_pool(&pool_name, &gpu, bundle, "pool_mismatch");
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json_openai_error(
-                    message,
-                    oai_type::INVALID_REQUEST,
-                    Some("X-SIE-Pool"),
-                    oai_code::INVALID_REQUEST,
-                )),
-            )
-                .into_response());
+        match state
+            .model_registry
+            .resolve_bundle(&route.model, Some(&route.bundle))
+        {
+            Ok(resolved) if resolved == route.bundle => {}
+            _ => {
+                return Err(governed_generation_route_failure(
+                    customer_model,
+                    request_intent,
+                    "compiled bundle is incompatible with the physical model",
+                ));
+            }
+        }
+    }
+    let bundle = governed
+        .as_ref()
+        .map_or_else(|| bundle.to_string(), |route| route.bundle.clone());
+    // Machine-profile + pool resolution, shared with the primitive path via
+    // `resolve_profile_and_pool`. Errors are rendered here in the OpenAI
+    // envelope (`json_openai_error`), preserving the compat surface.
+    // #1841: a sealed custom-model route carries its own machine profile + pool,
+    // so it short-circuits catalog profile/pool resolution entirely.
+    let (gpu, pool_name, gpu_configured) = if let Some(route) = &sealed {
+        (route.machine_profile.clone(), route.pool.clone(), true)
+    } else if let Some(route) = governed.as_ref() {
+        let route = governed_profile_and_pool(state, hdr, route)?;
+        (route.gpu, route.pool_name, route.gpu_configured)
+    } else {
+        match resolve_profile_and_pool(state, hdr, customer_model).await {
+            Ok(ProfilePoolRoute {
+                gpu,
+                pool_name,
+                gpu_configured,
+            }) => (gpu, pool_name, gpu_configured),
+            Err(ProfilePoolError::InvalidHeader { header }) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        format!("{header} header must be valid UTF-8"),
+                        oai_type::INVALID_REQUEST,
+                        Some(header),
+                        oai_code::INVALID_REQUEST,
+                    )),
+                )
+                    .into_response());
+            }
+            Err(ProfilePoolError::InvalidPool) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        "Invalid pool name: only [A-Za-z0-9_-] are allowed (max 128 chars)"
+                            .to_string(),
+                        oai_type::INVALID_REQUEST,
+                        Some("X-SIE-Pool"),
+                        oai_code::INVALID_REQUEST,
+                    )),
+                )
+                    .into_response());
+            }
+            Err(ProfilePoolError::PoolMismatch { message }) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        message,
+                        oai_type::INVALID_REQUEST,
+                        Some("X-SIE-Pool"),
+                        oai_code::INVALID_REQUEST,
+                    )),
+                )
+                    .into_response());
+            }
         }
     };
 
     if !gpu_configured {
-        let metric_pool = if pool_name.is_empty() {
-            DEFAULT_POOL_NAME
-        } else {
-            pool_name.as_str()
-        };
-        metrics::record_rejected_request_for_pool(
-            metric_pool,
-            "invalid",
-            bundle,
-            "gpu_not_configured",
-        );
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json_openai_error(
@@ -5173,12 +6492,6 @@ async fn resolve_generation_route(
     }
 
     let Some(work_publisher_arc) = state.work_publisher.clone() else {
-        let metric_pool = if pool_name.is_empty() {
-            DEFAULT_POOL_NAME
-        } else {
-            pool_name.as_str()
-        };
-        metrics::record_rejected_request_for_pool(metric_pool, &gpu, bundle, "queue_unavailable");
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json_openai_error(
@@ -5194,24 +6507,29 @@ async fn resolve_generation_route(
     let Some(hash_pool) = queue_pool_for_request(Some(&state.pool_manager), &pool_name).await
     else {
         let requested_pool = normalize_pool_name(&pool_name);
-        metrics::record_rejected_request_for_pool(&requested_pool, &gpu, bundle, "pool_not_found");
         return Err(build_pool_not_found_response_for_surface(
             &requested_pool,
             ProvisioningSurface::OpenAiCompat,
         ));
     };
-    let bundle_config_hash = state
-        .model_registry
-        .compute_bundle_config_hash_for_pool(bundle, &hash_pool);
-    let engine = state
-        .model_registry
-        .get_bundle_info(bundle)
-        .map(|info| info.engine)
-        .unwrap_or_else(|| crate::types::bundle::DEFAULT_ENGINE.to_string());
+    let (bundle_config_hash, model_revision) =
+        state
+            .model_registry
+            .bundle_execution_evidence(&bundle, &hash_pool, dispatch_model);
+    // #1841: pin the sealed engine marker (see the top-of-fn note); a bundle-less
+    // "sealed" bundle has no BundleInfo, so the else-branch would yield DEFAULT_ENGINE.
+    let engine = match &sealed {
+        Some(route) => route.engine.clone(),
+        None => state
+            .model_registry
+            .get_bundle_info(&bundle)
+            .map(|info| info.engine)
+            .unwrap_or_else(|| crate::types::bundle::DEFAULT_ENGINE.to_string()),
+    };
     let lookup = resolve_effective_pool(
         &state.registry,
         Some(&state.pool_manager),
-        bundle,
+        &bundle,
         &gpu,
         &pool_name,
         &bundle_config_hash,
@@ -5221,33 +6539,66 @@ async fn resolve_generation_route(
     let admission_pool = lookup.admission_pool.clone();
     let pending_demand_profiles = lookup.pending_demand_profiles.clone();
     for profile in &pending_demand_profiles {
-        state.demand_tracker.record(&demand_pool, profile, bundle);
+        if let Some(lane) = state
+            .demand_tracker
+            .resolve_lane(&demand_pool, profile, &bundle)
+        {
+            state.demand_tracker.record(&lane);
+        }
     }
     let effective_route = match lookup.resolution {
         PoolResolution::Route(route) => route,
         PoolResolution::PoolNotFound(pool) => {
-            metrics::record_rejected_request_for_pool(&pool, &gpu, bundle, "pool_not_found");
             return Err(build_pool_not_found_response_for_surface(
                 &pool,
                 ProvisioningSurface::OpenAiCompat,
             ));
         }
         PoolResolution::Provisioning => {
-            if pending_demand_profiles.is_empty() {
-                state.demand_tracker.record(&demand_pool, &gpu, bundle);
-            }
-            return Err(build_openai_provisioning_response(&gpu, bundle));
+            return Err(build_openai_provisioning_response(&gpu, &bundle));
         }
     };
     let effective_pool = effective_route.pool_name;
     let effective_machine_profile = effective_route.machine_profile;
+    let Some(physical_lane) =
+        state
+            .demand_tracker
+            .resolve_lane(&demand_pool, &effective_machine_profile, &bundle)
+    else {
+        error!(
+            pool = %demand_pool,
+            machine_profile = %effective_machine_profile,
+        bundle = %bundle,
+            "resolved generation route is absent from configured physical KEDA lane catalog"
+        );
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json_openai_error(
+                "Resolved worker lane is not configured for autoscaling".to_string(),
+                oai_type::SERVER_ERROR,
+                None,
+                oai_code::TRANSPORT_FAILURE,
+            )),
+        )
+            .into_response());
+    };
+
+    // The HTTP metrics middleware installed this shared slot before the handler
+    // consumed the request body. Fill it after canonical routing so all three
+    // OpenAI generation surfaces report the profile actually used. Rejections
+    // before a route exists intentionally remain `unknown`.
+    if let Some(slot) = metric_labels_slot {
+        slot.set(telemetry::MetricLabels {
+            machine_profile: effective_machine_profile.clone(),
+        });
+    }
 
     if let Some(resp) = capped_lane_admission_response(
         state,
         &admission_pool,
         &demand_pool,
         &effective_machine_profile,
-        bundle,
+        &bundle,
         ProvisioningSurface::OpenAiCompat,
     )
     .await
@@ -5265,12 +6616,15 @@ async fn resolve_generation_route(
         .unwrap_or(-1);
 
     Ok(ResolvedRoute {
+        physical_lane,
+        bundle,
         gpu,
         engine,
         admission_pool,
         effective_pool,
         effective_machine_profile,
         bundle_config_hash,
+        model_revision,
         work_publisher: work_publisher_arc,
         token_id,
         content_length,
@@ -5305,7 +6659,13 @@ async fn resolve_generation_route(
 /// routed variant. This is safe because grammar capabilities are model/task-level
 /// (identical across a model's profiles), so the gate verdict is the same on the
 /// base and the routed variant.
-fn route_grammar_to_profile(
+/// `pub` so the managed cost-estimate dry run (#2435) applies the SAME rewrite
+/// before rating. `profile` is a rate-key dimension and this rewrite decides it
+/// for every grammar-constrained generation, so an estimate that skipped it
+/// would quote `profile="default"` for a request admission holds under
+/// `profile="{grammar_profile}"` — a different price, or a confident 200 for a
+/// request the live path finds unpriced.
+pub fn route_grammar_to_profile(
     registry: &crate::state::model_registry::ModelRegistry,
     model: &mut String,
 ) {
@@ -5354,11 +6714,15 @@ fn route_grammar_to_profile(
 )]
 pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Response {
     check_sdk_version(req.headers());
+    let metric_labels_slot = req
+        .extensions()
+        .get::<telemetry::MetricLabelsSlot>()
+        .cloned();
 
     // M5: extract the inbound W3C trace context and open a
-    // gateway-side span as its child. The span stays active for the
-    // rest of the handler so `publish_generate_streaming` picks up
-    // *this* span's context when it calls
+    // gateway-side span as its child. Poll-scoped instrumentation keeps
+    // the span current while the handler runs so `publish_generate_streaming`
+    // picks up *this* span's context when it calls
     // `inject_current_context` to populate the work envelope.
     //
     // When no `traceparent` header is present the extracted context
@@ -5367,7 +6731,7 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     // continue. We attach via `tracing-opentelemetry`'s set_parent
     // so the structured logs emitted on the existing `tracing::*`
     // call-sites become part of the same OTel span tree.
-    let parent_cx = crate::observability::propagation::extract_context_from_headers(req.headers());
+    let parent_cx = managed_request_parent(&req);
     let chat_span = tracing::info_span!(
         "gateway.proxy_chat",
         http.route = "/v1/chat/completions",
@@ -5379,23 +6743,25 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
         use tracing_opentelemetry::OpenTelemetrySpanExt;
         let _ = chat_span.set_parent(parent_cx);
     }
-    let _chat_span_guard = chat_span.enter();
+    // Poll-scoped instrumentation is thread-hop-safe. A guard returned by
+    // `Span::enter()` must not cross the handler's awaits because Tokio may
+    // resume the future on a different worker thread.
+    async move { proxy_chat_inner(state, req, metric_labels_slot).await }
+        .instrument(chat_span)
+        .await
+}
 
-    // `/v1/chat/completions` is text generation; mirror the `generate`
-    // hardening rather than the legacy 256 MiB cap, which let concurrent
-    // oversized chat bodies OOM the gateway. 16 MiB leaves comfortable
-    // headroom for multimodal content parts (base64 images) while closing
-    // the trivial OOM-under-concurrency vector.
-    const MAX_CHAT_BODY: usize = 16 * 1024 * 1024;
+async fn proxy_chat_inner(
+    state: Arc<AppState>,
+    req: Request,
+    metric_labels_slot: Option<telemetry::MetricLabelsSlot>,
+) -> Response {
+    let max_chat_body = compat_request_body_limit("/v1/chat/completions");
     let hdr = req.headers().clone();
-    let body_bytes = match to_bytes(req.into_body(), MAX_CHAT_BODY).await {
+    let (parts, body) = req.into_parts(); // keep extensions (caller identity) for the #1841 gate
+    let body_bytes = match to_bytes(body, max_chat_body).await {
         Ok(b) => b,
         Err(e) => {
-            // GPU/bundle aren't resolved yet — use ``unknown`` labels
-            // matching the ``model_required`` precedent in
-            // ``proxy_request``. The rejection-reasons dashboard groups
-            // these under the explicit reason string.
-            metrics::record_rejected_request_for_pool("unknown", "", "unknown", "body_too_large");
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(json_openai_error(
@@ -5412,12 +6778,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     let body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
-            metrics::record_rejected_request_for_pool(
-                "unknown",
-                "",
-                "unknown",
-                "chat_invalid_body",
-            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json_openai_error(
@@ -5434,16 +6794,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     let params = match chat_params_from_json(&body_json) {
         ChatParamsResult::Ok(p) => p,
         ChatParamsResult::Err(resp) => {
-            // ``chat_params_from_json`` collapses the granular failure
-            // modes (unsupported field, invalid role, missing field) to
-            // one bucket so the dashboards stay low-cardinality; the
-            // response body still carries the precise ``param``/``code``.
-            metrics::record_rejected_request_for_pool(
-                "unknown",
-                "",
-                "unknown",
-                "chat_invalid_params",
-            );
             return resp;
         }
     };
@@ -5451,10 +6801,12 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     // -- model registry resolution (mirrors proxy_request, but the
     //    model comes from the body rather than the path). Shared with
     //    /v1/completions via resolve_model_and_bundle.
-    let (model_name, bundle) = match resolve_model_and_bundle(&state, &params.model) {
-        Ok(mb) => mb,
-        Err(resp) => return resp,
-    };
+    let (model_name, bundle) =
+        match resolve_model_and_bundle(&state, &params.model, &parts.extensions) {
+            Ok(mb) => mb,
+            Err(resp) => return resp,
+        };
+    let (explicit_bundle_override, _) = parse_model_spec(&params.model);
 
     // Grammar routing (follow-up: chat-path gate ordering). Resolve the model's
     // declared ``grammar_profile`` variant and compute the DISPATCH id BEFORE the
@@ -5496,12 +6848,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
                 // rejection arms into the same ``unknown_lora_adapter``
                 // response that's been the chat-gate contract since A.
                 LoraValidation::UnknownProfile | LoraValidation::UnknownAdapter => {
-                    metrics::record_rejected_request_for_pool(
-                        "unknown",
-                        "",
-                        &bundle,
-                        "unknown_lora_adapter",
-                    );
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(json_openai_error(
@@ -5517,12 +6863,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
         }
         if let Some(cap) = info.info_extras.max_output_tokens {
             if cap > 0 && params.max_new_tokens > cap {
-                metrics::record_rejected_request_for_pool(
-                    "unknown",
-                    "",
-                    &bundle,
-                    "chat_max_tokens_exceeded",
-                );
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json_openai_error(
@@ -5544,12 +6884,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
                 info.info_extras.grammar_capabilities.as_deref(),
                 &model_name,
             ) {
-                metrics::record_rejected_request_for_pool(
-                    "unknown",
-                    "",
-                    &bundle,
-                    "grammar_capability",
-                );
                 return resp;
             }
         }
@@ -5562,12 +6896,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
         if params.tools.is_some() {
             let supported = info.info_extras.tools_supported.unwrap_or(false);
             if !supported {
-                metrics::record_rejected_request_for_pool(
-                    "unknown",
-                    "",
-                    &bundle,
-                    "tools_capability",
-                );
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json_openai_error(
@@ -5594,12 +6922,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
             // models (CLIP/SigLIP), which must not accept a chat image request.
             let image_supported = info.info_extras.supports_vision_generation();
             if !image_supported {
-                metrics::record_rejected_request_for_pool(
-                    "unknown",
-                    "",
-                    &bundle,
-                    "vision_capability",
-                );
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json_openai_error(
@@ -5615,7 +6937,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     } else if params.grammar.is_some() {
         // No model info means we cannot determine grammar capabilities;
         // safer to reject than to publish work the model cannot honour.
-        metrics::record_rejected_request_for_pool("unknown", "", &bundle, "grammar_capability");
         return (
             StatusCode::BAD_REQUEST,
             Json(json_openai_error(
@@ -5630,7 +6951,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
         // Same defensive rejection for ``tools`` when the model is
         // unknown — safer than publishing work the model cannot
         // honour.
-        metrics::record_rejected_request_for_pool("unknown", "", &bundle, "tools_capability");
         return (
             StatusCode::BAD_REQUEST,
             Json(json_openai_error(
@@ -5648,7 +6968,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     {
         // Same defensive rejection for image input when the model is
         // unknown — safer than publishing vision work the model can't honour.
-        metrics::record_rejected_request_for_pool("unknown", "", &bundle, "vision_capability");
         return (
             StatusCode::BAD_REQUEST,
             Json(json_openai_error(
@@ -5664,60 +6983,44 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     // -- headers → GPU/pool routing, effective-pool selection, publisher bind.
     //    Shared with /v1/completions via resolve_generation_route.
     let ResolvedRoute {
+        physical_lane,
+        bundle,
         gpu,
         engine,
         admission_pool,
         effective_pool,
         effective_machine_profile,
         bundle_config_hash,
+        model_revision,
         work_publisher: work_publisher_arc,
         token_id,
         content_length,
-    } = match resolve_generation_route(&state, &hdr, &bundle, &model_name).await {
+    } = match resolve_generation_route(
+        &state,
+        &hdr,
+        &bundle,
+        &model_name,
+        &dispatch_model,
+        if params.grammar.is_some() {
+            GenerationRequestIntent::Grammar
+        } else {
+            GenerationRequestIntent::Default
+        },
+        &explicit_bundle_override,
+        &parts.extensions,
+        metric_labels_slot.as_ref(),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(resp) => return resp,
     };
     let start = Instant::now();
 
-    // Thread the routing hints into both `GenerateParams`
-    // (where the HRW resolver reads them) and `WorkParams` (where
-    // they were already carried since the chat/grammar surfaces for the worker's
-    // inert hint path). Clone is one allocation each and avoids
-    // either reader having to fall back on the other.
-    let work_params = publisher::WorkParams {
-        generate: Some(publisher::GenerateParams {
-            input: publisher::GenerateInput::Messages {
-                messages: params.messages,
-            },
-            max_new_tokens: params.max_new_tokens,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            stop: params.stop,
-            frequency_penalty: params.frequency_penalty,
-            presence_penalty: params.presence_penalty,
-            top_k: params.top_k,
-            repetition_penalty: params.repetition_penalty,
-            min_tokens: params.min_tokens,
-            chat_template_kwargs: params.chat_template_kwargs,
-            grammar: params.grammar,
-            routing_key: params.routing_key.clone(),
-            prompt_cache_key: params.prompt_cache_key.clone(),
-            tools: params.tools,
-            tool_choice: params.tool_choice,
-            parallel_tool_calls: params.parallel_tool_calls,
-            seed: params.seed,
-            logit_bias: params.logit_bias,
-            logprobs: params.logprobs,
-            top_logprobs: params.top_logprobs,
-            n: params.n,
-            best_of: params.best_of,
-            stream: params.stream,
-            lora_adapter: params.lora_adapter.clone(),
-        }),
-        routing_key: params.routing_key,
-        prompt_cache_key: params.prompt_cache_key,
-        ..Default::default()
-    };
+    // Copied out BEFORE the params are consumed into `WorkParams` below.
+    let stream = params.stream;
+    let stream_include_usage = params.stream_include_usage;
+    let work_params = params.into_work_params();
 
     // SSE branch — when `stream: true` we hand off to the SSE
     // response builder. The non-streaming aggregating path below is
@@ -5727,10 +7030,11 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     // republish-to-pool) but installs a broadcast tap on the
     // collector so each chunk is forwarded to the HTTP client as it
     // arrives instead of being aggregated.
-    if params.stream {
+    if stream {
         return super::sse::build_sse_response(super::sse::SseParams {
             state: state.as_ref(),
             work_publisher: work_publisher_arc,
+            physical_lane: physical_lane.clone(),
             model: model_name.clone(),
             dispatch_model: dispatch_model.clone(),
             bundle: bundle.clone(),
@@ -5741,7 +7045,7 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
             bundle_config_hash: bundle_config_hash.clone(),
             work_params,
             endpoint: super::sse::SseEndpoint::Chat {
-                include_usage: params.stream_include_usage,
+                include_usage: stream_include_usage,
             },
         })
         .await;
@@ -5750,6 +7054,7 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
     let driver = run_streaming_generate(
         &state,
         work_publisher_arc,
+        &physical_lane,
         &model_name,
         &dispatch_model,
         &bundle,
@@ -5772,26 +7077,6 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
         Err(err) => return build_streaming_error_response(&err),
     };
     let elapsed = start.elapsed();
-
-    // Metrics parity: record gateway-observed TTFT/TPOT and token
-    // counters for the success path on /v1/chat/completions too.
-    // Without this dashboards keyed on those metrics would silently
-    // ignore chat-completion traffic. Grammar label comes off the
-    // `work_params` we already built (params was moved into it).
-    let grammar_label = metrics::grammar_label(
-        work_params
-            .generate
-            .as_ref()
-            .and_then(|g| g.grammar.as_ref()),
-    );
-    metrics::record_generation_success(
-        &model_name,
-        &effective_pool,
-        grammar_label,
-        outcome.ttft_ms,
-        outcome.tpot_ms,
-        outcome.usage.as_ref(),
-    );
 
     let body_bytes = match build_chat_completion_body(&model_name, &request_id, &outcome) {
         Ok(b) => b,
@@ -5829,6 +7114,13 @@ pub async fn proxy_chat(State(state): State<Arc<AppState>>, req: Request) -> Res
         HeaderName::from_static("x-sie-server-version"),
         HeaderValue::from_static(GATEWAY_VERSION),
     );
+    insert_stream_model_revision_header(
+        response.headers_mut(),
+        model_revision.as_deref(),
+        &bundle_config_hash,
+        &outcome,
+    );
+    insert_stream_execution_identity_header(response.headers_mut(), &outcome);
     response.headers_mut().insert(
         HeaderName::from_static("x-sie-request-id"),
         HeaderValue::from_str(&request_id).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -5858,13 +7150,56 @@ struct CompletionsParams {
     stop: Option<Vec<String>>,
     frequency_penalty: Option<f64>,
     presence_penalty: Option<f64>,
-    seed: Option<u64>,
+    seed: Option<i64>,
     stream: bool,
+    /// OpenAI ``stream_options.include_usage`` — when ``true`` the SSE stream
+    /// emits a trailing usage-only ``text_completion`` chunk before ``[DONE]``.
+    /// Unknown / non-boolean ``stream_options`` are rejected by the parser.
+    stream_include_usage: bool,
+}
+
+impl CompletionsParams {
+    /// The EXACT `WorkParams` a validated `/v1/completions` body dispatches
+    /// with. Extracted (not copied) for the same reason as
+    /// [`ChatRequestParams::into_work_params`] — see #2435.
+    fn into_work_params(self) -> publisher::WorkParams {
+        publisher::WorkParams {
+            generate: Some(publisher::GenerateParams {
+                input: publisher::GenerateInput::Prompt {
+                    prompt: self.prompt,
+                },
+                max_new_tokens: self.max_new_tokens,
+                temperature: self.temperature,
+                top_p: self.top_p,
+                stop: self.stop,
+                frequency_penalty: self.frequency_penalty,
+                presence_penalty: self.presence_penalty,
+                seed: self.seed,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 }
 
 enum CompletionsParamsResult {
     Ok(CompletionsParams),
     Err(Response),
+}
+
+/// The `(model, WorkParams)` a `/v1/completions` body dispatches with. See
+/// [`chat_completions_dispatch_inputs`], including the `dead_code` note.
+#[allow(clippy::result_large_err, dead_code)]
+pub fn completions_dispatch_inputs(
+    body: &serde_json::Value,
+) -> Result<(String, publisher::WorkParams), Response> {
+    match completions_params_from_json(body) {
+        CompletionsParamsResult::Ok(params) => {
+            let model = params.model.clone();
+            Ok((model, params.into_work_params()))
+        }
+        CompletionsParamsResult::Err(response) => Err(response),
+    }
 }
 
 /// Parse + validate a `/v1/completions` body. MVP scope: a single `prompt`
@@ -5964,6 +7299,40 @@ fn completions_params_from_json(body: &serde_json::Value) -> CompletionsParamsRe
             );
         }
     };
+    // ``stream_options.include_usage`` — same contract as chat: the only
+    // recognised key, boolean, and OpenAI-legal (ignored) with ``stream:false``.
+    let mut stream_include_usage = false;
+    if let Some(opts) = obj.get("stream_options") {
+        if !opts.is_null() {
+            let Some(opts_obj) = opts.as_object() else {
+                return bad(
+                    "'stream_options' must be a JSON object",
+                    Some("stream_options"),
+                    oai_code::INVALID_REQUEST,
+                );
+            };
+            for key in opts_obj.keys() {
+                if key != "include_usage" {
+                    return bad(
+                        &format!("'stream_options.{key}' is not supported by this endpoint"),
+                        Some(&format!("stream_options.{key}")),
+                        oai_code::UNSUPPORTED_FIELD,
+                    );
+                }
+            }
+            match opts_obj.get("include_usage") {
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::Bool(b)) => stream_include_usage = *b,
+                Some(_) => {
+                    return bad(
+                        "'stream_options.include_usage' must be a boolean",
+                        Some("stream_options.include_usage"),
+                        oai_code::INVALID_REQUEST,
+                    );
+                }
+            }
+        }
+    }
     // ``n``: single-candidate only on this endpoint. Reject any non-integer
     // and any value outside ``n == 1``. ``n=1`` is accepted as a no-op
     // (it is the implicit default).
@@ -6066,21 +7435,9 @@ fn completions_params_from_json(body: &serde_json::Value) -> CompletionsParamsRe
             }
         },
     };
-    let seed = match obj.get("seed") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(v) => match v.as_u64() {
-            Some(s) => Some(s),
-            None => match v.as_i64() {
-                Some(i) => Some(i as u64),
-                None => {
-                    return bad(
-                        "'seed' must be an integer",
-                        Some("seed"),
-                        oai_code::INVALID_REQUEST,
-                    );
-                }
-            },
-        },
+    let seed = match parse_seed_field(obj.get("seed")) {
+        Ok(seed) => seed,
+        Err(resp) => return CompletionsParamsResult::Err(resp),
     };
     // ``stop`` accepts a single string or an array of strings; any
     // mixed-type array (e.g. ``["x", 1]``) rejects rather than silently
@@ -6129,6 +7486,7 @@ fn completions_params_from_json(body: &serde_json::Value) -> CompletionsParamsRe
         "presence_penalty",
         "seed",
         "stream",
+        "stream_options",
         "n",
     ];
     for key in obj.keys() {
@@ -6152,6 +7510,7 @@ fn completions_params_from_json(body: &serde_json::Value) -> CompletionsParamsRe
         presence_penalty,
         seed,
         stream,
+        stream_include_usage,
     })
 }
 
@@ -6219,13 +7578,17 @@ fn build_text_completion_body(
 /// (raw `prompt` → `GenerateInput::Prompt`) and the `text_completion` body.
 pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request) -> Response {
     check_sdk_version(req.headers());
+    let metric_labels_slot = req
+        .extensions()
+        .get::<telemetry::MetricLabelsSlot>()
+        .cloned();
 
-    const MAX_COMPLETIONS_BODY: usize = 16 * 1024 * 1024;
+    let max_completions_body = compat_request_body_limit("/v1/completions");
     let hdr = req.headers().clone();
-    let body_bytes = match to_bytes(req.into_body(), MAX_COMPLETIONS_BODY).await {
+    let (parts, body) = req.into_parts(); // keep extensions (caller identity) for the #1841 gate
+    let body_bytes = match to_bytes(body, max_completions_body).await {
         Ok(b) => b,
         Err(e) => {
-            metrics::record_rejected_request_for_pool("unknown", "", "unknown", "body_too_large");
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(json_openai_error(
@@ -6241,12 +7604,6 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
     let body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
-            metrics::record_rejected_request_for_pool(
-                "unknown",
-                "",
-                "unknown",
-                "completions_invalid_body",
-            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json_openai_error(
@@ -6262,61 +7619,59 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
 
     let params = match completions_params_from_json(&body_json) {
         CompletionsParamsResult::Ok(p) => p,
-        CompletionsParamsResult::Err(resp) => {
-            metrics::record_rejected_request_for_pool(
-                "unknown",
-                "",
-                "unknown",
-                "completions_invalid_params",
-            );
-            return resp;
-        }
+        CompletionsParamsResult::Err(resp) => return resp,
     };
 
-    let (model_name, bundle) = match resolve_model_and_bundle(&state, &params.model) {
-        Ok(mb) => mb,
-        Err(resp) => return resp,
-    };
+    let (model_name, bundle) =
+        match resolve_model_and_bundle(&state, &params.model, &parts.extensions) {
+            Ok(mb) => mb,
+            Err(resp) => return resp,
+        };
+    let (explicit_bundle_override, _) = parse_model_spec(&params.model);
 
     let ResolvedRoute {
+        physical_lane,
+        bundle,
         gpu,
         engine,
         admission_pool,
         effective_pool,
         effective_machine_profile,
         bundle_config_hash,
+        model_revision,
         work_publisher: work_publisher_arc,
         token_id,
         content_length,
-    } = match resolve_generation_route(&state, &hdr, &bundle, &model_name).await {
+    } = match resolve_generation_route(
+        &state,
+        &hdr,
+        &bundle,
+        &model_name,
+        &model_name,
+        GenerationRequestIntent::Default,
+        &explicit_bundle_override,
+        &parts.extensions,
+        metric_labels_slot.as_ref(),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(resp) => return resp,
     };
     let start = Instant::now();
 
-    let work_params = publisher::WorkParams {
-        generate: Some(publisher::GenerateParams {
-            input: publisher::GenerateInput::Prompt {
-                prompt: params.prompt,
-            },
-            max_new_tokens: params.max_new_tokens,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            stop: params.stop,
-            frequency_penalty: params.frequency_penalty,
-            presence_penalty: params.presence_penalty,
-            seed: params.seed,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    // Copied out BEFORE the params are consumed into `WorkParams` below.
+    let stream = params.stream;
+    let stream_include_usage = params.stream_include_usage;
+    let work_params = params.into_work_params();
 
     // SSE streaming → emit `text_completion` chunks. Single-candidate
     // (completions rejects n>1), so no per-candidate interleave.
-    if params.stream {
+    if stream {
         return super::sse::build_sse_response(super::sse::SseParams {
             state: state.as_ref(),
             work_publisher: work_publisher_arc,
+            physical_lane: physical_lane.clone(),
             model: model_name.clone(),
             // /v1/completions does not accept grammar, so it never routes:
             // dispatch == display.
@@ -6328,7 +7683,9 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
             admission_pool: admission_pool.clone(),
             bundle_config_hash: bundle_config_hash.clone(),
             work_params,
-            endpoint: super::sse::SseEndpoint::Completion,
+            endpoint: super::sse::SseEndpoint::Completion {
+                include_usage: stream_include_usage,
+            },
         })
         .await;
     }
@@ -6336,6 +7693,7 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
     let driver = run_streaming_generate(
         &state,
         work_publisher_arc,
+        &physical_lane,
         &model_name,
         &model_name,
         &bundle,
@@ -6358,15 +7716,6 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
         Err(err) => return build_streaming_error_response(&err),
     };
     let elapsed = start.elapsed();
-
-    metrics::record_generation_success(
-        &model_name,
-        &effective_pool,
-        "none",
-        outcome.ttft_ms,
-        outcome.tpot_ms,
-        outcome.usage.as_ref(),
-    );
 
     let body_bytes = match build_text_completion_body(&model_name, &request_id, &outcome) {
         Ok(b) => b,
@@ -6401,6 +7750,13 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
         HeaderName::from_static("x-sie-version"),
         HeaderValue::from_static(GATEWAY_VERSION),
     );
+    insert_stream_model_revision_header(
+        h,
+        model_revision.as_deref(),
+        &bundle_config_hash,
+        &outcome,
+    );
+    insert_stream_execution_identity_header(h, &outcome);
     if let Ok(val) = HeaderValue::from_str(&request_id) {
         h.insert(HeaderName::from_static("x-sie-request-id"), val);
     }
@@ -6418,12 +7774,46 @@ struct ResponsesParams {
     max_new_tokens: u32,
     temperature: Option<f32>,
     top_p: Option<f32>,
-    seed: Option<u64>,
+    seed: Option<i64>,
+}
+
+impl ResponsesParams {
+    /// The EXACT `WorkParams` a validated `/v1/responses` body dispatches with.
+    /// Extracted (not copied) for the same reason as
+    /// [`ChatRequestParams::into_work_params`] — see #2435.
+    fn into_work_params(self) -> publisher::WorkParams {
+        publisher::WorkParams {
+            generate: Some(publisher::GenerateParams {
+                input: self.input,
+                max_new_tokens: self.max_new_tokens,
+                temperature: self.temperature,
+                top_p: self.top_p,
+                seed: self.seed,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 }
 
 enum ResponsesParamsResult {
     Ok(ResponsesParams),
     Err(Response),
+}
+
+/// The `(model, WorkParams)` a `/v1/responses` body dispatches with. See
+/// [`chat_completions_dispatch_inputs`], including the `dead_code` note.
+#[allow(clippy::result_large_err, dead_code)]
+pub fn responses_dispatch_inputs(
+    body: &serde_json::Value,
+) -> Result<(String, publisher::WorkParams), Response> {
+    match responses_params_from_json(body) {
+        ResponsesParamsResult::Ok(params) => {
+            let model = params.model.clone();
+            Ok((model, params.into_work_params()))
+        }
+        ResponsesParamsResult::Err(response) => Err(response),
+    }
 }
 
 /// Parse + validate a `/v1/responses` body. MVP: a string `input` or a
@@ -6693,21 +8083,9 @@ fn responses_params_from_json(body: &serde_json::Value) -> ResponsesParamsResult
             }
         },
     };
-    let seed = match obj.get("seed") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(v) => match v.as_u64() {
-            Some(s) => Some(s),
-            None => match v.as_i64() {
-                Some(i) => Some(i as u64),
-                None => {
-                    return bad(
-                        "'seed' must be an integer",
-                        Some("seed"),
-                        oai_code::INVALID_REQUEST,
-                    );
-                }
-            },
-        },
+    let seed = match parse_seed_field(obj.get("seed")) {
+        Ok(seed) => seed,
+        Err(resp) => return ResponsesParamsResult::Err(resp),
     };
 
     // -- allow-list: anything else surfaces as ``unsupported_field``.
@@ -6806,13 +8184,17 @@ fn build_responses_body(
 /// generation via the shared resolve+drive helpers; `response`-shaped body.
 pub async fn proxy_responses(State(state): State<Arc<AppState>>, req: Request) -> Response {
     check_sdk_version(req.headers());
+    let metric_labels_slot = req
+        .extensions()
+        .get::<telemetry::MetricLabelsSlot>()
+        .cloned();
 
-    const MAX_RESPONSES_BODY: usize = 16 * 1024 * 1024;
+    let max_responses_body = compat_request_body_limit("/v1/responses");
     let hdr = req.headers().clone();
-    let body_bytes = match to_bytes(req.into_body(), MAX_RESPONSES_BODY).await {
+    let (parts, body) = req.into_parts(); // keep extensions (caller identity) for the #1841 gate
+    let body_bytes = match to_bytes(body, max_responses_body).await {
         Ok(b) => b,
         Err(e) => {
-            metrics::record_rejected_request_for_pool("unknown", "", "unknown", "body_too_large");
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(json_openai_error(
@@ -6828,12 +8210,6 @@ pub async fn proxy_responses(State(state): State<Arc<AppState>>, req: Request) -
     let body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
-            metrics::record_rejected_request_for_pool(
-                "unknown",
-                "",
-                "unknown",
-                "responses_invalid_body",
-            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json_openai_error(
@@ -6849,52 +8225,52 @@ pub async fn proxy_responses(State(state): State<Arc<AppState>>, req: Request) -
 
     let params = match responses_params_from_json(&body_json) {
         ResponsesParamsResult::Ok(p) => p,
-        ResponsesParamsResult::Err(resp) => {
-            metrics::record_rejected_request_for_pool(
-                "unknown",
-                "",
-                "unknown",
-                "responses_invalid_params",
-            );
-            return resp;
-        }
+        ResponsesParamsResult::Err(resp) => return resp,
     };
 
-    let (model_name, bundle) = match resolve_model_and_bundle(&state, &params.model) {
-        Ok(mb) => mb,
-        Err(resp) => return resp,
-    };
+    let (model_name, bundle) =
+        match resolve_model_and_bundle(&state, &params.model, &parts.extensions) {
+            Ok(mb) => mb,
+            Err(resp) => return resp,
+        };
+    let (explicit_bundle_override, _) = parse_model_spec(&params.model);
     let ResolvedRoute {
+        physical_lane,
+        bundle,
         gpu,
         engine,
         admission_pool,
         effective_pool,
         effective_machine_profile,
         bundle_config_hash,
+        model_revision,
         work_publisher: work_publisher_arc,
         token_id,
         content_length,
-    } = match resolve_generation_route(&state, &hdr, &bundle, &model_name).await {
+    } = match resolve_generation_route(
+        &state,
+        &hdr,
+        &bundle,
+        &model_name,
+        &model_name,
+        GenerationRequestIntent::Default,
+        &explicit_bundle_override,
+        &parts.extensions,
+        metric_labels_slot.as_ref(),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(resp) => return resp,
     };
     let start = Instant::now();
 
-    let work_params = publisher::WorkParams {
-        generate: Some(publisher::GenerateParams {
-            input: params.input,
-            max_new_tokens: params.max_new_tokens,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            seed: params.seed,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let work_params = params.into_work_params();
 
     let driver = run_streaming_generate(
         &state,
         work_publisher_arc,
+        &physical_lane,
         &model_name,
         // /v1/responses does not accept grammar, so it never routes:
         // dispatch == display.
@@ -6918,15 +8294,6 @@ pub async fn proxy_responses(State(state): State<Arc<AppState>>, req: Request) -
         Err(err) => return build_streaming_error_response(&err),
     };
     let elapsed = start.elapsed();
-
-    metrics::record_generation_success(
-        &model_name,
-        &effective_pool,
-        "none",
-        outcome.ttft_ms,
-        outcome.tpot_ms,
-        outcome.usage.as_ref(),
-    );
 
     let body_bytes = match build_responses_body(&model_name, &request_id, &outcome) {
         Ok(b) => b,
@@ -6961,6 +8328,13 @@ pub async fn proxy_responses(State(state): State<Arc<AppState>>, req: Request) -
         HeaderName::from_static("x-sie-version"),
         HeaderValue::from_static(GATEWAY_VERSION),
     );
+    insert_stream_model_revision_header(
+        h,
+        model_revision.as_deref(),
+        &bundle_config_hash,
+        &outcome,
+    );
+    insert_stream_execution_identity_header(h, &outcome);
     if let Ok(val) = HeaderValue::from_str(&request_id) {
         h.insert(HeaderName::from_static("x-sie-request-id"), val);
     }
@@ -7044,6 +8418,19 @@ pub(crate) fn generation_timeout_config(
             _ => None,
         });
 
+    let request_seconds = |key: &str| -> Option<f64> {
+        params
+            .options
+            .as_ref()
+            .and_then(|options| options.get(key))
+            .and_then(|value| {
+                value
+                    .as_f64()
+                    .or_else(|| value.as_u64().map(|value| value as f64))
+            })
+            .filter(|value| *value > 0.0)
+    };
+
     let runtime_seconds = |key: &str| -> Option<f64> {
         runtime
             .as_ref()
@@ -7052,21 +8439,25 @@ pub(crate) fn generation_timeout_config(
             .filter(|v| *v > 0.0)
     };
 
-    // Precedence: environment override > profile runtime > hard default.
+    // Precedence: environment override > request option > profile runtime >
+    // hard default. Request options are already structurally validated.
     // Env overrides are read once at process start (see
     // `TIMEOUT_ENV_OVERRIDES`) instead of three `std::env::var` syscalls
     // per request.
     let env = &*TIMEOUT_ENV_OVERRIDES;
     let first_chunk = env
         .first_chunk_s
+        .or_else(|| request_seconds("first_chunk_timeout_s"))
         .or_else(|| runtime_seconds("first_chunk_timeout_s"))
         .unwrap_or(30.0);
     let inter_chunk = env
         .inter_chunk_s
+        .or_else(|| request_seconds("inter_chunk_timeout_s"))
         .or_else(|| runtime_seconds("inter_chunk_timeout_s"))
         .unwrap_or(10.0);
     let overall = env
         .overall_s
+        .or_else(|| request_seconds("overall_timeout_s"))
         .or_else(|| runtime_seconds("overall_timeout_s"))
         .unwrap_or(derived_overall);
 
@@ -7147,6 +8538,72 @@ fn build_model_load_failed_response(model: &str, message: &str) -> Response {
     resp
 }
 
+fn build_result_payload_too_large_response(endpoint: &str, message: &str) -> Response {
+    let mut resp = endpoint_error_response(
+        endpoint,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        err_code::PAYLOAD_TOO_LARGE,
+        oai_type::INVALID_REQUEST,
+        oai_code::INVALID_REQUEST,
+        None,
+        message,
+    );
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-error-code"),
+        HeaderValue::from_static(err_code::PAYLOAD_TOO_LARGE),
+    );
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-version"),
+        HeaderValue::from_static(GATEWAY_VERSION),
+    );
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-server-version"),
+        HeaderValue::from_static(GATEWAY_VERSION),
+    );
+    resp
+}
+
+fn result_payload_too_large_error(
+    results: &[publisher::WorkResult],
+) -> Option<&publisher::WorkResult> {
+    results
+        .iter()
+        .find(|result| result.error_code.as_deref() == Some(PAYLOAD_TOO_LARGE_ERROR_CODE))
+}
+
+fn result_transport_failure_error(
+    results: &[publisher::WorkResult],
+) -> Option<&publisher::WorkResult> {
+    results
+        .iter()
+        .find(|result| result.error_code.as_deref() == Some(oai_code::TRANSPORT_FAILURE))
+}
+
+fn build_result_transport_failure_response(endpoint: &str) -> Response {
+    let mut resp = endpoint_error_response(
+        endpoint,
+        StatusCode::SERVICE_UNAVAILABLE,
+        oai_code::TRANSPORT_FAILURE,
+        oai_type::SERVER_ERROR,
+        oai_code::TRANSPORT_FAILURE,
+        None,
+        "Worker result transport validation failed",
+    );
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-error-code"),
+        HeaderValue::from_static(oai_code::TRANSPORT_FAILURE),
+    );
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-version"),
+        HeaderValue::from_static(GATEWAY_VERSION),
+    );
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-server-version"),
+        HeaderValue::from_static(GATEWAY_VERSION),
+    );
+    resp
+}
+
 /// Return the retryable error code shared by every failed item, or
 /// ``None`` if the batch is mixed / non-retryable.
 ///
@@ -7173,24 +8630,66 @@ fn unanimous_retryable_error_code(errors: &[&publisher::WorkResult]) -> Option<&
     }
 }
 
-/// Metric label used when rejecting a request because workers emitted a
-/// retryable error code unanimously. Keeps Prometheus reasons stable
-/// instead of folding everything under ``all_items_failed``.
-fn retryable_metric_reason(code: &str) -> &'static str {
-    match code {
-        RESOURCE_EXHAUSTED_ERROR_CODE => "resource_exhausted",
-        MODEL_LOADING_ERROR_CODE => "upstream_model_loading",
-        LORA_LOADING_ERROR_CODE => "upstream_lora_loading",
-        _ => "all_items_failed",
-    }
+/// Return the caller-fixable terminal code shared by every failed item. Mixed
+/// batches keep their per-item 500 envelope; only homogeneous failures can be
+/// translated without hiding a different sibling error.
+fn unanimous_terminal_client_error(
+    errors: &[&publisher::WorkResult],
+) -> Option<(StatusCode, &'static str)> {
+    let first = errors.first()?.error_code.as_deref()?;
+    let (status, canonical) = match first {
+        INVALID_INPUT_ERROR_CODE => (StatusCode::BAD_REQUEST, INVALID_INPUT_ERROR_CODE),
+        PAYLOAD_TOO_LARGE_ERROR_CODE => {
+            (StatusCode::PAYLOAD_TOO_LARGE, PAYLOAD_TOO_LARGE_ERROR_CODE)
+        }
+        COLD_START_RATE_LIMITED_ERROR_CODE => (
+            StatusCode::TOO_MANY_REQUESTS,
+            COLD_START_RATE_LIMITED_ERROR_CODE,
+        ),
+        _ => return None,
+    };
+    errors
+        .iter()
+        .all(|result| result.error_code.as_deref() == Some(canonical))
+        .then_some((status, canonical))
 }
 
-fn generation_worker_error_metric_reason(code: &str) -> &'static str {
-    match code {
-        RESOURCE_EXHAUSTED_ERROR_CODE | MODEL_LOADING_ERROR_CODE | LORA_LOADING_ERROR_CODE => {
-            retryable_metric_reason(code)
-        }
-        _ => "generate_worker_error",
+fn unanimous_worker_error_message(errors: &[&publisher::WorkResult], code: &str) -> Option<String> {
+    let first = errors.first()?;
+    if first.error_code.as_deref() != Some(code)
+        || !errors
+            .iter()
+            .all(|result| result.error_code.as_deref() == Some(code))
+    {
+        return None;
+    }
+    Some(
+        first
+            .error
+            .as_deref()
+            .unwrap_or("Invalid input")
+            .to_string(),
+    )
+}
+
+fn build_invalid_input_response(message: &str) -> Response {
+    build_terminal_client_error_response(StatusCode::BAD_REQUEST, INVALID_INPUT_ERROR_CODE, message)
+}
+
+fn unanimous_client_error_code(errors: &[&publisher::WorkResult]) -> Option<&'static str> {
+    let first = errors.first()?.error_code.as_deref()?;
+    let canonical = match first {
+        "invalid_request" => "invalid_request",
+        "unsupported_field" => "unsupported_field",
+        _ => return None,
+    };
+    if errors
+        .iter()
+        .all(|result| result.error_code.as_deref() == Some(first))
+    {
+        Some(canonical)
+    } else {
+        None
     }
 }
 
@@ -7201,6 +8700,34 @@ fn batch_direct_fallback_delay(request_timeout_s: f64) -> Duration {
         30.0
     };
     Duration::from_secs_f64((timeout_s / 3.0).clamp(1.0, 10.0))
+}
+
+/// Build a native error response for a unanimous caller-fixable worker
+/// rejection. The body and version headers match gateway-owned 400/413 errors,
+/// preserving the local HTTP and queued-sidecar contract.
+fn build_terminal_client_error_response(
+    status: StatusCode,
+    code: &'static str,
+    message: &str,
+) -> Response {
+    let mut resp = (status, Json(json_detail(code, message))).into_response();
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-error-code"),
+        HeaderValue::from_static(code),
+    );
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-error-version"),
+        HeaderValue::from_static(GATEWAY_VERSION),
+    );
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-version"),
+        HeaderValue::from_static(GATEWAY_VERSION),
+    );
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-sie-server-version"),
+        HeaderValue::from_static(GATEWAY_VERSION),
+    );
+    resp
 }
 
 /// Build a ``503 + <code>`` response that mirrors the worker-side HTTP
@@ -7475,7 +9002,18 @@ fn alias_model_target(target: &str, requested_profile: Option<&str>) -> String {
 /// precision/profile bundle for a job alias — e.g. map `sql` to a BF16 bundle
 /// that avoids the FP8 SQL-accuracy regression (ADR 0001). An explicit caller
 /// bundle (`somebundle:/sql`) always wins over the alias's bundle.
-pub(crate) fn resolve_model_spec_with_aliases(
+/// `pub` because it is THE definition of "which model does this string denote"
+/// for this gateway, and two surfaces outside the route need that definition:
+///
+/// - the managed cost-estimate dry run (#2435) rates a caller-supplied id, and
+///   model is a rate-key dimension, so an estimate that skipped the `__`->`/`,
+///   case, and alias folding would quote a different identity than admission
+///   holds (or, as it did, 503 on the very path spelling the SDKs emit);
+/// - a surface that must DECIDE something about a model with no routing seam of
+///   its own (the managed async jobs/batches ingress, #2542) has to reach the
+///   same identity this function produces, or its decision is about a spelling
+///   rather than about a model.
+pub fn resolve_model_spec_with_aliases(
     aliases: &std::collections::HashMap<String, String>,
     spec: &str,
     canonicalize: impl Fn(&str) -> Option<String>,
@@ -7497,7 +9035,10 @@ pub(crate) fn resolve_model_spec_with_aliases(
     (req_bundle, model_name)
 }
 
-fn decode_model_path(raw: &str) -> Result<String, String> {
+/// `pub` for the same reason as [`resolve_model_spec_with_aliases`]: the
+/// estimate receives a target PATH and must decode its model segment the way
+/// the route does before rating it.
+pub fn decode_model_path(raw: &str) -> Result<String, String> {
     percent_decode_str(raw)
         .decode_utf8()
         .map(|decoded| decoded.into_owned())
@@ -7565,6 +9106,90 @@ fn insert_optional_timing_header(
     }
 }
 
+fn insert_model_revision_header(
+    headers: &mut HeaderMap,
+    model_revision: Option<&str>,
+    expected_bundle_config_hash: &str,
+    successful: &[&publisher::WorkResult],
+) {
+    if expected_bundle_config_hash.is_empty()
+        || successful.is_empty()
+        || successful.iter().any(|result| {
+            result.executed_bundle_config_hash.as_deref() != Some(expected_bundle_config_hash)
+        })
+    {
+        return;
+    }
+    if model_revision.is_none() {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_str(expected_bundle_config_hash) {
+        headers.insert(HeaderName::from_static("x-sie-model-revision"), value);
+    }
+}
+
+fn insert_stream_model_revision_header(
+    headers: &mut HeaderMap,
+    model_revision: Option<&str>,
+    expected_bundle_config_hash: &str,
+    outcome: &crate::queue::streaming::StreamOutcome,
+) {
+    if expected_bundle_config_hash.is_empty()
+        || outcome.executed_bundle_config_hash.as_deref() != Some(expected_bundle_config_hash)
+    {
+        return;
+    }
+    if model_revision.is_none() {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_str(expected_bundle_config_hash) {
+        headers.insert(HeaderName::from_static("x-sie-model-revision"), value);
+    }
+}
+
+fn insert_execution_identity_header(
+    headers: &mut HeaderMap,
+    successful: &[&publisher::WorkResult],
+) {
+    let Some(first) = successful
+        .first()
+        .and_then(|result| result.execution_identity_sha256.as_deref())
+    else {
+        return;
+    };
+    if !is_lower_sha256(first)
+        || successful
+            .iter()
+            .any(|result| result.execution_identity_sha256.as_deref() != Some(first))
+    {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_str(first) {
+        headers.insert(
+            HeaderName::from_static("x-sie-execution-identity-sha256"),
+            value,
+        );
+    }
+}
+
+fn insert_stream_execution_identity_header(
+    headers: &mut HeaderMap,
+    outcome: &crate::queue::streaming::StreamOutcome,
+) {
+    let Some(identity) = outcome.execution_identity_sha256.as_deref() else {
+        return;
+    };
+    if !is_lower_sha256(identity) {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_str(identity) {
+        headers.insert(
+            HeaderName::from_static("x-sie-execution-identity-sha256"),
+            value,
+        );
+    }
+}
+
 fn insert_queue_worker_timing_headers(
     headers: &mut HeaderMap,
     successful: &[&publisher::WorkResult],
@@ -7600,7 +9225,18 @@ fn insert_queue_worker_timing_headers(
     );
 }
 
-fn is_openai_embeddings_forwarded_header(name: &str) -> bool {
+pub(crate) fn is_valid_compat_model_id(model: &str) -> bool {
+    let mut chars = model.chars();
+    chars
+        .next()
+        .is_some_and(|value| value.is_ascii_alphanumeric())
+        && !model.contains("..")
+        && !model.contains('\\')
+        && chars
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '_' | '/' | '-'))
+}
+
+pub(crate) fn is_openai_compat_forwarded_header(name: &str) -> bool {
     [
         "x-sie-request-id",
         "x-sie-version",
@@ -7609,6 +9245,8 @@ fn is_openai_embeddings_forwarded_header(name: &str) -> bool {
         "x-queue-publish-time",
         "x-queue-wait-time",
         "x-queue-time",
+        "x-sie-model-revision",
+        "x-sie-execution-identity-sha256",
         "x-inference-time",
         "x-tokenization-time",
         "x-postprocessing-time",
@@ -7618,13 +9256,13 @@ fn is_openai_embeddings_forwarded_header(name: &str) -> bool {
     .any(|allowed| name.eq_ignore_ascii_case(allowed))
 }
 
-/// Headers copied from an inbound ``/v1/embeddings`` request onto the
-/// internal ``/v1/encode`` request it is rewritten into. Auth/routing
+/// Headers copied from an inbound OpenAI-compatible request onto the
+/// internal SIE-native request it is rewritten into. Auth/routing
 /// hints plus the W3C trace headers (`traceparent`/`tracestate`) so the
 /// worker span continues the client's trace instead of rooting a fresh
 /// one — every other endpoint already injects queue trace context, and
 /// without this embeddings would be the lone disconnected path.
-fn is_openai_embeddings_inner_request_header(name: &str) -> bool {
+pub(crate) fn is_openai_compat_inner_request_header(name: &str) -> bool {
     [
         "authorization",
         "x-sie-machine-profile",
@@ -7638,8 +9276,8 @@ fn is_openai_embeddings_inner_request_header(name: &str) -> bool {
     .any(|allowed| name.eq_ignore_ascii_case(allowed))
 }
 
-/// Re-surface a SIE-native error response from the inner ``/v1/encode``
-/// call (used to service ``/v1/embeddings``) in the OpenAI ``{error:{…}}``
+/// Re-surface a SIE-native error response from an inner primitive call
+/// (used to service an OpenAI-compatible endpoint) in the OpenAI ``{error:{…}}``
 /// envelope. The inner path emits ``{detail:{code,message}}`` (and, for the
 /// 502/503 SDK-stable shapes, ``{error:{…}}``); a client that wraps
 /// ``client.embeddings.create(...)`` in ``except openai.APIError`` cannot
@@ -7651,7 +9289,13 @@ fn is_openai_embeddings_inner_request_header(name: &str) -> bool {
 /// inner ``message`` is already gateway-sanitized (field names + validation
 /// text, never request content or raw upstream internals); unparseable
 /// bodies fall back to a generic message, never the raw bytes.
-async fn translate_inner_encode_error(resp: Response) -> Response {
+pub(crate) async fn translate_inner_compat_error(resp: Response) -> Response {
+    // Deliberately NOT [`MAX_COMPAT_RESPONSE_BODY`]. This buffers an ERROR
+    // envelope — a code and a sanitized message, kilobytes at the outside — so
+    // 16 MiB is already orders of magnitude above any real body here and the
+    // amplification that forced the embeddings cap up does not exist. Raising
+    // it by symmetry would only widen the buffer an unhealthy upstream can make
+    // the gateway hold.
     const MAX: usize = 16 * 1024 * 1024;
     let status = resp.status();
     let headers = resp.headers().clone();
@@ -7680,7 +9324,7 @@ async fn translate_inner_encode_error(resp: Response) -> Response {
     let mut out = (status, Json(embeddings_error(&sie_code, None, message))).into_response();
     for (k, v) in headers.iter() {
         let n = k.as_str();
-        if is_openai_embeddings_forwarded_header(n) || n.eq_ignore_ascii_case("retry-after") {
+        if is_openai_compat_forwarded_header(n) || n.eq_ignore_ascii_case("retry-after") {
             out.headers_mut().insert(k.clone(), v.clone());
         }
     }
@@ -7718,6 +9362,30 @@ fn result_decode_error_value(r: &publisher::WorkResult, message: String) -> serd
     })
 }
 
+fn aggregate_score_usage(successful: &[&publisher::WorkResult]) -> Option<Value> {
+    if successful.is_empty() {
+        return None;
+    }
+    let mut input_tokens = 0_u64;
+    let mut images = 0_u64;
+    let mut all_have_images = true;
+    for result in successful {
+        let units = result.units.as_ref()?;
+        input_tokens = input_tokens.checked_add(units.input_tokens?)?;
+        match units.images {
+            Some(value) => images = images.checked_add(value)?,
+            None => all_have_images = false,
+        }
+    }
+
+    let mut usage = Map::new();
+    usage.insert("input_tokens".to_string(), json!(input_tokens));
+    if all_have_images {
+        usage.insert("images".to_string(), json!(images));
+    }
+    Some(Value::Object(usage))
+}
+
 fn build_queue_success_body(
     endpoint: &str,
     model: &str,
@@ -7737,6 +9405,12 @@ fn build_queue_success_body(
         "items"
     };
 
+    let usage = if endpoint == "score" {
+        aggregate_score_usage(successful)
+    } else {
+        None
+    };
+
     if use_msgpack {
         // Msgpack: build {"model": ..., "items"|"scores": [raw_blobs...]}
         // at byte level. The worker already produced msgpack bytes, so the
@@ -7747,11 +9421,11 @@ fn build_queue_success_body(
             .map(|r| r.result_msgpack.len())
             .sum::<usize>();
         let mut packer = rmp::encode::buffer::ByteBuf::new();
-        rmp::encode::write_map_len(&mut packer, 2).unwrap();
+        rmp::encode::write_map_len(&mut packer, if usage.is_some() { 3 } else { 2 }).unwrap();
         rmp::encode::write_str(&mut packer, "model").unwrap();
         rmp::encode::write_str(&mut packer, model).unwrap();
         rmp::encode::write_str(&mut packer, content_key).unwrap();
-        if endpoint == "score" && successful.len() == 1 {
+        let mut parts = if endpoint == "score" && successful.len() == 1 {
             let mut parts = packer.into_vec();
             parts.reserve(payload_len);
             parts.extend_from_slice(&successful[0].result_msgpack);
@@ -7764,7 +9438,16 @@ fn build_queue_success_body(
                 parts.extend_from_slice(&result.result_msgpack);
             }
             parts
+        };
+        if let Some(usage) = usage {
+            let mut usage_packer = rmp::encode::buffer::ByteBuf::new();
+            rmp::encode::write_str(&mut usage_packer, "usage").unwrap();
+            parts.extend_from_slice(&usage_packer.into_vec());
+            parts.extend_from_slice(
+                &rmp_serde::to_vec_named(&usage).expect("score usage JSON value must serialize"),
+            );
         }
+        parts
     } else {
         // JSON: decode each blob, convert numpy arrays, wrap in the server
         // envelope. The result blobs typically carry msgpack_numpy-encoded
@@ -7791,11 +9474,13 @@ fn build_queue_success_body(
         } else {
             serde_json::Value::Array(result_items)
         };
-        serde_json::to_vec(&json!({
-            "model": model,
-            content_key: items_val,
-        }))
-        .unwrap_or_default()
+        let mut response = Map::new();
+        response.insert("model".to_string(), json!(model));
+        response.insert(content_key.to_string(), items_val);
+        if let Some(usage) = usage {
+            response.insert("usage".to_string(), usage);
+        }
+        serde_json::to_vec(&response).unwrap_or_default()
     }
 }
 
@@ -7963,7 +9648,7 @@ fn check_sdk_version(headers: &HeaderMap) {
 /// envelope so grammar safety violations can surface with
 /// their precise ``param`` / ``code`` rather than being re-wrapped.
 #[derive(Debug)]
-pub(crate) enum QueueParseError {
+pub enum QueueParseError {
     /// Caller surfaces as a generic 400 with the message body.
     Generic(String),
     /// Caller returns the response verbatim (already 400 with the
@@ -7985,16 +9670,78 @@ impl From<String> for QueueParseError {
 // would force every caller to dereference at the recovery site and
 // match the pre-existing ``ChatParamsResult::Err(Response)`` shape.
 #[allow(clippy::result_large_err)]
-fn parse_queue_request(
+pub fn parse_queue_request(
     body: &[u8],
     is_msgpack: bool,
     endpoint: &str,
 ) -> Result<(Vec<rmpv::Value>, publisher::WorkParams), QueueParseError> {
-    if is_msgpack {
-        parse_queue_request_msgpack(body, endpoint)
+    let (items, params) = if is_msgpack {
+        parse_queue_request_msgpack(body, endpoint)?
     } else {
-        parse_queue_request_json(body, endpoint)
+        parse_queue_request_json(body, endpoint)?
+    };
+    validate_queue_item_shapes(endpoint, &items, &params)?;
+    Ok((items, params))
+}
+
+pub(crate) const MAX_SCORE_ITEMS: usize = 1000;
+pub(crate) const MAX_EMBEDDING_INPUTS: usize = 256;
+
+/// Reject queue-request bodies whose per-item / query shapes the worker
+/// cannot consume, at ingress, instead of forwarding them to a GPU lane
+/// where they NAK and burn ~15s of in-lane retries before surfacing a 500.
+///
+/// The worker's typed contract (ScoreRequest.query: Item, {Encode,Score,
+/// Extract}Request.items: list[Item]) requires every query and every work
+/// item to be a map/object. Well-formed SDK traffic (msgpack AND correctly
+/// shaped JSON) always satisfies this, so this only rejects malformed
+/// bodies and leaves the happy path byte-identical.
+///
+/// Runs on the shared rmpv representation both wire paths converge on, so a
+/// single call from `parse_queue_request` closes the class for JSON and
+/// msgpack alike.
+#[allow(clippy::result_large_err)]
+fn validate_queue_item_shapes(
+    endpoint: &str,
+    items: &[rmpv::Value],
+    params: &publisher::WorkParams,
+) -> Result<(), QueueParseError> {
+    // `generate` carries no items array (prompt/sampling live under
+    // params.generate); skip it entirely.
+    if endpoint == "generate" {
+        return Ok(());
     }
+
+    // score: a PRESENT query must be a map. A missing query defaults to an
+    // empty map upstream (work_params_from_json / _from_rmpv), which is a
+    // Map and passes, so this only rejects an explicit non-map query
+    // (string / number / array / null).
+    if endpoint == "score" {
+        if items.is_empty() {
+            return Err("'items' must contain at least one candidate"
+                .to_string()
+                .into());
+        }
+        if items.len() > MAX_SCORE_ITEMS {
+            return Err(
+                format!("'items' must contain at most {MAX_SCORE_ITEMS} candidates").into(),
+            );
+        }
+        if let Some(query) = params.query_item.as_ref() {
+            if !matches!(query, rmpv::Value::Map(_)) {
+                return Err("'query' must be an object".to_string().into());
+            }
+        }
+    }
+
+    // Every work item must be a map/object.
+    for (index, item) in items.iter().enumerate() {
+        if !matches!(item, rmpv::Value::Map(_)) {
+            return Err(format!("item at index {index} must be an object").into());
+        }
+    }
+
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
@@ -8078,10 +9825,7 @@ fn parse_queue_request_msgpack(
         }
     };
 
-    let params = match work_params_from_rmpv(&map, endpoint) {
-        Ok(p) => p,
-        Err(resp) => return Err(QueueParseError::PreBuilt(resp)),
-    };
+    let params = work_params_from_rmpv(&map, endpoint)?;
 
     if endpoint == "generate" {
         return Ok((Vec::new(), params));
@@ -8153,18 +9897,6 @@ fn rmpv_as_str(value: &rmpv::Value) -> Option<&str> {
     }
 }
 
-/// Extract a numeric sampler value (`temperature` / `top_p`) from an rmpv
-/// map as `f64`. Returns `None` for absent / nil / non-numeric values so
-/// callers can treat that as "use the worker default".
-fn rmpv_sampler_f64(map: &[(rmpv::Value, rmpv::Value)], field: &str) -> Option<f64> {
-    match rmpv_map_get(map, field)? {
-        rmpv::Value::F32(f) => Some(*f as f64),
-        rmpv::Value::F64(f) => Some(*f),
-        rmpv::Value::Integer(i) => i.as_f64(),
-        _ => None,
-    }
-}
-
 fn rmpv_as_bool(value: &rmpv::Value) -> Option<bool> {
     match value {
         rmpv::Value::Boolean(b) => Some(*b),
@@ -8176,6 +9908,155 @@ fn rmpv_as_array(value: &rmpv::Value) -> Option<&[rmpv::Value]> {
     match value {
         rmpv::Value::Array(a) => Some(a),
         _ => None,
+    }
+}
+
+fn score_grammar_error(field: &str, expected: &str) -> String {
+    format!("'{field}' must be {expected}")
+}
+
+fn validate_score_rmpv_map_keys(
+    entries: &[(rmpv::Value, rmpv::Value)],
+    path: &str,
+) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::with_capacity(entries.len());
+    for (key, _) in entries {
+        let rmpv::Value::String(key) = key else {
+            return Err(if path.is_empty() {
+                "score request field names must be MessagePack strings".to_string()
+            } else {
+                format!("'{path}' field names must be MessagePack strings")
+            });
+        };
+        let Some(key) = key.as_str() else {
+            return Err(if path.is_empty() {
+                "score request field names must be valid UTF-8 MessagePack strings".to_string()
+            } else {
+                format!("'{path}' field names must be valid UTF-8 MessagePack strings")
+            });
+        };
+        if !seen.insert(key) {
+            let field = if path.is_empty() {
+                key.to_string()
+            } else {
+                format!("{path}.{key}")
+            };
+            return Err(format!("duplicate score request field '{field}'"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_generate_rmpv_map_keys(
+    entries: &[(rmpv::Value, rmpv::Value)],
+    path: &str,
+) -> Result<(), (String, String)> {
+    let mut seen = std::collections::HashSet::with_capacity(entries.len());
+    for (key, _) in entries {
+        let rmpv::Value::String(key) = key else {
+            let label = if path.is_empty() { "request" } else { path };
+            return Err((
+                format!("'{label}' field names must be MessagePack strings"),
+                label.to_string(),
+            ));
+        };
+        let Some(key) = key.as_str() else {
+            let label = if path.is_empty() { "request" } else { path };
+            return Err((
+                format!("'{label}' field names must be valid UTF-8 MessagePack strings"),
+                label.to_string(),
+            ));
+        };
+        if !seen.insert(key) {
+            let field = if path.is_empty() {
+                key.to_string()
+            } else {
+                format!("{path}.{key}")
+            };
+            return Err((format!("duplicate generate request field '{field}'"), field));
+        }
+    }
+    Ok(())
+}
+
+fn validate_generate_rmpv_json_value(
+    value: &rmpv::Value,
+    path: &str,
+) -> Result<(), (String, String)> {
+    match value {
+        rmpv::Value::Map(entries) => {
+            validate_generate_rmpv_map_keys(entries, path)?;
+            for (key, value) in entries {
+                let rmpv::Value::String(key) = key else {
+                    unreachable!("map keys were validated above")
+                };
+                let key = key.as_str().expect("map key UTF-8 was validated above");
+                let child_path = if path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{path}.{key}")
+                };
+                validate_generate_rmpv_json_value(value, &child_path)?;
+            }
+            Ok(())
+        }
+        rmpv::Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                validate_generate_rmpv_json_value(value, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_score_grammar_json(parsed: &Value) -> Result<(), String> {
+    if let Some(instruction) = parsed.get("instruction") {
+        if !instruction.is_null() && !instruction.is_string() {
+            return Err(score_grammar_error("instruction", "a string or null"));
+        }
+    }
+
+    match parsed.get("options") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Object(options)) => {
+            if let Some(instruction) = options.get("instruction") {
+                if !instruction.is_null() && !instruction.is_string() {
+                    return Err(score_grammar_error(
+                        "options.instruction",
+                        "a string or null",
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Some(_) => Err(score_grammar_error("options", "an object or null")),
+    }
+}
+
+fn validate_score_grammar_rmpv(parsed: &[(rmpv::Value, rmpv::Value)]) -> Result<(), String> {
+    validate_score_rmpv_map_keys(parsed, "")?;
+    if let Some(instruction) = rmpv_map_get(parsed, "instruction") {
+        if !matches!(instruction, rmpv::Value::Nil) && rmpv_as_str(instruction).is_none() {
+            return Err(score_grammar_error("instruction", "a string or null"));
+        }
+    }
+
+    match rmpv_map_get(parsed, "options") {
+        None | Some(rmpv::Value::Nil) => Ok(()),
+        Some(rmpv::Value::Map(options)) => {
+            validate_score_rmpv_map_keys(options, "options")?;
+            if let Some(instruction) = rmpv_map_get(options, "instruction") {
+                if !matches!(instruction, rmpv::Value::Nil) && rmpv_as_str(instruction).is_none() {
+                    return Err(score_grammar_error(
+                        "options.instruction",
+                        "a string or null",
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Some(_) => Err(score_grammar_error("options", "an object or null")),
     }
 }
 
@@ -8244,27 +10125,84 @@ fn rmpv_to_json_owned(value: &rmpv::Value) -> serde_json::Value {
     rmpv_to_json(value.clone())
 }
 
+/// Carry the typed encode ``params.output_dtype`` through the queue's existing
+/// runtime-options field. Queue workers already resolve
+/// ``request options > profile runtime > default`` from this object, so
+/// overlaying the typed parameter here preserves the HTTP encode contract:
+/// ``params.output_dtype > options.output_dtype > profile > default``.
+///
+/// A non-object ``options`` value is already outside the typed request
+/// contract. Preserve it so this compatibility bridge does not silently turn
+/// a malformed request into a different valid one; the existing worker-side
+/// validation remains authoritative for that case.
+fn encode_options_with_output_dtype(
+    options: Option<Value>,
+    output_dtype: Option<Value>,
+) -> Option<Value> {
+    let Some(output_dtype) = output_dtype.filter(|value| !value.is_null()) else {
+        return options;
+    };
+
+    match options {
+        Some(Value::Object(mut options)) => {
+            options.insert("output_dtype".to_string(), output_dtype);
+            Some(Value::Object(options))
+        }
+        None | Some(Value::Null) => {
+            let mut options = Map::new();
+            options.insert("output_dtype".to_string(), output_dtype);
+            Some(Value::Object(options))
+        }
+        malformed => malformed,
+    }
+}
+
+/// Resolve the score instruction once at queue ingress so every worker engine
+/// consumes the same canonical field. A present top-level string wins even
+/// when it is empty; an absent or null top-level field promotes
+/// `options.instruction` to match the typed Python API.
+fn score_instruction_from_json(parsed: &Value) -> Option<String> {
+    match parsed.get("instruction") {
+        Some(Value::Null) | None => parsed
+            .get("options")
+            .and_then(|options| options.get("instruction"))
+            .and_then(Value::as_str)
+            .map(String::from),
+        Some(instruction) => instruction.as_str().map(String::from),
+    }
+}
+
+/// Msgpack twin of [`score_instruction_from_json`].
+fn score_instruction_from_rmpv(parsed: &[(rmpv::Value, rmpv::Value)]) -> Option<String> {
+    match rmpv_map_get(parsed, "instruction") {
+        Some(rmpv::Value::Nil) | None => rmpv_map_get(parsed, "options")
+            .and_then(|options| match options {
+                rmpv::Value::Map(options) => rmpv_map_get(options, "instruction"),
+                _ => None,
+            })
+            .and_then(rmpv_as_str)
+            .map(String::from),
+        Some(instruction) => rmpv_as_str(instruction).map(String::from),
+    }
+}
+
 /// Build the per-request :class:`WorkParams` from a JSON body.
 ///
-/// Returns ``Err(Response)`` when grammar validation rejects
-/// the request — that response is already shaped as an OpenAI 400 with
-/// the precise ``param`` / ``code`` and is returned verbatim by the
-/// caller. All other parse failures (missing prompt, bad max-tokens,
-/// etc.) still flow through ``Ok(WorkParams)`` with
-/// ``params.generate == None`` and are handled by the existing
-/// downstream validation in :func:`queue_mode_proxy`.
+/// Score grammar violations use the generic parse-error path, which the
+/// caller maps to a 400 before dispatch. Generate grammar violations carry
+/// an already-shaped OpenAI 400 response through ``PreBuilt``. Other generate
+/// parse misses still flow through ``Ok(WorkParams)`` with
+/// ``params.generate == None`` for existing downstream validation.
 #[allow(clippy::result_large_err)]
 fn work_params_from_json(
     parsed: &serde_json::Value,
     endpoint: &str,
 ) -> Result<publisher::WorkParams, QueueParseError> {
     if endpoint == "score" {
+        validate_score_grammar_json(parsed)?;
         return Ok(publisher::WorkParams {
             output_types: None,
-            instruction: parsed
-                .get("instruction")
-                .and_then(|v| v.as_str())
-                .map(String::from),
+            instruction: score_instruction_from_json(parsed),
             is_query: false,
             options: parsed.get("options").cloned(),
             labels: None,
@@ -8285,6 +10223,8 @@ fn work_params_from_json(
 
     if endpoint == "generate" {
         return Ok(publisher::WorkParams {
+            options: parse_generate_options_field(parsed.get("options"))
+                .map_err(QueueParseError::PreBuilt)?,
             generate: generate_params_from_json(parsed).map_err(QueueParseError::PreBuilt)?,
             ..Default::default()
         });
@@ -8292,7 +10232,11 @@ fn work_params_from_json(
 
     let nested_params = parsed.get("params");
     let field = |key: &str| nested_params.and_then(|params| params.get(key));
-    let options = field("options").cloned();
+    let options = if endpoint == "encode" {
+        encode_options_with_output_dtype(field("options").cloned(), field("output_dtype").cloned())
+    } else {
+        field("options").cloned()
+    };
 
     Ok(publisher::WorkParams {
         output_types: field("output_types").and_then(|v| v.as_array()).map(|arr| {
@@ -8326,76 +10270,6 @@ fn work_params_from_json(
     })
 }
 
-/// Extract just the ``stream: bool`` flag from a SIE-native
-/// ``/v1/generate/{model}`` request body. The full body has already
-/// been parsed once into :class:`WorkParams`; this helper does a
-/// second light-touch decode purely to read the streaming flag,
-/// which is **not** part of the work envelope (the worker never
-/// sees it — the gateway switches response shape based on it).
-///
-/// Returns:
-///
-/// * `Ok(true)` — `stream: true` is set, switch to the SSE branch.
-/// * `Ok(false)` — flag is absent / null / false, use the
-///   aggregating path.
-/// * `Err(Response)` — flag is present but the wrong type
-///   (e.g. a string); surface a 400 with the OpenAI envelope.
-///
-/// A body that fails to decode entirely is silently treated as
-/// "no stream flag" — the existing aggregating-path body parser
-/// (`parse_queue_request`) is the authoritative validator and
-/// already surfaces the precise error.
-///
-/// The `Err`-variant carries a fully-built 400 response (the
-/// OpenAI envelope is shaped at the call site, matching the
-/// pattern used by `chat_params_from_json`). We accept the
-/// `clippy::result_large_err` allow here for the same reason the
-/// pre-existing :class:`QueueParseError::PreBuilt` arm does: boxing
-/// the response forces every caller to dereference at the recovery
-/// site for negligible gain.
-#[allow(clippy::result_large_err)]
-fn stream_flag_from_body(body: &[u8], is_msgpack: bool) -> Result<bool, Response> {
-    let bad_type = || -> Response {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json_openai_error(
-                "'stream' must be a boolean".to_string(),
-                oai_type::INVALID_REQUEST,
-                Some("stream"),
-                oai_code::INVALID_REQUEST,
-            )),
-        )
-            .into_response()
-    };
-    if is_msgpack {
-        let Ok(rmpv::Value::Map(entries)) = rmp_serde::from_slice::<rmpv::Value>(body) else {
-            return Ok(false);
-        };
-        for (k, v) in entries.iter() {
-            if rmpv_key_eq(k, "stream") {
-                return match v {
-                    rmpv::Value::Boolean(b) => Ok(*b),
-                    rmpv::Value::Nil => Ok(false),
-                    _ => Err(bad_type()),
-                };
-            }
-        }
-        Ok(false)
-    } else {
-        let Ok(v): Result<serde_json::Value, _> = serde_json::from_slice(body) else {
-            return Ok(false);
-        };
-        let Some(obj) = v.as_object() else {
-            return Ok(false);
-        };
-        match obj.get("stream") {
-            None | Some(serde_json::Value::Null) => Ok(false),
-            Some(serde_json::Value::Bool(b)) => Ok(*b),
-            Some(_) => Err(bad_type()),
-        }
-    }
-}
-
 /// Maximum number of entries in a ``logit_bias`` map. Mirrors the cap
 /// enforced inline by :func:`chat_params_from_json` so the two routes
 /// share an identical DoS-prevention budget.
@@ -8404,7 +10278,7 @@ const MAX_LOGIT_BIAS_KEYS_GENERATE: usize = 1024;
 /// Shared OpenAI-shaped 400 builder for the pure-function sampler
 /// helpers below. Returns a fully-rendered ``Response`` so callers can
 /// short-circuit with ``?``.
-fn sampler_bad_request(message: String, param: &'static str, code: &'static str) -> Response {
+fn sampler_bad_request(message: String, param: &str, code: &'static str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(json_openai_error(
@@ -8417,29 +10291,45 @@ fn sampler_bad_request(message: String, param: &'static str, code: &'static str)
         .into_response()
 }
 
-/// Parse OpenAI ``seed``: best-effort sampler determinism. ``null`` /
-/// absent → ``Ok(None)``. Accepts non-negative ``u64`` and negative
-/// ``i64`` (reinterpreted as ``u64``, matching how some SDKs round-trip
-/// the field). Non-integer → 400 ``invalid_request``.
+/// Parse OpenAI ``seed`` as a signed 64-bit per-request sampling seed.
+/// ``null`` / absent → ``Ok(None)``. Values outside the signed 64-bit range
+/// and non-integers reject with 400 ``invalid_request``.
 ///
-/// Shared with the chat parser's inline ``seed`` block (line ~2881);
-/// kept identical so SDK error envelopes are byte-for-byte stable
-/// regardless of route.
+/// Shared by every generation route so validation and wire semantics cannot
+/// drift between the OpenAI-compatible and SIE-native surfaces.
 #[allow(clippy::result_large_err)]
-fn parse_seed_field(value: Option<&serde_json::Value>) -> Result<Option<u64>, Response> {
+fn parse_seed_field(value: Option<&serde_json::Value>) -> Result<Option<i64>, Response> {
     match value {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(v) => match v.as_u64() {
-            Some(s) => Ok(Some(s)),
-            None => match v.as_i64() {
-                Some(i) => Ok(Some(i as u64)),
-                None => Err(sampler_bad_request(
-                    "'seed' must be an integer".to_string(),
-                    "seed",
-                    oai_code::INVALID_REQUEST,
-                )),
-            },
-        },
+        Some(v) => v.as_i64().map(Some).ok_or_else(|| {
+            sampler_bad_request(
+                "'seed' must be a signed 64-bit integer".to_string(),
+                "seed",
+                oai_code::INVALID_REQUEST,
+            )
+        }),
+    }
+}
+
+/// Msgpack twin of [`parse_seed_field`]. Parse the native value directly so
+/// non-JSON msgpack scalars (notably NaN / infinity and unsigned integers
+/// above ``i64::MAX``) cannot be collapsed to ``null`` by the JSON bridge.
+#[allow(clippy::result_large_err)]
+fn parse_rmpv_seed_field(value: Option<&rmpv::Value>) -> Result<Option<i64>, Response> {
+    match value {
+        None | Some(rmpv::Value::Nil) => Ok(None),
+        Some(rmpv::Value::Integer(value)) => value.as_i64().map(Some).ok_or_else(|| {
+            sampler_bad_request(
+                "'seed' must be a signed 64-bit integer".to_string(),
+                "seed",
+                oai_code::INVALID_REQUEST,
+            )
+        }),
+        Some(_) => Err(sampler_bad_request(
+            "'seed' must be a signed 64-bit integer".to_string(),
+            "seed",
+            oai_code::INVALID_REQUEST,
+        )),
     }
 }
 
@@ -8558,80 +10448,173 @@ fn parse_logit_bias_field(
     }
 }
 
-/// Parse OpenAI ``n``: number of candidate completions. Range ``[1,
-/// 128]``. Zero / non-integer / out-of-range → 400. Mirrors the chat
-/// parser block at line ~2813.
 #[allow(clippy::result_large_err)]
-fn parse_n_field(value: Option<&serde_json::Value>) -> Result<Option<u32>, Response> {
+fn parse_optional_string_field(
+    value: Option<&serde_json::Value>,
+    field: &'static str,
+) -> Result<Option<String>, Response> {
     match value {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(v) => match v.as_u64() {
-            Some(0) => Err(sampler_bad_request(
-                "'n' must be a positive integer".to_string(),
-                "n",
-                oai_code::INVALID_REQUEST,
-            )),
-            Some(n) if n <= 128 => Ok(Some(n as u32)),
-            Some(_) => Err(sampler_bad_request(
-                "'n' must be in [1, 128]".to_string(),
-                "n",
-                oai_code::INVALID_REQUEST,
-            )),
-            None => Err(sampler_bad_request(
-                "'n' must be an integer".to_string(),
-                "n",
-                oai_code::INVALID_REQUEST,
-            )),
-        },
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(sampler_bad_request(
+            format!("'{field}' must be a string"),
+            field,
+            oai_code::INVALID_REQUEST,
+        )),
     }
 }
 
-/// Parse OpenAI ``best_of``: generate this many candidates, return the
-/// top ``n`` by cumulative logprob. Range ``[1, 128]``. Cross-field
-/// rules (``best_of >= n``, non-streaming-only) are checked separately
-/// via :func:`check_best_of_consistency` because they need the already-
-/// parsed ``n`` and ``stream`` values.
 #[allow(clippy::result_large_err)]
-fn parse_best_of_field(value: Option<&serde_json::Value>) -> Result<Option<u32>, Response> {
-    match value {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(v) => match v.as_u64() {
-            Some(b) if (1..=128).contains(&b) => Ok(Some(b as u32)),
-            _ => Err(sampler_bad_request(
-                "'best_of' must be an integer in [1, 128]".to_string(),
-                "best_of",
-                oai_code::INVALID_REQUEST,
-            )),
-        },
-    }
-}
-
-/// Cross-field rule: ``best_of >= n``, and ``best_of > 1`` is non-
-/// streaming-only (mirrors OpenAI). Mirrors the chat parser's tail-
-/// end check at line ~3211.
-#[allow(clippy::result_large_err)]
-fn check_best_of_consistency(
-    best_of: Option<u32>,
-    n: Option<u32>,
-    stream: bool,
+fn validate_generate_options_map(
+    options: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), Response> {
-    if let Some(b) = best_of {
-        if b > 1 && stream {
+    const ACCEPTED: &[&str] = &[
+        "default_sampling",
+        "stop_tokens",
+        "first_chunk_timeout_s",
+        "inter_chunk_timeout_s",
+        "overall_timeout_s",
+    ];
+    for key in options.keys() {
+        if !ACCEPTED.contains(&key.as_str()) {
+            let field = format!("options.{key}");
             return Err(sampler_bad_request(
-                "'best_of' > 1 is not supported with stream:true (mirrors OpenAI)".to_string(),
-                "best_of",
+                format!("'{field}' is not supported by this endpoint"),
+                &field,
                 oai_code::UNSUPPORTED_FIELD,
             ));
         }
-        if b < n.unwrap_or(1) {
+    }
+
+    if let Some(value) = options.get("default_sampling") {
+        let sampling = match value {
+            serde_json::Value::Object(sampling) => sampling,
+            _ => {
+                return Err(sampler_bad_request(
+                    "'options.default_sampling' must be an object".to_string(),
+                    "options.default_sampling",
+                    oai_code::INVALID_REQUEST,
+                ));
+            }
+        };
+        const SAMPLERS: &[&str] = &[
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "top_k",
+            "min_new_tokens",
+        ];
+        for (key, value) in sampling {
+            let field = format!("options.default_sampling.{key}");
+            if !SAMPLERS.contains(&key.as_str()) {
+                return Err(sampler_bad_request(
+                    format!("'{field}' is not supported"),
+                    &field,
+                    oai_code::UNSUPPORTED_FIELD,
+                ));
+            }
+            let valid = match key.as_str() {
+                "temperature" => value
+                    .as_f64()
+                    .is_some_and(|value| value.is_finite() && value >= 0.0),
+                "top_p" => value
+                    .as_f64()
+                    .is_some_and(|value| value.is_finite() && value > 0.0 && value <= 1.0),
+                "presence_penalty" => value
+                    .as_f64()
+                    .is_some_and(|value| value.is_finite() && (-2.0..=2.0).contains(&value)),
+                "top_k" => value.as_u64().is_some_and(|value| value >= 1),
+                "min_new_tokens" => value.as_u64().is_some(),
+                _ => unreachable!("sampling key was checked above"),
+            };
+            if !valid {
+                return Err(sampler_bad_request(
+                    format!("'{field}' has an invalid value"),
+                    &field,
+                    oai_code::INVALID_REQUEST,
+                ));
+            }
+        }
+    }
+
+    if let Some(value) = options.get("stop_tokens") {
+        let valid = value.as_array().is_some_and(|values| {
+            values
+                .iter()
+                .all(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+        });
+        if !valid {
             return Err(sampler_bad_request(
-                "'best_of' must be >= 'n'".to_string(),
-                "best_of",
+                "'options.stop_tokens' must be an array of non-empty strings".to_string(),
+                "options.stop_tokens",
                 oai_code::INVALID_REQUEST,
             ));
         }
     }
+
+    for key in [
+        "first_chunk_timeout_s",
+        "inter_chunk_timeout_s",
+        "overall_timeout_s",
+    ] {
+        if let Some(value) = options.get(key) {
+            let valid = value
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value > 0.0);
+            if !valid {
+                let field = format!("options.{key}");
+                return Err(sampler_bad_request(
+                    format!("'{field}' must be a positive number"),
+                    &field,
+                    oai_code::INVALID_REQUEST,
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_generate_options_field(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<serde_json::Value>, Response> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(options) = value.as_object() else {
+        return Err(sampler_bad_request(
+            "'options' must be an object".to_string(),
+            "options",
+            oai_code::INVALID_REQUEST,
+        ));
+    };
+
+    let mut options = options.clone();
+    match options.remove("profile") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(profile)) if profile == "default" => {}
+        Some(serde_json::Value::String(profile)) => {
+            return Err(sampler_bad_request(
+                format!(
+                    "non-default options.profile '{profile}' cannot select a routed model variant; use the 'model:profile' identity"
+                ),
+                "options.profile",
+                oai_code::INVALID_REQUEST,
+            ));
+        }
+        Some(_) => {
+            return Err(sampler_bad_request(
+                "'options.profile' must be a string".to_string(),
+                "options.profile",
+                oai_code::INVALID_REQUEST,
+            ));
+        }
+    }
+    validate_generate_options_map(&options)?;
+    Ok(Some(serde_json::Value::Object(options)))
 }
 
 /// Parse SIE-extension ``lora_adapter``: optional served-name. The
@@ -8657,13 +10640,12 @@ fn parse_lora_adapter_field(value: Option<&serde_json::Value>) -> Result<Option<
 /// strict allow-list discipline (M8) — the same pattern as chat's
 /// ``ACCEPTED`` block at line ~3170.
 ///
-/// Mirrors the direct Python route's ``_SUPPORTED_FIELDS`` set in
-/// ``packages/sie_server/src/sie_server/api/generate.py`` (line 91-107)
-/// plus the chat-equivalents accepted on this raw-prompt path:
-/// ``n`` / ``best_of`` / ``lora_adapter`` / ``stream`` /
-/// ``stream_options``. Tool-calling fields stay chat-only.
+/// Native generate intentionally remains single-candidate. Compatibility
+/// fields whose output cannot be represented by the native response
+/// (``n`` / ``best_of`` / ``stream_options``) stay on the OpenAI adapters.
 const GENERATE_ACCEPTED_FIELDS: &[&str] = &[
     "prompt",
+    "images",
     "max_new_tokens",
     "temperature",
     "top_p",
@@ -8678,12 +10660,145 @@ const GENERATE_ACCEPTED_FIELDS: &[&str] = &[
     "logit_bias",
     "logprobs",
     "top_logprobs",
-    "n",
-    "best_of",
     "lora_adapter",
+    "options",
     "stream",
-    "stream_options",
 ];
+
+/// Parse the SIE-native JSON image envelope used by ``/v1/generate``.
+///
+/// The gateway never fetches URLs. Each entry is an exact
+/// ``{data: <standard-base64>, format?: <short token>}`` object and remains
+/// base64 on the generate work wire so it can round-trip through the
+/// sidecar's ``serde_json::Value`` representation.
+#[allow(clippy::result_large_err)]
+fn parse_native_generate_images(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<Vec<publisher::ChatImage>>, Response> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(entries) = value.as_array() else {
+        return Err(sampler_bad_request(
+            "'images' must be a non-empty array".to_string(),
+            "images",
+            oai_code::INVALID_REQUEST,
+        ));
+    };
+    if entries.is_empty() || entries.len() > MAX_GENERATE_IMAGES {
+        return Err(sampler_bad_request(
+            format!("'images' must contain between 1 and {MAX_GENERATE_IMAGES} entries"),
+            "images",
+            oai_code::INVALID_REQUEST,
+        ));
+    }
+    let mut images = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let param = format!("images[{index}]");
+        let Some(object) = entry.as_object() else {
+            return Err(sampler_bad_request(
+                format!("'{param}' must be an object"),
+                &param,
+                oai_code::INVALID_REQUEST,
+            ));
+        };
+        if let Some(unknown) = object
+            .keys()
+            .find(|key| !matches!(key.as_str(), "data" | "format"))
+        {
+            let unknown_param = format!("{param}.{unknown}");
+            return Err(sampler_bad_request(
+                format!("'{unknown_param}' is not supported"),
+                &unknown_param,
+                oai_code::UNSUPPORTED_FIELD,
+            ));
+        }
+        let data_param = format!("{param}.data");
+        let Some(data) = object.get("data").and_then(serde_json::Value::as_str) else {
+            return Err(sampler_bad_request(
+                format!("'{data_param}' must be a non-empty base64 string"),
+                &data_param,
+                oai_code::INVALID_REQUEST,
+            ));
+        };
+        if !native_generate_image_encoded_size_allowed(data.len()) {
+            return Err(sampler_bad_request(
+                format!(
+                    "'{data_param}' must decode to between 1 byte and {MAX_GENERATE_IMAGE_BYTES} bytes"
+                ),
+                &data_param,
+                oai_code::INVALID_REQUEST,
+            ));
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| {
+                sampler_bad_request(
+                    format!("'{data_param}' must be valid standard base64"),
+                    &data_param,
+                    oai_code::INVALID_REQUEST,
+                )
+            })?;
+        if decoded.is_empty() || decoded.len() > MAX_GENERATE_IMAGE_BYTES {
+            return Err(sampler_bad_request(
+                format!(
+                    "'{data_param}' must decode to between 1 byte and {MAX_GENERATE_IMAGE_BYTES} bytes"
+                ),
+                &data_param,
+                oai_code::INVALID_REQUEST,
+            ));
+        }
+        let format = match object.get("format") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(format))
+                if !format.is_empty()
+                    && format.len() <= 32
+                    && format.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-')
+                    }) =>
+            {
+                Some(format.to_ascii_lowercase())
+            }
+            Some(_) => {
+                let format_param = format!("{param}.format");
+                return Err(sampler_bad_request(
+                    format!("'{format_param}' must be a short media-format token"),
+                    &format_param,
+                    oai_code::INVALID_REQUEST,
+                ));
+            }
+        };
+        images.push(publisher::ChatImage {
+            data: data.to_string(),
+            format,
+        });
+    }
+    Ok(Some(images))
+}
+
+fn native_generate_image_encoded_size_allowed(length: usize) -> bool {
+    (1..=MAX_GENERATE_IMAGE_BASE64_CHARS).contains(&length)
+}
+
+fn generate_params_have_images(params: &publisher::GenerateParams) -> bool {
+    matches!(
+        &params.input,
+        publisher::GenerateInput::Messages { messages }
+            if messages.iter().any(|message| {
+                message.images.as_ref().is_some_and(|images| !images.is_empty())
+            })
+    )
+}
+
+fn native_generate_image_input_allowed(
+    params: Option<&publisher::GenerateParams>,
+    model_supports_vision_generation: bool,
+) -> bool {
+    !params.is_some_and(generate_params_have_images) || model_supports_vision_generation
+}
 
 /// Parse the walking-skeleton ``/v1/generate/{model}`` JSON body shape into a
 /// :class:`GenerateParams`. Returns ``Ok(None)`` when required fields are
@@ -8692,20 +10807,26 @@ const GENERATE_ACCEPTED_FIELDS: &[&str] = &[
 /// that response is the precise OpenAI envelope and is returned
 /// verbatim.
 ///
-/// Only the ``Prompt`` arm is exposed via this entrypoint; chat requests
-/// flow through :func:`chat_params_from_json` and assemble
-/// the ``Messages`` arm there.
+/// Text-only requests preserve the ``Prompt`` arm. Native image requests and
+/// chat requests assemble the existing ``Messages`` arm so both reach the
+/// worker's model-native template renderer.
 #[allow(clippy::result_large_err)]
 fn generate_params_from_json(
     parsed: &serde_json::Value,
 ) -> Result<Option<publisher::GenerateParams>, Response> {
-    let Some(prompt) = parsed.get("prompt").and_then(|v| v.as_str()) else {
-        return Ok(None);
+    let prompt = match parsed.get("prompt") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::String(prompt)) if !prompt.is_empty() => prompt.clone(),
+        Some(serde_json::Value::String(_)) => return Ok(None),
+        Some(_) => {
+            return Err(sampler_bad_request(
+                "'prompt' must be a string".to_string(),
+                "prompt",
+                oai_code::INVALID_REQUEST,
+            ))
+        }
     };
-    let prompt = prompt.to_string();
-    if prompt.is_empty() {
-        return Ok(None);
-    }
+    let images = parse_native_generate_images(parsed.get("images"))?;
     // Granular `max_new_tokens` rejection so OpenAI-shaped error
     // envelopes carry the correct `param` field. Previously every
     // failure mode collapsed to `Ok(None)` and the caller emitted
@@ -8752,39 +10873,43 @@ fn generate_params_from_json(
         )
             .into_response());
     }
-    // Range-validate samplers so NaN / inf / out-of-range never reach the
-    // worker; a non-numeric value is ignored (lenient, prior behaviour).
-    let temperature = match parsed.get("temperature").and_then(|v| v.as_f64()) {
-        None => None,
-        Some(f) if f.is_finite() && f >= 0.0 => Some(f as f32),
-        Some(_) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json_openai_error(
-                    "'temperature' must be a finite number >= 0",
-                    oai_type::INVALID_REQUEST,
-                    Some("temperature"),
-                    oai_code::INVALID_REQUEST,
-                )),
-            )
-                .into_response());
-        }
+    // Preserve absent-vs-explicit sampler semantics so profile defaults can
+    // apply, while rejecting values that cannot execute faithfully.
+    let temperature = match parsed.get("temperature") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => match v.as_f64() {
+            Some(f) if f.is_finite() && f >= 0.0 => Some(f as f32),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        "'temperature' must be a finite number >= 0",
+                        oai_type::INVALID_REQUEST,
+                        Some("temperature"),
+                        oai_code::INVALID_REQUEST,
+                    )),
+                )
+                    .into_response());
+            }
+        },
     };
-    let top_p = match parsed.get("top_p").and_then(|v| v.as_f64()) {
-        None => None,
-        Some(f) if f.is_finite() && f > 0.0 && f <= 1.0 => Some(f as f32),
-        Some(_) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json_openai_error(
-                    "'top_p' must be in (0, 1]",
-                    oai_type::INVALID_REQUEST,
-                    Some("top_p"),
-                    oai_code::INVALID_REQUEST,
-                )),
-            )
-                .into_response());
-        }
+    let top_p = match parsed.get("top_p") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => match v.as_f64() {
+            Some(f) if f.is_finite() && f > 0.0 && f <= 1.0 => Some(f as f32),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        "'top_p' must be in (0, 1]",
+                        oai_type::INVALID_REQUEST,
+                        Some("top_p"),
+                        oai_code::INVALID_REQUEST,
+                    )),
+                )
+                    .into_response());
+            }
+        },
     };
     // OpenAI accepts ``stop`` as a string OR an array of strings; a
     // non-string scalar / non-string array entry is a 400. The prior
@@ -8829,48 +10954,34 @@ fn generate_params_from_json(
             super::grammar::GrammarParseResult::Err(resp) => return Err(resp),
         },
     };
-    let routing_key = parsed
-        .get("routing_key")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    let prompt_cache_key = parsed
-        .get("prompt_cache_key")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let routing_key = parse_optional_string_field(parsed.get("routing_key"), "routing_key")?
+        .filter(|value| !value.is_empty());
+    let prompt_cache_key =
+        parse_optional_string_field(parsed.get("prompt_cache_key"), "prompt_cache_key")?
+            .filter(|value| !value.is_empty());
     // Privacy contract: `safety_identifier` is parsed and
     // immediately discarded — never placed on the JetStream wire,
     // never logged with its raw value. The trace log records only
     // its presence so we can confirm at runtime that clients are
     // sending it without exposing the value itself.
-    if parsed.get("safety_identifier").is_some() {
+    let safety_identifier =
+        parse_optional_string_field(parsed.get("safety_identifier"), "safety_identifier")?;
+    if safety_identifier.is_some() {
         tracing::trace!("safety_identifier acknowledged and dropped (JSON)");
     }
 
-    // M8: OpenAI sampler knobs that were previously chat-only now
-    // mirror onto the SIE-native ``/v1/generate`` surface so callers
-    // see the same contract regardless of which entry point they
-    // hit. Per ADR-0001 ``generate`` is a supported primitive, so the
-    // gateway-native route is canonical — the direct Python route in
-    // ``packages/sie_server/src/sie_server/api/generate.py`` is
-    // treated as a development entry-point that should not exceed
-    // the gateway surface. Helpers are pure functions defined just
-    // above so unit-tests can exercise each field in isolation.
+    parse_generate_options_field(parsed.get("options"))?;
+
+    // Native generate keeps sampler controls that have faithful native
+    // semantics. Multi-candidate / best-of controls remain compatibility-only
+    // until the native response types can represent every candidate.
     let seed = parse_seed_field(parsed.get("seed"))?;
-    let logprobs = parse_logprobs_field(parsed.get("logprobs"))?;
-    let top_logprobs = parse_top_logprobs_field(parsed.get("top_logprobs"))?;
-    check_logprobs_consistency(logprobs, top_logprobs)?;
     let logit_bias = parse_logit_bias_field(parsed.get("logit_bias"))?;
-    let n = parse_n_field(parsed.get("n"))?;
-    let best_of = parse_best_of_field(parsed.get("best_of"))?;
     let lora_adapter = parse_lora_adapter_field(parsed.get("lora_adapter"))?;
 
     // ``stream`` parsing is duplicated with :func:`stream_flag_from_body`
-    // (which the SSE branch in ``queue_mode_proxy`` consults), but doing
-    // it here too lets us apply the ``best_of`` + ``stream`` cross-field
-    // rule without an extra round-trip through the body. Same shape as
-    // the chat parser (`'stream' must be a boolean`).
+    // (which the SSE branch in ``queue_mode_proxy`` consults). Parsing it
+    // here also gates logprobs, whose native shape exists only on SSE.
     let stream = match parsed.get("stream") {
         None | Some(serde_json::Value::Null) => false,
         Some(serde_json::Value::Bool(b)) => *b,
@@ -8887,9 +10998,7 @@ fn generate_params_from_json(
                 .into_response());
         }
     };
-    check_best_of_consistency(best_of, n, stream)?;
-
-    // M8: strict accept-list. Anything outside the supported set
+    // Strict accept-list. Anything outside the supported set
     // surfaces as ``400 unsupported_field`` (A's discipline) so SDK
     // typos / unknown future knobs fail fast instead of being
     // silently dropped. Tool-calling fields (``tools`` /
@@ -8912,8 +11021,34 @@ fn generate_params_from_json(
         }
     }
 
+    for field in ["logprobs", "top_logprobs"] {
+        if !stream && parsed.get(field).is_some_and(|value| !value.is_null()) {
+            return Err(sampler_bad_request(
+                format!("'{field}' is supported only with 'stream: true' on the native endpoint"),
+                field,
+                oai_code::UNSUPPORTED_FIELD,
+            ));
+        }
+    }
+    let logprobs = parse_logprobs_field(parsed.get("logprobs"))?;
+    let top_logprobs = parse_top_logprobs_field(parsed.get("top_logprobs"))?;
+    check_logprobs_consistency(logprobs, top_logprobs)?;
+
+    let input = match images {
+        Some(images) => publisher::GenerateInput::Messages {
+            messages: vec![publisher::ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+                tool_calls: None,
+                tool_call_id: None,
+                images: Some(images),
+                content_parts: None,
+            }],
+        },
+        None => publisher::GenerateInput::Prompt { prompt },
+    };
     Ok(Some(publisher::GenerateParams {
-        input: publisher::GenerateInput::Prompt { prompt },
+        input,
         max_new_tokens,
         temperature,
         top_p,
@@ -8936,19 +11071,12 @@ fn generate_params_from_json(
         tools: None,
         tool_choice: None,
         parallel_tool_calls: None,
-        // M8: OpenAI sampler knobs (seed / logit_bias / logprobs /
-        // top_logprobs / n / best_of / lora_adapter) now mirror onto
-        // ``/v1/generate`` so the contract matches the direct Python
-        // route in ``api/generate.py``. ``stream`` is also threaded
-        // (the body-level decision is owned by ``stream_flag_from_body``
-        // for the SSE branch, but composing with B's per-choice
-        // streaming means the worker envelope needs the flag too).
         seed,
         logit_bias,
         logprobs,
         top_logprobs,
-        n,
-        best_of,
+        n: None,
+        best_of: None,
         stream,
         lora_adapter,
     }))
@@ -8958,13 +11086,12 @@ fn generate_params_from_json(
 fn work_params_from_rmpv(
     parsed: &[(rmpv::Value, rmpv::Value)],
     endpoint: &str,
-) -> Result<publisher::WorkParams, Response> {
+) -> Result<publisher::WorkParams, QueueParseError> {
     if endpoint == "score" {
+        validate_score_grammar_rmpv(parsed)?;
         return Ok(publisher::WorkParams {
             output_types: None,
-            instruction: rmpv_map_get(parsed, "instruction")
-                .and_then(rmpv_as_str)
-                .map(String::from),
+            instruction: score_instruction_from_rmpv(parsed),
             is_query: false,
             options: rmpv_map_get(parsed, "options").map(rmpv_to_json_owned),
             labels: None,
@@ -8982,7 +11109,13 @@ fn work_params_from_rmpv(
 
     if endpoint == "generate" {
         return Ok(publisher::WorkParams {
-            generate: generate_params_from_rmpv(parsed)?,
+            options: parse_generate_options_field(
+                rmpv_map_get(parsed, "options")
+                    .map(rmpv_to_json_owned)
+                    .as_ref(),
+            )
+            .map_err(QueueParseError::PreBuilt)?,
+            generate: generate_params_from_rmpv(parsed).map_err(QueueParseError::PreBuilt)?,
             ..Default::default()
         });
     }
@@ -8995,7 +11128,14 @@ fn work_params_from_rmpv(
     });
     let field = |key: &str| -> Option<&rmpv::Value> { nested.and_then(|m| rmpv_map_get(m, key)) };
     let options_rmpv = field("options");
-    let options = options_rmpv.map(rmpv_to_json_owned);
+    let options = if endpoint == "encode" {
+        encode_options_with_output_dtype(
+            options_rmpv.map(rmpv_to_json_owned),
+            field("output_dtype").map(rmpv_to_json_owned),
+        )
+    } else {
+        options_rmpv.map(rmpv_to_json_owned)
+    };
     let is_query = field("is_query")
         .and_then(rmpv_as_bool)
         .or_else(|| {
@@ -9026,13 +11166,41 @@ fn work_params_from_rmpv(
 fn generate_params_from_rmpv(
     parsed: &[(rmpv::Value, rmpv::Value)],
 ) -> Result<Option<publisher::GenerateParams>, Response> {
-    let Some(prompt) = rmpv_map_get(parsed, "prompt").and_then(rmpv_as_str) else {
-        return Ok(None);
+    let validation_response = |(message, parameter): (String, String)| {
+        sampler_bad_request(message, &parameter, oai_code::INVALID_REQUEST)
     };
-    let prompt = prompt.to_string();
-    if prompt.is_empty() {
-        return Ok(None);
+    validate_generate_rmpv_map_keys(parsed, "").map_err(validation_response)?;
+    for (key, value) in parsed {
+        let rmpv::Value::String(key) = key else {
+            unreachable!("top-level generate map keys were validated above")
+        };
+        validate_generate_rmpv_json_value(
+            value,
+            key.as_str()
+                .expect("top-level generate key UTF-8 was validated above"),
+        )
+        .map_err(validation_response)?;
     }
+
+    let prompt = match rmpv_map_get(parsed, "prompt") {
+        None | Some(rmpv::Value::Nil) => return Ok(None),
+        Some(rmpv::Value::String(prompt)) if prompt.as_str().is_some_and(|p| !p.is_empty()) => {
+            prompt.as_str().expect("checked above").to_string()
+        }
+        Some(rmpv::Value::String(_)) => return Ok(None),
+        Some(_) => {
+            return Err(sampler_bad_request(
+                "'prompt' must be a string".to_string(),
+                "prompt",
+                oai_code::INVALID_REQUEST,
+            ))
+        }
+    };
+    let images = parse_native_generate_images(
+        rmpv_map_get(parsed, "images")
+            .map(rmpv_to_json_owned)
+            .as_ref(),
+    )?;
     // Mirror the JSON path's granular error attribution so SDKs that
     // branch on `error.param` see the same field name whether the
     // wire format is JSON or msgpack.
@@ -9092,9 +11260,26 @@ fn generate_params_from_rmpv(
         )
             .into_response());
     }
-    // Range-validate samplers (parity with the JSON twin); a non-numeric
-    // value is ignored, an in-band out-of-range number is rejected.
-    let temperature = match rmpv_sampler_f64(parsed, "temperature") {
+    let parse_number = |field: &str| -> Result<Option<f64>, Response> {
+        match rmpv_map_get(parsed, field) {
+            None | Some(rmpv::Value::Nil) => Ok(None),
+            Some(rmpv::Value::F32(value)) => Ok(Some(*value as f64)),
+            Some(rmpv::Value::F64(value)) => Ok(Some(*value)),
+            Some(rmpv::Value::Integer(value)) => value.as_f64().map(Some).ok_or_else(|| {
+                sampler_bad_request(
+                    format!("'{field}' must be a number"),
+                    field,
+                    oai_code::INVALID_REQUEST,
+                )
+            }),
+            Some(_) => Err(sampler_bad_request(
+                format!("'{field}' must be a number"),
+                field,
+                oai_code::INVALID_REQUEST,
+            )),
+        }
+    };
+    let temperature = match parse_number("temperature")? {
         None => None,
         Some(f) if f.is_finite() && f >= 0.0 => Some(f as f32),
         Some(_) => {
@@ -9110,7 +11295,7 @@ fn generate_params_from_rmpv(
                 .into_response());
         }
     };
-    let top_p = match rmpv_sampler_f64(parsed, "top_p") {
+    let top_p = match parse_number("top_p")? {
         None => None,
         Some(f) if f.is_finite() && f > 0.0 && f <= 1.0 => Some(f as f32),
         Some(_) => {
@@ -9188,34 +11373,30 @@ fn generate_params_from_rmpv(
             }
         }
     };
-    let routing_key = rmpv_map_get(parsed, "routing_key")
-        .and_then(rmpv_as_str)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    let prompt_cache_key = rmpv_map_get(parsed, "prompt_cache_key")
-        .and_then(rmpv_as_str)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let bridge = |field: &str| rmpv_map_get(parsed, field).map(rmpv_to_json_owned);
+    let routing_key = parse_optional_string_field(bridge("routing_key").as_ref(), "routing_key")?
+        .filter(|value| !value.is_empty());
+    let prompt_cache_key =
+        parse_optional_string_field(bridge("prompt_cache_key").as_ref(), "prompt_cache_key")?
+            .filter(|value| !value.is_empty());
     // See `generate_params_from_json` — same privacy contract for
     // msgpack ingress. We intentionally do **not** thread the field
     // into `WorkParams`/`WorkItem`.
-    if rmpv_map_get(parsed, "safety_identifier").is_some() {
+    let safety_identifier =
+        parse_optional_string_field(bridge("safety_identifier").as_ref(), "safety_identifier")?;
+    if safety_identifier.is_some() {
         tracing::trace!("safety_identifier acknowledged and dropped (msgpack)");
     }
 
-    // M8: bridge each msgpack sampler field through to JSON once so
+    parse_generate_options_field(bridge("options").as_ref())?;
+
+    // Bridge each msgpack sampler field through to JSON once so
     // we can reuse the pure-function helpers shared with the JSON
     // parser (no per-format duplication of range / cross-field
     // checks). Each field is tiny (scalar / short map) so the
     // conversion cost is negligible.
-    let bridge = |field: &str| rmpv_map_get(parsed, field).map(rmpv_to_json_owned);
-    let seed = parse_seed_field(bridge("seed").as_ref())?;
-    let logprobs = parse_logprobs_field(bridge("logprobs").as_ref())?;
-    let top_logprobs = parse_top_logprobs_field(bridge("top_logprobs").as_ref())?;
-    check_logprobs_consistency(logprobs, top_logprobs)?;
+    let seed = parse_rmpv_seed_field(rmpv_map_get(parsed, "seed"))?;
     let logit_bias = parse_logit_bias_field(bridge("logit_bias").as_ref())?;
-    let n = parse_n_field(bridge("n").as_ref())?;
-    let best_of = parse_best_of_field(bridge("best_of").as_ref())?;
     let lora_adapter = parse_lora_adapter_field(bridge("lora_adapter").as_ref())?;
 
     let stream = match rmpv_map_get(parsed, "stream") {
@@ -9234,35 +11415,58 @@ fn generate_params_from_rmpv(
                 .into_response());
         }
     };
-    check_best_of_consistency(best_of, n, stream)?;
-
-    // M8: strict accept-list — mirrors the JSON twin. ``rmpv_key_eq``
-    // tolerates both string and binary keys so SDKs that pack keys
-    // without ``strict_map_key=True`` still flow through cleanly.
+    // Strict accept-list — map keys are already proven unique UTF-8 strings.
     for (k, _) in parsed.iter() {
-        let key_str = match k {
-            rmpv::Value::String(s) => s.as_str(),
-            rmpv::Value::Binary(b) => std::str::from_utf8(b).ok(),
-            _ => None,
+        let rmpv::Value::String(key) = k else {
+            unreachable!("generate map keys were validated above")
         };
-        if let Some(key) = key_str {
-            if !GENERATE_ACCEPTED_FIELDS.contains(&key) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json_openai_error(
-                        format!("'{key}' is not supported by this endpoint"),
-                        oai_type::INVALID_REQUEST,
-                        Some(key),
-                        oai_code::UNSUPPORTED_FIELD,
-                    )),
-                )
-                    .into_response());
-            }
+        let key = key
+            .as_str()
+            .expect("generate map key UTF-8 was validated above");
+        if !GENERATE_ACCEPTED_FIELDS.contains(&key) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json_openai_error(
+                    format!("'{key}' is not supported by this endpoint"),
+                    oai_type::INVALID_REQUEST,
+                    Some(key),
+                    oai_code::UNSUPPORTED_FIELD,
+                )),
+            )
+                .into_response());
         }
     }
 
+    for field in ["logprobs", "top_logprobs"] {
+        if !stream
+            && rmpv_map_get(parsed, field).is_some_and(|value| !matches!(value, rmpv::Value::Nil))
+        {
+            return Err(sampler_bad_request(
+                format!("'{field}' is supported only with 'stream: true' on the native endpoint"),
+                field,
+                oai_code::UNSUPPORTED_FIELD,
+            ));
+        }
+    }
+    let logprobs = parse_logprobs_field(bridge("logprobs").as_ref())?;
+    let top_logprobs = parse_top_logprobs_field(bridge("top_logprobs").as_ref())?;
+    check_logprobs_consistency(logprobs, top_logprobs)?;
+
+    let input = match images {
+        Some(images) => publisher::GenerateInput::Messages {
+            messages: vec![publisher::ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+                tool_calls: None,
+                tool_call_id: None,
+                images: Some(images),
+                content_parts: None,
+            }],
+        },
+        None => publisher::GenerateInput::Prompt { prompt },
+    };
     Ok(Some(publisher::GenerateParams {
-        input: publisher::GenerateInput::Prompt { prompt },
+        input,
         max_new_tokens,
         temperature,
         top_p,
@@ -9282,16 +11486,12 @@ fn generate_params_from_rmpv(
         tools: None,
         tool_choice: None,
         parallel_tool_calls: None,
-        // M8: see generate_params_from_json for the contract — the
-        // msgpack twin threads the same fields through to the worker
-        // envelope so the two wire formats stay byte-for-byte
-        // equivalent at the WorkParams layer.
         seed,
         logit_bias,
         logprobs,
         top_logprobs,
-        n,
-        best_of,
+        n: None,
+        best_of: None,
         stream,
         lora_adapter,
     }))
@@ -9825,6 +12025,28 @@ fn estimate_embedding_tokens(texts: &[String]) -> u64 {
     u64::max(1, (total / 4) as u64)
 }
 
+/// The native `/v1/encode/{model}` body ONE `/v1/embeddings` request rewrites
+/// itself into before the in-process re-dispatch.
+///
+/// `/v1/embeddings` is not dispatched directly: the handler normalizes its
+/// `input` into native encode items and re-issues the request against
+/// `/v1/encode/{model}`, so the reservation the live path takes is the
+/// reservation for THIS body, not for the compat one. The managed
+/// cost-estimate dry run (#2435) must therefore price the same rewritten body —
+/// which it does by calling this function, the one the handler itself calls.
+/// A private second rewrite here is exactly how an estimate would come to price
+/// a request shape that never reaches the planner.
+pub fn openai_embeddings_encode_body(input: &Value) -> Result<(Value, u64), String> {
+    let OpenAiEmbeddingInput { texts, token_count } = openai_embedding_input_to_texts(input)?;
+    Ok((
+        json!({
+            "items": texts.iter().map(|t| json!({"text": t})).collect::<Vec<_>>(),
+            "params": {"output_types": ["dense"]},
+        }),
+        token_count,
+    ))
+}
+
 fn openai_embedding_input_to_texts(input: &Value) -> Result<OpenAiEmbeddingInput, String> {
     match input {
         Value::String(s) => {
@@ -9836,6 +12058,11 @@ fn openai_embedding_input_to_texts(input: &Value) -> Result<OpenAiEmbeddingInput
         }
         Value::Array(a) if a.is_empty() => Err("input array is empty".to_string()),
         Value::Array(a) if a.iter().all(|x| x.is_string()) => {
+            if a.len() > MAX_EMBEDDING_INPUTS {
+                return Err(format!(
+                    "input must contain at most {MAX_EMBEDDING_INPUTS} texts; split the request into smaller batches"
+                ));
+            }
             let texts: Vec<String> = a
                 .iter()
                 .filter_map(|x| x.as_str().map(String::from))
@@ -9942,10 +12169,10 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
     // multimodal payloads — so it gets the same text-appropriate cap as
     // the chat path (16 MiB) rather than the legacy 256 MiB, which left a
     // trivial OOM-under-concurrency vector open.
-    const MAX: usize = 16 * 1024 * 1024;
+    let max_body = compat_request_body_limit("/v1/embeddings");
     let hdr = req.headers().clone();
     let (parts, body) = req.into_parts();
-    let body_bytes = match to_bytes(body, MAX).await {
+    let body_bytes = match to_bytes(body, max_body).await {
         Ok(b) => b,
         Err(e) => {
             return (
@@ -9987,6 +12214,17 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
                 .into_response();
         }
     };
+    if !is_valid_compat_model_id(&model_str) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(embeddings_error(
+                err_code::INVALID_REQUEST,
+                Some("model"),
+                "invalid model id for path",
+            )),
+        )
+            .into_response();
+    }
     let enc_fmt = parsed
         .get("encoding_format")
         .and_then(|v| v.as_str())
@@ -10003,8 +12241,8 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
             .into_response();
     }
     let input = parsed.get("input").cloned().unwrap_or(Value::Null);
-    let normalized_input = match openai_embedding_input_to_texts(&input) {
-        Ok(input) => input,
+    let (encode_body, token_count) = match openai_embeddings_encode_body(&input) {
+        Ok(normalized) => normalized,
         Err(msg) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -10017,12 +12255,12 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
                 .into_response();
         }
     };
-    let OpenAiEmbeddingInput { texts, token_count } = normalized_input;
-    let encode_body = json!({
-        "items": texts.iter().map(|t| json!({"text": t})).collect::<Vec<_>>(),
-        "params": {"output_types": ["dense"]},
-    });
-    let encode_uri = format!("/v1/encode/{}", model_str.trim_start_matches('/'));
+    // One encode item per normalized input text — the count the response
+    // assembler pads/validates its `data` array against.
+    let input_count = encode_body
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
     let encode_bytes = match serde_json::to_vec(&encode_body) {
         Ok(b) => b,
         Err(e) => {
@@ -10041,7 +12279,7 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
     let extensions = parts.extensions;
     let mut inner_headers = HeaderMap::new();
     for (name, val) in hdr.iter() {
-        if is_openai_embeddings_inner_request_header(name.as_str()) {
+        if is_openai_compat_inner_request_header(name.as_str()) {
             // `append`, not `insert`: W3C `tracestate` may arrive as
             // multiple header fields and `HeaderMap::iter()` yields each
             // separately — `insert` would drop all but the last, so a
@@ -10057,7 +12295,7 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
         axum::http::header::ACCEPT,
         HeaderValue::from_static("application/json"),
     );
-    let uri: axum::http::Uri = match encode_uri.parse() {
+    let uri = match compatibility_model_uri("encode", &model_str) {
         Ok(u) => u,
         Err(_) => {
             return (
@@ -10101,58 +12339,108 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
         // translate them into the OpenAI envelope so the embeddings surface
         // stays parseable by `openai`-client error handling.
         if inner_status.is_client_error() || inner_status.is_server_error() {
-            return translate_inner_encode_error(resp).await;
+            return translate_inner_compat_error(resp).await;
         }
         return resp;
     }
+    // From here the worker has already run and reported its units, so EVERY
+    // failure below is the gateway's: a successful encode this handler could not
+    // render into the client's shape, with the client receiving none of it.
+    // EVERY such arm is marked [`GatewayOwnedFault`] — the two buffering ones
+    // and the three translation ones after them — so a metered composition
+    // releases the hold instead of debiting for an undelivered result, the same
+    // treatment `audio.rs` gives all four of its equivalents. The buffering and
+    // translation arms are one class: "the worker delivered, we could not", and
+    // marking only the half nearest the read would bill the other half in full.
     let enc_headers = resp.headers().clone();
-    let rb = match to_bytes(resp.into_body(), MAX).await {
-        Ok(b) => b,
-        Err(_) => {
-            return (
+    // NOT `max_body`. That is the REQUEST cap, and this body is the encode
+    // reply — an amplification of the request, not a copy of it. See
+    // [`MAX_COMPAT_RESPONSE_BODY`].
+    let rb = match buffer_compat_response_body(resp.into_body()).await {
+        CompatResponseBody::Buffered(b) => b,
+        CompatResponseBody::TooLarge { observed } => {
+            // Terminal, and deliberately not 503: the identical request yields
+            // the identical oversized reply, so a retryable surface would have
+            // SDK retry loops hammering a permanent condition forever. 413 is
+            // already this route's documented terminal size verdict and carries
+            // no `Retry-After`.
+            //
+            // The status is terminal AND the fault is gateway-owned; those are
+            // orthogonal. The status tells the caller not to retry unchanged;
+            // the marker tells billing not to charge for zero embeddings.
+            warn!(
+                limit = MAX_COMPAT_RESPONSE_BODY,
+                observed_bytes = observed,
+                "encode response exceeds the compat response cap"
+            );
+            // Only ONE remedy is named, because only one works. An earlier
+            // revision also offered `encoding_format="base64"`; that is inert
+            // here — the field is never forwarded to `/v1/encode` (see
+            // `openai_embeddings_encode_body`) and base64 is applied afterwards,
+            // when the OUTER response is assembled from this very buffer. A
+            // caller who followed it paid for a second identical encode and got
+            // a byte-identical rejection (#2617).
+            let detail = match observed {
+                Some(bytes) => format!(
+                    "the embedding response for this request is {bytes} bytes, over the \
+                     {MAX_COMPAT_RESPONSE_BODY}-byte limit; send fewer inputs per request"
+                ),
+                None => format!(
+                    "the embedding response for this request exceeds the \
+                     {MAX_COMPAT_RESPONSE_BODY}-byte limit; send fewer inputs per request"
+                ),
+            };
+            return compat_translation_fault(
+                "read_encode_response_too_large",
+                StatusCode::PAYLOAD_TOO_LARGE,
+                err_code::PAYLOAD_TOO_LARGE,
+                Some("input"),
+                detail,
+            );
+        }
+        CompatResponseBody::Unreadable => {
+            // Pre-existing 500, now marked. It billed in full before this change
+            // for exactly the same reason the 413 would have.
+            return compat_translation_fault(
+                "read_encode_response",
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(embeddings_error(
-                    err_code::INTERNAL_ERROR,
-                    None,
-                    "failed to read encode response body",
-                )),
-            )
-                .into_response();
+                err_code::INTERNAL_ERROR,
+                None,
+                "failed to read encode response body".to_string(),
+            );
         }
     };
     let enc: Value = match serde_json::from_slice(&rb) {
         Ok(v) => v,
         Err(e) => {
-            return (
+            return compat_translation_fault(
+                "decode_encode_response",
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(embeddings_error(
-                    err_code::INTERNAL_ERROR,
-                    None,
-                    format!("encode JSON: {}", e),
-                )),
-            )
-                .into_response();
+                err_code::INTERNAL_ERROR,
+                None,
+                format!("encode JSON: {}", e),
+            );
         }
     };
     let Some(items) = enc.get("items").and_then(|i| i.as_array()) else {
-        return (
+        return compat_translation_fault(
+            "encode_response_shape",
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(embeddings_error(
-                err_code::INTERNAL_ERROR,
-                None,
-                "encode response missing items",
-            )),
-        )
-            .into_response();
+            err_code::INTERNAL_ERROR,
+            None,
+            "encode response missing items".to_string(),
+        );
     };
-    let data = match openai_embedding_items_to_data(items, texts.len(), enc_fmt) {
+    let data = match openai_embedding_items_to_data(items, input_count, enc_fmt) {
         Ok(data) => data,
         Err(msg) => {
-            return (
+            return compat_translation_fault(
+                "format_embeddings",
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(embeddings_error(err_code::INTERNAL_ERROR, None, msg)),
-            )
-                .into_response();
+                err_code::INTERNAL_ERROR,
+                None,
+                msg,
+            );
         }
     };
     let token_est = token_count;
@@ -10164,11 +12452,505 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
     });
     let mut out_resp = (StatusCode::OK, Json(out)).into_response();
     for (k, v) in enc_headers.iter() {
-        if is_openai_embeddings_forwarded_header(k.as_str()) {
+        if is_openai_compat_forwarded_header(k.as_str()) {
             out_resp.headers_mut().insert(k.clone(), v.clone());
         }
     }
     out_resp
+}
+
+const MAX_RERANK_DOCUMENTS: usize = 1_000;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RerankCompatibilityVersion {
+    V1,
+    V2,
+}
+
+#[derive(Debug, PartialEq)]
+struct NormalizedRerankRequest {
+    model: String,
+    query: String,
+    documents: Vec<String>,
+    top_n: Option<usize>,
+    return_documents: bool,
+    options: Map<String, Value>,
+}
+
+fn normalize_rerank_options(value: Option<&Value>) -> Result<Map<String, Value>, String> {
+    let options = match value {
+        None | Some(Value::Null) => return Ok(Map::new()),
+        Some(Value::Object(value)) => value,
+        Some(_) => return Err("'options' must be an object".to_string()),
+    };
+    const ALLOWED_OPTIONS: &[&str] = &["profile", "max_seq_length"];
+    if let Some(unknown) = options
+        .keys()
+        .find(|key| !ALLOWED_OPTIONS.contains(&key.as_str()))
+    {
+        return Err(format!("options field '{unknown}' is not supported"));
+    }
+    if let Some(profile) = options.get("profile").filter(|value| !value.is_null()) {
+        profile
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "options.profile must be a non-blank string or null".to_string())?;
+    }
+    if let Some(max_seq_length) = options
+        .get("max_seq_length")
+        .filter(|value| !value.is_null())
+    {
+        max_seq_length
+            .as_u64()
+            .filter(|value| *value > 0)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                "options.max_seq_length must be a positive platform-sized integer or null"
+                    .to_string()
+            })?;
+    }
+    Ok(options.clone())
+}
+
+fn normalize_rerank_request(
+    value: &Value,
+    version: RerankCompatibilityVersion,
+) -> Result<NormalizedRerankRequest, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "request body must be a JSON object".to_string())?;
+    const V1_ALLOWED_FIELDS: &[&str] = &[
+        "model",
+        "query",
+        "documents",
+        "top_n",
+        "return_documents",
+        "options",
+    ];
+    const V2_ALLOWED_FIELDS: &[&str] = &[
+        "model",
+        "query",
+        "documents",
+        "top_n",
+        "max_tokens_per_doc",
+        "priority",
+        "options",
+    ];
+    let allowed_fields = match version {
+        RerankCompatibilityVersion::V1 => V1_ALLOWED_FIELDS,
+        RerankCompatibilityVersion::V2 => V2_ALLOWED_FIELDS,
+    };
+    if let Some(unknown) = object
+        .keys()
+        .find(|key| !allowed_fields.contains(&key.as_str()))
+    {
+        return Err(format!("field '{unknown}' is not supported"));
+    }
+    if version == RerankCompatibilityVersion::V2 {
+        for field in ["max_tokens_per_doc", "priority"] {
+            if object.get(field).is_some_and(|value| !value.is_null()) {
+                return Err(format!(
+                    "field '{field}' is not supported; omit it or send null"
+                ));
+            }
+        }
+    }
+
+    let model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "'model' must be a non-blank string".to_string())?
+        .to_string();
+    let query = object
+        .get("query")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "'query' must be a non-blank string".to_string())?
+        .to_string();
+    let document_values = object
+        .get("documents")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| "'documents' must be a non-empty array of strings".to_string())?;
+    if document_values.len() > MAX_RERANK_DOCUMENTS {
+        return Err(format!(
+            "'documents' exceeds the maximum of {MAX_RERANK_DOCUMENTS} per request"
+        ));
+    }
+    let documents = document_values
+        .iter()
+        .map(|document| {
+            document
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| "'documents' must contain only non-blank strings".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let top_n = match object.get("top_n") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let value = value
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| "'top_n' must be a positive integer".to_string())?;
+            Some(
+                usize::try_from(value)
+                    .map_err(|_| "'top_n' must fit in the platform integer range".to_string())?,
+            )
+        }
+    };
+    let return_documents = match (version, object.get("return_documents")) {
+        (RerankCompatibilityVersion::V1, None | Some(Value::Null)) => false,
+        (RerankCompatibilityVersion::V1, Some(Value::Bool(value))) => *value,
+        (RerankCompatibilityVersion::V1, Some(_)) => {
+            return Err("'return_documents' must be a boolean".to_string())
+        }
+        (RerankCompatibilityVersion::V2, _) => false,
+    };
+    let options = normalize_rerank_options(object.get("options"))?;
+
+    Ok(NormalizedRerankRequest {
+        model,
+        query,
+        documents,
+        top_n,
+        return_documents,
+        options,
+    })
+}
+
+fn compatibility_model_uri(endpoint: &str, model: &str) -> Result<axum::http::Uri, String> {
+    let model = model.trim_start_matches('/');
+    if model.is_empty() {
+        return Err("'model' must contain a model id".to_string());
+    }
+    let encoded_model = utf8_percent_encode(model, NON_ALPHANUMERIC);
+    format!("/v1/{endpoint}/{encoded_model}")
+        .parse()
+        .map_err(|_| "invalid model id for path".to_string())
+}
+
+fn rerank_response_from_score(
+    native: &Value,
+    documents: &[String],
+    top_n: Option<usize>,
+    return_documents: bool,
+) -> Result<Value, String> {
+    let model = native
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "score response missing model".to_string())?;
+    let scores = native
+        .get("scores")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "score response missing scores".to_string())?;
+    if scores.len() != documents.len() {
+        return Err(format!(
+            "score response item count mismatch: expected {}, got {}",
+            documents.len(),
+            scores.len()
+        ));
+    }
+
+    let mut seen = vec![false; documents.len()];
+    let mut ranked = Vec::with_capacity(scores.len());
+    for entry in scores {
+        let item_id = entry
+            .get("item_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "score response entry missing item_id".to_string())?;
+        let index = item_id
+            .parse::<usize>()
+            .map_err(|_| "score response item_id is not a document index".to_string())?;
+        if index >= documents.len() {
+            return Err("score response item_id is out of range".to_string());
+        }
+        if std::mem::replace(&mut seen[index], true) {
+            return Err("score response contains a duplicate item_id".to_string());
+        }
+        let score = entry
+            .get("score")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| "score response entry has an invalid score".to_string())?;
+        ranked.push((index, score));
+    }
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+    if let Some(limit) = top_n {
+        ranked.truncate(limit);
+    }
+
+    let usage = native
+        .get("usage")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "score response missing authoritative usage".to_string())?;
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "score response usage missing input_tokens".to_string())?;
+    let images = usage.get("images").map(|value| {
+        value
+            .as_u64()
+            .ok_or_else(|| "score response usage has an invalid images count".to_string())
+    });
+    let mut output_usage = Map::new();
+    output_usage.insert("input_tokens".to_string(), json!(input_tokens));
+    if let Some(images) = images {
+        output_usage.insert("images".to_string(), json!(images?));
+    }
+
+    let results = ranked
+        .into_iter()
+        .map(|(index, score)| {
+            let mut result = Map::new();
+            result.insert("index".to_string(), json!(index));
+            result.insert("relevance_score".to_string(), json!(score));
+            if return_documents {
+                result.insert("document".to_string(), json!({"text": documents[index]}));
+            }
+            Value::Object(result)
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "model": model,
+        "results": results,
+        "usage": output_usage,
+    }))
+}
+
+fn rerank_error(status: StatusCode, message: impl Into<String>) -> Response {
+    (status, Json(json!({"message": message.into()}))).into_response()
+}
+
+/// A `/v1/rerank` 500 for a POST-DISPATCH failure, marked as gateway-owned.
+///
+/// The `score` counterpart of [`compat_translation_fault`] and `audio.rs`'s
+/// `translation_fault`. Once `proxy_request` has returned 200 the worker has run
+/// and the meter already holds its units, so a failure to read, decode, or
+/// reshape that reply is OURS: the client receives zero rerank results and,
+/// without this marker, the managed edge falls through to
+/// `settle_planned_request` and debits the hold in full.
+///
+/// Deliberately NOT folded into [`rerank_error`], which also serves
+/// `translate_inner_rerank_error` — that path carries the WORKER's own verdict on
+/// a request that never produced billable output through this handler, and
+/// marking it would change a settlement this change has no business touching.
+fn rerank_translation_fault(stage: &'static str, message: impl Into<String>) -> Response {
+    GatewayOwnedFault::new(stage).mark(rerank_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        message.into(),
+    ))
+}
+
+async fn translate_inner_rerank_error(resp: Response) -> Response {
+    // An error envelope, like `translate_inner_compat_error` — see the note
+    // there for why this stays at the request-shaped bound.
+    const MAX: usize = 16 * 1024 * 1024;
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let parsed: Value = match to_bytes(resp.into_body(), MAX).await {
+        Ok(body) => serde_json::from_slice(&body).unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    let message = parsed
+        .get("detail")
+        .and_then(|detail| detail.get("message"))
+        .or_else(|| parsed.get("error").and_then(|error| error.get("message")))
+        .and_then(Value::as_str)
+        .unwrap_or("internal server error");
+    let mut output = rerank_error(status, message);
+    for (name, value) in headers.iter() {
+        if is_openai_compat_forwarded_header(name.as_str())
+            || name.as_str().eq_ignore_ascii_case("retry-after")
+            || name.as_str().eq_ignore_ascii_case("x-sie-error-code")
+        {
+            output.headers_mut().insert(name.clone(), value.clone());
+        }
+    }
+    output
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/rerank",
+    tag = "inference",
+    description = "Cohere v1-compatible text-only subset over SIE's native score primitive. Supported request fields are model, query, string documents, top_n, return_documents, and the documented SIE options extension. Unknown or unsupported fields reject with 400. The adapter rejects partial native results and forwards only authoritative worker-emitted usage.",
+    request_body = crate::openapi::RerankRequest,
+    params(
+        ("X-SIE-MACHINE-PROFILE" = Option<String>, Header, description = "Preferred GPU or machine profile"),
+        ("X-SIE-Pool" = Option<String>, Header, description = "Explicit pool routing override"),
+        ("X-SIE-SDK-Version" = Option<String>, Header, description = "Client SDK version for skew warnings")
+    ),
+    responses(
+        (status = 200, description = "Cohere v1-compatible subset response", body = crate::openapi::RerankResponse),
+        (status = 400, description = "Invalid request", body = crate::openapi::RerankError),
+        (status = 401, description = "Missing or invalid bearer token", body = crate::openapi::RerankError),
+        (status = 404, description = "Model not found", body = crate::openapi::RerankError),
+        (status = 409, description = "Bundle override conflicts with model routing", body = crate::openapi::RerankError),
+        (status = 413, description = "Request body too large", body = crate::openapi::RerankError),
+        (status = 500, description = "Malformed or partial native score result", body = crate::openapi::RerankError),
+        (status = 502, description = "MODEL_LOAD_FAILED", body = crate::openapi::RerankError),
+        (status = 503, description = "Provisioning, model loading, or capacity exhausted", body = crate::openapi::RerankError),
+        (status = 504, description = "Result channel closed", body = crate::openapi::RerankError)
+    )
+)]
+pub async fn proxy_rerank(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    proxy_rerank_inner(RerankCompatibilityVersion::V1, state, req).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v2/rerank",
+    tag = "inference",
+    description = "Cohere v2-compatible text-only subset over SIE's native score primitive. Supported request fields are model, query, string documents, top_n, and the documented SIE options extension. max_tokens_per_doc and priority must be omitted or null; unknown or unsupported fields reject with 400. The adapter rejects partial native results and forwards only authoritative worker-emitted usage.",
+    request_body = crate::openapi::RerankV2Request,
+    params(
+        ("X-SIE-MACHINE-PROFILE" = Option<String>, Header, description = "Preferred GPU or machine profile"),
+        ("X-SIE-Pool" = Option<String>, Header, description = "Explicit pool routing override"),
+        ("X-SIE-SDK-Version" = Option<String>, Header, description = "Client SDK version for skew warnings")
+    ),
+    responses(
+        (status = 200, description = "Cohere v2-compatible subset response", body = crate::openapi::RerankResponse),
+        (status = 400, description = "Invalid or unsupported request", body = crate::openapi::RerankError),
+        (status = 401, description = "Missing or invalid bearer token", body = crate::openapi::RerankError),
+        (status = 404, description = "Model not found", body = crate::openapi::RerankError),
+        (status = 409, description = "Bundle override conflicts with model routing", body = crate::openapi::RerankError),
+        (status = 413, description = "Request body too large", body = crate::openapi::RerankError),
+        (status = 500, description = "Malformed or partial native score result", body = crate::openapi::RerankError),
+        (status = 502, description = "MODEL_LOAD_FAILED", body = crate::openapi::RerankError),
+        (status = 503, description = "Provisioning, model loading, or capacity exhausted", body = crate::openapi::RerankError),
+        (status = 504, description = "Result channel closed", body = crate::openapi::RerankError)
+    )
+)]
+pub async fn proxy_rerank_v2(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    proxy_rerank_inner(RerankCompatibilityVersion::V2, state, req).await
+}
+
+async fn proxy_rerank_inner(
+    version: RerankCompatibilityVersion,
+    state: Arc<AppState>,
+    req: Request,
+) -> Response {
+    check_sdk_version(req.headers());
+    // Bounds BOTH the rerank request and the inner `score` reply below, and
+    // that symmetry is sound here where it was not for embeddings: a score
+    // reply is `{index, relevance_score}` per document, capped at
+    // [`MAX_RERANK_DOCUMENTS`] (1000) — tens of KiB, with no per-item vector to
+    // amplify. The response is smaller than the request that produced it.
+    const MAX: usize = 16 * 1024 * 1024;
+    let headers = req.headers().clone();
+    let (parts, body) = req.into_parts();
+    let body = match to_bytes(body, MAX).await {
+        Ok(body) => body,
+        Err(error) => {
+            return rerank_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("request body: {error}"),
+            );
+        }
+    };
+    let parsed: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return rerank_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {error}"));
+        }
+    };
+    let normalized = match normalize_rerank_request(&parsed, version) {
+        Ok(value) => value,
+        Err(message) => return rerank_error(StatusCode::BAD_REQUEST, message),
+    };
+
+    let score_body = json!({
+        "query": {"text": normalized.query},
+        "items": normalized.documents.iter().enumerate().map(|(index, document)| {
+            json!({"id": index.to_string(), "text": document})
+        }).collect::<Vec<_>>(),
+        "options": normalized.options,
+    });
+    let uri = match compatibility_model_uri("score", &normalized.model) {
+        Ok(uri) => uri,
+        Err(message) => return rerank_error(StatusCode::BAD_REQUEST, message),
+    };
+    let score_bytes = match serde_json::to_vec(&score_body) {
+        Ok(body) => body,
+        Err(error) => {
+            return rerank_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("score body: {error}"),
+            );
+        }
+    };
+
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .version(parts.version);
+    for (name, value) in headers.iter() {
+        if is_openai_compat_inner_request_header(name.as_str()) {
+            builder = builder.header(name, value);
+        }
+    }
+    builder = builder
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ACCEPT, "application/json");
+    let mut inner = match builder.body(Body::from(score_bytes)) {
+        Ok(request) => request,
+        Err(_) => {
+            return rerank_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build internal score request",
+            );
+        }
+    };
+    *inner.extensions_mut() = parts.extensions;
+    let response = proxy_request(State(state), inner, "score").await;
+    if response.status() != StatusCode::OK {
+        return translate_inner_rerank_error(response).await;
+    }
+
+    // From here the worker has already run and reported its units, so every
+    // failure below is the gateway's, exactly as on the embeddings and audio
+    // surfaces: the client receives zero rerank results and must not be
+    // debited for them. Each arm is marked [`GatewayOwnedFault`].
+    let response_headers = response.headers().clone();
+    let native: Value = match to_bytes(response.into_body(), MAX).await {
+        Ok(body) => match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                return rerank_translation_fault(
+                    "decode_score_response",
+                    format!("score response is not valid JSON: {error}"),
+                );
+            }
+        },
+        Err(_) => {
+            return rerank_translation_fault(
+                "read_score_response",
+                "failed to read score response body",
+            );
+        }
+    };
+    let output = match rerank_response_from_score(
+        &native,
+        &normalized.documents,
+        normalized.top_n,
+        normalized.return_documents,
+    ) {
+        Ok(output) => output,
+        Err(message) => return rerank_translation_fault("format_rerank", message),
+    };
+    let mut output = (StatusCode::OK, Json(output)).into_response();
+    for (name, value) in response_headers.iter() {
+        if is_openai_compat_forwarded_header(name.as_str()) {
+            output.headers_mut().insert(name.clone(), value.clone());
+        }
+    }
+    output
 }
 
 #[utoipa::path(
@@ -10201,6 +12983,197 @@ pub async fn proxy_moderations() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use crate::queue::dispatch::{
+        ChunkEnvelope, PendingGenerationSnapshot, PublishTarget, StreamOutcome, WorkParams,
+        WorkResult,
+    };
+    use tokio::sync::{broadcast, oneshot, Notify};
+
+    #[derive(Default)]
+    struct AbandonmentProbe {
+        claimed: AtomicBool,
+        begin_calls: AtomicUsize,
+        finish_calls: AtomicUsize,
+        finished: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkDispatcher for AbandonmentProbe {
+        async fn publish_work(
+            self: Arc<Self>,
+            _target: PublishTarget,
+            _admission_pool: &str,
+            _endpoint: &str,
+            _model: &str,
+            _engine: &str,
+            _bundle_config_hash: &str,
+            _items: Vec<rmpv::Value>,
+            _params: &WorkParams,
+        ) -> Result<
+            (
+                String,
+                oneshot::Receiver<Vec<WorkResult>>,
+                DispatchDurability,
+            ),
+            DispatchError,
+        > {
+            unreachable!("abandonment guard test does not publish work")
+        }
+
+        async fn publish_generate_streaming(
+            &self,
+            _target: PublishTarget,
+            _display_model: &str,
+            _engine: &str,
+            _bundle_config_hash: &str,
+            _params: &WorkParams,
+            _admission_pool: &str,
+        ) -> Result<
+            (
+                String,
+                oneshot::Receiver<StreamOutcome>,
+                Arc<Notify>,
+                DispatchDurability,
+            ),
+            String,
+        > {
+            unreachable!("abandonment guard test does not publish generation")
+        }
+
+        async fn publish_generate_streaming_sse(
+            &self,
+            _target: PublishTarget,
+            _display_model: &str,
+            _engine: &str,
+            _bundle_config_hash: &str,
+            _params: &WorkParams,
+            _admission_pool: &str,
+        ) -> Result<
+            (
+                String,
+                oneshot::Receiver<StreamOutcome>,
+                broadcast::Receiver<ChunkEnvelope>,
+                DispatchDurability,
+            ),
+            String,
+        > {
+            unreachable!("abandonment guard test does not publish generation")
+        }
+
+        async fn publish_cancel(&self, _request_id: &str) {}
+
+        fn begin_work_abandonment(&self, _request_id: &str) -> bool {
+            self.begin_calls.fetch_add(1, Ordering::Relaxed);
+            !self.claimed.swap(true, Ordering::AcqRel)
+        }
+
+        async fn finish_work_abandonment(&self, _request_id: &str) {
+            self.finish_calls.fetch_add(1, Ordering::Relaxed);
+            self.finished.notify_one();
+        }
+
+        async fn republish_to_pool(
+            &self,
+            _request_id: &str,
+            _reason: &'static str,
+        ) -> Result<bool, String> {
+            unreachable!("abandonment guard test does not republish")
+        }
+
+        async fn republish_pending_result_to_pool(
+            &self,
+            _request_id: &str,
+            _reason: &'static str,
+        ) -> Result<bool, String> {
+            unreachable!("abandonment guard test does not republish")
+        }
+
+        fn drop_pending_stream(&self, _request_id: &str) {}
+
+        fn pending_generation_snapshot(&self) -> PendingGenerationSnapshot {
+            PendingGenerationSnapshot::default()
+        }
+
+        fn pending_generation_for_model(&self, _model_id: &str) -> PendingGenerationSnapshot {
+            PendingGenerationSnapshot::default()
+        }
+
+        fn stream_observed_first_chunk(&self, _request_id: &str) -> bool {
+            false
+        }
+
+        fn stream_chunk_timing(
+            &self,
+            _request_id: &str,
+        ) -> Option<(Option<Instant>, Option<Instant>)> {
+            None
+        }
+    }
+
+    #[test]
+    fn dispatcher_defaults_to_no_first_chunk_pool_republish() {
+        let dispatcher = AbandonmentProbe::default();
+        assert!(!dispatcher.supports_first_chunk_pool_republish());
+    }
+
+    #[test]
+    fn enabled_first_chunk_capability_preserves_initial_republish_and_pool_timeout_decisions() {
+        assert_eq!(
+            first_chunk_deadline_action(true, true, false, false),
+            FirstChunkDeadlineAction::RepublishToPool
+        );
+        assert_eq!(
+            first_chunk_deadline_action(true, false, false, false),
+            FirstChunkDeadlineAction::SurfaceTimeout
+        );
+    }
+
+    #[test]
+    fn enabled_first_chunk_capability_waits_for_overall_on_single_consumer_lane() {
+        assert_eq!(
+            first_chunk_deadline_action(true, true, false, true),
+            FirstChunkDeadlineAction::WaitForOverall
+        );
+    }
+
+    #[test]
+    fn enabled_first_chunk_capability_surfaces_after_republish_was_already_attempted() {
+        assert_eq!(
+            first_chunk_deadline_action(true, true, true, false),
+            FirstChunkDeadlineAction::SurfaceTimeout
+        );
+    }
+
+    #[test]
+    fn no_republish_capability_waits_for_overall_without_cancel_or_first_chunk_timeout() {
+        for was_direct_dispatched in [false, true] {
+            assert_eq!(
+                first_chunk_deadline_action(false, was_direct_dispatched, false, false,),
+                FirstChunkDeadlineAction::WaitForOverall
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_work_guard_drop_claims_and_finishes_once() {
+        let probe = Arc::new(AbandonmentProbe::default());
+        let publisher: Arc<dyn WorkDispatcher> = probe.clone();
+        let finished = probe.finished.notified();
+        drop(PendingWorkAbandonGuard::new(
+            Arc::clone(&publisher),
+            "req-1".to_string(),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), finished)
+            .await
+            .expect("abandonment cleanup finished");
+
+        drop(PendingWorkAbandonGuard::new(publisher, "req-1".to_string()));
+        tokio::task::yield_now().await;
+        assert_eq!(probe.begin_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(probe.finish_calls.load(Ordering::Relaxed), 1);
+    }
 
     // ── parse_model_spec ───────────────────────────────────────────
 
@@ -10484,6 +13457,56 @@ mod tests {
         );
     }
 
+    /// Handler spans must be entered around each future poll, never by a guard
+    /// whose lifetime crosses an await. A cross-await guard can be created on
+    /// one Tokio worker and dropped on another, leaving the OpenTelemetry
+    /// context guard in the first worker's TLS until thread teardown.
+    #[test]
+    fn async_proxy_spans_are_poll_scoped() {
+        let source = include_str!("proxy.rs");
+        let forbidden_enter = [".en", "ter()"].concat();
+
+        for (handler_start, handler_end, span_name, guard_parts) in [
+            (
+                "pub(crate) async fn proxy_request(",
+                "\nasync fn proxy_request_inner(",
+                "proxy_span",
+                ["_proxy_span_", "guard"],
+            ),
+            (
+                "pub async fn proxy_chat(",
+                "\nasync fn proxy_chat_inner(",
+                "chat_span",
+                ["_chat_span_", "guard"],
+            ),
+        ] {
+            let start = source
+                .find(handler_start)
+                .unwrap_or_else(|| panic!("handler start not found: {handler_start}"));
+            let end = source[start..]
+                .find(handler_end)
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("handler end not found: {handler_end}"));
+            let handler = &source[start..end];
+            let compact = handler.split_whitespace().collect::<Vec<_>>().join(" ");
+            let expected_tail = format!("}} .instrument({span_name}) .await }}");
+            let forbidden_guard = guard_parts.concat();
+
+            assert!(
+                compact.ends_with(&expected_tail),
+                "{handler_start} must instrument the complete handler remainder with {span_name}"
+            );
+            assert!(
+                !handler.contains(&forbidden_enter),
+                "{handler_start} must not hold a span entry guard across awaits"
+            );
+            assert!(
+                !handler.contains(&forbidden_guard),
+                "{handler_start} retained the old cross-await span guard"
+            );
+        }
+    }
+
     #[test]
     fn test_resolve_bundle_for_request_empty_registry_falls_back_to_caller() {
         // With an empty registry (no models), the resolver falls back to the
@@ -10494,14 +13517,209 @@ mod tests {
         let registry = ModelRegistry::new(bundles_dir.path(), models_dir.path(), true);
         assert!(!registry.has_any_models());
 
-        let default = resolve_bundle_for_request(&registry, "org/model", "", None, "encode")
-            .expect("empty registry + no override resolves");
+        let default =
+            resolve_bundle_for_request(&registry, "org/model", "org/model", "", None, "encode")
+                .expect("empty registry + no override resolves");
         assert_eq!(default, "default");
 
-        let overridden =
-            resolve_bundle_for_request(&registry, "org/model", "custom-bundle", None, "encode")
-                .expect("empty registry preserves caller bundle");
+        let overridden = resolve_bundle_for_request(
+            &registry,
+            "org/model",
+            "org/model",
+            "custom-bundle",
+            None,
+            "encode",
+        )
+        .expect("empty registry preserves caller bundle");
         assert_eq!(overridden, "custom-bundle");
+    }
+
+    #[test]
+    fn test_model_revision_header_requires_matching_worker_execution_hash() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let execution_hash = "a".repeat(64);
+        let matching: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-1",
+            "success": true,
+            "executed_bundle_config_hash": execution_hash.clone()
+        }))
+        .unwrap();
+        let mut headers = HeaderMap::new();
+
+        insert_model_revision_header(
+            &mut headers,
+            Some(revision),
+            execution_hash.as_str(),
+            &[&matching],
+        );
+
+        assert_eq!(
+            headers
+                .get("x-sie-model-revision")
+                .and_then(|value| value.to_str().ok()),
+            Some(execution_hash.as_str())
+        );
+
+        headers.clear();
+        insert_model_revision_header(&mut headers, None, execution_hash.as_str(), &[&matching]);
+        assert!(headers.get("x-sie-model-revision").is_none());
+
+        let mismatching: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-2",
+            "success": true,
+            "executed_bundle_config_hash": "b".repeat(64)
+        }))
+        .unwrap();
+        insert_model_revision_header(
+            &mut headers,
+            Some(revision),
+            execution_hash.as_str(),
+            &[&matching, &mismatching],
+        );
+        assert!(headers.get("x-sie-model-revision").is_none());
+
+        insert_model_revision_header(&mut headers, Some(revision), &"b".repeat(64), &[&matching]);
+        assert!(headers.get("x-sie-model-revision").is_none());
+
+        let legacy: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-1",
+            "success": true
+        }))
+        .unwrap();
+        insert_model_revision_header(
+            &mut headers,
+            Some(revision),
+            execution_hash.as_str(),
+            &[&legacy],
+        );
+        assert!(headers.get("x-sie-model-revision").is_none());
+
+        let mut stream_outcome = crate::queue::streaming::StreamOutcome {
+            text: "ok".to_string(),
+            finish_reason: "stop".to_string(),
+            usage: None,
+            attempt_id: "attempt-1".to_string(),
+            ttft_ms: None,
+            tpot_ms: None,
+            error: None,
+            tool_calls: None,
+            logprobs: None,
+            candidates: Vec::new(),
+            executed_bundle_config_hash: Some(execution_hash.clone()),
+            execution_identity_sha256: None,
+        };
+        insert_stream_model_revision_header(
+            &mut headers,
+            Some(revision),
+            execution_hash.as_str(),
+            &stream_outcome,
+        );
+        assert_eq!(
+            headers
+                .get("x-sie-model-revision")
+                .and_then(|value| value.to_str().ok()),
+            Some(execution_hash.as_str())
+        );
+
+        headers.clear();
+        stream_outcome.executed_bundle_config_hash = Some("b".repeat(64));
+        insert_stream_model_revision_header(
+            &mut headers,
+            Some(revision),
+            execution_hash.as_str(),
+            &stream_outcome,
+        );
+        assert!(headers.get("x-sie-model-revision").is_none());
+
+        stream_outcome.executed_bundle_config_hash = None;
+        insert_stream_model_revision_header(
+            &mut headers,
+            Some(revision),
+            execution_hash.as_str(),
+            &stream_outcome,
+        );
+        assert!(headers.get("x-sie-model-revision").is_none());
+    }
+
+    #[test]
+    fn test_execution_identity_header_requires_valid_unanimous_worker_proof() {
+        let identity = "c".repeat(64);
+        let matching: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-1",
+            "success": true,
+            "execution_identity_sha256": identity.clone()
+        }))
+        .unwrap();
+        let same: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-2",
+            "success": true,
+            "execution_identity_sha256": identity.clone()
+        }))
+        .unwrap();
+        let mismatching: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-3",
+            "success": true,
+            "execution_identity_sha256": "d".repeat(64)
+        }))
+        .unwrap();
+        let missing: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-4",
+            "success": true
+        }))
+        .unwrap();
+        let malformed: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-5",
+            "success": true,
+            "execution_identity_sha256": "C".repeat(64)
+        }))
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        insert_execution_identity_header(&mut headers, &[&matching, &same]);
+        assert_eq!(
+            headers
+                .get("x-sie-execution-identity-sha256")
+                .and_then(|value| value.to_str().ok()),
+            Some(identity.as_str())
+        );
+
+        for results in [
+            vec![&matching, &mismatching],
+            vec![&matching, &missing],
+            vec![&malformed],
+            Vec::new(),
+        ] {
+            headers.clear();
+            insert_execution_identity_header(&mut headers, &results);
+            assert!(headers.get("x-sie-execution-identity-sha256").is_none());
+        }
+
+        let mut outcome = crate::queue::streaming::StreamOutcome {
+            text: "ok".to_string(),
+            finish_reason: "stop".to_string(),
+            usage: None,
+            attempt_id: "attempt-1".to_string(),
+            ttft_ms: None,
+            tpot_ms: None,
+            error: None,
+            tool_calls: None,
+            logprobs: None,
+            candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: Some(identity.clone()),
+        };
+        insert_stream_execution_identity_header(&mut headers, &outcome);
+        assert_eq!(
+            headers
+                .get("x-sie-execution-identity-sha256")
+                .and_then(|value| value.to_str().ok()),
+            Some(identity.as_str())
+        );
+
+        headers.clear();
+        outcome.execution_identity_sha256 = Some("bad".to_string());
+        insert_stream_execution_identity_header(&mut headers, &outcome);
+        assert!(headers.get("x-sie-execution-identity-sha256").is_none());
     }
 
     #[tokio::test]
@@ -10550,6 +13768,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn dispatch_size_marker_maps_to_typed_payload_too_large() {
+        use crate::queue::dispatch::DispatchPayloadTooLarge;
+
+        let error = DispatchPayloadTooLarge::from("managed dispatch frame exceeds 67108864 bytes");
+        let response = dispatch_rejection_response("extract", &error.into()).expect("known marker");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["detail"]["code"], err_code::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            body["detail"]["message"],
+            "managed dispatch frame exceeds 67108864 bytes"
+        );
+        assert!(
+            dispatch_rejection_response(
+                "extract",
+                &DispatchError::Other("transport failed".to_string()),
+            )
+            .is_none(),
+            "untyped transport failures must remain retryable service errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_invalid_input_and_backpressure_have_typed_responses() {
+        use crate::queue::dispatch::{DispatchBackpressure, DispatchInvalidInput};
+
+        let invalid = dispatch_rejection_response(
+            "extract",
+            &DispatchInvalidInput::from("malformed audio").into(),
+        )
+        .expect("typed invalid input");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let saturated = dispatch_rejection_response(
+            "extract",
+            &DispatchBackpressure::from("audio preflight busy").into(),
+        )
+        .expect("typed backpressure");
+        assert_eq!(saturated.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            saturated
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some(BACKPRESSURE_RETRY_AFTER),
+        );
+    }
+
     #[test]
     fn test_retry_after_defaults_pin_wire_values() {
         // These Retry-After wire strings are part of the capacity contract
@@ -10581,10 +13853,30 @@ mod tests {
         .unwrap();
         let mut gpu_profile_map = std::collections::HashMap::new();
         gpu_profile_map.insert("l4".to_string(), "l4".to_string());
+        let configured_physical_lanes = crate::state::demand_tracker::PhysicalLaneCatalog::try_new(
+            [
+                ("default", "l4", "default"),
+                (
+                    "test-zero-assigned-native",
+                    "l4",
+                    "test-zero-assigned-native-bundle",
+                ),
+                (
+                    "test-zero-assigned-openai",
+                    "l4",
+                    "test-zero-assigned-openai-bundle",
+                ),
+                ("test-bp-demand-pool", "l4", "test-bp-demand-bundle"),
+            ]
+            .into_iter()
+            .map(|(pool, profile, bundle)| {
+                crate::state::demand_tracker::PhysicalLane::try_new(pool, profile, bundle).unwrap()
+            }),
+        )
+        .unwrap();
         let config = crate::config::Config {
             host: "127.0.0.1".to_string(),
             port: 0,
-            metrics_port: None,
             worker_urls: Vec::new(),
             use_kubernetes: false,
             k8s_namespace: "default".to_string(),
@@ -10608,6 +13900,7 @@ mod tests {
             stream_max_age_s: 300,
             configured_gpus: vec!["l4".to_string()],
             gpu_profile_map,
+            configured_physical_lanes: configured_physical_lanes.clone(),
             static_queue_pools: Vec::new(),
             model_aliases: std::collections::HashMap::new(),
             bundles_dir: bundles_dir.path().to_string_lossy().to_string(),
@@ -10616,6 +13909,7 @@ mod tests {
             config_service_token: None,
             config_modal_proxy_token: None,
             payload_store_url: String::new(),
+            public_base_url: None,
         };
         AppState {
             registry: Arc::new(WorkerRegistry::new(Duration::from_secs(30), None)),
@@ -10627,8 +13921,1247 @@ mod tests {
             )),
             pool_manager,
             work_publisher: None,
-            demand_tracker: Arc::new(crate::state::demand_tracker::DemandTracker::new()),
+            lane_backlog_source: None,
+            demand_tracker: Arc::new(crate::state::demand_tracker::DemandTracker::new(
+                configured_physical_lanes,
+            )),
             config_epoch: crate::state::config_epoch::ConfigEpoch::new(),
+            model_access_policy: None,
+        }
+    }
+
+    struct FixedGenerationRoutePolicy {
+        customer_model: &'static str,
+        intent: GenerationRequestIntent,
+        route: GovernedGenerationRoute,
+    }
+
+    struct PermissiveModelAccessPolicy {
+        generation: Arc<dyn crate::server::GenerationRoutePolicy>,
+    }
+
+    impl crate::server::ModelAccessPolicy for PermissiveModelAccessPolicy {
+        fn visible(&self, _resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            true
+        }
+
+        fn generation_route_policy(&self) -> Option<&dyn crate::server::GenerationRoutePolicy> {
+            Some(self.generation.as_ref())
+        }
+    }
+
+    fn install_generation_policy(
+        state: &mut AppState,
+        policy: Arc<dyn crate::server::GenerationRoutePolicy>,
+    ) {
+        state.model_access_policy =
+            Some(Arc::new(PermissiveModelAccessPolicy { generation: policy }));
+    }
+
+    impl crate::server::GenerationRoutePolicy for FixedGenerationRoutePolicy {
+        fn resolve(
+            &self,
+            customer_model: &str,
+            intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            (customer_model == self.customer_model && intent == self.intent)
+                .then(|| self.route.clone())
+        }
+    }
+
+    fn fixed_generation_route(
+        model: &str,
+        intent: GenerationRequestIntent,
+    ) -> FixedGenerationRoutePolicy {
+        FixedGenerationRoutePolicy {
+            customer_model: "vendor/model",
+            intent,
+            route: GovernedGenerationRoute {
+                model: model.to_string(),
+                bundle: "default".to_string(),
+                pool: "default".to_string(),
+                machine_profile: "l4".to_string(),
+            },
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingGenerationRoutePolicy {
+        calls: std::sync::Mutex<Vec<(String, GenerationRequestIntent)>>,
+    }
+
+    impl RecordingGenerationRoutePolicy {
+        fn take_calls(&self) -> Vec<(String, GenerationRequestIntent)> {
+            std::mem::take(&mut *self.calls.lock().expect("route-policy call lock"))
+        }
+    }
+
+    impl crate::server::GenerationRoutePolicy for RecordingGenerationRoutePolicy {
+        fn resolve(
+            &self,
+            customer_model: &str,
+            intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            self.calls
+                .lock()
+                .expect("route-policy call lock")
+                .push((customer_model.to_string(), intent));
+            let model = match intent {
+                GenerationRequestIntent::Default => customer_model.to_string(),
+                GenerationRequestIntent::Grammar => format!("{customer_model}:no-spec"),
+            };
+            Some(GovernedGenerationRoute {
+                model,
+                bundle: "default".to_string(),
+                pool: "default".to_string(),
+                machine_profile: "l4".to_string(),
+            })
+        }
+    }
+
+    async fn recording_generation_state() -> (Arc<AppState>, Arc<RecordingGenerationRoutePolicy>) {
+        let pool_manager = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        pool_manager.create_default_pool().await;
+        let mut state = admission_test_state(pool_manager);
+        state.model_registry = Arc::new(grammar_routed_registry());
+        let policy = Arc::new(RecordingGenerationRoutePolicy::default());
+        install_generation_policy(&mut state, policy.clone());
+        (Arc::new(state), policy)
+    }
+
+    struct EmptyGenerationRoutePolicy;
+
+    impl crate::server::GenerationRoutePolicy for EmptyGenerationRoutePolicy {
+        fn resolve(
+            &self,
+            _customer_model: &str,
+            _intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            None
+        }
+    }
+
+    struct MappedGenerationRoutePolicy {
+        routes:
+            std::collections::HashMap<(String, GenerationRequestIntent), GovernedGenerationRoute>,
+    }
+
+    impl crate::server::GenerationRoutePolicy for MappedGenerationRoutePolicy {
+        fn resolve(
+            &self,
+            customer_model: &str,
+            intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            self.routes
+                .get(&(customer_model.to_string(), intent))
+                .cloned()
+        }
+    }
+
+    #[derive(Default)]
+    struct GenerationTargetProbe {
+        targets: std::sync::Mutex<Vec<(String, PublishTarget)>>,
+    }
+
+    impl GenerationTargetProbe {
+        fn take_target(&self) -> (String, PublishTarget) {
+            self.targets
+                .lock()
+                .expect("target probe lock")
+                .pop()
+                .expect("generation publish target")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkDispatcher for GenerationTargetProbe {
+        async fn publish_work(
+            self: Arc<Self>,
+            _target: PublishTarget,
+            _admission_pool: &str,
+            _endpoint: &str,
+            _model: &str,
+            _engine: &str,
+            _bundle_config_hash: &str,
+            _items: Vec<rmpv::Value>,
+            _params: &WorkParams,
+        ) -> Result<
+            (
+                String,
+                oneshot::Receiver<Vec<WorkResult>>,
+                DispatchDurability,
+            ),
+            DispatchError,
+        > {
+            unreachable!("generation target probe only accepts generation")
+        }
+
+        async fn publish_generate_streaming(
+            &self,
+            target: PublishTarget,
+            display_model: &str,
+            _engine: &str,
+            _bundle_config_hash: &str,
+            _params: &WorkParams,
+            _admission_pool: &str,
+        ) -> Result<
+            (
+                String,
+                oneshot::Receiver<StreamOutcome>,
+                Arc<Notify>,
+                DispatchDurability,
+            ),
+            String,
+        > {
+            self.targets
+                .lock()
+                .expect("target probe lock")
+                .push((display_model.to_string(), target));
+            let (tx, rx) = oneshot::channel();
+            tx.send(StreamOutcome {
+                text: "ok".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: Some(crate::queue::streaming::UsageBlock {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                }),
+                attempt_id: "attempt-1".to_string(),
+                ttft_ms: None,
+                tpot_ms: None,
+                error: None,
+                tool_calls: None,
+                logprobs: None,
+                candidates: Vec::new(),
+                executed_bundle_config_hash: None,
+                execution_identity_sha256: None,
+            })
+            .expect("target probe outcome receiver");
+            Ok((
+                "request-1".to_string(),
+                rx,
+                Arc::new(Notify::new()),
+                DispatchDurability::accepted(),
+            ))
+        }
+
+        async fn publish_generate_streaming_sse(
+            &self,
+            _target: PublishTarget,
+            _display_model: &str,
+            _engine: &str,
+            _bundle_config_hash: &str,
+            _params: &WorkParams,
+            _admission_pool: &str,
+        ) -> Result<
+            (
+                String,
+                oneshot::Receiver<StreamOutcome>,
+                broadcast::Receiver<ChunkEnvelope>,
+                DispatchDurability,
+            ),
+            String,
+        > {
+            unreachable!("bounded target proof uses non-streaming requests")
+        }
+
+        async fn publish_cancel(&self, _request_id: &str) {}
+
+        fn begin_work_abandonment(&self, _request_id: &str) -> bool {
+            true
+        }
+
+        async fn finish_work_abandonment(&self, _request_id: &str) {}
+
+        async fn republish_to_pool(
+            &self,
+            _request_id: &str,
+            _reason: &'static str,
+        ) -> Result<bool, String> {
+            Ok(false)
+        }
+
+        async fn republish_pending_result_to_pool(
+            &self,
+            _request_id: &str,
+            _reason: &'static str,
+        ) -> Result<bool, String> {
+            Ok(false)
+        }
+
+        fn drop_pending_stream(&self, _request_id: &str) {}
+
+        fn pending_generation_snapshot(&self) -> PendingGenerationSnapshot {
+            PendingGenerationSnapshot::default()
+        }
+
+        fn pending_generation_for_model(&self, _model_id: &str) -> PendingGenerationSnapshot {
+            PendingGenerationSnapshot::default()
+        }
+
+        fn stream_observed_first_chunk(&self, _request_id: &str) -> bool {
+            false
+        }
+
+        fn stream_chunk_timing(
+            &self,
+            _request_id: &str,
+        ) -> Option<(Option<Instant>, Option<Instant>)> {
+            None
+        }
+    }
+
+    fn mixed_governed_registry() -> crate::state::model_registry::ModelRegistry {
+        use crate::types::model::{ModelConfig, ProfileConfig};
+
+        let registry = grammar_routed_registry();
+        let mut profiles = std::collections::HashMap::new();
+        profiles.insert(
+            "default".to_string(),
+            ProfileConfig {
+                adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
+                max_batch_tokens: Some(4096),
+                compute_precision: None,
+                adapter_options: None,
+                extends: None,
+            },
+        );
+        let tasks: serde_yaml::Value =
+            serde_yaml::from_str("generate:\n  capabilities:\n    grammar: [json_schema]\n")
+                .expect("generation task");
+        registry
+            .add_model_config(ModelConfig {
+                name: "org/h".to_string(),
+                hf_revision: None,
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles,
+                inputs: None,
+                max_sequence_length: None,
+                tasks: Some(tasks),
+            })
+            .expect("h100 test model");
+        registry
+    }
+
+    async fn mixed_governed_generation_state(
+        reverse_insertion: bool,
+    ) -> (Arc<AppState>, Arc<GenerationTargetProbe>) {
+        let profiles = vec![
+            "l4".to_string(),
+            "a100-80gb".to_string(),
+            "h100".to_string(),
+        ];
+        let pool_manager = Arc::new(PoolManager::new(profiles.clone()));
+        pool_manager.create_default_pool().await;
+        let mut state = admission_test_state(pool_manager);
+        state.model_registry = Arc::new(mixed_governed_registry());
+
+        let physical_lanes = crate::state::demand_tracker::PhysicalLaneCatalog::try_from_raw(
+            profiles.iter().map(|profile| {
+                (
+                    "default".to_string(),
+                    profile.clone(),
+                    "default".to_string(),
+                )
+            }),
+        )
+        .expect("mixed physical lanes");
+        let config = Arc::make_mut(&mut state.config);
+        config.configured_gpus = profiles.clone();
+        config.gpu_profile_map = profiles
+            .iter()
+            .map(|profile| (profile.clone(), profile.clone()))
+            .collect();
+        config.configured_physical_lanes = physical_lanes.clone();
+        state.demand_tracker = Arc::new(crate::state::demand_tracker::DemandTracker::new(
+            physical_lanes,
+        ));
+
+        let mut routes = vec![
+            (
+                ("org/g".to_string(), GenerationRequestIntent::Default),
+                GovernedGenerationRoute {
+                    model: "org/g".to_string(),
+                    bundle: "default".to_string(),
+                    pool: "default".to_string(),
+                    machine_profile: "l4".to_string(),
+                },
+            ),
+            (
+                ("org/g".to_string(), GenerationRequestIntent::Grammar),
+                GovernedGenerationRoute {
+                    model: "org/g:no-spec".to_string(),
+                    bundle: "default".to_string(),
+                    pool: "default".to_string(),
+                    machine_profile: "a100-80gb".to_string(),
+                },
+            ),
+            (
+                ("org/h".to_string(), GenerationRequestIntent::Default),
+                GovernedGenerationRoute {
+                    model: "org/h".to_string(),
+                    bundle: "default".to_string(),
+                    pool: "default".to_string(),
+                    machine_profile: "h100".to_string(),
+                },
+            ),
+        ];
+        if reverse_insertion {
+            routes.reverse();
+        }
+        install_generation_policy(
+            &mut state,
+            Arc::new(MappedGenerationRoutePolicy {
+                routes: routes.into_iter().collect(),
+            }),
+        );
+
+        let (bundle_hash, _) = state
+            .model_registry
+            .bundle_execution_evidence("default", "default", "org/g");
+        let mut worker_profiles = profiles;
+        if reverse_insertion {
+            worker_profiles.reverse();
+        }
+        for profile in worker_profiles {
+            let mut status = worker_msg("default", &profile, "default");
+            status.name = format!("worker-{profile}");
+            status.bundle_config_hash = bundle_hash.clone();
+            state
+                .registry
+                .update_worker(&format!("http://worker-{profile}:8080"), status)
+                .await;
+        }
+
+        let probe = Arc::new(GenerationTargetProbe::default());
+        state.work_publisher = Some(probe.clone());
+        (Arc::new(state), probe)
+    }
+
+    fn assert_generation_target(
+        target: (String, PublishTarget),
+        display_model: &str,
+        model: &str,
+        profile: &str,
+    ) {
+        assert_eq!(target.0, display_model);
+        let (pool, machine_profile, bundle, dispatch_model) = match target.1 {
+            PublishTarget::Worker {
+                pool,
+                machine_profile,
+                bundle,
+                model,
+                ..
+            }
+            | PublishTarget::Pool {
+                pool,
+                machine_profile,
+                bundle,
+                model,
+            } => (pool, machine_profile, bundle, model),
+        };
+        assert_eq!(
+            (
+                pool.as_str(),
+                machine_profile.as_str(),
+                bundle.as_str(),
+                dispatch_model.as_str()
+            ),
+            ("default", profile, "default", model)
+        );
+    }
+
+    fn json_request(uri: &str, body: serde_json::Value) -> Request {
+        Request::builder()
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).expect("request JSON")))
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn governed_native_generate_routes_default_and_grammar_before_worker_lookup() {
+        for (body, expected_intent) in [
+            (
+                serde_json::json!({"prompt": "hello", "max_new_tokens": 4}),
+                GenerationRequestIntent::Default,
+            ),
+            (
+                serde_json::json!({
+                    "prompt": "hello",
+                    "max_new_tokens": 4,
+                    "grammar": {"json_schema": {"type": "object"}}
+                }),
+                GenerationRequestIntent::Grammar,
+            ),
+        ] {
+            let (state, policy) = recording_generation_state().await;
+            let response = proxy_request(
+                State(state),
+                json_request("/v1/generate/org%2Fg", body),
+                "generate",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                policy.take_calls(),
+                vec![("org/g".to_string(), expected_intent)]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn governed_openai_generation_routes_chat_completions_and_responses() {
+        let cases = [
+            (
+                "/v1/chat/completions",
+                serde_json::json!({
+                    "model": "org/g",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4
+                }),
+                GenerationRequestIntent::Default,
+            ),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({
+                    "model": "org/g",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "answer",
+                            "schema": {"type": "object"}
+                        }
+                    }
+                }),
+                GenerationRequestIntent::Grammar,
+            ),
+            (
+                "/v1/completions",
+                serde_json::json!({
+                    "model": "org/g",
+                    "prompt": "hello",
+                    "max_tokens": 4
+                }),
+                GenerationRequestIntent::Default,
+            ),
+            (
+                "/v1/responses",
+                serde_json::json!({
+                    "model": "org/g",
+                    "input": "hello",
+                    "max_output_tokens": 4
+                }),
+                GenerationRequestIntent::Default,
+            ),
+        ];
+
+        for (uri, body, expected_intent) in cases {
+            let (state, policy) = recording_generation_state().await;
+            let request = json_request(uri, body);
+            let response = match uri {
+                "/v1/chat/completions" => proxy_chat(State(state), request).await,
+                "/v1/completions" => proxy_completions(State(state), request).await,
+                "/v1/responses" => proxy_responses(State(state), request).await,
+                _ => unreachable!("bounded OpenAI generation test surface"),
+            };
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                policy.take_calls(),
+                vec![("org/g".to_string(), expected_intent)],
+                "governed route lookup for {uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn governed_generation_dispatch_targets_are_exact_and_order_independent() {
+        for reverse_insertion in [false, true] {
+            let (state, probe) = mixed_governed_generation_state(reverse_insertion).await;
+
+            let response = proxy_request(
+                State(Arc::clone(&state)),
+                json_request(
+                    "/v1/generate/org%2Fg",
+                    serde_json::json!({"prompt": "hello", "max_new_tokens": 4}),
+                ),
+                "generate",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_generation_target(probe.take_target(), "org/g", "org/g", "l4");
+
+            let response = proxy_request(
+                State(Arc::clone(&state)),
+                json_request(
+                    "/v1/generate/org%2Fg",
+                    serde_json::json!({
+                        "prompt": "hello",
+                        "max_new_tokens": 4,
+                        "grammar": {"json_schema": {"type": "object"}}
+                    }),
+                ),
+                "generate",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_generation_target(probe.take_target(), "org/g", "org/g:no-spec", "a100-80gb");
+
+            let response = proxy_chat(
+                State(Arc::clone(&state)),
+                json_request(
+                    "/v1/chat/completions",
+                    serde_json::json!({
+                        "model": "org/h",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_tokens": 4
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_generation_target(probe.take_target(), "org/h", "org/h", "h100");
+
+            let response = proxy_chat(
+                State(Arc::clone(&state)),
+                json_request(
+                    "/v1/chat/completions",
+                    serde_json::json!({
+                        "model": "org/g",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_tokens": 4,
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "answer",
+                                "schema": {"type": "object"}
+                            }
+                        }
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_generation_target(probe.take_target(), "org/g", "org/g:no-spec", "a100-80gb");
+
+            let response = proxy_completions(
+                State(Arc::clone(&state)),
+                json_request(
+                    "/v1/completions",
+                    serde_json::json!({
+                        "model": "org/g",
+                        "prompt": "hello",
+                        "max_tokens": 4
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_generation_target(probe.take_target(), "org/g", "org/g", "l4");
+
+            let response = proxy_responses(
+                State(Arc::clone(&state)),
+                json_request(
+                    "/v1/responses",
+                    serde_json::json!({
+                        "model": "org/h",
+                        "input": "hello",
+                        "max_output_tokens": 4
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_generation_target(probe.take_target(), "org/h", "org/h", "h100");
+        }
+    }
+
+    #[tokio::test]
+    async fn self_hosted_native_grammar_dispatches_profile_variant_after_one_parse() {
+        let (state, probe) = mixed_governed_generation_state(false).await;
+        let mut state = Arc::try_unwrap(state).unwrap_or_else(|_| panic!("unique test state"));
+        state.model_access_policy = None;
+        let state = Arc::new(state);
+        let mut request = json_request(
+            "/v1/generate/org%2Fg",
+            serde_json::json!({
+                "prompt": "hello",
+                "max_new_tokens": 4,
+                "grammar": {"json_schema": {"type": "object"}}
+            }),
+        );
+        request.headers_mut().insert(
+            "x-sie-machine-profile",
+            HeaderValue::from_static("a100-80gb"),
+        );
+
+        let response = proxy_request(State(state), request, "generate").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_generation_target(probe.take_target(), "org/g", "org/g:no-spec", "a100-80gb");
+    }
+
+    #[tokio::test]
+    async fn installed_empty_generation_policy_fails_native_and_openai_closed() {
+        let pool_manager = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        pool_manager.create_default_pool().await;
+        let mut state = admission_test_state(pool_manager);
+        state.model_registry = Arc::new(grammar_routed_registry());
+        install_generation_policy(&mut state, Arc::new(EmptyGenerationRoutePolicy));
+        let state = Arc::new(state);
+
+        let native = proxy_request(
+            State(Arc::clone(&state)),
+            json_request(
+                "/v1/generate/org%2Fg",
+                serde_json::json!({"prompt": "hello", "max_new_tokens": 4}),
+            ),
+            "generate",
+        )
+        .await;
+        assert_eq!(native.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let chat = proxy_chat(
+            State(state),
+            json_request(
+                "/v1/chat/completions",
+                serde_json::json!({
+                    "model": "org/g",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(chat.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn governed_generation_route_is_exact_and_missing_keys_fail_closed() {
+        let pool_manager = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        let mut state = admission_test_state(pool_manager);
+        install_generation_policy(
+            &mut state,
+            Arc::new(fixed_generation_route(
+                "vendor/model:no-spec",
+                GenerationRequestIntent::Grammar,
+            )),
+        );
+
+        let route = governed_generation_route(
+            &state,
+            "vendor/model",
+            "vendor/model:no-spec",
+            GenerationRequestIntent::Grammar,
+        )
+        .expect("matching governed route")
+        .expect("installed policy route");
+        assert_eq!(route.machine_profile, "l4");
+        assert_eq!(route.model, "vendor/model:no-spec");
+
+        let missing = governed_generation_route(
+            &state,
+            "vendor/model",
+            "vendor/model",
+            GenerationRequestIntent::Default,
+        )
+        .expect_err("a governed mapping miss must not fall back");
+        assert_eq!(missing.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn governed_generation_route_adopts_omitted_headers_and_rejects_wrong_gpu() {
+        let pool_manager = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        let state = admission_test_state(pool_manager);
+        let route = fixed_generation_route("vendor/model", GenerationRequestIntent::Default).route;
+
+        let adopted = governed_profile_and_pool(&state, &HeaderMap::new(), &route)
+            .expect("omitted overrides adopt the compiled route");
+        assert_eq!(adopted.gpu, "l4");
+        assert_eq!(adopted.pool_name, "default");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-sie-machine-profile", HeaderValue::from_static("h100"));
+        let rejected = match governed_profile_and_pool(&state, &headers, &route) {
+            Err(response) => response,
+            Ok(_) => panic!("a conflicting GPU pin must not select a sibling lane"),
+        };
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+        let mut conflicting_pool_headers = HeaderMap::new();
+        conflicting_pool_headers.insert(
+            "x-sie-machine-profile",
+            HeaderValue::from_static("default/l4"),
+        );
+        conflicting_pool_headers.insert("x-sie-pool", HeaderValue::from_static("other"));
+        let rejected = match governed_profile_and_pool(&state, &conflicting_pool_headers, &route) {
+            Err(response) => response,
+            Ok(_) => panic!("conflicting inline and explicit pool pins must fail"),
+        };
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+        for header in ["x-sie-machine-profile", "x-sie-pool"] {
+            let mut invalid_utf8 = HeaderMap::new();
+            invalid_utf8.insert(
+                header,
+                HeaderValue::from_bytes(b"\xff").expect("opaque header"),
+            );
+            let rejected = match governed_profile_and_pool(&state, &invalid_utf8, &route) {
+                Err(response) => response,
+                Ok(_) => panic!("invalid UTF-8 routing headers must fail"),
+            };
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn governed_native_route_rejects_incompatible_compiled_bundle() {
+        let pool_manager = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        let mut state = admission_test_state(pool_manager);
+        let mut policy = fixed_generation_route("vendor/model", GenerationRequestIntent::Default);
+        policy.route.bundle = "missing-bundle".to_string();
+        install_generation_policy(&mut state, Arc::new(policy));
+
+        let result = resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/generate/vendor%2Fmodel",
+            "generate",
+            Some(GenerationRequestIntent::Default),
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("incompatible compiled bundle must fail closed"),
+            Err(response) => assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE),
+        }
+    }
+
+    /// A #1841 test policy: reports `visible` per the flag and marks any
+    /// `org-`-prefixed id as sealed. Lets the native resolve path's sealed branch be
+    /// exercised (and its ordering behind the visibility gate be locked) without the
+    /// managed crate.
+    struct SealedTestPolicy {
+        visible: bool,
+    }
+    impl crate::server::ModelAccessPolicy for SealedTestPolicy {
+        fn visible(&self, _resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            self.visible
+        }
+        fn sealed_route(
+            &self,
+            resolved_model: &str,
+            _ext: &axum::http::Extensions,
+        ) -> Option<crate::server::SealedRoute> {
+            resolved_model
+                .starts_with("org-")
+                .then(|| crate::server::SealedRoute {
+                    engine: "sealed".to_string(),
+                    bundle: "sealed".to_string(),
+                    pool: "sealed".to_string(),
+                    machine_profile: "sealed".to_string(),
+                })
+        }
+    }
+
+    /// A #2542 test policy: refuses one model outright and records every id it
+    /// was asked about, so a test can prove WHICH string the seam consults —
+    /// the caller's, or the one the registry resolved.
+    struct RefusingTestPolicy {
+        refuse: &'static str,
+        visible: bool,
+        asked: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl RefusingTestPolicy {
+        fn new(refuse: &'static str) -> Self {
+            Self {
+                refuse,
+                visible: true,
+                asked: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().expect("asked lock").clone()
+        }
+    }
+    impl crate::server::ModelAccessPolicy for RefusingTestPolicy {
+        fn visible(&self, _resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            self.visible
+        }
+        fn serving_refusal(
+            &self,
+            resolved_model: &str,
+            _ext: &axum::http::Extensions,
+        ) -> Option<Response> {
+            self.asked
+                .lock()
+                .expect("asked lock")
+                .push(resolved_model.to_string());
+            (resolved_model == self.refuse)
+                .then(|| (StatusCode::FORBIDDEN, "refused").into_response())
+        }
+        /// Seals every `org-` id, exactly like [`SealedTestPolicy`], so ONE
+        /// stub can both refuse and seal the same model — the only way to
+        /// observe which of the two branches `resolve_routing` reaches first.
+        fn sealed_route(
+            &self,
+            resolved_model: &str,
+            _ext: &axum::http::Extensions,
+        ) -> Option<crate::server::SealedRoute> {
+            resolved_model
+                .starts_with("org-")
+                .then(|| crate::server::SealedRoute {
+                    engine: "sealed".to_string(),
+                    bundle: "sealed".to_string(),
+                    pool: "sealed".to_string(),
+                    machine_profile: "sealed".to_string(),
+                })
+        }
+    }
+
+    fn state_with_alias(alias: &str, target: &str) -> AppState {
+        let pm = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        let mut state = admission_test_state(pm);
+        let mut config = (*state.config).clone();
+        config
+            .model_aliases
+            .insert(alias.to_string(), target.to_string());
+        state.config = Arc::new(config);
+        state
+    }
+
+    /// A registry holding exactly one real model, in temp dirs the CALLER owns.
+    ///
+    /// `admission_test_state`'s dirs are dropped with it, so its registry is
+    /// permanently empty — which silently routes an unknown model to the
+    /// empty-registry bundle fallback instead of the `has_any_models` 404. The
+    /// #2542 no-oracle tests compare against that 404, so they need a registry
+    /// that is populated and stays on disk.
+    fn populated_registry() -> (Arc<ModelRegistry>, tempfile::TempDir, tempfile::TempDir) {
+        let bundles_dir = tempfile::TempDir::new().unwrap();
+        let models_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            bundles_dir.path().join("default.yaml"),
+            "name: default\nadapters:\n  - module\ndefault: true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            models_dir.path().join("known.yaml"),
+            "sie_id: known/model\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.sentence_transformer:Adapter\n",
+        )
+        .unwrap();
+        let registry = Arc::new(ModelRegistry::new(
+            bundles_dir.path(),
+            models_dir.path(),
+            true,
+        ));
+        assert!(registry.has_any_models());
+        (registry, bundles_dir, models_dir)
+    }
+
+    fn hiding_policy() -> Arc<RefusingTestPolicy> {
+        Arc::new(RefusingTestPolicy {
+            refuse: "nothing-is-refused-here",
+            visible: false,
+            asked: Arc::new(std::sync::Mutex::new(Vec::new())),
+        })
+    }
+
+    /// #2542: the seam asks about the model the ALIAS resolves to, not the string
+    /// the caller sent. An edge gate can only ever see `fast`, so this is the
+    /// vantage point that makes the refusal authoritative.
+    #[tokio::test]
+    async fn resolve_routing_refuses_a_model_the_policy_will_not_serve() {
+        let mut state = state_with_alias("fast", "vendor/refused");
+        let policy = Arc::new(RefusingTestPolicy::new("vendor/refused"));
+        state.model_access_policy =
+            Some(Arc::clone(&policy) as Arc<dyn crate::server::ModelAccessPolicy>);
+        let result = resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/encode/fast",
+            "encode",
+            None,
+        )
+        .await;
+        match result {
+            Ok(_) => panic!("a refused model must never reach a lane"),
+            Err(resp) => assert_eq!(resp.status(), StatusCode::FORBIDDEN),
+        }
+        assert_eq!(policy.asked(), vec!["vendor/refused".to_string()]);
+    }
+
+    /// The other direction: an alias onto a model the policy serves resolves and
+    /// routes normally, so the verdict is a decision and not a blanket deny.
+    #[tokio::test]
+    async fn resolve_routing_serves_an_alias_the_policy_allows() {
+        let mut state = state_with_alias("quick", "vendor/served");
+        let policy = Arc::new(RefusingTestPolicy::new("vendor/refused"));
+        state.model_access_policy =
+            Some(Arc::clone(&policy) as Arc<dyn crate::server::ModelAccessPolicy>);
+        let routing = resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/encode/quick",
+            "encode",
+            None,
+        )
+        .await
+        .expect("an allowed alias must route");
+        assert_eq!(routing.model_name, "vendor/served");
+        assert_eq!(policy.asked(), vec!["vendor/served".to_string()]);
+    }
+
+    /// Ordering lock (#1841 × #2542): a caller who may not SEE the model is
+    /// answered the flat 404 and the serving verdict is never consulted, so a
+    /// refusal shape can never become a cross-org existence oracle.
+    #[tokio::test]
+    async fn resolve_routing_runs_the_visibility_gate_before_the_serving_refusal() {
+        let pm = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        let mut state = admission_test_state(pm);
+        let mut policy = RefusingTestPolicy::new("org-7/support-embedder");
+        policy.visible = false;
+        let policy = Arc::new(policy);
+        state.model_access_policy =
+            Some(Arc::clone(&policy) as Arc<dyn crate::server::ModelAccessPolicy>);
+        let result = resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/encode/org-7/support-embedder",
+            "encode",
+            None,
+        )
+        .await;
+        match result {
+            Ok(_) => panic!("a hidden model must 404"),
+            Err(resp) => assert_eq!(resp.status(), StatusCode::NOT_FOUND),
+        }
+        assert!(
+            policy.asked().is_empty(),
+            "the serving verdict must not run for a model the caller cannot see"
+        );
+    }
+
+    /// The OTHER half of that ordering (#2542): the refusal runs BEFORE the
+    /// sealed branch, so a refused model cannot reach a lane.
+    ///
+    /// The sealed branch returns `Ok(RoutingResult)` — a dispatch — so a
+    /// reorder would not merely change a status code, it would serve a model
+    /// the deployment refuses. One policy that both refuses and seals the same
+    /// `org-N/` id is the only way to observe which branch wins; separate
+    /// stubs, each exercising its own branch, would pass either way.
+    #[tokio::test]
+    async fn resolve_routing_refuses_before_it_seals() {
+        let pm = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        let mut state = admission_test_state(pm);
+        let policy = Arc::new(RefusingTestPolicy::new("org-7/support-embedder"));
+        state.model_access_policy =
+            Some(Arc::clone(&policy) as Arc<dyn crate::server::ModelAccessPolicy>);
+        let result = resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/encode/org-7/support-embedder",
+            "encode",
+            None,
+        )
+        .await;
+        match result {
+            Ok(routing) => panic!("a refused model reached the {} lane", routing.engine),
+            Err(resp) => assert_eq!(resp.status(), StatusCode::FORBIDDEN),
+        }
+
+        // The control: the SAME policy still seals an org id it does not
+        // refuse, so the assertion above is about ordering and not about the
+        // sealed branch having been disabled.
+        let sealed = resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/encode/org-7/other-embedder",
+            "encode",
+            None,
+        )
+        .await
+        .expect("an unrefused org model still seals");
+        assert_eq!(sealed.engine, "sealed");
+    }
+
+    /// #2542 no-oracle rendering, native surface. An operator alias whose target
+    /// sits in another org's namespace must not be readable out of the 404 body,
+    /// and the refusal must be **byte-identical** to the one an absent model
+    /// gets — otherwise the wording alone tells a tenant that something is there
+    /// and hidden. Both halves are asserted, because fixing only the id would
+    /// leave the message template as the oracle.
+    #[tokio::test]
+    async fn resolve_routing_cross_org_404_reveals_nothing_the_caller_did_not_send() {
+        let (registry, _bundles, _models) = populated_registry();
+
+        let mut hidden_state = state_with_alias("support", "org-42/support-gen");
+        hidden_state.model_registry = Arc::clone(&registry);
+        hidden_state.model_access_policy =
+            Some(hiding_policy() as Arc<dyn crate::server::ModelAccessPolicy>);
+        let hidden = match resolve_routing(
+            &hidden_state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/encode/support",
+            "encode",
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("a hidden model must 404"),
+            Err(resp) => *resp,
+        };
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+        let hidden_body = to_bytes(hidden.into_body(), 64 * 1024).await.expect("body");
+        let hidden_body = String::from_utf8(hidden_body.to_vec()).expect("utf8");
+        assert!(
+            !hidden_body.contains("org-42"),
+            "the alias target must not appear in the 404 body: {hidden_body}"
+        );
+        assert!(hidden_body.contains("support"), "{hidden_body}");
+
+        // The SAME request with no policy installed, against the same populated
+        // registry: `support` resolves to a model that simply is not there. The
+        // two responses must be one response — otherwise the wording alone tells
+        // the caller that something exists and is hidden from them.
+        let mut absent_state = state_with_alias("support", "org-42/support-gen");
+        absent_state.model_registry = registry;
+        absent_state.model_access_policy = None;
+        let absent = match resolve_routing(
+            &absent_state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/encode/support",
+            "encode",
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("an absent model must 404 against a populated registry"),
+            Err(resp) => *resp,
+        };
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+        let absent_body = to_bytes(absent.into_body(), 64 * 1024).await.expect("body");
+        assert_eq!(
+            hidden_body,
+            String::from_utf8(absent_body.to_vec()).expect("utf8"),
+            "hidden and absent must be one response"
+        );
+    }
+
+    /// The same rule on the OpenAI body seam, and the same
+    /// hidden-vs-absent equality — this time against a REAL populated registry,
+    /// so the comparison is with the live `has_any_models` 404 rather than a
+    /// fallback branch.
+    #[tokio::test]
+    async fn resolve_model_and_bundle_cross_org_404_is_the_absent_model_404() {
+        // A populated registry so the unknown-model arm (not the empty-registry
+        // fallback) is what an absent model reaches.
+        let (registry, _bundles, _models) = populated_registry();
+
+        let mut state = state_with_alias("support", "org-42/support-gen");
+        state.model_registry = Arc::clone(&registry);
+        state.model_access_policy =
+            Some(hiding_policy() as Arc<dyn crate::server::ModelAccessPolicy>);
+        let hidden = resolve_model_and_bundle(&state, "support", &axum::http::Extensions::new())
+            .expect_err("a hidden model must 404");
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+
+        let mut open = state_with_alias("support", "org-42/support-gen");
+        open.model_registry = registry;
+        open.model_access_policy = None;
+        let absent = resolve_model_and_bundle(&open, "support", &axum::http::Extensions::new())
+            .expect_err("an unresolvable model must 404");
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+
+        let hidden = to_bytes(hidden.into_body(), 64 * 1024).await.expect("body");
+        let absent = to_bytes(absent.into_body(), 64 * 1024).await.expect("body");
+        let hidden = String::from_utf8(hidden.to_vec()).expect("utf8");
+        assert!(
+            !hidden.contains("org-42"),
+            "the alias target must not appear in the 404 body: {hidden}"
+        );
+        assert_eq!(
+            hidden,
+            String::from_utf8(absent.to_vec()).expect("utf8"),
+            "hidden and absent must be one response"
+        );
+    }
+
+    /// The OpenAI body-model seam carries the same verdict on the same resolved
+    /// id — one hook, both routing entry points, no per-surface copy.
+    #[test]
+    fn resolve_model_and_bundle_refuses_a_model_the_policy_will_not_serve() {
+        let mut state = state_with_alias("fast", "vendor/refused");
+        let policy = Arc::new(RefusingTestPolicy::new("vendor/refused"));
+        state.model_access_policy =
+            Some(Arc::clone(&policy) as Arc<dyn crate::server::ModelAccessPolicy>);
+        let err = resolve_model_and_bundle(&state, "fast", &axum::http::Extensions::new())
+            .expect_err("a refused model must never resolve to a bundle");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(policy.asked(), vec!["vendor/refused".to_string()]);
+
+        let (model, _bundle) =
+            resolve_model_and_bundle(&state, "vendor/served", &axum::http::Extensions::new())
+                .expect("an allowed model still resolves");
+        assert_eq!(model, "vendor/served");
+    }
+
+    #[tokio::test]
+    async fn resolve_routing_sends_owned_custom_model_to_the_sealed_lane() {
+        let pm = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        let mut state = admission_test_state(pm);
+        state.model_access_policy = Some(Arc::new(SealedTestPolicy { visible: true }));
+        let routing = resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/encode/org-7/support-embedder",
+            "encode",
+            None,
+        )
+        .await
+        .expect("a visible sealed model must route, not error");
+        // Bundle-less sealed dispatch: `engine` is the sealed marker and the lane
+        // tuple is synthetic. bundle/profile resolution was SKIPPED — the model is
+        // not in the registry, so the normal path would have returned MODEL_NOT_FOUND.
+        assert_eq!(routing.engine, "sealed");
+        assert_eq!(routing.bundle, "sealed");
+        assert_eq!(routing.pool_name, "sealed");
+        assert_eq!(routing.gpu, "sealed");
+        assert_eq!(routing.model_name, "org-7/support-embedder");
+    }
+
+    #[tokio::test]
+    async fn resolve_routing_runs_visibility_gate_before_the_sealed_branch() {
+        // Ordering lock: a non-visible caller is 404'd BEFORE the sealed branch, so a
+        // cross-org / anonymous caller can never coerce engine="sealed".
+        let pm = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        let mut state = admission_test_state(pm);
+        state.model_access_policy = Some(Arc::new(SealedTestPolicy { visible: false }));
+        let result = resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/encode/org-7/support-embedder",
+            "encode",
+            None,
+        )
+        .await;
+        match result {
+            Ok(_) => panic!("a hidden model must 404, never reach the sealed branch"),
+            Err(resp) => assert_eq!(resp.status(), StatusCode::NOT_FOUND),
         }
     }
 
@@ -10733,15 +15266,13 @@ mod tests {
         assert_eq!(value["error"]["code"], err_code::PROVISIONING);
         assert!(value.get("status").is_none());
 
-        let pending_demand = metrics::PENDING_DEMAND
-            .with_label_values(&[demand_pool, "l4", bundle])
-            .get();
-        assert!((pending_demand - 1.0).abs() < f64::EPSILON);
-        state.demand_tracker.clear(demand_pool, "l4", bundle);
-        let cleared_demand = metrics::PENDING_DEMAND
-            .with_label_values(&[demand_pool, "l4", bundle])
-            .get();
-        assert!((cleared_demand - 0.0).abs() < f64::EPSILON);
+        let lane = state
+            .demand_tracker
+            .resolve_lane(demand_pool, "l4", bundle)
+            .unwrap();
+        assert!(state.demand_tracker.active_lanes().contains(&lane));
+        state.demand_tracker.clear(&lane);
+        assert!(!state.demand_tracker.active_lanes().contains(&lane));
     }
 
     #[tokio::test]
@@ -10787,7 +15318,11 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("Provisioning in progress"));
-        state.demand_tracker.clear(demand_pool, "l4", bundle);
+        let lane = state
+            .demand_tracker
+            .resolve_lane(demand_pool, "l4", bundle)
+            .unwrap();
+        state.demand_tracker.clear(&lane);
     }
 
     #[tokio::test]
@@ -10798,36 +15333,144 @@ mod tests {
         let pm = Arc::new(PoolManager::new(vec!["l4".to_string()]));
         let state = admission_test_state(Arc::clone(&pm));
         let bp_pool = "test-bp-demand-pool";
-        let other_pool = "test-other-failure-pool";
         let bundle = "test-bp-demand-bundle";
+        let lane = state
+            .demand_tracker
+            .resolve_lane(bp_pool, "l4", bundle)
+            .unwrap();
 
         let retry = record_publish_failure(
             &state,
-            bp_pool,
-            "l4",
-            bundle,
+            &lane,
             "stream publish failed: backpressure (lane saturated)",
         );
         assert_eq!(retry, Some(BACKPRESSURE_RETRY_AFTER));
-        let demand = metrics::PENDING_DEMAND
-            .with_label_values(&[bp_pool, "l4", bundle])
-            .get();
         assert!(
-            (demand - 1.0).abs() < f64::EPSILON,
+            state.demand_tracker.active_lanes().contains(&lane),
             "backpressure must record pending demand for KEDA"
         );
-        state.demand_tracker.clear(bp_pool, "l4", bundle);
+        state.demand_tracker.clear(&lane);
 
-        let retry_other =
-            record_publish_failure(&state, other_pool, "l4", bundle, "connection reset by peer");
+        let retry_other = record_publish_failure(&state, &lane, "connection reset by peer");
         assert_eq!(retry_other, None);
-        let demand_other = metrics::PENDING_DEMAND
-            .with_label_values(&[other_pool, "l4", bundle])
-            .get();
         assert!(
-            (demand_other - 0.0).abs() < f64::EPSILON,
+            state.demand_tracker.active_lanes().is_empty(),
             "a generic publish failure must not record demand"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_dispatch_clears_only_the_exact_confirmed_lane() {
+        let state = admission_test_state(Arc::new(PoolManager::new(vec!["l4".to_string()])));
+        let confirmed = state
+            .demand_tracker
+            .resolve_lane("test-bp-demand-pool", "l4", "test-bp-demand-bundle")
+            .unwrap();
+        let retained = state
+            .demand_tracker
+            .resolve_lane(
+                "test-zero-assigned-native",
+                "l4",
+                "test-zero-assigned-native-bundle",
+            )
+            .unwrap();
+        assert!(state.demand_tracker.record(&retained));
+        assert!(state.demand_tracker.record(&confirmed));
+        let handoff = state
+            .demand_tracker
+            .begin_dispatch_handoff(&confirmed)
+            .unwrap();
+
+        state
+            .demand_tracker
+            .finish_dispatch_handoff(&confirmed, handoff, true);
+
+        assert_eq!(state.demand_tracker.active_lanes(), vec![retained]);
+    }
+
+    #[tokio::test]
+    async fn failed_or_unavailable_durability_retains_pending_demand() {
+        let state = admission_test_state(Arc::new(PoolManager::new(vec!["l4".to_string()])));
+        let lane = state
+            .demand_tracker
+            .resolve_lane("test-bp-demand-pool", "l4", "test-bp-demand-bundle")
+            .unwrap();
+
+        for durability in [
+            DispatchDurability::from_result(Err("broker rejected publish".to_string())),
+            DispatchDurability::from_result(Err("durability monitor unavailable".to_string())),
+        ] {
+            let guard = DispatchHandoffGuard::new(Arc::clone(&state.demand_tracker), lane.clone())
+                .expect("configured lane handoff");
+            guard.finish(durability.wait().await.is_ok());
+            assert_eq!(state.demand_tracker.active_lanes(), vec![lane.clone()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_durability_task_retains_pending_demand() {
+        let state = admission_test_state(Arc::new(PoolManager::new(vec!["l4".to_string()])));
+        let lane = state
+            .demand_tracker
+            .resolve_lane("test-bp-demand-pool", "l4", "test-bp-demand-bundle")
+            .unwrap();
+        let guard = DispatchHandoffGuard::new(Arc::clone(&state.demand_tracker), lane.clone())
+            .expect("configured lane handoff");
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(state.demand_tracker.active_lanes(), vec![lane]);
+    }
+
+    #[tokio::test]
+    async fn adversarial_unique_profile_headers_cannot_create_keda_demand() {
+        let state = Arc::new(admission_test_state(Arc::new(PoolManager::new(vec![
+            "l4".to_string()
+        ]))));
+
+        for index in 0..2_048 {
+            let request = Request::builder()
+                .uri("/v1/encode/org/model")
+                .header("x-sie-machine-profile", format!("caller-{index}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = proxy_request(State(Arc::clone(&state)), request, "encode").await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["detail"]["code"], err_code::GPU_NOT_CONFIGURED);
+        }
+
+        assert!(
+            state.demand_tracker.active_lanes().is_empty(),
+            "caller-controlled machine-profile headers must never create KEDA lanes"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_configured_profile_catalog_is_fail_closed_not_allow_all() {
+        let mut state = admission_test_state(Arc::new(PoolManager::new(Vec::new())));
+        let config = Arc::make_mut(&mut state.config);
+        config.configured_gpus.clear();
+        config.gpu_profile_map.clear();
+        let state = Arc::new(state);
+        let request = Request::builder()
+            .uri("/v1/encode/org/model")
+            .header("x-sie-machine-profile", "caller-selected-gpu")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = proxy_request(State(Arc::clone(&state)), request, "encode").await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["detail"]["code"], err_code::GPU_NOT_CONFIGURED);
+        assert!(state.demand_tracker.active_lanes().is_empty());
     }
 
     #[tokio::test]
@@ -11121,6 +15764,131 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_params_from_json_maps_native_images_to_worker_messages() {
+        for stream in [false, true] {
+            let body = serde_json::json!({
+                "prompt": "Read the image",
+                "images": [{"data": "aGVsbG8=", "format": "PNG"}],
+                "max_new_tokens": 8,
+                "stream": stream,
+            });
+            let params = _expect_generate_ok(&body);
+            assert_eq!(params.stream, stream);
+            assert!(generate_params_have_images(&params));
+            let publisher::GenerateInput::Messages { messages } = params.input else {
+                panic!("image-native generate must use the worker message path")
+            };
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, "user");
+            assert_eq!(messages[0].content, "Read the image");
+            let images = messages[0].images.as_ref().expect("one image");
+            assert_eq!(images[0].data, "aGVsbG8=");
+            assert_eq!(images[0].format.as_deref(), Some("png"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_params_from_json_rejects_malformed_native_images() {
+        let too_many = serde_json::Value::Array(vec![
+            serde_json::json!({"data": "aGk="});
+            MAX_GENERATE_IMAGES + 1
+        ]);
+        let cases = [
+            (serde_json::json!([]), "images"),
+            (serde_json::json!([{"data": "!!!"}]), "images[0].data"),
+            (serde_json::json!([{"data": "aGk"}]), "images[0].data"),
+            (serde_json::json!([{"data": "__8="}]), "images[0].data"),
+            (serde_json::json!([{"data": "AB=="}]), "images[0].data"),
+            (
+                serde_json::json!([{"data": "aGVsbG8=", "url": "https://example.com/image.png"}]),
+                "images[0].url",
+            ),
+            (
+                serde_json::json!([{"data": "aGVsbG8=", "format": "png;bad"}]),
+                "images[0].format",
+            ),
+            (too_many, "images"),
+        ];
+        for (images, expected_param) in cases {
+            let body = serde_json::json!({
+                "prompt": "Read",
+                "images": images,
+                "max_new_tokens": 8,
+            });
+            let error = _expect_generate_err(&body).await;
+            assert_eq!(error["error"]["param"], expected_param);
+        }
+    }
+
+    #[test]
+    fn test_generate_params_from_rmpv_maps_native_images_to_worker_messages() {
+        let body = serde_json::json!({
+            "prompt": "Read",
+            "images": [{"data": "aGVsbG8=", "format": "png"}],
+            "max_new_tokens": 8,
+        });
+        let rmpv::Value::Map(map) = json_to_rmpv(body) else {
+            panic!("object must map")
+        };
+        let params = generate_params_from_rmpv(&map)
+            .expect("valid request")
+            .expect("generate params");
+        assert!(generate_params_have_images(&params));
+    }
+
+    #[test]
+    fn test_generate_native_image_validation_has_json_msgpack_parity() {
+        let body = serde_json::json!({
+            "prompt": "Read",
+            "images": [{"data": "aGk"}],
+            "max_new_tokens": 8,
+        });
+        assert!(generate_params_from_json(&body).is_err());
+        let rmpv::Value::Map(map) = json_to_rmpv(body) else {
+            panic!("object must map")
+        };
+        assert!(generate_params_from_rmpv(&map).is_err());
+    }
+
+    #[test]
+    fn test_generate_native_images_fail_closed_on_model_capability() {
+        let image_body = serde_json::json!({
+            "prompt": "Read",
+            "images": [{"data": "aGk="}],
+            "max_new_tokens": 8,
+        });
+        let image_params = _expect_generate_ok(&image_body);
+        assert!(!native_generate_image_input_allowed(
+            Some(&image_params),
+            false
+        ));
+        assert!(native_generate_image_input_allowed(
+            Some(&image_params),
+            true
+        ));
+
+        let text_params = _expect_generate_ok(&serde_json::json!({
+            "prompt": "Read",
+            "max_new_tokens": 8,
+        }));
+        assert!(native_generate_image_input_allowed(
+            Some(&text_params),
+            false
+        ));
+    }
+
+    #[test]
+    fn test_generate_native_image_caps_fit_bounded_aggregate_body() {
+        assert!(native_generate_image_encoded_size_allowed(
+            MAX_GENERATE_IMAGE_BASE64_CHARS
+        ));
+        assert!(!native_generate_image_encoded_size_allowed(0));
+        assert!(!native_generate_image_encoded_size_allowed(
+            MAX_GENERATE_IMAGE_BASE64_CHARS + 1
+        ));
+    }
+
+    #[test]
     fn test_generate_params_from_json_rejects_empty_prompt() {
         let body = serde_json::json!({"prompt": "", "max_new_tokens": 8});
         _expect_generate_none(&body);
@@ -11324,7 +16092,7 @@ mod tests {
         let body = serde_json::json!({
             "prompt": "x",
             "max_new_tokens": 4,
-            "seed": 42_u64,
+            "seed": 42_i64,
         });
         let params = _expect_generate_ok(&body);
         assert_eq!(params.seed, Some(42));
@@ -11332,15 +16100,46 @@ mod tests {
 
     #[test]
     fn test_generate_params_from_json_forwards_negative_seed() {
-        // Mirrors the chat parser: negative seeds are reinterpreted as
-        // u64. Some SDKs round-trip ``-1`` and we keep parity.
+        // Signed seeds must reach the worker unchanged. Reinterpreting ``-1``
+        // as u64::MAX overflows pinned SGLang's torch.int64 seed tensor.
         let body = serde_json::json!({
             "prompt": "x",
             "max_new_tokens": 4,
             "seed": -1_i64,
         });
         let params = _expect_generate_ok(&body);
-        assert_eq!(params.seed, Some(u64::MAX));
+        assert_eq!(params.seed, Some(-1));
+    }
+
+    #[test]
+    fn test_parse_seed_field_preserves_signed_i64_boundaries() {
+        for seed in [i64::MIN, -1, 0, i64::MAX] {
+            let value = serde_json::json!(seed);
+            assert_eq!(
+                parse_seed_field(Some(&value)).expect("valid seed"),
+                Some(seed)
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_seed_field_rejects_values_outside_signed_i64() {
+        let above_max = serde_json::json!(i64::MAX as u64 + 1);
+        let below_min: serde_json::Value = serde_json::from_str("-9223372036854775809").unwrap();
+        assert!(parse_seed_field(Some(&above_max)).is_err());
+        assert!(parse_seed_field(Some(&below_min)).is_err());
+    }
+
+    #[test]
+    fn test_parse_seed_field_rejects_non_integer_types() {
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+            serde_json::json!({}),
+        ] {
+            assert!(parse_seed_field(Some(&value)).is_err());
+        }
     }
 
     #[tokio::test]
@@ -11409,6 +16208,7 @@ mod tests {
         let body = serde_json::json!({
             "prompt": "x",
             "max_new_tokens": 4,
+            "stream": true,
             "logprobs": true,
             "top_logprobs": 5,
         });
@@ -11424,6 +16224,7 @@ mod tests {
         let body = serde_json::json!({
             "prompt": "x",
             "max_new_tokens": 4,
+            "stream": true,
             "logprobs": false,
         });
         let params = _expect_generate_ok(&body);
@@ -11436,6 +16237,7 @@ mod tests {
         let body = serde_json::json!({
             "prompt": "x",
             "max_new_tokens": 4,
+            "stream": true,
             "logprobs": "yes",
         });
         let v = _expect_generate_err(&body).await;
@@ -11448,6 +16250,7 @@ mod tests {
         let body = serde_json::json!({
             "prompt": "x",
             "max_new_tokens": 4,
+            "stream": true,
             "logprobs": true,
             "top_logprobs": 50,
         });
@@ -11463,6 +16266,7 @@ mod tests {
         let body = serde_json::json!({
             "prompt": "x",
             "max_new_tokens": 4,
+            "stream": true,
             "top_logprobs": 3,
         });
         let v = _expect_generate_err(&body).await;
@@ -11475,6 +16279,7 @@ mod tests {
         let body = serde_json::json!({
             "prompt": "x",
             "max_new_tokens": 4,
+            "stream": true,
             "logprobs": false,
             "top_logprobs": 3,
         });
@@ -11482,100 +16287,41 @@ mod tests {
         assert_eq!(v["error"]["param"], "top_logprobs");
     }
 
-    #[test]
-    fn test_generate_params_from_json_forwards_n() {
-        let body = serde_json::json!({
-            "prompt": "x",
-            "max_new_tokens": 4,
-            "n": 4,
-        });
-        let params = _expect_generate_ok(&body);
-        assert_eq!(params.n, Some(4));
+    #[tokio::test]
+    async fn test_generate_params_from_json_rejects_lossy_native_fields() {
+        for (field, value) in [
+            ("n", serde_json::json!(2)),
+            ("best_of", serde_json::json!(4)),
+            ("stream_options", serde_json::json!({"include_usage": true})),
+        ] {
+            let mut body = serde_json::json!({
+                "prompt": "x",
+                "max_new_tokens": 4,
+                "stream": true,
+            });
+            body[field] = value;
+            let v = _expect_generate_err(&body).await;
+            assert_eq!(v["error"]["param"], field);
+            assert_eq!(v["error"]["code"], "unsupported_field");
+        }
     }
 
     #[tokio::test]
-    async fn test_generate_params_from_json_rejects_n_zero() {
-        let body = serde_json::json!({
-            "prompt": "x",
-            "max_new_tokens": 4,
-            "n": 0,
-        });
-        let v = _expect_generate_err(&body).await;
-        assert_eq!(v["error"]["param"], "n");
-        assert_eq!(v["error"]["code"], "invalid_request");
-    }
-
-    #[tokio::test]
-    async fn test_generate_params_from_json_rejects_n_non_integer() {
-        let body = serde_json::json!({
-            "prompt": "x",
-            "max_new_tokens": 4,
-            "n": "many",
-        });
-        let v = _expect_generate_err(&body).await;
-        assert_eq!(v["error"]["param"], "n");
-    }
-
-    #[tokio::test]
-    async fn test_generate_params_from_json_rejects_n_too_large() {
-        let body = serde_json::json!({
-            "prompt": "x",
-            "max_new_tokens": 4,
-            "n": 1000,
-        });
-        let v = _expect_generate_err(&body).await;
-        assert_eq!(v["error"]["param"], "n");
-    }
-
-    #[test]
-    fn test_generate_params_from_json_forwards_best_of_ge_n() {
-        let body = serde_json::json!({
-            "prompt": "x",
-            "max_new_tokens": 4,
-            "n": 2,
-            "best_of": 4,
-        });
-        let params = _expect_generate_ok(&body);
-        assert_eq!(params.n, Some(2));
-        assert_eq!(params.best_of, Some(4));
-    }
-
-    #[tokio::test]
-    async fn test_generate_params_from_json_rejects_best_of_lt_n() {
-        let body = serde_json::json!({
-            "prompt": "x",
-            "max_new_tokens": 4,
-            "n": 4,
-            "best_of": 2,
-        });
-        let v = _expect_generate_err(&body).await;
-        assert_eq!(v["error"]["param"], "best_of");
-        assert_eq!(v["error"]["code"], "invalid_request");
-    }
-
-    #[tokio::test]
-    async fn test_generate_params_from_json_rejects_best_of_with_stream() {
-        // Mirrors chat + OpenAI: ``best_of > 1`` is non-streaming-only.
-        let body = serde_json::json!({
-            "prompt": "x",
-            "max_new_tokens": 4,
-            "best_of": 4,
-            "stream": true,
-        });
-        let v = _expect_generate_err(&body).await;
-        assert_eq!(v["error"]["param"], "best_of");
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_generate_params_from_json_rejects_best_of_out_of_range() {
-        let body = serde_json::json!({
-            "prompt": "x",
-            "max_new_tokens": 4,
-            "best_of": 0,
-        });
-        let v = _expect_generate_err(&body).await;
-        assert_eq!(v["error"]["param"], "best_of");
+    async fn test_generate_params_from_json_rejects_blocking_logprobs() {
+        for field in ["logprobs", "top_logprobs"] {
+            let mut body = serde_json::json!({
+                "prompt": "x",
+                "max_new_tokens": 4,
+            });
+            body[field] = if field == "logprobs" {
+                serde_json::json!(true)
+            } else {
+                serde_json::json!(3)
+            };
+            let v = _expect_generate_err(&body).await;
+            assert_eq!(v["error"]["param"], field);
+            assert_eq!(v["error"]["code"], "unsupported_field");
+        }
     }
 
     #[test]
@@ -11689,11 +16435,10 @@ mod tests {
         let body = vec![
             (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
             (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
-            (rmpv::Value::from("seed"), rmpv::Value::from(7u64)),
+            (rmpv::Value::from("seed"), rmpv::Value::from(-7i64)),
+            (rmpv::Value::from("stream"), rmpv::Value::Boolean(true)),
             (rmpv::Value::from("logprobs"), rmpv::Value::Boolean(true)),
             (rmpv::Value::from("top_logprobs"), rmpv::Value::from(3u32)),
-            (rmpv::Value::from("n"), rmpv::Value::from(2u32)),
-            (rmpv::Value::from("best_of"), rmpv::Value::from(4u32)),
             (
                 rmpv::Value::from("lora_adapter"),
                 rmpv::Value::from("my-adapter"),
@@ -11702,12 +16447,30 @@ mod tests {
         let params = generate_params_from_rmpv(&body)
             .expect("rmpv ok")
             .expect("some params");
-        assert_eq!(params.seed, Some(7));
+        assert_eq!(params.seed, Some(-7));
         assert_eq!(params.logprobs, Some(true));
         assert_eq!(params.top_logprobs, Some(3));
-        assert_eq!(params.n, Some(2));
-        assert_eq!(params.best_of, Some(4));
+        assert_eq!(params.n, None);
+        assert_eq!(params.best_of, None);
         assert_eq!(params.lora_adapter.as_deref(), Some("my-adapter"));
+    }
+
+    #[test]
+    fn test_generate_params_from_rmpv_rejects_non_signed_integer_seed() {
+        for seed in [
+            rmpv::Value::F64(f64::NAN),
+            rmpv::Value::F64(f64::INFINITY),
+            rmpv::Value::from(u64::MAX),
+            rmpv::Value::Boolean(true),
+            rmpv::Value::from("42"),
+        ] {
+            let body = vec![
+                (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+                (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+                (rmpv::Value::from("seed"), seed),
+            ];
+            assert!(generate_params_from_rmpv(&body).is_err());
+        }
     }
 
     #[tokio::test]
@@ -11730,10 +16493,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_generate_params_from_rmpv_rejects_lossy_native_fields() {
+        for (field, value) in [
+            ("n", rmpv::Value::from(2)),
+            ("best_of", rmpv::Value::from(2)),
+            (
+                "stream_options",
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::from("include_usage"),
+                    rmpv::Value::Boolean(true),
+                )]),
+            ),
+        ] {
+            let body = vec![
+                (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+                (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+                (rmpv::Value::from(field), value),
+            ];
+            let resp = generate_params_from_rmpv(&body).expect_err("expected 400");
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v["error"]["param"], field);
+            assert_eq!(v["error"]["code"], "unsupported_field");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_params_from_rmpv_rejects_blocking_logprobs() {
+        let body = vec![
+            (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+            (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+            (rmpv::Value::from("logprobs"), rmpv::Value::Boolean(true)),
+        ];
+        let resp = generate_params_from_rmpv(&body).expect_err("expected 400");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["param"], "logprobs");
+        assert_eq!(v["error"]["code"], "unsupported_field");
+    }
+
+    #[tokio::test]
     async fn test_generate_params_from_rmpv_rejects_top_logprobs_without_logprobs() {
         let body = vec![
             (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
             (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+            (rmpv::Value::from("stream"), rmpv::Value::Boolean(true)),
             (rmpv::Value::from("top_logprobs"), rmpv::Value::from(3u32)),
         ];
         let resp = generate_params_from_rmpv(&body).expect_err("expected 400");
@@ -11745,6 +16553,197 @@ mod tests {
         assert_eq!(v["error"]["code"], "invalid_request");
     }
 
+    #[tokio::test]
+    async fn test_generate_json_rejects_present_wrong_types() {
+        for (field, value) in [
+            ("temperature", serde_json::json!("0.7")),
+            ("top_p", serde_json::json!(true)),
+            ("routing_key", serde_json::json!(42)),
+            ("prompt_cache_key", serde_json::json!([])),
+            ("safety_identifier", serde_json::json!({})),
+        ] {
+            let mut body = serde_json::json!({"prompt": "hi", "max_new_tokens": 8});
+            body[field] = value;
+            let error = _expect_generate_err(&body).await;
+            assert_eq!(error["error"]["param"], field);
+            assert_eq!(error["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[test]
+    fn test_generate_json_accepts_schema_nullable_fields() {
+        let body = serde_json::json!({
+            "prompt": "hi",
+            "max_new_tokens": 8,
+            "temperature": null,
+            "top_p": null,
+            "routing_key": null,
+            "prompt_cache_key": null,
+            "safety_identifier": null,
+        });
+        let work = work_params_from_json(&body, "generate").expect("valid work params");
+        let generate = work.generate.expect("generate params");
+        assert_eq!(generate.temperature, None);
+        assert_eq!(generate.top_p, None);
+        assert_eq!(work.routing_key, None);
+        assert_eq!(work.prompt_cache_key, None);
+    }
+
+    #[test]
+    fn test_generate_json_options_default_profile_is_consumed() {
+        let body = serde_json::json!({
+            "prompt": "hi",
+            "max_new_tokens": 8,
+            "options": {"profile": "default", "overall_timeout_s": 20},
+        });
+        let work = work_params_from_json(&body, "generate").expect("valid work params");
+        assert_eq!(
+            work.options,
+            Some(serde_json::json!({"overall_timeout_s": 20}))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_json_options_fail_closed_before_dispatch() {
+        for (options, parameter) in [
+            (serde_json::json!({"unknown": true}), "options.unknown"),
+            (
+                serde_json::json!({"default_sampling": {"temperature": "0.7"}}),
+                "options.default_sampling.temperature",
+            ),
+            (
+                serde_json::json!({"overall_timeout_s": null}),
+                "options.overall_timeout_s",
+            ),
+        ] {
+            let body = serde_json::json!({"prompt": "hi", "max_new_tokens": 8, "options": options});
+            let error = _expect_generate_err(&body).await;
+            assert_eq!(error["error"]["param"], parameter);
+            assert!(matches!(
+                error["error"]["code"].as_str(),
+                Some("invalid_request" | "unsupported_field")
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_json_rejects_non_default_options_profile() {
+        let body = serde_json::json!({
+            "prompt": "hi",
+            "max_new_tokens": 8,
+            "options": {"profile": "fast"},
+        });
+        let QueueParseError::PreBuilt(response) =
+            work_params_from_json(&body, "generate").unwrap_err()
+        else {
+            panic!("expected prebuilt response")
+        };
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["error"]["param"], "options.profile");
+        assert!(error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("model:profile"));
+    }
+
+    #[test]
+    fn test_generate_rmpv_rejects_wrong_sampler_types() {
+        for (field, value) in [
+            ("temperature", rmpv::Value::from("0.7")),
+            ("top_p", rmpv::Value::Boolean(true)),
+        ] {
+            let body = vec![
+                (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+                (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+                (rmpv::Value::from(field), value),
+            ];
+            assert!(generate_params_from_rmpv(&body).is_err());
+        }
+    }
+
+    #[test]
+    fn test_generate_rmpv_accepts_schema_nullable_fields() {
+        let body = vec![
+            (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+            (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+            (rmpv::Value::from("temperature"), rmpv::Value::Nil),
+            (rmpv::Value::from("top_p"), rmpv::Value::Nil),
+            (rmpv::Value::from("routing_key"), rmpv::Value::Nil),
+            (rmpv::Value::from("prompt_cache_key"), rmpv::Value::Nil),
+            (rmpv::Value::from("safety_identifier"), rmpv::Value::Nil),
+        ];
+        let generate = generate_params_from_rmpv(&body)
+            .expect("valid msgpack")
+            .expect("generate params");
+        assert_eq!(generate.temperature, None);
+        assert_eq!(generate.top_p, None);
+        assert_eq!(generate.routing_key, None);
+        assert_eq!(generate.prompt_cache_key, None);
+    }
+
+    #[test]
+    fn test_generate_rmpv_rejects_non_string_and_duplicate_keys() {
+        let non_string = vec![
+            (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+            (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+            (
+                rmpv::Value::Binary(b"temperature".to_vec()),
+                rmpv::Value::from(0.7),
+            ),
+        ];
+        assert!(generate_params_from_rmpv(&non_string).is_err());
+
+        let duplicate = vec![
+            (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+            (rmpv::Value::from("prompt"), rmpv::Value::from("bye")),
+            (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+        ];
+        assert!(generate_params_from_rmpv(&duplicate).is_err());
+    }
+
+    #[test]
+    fn test_generate_rmpv_rejects_nested_duplicate_keys_without_narrowing_schema_keys() {
+        let duplicate_nested = vec![
+            (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+            (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+            (
+                rmpv::Value::from("options"),
+                rmpv::Value::Map(vec![
+                    (
+                        rmpv::Value::from("overall_timeout_s"),
+                        rmpv::Value::from(10),
+                    ),
+                    (
+                        rmpv::Value::from("overall_timeout_s"),
+                        rmpv::Value::from(20),
+                    ),
+                ]),
+            ),
+        ];
+        assert!(generate_params_from_rmpv(&duplicate_nested).is_err());
+
+        let arbitrary_schema_key = vec![
+            (rmpv::Value::from("prompt"), rmpv::Value::from("hi")),
+            (rmpv::Value::from("max_new_tokens"), rmpv::Value::from(8u32)),
+            (
+                rmpv::Value::from("grammar"),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::from("json_schema"),
+                    rmpv::Value::Map(vec![
+                        (rmpv::Value::from("type"), rmpv::Value::from("object")),
+                        (
+                            rmpv::Value::from("x-vendor-key"),
+                            rmpv::Value::from("preserved"),
+                        ),
+                    ]),
+                )]),
+            ),
+        ];
+        assert!(generate_params_from_rmpv(&arbitrary_schema_key).is_ok());
+    }
     // ── build_generate_success_body ───────────────────────────────
 
     #[test]
@@ -11773,6 +16772,8 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let body = build_generate_success_body("Qwen/Qwen3-4B-Instruct", &[&r], false);
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -11809,15 +16810,6 @@ mod tests {
         std::env::set_var(&key, "-3");
         assert_eq!(env_seconds_or(&key, 5.0), 5.0);
         std::env::remove_var(&key);
-    }
-
-    #[test]
-    fn test_generation_timeouts_metric_accepts_kind_labels() {
-        for kind in ["first_chunk", "inter_chunk", "overall"] {
-            metrics::GENERATION_TIMEOUTS
-                .with_label_values(&["m", "p", kind])
-                .inc();
-        }
     }
 
     // ── ADR-0003: generation timeout authority + invariant ────────
@@ -11861,25 +16853,6 @@ mod tests {
 
     // ── StreamCancelGuard (streaming cancel-on-drop) ──────────────
     //
-    // Constructing a real ``WorkPublisher`` in a unit test requires a
-    // live JetStream context, which is out of scope here. The metric
-    // mechanics + label set are exercised below; the end-to-end
-    // cancel-on-disconnect path is covered by the integration tests
-    // booted with a real NATS server (Phase J).
-
-    #[test]
-    fn test_generation_cancelled_metric_labels_are_registered() {
-        // Both stages must accept label writes without panicking
-        // (validates the CounterVec was registered with the expected
-        // label cardinality).
-        metrics::GENERATION_CANCELLED
-            .with_label_values(&["m", "p", "before_first_chunk"])
-            .inc();
-        metrics::GENERATION_CANCELLED
-            .with_label_values(&["m", "p", "mid_stream"])
-            .inc();
-    }
-
     // ── build_generate_success_body_v2 ────────────────────────────
 
     #[test]
@@ -11899,6 +16872,8 @@ mod tests {
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let body = build_generate_success_body_v2("Qwen/Qwen3-4B-Instruct", &outcome, false);
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -11993,7 +16968,7 @@ mod tests {
     // SIE-native `{detail:{…}}`), preserving status + `Retry-After`.
 
     #[tokio::test]
-    async fn test_translate_inner_encode_error_detail_to_openai_envelope() {
+    async fn test_translate_inner_compat_error_detail_to_openai_envelope() {
         let mut resp = (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json_detail(err_code::QUEUE_UNAVAILABLE, "pool saturated")),
@@ -12001,7 +16976,7 @@ mod tests {
             .into_response();
         resp.headers_mut()
             .insert("retry-after", HeaderValue::from_static("5"));
-        let out = translate_inner_encode_error(resp).await;
+        let out = translate_inner_compat_error(resp).await;
         assert_eq!(out.status(), StatusCode::SERVICE_UNAVAILABLE);
         // Retry-After survives the rewrite so SDK auto-retry still fires.
         assert_eq!(out.headers().get("retry-after").unwrap(), "5");
@@ -12016,7 +16991,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_translate_inner_encode_pool_capacity_error_to_openai_envelope() {
+    async fn test_translate_inner_compat_pool_capacity_error_to_openai_envelope() {
         let resp = (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json_detail(
@@ -12025,7 +17000,7 @@ mod tests {
             )),
         )
             .into_response();
-        let out = translate_inner_encode_error(resp).await;
+        let out = translate_inner_compat_error(resp).await;
         assert_eq!(out.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             out.headers().get("retry-after").is_none(),
@@ -12047,7 +17022,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_translate_inner_encode_provisioning_error_to_openai_503() {
+    async fn test_translate_inner_compat_provisioning_error_to_openai_503() {
         let mut resp = (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
@@ -12063,7 +17038,7 @@ mod tests {
             HeaderValue::from_static(PROVISIONING_RETRY_AFTER),
         );
 
-        let out = translate_inner_encode_error(resp).await;
+        let out = translate_inner_compat_error(resp).await;
         assert_eq!(out.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             out.headers().get("retry-after").unwrap(),
@@ -12088,7 +17063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_translate_inner_encode_error_falls_back_to_status_for_error_shape() {
+    async fn test_translate_inner_compat_error_falls_back_to_status_for_error_shape() {
         // 502/503 SDK-stable bodies are `{error:{…}}` with no `detail.code`;
         // the HTTP status drives classification and the message is preserved.
         let resp = (
@@ -12096,7 +17071,7 @@ mod tests {
             Json(json!({"error": {"message": "model 'x' not found"}})),
         )
             .into_response();
-        let out = translate_inner_encode_error(resp).await;
+        let out = translate_inner_compat_error(resp).await;
         assert_eq!(out.status(), StatusCode::NOT_FOUND);
         let body_bytes = axum::body::to_bytes(out.into_body(), 64 * 1024)
             .await
@@ -12166,7 +17141,33 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_managed_invalid_request_maps_to_native_extract_400_envelope() {
+        let result = _err_result(Some("invalid_request"), "unsupported audio container");
+        let errors = vec![&result];
+        let code = unanimous_client_error_code(&errors).expect("client error should classify");
+        assert_eq!(code, "invalid_request");
+        let response = endpoint_error_response(
+            "extract",
+            StatusCode::BAD_REQUEST,
+            err_code::INVALID_REQUEST,
+            oai_type::INVALID_REQUEST,
+            oai_code::INVALID_REQUEST,
+            None,
+            result.error.as_deref().unwrap(),
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["detail"]["code"], err_code::INVALID_REQUEST);
+        assert_eq!(body["detail"]["message"], "unsupported audio container");
     }
 
     fn _ok_result(item_index: u32, result_msgpack: Vec<u8>) -> publisher::WorkResult {
@@ -12187,7 +17188,87 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         }
+    }
+
+    #[test]
+    fn test_result_payload_too_large_is_detected_among_successful_siblings() {
+        let ok = _ok_result(0, vec![0x80]);
+        let oversized = _err_result(Some("PAYLOAD_TOO_LARGE"), "large");
+        let other = _err_result(Some("inference_error"), "other");
+
+        assert_eq!(
+            result_payload_too_large_error(&[ok.clone(), oversized.clone()])
+                .and_then(|result| result.error_code.as_deref()),
+            Some("PAYLOAD_TOO_LARGE")
+        );
+        assert!(result_payload_too_large_error(&[ok, other]).is_none());
+        assert!(result_payload_too_large_error(&[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_result_payload_too_large_response_is_typed_413() {
+        let resp = build_result_payload_too_large_response(
+            "encode",
+            "Encoded result exceeds the transport limit",
+        );
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            resp.headers().get("x-sie-error-code").unwrap(),
+            PAYLOAD_TOO_LARGE_ERROR_CODE
+        );
+        assert!(resp.headers().get("x-sie-version").is_some());
+        assert!(resp.headers().get("x-sie-server-version").is_some());
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body["detail"]["code"], "PAYLOAD_TOO_LARGE");
+        assert!(body["detail"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("transport limit"));
+    }
+
+    #[test]
+    fn test_result_transport_failure_is_detected_among_successful_siblings() {
+        let ok = _ok_result(0, vec![0x80]);
+        let transport = _err_result(Some("transport_failure"), "untrusted detail");
+        let other = _err_result(Some("inference_error"), "other");
+
+        assert_eq!(
+            result_transport_failure_error(&[ok.clone(), transport])
+                .and_then(|result| result.error_code.as_deref()),
+            Some("transport_failure")
+        );
+        assert!(result_transport_failure_error(&[ok, other]).is_none());
+        assert!(result_transport_failure_error(&[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_result_transport_failure_response_is_static_typed_503_without_retry_hint() {
+        let resp = build_result_transport_failure_response("encode");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers().get("x-sie-error-code").unwrap(),
+            oai_code::TRANSPORT_FAILURE
+        );
+        assert!(resp.headers().get("retry-after").is_none());
+        assert!(resp.headers().get("x-sie-version").is_some());
+        assert!(resp.headers().get("x-sie-server-version").is_some());
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body["detail"]["code"], "transport_failure");
+        assert_eq!(
+            body["detail"]["message"],
+            "Worker result transport validation failed"
+        );
     }
 
     #[test]
@@ -12220,14 +17301,6 @@ mod tests {
         assert_eq!(
             unanimous_retryable_error_code(&errors),
             Some(LORA_LOADING_ERROR_CODE)
-        );
-    }
-
-    #[test]
-    fn test_retryable_metric_reason_lora_loading() {
-        assert_eq!(
-            retryable_metric_reason(LORA_LOADING_ERROR_CODE),
-            "upstream_lora_loading"
         );
     }
 
@@ -12275,6 +17348,100 @@ mod tests {
     }
 
     #[test]
+    fn test_unanimous_terminal_client_errors_map_to_400_and_413() {
+        for (code, status) in [
+            (INVALID_INPUT_ERROR_CODE, StatusCode::BAD_REQUEST),
+            (PAYLOAD_TOO_LARGE_ERROR_CODE, StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            let first = _err_result(Some(code), "rejected 1");
+            let second = _err_result(Some(code), "rejected 2");
+            let errors = vec![&first, &second];
+            assert_eq!(
+                unanimous_terminal_client_error(&errors),
+                Some((status, code))
+            );
+        }
+
+        let invalid = _err_result(Some(INVALID_INPUT_ERROR_CODE), "invalid");
+        let oversized = _err_result(Some(PAYLOAD_TOO_LARGE_ERROR_CODE), "large");
+        assert_eq!(
+            unanimous_terminal_client_error(&[&invalid, &oversized]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_unanimous_invalid_input_requires_every_worker_result_to_match() {
+        let first = _err_result(Some(INVALID_INPUT_ERROR_CODE), "bad media");
+        let second = _err_result(Some(INVALID_INPUT_ERROR_CODE), "bad document");
+        let inference = _err_result(Some("inference_error"), "backend failure");
+
+        assert_eq!(
+            unanimous_worker_error_message(&[&first, &second], INVALID_INPUT_ERROR_CODE),
+            Some("bad media".to_string())
+        );
+        assert_eq!(
+            unanimous_worker_error_message(&[&first, &inference], INVALID_INPUT_ERROR_CODE),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_terminal_client_error_response_preserves_native_contract() {
+        let response = build_terminal_client_error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            PAYLOAD_TOO_LARGE_ERROR_CODE,
+            "payload exceeds limit",
+        );
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response.headers().get("x-sie-error-code").unwrap(),
+            PAYLOAD_TOO_LARGE_ERROR_CODE
+        );
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["detail"]["code"], PAYLOAD_TOO_LARGE_ERROR_CODE);
+        assert_eq!(value["detail"]["message"], "payload exceeds limit");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_input_is_native_400_and_cohere_error_envelope() {
+        let native = build_invalid_input_response("unsupported image payload");
+        assert_eq!(native.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            native.headers().get("x-sie-error-code").unwrap(),
+            INVALID_INPUT_ERROR_CODE
+        );
+        let native_body = axum::body::to_bytes(native.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let native_json: Value = serde_json::from_slice(&native_body).unwrap();
+        assert_eq!(native_json["detail"]["code"], INVALID_INPUT_ERROR_CODE);
+        assert_eq!(
+            native_json["detail"]["message"],
+            "unsupported image payload"
+        );
+
+        let compat =
+            translate_inner_rerank_error(build_invalid_input_response("unsupported image payload"))
+                .await;
+        assert_eq!(compat.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            compat.headers().get("x-sie-error-code").unwrap(),
+            INVALID_INPUT_ERROR_CODE
+        );
+        let compat_body = axum::body::to_bytes(compat.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&compat_body).unwrap(),
+            json!({"message": "unsupported image payload"})
+        );
+    }
+
+    #[test]
     fn test_queue_success_body_json_omits_partial_error_envelope() {
         let payload = rmp_serde::to_vec(&json!({"result": "ok"})).unwrap();
         let ok = _ok_result(0, payload);
@@ -12284,6 +17451,23 @@ mod tests {
         assert_eq!(parsed["model"], "model-a");
         assert_eq!(parsed["items"][0]["result"], "ok");
         assert!(parsed.get("errors").is_none());
+    }
+
+    #[test]
+    fn test_queue_success_body_preserves_partial_extract_data_and_error() {
+        let payload = rmp_serde::to_vec(&json!({
+            "id": "doc-1",
+            "data": {"partial": true},
+            "error": {"code": "INFERENCE_ERROR", "message": "export failed"}
+        }))
+        .unwrap();
+        let result = _ok_result(0, payload);
+        let body = build_queue_success_body("extract", "docling", &[&result], false);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(parsed["items"][0]["data"], json!({"partial": true}));
+        assert_eq!(parsed["items"][0]["error"]["code"], "INFERENCE_ERROR");
+        assert_eq!(parsed["items"][0]["error"]["message"], "export failed");
     }
 
     #[test]
@@ -12349,6 +17533,20 @@ mod tests {
     }
 
     #[test]
+    fn test_openai_embeddings_item_cap_accepts_256_and_rejects_257() {
+        let accepted = json!(vec!["text"; MAX_EMBEDDING_INPUTS]);
+        let normalized =
+            openai_embedding_input_to_texts(&accepted).expect("256 inputs are accepted");
+        assert_eq!(normalized.texts.len(), MAX_EMBEDDING_INPUTS);
+
+        let rejected = json!(vec!["text"; MAX_EMBEDDING_INPUTS + 1]);
+        let error =
+            openai_embedding_input_to_texts(&rejected).expect_err("257 inputs are rejected");
+        assert!(error.contains("at most 256 texts"));
+        assert!(error.contains("split the request"));
+    }
+
+    #[test]
     fn test_openai_embeddings_forwarded_headers_include_encode_timings() {
         for name in [
             "x-sie-request-id",
@@ -12364,13 +17562,37 @@ mod tests {
             "x-payload-fetch-time",
         ] {
             assert!(
-                is_openai_embeddings_forwarded_header(name),
+                is_openai_compat_forwarded_header(name),
                 "{name} should be forwarded from /v1/encode to /v1/embeddings"
             );
         }
-        assert!(is_openai_embeddings_forwarded_header("X-SIE-WORKER"));
-        assert!(!is_openai_embeddings_forwarded_header("content-type"));
-        assert!(!is_openai_embeddings_forwarded_header("x-sie-error-code"));
+        assert!(is_openai_compat_forwarded_header("X-SIE-WORKER"));
+        assert!(!is_openai_compat_forwarded_header("content-type"));
+        assert!(!is_openai_compat_forwarded_header("x-sie-error-code"));
+    }
+
+    #[test]
+    fn test_openai_compat_model_ids_use_config_service_grammar() {
+        for model in [
+            "openai/whisper-large-v3-turbo",
+            "jinaai/jina-embeddings-v3",
+            "model_1.0",
+        ] {
+            assert!(is_valid_compat_model_id(model), "{model} should be valid");
+        }
+        for model in [
+            "/leading",
+            "two..dots",
+            "back\\slash",
+            "query?x=1",
+            "fragment#x",
+            "unicode-model-模型",
+        ] {
+            assert!(
+                !is_valid_compat_model_id(model),
+                "{model} should be invalid"
+            );
+        }
     }
 
     #[test]
@@ -12389,15 +17611,13 @@ mod tests {
             "tracestate",
         ] {
             assert!(
-                is_openai_embeddings_inner_request_header(name),
+                is_openai_compat_inner_request_header(name),
                 "{name} should be forwarded onto the internal /v1/encode request"
             );
         }
-        assert!(is_openai_embeddings_inner_request_header("TraceParent"));
-        assert!(!is_openai_embeddings_inner_request_header("cookie"));
-        assert!(!is_openai_embeddings_inner_request_header(
-            "x-sie-request-id"
-        ));
+        assert!(is_openai_compat_inner_request_header("TraceParent"));
+        assert!(!is_openai_compat_inner_request_header("cookie"));
+        assert!(!is_openai_compat_inner_request_header("x-sie-request-id"));
     }
 
     #[test]
@@ -12481,40 +17701,6 @@ mod tests {
                 .unwrap_or("")
                 .contains("out of memory"),
             "message preserves upstream error text: {body}"
-        );
-    }
-
-    #[test]
-    fn test_retryable_metric_reason_known_codes() {
-        assert_eq!(
-            retryable_metric_reason(RESOURCE_EXHAUSTED_ERROR_CODE),
-            "resource_exhausted"
-        );
-        assert_eq!(
-            retryable_metric_reason(MODEL_LOADING_ERROR_CODE),
-            "upstream_model_loading"
-        );
-        // Unknown code falls back to the legacy bucket.
-        assert_eq!(retryable_metric_reason("anything-else"), "all_items_failed");
-    }
-
-    #[test]
-    fn test_generation_worker_error_metric_reason_keeps_model_loading_retryable() {
-        assert_eq!(
-            generation_worker_error_metric_reason(MODEL_LOADING_ERROR_CODE),
-            "upstream_model_loading"
-        );
-        assert_eq!(
-            generation_worker_error_metric_reason(RESOURCE_EXHAUSTED_ERROR_CODE),
-            "resource_exhausted"
-        );
-        assert_eq!(
-            generation_worker_error_metric_reason(LORA_LOADING_ERROR_CODE),
-            "upstream_lora_loading"
-        );
-        assert_eq!(
-            generation_worker_error_metric_reason("invalid_request"),
-            "generate_worker_error"
         );
     }
 
@@ -12746,6 +17932,42 @@ mod tests {
         assert_eq!(params.options.unwrap()["truncate"], true);
     }
 
+    #[test]
+    fn test_parse_queue_request_json_encode_carries_output_dtype_without_options() {
+        let body = serde_json::to_vec(&json!({
+            "items": [{"text": "a"}],
+            "params": {"output_dtype": "float32"}
+        }))
+        .unwrap();
+
+        let (_, params) = parse_queue_request(&body, false, "encode").unwrap();
+        assert_eq!(params.options, Some(json!({"output_dtype": "float32"})));
+    }
+
+    #[test]
+    fn test_parse_queue_request_json_encode_output_dtype_overrides_options() {
+        let body = serde_json::to_vec(&json!({
+            "items": [{"text": "a"}],
+            "params": {
+                "output_dtype": "float32",
+                "options": {
+                    "output_dtype": "float16",
+                    "profile": "quantized"
+                }
+            }
+        }))
+        .unwrap();
+
+        let (_, params) = parse_queue_request(&body, false, "encode").unwrap();
+        assert_eq!(
+            params.options,
+            Some(json!({
+                "output_dtype": "float32",
+                "profile": "quantized"
+            }))
+        );
+    }
+
     fn rmpv_map_get<'a>(value: &'a rmpv::Value, key: &str) -> Option<&'a rmpv::Value> {
         let rmpv::Value::Map(entries) = value else {
             return None;
@@ -12828,6 +18050,54 @@ mod tests {
     }
 
     #[test]
+    fn maximum_audio_fits_extract_ingress_on_json_and_msgpack() {
+        const MAX_AUDIO_BYTES: usize = 24 * 1024 * 1024;
+
+        let audio = vec![0x5a; MAX_AUDIO_BYTES];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&audio);
+        let body = serde_json::to_vec(&json!({
+            "input": {"audio": {"data": encoded, "format": "wav"}}
+        }))
+        .unwrap();
+        assert!(body.len() > 32 * 1024 * 1024);
+        assert!(body.len() <= MAX_EXTRACT_BODY);
+
+        let (items, _) = parse_queue_request(&body, false, "extract").unwrap();
+        assert_media_data(items.first().expect("one item"), "audio", &audio);
+        drop(items);
+        drop(body);
+
+        let body_value = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::from("items"),
+                rmpv::Value::Array(vec![rmpv::Value::Map(vec![(
+                    rmpv::Value::from("audio"),
+                    rmpv::Value::Map(vec![
+                        (
+                            rmpv::Value::from("data"),
+                            rmpv::Value::Binary(audio.clone()),
+                        ),
+                        (rmpv::Value::from("format"), rmpv::Value::from("wav")),
+                    ]),
+                )])]),
+            ),
+            (
+                rmpv::Value::from("params"),
+                rmpv::Value::Map(vec![
+                    (rmpv::Value::from("instruction"), rmpv::Value::Nil),
+                    (rmpv::Value::from("options"), rmpv::Value::Map(Vec::new())),
+                ]),
+            ),
+        ]);
+        let body = rmp_serde::to_vec(&body_value).unwrap();
+        assert!(body.len() <= MAX_AUDIO_BYTES + 1024);
+        assert!(body.len() <= MAX_EXTRACT_BODY);
+
+        let (items, _) = parse_queue_request(&body, true, "extract").unwrap();
+        assert_media_data(items.first().expect("one item"), "audio", &audio);
+    }
+
+    #[test]
     fn test_parse_queue_request_score_keeps_query_and_items() {
         let body = serde_json::to_vec(&json!({
             "query": {"text": "hello"},
@@ -12849,6 +18119,357 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_queue_request_score_instruction_precedence_matches_json_and_msgpack() {
+        let cases = [
+            (
+                "top-level wins",
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "instruction": "top-level",
+                    "options": {"instruction": "option", "normalize": true}
+                }),
+                Some("top-level"),
+            ),
+            (
+                "empty top-level suppresses fallback",
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "instruction": "",
+                    "options": {"instruction": "option"}
+                }),
+                Some(""),
+            ),
+            (
+                "missing top-level promotes option",
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "options": {"instruction": "option", "normalize": true}
+                }),
+                Some("option"),
+            ),
+            (
+                "null top-level promotes option",
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "instruction": null,
+                    "options": {"instruction": "option", "normalize": true}
+                }),
+                Some("option"),
+            ),
+            (
+                "null option instruction remains absent",
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "instruction": null,
+                    "options": {"instruction": null, "normalize": true}
+                }),
+                None,
+            ),
+            (
+                "empty option is promoted",
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "options": {"instruction": ""}
+                }),
+                Some(""),
+            ),
+            (
+                "null options remain absent",
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "instruction": null,
+                    "options": null
+                }),
+                None,
+            ),
+            (
+                "no instruction remains absent",
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "options": {"normalize": true}
+                }),
+                None,
+            ),
+        ];
+
+        for (name, body, expected) in cases {
+            let json_body = serde_json::to_vec(&body).unwrap();
+            let msgpack_body = rmp_serde::to_vec_named(&body).unwrap();
+            let (_, json_params) = parse_queue_request(&json_body, false, "score").unwrap();
+            let (_, msgpack_params) = parse_queue_request(&msgpack_body, true, "score").unwrap();
+
+            for params in [&json_params, &msgpack_params] {
+                assert_eq!(params.instruction.as_deref(), expected, "{name}");
+                assert_eq!(params.options, body.get("options").cloned(), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_queue_request_score_rejects_invalid_typed_grammar_json_and_msgpack() {
+        let invalid_values = [
+            ("boolean", json!(true)),
+            ("number", json!(7)),
+            ("array", json!([])),
+            ("object", json!({})),
+        ];
+
+        let mut cases = Vec::new();
+        for (kind, value) in invalid_values {
+            cases.push((
+                format!("top-level instruction {kind}"),
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "instruction": value
+                }),
+                "'instruction' must be a string or null",
+            ));
+        }
+        for (kind, value) in [
+            ("boolean", json!(true)),
+            ("number", json!(7)),
+            ("string", json!("not-an-object")),
+            ("array", json!([])),
+        ] {
+            cases.push((
+                format!("options container {kind}"),
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "options": value
+                }),
+                "'options' must be an object or null",
+            ));
+        }
+        for (kind, value) in [
+            ("boolean", json!(false)),
+            ("number", json!(7)),
+            ("array", json!([])),
+            ("object", json!({})),
+        ] {
+            cases.push((
+                format!("nested instruction {kind}"),
+                json!({
+                    "query": {"text": "q"},
+                    "items": [{"text": "d"}],
+                    "options": {"instruction": value}
+                }),
+                "'options.instruction' must be a string or null",
+            ));
+        }
+
+        for (name, body, expected) in cases {
+            let encoded = [
+                ("json", serde_json::to_vec(&body).unwrap(), false),
+                ("msgpack", rmp_serde::to_vec_named(&body).unwrap(), true),
+            ];
+            for (wire, bytes, is_msgpack) in encoded {
+                match parse_queue_request(&bytes, is_msgpack, "score").unwrap_err() {
+                    QueueParseError::Generic(message) => assert!(
+                        message.contains(expected),
+                        "{name} over {wire}: unexpected error: {message}"
+                    ),
+                    QueueParseError::PreBuilt(_) => {
+                        panic!("{name} over {wire}: expected generic 400-equivalent error")
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_queue_request_score_rejects_msgpack_binary_nested_instruction() {
+        let body_value = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::from("query"),
+                rmpv::Value::Map(vec![(rmpv::Value::from("text"), rmpv::Value::from("q"))]),
+            ),
+            (
+                rmpv::Value::from("items"),
+                rmpv::Value::Array(vec![rmpv::Value::Map(vec![(
+                    rmpv::Value::from("text"),
+                    rmpv::Value::from("d"),
+                )])]),
+            ),
+            (
+                rmpv::Value::from("options"),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::from("instruction"),
+                    rmpv::Value::Binary(b"not-a-msgpack-string".to_vec()),
+                )]),
+            ),
+        ]);
+        let body = rmp_serde::to_vec(&body_value).unwrap();
+
+        match parse_queue_request(&body, true, "score").unwrap_err() {
+            QueueParseError::Generic(message) => assert!(
+                message.contains("'options.instruction' must be a string or null"),
+                "unexpected error: {message}"
+            ),
+            QueueParseError::PreBuilt(_) => panic!("expected generic 400-equivalent error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_queue_request_score_rejects_msgpack_duplicate_and_non_string_keys() {
+        let score_body = |extra: Vec<(rmpv::Value, rmpv::Value)>| {
+            let mut entries = vec![
+                (
+                    rmpv::Value::from("query"),
+                    rmpv::Value::Map(vec![(rmpv::Value::from("text"), rmpv::Value::from("q"))]),
+                ),
+                (
+                    rmpv::Value::from("items"),
+                    rmpv::Value::Array(vec![rmpv::Value::Map(vec![(
+                        rmpv::Value::from("text"),
+                        rmpv::Value::from("d"),
+                    )])]),
+                ),
+            ];
+            entries.extend(extra);
+            rmpv::Value::Map(entries)
+        };
+        let options = |instruction_entries: Vec<(rmpv::Value, rmpv::Value)>| {
+            rmpv::Value::Map(instruction_entries)
+        };
+
+        let cases = vec![
+            (
+                "duplicate top-level instruction valid then invalid",
+                score_body(vec![
+                    (rmpv::Value::from("instruction"), rmpv::Value::from("valid")),
+                    (
+                        rmpv::Value::from("instruction"),
+                        rmpv::Value::Boolean(false),
+                    ),
+                ]),
+                "duplicate score request field 'instruction'",
+            ),
+            (
+                "duplicate top-level instruction invalid then valid",
+                score_body(vec![
+                    (
+                        rmpv::Value::from("instruction"),
+                        rmpv::Value::Boolean(false),
+                    ),
+                    (rmpv::Value::from("instruction"), rmpv::Value::from("valid")),
+                ]),
+                "duplicate score request field 'instruction'",
+            ),
+            (
+                "duplicate top-level options object then scalar",
+                score_body(vec![
+                    (
+                        rmpv::Value::from("options"),
+                        options(vec![(
+                            rmpv::Value::from("instruction"),
+                            rmpv::Value::from("valid"),
+                        )]),
+                    ),
+                    (rmpv::Value::from("options"), rmpv::Value::Boolean(false)),
+                ]),
+                "duplicate score request field 'options'",
+            ),
+            (
+                "duplicate top-level options scalar then object",
+                score_body(vec![
+                    (rmpv::Value::from("options"), rmpv::Value::Boolean(false)),
+                    (
+                        rmpv::Value::from("options"),
+                        options(vec![(
+                            rmpv::Value::from("instruction"),
+                            rmpv::Value::from("valid"),
+                        )]),
+                    ),
+                ]),
+                "duplicate score request field 'options'",
+            ),
+            (
+                "duplicate nested instruction valid then invalid",
+                score_body(vec![(
+                    rmpv::Value::from("options"),
+                    options(vec![
+                        (rmpv::Value::from("instruction"), rmpv::Value::from("valid")),
+                        (
+                            rmpv::Value::from("instruction"),
+                            rmpv::Value::Boolean(false),
+                        ),
+                    ]),
+                )]),
+                "duplicate score request field 'options.instruction'",
+            ),
+            (
+                "duplicate nested instruction invalid then valid",
+                score_body(vec![(
+                    rmpv::Value::from("options"),
+                    options(vec![
+                        (
+                            rmpv::Value::from("instruction"),
+                            rmpv::Value::Boolean(false),
+                        ),
+                        (rmpv::Value::from("instruction"), rmpv::Value::from("valid")),
+                    ]),
+                )]),
+                "duplicate score request field 'options.instruction'",
+            ),
+            (
+                "binary top-level key",
+                score_body(vec![(
+                    rmpv::Value::Binary(b"instruction".to_vec()),
+                    rmpv::Value::from("value"),
+                )]),
+                "score request field names must be MessagePack strings",
+            ),
+            (
+                "binary nested key",
+                score_body(vec![(
+                    rmpv::Value::from("options"),
+                    options(vec![(
+                        rmpv::Value::Binary(b"instruction".to_vec()),
+                        rmpv::Value::from("value"),
+                    )]),
+                )]),
+                "'options' field names must be MessagePack strings",
+            ),
+            (
+                "integer top-level key",
+                score_body(vec![(rmpv::Value::from(7), rmpv::Value::from("value"))]),
+                "score request field names must be MessagePack strings",
+            ),
+            (
+                "integer nested key",
+                score_body(vec![(
+                    rmpv::Value::from("options"),
+                    options(vec![(rmpv::Value::from(7), rmpv::Value::from("value"))]),
+                )]),
+                "'options' field names must be MessagePack strings",
+            ),
+        ];
+
+        for (name, value, expected) in cases {
+            let body = rmp_serde::to_vec(&value).unwrap();
+            match parse_queue_request(&body, true, "score").unwrap_err() {
+                QueueParseError::Generic(message) => assert!(
+                    message.contains(expected),
+                    "{name}: unexpected error: {message}"
+                ),
+                QueueParseError::PreBuilt(_) => {
+                    panic!("{name}: expected generic 400-equivalent error")
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_parse_queue_request_score_defaults_missing_query_to_empty_object() {
         let body = serde_json::to_vec(&json!({
             "items": [{"text": "a"}]
@@ -12861,16 +18482,75 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_queue_request_score_keeps_non_object_query() {
+    fn test_parse_queue_request_score_rejects_non_object_query() {
         let body = serde_json::to_vec(&json!({
             "query": "hello",
             "items": [{"text": "a"}]
         }))
         .unwrap();
+        let err = parse_queue_request(&body, false, "score").unwrap_err();
+        match err {
+            QueueParseError::Generic(s) => assert!(
+                s.contains("'query' must be an object"),
+                "unexpected error: {s}"
+            ),
+            QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
+        }
+    }
 
-        let (items, params) = parse_queue_request(&body, false, "score").unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(params.query_item, Some(rmpv::Value::from("hello")));
+    #[test]
+    fn test_parse_queue_request_encode_rejects_non_object_item() {
+        let body = serde_json::to_vec(&json!({
+            "items": ["a bare string is not an item"]
+        }))
+        .unwrap();
+        let err = parse_queue_request(&body, false, "encode").unwrap_err();
+        match err {
+            QueueParseError::Generic(s) => assert!(
+                s.contains("item at index 0 must be an object"),
+                "unexpected error: {s}"
+            ),
+            QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_queue_request_extract_rejects_non_object_input() {
+        let body = serde_json::to_vec(&json!({
+            "input": 42
+        }))
+        .unwrap();
+        let err = parse_queue_request(&body, false, "extract").unwrap_err();
+        match err {
+            QueueParseError::Generic(s) => assert!(
+                s.contains("item at index 0 must be an object"),
+                "unexpected error: {s}"
+            ),
+            QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_queue_request_msgpack_score_rejects_non_object_item() {
+        let body_value = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::from("query"),
+                rmpv::Value::Map(vec![(rmpv::Value::from("text"), rmpv::Value::from("q"))]),
+            ),
+            (
+                rmpv::Value::from("items"),
+                rmpv::Value::Array(vec![rmpv::Value::from("a bare string is not an item")]),
+            ),
+        ]);
+        let body = rmp_serde::to_vec(&body_value).unwrap();
+        let err = parse_queue_request(&body, true, "score").unwrap_err();
+        match err {
+            QueueParseError::Generic(s) => assert!(
+                s.contains("item at index 0 must be an object"),
+                "unexpected error: {s}"
+            ),
+            QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
+        }
     }
 
     /// Msgpack-in encode request: tuning fields are read only from the nested
@@ -12917,6 +18597,42 @@ mod tests {
         assert_eq!(params.output_types, Some(vec!["dense".to_string()]));
         assert_eq!(params.instruction, Some("search".to_string()));
         assert!(params.is_query);
+    }
+
+    #[test]
+    fn test_parse_queue_request_msgpack_encode_carries_output_dtype_without_options() {
+        let body = rmp_serde::to_vec_named(&json!({
+            "items": [{"text": "hello"}],
+            "params": {"output_dtype": "float32"}
+        }))
+        .unwrap();
+
+        let (_, params) = parse_queue_request(&body, true, "encode").unwrap();
+        assert_eq!(params.options, Some(json!({"output_dtype": "float32"})));
+    }
+
+    #[test]
+    fn test_parse_queue_request_msgpack_encode_output_dtype_overrides_options() {
+        let body = rmp_serde::to_vec_named(&json!({
+            "items": [{"text": "hello"}],
+            "params": {
+                "output_dtype": "float32",
+                "options": {
+                    "output_dtype": "float16",
+                    "profile": "quantized"
+                }
+            }
+        }))
+        .unwrap();
+
+        let (_, params) = parse_queue_request(&body, true, "encode").unwrap();
+        assert_eq!(
+            params.options,
+            Some(json!({
+                "output_dtype": "float32",
+                "profile": "quantized"
+            }))
+        );
     }
 
     /// Regression guard for the rmpv-passthrough correctness fix:
@@ -12994,7 +18710,10 @@ mod tests {
             ),
             (
                 rmpv::Value::from("items"),
-                rmpv::Value::Array(vec![rmpv::Value::from("a"), rmpv::Value::from("b")]),
+                rmpv::Value::Array(vec![
+                    rmpv::Value::Map(vec![(rmpv::Value::from("text"), rmpv::Value::from("a"))]),
+                    rmpv::Value::Map(vec![(rmpv::Value::from("text"), rmpv::Value::from("b"))]),
+                ]),
             ),
         ]);
         let body = rmp_serde::to_vec(&body_value).unwrap();
@@ -13013,7 +18732,7 @@ mod tests {
     #[test]
     fn test_parse_queue_request_score_ignores_nested_params() {
         let body = serde_json::to_vec(&json!({
-            "items": [],
+            "items": [{"text": "candidate"}],
             "instruction": "top-level",
             "options": {"truncate": false},
             "params": {
@@ -13024,10 +18743,35 @@ mod tests {
         .unwrap();
 
         let (items, params) = parse_queue_request(&body, false, "score").unwrap();
-        assert!(items.is_empty());
+        assert_eq!(items.len(), 1);
         assert_eq!(params.query_item, Some(rmpv::Value::Map(Vec::new())));
         assert_eq!(params.instruction, Some("top-level".to_string()));
         assert_eq!(params.options, Some(json!({"truncate": false})));
+    }
+
+    #[test]
+    fn test_parse_queue_request_score_enforces_candidate_bounds() {
+        let empty = serde_json::to_vec(&json!({
+            "query": {"text": "query"},
+            "items": []
+        }))
+        .unwrap();
+        let err = parse_queue_request(&empty, false, "score").unwrap_err();
+        match err {
+            QueueParseError::Generic(message) => assert!(message.contains("at least one")),
+            QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
+        }
+
+        let too_many = serde_json::to_vec(&json!({
+            "query": {"text": "query"},
+            "items": vec![json!({"text": "candidate"}); MAX_SCORE_ITEMS + 1]
+        }))
+        .unwrap();
+        let err = parse_queue_request(&too_many, false, "score").unwrap_err();
+        match err {
+            QueueParseError::Generic(message) => assert!(message.contains("at most 1000")),
+            QueueParseError::PreBuilt(_) => panic!("expected generic parse error"),
+        }
     }
 
     // ── msgpack_numpy conversion tests ──────────────────────────
@@ -13222,6 +18966,8 @@ mod tests {
             payload_fetch_ms: None,
             units: None,
             worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let resp_body = result.result_msgpack.clone();
         assert_eq!(resp_body, payload);
@@ -13259,6 +19005,8 @@ mod tests {
                 payload_fetch_ms: None,
                 units: None,
                 worker_direct: false,
+                executed_bundle_config_hash: None,
+                execution_identity_sha256: None,
             },
             publisher::WorkResult {
                 work_item_id: "r1.1".to_string(),
@@ -13277,6 +19025,8 @@ mod tests {
                 payload_fetch_ms: None,
                 units: None,
                 worker_direct: false,
+                executed_bundle_config_hash: None,
+                execution_identity_sha256: None,
             },
         ];
         let items: Vec<serde_json::Value> = results
@@ -13567,7 +19317,8 @@ mod tests {
         let reg = pool_registry();
         reg.update_worker("http://w1:8080", worker_msg("default", "a100", "default"))
             .await;
-        let out = resolve_effective_pool(&reg, None, "default", "l4", "", "").await;
+        let pm = PoolManager::new(vec!["l4".into(), "a100".into()]);
+        let out = resolve_effective_pool(&reg, Some(&pm), "default", "l4", "", "").await;
         assert_eq!(out.resolution, PoolResolution::Provisioning);
         assert!(!out.exact_gpu_match);
         assert_eq!(out.pending_demand_profiles, vec!["l4".to_string()]);
@@ -13579,16 +19330,23 @@ mod tests {
         // explicit-GPU cold demand on that same label shape even when callers or
         // profile aliases pass mixed-case values through routing.
         let reg = pool_registry();
+        let pm = PoolManager::new(vec!["RTX6000".into()]);
 
-        let default_pool = resolve_effective_pool(&reg, None, "sglang", "RTX6000", "", "").await;
+        let default_pool =
+            resolve_effective_pool(&reg, Some(&pm), "sglang", "RTX6000", "", "").await;
         assert_eq!(default_pool.resolution, PoolResolution::Provisioning);
         assert_eq!(
             default_pool.pending_demand_profiles,
             vec!["rtx6000".to_string()]
         );
 
+        let mut gpus = std::collections::HashMap::new();
+        gpus.insert("RTX6000".to_string(), 0);
+        pm.create_pool("tenant-a", gpus, None, None, 0, vec![])
+            .await
+            .unwrap();
         let pinned_pool =
-            resolve_effective_pool(&reg, None, "sglang", "RTX6000", "tenant-a", "").await;
+            resolve_effective_pool(&reg, Some(&pm), "sglang", "RTX6000", "tenant-a", "").await;
         assert_eq!(pinned_pool.resolution, PoolResolution::Provisioning);
         assert_eq!(
             pinned_pool.pending_demand_profiles,
@@ -13734,7 +19492,14 @@ mod tests {
         let reg = pool_registry();
         reg.update_worker("http://w1:8080", worker_msg("default", "l4-spot", "pool-a"))
             .await;
-        let out = resolve_effective_pool(&reg, None, "default", "l4-spot", "my-bench", "").await;
+        let pm = PoolManager::new(vec!["l4-spot".into()]);
+        let mut gpus = std::collections::HashMap::new();
+        gpus.insert("l4-spot".to_string(), 0);
+        pm.create_pool("my-bench", gpus, None, None, 0, vec![])
+            .await
+            .unwrap();
+        let out =
+            resolve_effective_pool(&reg, Some(&pm), "default", "l4-spot", "my-bench", "").await;
         assert_eq!(out.resolution, PoolResolution::Provisioning);
         assert!(!out.exact_gpu_match);
         assert_eq!(out.pending_demand_profiles, vec!["l4-spot".to_string()]);
@@ -13869,7 +19634,13 @@ mod tests {
         let reg = pool_registry();
         reg.update_worker("http://w1:8080", worker_msg("default", "a100", "pool-a"))
             .await;
-        let out = resolve_effective_pool(&reg, None, "default", "l4", "my-bench", "").await;
+        let pm = PoolManager::new(vec!["l4".into(), "a100".into()]);
+        let mut gpus = std::collections::HashMap::new();
+        gpus.insert("l4".to_string(), 0);
+        pm.create_pool("my-bench", gpus, None, None, 0, vec![])
+            .await
+            .unwrap();
+        let out = resolve_effective_pool(&reg, Some(&pm), "default", "l4", "my-bench", "").await;
         assert_eq!(out.resolution, PoolResolution::Provisioning);
         assert!(!out.exact_gpu_match);
         assert_eq!(out.pending_demand_profiles, vec!["l4".to_string()]);
@@ -13896,8 +19667,21 @@ mod tests {
             worker_msg("default", "l4-spot", "default"),
         )
         .await;
-        let out =
-            resolve_effective_pool(&reg, None, "default", "l4-spot", "my-bench", "new-hash").await;
+        let pm = PoolManager::new(vec!["l4-spot".into()]);
+        let mut gpus = std::collections::HashMap::new();
+        gpus.insert("l4-spot".to_string(), 0);
+        pm.create_pool("my-bench", gpus, None, None, 0, vec![])
+            .await
+            .unwrap();
+        let out = resolve_effective_pool(
+            &reg,
+            Some(&pm),
+            "default",
+            "l4-spot",
+            "my-bench",
+            "new-hash",
+        )
+        .await;
         assert_eq!(out.resolution, PoolResolution::Provisioning);
         assert!(!out.exact_gpu_match);
         assert_eq!(out.pending_demand_profiles, vec!["l4-spot".to_string()]);
@@ -13962,6 +19746,7 @@ mod tests {
         registry
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -14039,6 +19824,7 @@ mod tests {
         registry
             .add_model_config(ModelConfig {
                 name: "org/plain".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -14093,6 +19879,7 @@ mod tests {
         registry
             .add_model_config(ModelConfig {
                 name: "org/g2".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -14151,6 +19938,7 @@ mod tests {
         registry
             .add_model_config(ModelConfig {
                 name: "org/g3".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -14985,7 +20773,7 @@ mod tests {
 
     /// ``seed`` round-trips onto :class:`ChatRequestParams.seed` so the
     /// chat handler can plumb it through to the worker's SGLang
-    /// ``sampling_params.seed``.
+    /// ``sampling_params.sampling_seed``.
     #[test]
     fn test_chat_params_from_json_seed_round_trips() {
         let mut body = _chat_body_min("m");
@@ -14994,15 +20782,13 @@ mod tests {
         assert_eq!(p.seed, Some(42));
     }
 
-    /// Negative seeds (some clients send ``-1`` as "no seed") are
-    /// accepted and reinterpreted as u64. Documented best-effort —
-    /// the worker forwards verbatim to SGLang.
+    /// Negative signed seeds are preserved on the worker wire.
     #[test]
     fn test_chat_params_from_json_seed_negative_accepted() {
         let mut body = _chat_body_min("m");
         body["seed"] = serde_json::json!(-1);
         let p = _expect_chat_ok(body);
-        assert_eq!(p.seed, Some(u64::MAX));
+        assert_eq!(p.seed, Some(-1));
     }
 
     /// ``seed: null`` is explicitly allowed by OpenAI's spec.
@@ -15344,6 +21130,8 @@ mod tests {
                     tool_calls: None,
                 },
             ],
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -15402,6 +21190,8 @@ mod tests {
                     tool_calls: None,
                 },
             ],
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -15450,6 +21240,8 @@ mod tests {
                 logprobs: Some(cand_lp),
                 tool_calls: None,
             }],
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req-lp", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -15734,6 +21526,39 @@ mod tests {
         }
     }
 
+    /// ``stream_options.include_usage`` on /v1/completions. A streamed response
+    /// cannot carry usage in headers, so this flag is the only surface on which
+    /// a streamed completion reports what it consumed.
+    #[test]
+    fn test_completions_params_accepts_stream_options_include_usage() {
+        let mut body = _completions_body_min("m");
+        assert!(matches!(
+            completions_params_from_json(&body),
+            CompletionsParamsResult::Ok(ref p) if !p.stream_include_usage
+        ));
+        body["stream"] = serde_json::json!(true);
+        body["stream_options"] = serde_json::json!({"include_usage": true});
+        match completions_params_from_json(&body) {
+            CompletionsParamsResult::Ok(p) => {
+                assert!(p.stream);
+                assert!(p.stream_include_usage);
+            }
+            CompletionsParamsResult::Err(_) => panic!("expected Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completions_rejects_stream_options_unknown_keys_and_types() {
+        let mut body = _completions_body_min("m");
+        body["stream_options"] = serde_json::json!({"foo": 1});
+        let v = _completions_err(body.clone()).await;
+        assert_eq!(v["error"]["param"], "stream_options.foo");
+
+        body["stream_options"] = serde_json::json!({"include_usage": "yes"});
+        let v = _completions_err(body).await;
+        assert_eq!(v["error"]["param"], "stream_options.include_usage");
+    }
+
     #[tokio::test]
     async fn test_completions_missing_model() {
         let v = _completions_err(serde_json::json!({"prompt": "hi"})).await;
@@ -15790,6 +21615,8 @@ mod tests {
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_text_completion_body("m", "req-1", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -16007,6 +21834,16 @@ mod tests {
         body["seed"] = serde_json::json!("42");
         let v = _completions_err(body).await;
         assert_eq!(v["error"]["param"], "seed");
+    }
+
+    #[test]
+    fn test_completions_preserves_negative_seed() {
+        let mut body = _completions_body_min("m");
+        body["seed"] = serde_json::json!(-1);
+        match completions_params_from_json(&body) {
+            CompletionsParamsResult::Ok(params) => assert_eq!(params.seed, Some(-1)),
+            CompletionsParamsResult::Err(_) => panic!("expected Ok"),
+        }
     }
 
     // ── /v1/responses ────────────────────────────────────────────────
@@ -16276,6 +22113,16 @@ mod tests {
         assert_eq!(v["error"]["param"], "seed");
     }
 
+    #[test]
+    fn test_responses_preserves_negative_seed() {
+        let mut body = _responses_body_min("m");
+        body["seed"] = serde_json::json!(-1);
+        match responses_params_from_json(&body) {
+            ResponsesParamsResult::Ok(params) => assert_eq!(params.seed, Some(-1)),
+            ResponsesParamsResult::Err(_) => panic!("expected Ok"),
+        }
+    }
+
     #[tokio::test]
     async fn test_responses_rejects_string_max_output_tokens() {
         let mut body = _responses_body_min("m");
@@ -16312,6 +22159,8 @@ mod tests {
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_responses_body("m", "req-1", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -16365,6 +22214,8 @@ mod tests {
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_chat_completion_body("Qwen/Qwen3-4B-Instruct-2507", "req-1", &outcome)
             .expect("ok");
@@ -16456,6 +22307,8 @@ mod tests {
                 "top_logprobs": [],
             })]),
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -16484,6 +22337,8 @@ mod tests {
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -16518,6 +22373,8 @@ mod tests {
             }]),
             logprobs: None,
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -16546,6 +22403,8 @@ mod tests {
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let resp = build_chat_completion_body("m", "req-1", &outcome).expect_err("missing usage");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -16656,6 +22515,55 @@ mod tests {
         assert_eq!(err_obj["attempt_id"], "att-rl-1");
     }
 
+    #[tokio::test]
+    async fn test_oversized_generate_payload_worker_error_returns_413() {
+        let err = StreamingDriverErr::WorkerError {
+            code: PAYLOAD_TOO_LARGE_ERROR_CODE.to_string(),
+            message: "referenced payload exceeds the worker size limit".to_string(),
+            request_id: "req-large-1".to_string(),
+            attempt_id: "att-large-1".to_string(),
+        };
+        let response = build_streaming_error_response(&err);
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response.headers().get("x-sie-error-code").unwrap(),
+            PAYLOAD_TOO_LARGE_ERROR_CODE
+        );
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["type"], oai_type::INVALID_REQUEST);
+        assert_eq!(value["error"]["code"], oai_code::INVALID_REQUEST);
+        assert_eq!(value["error"]["attempt_id"], "att-large-1");
+    }
+
+    /// The cold-start quota refusal must reach the wire with NO Retry-After:
+    /// the blanket 429 header block previously stamped `Retry-After: 1` on it,
+    /// re-creating the exact auto-retry hot loop the hourly ceiling exists to
+    /// prevent (review finding) — and the envelope code must be the typed
+    /// refusal, never a generic `inference_error`.
+    #[tokio::test]
+    async fn test_streaming_cold_start_refusal_is_429_without_retry_after() {
+        let err = StreamingDriverErr::WorkerError {
+            code: COLD_START_RATE_LIMITED_ERROR_CODE.to_string(),
+            message: "org exceeded its sealed cold-starts-per-hour ceiling".to_string(),
+            request_id: "req-cold-1".to_string(),
+            attempt_id: "att-cold-1".to_string(),
+        };
+        let resp = build_streaming_error_response(&err);
+
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().get("retry-after").is_none());
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"]["type"], oai_type::RATE_LIMIT);
+        assert_eq!(v["error"]["code"], COLD_START_RATE_LIMITED_ERROR_CODE);
+    }
+
     async fn assert_streaming_worker_error_is_retryable(
         code: &'static str,
         retry_after: &'static str,
@@ -16711,6 +22619,23 @@ mod tests {
         );
     }
 
+    /// The sealed cold-start quota refusal (#2426) is a deliberate 429 with
+    /// a rate-limit envelope type — never a generic server error — and stays
+    /// off the retryable lists (no Retry-After: an hourly quota must not
+    /// invite auto-retry storms).
+    #[test]
+    fn test_cold_start_rate_limited_maps_to_429_not_500() {
+        assert_eq!(
+            worker_error_http_status(COLD_START_RATE_LIMITED_ERROR_CODE),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            worker_error_openai_type(COLD_START_RATE_LIMITED_ERROR_CODE),
+            oai_type::RATE_LIMIT
+        );
+        assert!(worker_error_retry_after(COLD_START_RATE_LIMITED_ERROR_CODE).is_none());
+    }
+
     /// Envelope ``type`` mapping unit test.
     #[test]
     fn test_worker_error_openai_type_rate_limit() {
@@ -16746,66 +22671,6 @@ mod tests {
         assert_eq!(worker_error_retry_after("transport_failure"), None);
     }
 
-    // ── SSE: generate-endpoint `stream` flag extraction ────────────
-
-    /// JSON body without ``stream`` → ``Ok(false)``. The aggregating
-    /// path stays unchanged.
-    #[test]
-    fn test_stream_flag_from_body_absent_is_false() {
-        let body = br#"{"prompt": "Hi", "max_new_tokens": 8}"#;
-        assert_eq!(stream_flag_from_body(body, false).ok(), Some(false));
-    }
-
-    #[test]
-    fn test_stream_flag_from_body_true() {
-        let body = br#"{"prompt": "Hi", "max_new_tokens": 8, "stream": true}"#;
-        assert_eq!(stream_flag_from_body(body, false).ok(), Some(true));
-    }
-
-    #[test]
-    fn test_stream_flag_from_body_false_explicit() {
-        let body = br#"{"prompt": "Hi", "max_new_tokens": 8, "stream": false}"#;
-        assert_eq!(stream_flag_from_body(body, false).ok(), Some(false));
-    }
-
-    #[test]
-    fn test_stream_flag_from_body_null_is_false() {
-        let body = br#"{"prompt": "Hi", "max_new_tokens": 8, "stream": null}"#;
-        assert_eq!(stream_flag_from_body(body, false).ok(), Some(false));
-    }
-
-    #[tokio::test]
-    async fn test_stream_flag_from_body_non_bool_rejects_400() {
-        let body = br#"{"prompt": "Hi", "max_new_tokens": 8, "stream": "yes"}"#;
-        let err = stream_flag_from_body(body, false).expect_err("non-bool");
-        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
-        let bytes = axum::body::to_bytes(err.into_body(), 4096).await.unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["error"]["param"], "stream");
-        assert_eq!(v["error"]["code"], "invalid_request");
-    }
-
-    /// Body that fails to decode silently maps to ``Ok(false)``: the
-    /// authoritative validator is the existing ``parse_queue_request``
-    /// path, which surfaces the precise error on the aggregating
-    /// branch. This guard prevents double-rejection from the SSE
-    /// short-circuit.
-    #[test]
-    fn test_stream_flag_from_body_bad_json_falls_back_to_false() {
-        let body = b"not-json";
-        assert_eq!(stream_flag_from_body(body, false).ok(), Some(false));
-    }
-
-    /// msgpack twin: a msgpack body with ``stream: true`` parses too.
-    #[test]
-    fn test_stream_flag_from_body_msgpack_true() {
-        let body = rmp_serde::to_vec_named(&serde_json::json!({
-            "prompt": "Hi", "max_new_tokens": 8, "stream": true,
-        }))
-        .unwrap();
-        assert_eq!(stream_flag_from_body(&body, true).ok(), Some(true));
-    }
-
     /// Regression guard: the non-streaming aggregating path (the
     /// `stream: false` default) still composes the OpenAI
     /// ``chat.completion`` body exactly as before, character for
@@ -16828,6 +22693,8 @@ mod tests {
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req-x", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -16859,9 +22726,11 @@ mod tests {
             outputs: vec!["tokens".to_string()],
             dims: std::collections::HashMap::new(),
             max_sequence_length: None,
+            revision: None,
             max_output_tokens: None,
             grammar_capabilities: None,
             grammar_profile: None,
+            profile_parents: std::collections::HashMap::new(),
             tools_supported: None,
             code: false,
             sql: false,
@@ -16881,6 +22750,331 @@ mod tests {
                 .collect(),
             profile_configs: std::collections::HashMap::new(),
             info_extras,
+        }
+    }
+
+    fn successful_score_result(
+        scores: Value,
+        units: Option<publisher::UnitCounts>,
+    ) -> publisher::WorkResult {
+        publisher::WorkResult {
+            work_item_id: "request.0".to_string(),
+            request_id: "request".to_string(),
+            item_index: 0,
+            success: true,
+            result_msgpack: rmp_serde::to_vec_named(&scores).unwrap(),
+            error: None,
+            error_code: None,
+            inference_ms: None,
+            queue_ms: None,
+            processing_ms: None,
+            worker_id: None,
+            tokenization_ms: None,
+            postprocessing_ms: None,
+            payload_fetch_ms: None,
+            units,
+            worker_direct: false,
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
+        }
+    }
+
+    #[test]
+    fn test_score_success_body_includes_authoritative_usage_json_and_msgpack() {
+        let result = successful_score_result(
+            json!([{"item_id": "0", "score": 0.75, "rank": 0}]),
+            Some(publisher::UnitCounts {
+                input_tokens: Some(19),
+                pages: None,
+                images: Some(2),
+                audio_ms: None,
+                pairs: None,
+                gpu_second: None,
+                output_tokens: None,
+            }),
+        );
+        for use_msgpack in [false, true] {
+            let body = build_queue_success_body("score", "reranker", &[&result], use_msgpack);
+            let response: Value = if use_msgpack {
+                rmp_serde::from_slice(&body).unwrap()
+            } else {
+                serde_json::from_slice(&body).unwrap()
+            };
+            assert_eq!(response["usage"]["input_tokens"], 19);
+            assert_eq!(response["usage"]["images"], 2);
+            assert_eq!(response["scores"][0]["item_id"], "0");
+        }
+    }
+
+    #[test]
+    fn test_score_success_body_omits_unavailable_usage_fields() {
+        let result = successful_score_result(
+            json!([{"item_id": "0", "score": 0.75, "rank": 0}]),
+            Some(publisher::UnitCounts {
+                input_tokens: Some(19),
+                pages: None,
+                images: None,
+                audio_ms: None,
+                pairs: None,
+                gpu_second: None,
+                output_tokens: None,
+            }),
+        );
+        let body = build_queue_success_body("score", "reranker", &[&result], false);
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["usage"]["input_tokens"], 19);
+        assert!(response["usage"].get("images").is_none());
+    }
+
+    #[test]
+    fn test_score_usage_aggregation_rejects_partial_worker_counts() {
+        let complete = successful_score_result(
+            json!([]),
+            Some(publisher::UnitCounts {
+                input_tokens: Some(19),
+                pages: None,
+                images: Some(1),
+                audio_ms: None,
+                pairs: None,
+                gpu_second: None,
+                output_tokens: None,
+            }),
+        );
+        let missing_tokens = successful_score_result(
+            json!([]),
+            Some(publisher::UnitCounts {
+                input_tokens: None,
+                pages: None,
+                images: Some(1),
+                audio_ms: None,
+                pairs: None,
+                gpu_second: None,
+                output_tokens: None,
+            }),
+        );
+        assert!(aggregate_score_usage(&[&complete, &missing_tokens]).is_none());
+    }
+
+    #[test]
+    fn test_score_usage_aggregation_rejects_overflow() {
+        let maximum = successful_score_result(
+            json!([]),
+            Some(publisher::UnitCounts {
+                input_tokens: Some(u64::MAX),
+                pages: None,
+                images: None,
+                audio_ms: None,
+                pairs: None,
+                gpu_second: None,
+                output_tokens: None,
+            }),
+        );
+        let one = successful_score_result(
+            json!([]),
+            Some(publisher::UnitCounts {
+                input_tokens: Some(1),
+                pages: None,
+                images: None,
+                audio_ms: None,
+                pairs: None,
+                gpu_second: None,
+                output_tokens: None,
+            }),
+        );
+        assert!(aggregate_score_usage(&[&maximum, &one]).is_none());
+    }
+
+    #[test]
+    fn test_normalize_rerank_request_accepts_v1_and_v2_subsets() {
+        let v1 = normalize_rerank_request(
+            &json!({
+                "model": "Qwen__Qwen3-Reranker-0.6B",
+                "query": "query",
+                "documents": ["first", "second"],
+                "top_n": 1,
+                "return_documents": true,
+                "options": {"profile": "long", "max_seq_length": 512},
+            }),
+            RerankCompatibilityVersion::V1,
+        )
+        .unwrap();
+        assert_eq!(v1.documents.len(), 2);
+        assert_eq!(v1.top_n, Some(1));
+        assert!(v1.return_documents);
+        assert_eq!(v1.options["profile"], "long");
+        assert_eq!(v1.options["max_seq_length"], 512);
+
+        let v2 = normalize_rerank_request(
+            &json!({
+                "model": "Qwen__Qwen3-Reranker-0.6B",
+                "query": "query",
+                "documents": ["first", "second"],
+                "top_n": 2,
+                "max_tokens_per_doc": null,
+                "priority": null,
+                "options": {"profile": null, "max_seq_length": null},
+            }),
+            RerankCompatibilityVersion::V2,
+        )
+        .unwrap();
+        assert_eq!(v2.documents.len(), 2);
+        assert_eq!(v2.top_n, Some(2));
+        assert!(!v2.return_documents);
+        assert!(v2.options["profile"].is_null());
+        assert!(v2.options["max_seq_length"].is_null());
+    }
+
+    #[test]
+    fn test_normalize_rerank_request_rejects_unknown_and_adversarial_fields() {
+        for (version, body, expected) in [
+            (
+                RerankCompatibilityVersion::V1,
+                json!({"model": "m", "query": "q", "documents": ["d"], "priority": 1}),
+                "field 'priority' is not supported",
+            ),
+            (
+                RerankCompatibilityVersion::V2,
+                json!({"model": "m", "query": "q", "documents": ["d"], "priority": 1}),
+                "field 'priority' is not supported; omit it or send null",
+            ),
+            (
+                RerankCompatibilityVersion::V2,
+                json!({"model": "m", "query": "q", "documents": ["d"], "max_tokens_per_doc": 512}),
+                "field 'max_tokens_per_doc' is not supported; omit it or send null",
+            ),
+            (
+                RerankCompatibilityVersion::V2,
+                json!({"model": "m", "query": "q", "documents": ["d"], "return_documents": true}),
+                "field 'return_documents' is not supported",
+            ),
+            (
+                RerankCompatibilityVersion::V1,
+                json!({"model": "m", "query": "q", "documents": ["d"], "top_n": true}),
+                "'top_n' must be a positive integer",
+            ),
+            (
+                RerankCompatibilityVersion::V1,
+                json!({"model": "m", "query": "q", "documents": ["d"], "options": []}),
+                "'options' must be an object",
+            ),
+            (
+                RerankCompatibilityVersion::V1,
+                json!({"model": "m", "query": "q", "documents": ["d"], "options": {"max_length": 512}}),
+                "options field 'max_length' is not supported",
+            ),
+            (
+                RerankCompatibilityVersion::V1,
+                json!({"model": "m", "query": " ", "documents": ["d"]}),
+                "'query' must be a non-blank string",
+            ),
+            (
+                RerankCompatibilityVersion::V1,
+                json!({"model": "m", "query": "q", "documents": [" \t"]}),
+                "'documents' must contain only non-blank strings",
+            ),
+            (
+                RerankCompatibilityVersion::V1,
+                json!({"model": "m", "query": "q", "documents": ["d"], "options": {"profile": " "}}),
+                "options.profile must be a non-blank string or null",
+            ),
+            (
+                RerankCompatibilityVersion::V1,
+                json!({"model": "m", "query": "q", "documents": ["d"], "options": {"max_seq_length": 0}}),
+                "options.max_seq_length must be a positive platform-sized integer or null",
+            ),
+        ] {
+            assert_eq!(
+                normalize_rerank_request(&body, version).unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_compatibility_model_uri_encodes_untrusted_model_delimiters() {
+        for endpoint in ["encode", "score"] {
+            let uri = compatibility_model_uri(endpoint, "/Qwen/model?pool=other#fragment").unwrap();
+            assert!(uri.query().is_none());
+            let prefix = format!("/v1/{endpoint}/");
+            let raw_model = uri.path().strip_prefix(&prefix).unwrap();
+            assert_eq!(
+                decode_model_path(raw_model).unwrap(),
+                "Qwen/model?pool=other#fragment"
+            );
+        }
+        assert_eq!(
+            compatibility_model_uri("score", "///").unwrap_err(),
+            "'model' must contain a model id"
+        );
+    }
+
+    #[test]
+    fn test_normalize_rerank_request_rejects_oversized_candidates() {
+        let documents = vec![Value::String("d".to_string()); MAX_RERANK_DOCUMENTS + 1];
+        let error = normalize_rerank_request(
+            &json!({"model": "m", "query": "q", "documents": documents}),
+            RerankCompatibilityVersion::V1,
+        )
+        .unwrap_err();
+        assert!(error.contains("exceeds the maximum of 1000"));
+    }
+
+    #[test]
+    fn test_rerank_response_projects_top_n_documents_and_partial_usage() {
+        let response = rerank_response_from_score(
+            &json!({
+                "model": "reranker",
+                "scores": [
+                    {"item_id": "1", "score": 0.9, "rank": 0},
+                    {"item_id": "0", "score": 0.2, "rank": 1}
+                ],
+                "usage": {"input_tokens": 42}
+            }),
+            &["first".to_string(), "second".to_string()],
+            Some(1),
+            true,
+        )
+        .unwrap();
+        assert_eq!(response["results"].as_array().unwrap().len(), 1);
+        assert_eq!(response["results"][0]["index"], 1);
+        assert_eq!(response["results"][0]["document"]["text"], "second");
+        assert_eq!(response["usage"]["input_tokens"], 42);
+        assert!(response["usage"].get("images").is_none());
+    }
+
+    #[test]
+    fn test_rerank_response_rejects_partial_or_duplicate_scores() {
+        let documents = ["first".to_string(), "second".to_string()];
+        for (native, expected) in [
+            (
+                json!({"model": "m", "scores": [{"item_id": "0", "score": 0.5, "rank": 0}], "usage": {"input_tokens": 4}}),
+                "item count mismatch",
+            ),
+            (
+                json!({"model": "m", "scores": [{"item_id": "0", "score": 0.5, "rank": 0}, {"item_id": "0", "score": 0.4, "rank": 1}], "usage": {"input_tokens": 4}}),
+                "duplicate item_id",
+            ),
+        ] {
+            let error = rerank_response_from_score(&native, &documents, None, false).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn test_rerank_response_rejects_missing_or_malformed_usage() {
+        let scores = json!([{"item_id": "0", "score": 0.5, "rank": 0}]);
+        for (usage, expected) in [
+            (Value::Null, "missing authoritative usage"),
+            (json!({"images": 1}), "missing input_tokens"),
+            (
+                json!({"input_tokens": 4, "images": -1}),
+                "invalid images count",
+            ),
+        ] {
+            let native = json!({"model": "m", "scores": scores.clone(), "usage": usage});
+            let error =
+                rerank_response_from_score(&native, &["doc".to_string()], None, false).unwrap_err();
+            assert!(error.contains(expected), "{error}");
         }
     }
 
@@ -16961,6 +23155,345 @@ mod tests {
         assert_eq!(
             validate_lora_for_profile(&entry, "default", "anything"),
             LoraValidation::UnknownAdapter,
+        );
+    }
+
+    // ---- `/v1/embeddings` response cap (#2617) --------------------------------
+    //
+    // These exist because the FIRST version of this cap shipped a test that
+    // "certified the mechanism while never exercising it": it probed only `CAP`
+    // and `CAP + 1`, and `CAP + 1` happened to be the single size at which the
+    // over-cap branch could fire. Everything larger — i.e. every real oversized
+    // reply — fell into the error arm and returned the opaque 500 the change
+    // existed to remove, with the suite green throughout.
+    //
+    // So the rule for this block: never probe only the boundary. Every test here
+    // covers `CAP + 2` and a realistic multiple, and the classification tests are
+    // written so that reverting `buffer_compat_response_body` to the old
+    // `to_bytes(body, CAP + 1)` shape makes them fail.
+
+    /// A realistic `/v1/encode` dense reply, serialized the way the inner
+    /// handler serializes it. `dims` floats per item, values in the range real
+    /// normalized embeddings occupy so `serde_json`'s shortest-roundtrip
+    /// formatting produces realistic byte counts rather than `0.0`.
+    fn encode_reply_bytes(items: usize, dims: usize) -> Vec<u8> {
+        let vector: Vec<f64> = (0..dims)
+            .map(|i| {
+                // f32-representable, sign-alternating, ~1e-2 magnitude — the
+                // shape a normalized embedding coordinate actually has.
+                let raw = ((i % 977) as f32) / 30011.0;
+                let signed = if i % 2 == 0 { raw } else { -raw };
+                signed as f64
+            })
+            .collect();
+        let reply = json!({
+            "items": (0..items)
+                .map(|_| json!({ "dense": vector }))
+                .collect::<Vec<_>>(),
+        });
+        serde_json::to_vec(&reply).expect("serialize encode reply")
+    }
+
+    #[tokio::test]
+    async fn compat_response_cap_admits_a_realistic_large_encode_reply() {
+        // 700 inputs at 1024 dims (bge-m3's dense width): a real bulk-embedding
+        // batch, far inside `MAX_QUEUE_REQUEST_ITEMS` (4096), that must keep
+        // being served. This is the "realistic large response still passes" case.
+        let reply = encode_reply_bytes(700, 1024);
+        assert!(
+            reply.len() > 8 * 1024 * 1024,
+            "fixture is meant to be genuinely large; got {} bytes",
+            reply.len(),
+        );
+        assert!(
+            reply.len() < MAX_COMPAT_RESPONSE_BODY,
+            "a realistic batch must still fit; got {} bytes",
+            reply.len(),
+        );
+
+        match buffer_compat_response_body(Body::from(reply.clone())).await {
+            CompatResponseBody::Buffered(bytes) => assert_eq!(bytes.len(), reply.len()),
+            other => panic!("a realistic large reply must pass, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compat_response_cap_classifies_sizes_past_the_boundary() {
+        // THE regression test for the vacuous-boundary defect. `CAP` and
+        // `CAP + 1` alone were not enough: the broken implementation passed both
+        // and mis-classified everything else. `CAP + 2` is the smallest size that
+        // exposed it, and the two larger sizes are what production actually
+        // produces.
+        match buffer_compat_response_body(Body::from(vec![b'x'; MAX_COMPAT_RESPONSE_BODY])).await {
+            CompatResponseBody::Buffered(bytes) => {
+                assert_eq!(bytes.len(), MAX_COMPAT_RESPONSE_BODY)
+            }
+            other => panic!("a body exactly at the cap must pass, got {other:?}"),
+        }
+        // Classification first, across every size — so a regression reports
+        // WHICH size it mis-classified rather than tripping on a detail of the
+        // first one. Under the old implementation this names cap+2 directly.
+        let mut misclassified = Vec::new();
+        let mut unannounced = Vec::new();
+        for over in [1usize, 2, 4096, MAX_COMPAT_RESPONSE_BODY] {
+            let len = MAX_COMPAT_RESPONSE_BODY + over;
+            match buffer_compat_response_body(Body::from(vec![b'x'; len])).await {
+                CompatResponseBody::TooLarge { observed } => {
+                    // The size hint is exact for an in-process body, so the
+                    // caller-facing message can quote a real number.
+                    if observed != Some(len as u64) {
+                        unannounced.push(over);
+                    }
+                }
+                other => misclassified.push(format!("cap+{over} -> {other:?}")),
+            }
+        }
+        assert!(
+            misclassified.is_empty(),
+            "every oversized body must be TooLarge; these were not: {misclassified:?}",
+        );
+        assert!(
+            unannounced.is_empty(),
+            "an in-process body announces its length; these did not report it: {unannounced:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn compat_response_cap_refuses_a_realistic_oversized_encode_reply() {
+        // The concrete production case the gate raised: a max-size batch at the
+        // queue's own item ceiling. This is the shape that returned an opaque
+        // 500 under the first implementation.
+        let reply = encode_reply_bytes(1400, 1024);
+        assert!(
+            reply.len() > MAX_COMPAT_RESPONSE_BODY + 1,
+            "fixture must be genuinely oversized, not boundary-sized; got {} bytes",
+            reply.len(),
+        );
+        match buffer_compat_response_body(Body::from(reply)).await {
+            CompatResponseBody::TooLarge { observed } => assert!(observed.is_some()),
+            other => panic!("a realistic oversized reply must be TooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compat_response_cap_refuses_an_oversized_body_that_announces_no_length() {
+        // A body with no size hint cannot be pre-checked, so it must be caught by
+        // the `LengthLimitError` downcast instead. Without that second stage this
+        // case would be reported as an unreadable stream — a 500 for what is
+        // really a size condition. `lower()` is 0 here, which is what makes the
+        // downcast load-bearing rather than belt-and-braces.
+        let chunk = vec![b'y'; 1024 * 1024];
+        let chunks = (MAX_COMPAT_RESPONSE_BODY / chunk.len()) + 4;
+        let stream = futures_util::stream::iter(
+            (0..chunks).map(move |_| Ok::<_, std::io::Error>(vec![b'y'; 1024 * 1024])),
+        );
+        let body = Body::from_stream(stream);
+        {
+            use hyper::body::Body as _;
+            assert_eq!(
+                body.size_hint().lower(),
+                0,
+                "the streamed fixture must be un-pre-checkable for this test to mean anything",
+            );
+        }
+        match buffer_compat_response_body(body).await {
+            CompatResponseBody::TooLarge { observed } => {
+                assert_eq!(observed, None, "an unannounced body has no length to quote")
+            }
+            other => panic!("an oversized unannounced body must be TooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_broken_stream_stays_unreadable_rather_than_too_large() {
+        // The other half of the classification: the two failures must not be
+        // collapsed back together. A stream that ERRORS below the cap is a
+        // plumbing fault, not a size verdict, and must keep the 500.
+        let stream = futures_util::stream::iter(vec![
+            Ok::<_, std::io::Error>(vec![b'z'; 16]),
+            Err(std::io::Error::other("upstream went away")),
+        ]);
+        match buffer_compat_response_body(Body::from_stream(stream)).await {
+            CompatResponseBody::Unreadable => {}
+            other => panic!("a broken stream must stay Unreadable, got {other:?}"),
+        }
+    }
+
+    /// Every post-dispatch terminal arm must carry [`GatewayOwnedFault`].
+    ///
+    /// The worker has already run and the meter already holds its units by the
+    /// time any of them fires, so an unmarked response is billed in full for zero
+    /// delivered embeddings (#2641's defect class).
+    ///
+    /// This drives the two SHARED constructors the arms return through, which is
+    /// what makes marking a property of the constructor rather than of each call
+    /// site. It does NOT drive the handlers end to end — that needs a live queue
+    /// — so the guarantee that every arm uses these constructors rather than
+    /// building a bare response is held by
+    /// `no_post_dispatch_arm_builds_an_unmarked_response` below, not by this.
+    #[test]
+    fn every_post_dispatch_fault_is_marked_gateway_owned() {
+        let too_large = compat_translation_fault(
+            "read_encode_response_too_large",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            err_code::PAYLOAD_TOO_LARGE,
+            Some("input"),
+            "oversized".to_string(),
+        );
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            too_large.extensions().get::<GatewayOwnedFault>(),
+            Some(&GatewayOwnedFault::new("read_encode_response_too_large")),
+            "an over-cap reply must not bill: the customer receives no embeddings",
+        );
+        // Terminal means no retry hint — a retryable surface here would have SDK
+        // loops hammering a permanent condition (#2443).
+        assert!(
+            too_large.headers().get("retry-after").is_none(),
+            "the over-cap verdict is terminal and must carry no Retry-After",
+        );
+
+        let unreadable = compat_translation_fault(
+            "read_encode_response",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err_code::INTERNAL_ERROR,
+            None,
+            "failed".to_string(),
+        );
+        assert_eq!(
+            unreadable.extensions().get::<GatewayOwnedFault>(),
+            Some(&GatewayOwnedFault::new("read_encode_response")),
+            "the pre-existing unreadable 500 billed in full too; it is marked now",
+        );
+
+        // The three TRANSLATION arms after the buffering pair. They are the same
+        // class — worker delivered, we could not render it — and were billing in
+        // full until they were routed through this constructor.
+        for stage in [
+            "decode_encode_response",
+            "encode_response_shape",
+            "format_embeddings",
+        ] {
+            let response = compat_translation_fault(
+                stage,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                err_code::INTERNAL_ERROR,
+                None,
+                "translation failed".to_string(),
+            );
+            assert_eq!(
+                response.extensions().get::<GatewayOwnedFault>(),
+                Some(&GatewayOwnedFault::new(stage)),
+                "{stage}: zero embeddings delivered must mean nothing billed",
+            );
+        }
+
+        // `/v1/rerank` runs the identical sequence against `score` and had NO
+        // marked arm at all before this change.
+        for stage in [
+            "read_score_response",
+            "decode_score_response",
+            "format_rerank",
+        ] {
+            let response = rerank_translation_fault(stage, "translation failed");
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(
+                response.extensions().get::<GatewayOwnedFault>(),
+                Some(&GatewayOwnedFault::new(stage)),
+                "{stage}: zero rerank results delivered must mean nothing billed",
+            );
+        }
+    }
+
+    /// No post-dispatch arm builds a bare response instead of going through a
+    /// marked constructor.
+    ///
+    /// The constructors above are only load-bearing if every arm actually uses
+    /// one. This reads the two handlers' own source between the point the worker
+    /// reply is in hand and the success return, and fails on any early return
+    /// that is not routed through its marking constructor — which is exactly how
+    /// the three embeddings arms and all three rerank arms went unmarked while
+    /// their siblings were fixed.
+    #[test]
+    fn no_post_dispatch_arm_builds_an_unmarked_response() {
+        let source = include_str!("proxy.rs");
+        for (marker, end, marked_constructor) in [
+            (
+                "// From here the worker has already run and reported its units, so EVERY",
+                "let token_est = token_count;",
+                "return compat_translation_fault(",
+            ),
+            (
+                "// From here the worker has already run and reported its units, so every",
+                "let mut output = (StatusCode::OK, Json(output)).into_response();",
+                "return rerank_translation_fault(",
+            ),
+        ] {
+            let start = source
+                .find(marker)
+                .unwrap_or_else(|| panic!("post-dispatch region marker not found: {marker}"));
+            let stop = source[start..]
+                .find(end)
+                .unwrap_or_else(|| panic!("post-dispatch region end not found: {end}"));
+            let region = &source[start..start + stop];
+            let unmarked: Vec<&str> = region
+                .lines()
+                .filter(|line| line.trim_start().starts_with("return "))
+                .filter(|line| !line.contains(marked_constructor))
+                .collect();
+            assert!(
+                unmarked.is_empty(),
+                "post-dispatch arm builds a response outside a marking constructor, so it \
+                 bills in full for an undelivered result: {unmarked:?}",
+            );
+        }
+    }
+
+    /// The over-cap message must name only remedies that actually work.
+    ///
+    /// `encoding_format="base64"` was named in the first revision and is inert:
+    /// it is never forwarded to `/v1/encode`, and base64 is applied afterwards to
+    /// the OUTER response assembled from the very buffer that was refused. A
+    /// caller who followed it paid for a second identical encode and received a
+    /// byte-identical rejection.
+    #[test]
+    fn the_over_cap_message_does_not_name_the_inert_base64_remedy() {
+        let body = embeddings_error(
+            err_code::PAYLOAD_TOO_LARGE,
+            Some("input"),
+            format!(
+                "the embedding response for this request is {} bytes, over the \
+                 {MAX_COMPAT_RESPONSE_BODY}-byte limit; send fewer inputs per request",
+                MAX_COMPAT_RESPONSE_BODY + 1
+            ),
+        );
+        let rendered = serde_json::to_string(&body).expect("serialize");
+        assert!(
+            !rendered.contains("base64"),
+            "base64 cannot shrink the capped body; naming it sends the caller \
+             into a paid loop: {rendered}",
+        );
+        assert!(rendered.contains("send fewer inputs per request"));
+    }
+
+    /// `encoding_format` provably cannot change the body the cap measures.
+    ///
+    /// This is the structural reason the remedy above was removed, pinned so a
+    /// future change that re-adds the advice has to make it true first: the inner
+    /// encode body is built from `input` alone.
+    #[test]
+    fn encoding_format_never_reaches_the_inner_encode_request() {
+        let input = json!(["alpha", "beta"]);
+        let (float_body, _) = openai_embeddings_encode_body(&input).expect("encode body");
+        // There is no second builder that takes the format — the same call is
+        // the only path for both `float` and `base64` callers, so the inner
+        // reply, and therefore the capped buffer, is byte-identical.
+        let (again, _) = openai_embeddings_encode_body(&input).expect("encode body");
+        assert_eq!(float_body, again);
+        let rendered = serde_json::to_string(&float_body).expect("serialize");
+        assert!(
+            !rendered.contains("encoding_format") && !rendered.contains("base64"),
+            "the inner encode request carries no encoding hint: {rendered}",
         );
     }
 }

@@ -39,6 +39,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput
+from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
 from sie_server.types.inputs import media_bytes
 
 if TYPE_CHECKING:
@@ -51,8 +52,8 @@ _ERR_REQUIRES_FLASH_ATTN = (
     "NemoColEmbedAdapter requires flash_attn. Install with: pip install flash-attn --no-build-isolation"
 )
 
-# Serializes the v1 ``config_class.to_dict`` monkey-patch so concurrent v1
-# loads cannot observe a partially-restored serializer or race on the restore.
+# Serializes v1 dynamic-class resolution and the ``config_class.to_dict``
+# monkey-patch so concurrent loads cannot observe a temporary serializer.
 _V1_TO_DICT_PATCH_LOCK = threading.Lock()
 
 
@@ -73,7 +74,10 @@ class NemoColEmbedAdapter(BaseAdapter):
     spec = AdapterSpec(
         inputs=("text", "image"),
         outputs=("multivector", "score"),
-        multivector_dim=128,
+        # v1 emits the Llama hidden width (3072); v2 emits its Qwen3-VL
+        # hidden width (2560). Keep this instance-derived so one shared
+        # adapter contract does not mask either model's configured token_dim.
+        multivector_dim=None,
         unload_fields=("_model", "_processor"),
         default_preprocessor="charcount",
     )
@@ -88,7 +92,7 @@ class NemoColEmbedAdapter(BaseAdapter):
         max_seq_length: int | None = None,
         batch_size: int = 8,
         muvera_config: dict[str, Any] | None = None,
-        token_dim: int = 128,
+        token_dim: int = 3072,
     ) -> None:
         """Initialize the adapter.
 
@@ -101,7 +105,8 @@ class NemoColEmbedAdapter(BaseAdapter):
             max_seq_length: Ignored - model uses dynamic sequence length.
             batch_size: Batch size for encoding (passed to model methods).
             muvera_config: MUVERA configuration (passed to postprocessor, not used by adapter).
-            token_dim: Token embedding dimension (stored but not used, model has fixed 128-dim).
+            token_dim: Token embedding dimension used until the loaded model
+                configuration provides its effective hidden width.
         """
         self._model_name_or_path = str(model_name_or_path)
         self._normalize = normalize
@@ -110,8 +115,14 @@ class NemoColEmbedAdapter(BaseAdapter):
         self._batch_size = batch_size
 
         self._model: Any = None
+        # The v1 wrappers and direct prepared path request hidden states. If the
+        # remote model uses transformers' process-global output recorder, its
+        # unlocked layer-forward patch/restore leaks GPU memory under interleaved
+        # forwards. Keep every model call behind one boundary (#2144/#2204).
+        self._forward_lock = threading.Lock()
         self._device: str | None = None
-        self._multivector_dim: int = token_dim  # ColEmbed uses 128-dim per patch
+        self._muvera_config = muvera_config
+        self._multivector_dim: int = token_dim
         self._processor: Any = None  # NemoColEmbedPreprocessor, created on load()
         # Note: Named _processor (not _preprocessor) for PreprocessorRegistry auto-detection
 
@@ -174,14 +185,13 @@ class NemoColEmbedAdapter(BaseAdapter):
 
         self._model.eval()
 
-        # Discover embedding dim with a fallback chain:
-        #   1. config.embedding_dim (v1: 128)
-        #   2. config.hidden_size  (v2: 2560)
-        #   3. constructor token_dim (last-resort default)
-        embedding_dim = getattr(self._model.config, "embedding_dim", None)
-        if embedding_dim is None:
-            embedding_dim = getattr(self._model.config, "hidden_size", None)
-        if isinstance(embedding_dim, int) and embedding_dim > 0:
+        # v2 exposes its 2560-d token width under ``text_config``. v1 returns
+        # ``hidden_states[-1]`` from the nested Llama backbone, so its 3072-d
+        # output width lives under ``config.llm_config.hidden_size``.
+        # The stale 128-d fallback used to build an 8,192-wide MUVERA
+        # repetition block for a 196,608-wide result (64 * 3072).
+        embedding_dim = self._discover_multivector_dim(self._model.config)
+        if embedding_dim is not None:
             self._multivector_dim = embedding_dim
 
         # FIX[#1055]: ensure the requested attention impl actually reaches the
@@ -217,6 +227,19 @@ class NemoColEmbedAdapter(BaseAdapter):
         else:
             logger.info("Skipping NemoColEmbedPreprocessor — model lacks v1 attrs (likely v2 backbone).")
 
+    @staticmethod
+    def _discover_multivector_dim(config: Any) -> int | None:
+        """Return the token width emitted by the loaded ColEmbed model."""
+        for candidate in (
+            getattr(config, "hidden_size", None),
+            getattr(getattr(config, "text_config", None), "hidden_size", None),
+            getattr(getattr(config, "llm_config", None), "hidden_size", None),
+            getattr(config, "embedding_dim", None),
+        ):
+            if isinstance(candidate, int) and candidate > 0:
+                return candidate
+        return None
+
     def _load_v1_dynamic(self, device: str, dtype: torch.dtype) -> Any:
         """Load v1 (SigLIP+Llama) via the explicit dynamic-module path.
 
@@ -231,20 +254,9 @@ class NemoColEmbedAdapter(BaseAdapter):
 
         from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-        model_class = get_class_from_dynamic_module(
-            "modeling_llama_nemoretrievercolembed.llama_NemoRetrieverColEmbed",
-            self._model_name_or_path,
-            trust_remote_code=True,
-            revision=self._revision,
-        )
-
         # v1's config.to_dict() bug: assumes vision_config exists but it doesn't.
         # Triggered during transformers' to_diff_dict() comparison. Patch around it
         # only for this v1 fallback path — v2 inherits from Qwen3VLConfig cleanly.
-        # Serialized with _V1_TO_DICT_PATCH_LOCK so concurrent v1 loads can't leak
-        # the patched serializer or race on the restore.
-        config_class = model_class.config_class  # ty:ignore[unresolved-attribute]
-
         def patched_to_dict(self: Any) -> dict[str, Any]:
             """Patched to_dict that handles missing vision_config (v1 only)."""
             import copy
@@ -264,7 +276,19 @@ class NemoColEmbedAdapter(BaseAdapter):
         }
         if self._revision is not None:
             v1_kwargs["revision"] = self._revision
+
+        # Dynamic-module resolution can return the same cached class while
+        # another load has its config serializer patched. Serialize resolution,
+        # patching, loading, and restoration as one critical section so no
+        # concurrent v1 load can observe or reuse the temporary serializer.
         with _V1_TO_DICT_PATCH_LOCK:
+            model_class = get_class_from_dynamic_module(
+                "modeling_llama_nemoretrievercolembed.llama_NemoRetrieverColEmbed",
+                self._model_name_or_path,
+                trust_remote_code=True,
+                revision=self._revision,
+            )
+            config_class = model_class.config_class  # ty:ignore[unresolved-attribute]
             original_to_dict = config_class.to_dict
             config_class.to_dict = patched_to_dict
             try:
@@ -439,7 +463,7 @@ class NemoColEmbedAdapter(BaseAdapter):
             texts.append(item.text)
 
         # Use model's forward_queries method
-        with torch.inference_mode():
+        with self._forward_lock, torch.inference_mode():
             embeddings = self._model.forward_queries(texts, batch_size=self._batch_size)
 
         multivector_list = self._unpack_embeddings(embeddings, expected_count=len(texts))
@@ -485,7 +509,7 @@ class NemoColEmbedAdapter(BaseAdapter):
         # v2 exposes ``forward_images`` (Qwen3-VL backbone); v1 exposes ``forward_passages``.
         forward = getattr(self._model, "forward_images", None) or self._model.forward_passages
 
-        with torch.inference_mode():
+        with self._forward_lock, torch.inference_mode():
             embeddings = forward(pil_images, batch_size=self._batch_size)
 
         multivector_list = self._unpack_embeddings(embeddings, expected_count=len(pil_images))
@@ -602,7 +626,11 @@ class NemoColEmbedAdapter(BaseAdapter):
                 batch = self._processor.collate(sub_batch_items, device=self._device)
 
                 # Forward pass - call model directly
-                with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                with (
+                    self._forward_lock,
+                    torch.inference_mode(),
+                    torch.autocast(device_type="cuda", dtype=torch.bfloat16),
+                ):
                     outputs = self._model(
                         pixel_values=batch["pixel_values"],
                         input_ids=batch["input_ids"],
@@ -702,3 +730,8 @@ class NemoColEmbedAdapter(BaseAdapter):
         if unsupported:
             msg = f"Unsupported output types: {unsupported}. NemoColEmbedAdapter only supports 'multivector'."
             raise ValueError(msg)
+
+    def get_postprocessors(self) -> dict[str, Any]:
+        """Return the configured MUVERA multivector-to-dense postprocessor."""
+        config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
+        return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim, config=config)}

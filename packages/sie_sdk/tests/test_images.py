@@ -170,6 +170,43 @@ class TestConvertItemImages:
         assert isinstance(result["images"][0]["data"], bytes)
         assert result["images"][0]["format"] == "jpeg"
 
+    def test_raw_png_bytes_preserve_detected_format(self) -> None:
+        png_bytes = b"\x89PNG\r\n\x1a\npayload"
+        item = {"images": [png_bytes, {"data": png_bytes, "format": "PNG"}]}
+
+        result = convert_item_images(item)
+
+        assert result["images"] == [
+            {"data": png_bytes, "format": "png"},
+            {"data": png_bytes, "format": "png"},
+        ]
+
+    def test_raw_jpeg_alias_normalizes_without_relabeling_bytes(self) -> None:
+        jpeg_bytes = b"\xff\xd8\xff\xe0payload"
+
+        result = convert_item_images({"images": [{"data": jpeg_bytes, "format": "JPG"}]})
+
+        assert result["images"] == [{"data": jpeg_bytes, "format": "jpeg"}]
+
+    @pytest.mark.parametrize("header", [b"II+\x00", b"MM\x00+"])
+    def test_raw_bigtiff_bytes_preserve_detected_format(self, header: bytes) -> None:
+        bigtiff_bytes = header + b"payload"
+
+        result = convert_item_images({"images": [bigtiff_bytes]})
+
+        assert result["images"] == [{"data": bigtiff_bytes, "format": "tiff"}]
+
+    @pytest.mark.parametrize("declared_format", ["jpeg", "png;url=https://example.com", 7])
+    def test_declared_format_mismatch_or_invalid_token_fails_closed(self, declared_format: object) -> None:
+        png_bytes = b"\x89PNG\r\n\x1a\npayload"
+
+        with pytest.raises(ValueError, match="Image format"):
+            convert_item_images({"images": [{"data": png_bytes, "format": declared_format}]})
+
+    def test_unknown_raw_bytes_fail_closed(self) -> None:
+        with pytest.raises(ValueError, match="Could not detect encoded image format"):
+            convert_item_images({"images": [b"not-an-image"]})
+
     def test_mixed_formats(self) -> None:
         """Handle mix of PIL images and ImageInput dicts."""
         img1 = Image.new("RGB", (10, 10), color="red")

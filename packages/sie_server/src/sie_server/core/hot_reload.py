@@ -445,31 +445,23 @@ class HotReloader:
         """
         model_name = change.model_name
 
-        if not self._registry.has_model(model_name):
+        # The registry owns config mutation and drains any loaded base/profile
+        # variants under its load lock before refreshing loader + telemetry
+        # catalog state. This also handles profile-only configs where the bare
+        # filesystem model id is not itself a routable registry key.
+        self._reloading.add(model_name)
+        try:
+            removed_ids = await self._registry.remove_config_async(model_name)
+        finally:
+            self._reloading.discard(model_name)
+
+        if not removed_ids:
             return ReloadResult(
                 model_name=model_name,
                 status=ReloadStatus.SKIPPED,
                 change_type=change.change_type,
                 error="Model not in registry",
             )
-
-        if self._registry.is_loaded(model_name):
-            # Mark as reloading
-            self._reloading.add(model_name)
-
-            try:
-                # Drain in-flight requests
-                await self._drain_requests(model_name)
-
-                # Unload the model through the registry's async load lock.
-                await self._registry.unload_async(model_name)
-
-            finally:
-                self._reloading.discard(model_name)
-
-        # Remove from registry configs
-        self._registry._configs.pop(model_name, None)
-        self._registry._model_dirs.pop(model_name, None)
 
         # Clear custom adapter from module cache
         self._clear_custom_adapter_cache(model_name)

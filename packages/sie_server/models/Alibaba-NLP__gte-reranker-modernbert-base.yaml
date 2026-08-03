@@ -1,5 +1,6 @@
 sie_id: Alibaba-NLP/gte-reranker-modernbert-base
 hf_id: Alibaba-NLP/gte-reranker-modernbert-base
+hf_revision: f7481e6055501a30fb19d090657df9ec1f79ab2c
 inputs:
   text: true
   image: false

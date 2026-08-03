@@ -46,8 +46,8 @@ use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use crate::metrics::MetricsRegistry;
 use crate::readiness::Readiness;
+use crate::runtime_state::RuntimeState;
 use crate::shutdown::Shutdown;
 
 pub type SharedBundleConfigHash = Arc<RwLock<String>>;
@@ -105,7 +105,7 @@ pub struct HealthPublisherConfig {
     /// heartbeat, not by config apply.
     pub loaded_models: SharedLoadedModels,
     /// Runtime pressure/capacity gauges mirrored into the heartbeat payload.
-    pub metrics: Arc<MetricsRegistry>,
+    pub runtime_state: Arc<RuntimeState>,
     /// How often to publish. Defaults to [`DEFAULT_PUBLISH_INTERVAL`].
     pub interval: Duration,
 }
@@ -172,7 +172,7 @@ fn encode_payload(
     let configured_slots = config.gpu_count.max(1);
     let total_gpu_slots = clamp_i64_to_i32(
         config
-            .metrics
+            .runtime_state
             .worker_gpu_slots_total
             .get()
             .max(configured_slots.into()),
@@ -180,7 +180,7 @@ fn encode_payload(
     let ready_gpu_slots = if ready {
         clamp_i64_to_i32(
             config
-                .metrics
+                .runtime_state
                 .worker_gpu_slots_ready
                 .get()
                 .clamp(0, total_gpu_slots.into()),
@@ -189,18 +189,18 @@ fn encode_payload(
         0
     };
     config
-        .metrics
+        .runtime_state
         .worker_gpu_slots_total
         .set(total_gpu_slots.into());
     config
-        .metrics
+        .runtime_state
         .worker_gpu_slots_ready
         .set(ready_gpu_slots.into());
-    let queue_depth = clamp_i64_to_i32(config.metrics.worker_queue_depth.get().max(0));
-    let pending_cost = config.metrics.worker_pending_cost.get().max(0);
-    let inflight_batches = clamp_i64_to_i32(config.metrics.inflight_batches.get().max(0));
-    refresh_worker_saturation(&config.metrics);
-    let saturated = config.metrics.worker_saturated.get() > 0;
+    let queue_depth = clamp_i64_to_i32(config.runtime_state.worker_queue_depth.get().max(0));
+    let pending_cost = config.runtime_state.worker_pending_cost.get().max(0);
+    let inflight_batches = clamp_i64_to_i32(config.runtime_state.inflight_batches.get().max(0));
+    refresh_worker_saturation(&config.runtime_state);
+    let saturated = config.runtime_state.worker_saturated.get() > 0;
     let payload = WorkerStatusPayload {
         name: &config.worker_id,
         ready,
@@ -225,28 +225,44 @@ fn clamp_i64_to_i32(value: i64) -> i32 {
     i32::try_from(value).unwrap_or_else(|_| if value.is_negative() { 0 } else { i32::MAX })
 }
 
-fn refresh_worker_saturation(metrics: &MetricsRegistry) {
-    let ready_slots = metrics.worker_gpu_slots_ready.get().max(0);
+fn refresh_worker_saturation(runtime_state: &RuntimeState) {
+    let ready_slots = runtime_state.worker_gpu_slots_ready.get().max(0);
     if ready_slots == 0 {
-        metrics.worker_saturated.set(0);
+        runtime_state.worker_saturated.set(0);
         return;
     }
 
     let capacity = ready_slots
         .saturating_mul(crate::dispatcher::default_max_concurrent_batches().max(1) as i64)
         .max(1);
-    let load = metrics
+    let load = runtime_state
         .worker_queue_depth
         .get()
         .max(0)
-        .saturating_add(metrics.inflight_batches.get().max(0));
-    let threshold = if metrics.worker_saturated.get() > 0 {
+        .saturating_add(runtime_state.inflight_batches.get().max(0));
+    let threshold = if runtime_state.worker_saturated.get() > 0 {
         SATURATION_CLEAR_PERCENT
     } else {
         SATURATION_SET_PERCENT
     };
     let saturated = load.saturating_mul(100) >= capacity.saturating_mul(threshold);
-    metrics.worker_saturated.set(i64::from(saturated));
+    runtime_state.worker_saturated.set(i64::from(saturated));
+}
+
+/// Emit the complete runtime-pressure snapshot once per shared IPC heartbeat.
+/// The heartbeat exists in both NATS and local-ingest modes, so this avoids a
+/// topology-specific duplicate observation path.
+pub(crate) fn record_runtime_telemetry(runtime_state: &RuntimeState) {
+    refresh_worker_saturation(runtime_state);
+    let nonnegative = |value: i64| u64::try_from(value.max(0)).unwrap_or(u64::MAX);
+    runtime_state.telemetry.runtime_snapshot(
+        nonnegative(runtime_state.worker_gpu_slots_total.get()),
+        nonnegative(runtime_state.worker_gpu_slots_ready.get()),
+        nonnegative(runtime_state.worker_queue_depth.get()),
+        nonnegative(runtime_state.worker_pending_cost.get()),
+        nonnegative(runtime_state.inflight_batches.get()),
+        runtime_state.worker_saturated.get() > 0,
+    );
 }
 
 pub async fn publish_tombstone(
@@ -380,7 +396,7 @@ mod tests {
             gpu_count: 1,
             bundle_config_hash: Arc::new(RwLock::new("hash-abc".into())),
             loaded_models: Arc::new(RwLock::new(Vec::new())),
-            metrics: Arc::new(MetricsRegistry::new().unwrap()),
+            runtime_state: Arc::new(RuntimeState::new()),
             interval: DEFAULT_PUBLISH_INTERVAL,
         }
     }
@@ -506,10 +522,10 @@ mod tests {
     #[test]
     fn payload_includes_runtime_pressure_metrics() {
         let c = cfg();
-        c.metrics.worker_gpu_slots_ready.set(1);
-        c.metrics.worker_queue_depth.set(1_000_000);
-        c.metrics.worker_pending_cost.set(1234);
-        c.metrics.inflight_batches.set(2);
+        c.runtime_state.worker_gpu_slots_ready.set(1);
+        c.runtime_state.worker_queue_depth.set(1_000_000);
+        c.runtime_state.worker_pending_cost.set(1234);
+        c.runtime_state.inflight_batches.set(2);
 
         let json: serde_json::Value =
             serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
@@ -523,14 +539,14 @@ mod tests {
     #[test]
     fn payload_derives_saturation_from_worker_pressure() {
         let c = cfg();
-        c.metrics.worker_gpu_slots_ready.set(1);
-        c.metrics.worker_queue_depth.set(1_000_000);
+        c.runtime_state.worker_gpu_slots_ready.set(1);
+        c.runtime_state.worker_queue_depth.set(1_000_000);
 
         let saturated: serde_json::Value =
             serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
         assert_eq!(saturated["saturated"], true);
 
-        c.metrics.worker_queue_depth.set(0);
+        c.runtime_state.worker_queue_depth.set(0);
         let cleared: serde_json::Value =
             serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
         assert_eq!(cleared["saturated"], false);

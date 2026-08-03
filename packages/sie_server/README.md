@@ -90,18 +90,11 @@ For nested settings (any field with `__`), the env-var format is
 
 ## Observability
 
-Prometheus metrics exposed on `/metrics`. Notable counters added with
-the OOM resilience layer:
-
-- `sie_oom_recoveries_attempted_total{model}` — OOMs caught at dispatch.
-- `sie_oom_recoveries_succeeded_total{model}` — recovery fully succeeded.
-- `sie_oom_terminal_failures_total{model}` — recovery exhausted; client saw 503.
-- `sie_oom_cache_clears_total{model}` / `sie_oom_evictions_triggered_total{model}` / `sie_oom_batch_splits_total{model}` — per-strategy counters.
-- `sie_idle_evictions_total{model}` — proactive idle-TTL unloads.
-
-A sustained non-zero rate on `terminal_failures` indicates the GPU pool
-is undersized for the workload; tune `SIE_OOM_RECOVERY__MAX_SPLIT_DEPTH`
-or scale up. See `deploy/upgrade-runbook.md` §5 for the operator playbook.
+The server emits the checked-in worker telemetry contract once through
+OpenTelemetry/OTLP. The regional collector owns Prometheus exposition and
+optional remote OTLP routing; the application does not expose `/metrics` or
+maintain a second Prometheus registry. See `telemetry/contract.yaml` for exact
+instrument names, dimensions, ownership, and histogram bounds.
 
 ## API
 

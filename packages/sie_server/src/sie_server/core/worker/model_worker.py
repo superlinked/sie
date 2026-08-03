@@ -42,90 +42,7 @@ from sie_server.core.worker.types import (
     WorkerResult,
     WorkerStats,
 )
-
-try:
-    from prometheus_client import Counter, Gauge, Histogram
-
-    GPU_BATCH_ITEMS = Histogram(
-        "sie_gpu_batch_items",
-        "Number of items per GPU batch",
-        ["model"],
-        buckets=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512],
-    )
-    GPU_BATCH_TOKENS = Histogram(
-        "sie_gpu_batch_tokens",
-        "Number of tokens per GPU batch",
-        ["model"],
-        buckets=[64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768],
-    )
-    ADAPTIVE_BATCH_WAIT = Gauge(
-        "sie_adaptive_batch_wait_ms",
-        "Current dynamic max_batch_wait_ms from adaptive controller",
-        ["model"],
-    )
-    ADAPTIVE_P50 = Gauge(
-        "sie_adaptive_p50_ms",
-        "Observed rolling p50 latency from adaptive controller",
-        ["model"],
-    )
-    ADAPTIVE_HEADROOM = Gauge(
-        "sie_adaptive_headroom_ms",
-        "Latency headroom (target_p50 - observed_p50)",
-        ["model"],
-    )
-    ADAPTIVE_BATCH_COST = Gauge(
-        "sie_adaptive_batch_cost",
-        "Current dynamic max_batch_cost (tokens) from adaptive controller",
-        ["model"],
-    )
-    ADAPTIVE_FILL_RATIO = Gauge(
-        "sie_adaptive_fill_ratio",
-        "Mean batch fill ratio (actual_cost / max_cost)",
-        ["model"],
-    )
-    ADAPTIVE_BATCH_EFFICIENCY = Histogram(
-        "sie_adaptive_batch_efficiency",
-        "Batch request efficiency: actual_batch_size / max_batch_requests",
-        ["model"],
-        buckets=[0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0],
-    )
-    ADAPTIVE_STARVATION_STREAK = Gauge(
-        "sie_adaptive_starvation_streak",
-        "Current consecutive-tiny-batch streak tracked by the adaptive controller",
-        ["model"],
-    )
-    ADAPTIVE_STARVATION_RESETS = Counter(
-        "sie_adaptive_starvation_resets_total",
-        "Total number of starvation-triggered controller resets",
-        ["model"],
-    )
-    # Queue-depth visibility for the Python-side adaptive batcher.
-    #
-    # Counterpart to the Rust-side `sie_worker_ipc_mux_inflight` gauge:
-    # together they bracket the path between Rust dispatch and the GPU.
-    # A regression where Rust caching/multiplexing removes its own
-    # back-pressure shows up here as a wider distribution of items
-    # waiting at dispatch time, even though the GPU sees the same
-    # batch size and total throughput. This is the metric to watch
-    # when tuning `SIE_IPC_MUX_MAX_INFLIGHT_PER_POD` — a healthy cap
-    # keeps the histogram concentrated near 0–1 batches deep.
-    MODEL_LOOP_PENDING_AT_DISPATCH = Histogram(
-        "sie_model_loop_pending_at_dispatch",
-        "Total items pending across all LoRA batchers at the moment a "
-        "batch is dispatched to the model adapter (i.e. queue depth "
-        "observed by the model loop, NOT including the items being "
-        "dispatched).",
-        ["model"],
-        buckets=[0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
-    )
-    MODEL_LOOP_PENDING_GAUGE = Gauge(
-        "sie_model_loop_pending",
-        "Current items pending across all LoRA batchers; sampled at every model-loop iteration.",
-        ["model"],
-    )
-    _HAS_BATCH_METRICS = True
-except ImportError:
-    _HAS_BATCH_METRICS = False
+from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 
 if TYPE_CHECKING:
     from sie_server.adapters.base import ModelAdapter
@@ -987,12 +904,22 @@ class ModelWorker:
                 break
             drained = True
             drain_budget -= drain_batch.size
-            await self._process_batch(drain_batch)
-            if _HAS_BATCH_METRICS:
-                _label_name = self._model_name or "unknown"
-                GPU_BATCH_ITEMS.labels(model=_label_name).observe(drain_batch.size)
-                GPU_BATCH_TOKENS.labels(model=_label_name).observe(drain_batch.total_tokens)
+            await self._process_batch(drain_batch, engine_queue_owned=True)
+            self._record_runtime_batch(drain_batch)
         return drained
+
+    def _record_runtime_batch(self, batch: FormattedBatch[HasCost, RequestMetadata]) -> None:
+        """Emit one engine-owned batch event after a successful dispatch."""
+        if not worker_telemetry_enabled():
+            return
+        worker_telemetry().batch_formed(
+            operation="other",
+            model=self._model_name or "other",
+            profile="default",
+            size=batch.size,
+            cost=batch.total_cost,
+            capacity=self._batch_config.max_batch_cost,
+        )
 
     async def _process_loop(self) -> None:
         """Background loop that processes batches using FCFS across LoRAs."""
@@ -1016,17 +943,23 @@ class ModelWorker:
                 if batch.size == 0:
                     continue
 
-                batch_wait_ms = (time.monotonic() - batch_wait_start) * 1000
+                telemetry = worker_telemetry() if worker_telemetry_enabled() else None
+                if telemetry is not None:
+                    pending_after_pull = sum(batcher.pending_count for batcher in self._batchers.values())
+                    telemetry.queue_depth_changed(
+                        operation="other",
+                        model=self._model_name or "other",
+                        profile="default",
+                        depth=pending_after_pull,
+                    )
+                    telemetry.queue_pending_observed(
+                        operation="other",
+                        model=self._model_name or "other",
+                        profile="default",
+                        pending=pending_after_pull,
+                    )
 
-                # Queue-depth observation. Captured AFTER the batch is
-                # pulled so it reflects items still waiting once we
-                # commit to dispatching this batch — that's the figure
-                # we want when reasoning about Rust-side back-pressure.
-                if _HAS_BATCH_METRICS:
-                    pending_after_pull = sum(b.pending_count for b in self._batchers.values())
-                    _label_name = self._model_name or "unknown"
-                    MODEL_LOOP_PENDING_AT_DISPATCH.labels(model=_label_name).observe(pending_after_pull)
-                    MODEL_LOOP_PENDING_GAUGE.labels(model=_label_name).set(pending_after_pull)
+                batch_wait_ms = (time.monotonic() - batch_wait_start) * 1000
 
                 inference_start = time.monotonic()
                 drained = False
@@ -1038,7 +971,8 @@ class ModelWorker:
                     self._adapter.set_active_lora(active_lora)
 
                     # Process the batch and track inference time.
-                    await self._process_batch(batch)
+                    await self._process_batch(batch, engine_queue_owned=True)
+                    self._record_runtime_batch(batch)
 
                     # Continuous batching: immediately drain items that accumulated
                     # during GPU inference, bypassing the coalesce/timeout wait —
@@ -1071,15 +1005,6 @@ class ModelWorker:
                     unique_requests = len({id(m) for m in batch.metadata})
                     self._stats.requests_per_batch.append(unique_requests)
 
-                if _HAS_BATCH_METRICS:
-                    _label_name = self._model_name or "unknown"
-                    GPU_BATCH_ITEMS.labels(model=_label_name).observe(batch.size)
-                    GPU_BATCH_TOKENS.labels(model=_label_name).observe(batch.total_tokens)
-                    if self._batch_config.max_batch_requests > 0:
-                        ADAPTIVE_BATCH_EFFICIENCY.labels(model=_label_name).observe(
-                            batch.size / self._batch_config.max_batch_requests
-                        )
-
                 # Track batch efficiency for adaptive controller
                 if self._efficiency_tracker is not None:
                     self._efficiency_tracker.record(batch.total_cost, self._batch_config.max_batch_cost)
@@ -1092,26 +1017,22 @@ class ModelWorker:
                 if self._adaptive_controller is not None and self._latency_tracker is not None:
                     observed_p50 = self._latency_tracker.p50()
                     fill_ratio = self._efficiency_tracker.mean_fill_ratio() if self._efficiency_tracker else None
-                    prev_resets = self._adaptive_controller.starvation_resets
-                    new_wait, new_cost = self._adaptive_controller.apply_step(
+                    starvation_resets_before = self._adaptive_controller.starvation_resets
+                    self._adaptive_controller.apply_step(
                         self._batch_config, observed_p50, fill_ratio, batch_size=batch.size
                     )
-
-                    if _HAS_BATCH_METRICS:
-                        _label = self._model_name or "unknown"
-                        ADAPTIVE_BATCH_WAIT.labels(model=_label).set(new_wait)
-                        ADAPTIVE_BATCH_COST.labels(model=_label).set(new_cost)
-                        if observed_p50 is not None:
-                            ADAPTIVE_P50.labels(model=_label).set(observed_p50)
-                            target = self._adaptive_controller.target_p50_ms
-                            if target is not None:
-                                ADAPTIVE_HEADROOM.labels(model=_label).set(target - observed_p50)
-                        if fill_ratio is not None:
-                            ADAPTIVE_FILL_RATIO.labels(model=_label).set(fill_ratio)
-                        ADAPTIVE_STARVATION_STREAK.labels(model=_label).set(self._adaptive_controller.starvation_streak)
-                        reset_delta = self._adaptive_controller.starvation_resets - prev_resets
-                        if reset_delta > 0:
-                            ADAPTIVE_STARVATION_RESETS.labels(model=_label).inc(reset_delta)
+                    if telemetry is not None:
+                        telemetry.adaptive_snapshot(
+                            model=self._model_name or "other",
+                            profile="default",
+                            wait_ms=self._adaptive_controller.current_wait_ms,
+                            cost=self._adaptive_controller.current_batch_cost,
+                            observed_p50_ms=observed_p50,
+                            target_p50_ms=self._adaptive_controller.target_p50_ms,
+                            starvation_resets_delta=(
+                                self._adaptive_controller.starvation_resets - starvation_resets_before
+                            ),
+                        )
 
                 # Log every 10 batches at INFO level for visibility
                 if self._stats.batches_processed % 10 == 0:
@@ -1141,7 +1062,12 @@ class ModelWorker:
 
         logger.debug("Process loop stopped")
 
-    async def _process_batch(self, batch: FormattedBatch[HasCost, RequestMetadata]) -> None:
+    async def _process_batch(
+        self,
+        batch: FormattedBatch[HasCost, RequestMetadata],
+        *,
+        engine_queue_owned: bool = False,
+    ) -> None:
         """Process a single batch of requests.
 
         Items from different requests are batched together for inference if they
@@ -1164,6 +1090,7 @@ class ModelWorker:
         config_groups = self._group_by_inference_config(batch)
 
         # Mark inference start for all requests in this batch
+        telemetry = worker_telemetry() if engine_queue_owned and worker_telemetry_enabled() else None
         seen_metadata: set[int] = set()
         for metadata in batch.metadata:
             meta_id = id(metadata)
@@ -1171,6 +1098,13 @@ class ModelWorker:
                 seen_metadata.add(meta_id)
                 if metadata.timing._inference_start is None:
                     metadata.timing.start_inference()
+                    if telemetry is not None:
+                        telemetry.queue_released(
+                            operation=metadata.operation,
+                            model=self._model_name or "other",
+                            profile="default",
+                            duration_s=metadata.timing.queue_ms / 1_000.0,
+                        )
 
         # Run ONE inference call per unique configuration using handlers.
         # The BatchExecutor wraps dispatch with reactive OOM recovery —

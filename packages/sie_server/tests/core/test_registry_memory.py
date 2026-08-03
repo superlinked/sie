@@ -146,7 +146,9 @@ class TestRegistryMemoryManagerIntegration:
         assert registry.memory_manager.get_lru_model() == "model-a"
 
         # Load third model - should trigger OOM, evict model-a, then succeed on retry
-        registry.load("model-c", device="cuda:0")
+        telemetry = MagicMock()
+        with patch("sie_server.core.registry.worker_telemetry", return_value=telemetry):
+            registry.load("model-c", device="cuda:0")
 
         # model-a should be evicted
         assert not registry.is_loaded("model-a")
@@ -161,6 +163,34 @@ class TestRegistryMemoryManagerIntegration:
         # Now only model-b and model-c are loaded
         assert len(registry.loaded_model_names) == 2
         assert set(registry.loaded_model_names) == {"model-b", "model-c"}
+        telemetry.model_evicted.assert_called_once_with(model="model-a", reason="load_oom")
+
+    @patch("sie_server.core.model_loader.load_adapter")
+    def test_sync_preload_pressure_eviction_uses_bounded_reason(
+        self,
+        mock_load_adapter: MagicMock,
+        mock_adapter_factory: MagicMock,
+    ) -> None:
+        adapter_a = mock_adapter_factory()
+        adapter_b = mock_adapter_factory()
+        mock_load_adapter.side_effect = [adapter_a, adapter_b]
+        registry = ModelRegistry()
+        registry.add_config(_make_config(name="model-a", hf_id="org/model-a"))
+        registry.add_config(_make_config(name="model-b", hf_id="org/model-b"))
+
+        with patch.object(registry._memory_manager, "should_evict_for_load", return_value=False):
+            registry.load("model-a", device="cpu")
+
+        telemetry = MagicMock()
+        with (
+            patch.object(registry._memory_manager, "should_evict_for_load", side_effect=[True, False]),
+            patch("sie_server.core.registry.worker_telemetry", return_value=telemetry),
+        ):
+            registry.load("model-b", device="cpu")
+
+        assert not registry.is_loaded("model-a")
+        assert registry.is_loaded("model-b")
+        telemetry.model_evicted.assert_called_once_with(model="model-a", reason="preload_pressure")
 
     @patch("sie_server.core.model_loader.load_adapter")
     def test_oom_with_no_models_to_evict_raises(

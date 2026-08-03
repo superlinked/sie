@@ -5,7 +5,6 @@ mod error;
 mod handlers;
 mod health_mode;
 mod http_error;
-mod metrics;
 mod middleware;
 mod nats;
 mod observability;
@@ -23,7 +22,6 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 use tokio::signal;
-use tokio::sync::watch;
 use tracing::info;
 
 use config::Config;
@@ -178,12 +176,6 @@ async fn main() {
 async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let config = Arc::new(cfg);
-
-    // Pre-instantiate request/demand metric families with empty-label
-    // sentinels so `/metrics` exposes them from the very first scrape,
-    // before any proxied traffic has landed. See `init_metric_families`
-    // for why dashboards on a freshly booted gateway need this.
-    metrics::init_metric_families();
 
     // Surface a loud warning if the operator has opted in
     // to raw routing-key logging. The default (flag unset) emits only
@@ -575,57 +567,34 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Per-pool warm floor emitter (every 30s, matches KEDA pollingInterval).
-    // The gateway never writes KEDA/StatefulSets directly; it re-emits the
-    // `sie_gateway_pool_warm_floor` gauge for each lane a pool with
-    // `minimum_worker_count > 0` can name, and clears lanes that disappear so
-    // KEDA can scale them back to zero. Default `minimum_worker_count == 0`
-    // emits nothing, leaving scale-from-zero unchanged.
-    if pools_enabled {
-        let pm = Arc::clone(&pool_manager);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            let mut prev = state::warm_floor::WarmFloorLanes::new();
-            loop {
-                interval.tick().await;
-                let pools = pm.list_pools().await;
-                state::warm_floor::reconcile_and_emit(&pools, &mut prev);
-            }
-        });
-    }
-
-    // Per-pool pinned-model loaded-signal emitter (every 30s). Observability
-    // only: reports whether each pinned model is loaded on a pool's healthy
-    // workers via the `sie_gateway_pool_pinned_model_loaded` gauge. It does not
-    // load or pin models (worker-side LRU pinning is a separate project). A pool
-    // with an empty `pinned_models` set emits nothing.
-    if pools_enabled {
+    // Per-logical-pool pinned-model readiness (every 30s). This is one
+    // complete semantic snapshot emitted through the canonical OTel facade;
+    // it does not load or pin models itself.
+    if pools_enabled && observability::tracing::metrics_exporter_enabled() {
         let pm = Arc::clone(&pool_manager);
         let reg = Arc::clone(&registry);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
-            let mut prev = state::pinned_models::PinnedLanes::new();
             loop {
                 interval.tick().await;
                 let pools = pm.list_pools().await;
-                // Build the per-pool loaded-model view: the union of loaded
-                // models across the healthy workers assigned to each pool.
                 let workers = reg.workers().await;
                 let mut loaded = state::pinned_models::PoolLoadedModels::new();
                 for pool in &pools {
                     if pool.spec.pinned_models.is_empty() {
                         continue;
                     }
-                    let set = loaded.entry(pool.spec.name.clone()).or_default();
+                    let pool_models = loaded.entry(pool.spec.name.clone()).or_default();
                     for assigned in &pool.status.assigned_workers {
-                        if let Some(w) = workers.get(&assigned.url) {
-                            if w.healthy() {
-                                set.extend(w.models.iter().cloned());
+                        if let Some(worker) = workers.get(&assigned.url) {
+                            if worker.healthy() {
+                                pool_models.extend(worker.models.iter().cloned());
                             }
                         }
                     }
                 }
-                state::pinned_models::reconcile_and_emit(&pools, &loaded, &mut prev);
+                let snapshot = state::pinned_models::pinned_model_values(&pools, &loaded);
+                observability::metrics::record_pool_pinned_model_loaded_snapshot(&snapshot);
             }
         });
     }
@@ -703,7 +672,28 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Keep a handle for graceful shutdown drain
     let shutdown_publisher = work_publisher.clone();
 
-    let demand_tracker = Arc::new(state::demand_tracker::DemandTracker::new());
+    let demand_tracker = Arc::new(state::demand_tracker::DemandTracker::new(
+        config.configured_physical_lanes.clone(),
+    ));
+    let lane_backlog_source: Option<Arc<dyn queue::backlog::LaneBacklogSource>> =
+        if work_publisher.is_some() {
+            let client = nats_manager.get_client().await.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "queue publisher exists without an active NATS client",
+                )
+            })?;
+            let source = queue::backlog::JetStreamLaneBacklogSource::try_new(
+                async_nats::jetstream::new(client),
+                demand_tracker.catalog(),
+            )
+            .map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+            })?;
+            Some(Arc::new(source))
+        } else {
+            None
+        };
 
     let state = Arc::new(AppState {
         registry: Arc::clone(&registry),
@@ -714,14 +704,21 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
         // methods stay on the concrete clones retained above.
         work_publisher: work_publisher
             .map(|publisher| publisher as Arc<dyn queue::dispatch::WorkDispatcher>),
+        lane_backlog_source,
         demand_tracker,
         config_epoch: config_epoch.clone(),
+        // OSS self-host: no org-scoping; every model is global.
+        model_access_policy: None,
     });
 
+    // KEDA consumes the collector's Prometheus translation. The shared helper
+    // owns the five-second/skip policy and spawns nothing without an exporter.
+    let _ = server::spawn_keda_capacity_reconciler(
+        Arc::clone(&state),
+        server::LaneBacklogMode::JetStreamRequired,
+    );
+
     let app = server::create_router(Arc::clone(&state), Arc::clone(&config));
-    let metrics_app = config
-        .metrics_port
-        .map(|_| server::create_metrics_router(Arc::clone(&state)));
 
     info!(
         addr = %addr,
@@ -730,38 +727,12 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
         "starting SIE Gateway"
     );
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let listener = TcpListener::bind(&addr).await?;
-
-    let metrics_handle = match (config.metrics_port, metrics_app) {
-        (Some(metrics_port), Some(metrics_app)) => {
-            let metrics_addr = format!("{}:{}", config.host, metrics_port);
-            let metrics_listener = TcpListener::bind(&metrics_addr).await?;
-            let metrics_shutdown = shutdown_rx.clone();
-            info!(
-                addr = %metrics_addr,
-                "starting SIE Gateway metrics listener"
-            );
-            Some(tokio::spawn(async move {
-                axum::serve(metrics_listener, metrics_app)
-                    .with_graceful_shutdown(wait_for_shutdown(metrics_shutdown))
-                    .await
-            }))
-        }
-        _ => None,
-    };
-
-    let shutdown_tx_for_signal = shutdown_tx.clone();
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            let _ = shutdown_tx_for_signal.send(true);
         })
         .await;
-    let _ = shutdown_tx.send(true);
-    if let Some(handle) = metrics_handle {
-        handle.await??;
-    }
     serve_result?;
 
     info!("server stopped");
@@ -807,14 +778,6 @@ async fn shutdown_signal() {
         }
         _ = terminate => {
             info!("shutdown signal received (SIGTERM)");
-        }
-    }
-}
-
-async fn wait_for_shutdown(mut rx: watch::Receiver<bool>) {
-    while !*rx.borrow() {
-        if rx.changed().await.is_err() {
-            break;
         }
     }
 }

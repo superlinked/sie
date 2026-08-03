@@ -1,0 +1,76 @@
+{{- if eq (include "sie-cluster.otel.collectorEnabled" .) "true" }}
+{{- $_ := include "sie-cluster.otel.validatePrometheusScrapeNamespaces" . -}}
+{{- $metricsEnabled := eq (include "sie-cluster.otel.metricsEnabled" .) "true" -}}
+{{- $collector := .Values.observability.otel.collector -}}
+{{- $applicationPrometheusEnabled := eq (include "sie-cluster.otel.applicationPrometheusEnabled" .) "true" -}}
+{{- $prometheusEnabled := and $metricsEnabled (or $applicationPrometheusEnabled $collector.prometheus.enabled) -}}
+{{- $workloadNamespace := include "sie-cluster.namespace" . -}}
+{{- $bundledPrometheusInstalled := index .Values "kube-prometheus-stack" "install" -}}
+{{- $bundledPrometheusNamespace := include "sie-cluster.kubePrometheusStack.namespace" . -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-otel-collector
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sie-cluster.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: otel-collector
+  policyTypes:
+    - Ingress
+  ingress:
+    # KEDA trusts only telemetry accepted on the gateway receiver. Restrict it
+    # to release gateway pods; all other SIE producers use the isolated
+    # application receiver below.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "sie-cluster.gateway.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: 4317
+          protocol: TCP
+        - port: 4318
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "sie-cluster.selectorLabels" . | nindent 14 }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - config
+                  - worker
+      ports:
+        - port: 4327
+          protocol: TCP
+    {{- if $prometheusEnabled }}
+    # Keep the control-path exposition private to this namespace, the exact
+    # operator-owned bundled Prometheus pod, and explicitly named external
+    # scrape namespaces. Namespace names use Kubernetes' immutable
+    # kubernetes.io/metadata.name label rather than caller-controlled labels.
+    - from:
+        - podSelector: {}
+{{- if and $bundledPrometheusInstalled (ne $bundledPrometheusNamespace $workloadNamespace) }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $bundledPrometheusNamespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              operator.prometheus.io/name: {{ include "sie-cluster.kubePrometheusStack.prometheusCrName" . | quote }}
+{{- end }}
+{{ range $namespace := $collector.prometheus.networkPolicy.scrapeNamespaceNames }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $namespace | quote }}
+{{ end }}
+      ports:
+        - port: {{ $collector.prometheus.port }}
+          protocol: TCP
+    {{- end }}
+{{- end }}

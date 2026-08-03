@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "SIE perf-tuning dashboard — 4 rows mirror the four tuning surfaces documented in sie-perf-lab/docs/l4-cluster-perf-tuning.md: (1) cluster throughput + SLO, (2) worker-sidecar pull loop / IPC pool, (3) Rust scheduler adaptive controller, (4) DCGM device-level power & clocks. Each panel is annotated with the knob it answers and the failure mode its shape encodes.",
+  "description": "SIE performance dashboard built from the canonical request, queue, batching, IPC, model/OOM contract plus DCGM device telemetry. Runtime-private scheduler and pull-loop families are intentionally not queried.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -23,7 +23,7 @@
       "type": "text",
       "options": {
         "mode": "markdown",
-        "content": "## Cluster throughput & SLO\nTarget: **1M tok/s** cluster (= **100k tok/s per pod**). `sie_worker_backend_item_outcomes_total{disposition=\"publish_and_ack\"}` is the per-pod items/s — multiply by `tokens/item` (~433 on the NFCorpus bench) for tok/s."
+        "content": "## Cluster throughput & SLO\nUse canonical completed worker items for request throughput and `sie_worker_units_total` only where the worker reports authoritative input units. Do not infer tokens from item counts."
       }
     },
     {
@@ -54,7 +54,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(sie_worker_backend_item_outcomes_total{namespace=\"$namespace\", disposition=\"publish_and_ack\"}[1m]))",
+          "expr": "sum(rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", outcome=\"success\"}[1m]))",
           "legendFormat": "items/s",
           "refId": "A"
         }
@@ -73,12 +73,12 @@
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
       "targets": [
         {
-          "expr": "sum(rate(sie_worker_backend_item_outcomes_total{namespace=\"$namespace\", disposition=\"publish_and_ack\"}[1m])) by (pod)",
-          "legendFormat": "{{pod}}",
+          "expr": "sum(rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", outcome=\"success\"}[1m])) by (producer_instance)",
+          "legendFormat": "{{producer_instance}}",
           "refId": "A"
         }
       ],
-      "title": "Per-pod items/s (target ~230/s/pod at 433 tok/item)"
+      "title": "Successful items/s by worker producer"
     },
     {
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 2 },
@@ -92,18 +92,18 @@
       "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 0 } } },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[1m])) by (le))",
+          "expr": "histogram_quantile(0.5, sum(rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[1m])) by (le))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[1m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[1m])) by (le))",
           "legendFormat": "p99",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_queue_result_wait_seconds_bucket{namespace=\"$namespace\"}[1m])) by (le))",
-          "legendFormat": "queue-wait p99",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_dispatch_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[1m])) by (le))",
+          "legendFormat": "dispatch p99",
           "refId": "C"
         }
       ],
@@ -115,7 +115,7 @@
       "type": "text",
       "options": {
         "mode": "markdown",
-        "content": "## worker-sidecar — pull loop & IPC pool\n`ipc_pool_inflight` flatlining at `SIE_IPC_POOL_SIZE` is the canonical symptom of a too-small IPC pool. Rule of thumb: keep `SIE_PULL_LOOP_INFLIGHT ≤ SIE_MAX_CONCURRENT_BATCHES ≤ SIE_IPC_POOL_SIZE`."
+        "content": "## worker-sidecar — queue, batching, and IPC\nThe contract exposes logical IPC outcomes/duration and scheduler-owned queue/batch behavior. Pool internals and pull-loop implementation diagnostics are intentionally outside this dashboard."
       }
     },
     {
@@ -130,17 +130,17 @@
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 20 } } },
       "targets": [
         {
-          "expr": "avg(sie_worker_ipc_pool_inflight{namespace=\"$namespace\"}) by (pod)",
-          "legendFormat": "{{pod}} inflight",
+          "expr": "sum(rate(sie_worker_ipc_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\", outcome=~\"success|success_after_retry\"}[1m])) by (producer_instance, lane, method)",
+          "legendFormat": "{{producer_instance}} / {{lane}} / {{method}} success",
           "refId": "A"
         },
         {
-          "expr": "avg(sie_worker_ipc_pool_size{namespace=\"$namespace\"}) by (pod)",
-          "legendFormat": "{{pod}} pool size",
+          "expr": "sum(rate(sie_worker_ipc_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\", outcome!~\"success|success_after_retry\"}[1m])) by (producer_instance, lane, method, outcome)",
+          "legendFormat": "{{producer_instance}} / {{lane}} / {{method}} / {{outcome}}",
           "refId": "B"
         }
       ],
-      "title": "IPC pool: inflight vs size (flatline at size = saturated)"
+      "title": "Sidecar IPC request rate by outcome"
     },
     {
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
@@ -154,18 +154,18 @@
       "fieldConfig": { "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "fillOpacity": 0 } } },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum(rate(sie_pull_loop_batch_process_seconds_bucket{namespace=\"$namespace\"}[1m])) by (le, pod)) * 1000",
-          "legendFormat": "{{pod}} p50",
+          "expr": "histogram_quantile(0.5, sum(rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[1m])) by (le, producer_instance)) * 1000",
+          "legendFormat": "{{producer_instance}} p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_batch_process_seconds_bucket{namespace=\"$namespace\"}[1m])) by (le, pod)) * 1000",
-          "legendFormat": "{{pod}} p99",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[1m])) by (le, producer_instance)) * 1000",
+          "legendFormat": "{{producer_instance}} p99",
           "refId": "B"
         }
       ],
-      "title": "Pull-loop batch wall time (fetch → IPC → GPU → ACK)",
-      "description": "Buckets in source are [1,5,10,25,50,100,250,500,1000,2500,5000,10000] ms. p50 (~20-80ms FP16) lands in the 25-100ms range → ±33% quantile error; p99 (~100-300ms) in 100-500ms → ±50%. Use for trend, not absolute regressions < 20%."
+      "title": "Worker request duration by producer",
+      "description": "Canonical worker item duration. Histogram quantiles are suitable for operational trends; use benchmark traces for small regression claims."
     },
     {
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
@@ -179,12 +179,12 @@
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
       "targets": [
         {
-          "expr": "sum(rate(sie_pull_loop_items_fetched_sum{namespace=\"$namespace\"}[1m])) by (pod) / sum(rate(sie_pull_loop_items_fetched_count{namespace=\"$namespace\"}[1m])) by (pod)",
-          "legendFormat": "{{pod}} items/pull (avg)",
+          "expr": "sum(rate(sie_worker_batch_size_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[1m])) by (producer_instance) / clamp_min(sum(rate(sie_worker_batch_size_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[1m])) by (producer_instance), 1e-9)",
+          "legendFormat": "{{producer_instance}} items/batch (avg)",
           "refId": "A"
         }
       ],
-      "title": "Avg items/pull (cap = SIE_NATS_FETCH_BUDGET, 64)"
+      "title": "Average canonical batch size"
     },
     {
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
@@ -198,8 +198,8 @@
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
       "targets": [
         {
-          "expr": "sum(rate(sie_worker_ipc_requests_total{namespace=\"$namespace\"}[1m])) by (pod)",
-          "legendFormat": "{{pod}}",
+          "expr": "sum(rate(sie_worker_ipc_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[1m])) by (producer_instance, lane)",
+          "legendFormat": "{{producer_instance}} / {{lane}}",
           "refId": "A"
         }
       ],
@@ -211,7 +211,7 @@
       "type": "text",
       "options": {
         "mode": "markdown",
-        "content": "## Rust scheduler — adaptive controller\nIf `sie_worker_scheduler_batch_items` stays tiny while `sie_worker_scheduler_adaptive_fill_ratio` is low, the sidecar is flushing before work accumulates. Check `SIE_BATCHER_COALESCE_MS`, `SIE_BATCHER_MAX_BATCH_REQUESTS`, and the `SIE_ADAPTIVE_*` quantum knobs before changing Python adapter settings."
+        "content": "## Scheduler-owned contract signals\nBatch size, batch cost, fill ratio, queue duration, and flush reason are the stable tuning surface across worker implementations. Runtime-private adaptive-controller internals are deliberately excluded."
       }
     },
     {
@@ -226,17 +226,17 @@
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
       "targets": [
         {
-          "expr": "sum(rate(sie_worker_scheduler_batch_items_sum{namespace=\"$namespace\"}[1m])) by (pod) / sum(rate(sie_worker_scheduler_batch_items_count{namespace=\"$namespace\"}[1m])) by (pod)",
-          "legendFormat": "{{pod}} items",
+          "expr": "sum(rate(sie_worker_batch_size_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[1m])) by (producer_instance, model) / clamp_min(sum(rate(sie_worker_batch_size_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[1m])) by (producer_instance, model), 1e-9)",
+          "legendFormat": "{{producer_instance}} / {{model}} items",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(sie_worker_scheduler_batch_cost_sum{namespace=\"$namespace\"}[1m])) by (pod) / sum(rate(sie_worker_scheduler_batch_cost_count{namespace=\"$namespace\"}[1m])) by (pod) / 1000",
-          "legendFormat": "{{pod}} cost (k)",
+          "expr": "sum(rate(sie_worker_batch_cost_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[1m])) by (producer_instance, model) / clamp_min(sum(rate(sie_worker_batch_cost_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[1m])) by (producer_instance, model), 1e-9) / 1000",
+          "legendFormat": "{{producer_instance}} / {{model}} cost (k)",
           "refId": "B"
         }
       ],
-      "title": "Rust scheduler batch size (items & k cost per forward)"
+      "title": "Batch size and cost per formed batch"
     },
     {
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
@@ -250,22 +250,22 @@
       "fieldConfig": { "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "fillOpacity": 0 } } },
       "targets": [
         {
-          "expr": "avg(sie_worker_scheduler_adaptive_wait_ms{namespace=\"$namespace\"}) by (pod, model)",
-          "legendFormat": "{{pod}} wait",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_worker_queue_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[1m])) by (le, producer_instance, model, lane)) * 1000",
+          "legendFormat": "{{producer_instance}} / {{model}} / {{lane}} queue p50",
           "refId": "A"
         },
         {
-          "expr": "avg(sie_worker_scheduler_adaptive_observed_p50_ms{namespace=\"$namespace\"}) by (pod, model)",
-          "legendFormat": "{{pod}} p50",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[1m])) by (le, producer_instance, model, lane)) * 1000",
+          "legendFormat": "{{producer_instance}} / {{model}} / {{lane}} request p50",
           "refId": "B"
         },
         {
-          "expr": "avg(sie_worker_scheduler_adaptive_target_p50_ms{namespace=\"$namespace\"}) by (pod, model)",
-          "legendFormat": "{{pod}} target",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_worker_inference_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", phase=\"inference\"}[1m])) by (le, producer_instance, model, lane)) * 1000",
+          "legendFormat": "{{producer_instance}} / {{model}} / {{lane}} inference p50",
           "refId": "C"
         }
       ],
-      "title": "Rust scheduler adaptive controller: wait / p50 / target"
+      "title": "Queue, request, and inference p50"
     },
     {
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
@@ -279,12 +279,12 @@
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
       "targets": [
         {
-          "expr": "avg(sie_worker_scheduler_adaptive_cost{namespace=\"$namespace\"}) by (pod, model)",
-          "legendFormat": "{{pod}} batch-cost (tokens)",
+          "expr": "histogram_quantile(0.95, sum(rate(sie_worker_batch_cost_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[1m])) by (le, producer_instance, model, lane))",
+          "legendFormat": "{{producer_instance}} / {{model}} / {{lane}} p95 cost",
           "refId": "A"
         }
       ],
-      "title": "Rust scheduler adaptive max_batch_cost"
+      "title": "Batch cost p95"
     },
     {
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
@@ -312,8 +312,8 @@
       },
       "targets": [
         {
-          "expr": "avg(sie_worker_scheduler_adaptive_fill_ratio{namespace=\"$namespace\"}) by (pod, model)",
-          "legendFormat": "{{pod}} fill",
+          "expr": "max(sie_worker_batch_fill_ratio{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}) by (producer_instance, model, lane, flush_reason)",
+          "legendFormat": "{{producer_instance}} / {{model}} / {{lane}} / {{flush_reason}}",
           "refId": "A"
         }
       ],
@@ -331,12 +331,12 @@
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
       "targets": [
         {
-          "expr": "sum(rate(sie_worker_scheduler_enqueued_items_total{namespace=\"$namespace\"}[1m])) by (pod, model, operation)",
-          "legendFormat": "{{pod}} {{operation}} enq/s",
+          "expr": "sum(rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[1m])) by (producer_instance, model, operation, outcome)",
+          "legendFormat": "{{producer_instance}} / {{model}} / {{operation}} / {{outcome}}",
           "refId": "A"
         }
       ],
-      "title": "Rust scheduler enqueues / s"
+      "title": "Worker completion rate"
     },
     {
       "gridPos": { "h": 6, "w": 12, "x": 12, "y": 46 },
@@ -350,12 +350,12 @@
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 60 } } },
       "targets": [
         {
-          "expr": "sum(rate(sie_worker_scheduler_starvation_resets_total{namespace=\"$namespace\"}[5m])) by (pod, model)",
-          "legendFormat": "{{pod}} resets/s",
+          "expr": "sum(rate(sie_worker_oom_recoveries_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", outcome=~\"failed|terminal\"}[5m])) by (backend, strategy, outcome)",
+          "legendFormat": "{{backend}} / {{strategy}} / {{outcome}}",
           "refId": "A"
         }
       ],
-      "title": "Starvation resets rate (non-zero = self-heal firing)"
+      "title": "Failed and terminal OOM recovery rate"
     },
     {
       "gridPos": { "h": 2, "w": 24, "x": 0, "y": 52 },
@@ -625,11 +625,26 @@
         "multi": false,
         "name": "namespace",
         "options": [],
-        "query": "label_values(sie_worker_ipc_pool_size, namespace)",
+        "query": "label_values(kube_pod_info, namespace)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "sie-sie-cluster-otel-collector", "value": "sie-sie-cluster-otel-collector" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Collector",
+        "multi": false,
+        "name": "collector",
+        "options": [],
+        "query": "label_values(up{namespace=\"$namespace\", endpoint=\"prometheus\", service=~\".+-otel-collector\"}, service)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
         "type": "query"
       }
     ]

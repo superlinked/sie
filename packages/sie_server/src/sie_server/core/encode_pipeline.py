@@ -9,11 +9,151 @@ from sie_server.core.preprocessor.text import TextPreprocessor
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers.encode import EncodeHandler
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 
 if TYPE_CHECKING:
+    from sie_server.config.model import ModelConfig, ResolvedProfile
     from sie_server.core.preprocessor_registry import PreprocessorRegistry
     from sie_server.ipc_types import PreparedTokens
+
+
+_ENCODE_OUTPUT_TYPES = frozenset({"dense", "sparse", "multivector"})
+
+
+def _validated_encode_output_types(value: object) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise InvalidInputError("'output_types' must be a non-empty array")
+    validated_output_types: list[str] = []
+    for output_type in value:
+        if not isinstance(output_type, str) or output_type not in _ENCODE_OUTPUT_TYPES:
+            raise InvalidInputError(
+                f"'output_types' entries must be one of {sorted(_ENCODE_OUTPUT_TYPES)}",
+            )
+        validated_output_types.append(output_type)
+    return validated_output_types
+
+
+def resolve_encode_output_types(
+    config: ModelConfig,
+    request_output_types: list[str] | None,
+    selected_profile: ResolvedProfile,
+    effective_options: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Resolve adapter and response output types for every encode ingress.
+
+    Profiles may expose a postprocessed output that the adapter does not emit
+    directly. MuVERA is the canonical example: the public response is dense,
+    while the adapter must first produce multivectors. Keeping capability
+    validation and that translation here prevents the HTTP and managed queue
+    paths from drifting apart.
+
+    Returns:
+        ``(adapter_output_types, response_output_types)``.
+
+    Raises:
+        InvalidInputError: If the requested response includes an output not
+            declared by the model or the selected profile.
+    """
+    if "output_types" in effective_options:
+        requested_outputs: object = effective_options["output_types"]
+    elif request_output_types is not None:
+        requested_outputs = request_output_types
+    else:
+        requested_outputs = ["dense"]
+    response_output_types = _validated_encode_output_types(requested_outputs)
+
+    profile_output_types = selected_profile.runtime.get("output_types")
+    if profile_output_types is not None:
+        supported_outputs = set(_validated_encode_output_types(profile_output_types))
+    else:
+        supported_outputs = set(config.outputs) & _ENCODE_OUTPUT_TYPES
+
+    unsupported = set(response_output_types) - supported_outputs
+    if unsupported:
+        msg = f"Model '{config.sie_id}' does not support output types: {unsupported}. Supported: {supported_outputs}"
+        raise InvalidInputError(msg)
+
+    adapter_output_types = list(response_output_types)
+    if effective_options.get("muvera") is not None and "dense" in response_output_types:
+        adapter_output_types = [output_type for output_type in response_output_types if output_type != "dense"]
+        if "multivector" not in adapter_output_types:
+            adapter_output_types.append("multivector")
+
+    return adapter_output_types, response_output_types
+
+
+def _validated_counts(value: Any, expected_len: int, *, non_negative: bool = False) -> list[int] | None:
+    """Accept a per-item unit-count list only if it can be attributed exactly.
+
+    The single gate every metering basis passes through, so the contract lives
+    in one place as §7 dimensions are added. A value that is not a list, is
+    misaligned with the batch, or holds anything but real ints (``bool`` is an
+    ``int`` subclass and is rejected) yields ``None`` — the meter then falls
+    back to its reserve estimate rather than mis-attributing or approximating a
+    count. ``non_negative`` additionally rejects negatives; every §7 dimension
+    passes it, because a negative unit count is meaningless in all of them and
+    ``api/encode.py`` sums these straight into the reported usage.
+    """
+    if not isinstance(value, list) or len(value) != expected_len:
+        return None
+    for count in value:
+        if not isinstance(count, int) or isinstance(count, bool):
+            return None
+        if non_negative and count < 0:
+            return None
+    return [int(count) for count in value]
+
+
+def _wholly_skipped_text_tower_zeros(skipped: Any, items: list[Item]) -> list[int] | None:
+    """Authoritative per-item token zeros IFF a TEXT-BEARING batch wholly
+    skipped the text tower.
+
+    ``skipped`` is the adapter's own modality partition
+    (``extra["text_tower_skipped"]``, stamped by the SigLIP/CLIP twins). When it
+    says EVERY item in the batch took a non-text tower AND at least one of those
+    items carried text, the exact text-token count is zero — a measurement, not
+    an absent count — and the terminal can carry the dimension the gateway plan
+    reserved off text PRESENCE (``dispatcher::carries_tokenizable_text``)
+    instead of omitting it and faulting the whole dispatch as
+    reserved-but-missing (#2538).
+
+    ``None`` for anything else, which is what keeps today's billing intact:
+
+    * a partition that is malformed, misaligned with the batch, or holds
+      non-``bool`` entries is not a measurement and is dropped, exactly like
+      every other basis in `_validated_counts`;
+    * a partition with even ONE unskipped item is a batch that had text the
+      tokenizer should have counted. Returning zeros there would convert "bill
+      text the model read" into "bill nothing", which is a pricing decision
+      rather than a bug fix;
+    * an EMPTY partition vacuously satisfies ``all()``. It is rejected rather
+      than trusted: "no items took the text tower" is not a measurement of
+      anything, and letting it through would mint a bare unwitnessed zero — the
+      one shape the settlement witness exists to refuse;
+    * a batch with NO text at all — the pure-image request. ``text_tower_skipped``
+      is ``True`` for a pure-image item just as it is for a text+image one, so
+      without this clause the fallback would fire there too and put a
+      ``input_tokens = 0`` on the terminal of a request that never reserved the
+      dimension. That is the case the SigLIP/CLIP adapters already, deliberately,
+      keep off the token dimension (they stamp ``input_token_counts`` only when
+      at least one item reached the text tower), and #2538 must not quietly
+      reverse it. The text condition mirrors the gateway's reservation predicate
+      exactly: no reserved dimension, nothing to release.
+
+    Named and extracted so the rule can be exercised directly. Inline, its only
+    coverage was a source-text assertion about statement ORDER — which cannot
+    tell whether the branch computes the right thing, and passed unchanged with
+    the whole branch deleted.
+    """
+    if not isinstance(skipped, list) or len(skipped) != len(items):
+        return None
+    if not all(isinstance(flag, bool) for flag in skipped):
+        return None
+    if not skipped or not all(skipped):
+        return None
+    if not any(isinstance(getattr(item, "text", None), str) and item.text for item in items):
+        return None
+    return [0] * len(items)
 
 
 class EncodePipeline:
@@ -109,13 +249,21 @@ class EncodePipeline:
         # exist; malformed/misaligned values are dropped rather than
         # mis-attributed — metering falls back to its reserve estimate.
         if timing.input_token_counts is None:
-            extra_counts = encode_output.extra.get("input_token_counts")
-            if (
-                isinstance(extra_counts, list)
-                and len(extra_counts) == len(items)
-                and all(isinstance(count, int) and not isinstance(count, bool) for count in extra_counts)
-            ):
-                timing.input_token_counts = [int(count) for count in extra_counts]
+            timing.input_token_counts = _validated_counts(
+                encode_output.extra.get("input_token_counts"), len(items), non_negative=True
+            )
+
+        # Worker-authoritative per-image counts (§7 "$ per image"). Adapters
+        # whose billable image count differs from what the wire item carries —
+        # today the video-capable encoders, which bill the frames they actually
+        # sampled out of compressed video bytes — stamp them on ``extra``. The
+        # wire-derived ``count_input_images`` hook cannot know that number, so
+        # this is the only basis on which sampled frames settle. Malformed or
+        # misaligned values are dropped rather than mis-attributed; the result
+        # path then falls back to the hook.
+        timing.input_image_counts = _validated_counts(
+            encode_output.extra.get("input_image_counts"), len(items), non_negative=True
+        )
 
         # Shared metering seam: adapters that own their tokenization but do not
         # pre-stamp ``extra`` (every flash text encoder — e5/bert_flash,
@@ -133,12 +281,26 @@ class EncodePipeline:
                 adapter = None
             if adapter is not None:
                 counts = await asyncio.to_thread(adapter.count_input_tokens, items)
-                if (
-                    isinstance(counts, list)
-                    and len(counts) == len(items)
-                    and all(isinstance(count, int) and not isinstance(count, bool) for count in counts)
-                ):
-                    timing.input_token_counts = [int(count) for count in counts]
+                timing.input_token_counts = _validated_counts(counts, len(items), non_negative=True)
+
+        # LAST resort (#2538): every item in this batch took a non-text tower,
+        # as MEASURED by the adapter's own modality partition — so the exact
+        # text-token count is zero, not unknown. Without this the terminal omits
+        # a dimension the gateway plan reserved off text PRESENCE
+        # (``dispatcher::carries_tokenizable_text``) and settlement faults the
+        # whole dispatch as reserved-but-missing: a 500 with zero debit after
+        # the GPU already ran.
+        #
+        # Deliberately positioned AFTER the ``count_input_tokens`` fallback and
+        # gated on ALL items being skipped AND the batch carrying text, so it
+        # only fires where nothing else could count and the gateway actually
+        # reserved the dimension. Any batch where a real tokenizer produced
+        # numbers keeps them, a pure-image batch stays on the image dimension,
+        # and the billing of shapes that settle today is unchanged.
+        if timing.input_token_counts is None:
+            timing.input_token_counts = _wholly_skipped_text_tower_zeros(
+                encode_output.extra.get("text_tower_skipped"), items
+            )
 
         formatted_output = EncodeHandler.format_output(
             encode_output,

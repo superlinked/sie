@@ -46,7 +46,7 @@ from sie_server.adapters._generation_base import (
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.sglang import _server
-from sie_server.observability.metrics import GenerationStreamTimer
+from sie_server.observability.generation_diagnostics import GenerationStreamTimer
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import ImageInput, media_bytes
 
@@ -971,6 +971,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # ``min_tokens`` knob (workaround for Qwen3.6's first-token-EOS
         # bug under greedy decode).
         if min_new_tokens is not None:
+            if min_new_tokens > max_new_tokens:
+                raise ValueError(f"min_new_tokens ({min_new_tokens}) must not exceed max_new_tokens ({max_new_tokens})")
             sampling_params["min_new_tokens"] = min_new_tokens
         # SGLang accepts both penalty knobs natively under
         # ``sampling_params`` with the same names OpenAI uses. Pass them
@@ -980,11 +982,12 @@ class SGLangGenerationAdapter(GenerationAdapter):
             sampling_params["frequency_penalty"] = frequency_penalty
         if presence_penalty is not None:
             sampling_params["presence_penalty"] = presence_penalty
-        # OpenAI ``seed`` → SGLang ``sampling_params["seed"]``. Best-
-        # effort; kernel non-determinism and batching order still
-        # make exact reproducibility impossible.
+        # OpenAI ``seed`` → SGLang ``sampling_params["sampling_seed"]``.
+        # SGLang only applies this value when the server is launched with
+        # ``--enable-deterministic-inference``; otherwise it is accepted but
+        # has no sampling effect.
         if seed is not None:
-            sampling_params["seed"] = seed
+            sampling_params["sampling_seed"] = seed
         # OpenAI ``logit_bias`` → SGLang ``sampling_params["logit_bias"]``.
         # SGLang accepts the same ``{token_id_str: float}`` shape OpenAI
         # uses, so we forward verbatim.
@@ -996,6 +999,20 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # Merge default sampling from model config (request fields win).
         for k, v in self._default_sampling.items():
             sampling_params.setdefault(k, v)
+        # A profile-level minimum is a soft default, while the request's
+        # ``max_new_tokens`` is a hard caller limit. Cap the default to that
+        # limit so short health checks and legitimate one-token requests do
+        # not send SGLang an impossible ``min_new_tokens > max_new_tokens``
+        # combination. An explicit caller minimum is validated above instead
+        # of being silently rewritten.
+        if min_new_tokens is None:
+            default_min_new_tokens = sampling_params.get("min_new_tokens")
+            if (
+                isinstance(default_min_new_tokens, int)
+                and not isinstance(default_min_new_tokens, bool)
+                and default_min_new_tokens > max_new_tokens
+            ):
+                sampling_params["min_new_tokens"] = max_new_tokens
 
         stop_list = list(stop or [])
         stop_list.extend(s for s in self._stop_tokens if s not in stop_list)
@@ -1326,6 +1343,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # subtract worker latency from gateway latency per mode.
         grammar_label = "none" if grammar is None else grammar.kind
         stream_timer = GenerationStreamTimer(self._served_model_name, grammar=grammar_label)
+        terminal_prompt_tokens: int | None = None
         terminal_completion_tokens: int | None = None
 
         # Use the shared client. The httpx client outlives the generator
@@ -1402,6 +1420,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                         first_yield_done = True
                     if chunk.done:
                         terminal_yielded = True
+                        terminal_prompt_tokens = chunk.prompt_tokens
                         terminal_completion_tokens = chunk.completion_tokens
                     # Advance to SGLang's cumulative reported length rather
                     # than incrementing by ``len(chunk.logprobs)``: the
@@ -1512,7 +1531,10 @@ class SGLangGenerationAdapter(GenerationAdapter):
         finally:
             # Emit TPOT regardless of normal completion vs cancellation.
             # ``finalize`` is a no-op if no non-empty chunks were observed.
-            stream_timer.finalize(completion_tokens=terminal_completion_tokens)
+            stream_timer.finalize(
+                prompt_tokens=terminal_prompt_tokens,
+                completion_tokens=terminal_completion_tokens,
+            )
 
 
 def _p_unsafe_from_entry(entry: Any) -> float | None:

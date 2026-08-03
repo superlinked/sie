@@ -31,7 +31,6 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
-from sie_server.observability import metrics as _metrics
 from sie_server.processors.streaming import StreamingProcessor
 
 # ---------------------------------------------------------------------------
@@ -121,14 +120,6 @@ def _patch_compile(
 
 def _make_processor(registry: MagicMock) -> StreamingProcessor:
     return StreamingProcessor(nc=AsyncMock(), registry=registry, worker_id="w1")
-
-
-def _success_count(model: str, kind: str) -> float:
-    return _metrics.GRAMMAR_PREWARM_TOTAL.labels(model=model, kind=kind, outcome="success")._value.get()
-
-
-def _failed_count(model: str, kind: str) -> float:
-    return _metrics.GRAMMAR_PREWARM_TOTAL.labels(model=model, kind=kind, outcome="failed")._value.get()
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +218,7 @@ async def test_xgrammar_prewarm_skips_outlines_compile(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_single_json_schema_prewarms(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One JSON-schema entry → exactly one compile, one cache entry, one success metric."""
+    """One JSON-schema entry produces exactly one compile and one cache entry."""
     calls = _patch_compile(monkeypatch)
     config = _make_config(
         prewarm_grammars=[
@@ -239,19 +230,16 @@ async def test_single_json_schema_prewarms(monkeypatch: pytest.MonkeyPatch) -> N
         ]
     )
     proc = _make_processor(_make_registry(config))
-    before = _success_count(config.sie_id, "json_schema")
-
     await proc.prewarm_grammars_for_model(config.sie_id)
 
     assert len(calls) == 1
     assert calls[0][1].kind == "json_schema"
     assert len(proc._grammar_cache) == 1
-    assert _success_count(config.sie_id, "json_schema") == before + 1
 
 
 @pytest.mark.asyncio
 async def test_single_regex_prewarms(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One regex entry → one compile, one cache entry, success metric incremented."""
+    """One regex entry produces one compile and one cache entry."""
     calls = _patch_compile(monkeypatch)
     config = _make_config(
         prewarm_grammars=[
@@ -259,14 +247,11 @@ async def test_single_regex_prewarms(monkeypatch: pytest.MonkeyPatch) -> None:
         ]
     )
     proc = _make_processor(_make_registry(config))
-    before = _success_count(config.sie_id, "regex")
-
     await proc.prewarm_grammars_for_model(config.sie_id)
 
     assert len(calls) == 1
     assert calls[0][1].kind == "regex"
     assert len(proc._grammar_cache) == 1
-    assert _success_count(config.sie_id, "regex") == before + 1
 
 
 @pytest.mark.asyncio
@@ -292,7 +277,7 @@ async def test_failure_on_one_entry_does_not_block_others(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Compile failure on one entry → metric increments, model load continues."""
+    """Compile failure on one entry is logged while model load continues."""
     calls = _patch_compile(monkeypatch, raise_on=("bad",))
     config = _make_config(
         sie_id="test/mixed-failure",
@@ -304,10 +289,6 @@ async def test_failure_on_one_entry_does_not_block_others(
     )
     proc = _make_processor(_make_registry(config))
 
-    failed_before = _failed_count(config.sie_id, "regex")
-    success_json_before = _success_count(config.sie_id, "json_schema")
-    success_regex_before = _success_count(config.sie_id, "regex")
-
     import logging
 
     with caplog.at_level(logging.ERROR, logger="sie_server.processors.streaming"):
@@ -318,11 +299,8 @@ async def test_failure_on_one_entry_does_not_block_others(
     assert len(calls) == 3
     # Two succeeded (good_a + good_b) → in cache.
     assert len(proc._grammar_cache) == 2
-    # Failure surfaced as ERROR log + failed-counter increment.
+    # Failure surfaced as an ERROR log.
     assert any("bad" in rec.message and "compile failed" in rec.message for rec in caplog.records)
-    assert _failed_count(config.sie_id, "regex") == failed_before + 1
-    assert _success_count(config.sie_id, "json_schema") == success_json_before + 1
-    assert _success_count(config.sie_id, "regex") == success_regex_before + 1
 
 
 @pytest.mark.asyncio
@@ -367,6 +345,11 @@ async def test_prewarmed_grammar_hits_cache_on_request(
     Mirrors the cache-key derivation in :meth:`_ensure_grammar_ready` so a
     drift in either path would surface here.
     """
+    telemetry = MagicMock()
+    monkeypatch.setattr(
+        "sie_server.processors.streaming._metrics.worker_telemetry",
+        lambda: telemetry,
+    )
     calls = _patch_compile(monkeypatch)
     schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
     config = _make_config(prewarm_grammars=[PrewarmGrammar(name="x_schema", kind="json_schema", value=schema)])
@@ -375,11 +358,9 @@ async def test_prewarmed_grammar_hits_cache_on_request(
 
     await proc.prewarm_grammars_for_model(config.sie_id)
     assert len(calls) == 1
-    cache_hits_before = _metrics.GRAMMAR_CACHE_HITS.labels(model=config.sie_id)._value.get()
-
     # Simulate the request-path lookup directly: it goes through
     # ``_ensure_grammar_ready`` which writes the same key shape into the
-    # cache and bumps GRAMMAR_CACHE_HITS on a hit. Calling the helper
+    # cache and emits a canonical cache-hit event. Calling the helper
     # without the full process() machinery is cleaner than wiring up a
     # work item just to test the cache collision.
     from sie_server.types.grammar import GrammarSpec, hash_grammar
@@ -403,8 +384,13 @@ async def test_prewarmed_grammar_hits_cache_on_request(
     assert ok is True
     # No second compile happened.
     assert len(calls) == 1
-    # Cache hit counter incremented.
-    assert _metrics.GRAMMAR_CACHE_HITS.labels(model=config.sie_id)._value.get() == cache_hits_before + 1
+    assert telemetry.grammar_compile_completed.call_count == 1
+    assert telemetry.grammar_compile_completed.call_args.kwargs["phase"] == "prewarm"
+    assert telemetry.grammar_compile_completed.call_args.kwargs["outcome"] == "success"
+    assert [call.kwargs["result"] for call in telemetry.grammar_cache_lookup.call_args_list] == [
+        "miss",
+        "hit",
+    ]
 
 
 @pytest.mark.asyncio

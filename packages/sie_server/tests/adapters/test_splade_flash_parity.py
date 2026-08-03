@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from sie_server.adapters.splade_flash import SPLADEFlashAdapter, _has_flash_attn
+from sie_server.adapters.splade_flash.adapter import SPLADEFlashAdapter, _has_flash_attn
 from sie_server.types.inputs import Item
 
 pytestmark = [

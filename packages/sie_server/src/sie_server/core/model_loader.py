@@ -11,18 +11,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sie_server.adapters.base import ModelAdapter
-from sie_server.config.model import ModelConfig, ProfileAdaptiveBatching
+from sie_server.config.model import ModelConfig, ProfileAdaptiveBatching, lora_entry_ref
 from sie_server.core.inference import AttentionBackend, ComputePrecision
 from sie_server.core.load_errors import ModelLoadTimeoutError
 from sie_server.core.loader import load_adapter
 from sie_server.core.oom import OomRecoveryConfig
 from sie_server.core.worker import ModelWorker, WorkerConfig
 from sie_server.core.worker.types import AdaptiveBatchingParams
-from sie_server.observability.metrics import (
-    increment_model_load_timeout,
-    set_model_loaded,
-    set_model_memory,
-)
+from sie_server.observability.worker_telemetry import worker_telemetry
 
 if TYPE_CHECKING:
     from sie_server.core.disk_cache import ModelDiskCacheManager
@@ -386,7 +382,7 @@ class ModelLoader:
         Bounded by ``SIE_MODEL_LOAD_TIMEOUT_S``. The executor thread runs
         ONLY ``_run_load_with_markers`` (weight deserialization + warmup);
         the registry-state side effects (``_finish_load``: pre/postprocessor
-        registration, ``MODEL_LOADED`` gauge, worker creation, LoRA
+        registration, OTel residency event, worker creation, LoRA
         preloading) run on the awaiting coroutine AFTER the future
         resolves cleanly.
 
@@ -394,7 +390,7 @@ class ModelLoader:
         ``wait_for`` cancels, the orphaned thread keeps running but can
         only mutate the adapter object itself (which the registry will
         discard along with the LoadedModel that never gets created). It
-        cannot register stale preprocessors or set ``sie_model_loaded=1``
+        cannot register stale preprocessors or publish model residency
         for a model the registry has marked failed.
 
         Adapters that set ``manages_own_load_timeout`` are also run in this
@@ -449,11 +445,11 @@ class ModelLoader:
              queue behind the leaked thread (the registry holds
              ``_load_lock`` while awaiting us, so this happens with the
              registry quiesced).
-          3. ``sie_model_load_timeouts_total{model, stage}`` is incremented
-             and a structured error is logged.
+          3. A structured error is logged.
           4. :class:`ModelLoadTimeoutError` is raised; the registry's
-             ``_record_load_failure`` will classify it as ``TIMEOUT`` and
-             install a 30 s cooldown.
+             ``_record_load_failure`` classifies it as ``TIMEOUT``, records
+             ``sie.worker.model.load.duration{outcome="timeout"}``, and installs
+             a 30 s cooldown.
         """
         loop = asyncio.get_running_loop()
         timeout = self._model_load_timeout_s
@@ -475,7 +471,6 @@ class ModelLoader:
                 elapsed,
                 timeout,
             )
-            increment_model_load_timeout(name, stage)
             # The thread keeps running with a stale adapter/config; we
             # cannot kill it. Replace the executor so the next load is
             # not queued behind the leaked worker.
@@ -489,7 +484,8 @@ class ModelLoader:
         we orphan it (``shutdown(wait=False)`` returns immediately without
         joining) and bind ``self._load_executor`` to a new single-worker
         pool. The orphan thread continues to consume RAM/GPU until process
-        exit; ``sie_model_load_timeouts_total`` lets ops observe the rate.
+        exit; the timeout outcome on `sie.worker.model.load.duration` lets ops
+        observe the rate.
         """
         old = self._load_executor
         self._load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-load")
@@ -549,6 +545,14 @@ class ModelLoader:
         Returns:
             LoadedModel containing the loaded state.
         """
+        resolved = config.resolve_profile("default")
+        postprocessors = adapter.get_postprocessors() or {}
+        if resolved.runtime.get("muvera") is not None and "muvera" not in postprocessors:
+            raise ValueError(
+                f"model profile {name!r} requests MUVERA but adapter "
+                f"{type(adapter).__name__!r} did not register a 'muvera' postprocessor"
+            )
+
         # Get preprocessor(s) from adapter - all adapters implement get_preprocessor().
         # Most return a single preprocessor; multi-modal adapters (e.g. NemoColEmbed v1,
         # which needs a text preprocessor for queries AND an image preprocessor for
@@ -561,29 +565,28 @@ class ModelLoader:
                 continue
             modality = getattr(preprocessor, "modality", None)
             if modality == "text":
-                self._preprocessor_registry._register(name, preprocessor)
+                self._preprocessor_registry.register(name, preprocessor)
                 logger.info("Registered text preprocessor for model '%s'", name)
             elif modality == "image":
                 self._preprocessor_registry.register_image(name, preprocessor)
                 logger.info("Registered image preprocessor for model '%s'", name)
+            elif modality == "audio":
+                self._preprocessor_registry.register(name, preprocessor)
+                logger.info("Registered audio preprocessor for model '%s'", name)
 
         # Register postprocessors if adapter provides them.
-        if hasattr(adapter, "get_postprocessors"):
-            postprocessors = adapter.get_postprocessors()
-            if postprocessors:
-                self._postprocessor_registry.register(name, postprocessors)
-                logger.info(
-                    "Registered postprocessors for model '%s': %s",
-                    name,
-                    list(postprocessors.keys()),
-                )
+        if postprocessors:
+            self._postprocessor_registry.register(name, postprocessors)
+            logger.info(
+                "Registered postprocessors for model '%s': %s",
+                name,
+                list(postprocessors.keys()),
+            )
 
         # Get actual memory footprint from the adapter
         memory_bytes = adapter.memory_footprint()
 
         # Create worker for the adapter with postprocessor support
-        resolved = config.resolve_profile("default")
-
         # Merge per-model adaptive batching overrides onto engine defaults
         adaptive_params = _merge_adaptive_params(self._adaptive_batching, resolved.adaptive_batching)
 
@@ -606,9 +609,12 @@ class ModelLoader:
             registry_callbacks=self._registry_callbacks,
         )
 
-        # Record Prometheus metrics
-        set_model_loaded(name, device, loaded=True)
-        set_model_memory(name, device, memory_bytes)
+        # One authoritative lifecycle event expands to loaded + memory gauges.
+        worker_telemetry().model_residency_changed(
+            model=name,
+            loaded=True,
+            memory_bytes=memory_bytes,
+        )
 
         # Create LoadedModel instance
         loaded_model = LoadedModel(
@@ -620,14 +626,33 @@ class ModelLoader:
             max_loras=self._max_loras_per_model,
         )
 
-        # Preload profile LoRAs if adapter supports LoRA. Engine-owned adapters
-        # (sglang: ``supports_hot_lora_reload() == False``) consume
-        # ``loadtime.lora_paths`` themselves at engine launch, so only
+        # Preload profile LoRAs if the adapter exposes a LoRA capability.
+        # Engine-owned adapters (sglang: ``supports_hot_lora_reload() == False``)
+        # consume ``loadtime.lora_paths`` themselves at engine launch, so only
         # hot-reload (PEFT) adapters take the loadtime declarations from here.
-        if adapter.supports_lora():
+        lora_cap = adapter.lora_capability()
+
+        # A pinned LoRA revision (#2113) is only honored on the hot-reload path
+        # (``load_lora(revision=...)``). An engine-owned adapter consumes bare
+        # ids at engine launch and a LoRA-less adapter never loads the ref at
+        # all — in both cases a declared pin would silently resolve at the
+        # Hub's default branch, which is exactly the drift the pin exists to
+        # prevent. Fail the load loudly instead.
+        pinned = {ref: rev for ref, rev in config.lora_revisions().items() if rev is not None}
+        if pinned and (lora_cap is None or not lora_cap.supports_hot_lora_reload()):
+            msg = (
+                f"Model '{name}' pins LoRA revision(s) {pinned!r}, but adapter "
+                f"{type(adapter).__name__!r} cannot honor a pin: it loads LoRAs at engine "
+                "launch (or not at all), where only bare ids exist. Remove the pin, or "
+                "serve via a hot-reload (PEFT) adapter. In the managed path, staging "
+                "resolves pins to local snapshots before the server sees the config."
+            )
+            raise ValueError(msg)
+
+        if lora_cap is not None:
             profile_loras = self._collect_profile_loras(
                 config,
-                include_loadtime_paths=adapter.supports_hot_lora_reload(),
+                include_loadtime_paths=lora_cap.supports_hot_lora_reload(),
             )
             if profile_loras:
                 logger.info(
@@ -636,9 +661,9 @@ class ModelLoader:
                     name,
                     list(profile_loras),
                 )
-                for lora_path in profile_loras:
+                for lora_path, lora_revision in profile_loras.items():
                     try:
-                        lora_memory = adapter.load_lora(lora_path)
+                        lora_memory = lora_cap.load_lora(lora_path, revision=lora_revision)
                         loaded_model.loras[lora_path] = LoadedLora(
                             adapter_id=lora_path,
                             memory_bytes=lora_memory,
@@ -665,17 +690,18 @@ class ModelLoader:
         config: ModelConfig,
         *,
         include_loadtime_paths: bool = True,
-    ) -> set[str]:
-        """Collect all LoRA paths from model profiles.
+    ) -> dict[str, str | None]:
+        """Collect all LoRA paths from model profiles, with any pinned revision.
 
         The canonical spelling is
         ``adapter_options.loadtime["lora_paths"]`` — either a list of
         HuggingFace/local paths (each path doubles as the public LoRA id on
-        the PEFT path) or a dict of served-name → path (the sglang shape,
-        whose paths are what a PEFT adapter would load). The scalar
-        ``adapter_options.runtime["lora_id"]`` is the DEPRECATED legacy alias:
-        it is still accepted here for existing embedding profiles, but new
-        profiles should declare ``loadtime.lora_paths`` (the scalar form is
+        the PEFT path) or a dict of served-name → ref (the sglang shape,
+        whose paths are what a PEFT adapter would load). A dict-form ref may
+        be a bare path or a pinned ``{id, revision}`` mapping (#2113). The
+        scalar ``adapter_options.runtime["lora_id"]`` is the DEPRECATED legacy
+        alias: it is still accepted here for existing embedding profiles, but
+        new profiles should declare ``loadtime.lora_paths`` (the scalar form is
         already rejected outright on generation models — see
         ``core.pool_isolation.validate_no_legacy_scalar_lora_id``).
 
@@ -688,9 +714,13 @@ class ModelLoader:
                 double-load.
 
         Returns:
-            Set of unique LoRA paths from profiles.
+            Mapping of unique LoRA path/id -> pinned 40-hex revision, or
+            ``None`` when unpinned. Revisions come from
+            :meth:`ModelConfig.lora_revisions` (pin-beats-bare across
+            profiles; conflicting pins already rejected at config load).
         """
-        loras: set[str] = set()
+        revisions = config.lora_revisions()
+        loras: dict[str, str | None] = {}
 
         for profile_name, profile_config in config.profiles.items():
             # Canonical key: adapter_options.loadtime["lora_paths"].
@@ -698,7 +728,7 @@ class ModelLoader:
                 lora_paths = profile_config.adapter_options.loadtime.get("lora_paths")
                 entries: list[str] = []
                 if isinstance(lora_paths, dict):
-                    entries = [str(path) for path in lora_paths.values() if path]
+                    entries = [lora_entry_ref(ref)[0] for ref in lora_paths.values() if ref]
                 elif isinstance(lora_paths, (list, tuple)):
                     entries = [str(path) for path in lora_paths if path]
                 elif lora_paths:
@@ -709,7 +739,7 @@ class ModelLoader:
                         type(lora_paths).__name__,
                     )
                 for lora_path in entries:
-                    loras.add(lora_path)
+                    loras[lora_path] = revisions.get(lora_path)
                     logger.debug(
                         "Found LoRA '%s' in profile '%s' (loadtime.lora_paths)",
                         lora_path,
@@ -721,7 +751,7 @@ class ModelLoader:
             # backward compatibility with existing embedding profiles.
             lora_id = profile_config.adapter_options.runtime.get("lora_id")
             if lora_id:
-                loras.add(lora_id)
+                loras[lora_id] = revisions.get(lora_id)
                 logger.debug(
                     "Found LoRA '%s' in profile '%s' (legacy runtime.lora_id)",
                     lora_id,
@@ -737,9 +767,11 @@ class ModelLoader:
             name: Model name.
             device: Device string (for metrics).
         """
-        # Clear Prometheus metrics
-        set_model_loaded(name, device, loaded=False)
-        set_model_memory(name, device, 0)
+        worker_telemetry().model_residency_changed(
+            model=name,
+            loaded=False,
+            memory_bytes=0,
+        )
 
         # Unregister all preprocessors (text and image)
         self._preprocessor_registry.unregister(name)
@@ -789,7 +821,6 @@ def _raise_if_adapter_startup_timeout(name: str, started: float, exc: RuntimeErr
         return
 
     elapsed = time.monotonic() - started
-    increment_model_load_timeout(name, "load")
     logger.error(
         "Adapter startup timeout: model=%s elapsed_s=%.1f msg=%s",
         name,

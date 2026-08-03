@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,7 @@ from sie_server.adapters._multivector import maxsim_scores
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
+from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
 from sie_server.types.inputs import media_bytes
 
 if TYPE_CHECKING:
@@ -87,7 +89,7 @@ class ColPaliAdapter(BaseAdapter):
                 loading model artifacts. Forwarded to ``from_pretrained(..., revision=...)``.
             max_seq_length: Ignored - ColPali uses dynamic sequence length.
             muvera_config: Optional MUVERA configuration for converting
-                multi-vector to dense representation. Reserved for future use.
+                multi-vector outputs to dense representations.
             token_dim: Optional token dimension override.
         """
         self._model_name_or_path = str(model_name_or_path)
@@ -100,8 +102,26 @@ class ColPaliAdapter(BaseAdapter):
 
         self._model: ColPaliForRetrieval | None = None
         self._processor: ColPaliProcessor | None = None
+        # from_pretrained kwargs captured at load() so the preprocessor factory
+        # can rebuild an identical processor per pool thread (#2098).
+        self._processor_load_kwargs: dict[str, Any] = {}
+        # HF fast tokenizers are NOT thread-safe: applying per-call padding/truncation
+        # reconfigures the underlying Rust tokenizer (a mutable borrow). The direct
+        # adapter path (encode_pipeline.py: asyncio.to_thread, no per-model lock) lets
+        # concurrent requests race with RuntimeError: Already borrowed (#2098). Serialise
+        # the processor call — microseconds vs the GPU forward. Matches CLIP/SigLIP.
+        self._tokenizer_lock = threading.Lock()
         self._device: str | None = None
         self._multivector_dim: int = token_dim or 128  # ColPali uses 128-dim per patch
+        # ColPaliForRetrieval.forward hardcodes output_hidden_states=True into
+        # its inner vlm call, which makes transformers' output recorder
+        # monkey-patch every decoder layer's ``forward`` for the duration of
+        # the call and restore it afterwards — with no locking. Two concurrent
+        # forwards interleave patch/restore and leave a capture wrapper
+        # permanently installed; its closure then accumulates every later
+        # layer output (~0.6 GiB per batch) until OOM (#2144). Serializing
+        # forwards costs nothing — they serialize on the GPU anyway.
+        self._forward_lock = threading.Lock()
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -128,6 +148,10 @@ class ColPaliAdapter(BaseAdapter):
         shared_kwargs: dict[str, Any] = {"trust_remote_code": self._trust_remote_code}
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
+
+        # Capture the exact processor-load kwargs so get_preprocessor() can build
+        # an identical per-thread processor for each pool worker (#2098).
+        self._processor_load_kwargs = dict(shared_kwargs)
 
         # Load processor
         self._processor = ColPaliProcessor.from_pretrained(
@@ -158,6 +182,18 @@ class ColPaliAdapter(BaseAdapter):
             trust_remote_code=self._trust_remote_code,
             revision=self._revision,
         ).eval()
+
+        # Embeddings never need a KV cache. The runtime decision lives on the
+        # inner Gemma config, which is ``config.vlm_config.text_config`` — the
+        # same object as ``vlm.model.language_model.config`` (id-verified);
+        # ``config.text_config`` does not exist on ColPaliConfig, so guard all
+        # three spellings. The per-forward ``use_cache=False`` kwarg is the
+        # belt to this suspenders (#2144).
+        self._model.config.use_cache = False
+        for cfg_parent in (self._model.config, getattr(self._model.config, "vlm_config", None)):
+            text_config = getattr(cfg_parent, "text_config", None) if cfg_parent is not None else None
+            if text_config is not None:
+                text_config.use_cache = False
 
         # Get embedding dimension from model config
         # ColPali projects to 128-dim embeddings
@@ -361,11 +397,12 @@ class ColPaliAdapter(BaseAdapter):
         from torch.nn import functional
 
         # Process images
-        batch = self._processor(images=images, return_tensors="pt")
+        with self._tokenizer_lock:
+            batch = self._processor(images=images, return_tensors="pt")
         batch = {k: v.to(self._device) for k, v in batch.items()}
 
-        with torch.inference_mode():
-            outputs = self._model(**batch)
+        with self._forward_lock, torch.inference_mode():
+            outputs = self._model(**batch, use_cache=False)
             embeddings = outputs.embeddings  # [batch, num_patches, 128]
 
             # L2 normalize if configured
@@ -385,7 +422,9 @@ class ColPaliAdapter(BaseAdapter):
 
         # Free GPU memory from intermediate tensors to prevent OOM on
         # subsequent batches (L4 22GB GPUs are tight for VLM models).
-        del embeddings, batch
+        # `outputs` must be dropped too: it pins embeddings (and any
+        # past_key_values), making empty_cache a no-op otherwise (#2144).
+        del outputs, embeddings, batch
         if self._device and self._device.startswith("cuda"):
             torch.cuda.empty_cache()
 
@@ -406,18 +445,23 @@ class ColPaliAdapter(BaseAdapter):
         from torch.nn import functional
 
         # Process text
-        batch = self._processor(text=[text], return_tensors="pt")
+        with self._tokenizer_lock:
+            batch = self._processor(text=[text], return_tensors="pt")
         batch = {k: v.to(self._device) for k, v in batch.items()}
 
-        with torch.inference_mode():
-            outputs = self._model(**batch)
+        with self._forward_lock, torch.inference_mode():
+            outputs = self._model(**batch, use_cache=False)
             embeddings = outputs.embeddings  # [1, num_tokens, 128]
 
             # L2 normalize if configured
             if self._normalize:
                 embeddings = functional.normalize(embeddings, p=2, dim=-1)
 
-        return embeddings[0].float().cpu().numpy()
+        result = embeddings[0].float().cpu().numpy()
+        # Drop the ModelOutput before returning so no KV cache / activation
+        # tensors outlive the request (#2144).
+        del outputs, embeddings, batch
+        return result
 
     def _has_prepared_pixel_values(self, prepared_items: list[Any]) -> bool:
         """Check if prepared items have valid pixel_values for batched inference.
@@ -488,11 +532,12 @@ class ColPaliAdapter(BaseAdapter):
         attention_mask = self._cached_attention_mask.expand(batch_size, -1).to(self._device)
 
         # Run batched inference
-        with torch.inference_mode():
+        with self._forward_lock, torch.inference_mode():
             outputs = self._model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 pixel_values=batch_pixel_values,
+                use_cache=False,
             )
             embeddings = outputs.embeddings  # [batch, num_patches, 128]
 
@@ -508,7 +553,10 @@ class ColPaliAdapter(BaseAdapter):
 
         # Free GPU memory from intermediate tensors to prevent OOM on
         # subsequent batches (L4 22GB GPUs are tight for VLM models).
-        del embeddings, batch_pixel_values, input_ids, attention_mask
+        # `outputs` must be in the del: the ModelOutput pins embeddings (and
+        # any past_key_values), so empty_cache reclaimed nothing while it was
+        # live — the ~92 GiB accumulation of #2144.
+        del outputs, embeddings, batch_pixel_values, input_ids, attention_mask
         if self._device and self._device.startswith("cuda"):
             torch.cuda.empty_cache()
 
@@ -573,6 +621,11 @@ class ColPaliAdapter(BaseAdapter):
             msg = f"Unsupported output types: {unsupported}. ColPaliAdapter only supports 'multivector'."
             raise ValueError(msg)
 
+    def get_postprocessors(self) -> dict[str, Any]:
+        """Return the configured MUVERA multivector-to-dense postprocessor."""
+        config = MuveraConfig(**self._muvera_config) if self._muvera_config else MuveraConfig()
+        return {"muvera": MuveraPostprocessor(token_dim=self._multivector_dim, config=config)}
+
     def get_preprocessor(self) -> Any | None:
         """Return an ImagePreprocessor for CPU/GPU overlap.
 
@@ -582,6 +635,23 @@ class ColPaliAdapter(BaseAdapter):
         if self._processor is None:
             return None
 
+        from transformers import ColPaliProcessor
+
         from sie_server.core.preprocessor import ImagePreprocessor
 
-        return ImagePreprocessor(self._processor, self._model_name_or_path)
+        model_name_or_path = self._model_name_or_path
+        load_kwargs = self._processor_load_kwargs
+
+        def _make_processor() -> ColPaliProcessor:
+            # Built once per pool thread (HF-cache hit). The ColPali processor
+            # invokes its Rust fast tokenizer even for image-only calls, so the
+            # 8-worker preprocessor executor cannot share one instance without
+            # racing on "Already borrowed" (#2098). A per-thread instance removes
+            # the race without a pool-wide lock (which collapsed eval throughput).
+            return ColPaliProcessor.from_pretrained(model_name_or_path, **load_kwargs)
+
+        return ImagePreprocessor(
+            self._processor,
+            self._model_name_or_path,
+            processor_factory=_make_processor,
+        )

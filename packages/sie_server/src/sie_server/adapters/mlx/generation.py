@@ -86,6 +86,13 @@ _MLX_SAMPLING_KEYS: frozenset[str] = frozenset(
 )
 
 
+def normalize_mlx_seed(seed: int) -> int:
+    """Convert a signed i64 seed to MLX's equivalent uint64 bit pattern."""
+    if isinstance(seed, bool) or not isinstance(seed, int) or not -(1 << 63) <= seed <= (1 << 63) - 1:
+        raise ValueError("MLX seed must be a signed 64-bit integer")
+    return seed & ((1 << 64) - 1)
+
+
 class MLXGenerationAdapter(GenerationAdapter):
     """Streaming MLX generation adapter (Apple-Silicon, ``mlx_lm.server`` subprocess).
 
@@ -313,6 +320,9 @@ class MLXGenerationAdapter(GenerationAdapter):
         if top_k is not None:
             body["top_k"] = top_k
         if seed is not None:
+            # The public/worker contract preserves signed i64 values, while
+            # ``mlx.core.random.seed`` binds a uint64. Preserve the same 64-bit
+            # seed pattern at this backend boundary (e.g. ``-1`` → u64::MAX).
             body["seed"] = seed
         stop_list = list(stop or [])
         stop_list.extend(s for s in self._stop_tokens if s not in stop_list)
@@ -325,6 +335,10 @@ class MLXGenerationAdapter(GenerationAdapter):
         for key, value in self._default_sampling.items():
             if key in _MLX_SAMPLING_KEYS:
                 body.setdefault(key, value)
+        if "seed" in body:
+            # Normalize after defaults so model-config and request seeds obey
+            # the same MLX uint64 boundary contract.
+            body["seed"] = normalize_mlx_seed(body["seed"])
         return body
 
     async def generate(
@@ -339,6 +353,7 @@ class MLXGenerationAdapter(GenerationAdapter):
         presence_penalty: float | None = None,
         top_k: int | None = None,
         repetition_penalty: float | None = None,
+        min_new_tokens: int | None = None,
         seed: int | None = None,
         logit_bias: dict[str, float] | None = None,
         logprobs: bool = False,
@@ -354,6 +369,8 @@ class MLXGenerationAdapter(GenerationAdapter):
             raise ValueError("vision input is not supported on the Mac MLX generation path yet (see plan §9)")
         # Unused on the MLX path today (kept to satisfy the streaming contract):
         # mlx_lm.server's /v1/completions does not expose these knobs uniformly.
+        if min_new_tokens is not None:
+            raise ValueError("min_new_tokens is not supported on the MLX generation path")
         _ = (frequency_penalty, presence_penalty, repetition_penalty, logit_bias, logprobs, top_logprobs, kwargs)
 
         body = self._build_sampling_body(

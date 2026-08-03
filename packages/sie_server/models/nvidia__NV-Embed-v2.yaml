@@ -4,6 +4,7 @@ sie_id: nvidia/NV-Embed-v2
 # 2026-07-06: weight files sha-identical to nvidia/NV-Embed-v2, configuration
 # identical, modeling diff is compat-only; latent-attention stack intact (#1692).
 hf_id: Hyukkyu/nv-embed-v2
+hf_revision: 7d27cd8010d1be665351a1e226471d0d6c16afcb
 inputs:
   text: true
   image: false

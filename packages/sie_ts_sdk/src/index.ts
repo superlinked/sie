@@ -51,16 +51,20 @@ export { SDK_VERSION } from "./version.js";
 // Types
 export type {
   // Core types
+  AudioInput,
+  ExtractItem,
   Item,
   SparseResult,
   TimingInfo,
   EncodeResult,
   ScoreEntry,
+  ScoreUsage,
   ScoreResult,
   Entity,
   Relation,
   Classification,
   DetectedObject,
+  ExtractItemError,
   ExtractResult,
   // Model and cluster info
   ModelCapabilities,
@@ -90,6 +94,7 @@ export type {
   ConnectionRevoked,
   // Files (client.files) — OpenAI-compatible file objects
   File as SIEFile,
+  FileList,
   FileDeleted,
   // Batches (client.batches) — OpenAI-compatible batch objects
   Batch,
@@ -105,7 +110,12 @@ export type {
   // Generation
   FinishReason,
   GenerationUsage,
+  JsonSchemaGrammar,
+  RegexGrammar,
+  EbnfGrammar,
+  GenerateGrammar,
   GenerateOptions,
+  StreamGenerateOptions,
   GenerateResult,
   // Streaming generate (SSE)
   GenerateChunk,
@@ -124,6 +134,10 @@ export type {
   ChatCompletionChunk,
   ChatChunkChoice,
   ChatDelta,
+  // Cost-estimate dry run (client.estimate)
+  AppliedRate,
+  RateIdentity,
+  CostEstimate,
 } from "./types.js";
 
 // Utility functions
@@ -153,6 +167,7 @@ export {
   ResourceExhaustedError,
   SIEStreamError,
   InputTooLongError,
+  EstimateUnroutableError,
 } from "./errors.js";
 
 // Client-side scoring (MaxSim for ColBERT-style models)

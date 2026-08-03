@@ -10,26 +10,42 @@
   "panels": [
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 100,
       "title": "Latency Breakdown by Phase",
       "type": "row"
     },
     {
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         }
@@ -37,24 +53,54 @@
       "title": "Gateway E2E p50 (ms)",
       "type": "stat",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 100}, {"color": "red", "value": 500}] } }
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          }
+        }
       }
     },
     {
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
       "id": 2,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p99",
           "refId": "A"
         }
@@ -62,24 +108,54 @@
       "title": "Gateway E2E p99 (ms)",
       "type": "stat",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 200}, {"color": "red", "value": 1000}] } }
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 200
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          }
+        }
       }
     },
     {
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
       "id": 3,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_gateway_requests_total{namespace=\"$namespace\"}[$rate_window]))",
+          "expr": "sum(rate(sie_gateway_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
           "legendFormat": "Requests/s",
           "refId": "A"
         }
@@ -87,24 +163,46 @@
       "title": "Throughput (req/s)",
       "type": "stat",
       "fieldConfig": {
-        "defaults": { "unit": "reqps", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}] } }
+        "defaults": {
+          "unit": "reqps",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
       }
     },
     {
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
       "id": 4,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_gateway_requests_total{namespace=\"$namespace\", status!=\"200\"}[$rate_window])) / sum(rate(sie_gateway_requests_total{namespace=\"$namespace\"}[$rate_window])) * 100",
+          "expr": "sum(rate(sie_gateway_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\", outcome=~\"client_error|server_error\"}[$rate_window])) / clamp_min(sum(rate(sie_gateway_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])), 1e-9) * 100",
           "legendFormat": "Error %",
           "refId": "A"
         }
@@ -112,120 +210,275 @@
       "title": "Error Rate",
       "type": "stat",
       "fieldConfig": {
-        "defaults": { "unit": "percent", "noValue": "0%", "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}] } }
+        "defaults": {
+          "unit": "percent",
+          "noValue": "0%",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        }
       }
     },
     {
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 5 },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
       "id": 5,
-      "title": "Latency Breakdown Over Time (mean, stacked)",
-      "description": "Stacked mean latency by phase. Uses mean (not percentiles) because means are additive. Decomposition: E2E = gateway_overhead + result_wait. result_wait = publish_and_overhead + queue_transit + tokenization + inference. Stacked bars sum to total mean E2E.",
+      "title": "Canonical Duration Signals Over Time (mean)",
+      "description": "Independently observed contract durations for the gateway, dispatch, queue, tokenization, and inference. These signals can overlap and are deliberately not presented as an additive decomposition.",
       "type": "timeseries",
       "fieldConfig": {
         "defaults": {
-          "custom": { "stacking": { "mode": "normal", "group": "A" }, "fillOpacity": 30, "lineWidth": 1 },
+          "custom": {
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "fillOpacity": 15,
+            "lineWidth": 1
+          },
           "unit": "ms"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Gateway overhead" }, "properties": [{ "id": "color", "value": { "fixedColor": "#B877D9", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "NATS publish + overhead" }, "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "Queue transit" }, "properties": [{ "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "Tokenization" }, "properties": [{ "id": "color", "value": { "fixedColor": "#F2CC0C", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "GPU inference" }, "properties": [{ "id": "color", "value": { "fixedColor": "#F2495C", "mode": "fixed" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Gateway request"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Gateway dispatch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Worker queue"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tokenization"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2CC0C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "GPU inference"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2495C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "clamp_min((\n  sum(rate(sie_gateway_request_latency_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_gateway_request_latency_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_gateway_queue_result_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_gateway_queue_result_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n) * 1000, 0)",
-          "legendFormat": "Gateway overhead",
+          "expr": "sum(rate(sie_gateway_request_duration_seconds_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])) / clamp_min(sum(rate(sie_gateway_request_duration_seconds_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])), 1e-9) * 1000",
+          "legendFormat": "Gateway request",
           "refId": "A"
         },
         {
-          "expr": "clamp_min((\n  sum(rate(sie_gateway_queue_result_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_gateway_queue_result_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_pull_loop_queue_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_pull_loop_queue_wait_seconds_count{namespace=\"$namespace\"}[$rate_window]))\n  - sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window]))\n  - sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"inference\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"inference\"}[$rate_window]))\n) * 1000, 0)",
-          "legendFormat": "NATS publish + overhead",
+          "expr": "sum(rate(sie_gateway_dispatch_duration_seconds_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])) / clamp_min(sum(rate(sie_gateway_dispatch_duration_seconds_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])), 1e-9) * 1000",
+          "legendFormat": "Gateway dispatch",
           "refId": "B"
         },
         {
-          "expr": "sum(rate(sie_pull_loop_queue_wait_seconds_sum{namespace=\"$namespace\"}[$rate_window])) / sum(rate(sie_pull_loop_queue_wait_seconds_count{namespace=\"$namespace\"}[$rate_window])) * 1000",
-          "legendFormat": "Queue transit",
+          "expr": "sum(rate(sie_worker_queue_duration_seconds_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[$rate_window])) / clamp_min(sum(rate(sie_worker_queue_duration_seconds_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[$rate_window])), 1e-9) * 1000",
+          "legendFormat": "Worker queue",
           "refId": "C"
         },
         {
-          "expr": "sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"tokenize\"}[$rate_window])) * 1000",
+          "expr": "sum(rate(sie_worker_inference_duration_seconds_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", phase=\"tokenization\"}[$rate_window])) / clamp_min(sum(rate(sie_worker_inference_duration_seconds_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", phase=\"tokenization\"}[$rate_window])), 1e-9) * 1000",
           "legendFormat": "Tokenization",
           "refId": "D"
         },
         {
-          "expr": "sum(rate(sie_request_duration_seconds_sum{namespace=\"$namespace\", phase=\"inference\"}[$rate_window])) / sum(rate(sie_request_duration_seconds_count{namespace=\"$namespace\", phase=\"inference\"}[$rate_window])) * 1000",
+          "expr": "sum(rate(sie_worker_inference_duration_seconds_sum{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", phase=\"inference\"}[$rate_window])) / clamp_min(sum(rate(sie_worker_inference_duration_seconds_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", phase=\"inference\"}[$rate_window])), 1e-9) * 1000",
           "legendFormat": "GPU inference",
           "refId": "E"
         }
       ]
     },
     {
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
       "id": 6,
       "title": "E2E Latency Percentiles Over Time (Gateway)",
-      "description": "Gateway-measured end-to-end latency: sie_gateway_request_latency_seconds.",
+      "description": "Gateway-measured end-to-end latency from the canonical request-duration histogram.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "custom": { "lineWidth": 2 } }
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.95, sum(rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_request_latency_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p99",
           "refId": "C"
         }
       ]
     },
     {
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
       "id": 7,
       "title": "Worker-Side Total Latency Percentiles",
-      "description": "Worker-measured total request duration: sie_request_duration_seconds{phase=\"total\"}.",
+      "description": "Worker-measured item duration from the canonical worker request histogram.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "custom": { "lineWidth": 2 } }
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.95, sum(rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_request_duration_seconds_bucket{namespace=\"$namespace\", phase=\"total\"}[$rate_window])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window])) by (le)) * 1000",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -233,23 +486,48 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
       "id": 101,
       "title": "NATS Queue Health (requires nats.promExporter.enabled=true)",
       "type": "row"
     },
     {
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
       "id": 8,
       "title": "Consumer Pending Messages",
       "description": "Messages waiting in the queue for workers to pull. Sustained growth means workers can't keep up.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "custom": { "fillOpacity": 15 } }
+        "defaults": {
+          "custom": {
+            "fillOpacity": 15
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
@@ -261,17 +539,37 @@
       ]
     },
     {
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
       "id": 9,
       "title": "Consumer Ack Pending (In-Flight)",
       "description": "Messages pulled by workers but not yet acknowledged. Shows in-flight work.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "custom": { "fillOpacity": 15 } }
+        "defaults": {
+          "custom": {
+            "fillOpacity": 15
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
@@ -283,17 +581,38 @@
       ]
     },
     {
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
       "id": 10,
       "title": "JetStream Memory Usage",
       "description": "NATS JetStream memory store usage. Alert if approaching the 512MB limit (configurable via nats.config.jetstream.memoryStore.maxSize).",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "unit": "bytes", "custom": { "fillOpacity": 15 } }
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 15
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
@@ -310,17 +629,37 @@
       ]
     },
     {
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
       "id": 11,
       "title": "Stream Messages",
       "description": "Total messages in each work queue stream.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "custom": { "fillOpacity": 15 } }
+        "defaults": {
+          "custom": {
+            "fillOpacity": 15
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
@@ -332,203 +671,915 @@
       ]
     },
     {
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
       "id": 12,
-      "title": "DLQ Events",
-      "description": "Messages that exhausted max delivery attempts. Source: sie_gateway_dlq_events_total{stream, consumer}.",
+      "title": "Gateway Scale-Worthy Rejections",
+      "description": "KEDA control rate for the bounded backpressure, no_consumers, and upstream_result_timeout reasons. Every emitted series has scaling_action=scale_up.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "custom": { "fillOpacity": 15 } }
+        "defaults": {
+          "custom": {
+            "fillOpacity": 15
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "rate(sie_gateway_dlq_events_total{namespace=\"$namespace\"}[$rate_window])",
-          "legendFormat": "{{stream}} / {{consumer}}",
+          "expr": "sum by (reason, scaling_action) (rate(sie_gateway_rejected_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "{{reason}} / {{scaling_action}}",
           "refId": "A"
         }
       ]
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
       "id": 102,
-      "title": "Gateway Queue Publisher",
+      "title": "Gateway and Worker Dispatch",
       "type": "row"
     },
     {
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 41 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 41
+      },
       "id": 13,
-      "title": "NATS Publish Time (p99)",
-      "description": "Time for the gateway to publish all work items to NATS JetStream. Source: sie_gateway_queue_publish_seconds{operation}.",
+      "title": "Gateway Dispatch Duration (p99)",
+      "description": "Canonical dispatch duration by operation and bounded dispatch path.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_queue_publish_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
-          "legendFormat": "{{operation}}",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_dispatch_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])) by (le, operation, dispatch_path)) * 1000",
+          "legendFormat": "{{operation}} / {{dispatch_path}}",
           "refId": "A"
         }
       ]
     },
     {
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 41 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 41
+      },
       "id": 14,
-      "title": "Queue Result Wait Time (p99)",
-      "description": "Total time the gateway waits for worker replies after publishing. Source: sie_gateway_queue_result_wait_seconds{operation}.",
+      "title": "Worker Queue and Scheduler Duration (p99)",
+      "description": "Canonical queue duration plus per-request scheduler dispatch wait and backend-batch completion time.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
-      },
-      "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_gateway_queue_result_wait_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
-          "legendFormat": "{{operation}}",
-          "refId": "A"
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "fillOpacity": 10
+          }
         }
-      ]
-    },
-    {
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 41 },
-      "id": 15,
-      "title": "Items Published / sec",
-      "description": "Rate of work items published to NATS by operation type. Source: sie_gateway_queue_items_published (histogram, using _count for requests/sec).",
-      "type": "timeseries",
-      "fieldConfig": {
-        "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_gateway_queue_items_published_count{namespace=\"$namespace\"}[$rate_window])) by (operation)",
-          "legendFormat": "{{operation}} reqs/s",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_worker_queue_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[$rate_window])) by (le, operation, lane)) * 1000",
+          "legendFormat": "queue / {{operation}} / {{lane}}",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(sie_gateway_queue_items_published_sum{namespace=\"$namespace\"}[$rate_window])) by (operation)",
-          "legendFormat": "{{operation}} items/s",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_worker_scheduler_request_batch_dispatch_wait_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[$rate_window])) by (le, operation, lane, model, profile)) * 1000",
+          "legendFormat": "scheduler dispatch / {{operation}} / {{lane}} / {{model}} / {{profile}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sie_worker_scheduler_request_batch_total_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[$rate_window])) by (le, operation, lane, model, profile)) * 1000",
+          "legendFormat": "scheduler total / {{operation}} / {{lane}} / {{model}} / {{profile}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 41
+      },
+      "id": 15,
+      "title": "Dispatch Throughput",
+      "description": "Gateway dispatch completions and downstream dispatcher invocations by their bounded paths.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_gateway_dispatches_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])) by (operation, dispatch_path, outcome)",
+          "legendFormat": "gateway / {{operation}} / {{dispatch_path}} / {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(sie_dispatcher_invocations_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\"}[$rate_window])) by (operation, dispatch_path, outcome)",
+          "legendFormat": "dispatcher / {{operation}} / {{dispatch_path}} / {{outcome}}",
           "refId": "B"
         }
       ]
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 49 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
       "id": 103,
-      "title": "Worker Pull Loop",
+      "title": "Worker Execution",
       "type": "row"
     },
     {
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 50 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 50
+      },
       "id": 16,
-      "title": "Worker Queue Wait (p99)",
-      "description": "Time messages sit in NATS before a worker pulls them. High values = workers overloaded. Source: sie_pull_loop_queue_wait_seconds{model}.",
+      "title": "Sidecar IPC Duration",
+      "description": "Canonical logical sidecar-to-engine RPC duration, including the bounded retry.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
-          "legendFormat": "queue wait p99",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_worker_ipc_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[$rate_window])) by (le, method, outcome, lane)) * 1000",
+          "legendFormat": "{{method}} / {{outcome}} / {{lane}} p99",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.50, sum(rate(sie_pull_loop_queue_wait_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le)) * 1000",
-          "legendFormat": "queue wait p50",
+          "expr": "histogram_quantile(0.50, sum(rate(sie_worker_ipc_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker-sidecar\"}[$rate_window])) by (le, method, outcome, lane)) * 1000",
+          "legendFormat": "{{method}} / {{outcome}} / {{lane}} p50",
           "refId": "B"
         }
       ]
     },
     {
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 50 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 50
+      },
       "id": 17,
-      "title": "Worker Batch Process Time (p99)",
-      "description": "Time for the worker to process a batch after pulling from NATS. Source: sie_pull_loop_batch_process_seconds{model, operation}.",
+      "title": "Worker Request Duration (p99)",
+      "description": "Canonical worker item duration by operation, backend, and lane.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "custom": { "fillOpacity": 10 } }
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(sie_pull_loop_batch_process_seconds_bucket{namespace=\"$namespace\"}[$rate_window])) by (le, operation)) * 1000",
-          "legendFormat": "{{operation}}",
+          "expr": "histogram_quantile(0.99, sum(rate(sie_worker_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window])) by (le, operation, backend, lane)) * 1000",
+          "legendFormat": "{{operation}} / {{backend}} / {{lane}}",
           "refId": "A"
         }
       ]
     },
     {
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 50 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 50
+      },
       "id": 18,
-      "title": "Worker Pull Rate",
-      "description": "Rate of items pulled from NATS by workers. Source: sie_pull_loop_items_fetched (histogram — _count = pull cycles/sec, _sum = items/sec).",
+      "title": "Worker Request and Batch Rate",
+      "description": "Completed worker items and formed batches from the canonical worker contract.",
       "type": "timeseries",
       "fieldConfig": {
-        "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
       },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(rate(sie_pull_loop_items_fetched_sum{namespace=\"$namespace\"}[$rate_window]))",
-          "legendFormat": "items/sec",
+          "expr": "sum(rate(sie_worker_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[$rate_window]))",
+          "legendFormat": "completed items/sec",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(sie_pull_loop_items_fetched_count{namespace=\"$namespace\"}[$rate_window]))",
-          "legendFormat": "pull cycles/sec",
+          "expr": "sum(rate(sie_worker_batch_size_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=~\"sie-worker|sie-worker-sidecar\"}[$rate_window]))",
+          "legendFormat": "formed batches/sec",
           "refId": "B"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "id": 70,
+      "title": "Gateway Config, Queue, and Provisioning Event Rate",
+      "description": "Bounded gateway config operations, logical queue publishes/result waits, durability events, and provisioning responses.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (source, operation, outcome) (rate(sie_gateway_config_operations_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "config {{source}} / {{operation}} / {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (operation, outcome) (rate(sie_gateway_queue_publishes_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "publish {{operation}} / {{outcome}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (operation, outcome) (rate(sie_gateway_queue_result_waits_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "result wait {{operation}} / {{outcome}}",
+          "refId": "C"
+        },
+        {
+          "expr": "sum by (event, outcome) (rate(sie_gateway_queue_events_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "queue event {{event}} / {{outcome}}",
+          "refId": "D"
+        },
+        {
+          "expr": "sum by (surface, http_status_code) (rate(sie_gateway_provisioning_responses_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "provisioning {{surface}} / {{http_status_code}}",
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "id": 71,
+      "title": "Gateway Queue Latency and Publish Size p95",
+      "description": "Logical queue publish/result-wait duration and published-item distributions from the canonical gateway facade.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation, outcome) (rate(sie_gateway_queue_publish_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])))",
+          "legendFormat": "publish s {{operation}} / {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation, outcome) (rate(sie_gateway_queue_publish_items_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])))",
+          "legendFormat": "publish items {{operation}} / {{outcome}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation, outcome) (rate(sie_gateway_queue_result_wait_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window])))",
+          "legendFormat": "result wait s {{operation}} / {{outcome}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
+      "id": 72,
+      "title": "Gateway Config Convergence and KEDA Freshness",
+      "description": "Gateway config/messaging state plus warm-floor, global capacity freshness, and exact-lane JetStream queue freshness used to diagnose KEDA control-signal health.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "max(sie_gateway_config_applied_epoch{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "applied config epoch",
+          "refId": "A"
+        },
+        {
+          "expr": "max(sie_gateway_config_bootstrap_degraded_ratio{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "bootstrap degraded",
+          "refId": "B"
+        },
+        {
+          "expr": "max by (transport) (sie_gateway_messaging_client_ready_ratio{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "messaging {{transport}} ready",
+          "refId": "C"
+        },
+        {
+          "expr": "max by (pool, machine_profile, bundle) (sie_gateway_pool_warm_floor{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "warm floor {{pool}} / {{machine_profile}} / {{bundle}}",
+          "refId": "D"
+        },
+        {
+          "expr": "max by (producer_instance) (sie_gateway_capacity_snapshot_timestamp_seconds{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "capacity snapshot {{producer_instance}}",
+          "refId": "E"
+        },
+        {
+          "expr": "max by (producer_instance, pool, machine_profile, bundle) (sie_gateway_lane_queue_snapshot_timestamp_seconds{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "queue snapshot {{producer_instance}} / {{pool}} / {{machine_profile}} / {{bundle}}",
+          "refId": "F"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "id": 73,
+      "title": "Config Authority Requests and State",
+      "description": "Config-service request rate/latency, epoch/model state, publication/store attempts, and messaging readiness.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (http_route, http_status_code) (rate(sie_config_requests_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-config\"}[$rate_window]))",
+          "legendFormat": "request {{http_route}} / {{http_status_code}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(sie_config_request_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-config\"}[$rate_window])))",
+          "legendFormat": "request p95 {{http_route}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max(sie_config_epoch{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-config\"})",
+          "legendFormat": "config epoch",
+          "refId": "C"
+        },
+        {
+          "expr": "max by (source) (sie_config_models{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-config\"})",
+          "legendFormat": "models {{source}}",
+          "refId": "D"
+        },
+        {
+          "expr": "sum by (operation, outcome) (rate(sie_config_publish_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-config\"}[$rate_window]))",
+          "legendFormat": "publish {{operation}} / {{outcome}}",
+          "refId": "E"
+        },
+        {
+          "expr": "sum by (operation, outcome) (rate(sie_config_store_writes_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-config\"}[$rate_window]))",
+          "legendFormat": "store {{operation}} / {{outcome}}",
+          "refId": "F"
+        },
+        {
+          "expr": "max by (transport) (sie_config_messaging_ready_ratio{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-config\"})",
+          "legendFormat": "messaging {{transport}} ready",
+          "refId": "G"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 74
+      },
+      "id": 74,
+      "title": "Gateway Result-Chunk Transport Health",
+      "description": "Result-chunk receive, byte, completion, rejection, duplicate/retry, stale-retry, and current reservation signals. Legends keep rates, bytes per second, and reserved bytes explicit.",
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_gateway_queue_result_chunks_received_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "chunks received/sec",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(sie_gateway_queue_result_chunk_bytes_received_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "bytes received/sec",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (reason) (rate(sie_gateway_queue_result_chunk_rejections_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "rejections/sec {{reason}}",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(sie_gateway_queue_result_chunk_transfers_completed_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "transfers completed/sec",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(sie_gateway_queue_result_chunk_duplicates_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "duplicate chunks/sec",
+          "refId": "E"
+        },
+        {
+          "expr": "sum(rate(sie_gateway_queue_result_chunk_retry_replacements_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "retry replacements/sec",
+          "refId": "F"
+        },
+        {
+          "expr": "sum(rate(sie_gateway_queue_result_chunk_stale_retries_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"}[$rate_window]))",
+          "legendFormat": "stale retries/sec",
+          "refId": "G"
+        },
+        {
+          "expr": "sum(sie_gateway_queue_result_chunk_reserved_bytes{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "reserved bytes",
+          "refId": "H"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 84
+      },
+      "id": 104,
+      "type": "row",
+      "title": "Sealed Custom-Model Lane (#1841)",
+      "panels": []
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 85
+      },
+      "id": 110,
+      "type": "timeseries",
+      "title": "Sealed staging rate by outcome",
+      "description": "Staging attempts for org-registered custom models. `rejected` is a tenant config the lane refuses to serve; `error` is an SIE incident \u2014 keep them apart.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(sie_dispatcher_sealed_stage_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\"}[$rate_window]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 85
+      },
+      "id": 111,
+      "type": "timeseries",
+      "title": "Sealed staging duration p95",
+      "description": "p95 fetch + seal + first model load. The measured cold start is ~130 s \u2014 this is what the retryable 503 hides from the caller.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(sie_dispatcher_sealed_stage_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\"}[$rate_window])))",
+          "legendFormat": "p95 {{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 93
+      },
+      "id": 112,
+      "type": "timeseries",
+      "title": "Resident sealed engines",
+      "description": "Sealed engines resident per replica. EACH holds a sole-tenant GPU, so this is the live GPU count the custom-model lane occupies.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(sie_dispatcher_sealed_resident{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\"})",
+          "legendFormat": "resident",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 93
+      },
+      "id": 113,
+      "type": "timeseries",
+      "title": "Sealed sole-tenant GPU seconds",
+      "description": "Sole-tenant GPU time held by sealed sandboxes, banked at close. A cost surface, not a health signal.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(sie_dispatcher_sealed_sandbox_seconds_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\"}[$rate_window]))",
+          "legendFormat": "gpu seconds/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 101
+      },
+      "id": 114,
+      "type": "timeseries",
+      "title": "Sealed cold-start subsidy seconds by GPU class",
+      "description": "GPU time spent WAKING scaled-to-zero sealed models (fetch + seal + model load). A cold start is free to the customer by design, so this is the platform-subsidised share of sealed GPU time - the signal to watch when tuning SIE_SEALED_MAX_COLD_STARTS_PER_ACCOUNT_HOUR. Broken out by GPU class because that is what converts seconds into dollars. Neither neighbour answers this: sealed staging duration is a latency histogram with no summable total, and sealed sole-tenant GPU seconds covers the whole residency without separating the wake from the serving.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (gpu_class) (rate(sie_dispatcher_sealed_cold_start_seconds_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-dispatcher\"}[$rate_window]))",
+          "legendFormat": "{{gpu_class}}",
+          "refId": "A"
         }
       ]
     }
   ],
   "refresh": "10s",
   "schemaVersion": 38,
-  "tags": ["sie", "queue-routing", "nats"],
+  "tags": [
+    "sie",
+    "queue-routing",
+    "nats"
+  ],
   "templating": {
     "list": [
       {
-        "current": { "selected": false, "text": "sie", "value": "sie" },
+        "current": {
+          "selected": false,
+          "text": "sie",
+          "value": "sie"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Namespace",
         "multi": false,
         "name": "namespace",
         "options": [],
-        "query": "label_values(up, namespace)",
+        "query": "label_values(kube_pod_info, namespace)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
@@ -536,16 +1587,51 @@
         "type": "query"
       },
       {
-        "current": { "selected": true, "text": "1m", "value": "1m" },
+        "current": {
+          "selected": false,
+          "text": "sie-sie-cluster-otel-collector",
+          "value": "sie-sie-cluster-otel-collector"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Collector",
+        "multi": false,
+        "name": "collector",
+        "options": [],
+        "query": "label_values(up{namespace=\"$namespace\", endpoint=\"prometheus\", service=~\".+-otel-collector\"}, service)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "1m",
+          "value": "1m"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Rate Window",
         "multi": false,
         "name": "rate_window",
         "options": [
-          { "selected": true, "text": "1m", "value": "1m" },
-          { "selected": false, "text": "2m", "value": "2m" },
-          { "selected": false, "text": "5m", "value": "5m" }
+          {
+            "selected": true,
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "selected": false,
+            "text": "2m",
+            "value": "2m"
+          },
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          }
         ],
         "query": "1m,2m,5m",
         "skipUrlSync": false,
@@ -553,7 +1639,10 @@
       }
     ]
   },
-  "time": { "from": "now-1h", "to": "now" },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
   "title": "SIE Queue Routing",

@@ -13,10 +13,10 @@ import type { ChatCompletion } from "../src/types.js";
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
-function jsonResponse(body: unknown, status = 200): Response {
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
   });
 }
 
@@ -46,7 +46,13 @@ describe("SIEClient.chatCompletions", () => {
   });
 
   it("returns parsed ChatCompletion on success", async () => {
-    mockFetch.mockResolvedValueOnce(jsonResponse(SAMPLE_COMPLETION));
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(SAMPLE_COMPLETION, 200, {
+        "x-sie-request-id": "req-chat",
+        "x-sie-units-output-tokens": "3",
+        "x-sie-credits-debited": "9",
+      }),
+    );
 
     const client = new SIEClient("http://localhost:8080");
     const result = await client.chatCompletions({
@@ -57,6 +63,11 @@ describe("SIEClient.chatCompletions", () => {
     expect(result.id).toBe("chatcmpl-abc");
     expect(result.choices[0]?.message.content).toBe("Hi there!");
     expect(result.usage.total_tokens).toBe(12);
+    expect(result.request).toEqual({
+      id: "req-chat",
+      usage: { outputTokens: 3 },
+      creditsDebited: 9,
+    });
   });
 
   it("POSTs JSON to /v1/chat/completions with stream:false in the body", async () => {
@@ -82,6 +93,37 @@ describe("SIEClient.chatCompletions", () => {
     expect(body.max_completion_tokens).toBe(32);
     expect(body.temperature).toBe(0.7);
   });
+
+  it.each([Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1, 1.5, Number.NaN])(
+    "rejects a seed outside the JavaScript safe-integer contract: %s",
+    async (seed) => {
+      const client = new SIEClient("http://localhost:8080");
+      await expect(
+        client.chatCompletions({
+          model: "m",
+          messages: [{ role: "user", content: "hi" }],
+          seed,
+        }),
+      ).rejects.toThrow(RangeError);
+      expect(mockFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER])(
+    "forwards a safe-integer boundary seed unchanged: %s",
+    async (seed) => {
+      mockFetch.mockResolvedValueOnce(jsonResponse(SAMPLE_COMPLETION));
+      const client = new SIEClient("http://localhost:8080");
+      await client.chatCompletions({
+        model: "m",
+        messages: [{ role: "user", content: "hi" }],
+        seed,
+      });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.seed).toBe(seed);
+    },
+  );
 
   it("throws RequestError on 400", async () => {
     mockFetch.mockResolvedValueOnce(

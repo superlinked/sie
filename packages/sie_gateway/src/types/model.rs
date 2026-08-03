@@ -10,6 +10,10 @@ pub struct ModelInfoExtras {
     pub outputs: Vec<String>,
     pub dims: HashMap<String, i64>,
     pub max_sequence_length: Option<u64>,
+    /// Immutable Hugging Face commit SHA for the model weights. This is part
+    /// of worker/gateway parity and is absent for unpinned or package-backed
+    /// models.
+    pub revision: Option<String>,
     /// Per-request hard cap on ``max_new_tokens``. Mirrors
     /// ``tasks.generate.max_output_tokens`` from the model YAML; absent
     /// when the model has no ``generate`` task or the field was not
@@ -26,11 +30,15 @@ pub struct ModelInfoExtras {
     /// ``tasks.generate.grammar_profile`` from the model YAML — the name of a
     /// profile that grammar-constrained requests must be served on. When set,
     /// the chat/completions/generate handlers rewrite a grammar request's model
-    /// id to the ``{model}:{grammar_profile}`` variant so it runs on a profile
-    /// that enforces the grammar correctly (e.g. ``no-spec`` — speculative
-    /// decoding bypasses SGLang's Outlines FSM). ``None`` when the model has no
-    /// ``generate`` task or does not declare the field (no rewrite).
+    /// id to the ``{model}:{grammar_profile}`` variant unless an explicitly
+    /// requested, directly inheriting variant preserves the resolved
+    /// grammar-safe launch contract. ``None`` when the model has no ``generate``
+    /// task or does not declare the field (no rewrite).
     pub grammar_profile: Option<String>,
+    /// Direct ``profiles.<name>.extends`` relationships. The gateway keeps
+    /// these only to evaluate explicit variants that inherit the configured
+    /// grammar-safe profile; they are not exposed by ``/v1/models``.
+    pub profile_parents: HashMap<String, String>,
     /// ``tasks.generate.capabilities.tools`` from the model YAML — a
     /// single boolean advertising whether the model supports
     /// OpenAI-style tool calling. The chat completion handler gates
@@ -101,6 +109,11 @@ impl ModelInfoExtras {
         }
 
         extras.max_sequence_length = raw.get("max_sequence_length").and_then(|v| v.as_u64());
+        extras.revision = raw
+            .get("hf_revision")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
 
         let tasks = raw.get("tasks");
         if let Some(enc) = tasks.and_then(|t| match t.get("encode")? {
@@ -215,6 +228,20 @@ impl ModelInfoExtras {
             }
         }
 
+        if let Some(serde_yaml::Value::Mapping(profiles)) = raw.get("profiles") {
+            for (profile_name, profile) in profiles {
+                let (Some(profile_name), Some(parent_name)) = (
+                    profile_name.as_str(),
+                    profile.get("extends").and_then(serde_yaml::Value::as_str),
+                ) else {
+                    continue;
+                };
+                extras
+                    .profile_parents
+                    .insert(profile_name.to_string(), parent_name.to_string());
+            }
+        }
+
         // Multi-LoRA: collect the served-names declared per profile and
         // also flatten/dedup them into the model-level union. The
         // per-profile map is the precise capability the gateway gates
@@ -277,9 +304,11 @@ impl ModelInfoExtras {
                 outputs: vec!["dense".to_string()],
                 dims: HashMap::new(),
                 max_sequence_length: config.max_sequence_length,
+                revision: None,
                 max_output_tokens: None,
                 grammar_capabilities: None,
                 grammar_profile: None,
+                profile_parents: HashMap::new(),
                 tools_supported: None,
                 code: false,
                 sql: false,
@@ -305,6 +334,8 @@ impl ModelInfoExtras {
 pub struct ModelConfig {
     #[serde(alias = "sie_id")]
     pub name: String,
+    #[serde(default)]
+    pub hf_revision: Option<String>,
     #[serde(default)]
     pub adapter_module: Option<String>,
     #[serde(default)]
@@ -365,6 +396,7 @@ impl ModelEntry {
             "state": state,
             "last_error": Value::Null,
             "max_sequence_length": self.info_extras.max_sequence_length,
+            "revision": self.info_extras.revision,
             "profiles": Value::Object(profiles),
             // Advertised model capabilities. ``lora_adapters`` lists the
             // public served-names of declared LoRA adapters (union across
@@ -696,6 +728,7 @@ profiles: {}
     fn test_model_config_json_roundtrip() {
         let config = ModelConfig {
             name: "test/model".into(),
+            hf_revision: Some("0123456789abcdef0123456789abcdef01234567".into()),
             adapter_module: Some("mod".into()),
             default_bundle: None,
             pool: Some("customer-a".into()),
@@ -707,6 +740,7 @@ profiles: {}
         let json = serde_json::to_string(&config).unwrap();
         let back: ModelConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "test/model");
+        assert_eq!(back.hf_revision, config.hf_revision);
         assert_eq!(back.adapter_module, Some("mod".into()));
         assert_eq!(back.pool, Some("customer-a".into()));
     }

@@ -53,3 +53,24 @@ ranker = SIERanker(
 result = ranker.run(query="What is Python?", documents=embedded_docs, top_k=3)
 ranked_docs = result["documents"]
 ```
+
+Relation models such as GLiREL classify relations between supplied entity
+spans. Extract those spans first, then pass them through the relation
+extractor's `entities` input:
+
+```python
+from haystack_integrations.components.extractors.sie import SIEExtractor
+
+text = "Tim Cook is the CEO of Apple Inc."
+entity_extractor = SIEExtractor(
+    model="urchade/gliner_multi-v2.1",
+    labels=["person", "organization"],
+)
+relation_extractor = SIEExtractor(
+    model="jackboyla/glirel-large-v0",
+    labels=["ceo_of"],
+)
+
+entities = entity_extractor.run(text=text)["entities"]
+result = relation_extractor.run(text=text, entities=entities)
+```

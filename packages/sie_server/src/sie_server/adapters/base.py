@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
+    from sie_server.adapters.lora import LoraCapability
     from sie_server.core.inference_output import EncodeOutput, ExtractOutput, ScoreOutput
 
 logger = logging.getLogger(__name__)
@@ -479,6 +480,16 @@ class ModelAdapter(ABC):
         """
         return False
 
+    def lora_capability(self) -> "LoraCapability | None":
+        """Return this adapter as a :class:`LoraCapability` when it supports
+        LoRA, else ``None``.
+
+        One accessor callers use in place of checking :meth:`supports_lora` and
+        then calling the individual hooks. PEFT (in-process) and SGLang (HTTP)
+        are the two adapters behind this capability.
+        """
+        return self if self.supports_lora() else None
+
     def supports_hot_lora_reload(self) -> bool:
         """Return True if LoRAs can be loaded without blocking inference.
 
@@ -493,7 +504,7 @@ class ModelAdapter(ABC):
         """
         return False
 
-    def load_lora(self, lora_path: str) -> int:
+    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
         """Load a LoRA adapter.
 
         This is called by the LoRA manager to load a new adapter. The adapter
@@ -504,6 +515,9 @@ class ModelAdapter(ABC):
 
         Args:
             lora_path: HuggingFace path (e.g., "org/lora-name") or local path.
+            revision: Pinned 40-hex commit SHA from the config's
+                ``loadtime.lora_paths`` dict form (#2113); ``None`` resolves
+                the Hub's default branch, as before.
 
         Returns:
             Memory usage of the loaded LoRA in bytes.

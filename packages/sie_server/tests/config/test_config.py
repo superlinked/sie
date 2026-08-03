@@ -17,6 +17,7 @@ from sie_server.config.model import (
     ScoreTask,
     Tasks,
 )
+from sie_server.config.package_artifacts import PackageArtifactMode
 
 
 class TestEngineConfig:
@@ -217,6 +218,48 @@ class TestModelConfig:
         assert config.sie_id == "test-model"
         assert config.hf_id == "org/model"
         assert config.tasks.encode.dense.dim == 768  # type: ignore
+        assert config.hf_tokenizer_dependencies == {}
+
+    def test_hf_tokenizer_dependencies_accepts_mapping(self) -> None:
+        """ModelConfig accepts a tokenizer repository-to-revision mapping."""
+        dependencies = {
+            "microsoft/mdeberta-v3-base": "a0484667b22365f84929a935b5e50a51f71f159d",
+        }
+        payload = _make_config().model_dump(mode="json")
+        payload["hf_tokenizer_dependencies"] = dependencies
+
+        config = ModelConfig.model_validate(payload)
+
+        assert config.hf_tokenizer_dependencies == dependencies
+
+    def test_hf_tokenizer_dependencies_round_trip(self) -> None:
+        """Tokenizer dependency pins survive JSON serialization and validation."""
+        dependencies = {
+            "microsoft/deberta-v3-large": "64a8c8eab3e352a784c658aef62be1662607476f",
+        }
+        payload = _make_config().model_dump(mode="json")
+        payload["hf_tokenizer_dependencies"] = dependencies
+        config = ModelConfig.model_validate(payload)
+
+        serialized = config.model_dump(mode="json")
+
+        assert serialized["hf_tokenizer_dependencies"] == dependencies
+        assert ModelConfig.model_validate(serialized).hf_tokenizer_dependencies == dependencies
+
+    @pytest.mark.parametrize(
+        "invalid_dependencies",
+        [
+            [],
+            {"microsoft/deberta-v3-large": 123},
+        ],
+    )
+    def test_hf_tokenizer_dependencies_rejects_invalid_types(self, invalid_dependencies: object) -> None:
+        """Tokenizer dependencies fail closed when the mapping shape is invalid."""
+        payload = _make_config().model_dump(mode="json")
+        payload["hf_tokenizer_dependencies"] = invalid_dependencies
+
+        with pytest.raises(ValidationError, match="hf_tokenizer_dependencies"):
+            ModelConfig.model_validate(payload)
 
     def test_local_weights(self) -> None:
         """ModelConfig can use local weights."""
@@ -280,6 +323,113 @@ class TestModelConfig:
                 hf_revision="abc123",
                 tasks=Tasks(extract=ExtractTask()),
                 profiles={"default": ProfileConfig(adapter_path="mod:Cls", max_batch_tokens=1)},
+            )
+
+    def test_package_backed_declares_live_external_artifacts(self) -> None:
+        config = ModelConfig(
+            sie_id="package/model",
+            package_backed=True,
+            tasks=Tasks(extract=ExtractTask()),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="mod:Cls",
+                    max_batch_tokens=1,
+                    adapter_options=AdapterOptions(loadtime={"package_artifact_mode": "live"}),
+                )
+            },
+        )
+
+        assert config.package_artifact_declaration.mode == PackageArtifactMode.LIVE
+
+    def test_staged_package_artifacts_require_complete_manifest_identity(self) -> None:
+        with pytest.raises(ValidationError, match="64-hex manifest sha256"):
+            ModelConfig(
+                sie_id="package/model",
+                package_backed=True,
+                tasks=Tasks(extract=ExtractTask()),
+                profiles={
+                    "default": ProfileConfig(
+                        adapter_path="mod:Cls",
+                        max_batch_tokens=1,
+                        adapter_options=AdapterOptions(
+                            loadtime={
+                                "package_artifact_mode": "staged",
+                                "package_artifact_manifest_path": "/models/package/model/manifest.json",
+                            }
+                        ),
+                    )
+                },
+            )
+
+    def test_package_artifact_declaration_must_match_across_profiles(self) -> None:
+        with pytest.raises(ValidationError, match="identical package artifacts"):
+            ModelConfig(
+                sie_id="package/model",
+                package_backed=True,
+                tasks=Tasks(extract=ExtractTask()),
+                profiles={
+                    "default": ProfileConfig(
+                        adapter_path="mod:Cls",
+                        max_batch_tokens=1,
+                        adapter_options=AdapterOptions(loadtime={"package_artifact_mode": "live"}),
+                    ),
+                    "bundled": ProfileConfig(
+                        adapter_path="mod:Cls",
+                        max_batch_tokens=1,
+                    ),
+                },
+            )
+
+    def test_package_artifact_declaration_uses_resolved_profile_loadtime(self) -> None:
+        config = ModelConfig(
+            sie_id="package/model",
+            package_backed=True,
+            tasks=Tasks(extract=ExtractTask()),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="mod:Cls",
+                    max_batch_tokens=1,
+                    adapter_options=AdapterOptions(loadtime={"package_artifact_mode": "live"}),
+                ),
+                "inherited": ProfileConfig(extends="default"),
+            },
+        )
+
+        assert config.resolve_profile("inherited").loadtime["package_artifact_mode"] == "live"
+        assert config.package_artifact_declaration.mode == PackageArtifactMode.LIVE
+
+    def test_child_loadtime_replacement_must_repeat_package_artifact_declaration(self) -> None:
+        with pytest.raises(ValidationError, match="identical package artifacts"):
+            ModelConfig(
+                sie_id="package/model",
+                package_backed=True,
+                tasks=Tasks(extract=ExtractTask()),
+                profiles={
+                    "default": ProfileConfig(
+                        adapter_path="mod:Cls",
+                        max_batch_tokens=1,
+                        adapter_options=AdapterOptions(loadtime={"package_artifact_mode": "live"}),
+                    ),
+                    "replacement": ProfileConfig(
+                        extends="default",
+                        adapter_options=AdapterOptions(loadtime={"unrelated_option": True}),
+                    ),
+                },
+            )
+
+    def test_non_package_model_rejects_package_artifact_declaration(self) -> None:
+        with pytest.raises(ValidationError, match="require 'package_backed: true'"):
+            ModelConfig(
+                sie_id="org/model",
+                hf_id="org/model",
+                tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=768))),
+                profiles={
+                    "default": ProfileConfig(
+                        adapter_path="mod:Cls",
+                        max_batch_tokens=1,
+                        adapter_options=AdapterOptions(loadtime={"package_artifact_mode": "live"}),
+                    )
+                },
             )
 
     def test_empty_profiles_rejected(self) -> None:
@@ -606,6 +756,27 @@ class TestModelConfigProfiles:
         resolved = config.resolve_profile("child")
         assert resolved.runtime == {"instruction": "child"}
 
+    def test_resolve_child_profile_inherits_empty_runtime(self) -> None:
+        """An explicit empty runtime preserves the parent's runtime."""
+        config = ModelConfig(
+            sie_id="test-model",
+            hf_id="org/model",
+            tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=768))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="mod:Cls",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(runtime={"output_similarity": {"dense": "dot"}}),
+                ),
+                "child": ProfileConfig(
+                    extends="default",
+                    adapter_options=AdapterOptions(runtime={}),
+                ),
+            },
+        )
+
+        assert config.resolve_profile("child").runtime == {"output_similarity": {"dense": "dot"}}
+
     def test_resolve_missing_profile_raises(self) -> None:
         """resolve_profile raises for unknown profile."""
         config = _make_config()
@@ -816,3 +987,77 @@ class TestGrammarProfile:
     def test_grammar_profile_default_rejected(self) -> None:
         with pytest.raises(ValidationError, match="must not be 'default'"):
             self._config("default")
+
+
+class TestLoraRevisionPins:
+    """The pinned-LoRA spelling on loadtime.lora_paths dict values (#2113)."""
+
+    SHA_A = "a" * 40
+    SHA_B = "b" * 40
+
+    @staticmethod
+    def _profile(loadtime: dict | None = None, runtime: dict | None = None) -> ProfileConfig:
+        return ProfileConfig(
+            adapter_path="mod:Cls",
+            max_batch_tokens=8192,
+            adapter_options=AdapterOptions(loadtime=loadtime or {}, runtime=runtime or {}),
+        )
+
+    def test_pinned_dict_value_is_accepted_and_surfaced(self) -> None:
+        config = _make_config(
+            profiles={
+                "default": self._profile({"lora_paths": {"bank": {"id": "acme/l", "revision": self.SHA_A}}}),
+            }
+        )
+        assert config.lora_revisions() == {"acme/l": self.SHA_A}
+
+    def test_bare_dict_and_list_values_stay_unpinned(self) -> None:
+        config = _make_config(
+            profiles={
+                "default": self._profile({"lora_paths": {"bank": "acme/l"}}),
+                "listed": ProfileConfig(
+                    extends="default", adapter_options=AdapterOptions(loadtime={"lora_paths": ["acme/m"]})
+                ),
+                "legacy": ProfileConfig(
+                    extends="default", adapter_options=AdapterOptions(runtime={"lora_id": "acme/n"})
+                ),
+            }
+        )
+        assert config.lora_revisions() == {"acme/l": None, "acme/m": None, "acme/n": None}
+
+    def test_branch_name_revision_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="40-char commit SHA"):
+            self._profile({"lora_paths": {"bank": {"id": "acme/l", "revision": "main"}}})
+
+    def test_unknown_key_in_pin_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="unknown key"):
+            self._profile({"lora_paths": {"bank": {"id": "acme/l", "rev": self.SHA_A}}})
+
+    def test_list_form_stays_bare_only(self) -> None:
+        with pytest.raises(ValidationError, match="dict form"):
+            self._profile({"lora_paths": [{"id": "acme/l", "revision": self.SHA_A}]})
+
+    def test_conflicting_pins_across_profiles_are_rejected_at_config_load(self) -> None:
+        with pytest.raises(ValidationError, match="two different revisions"):
+            _make_config(
+                profiles={
+                    "default": self._profile({"lora_paths": {"x": {"id": "acme/l", "revision": self.SHA_A}}}),
+                    "other": ProfileConfig(
+                        extends="default",
+                        adapter_options=AdapterOptions(
+                            loadtime={"lora_paths": {"x": {"id": "acme/l", "revision": self.SHA_B}}}
+                        ),
+                    ),
+                }
+            )
+
+    def test_pin_beats_bare_mention_of_the_same_id(self) -> None:
+        config = _make_config(
+            profiles={
+                "default": self._profile({"lora_paths": {"x": {"id": "acme/l", "revision": self.SHA_A}}}),
+                "legacy": ProfileConfig(
+                    extends="default", adapter_options=AdapterOptions(runtime={"lora_id": "acme/l"})
+                ),
+            }
+        )
+        assert config.lora_revisions() == {"acme/l": self.SHA_A}

@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import pytest
 from sie_server.config.model import ModelConfig
-from sie_server.core.runtime_options import merge_runtime_options
+from sie_server.core.encode_pipeline import resolve_encode_output_types
+from sie_server.core.runtime_options import (
+    apply_generation_runtime_options,
+    merge_runtime_options,
+    merge_runtime_options_with_profile,
+)
+from sie_server.types.inputs import InvalidInputError
 
 
 def _embedder_config() -> ModelConfig:
@@ -88,8 +94,204 @@ def test_profile_key_selects_profile_and_is_consumed() -> None:
     assert merged["is_query"] is True
 
 
-def test_unknown_profile_raises_value_error() -> None:
-    """An unknown profile name surfaces as ValueError (handled by callers)."""
+def test_merge_returns_the_selected_profile_with_options() -> None:
     config = _embedder_config()
-    with pytest.raises(ValueError, match="nope"):
+
+    merged, selected_profile = merge_runtime_options_with_profile(config, {"profile": "alt"})
+
+    assert merged["query_template"] == "alt: {text}"
+    assert selected_profile.runtime["query_template"] == "alt: {text}"
+
+
+def test_encode_output_type_lists_are_independent() -> None:
+    config = _embedder_config()
+    effective_options, selected_profile = merge_runtime_options_with_profile(config, None)
+
+    adapter_output_types, response_output_types = resolve_encode_output_types(
+        config,
+        ["dense"],
+        selected_profile,
+        effective_options,
+    )
+    adapter_output_types.append("sparse")
+
+    assert response_output_types == ["dense"]
+
+
+def test_profile_output_types_restrict_model_wide_capabilities() -> None:
+    config = ModelConfig.model_validate(
+        {
+            "sie_id": "test/multi-output",
+            "hf_id": "test/multi-output",
+            "inputs": {"text": True},
+            "tasks": {"encode": {"dense": {"dim": 8}, "sparse": {"dim": 32}}},
+            "max_sequence_length": 512,
+            "profiles": {
+                "default": {
+                    "max_batch_tokens": 8192,
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "adapter_options": {"runtime": {"output_types": ["sparse"]}},
+                },
+            },
+        }
+    )
+    effective_options, selected_profile = merge_runtime_options_with_profile(
+        config,
+        {"output_types": ["dense"]},
+    )
+
+    with pytest.raises(InvalidInputError, match="does not support output types"):
+        resolve_encode_output_types(
+            config,
+            ["dense"],
+            selected_profile,
+            effective_options,
+        )
+
+
+def test_unknown_profile_raises_invalid_input() -> None:
+    """An unknown caller-selected profile is classified as invalid input."""
+    config = _embedder_config()
+    with pytest.raises(InvalidInputError, match="nope"):
         merge_runtime_options(config, {"profile": "nope"})
+
+
+@pytest.mark.parametrize("profile", ["", " ", [], {}, 0, False, ["alt"], {"name": "alt"}])
+def test_malformed_profile_selector_raises_invalid_input(profile: object) -> None:
+    config = _embedder_config()
+
+    with pytest.raises(InvalidInputError, match=r"options\.profile"):
+        merge_runtime_options(config, {"profile": profile})
+
+
+def _generation_config() -> ModelConfig:
+    return ModelConfig.model_validate(
+        {
+            "sie_id": "test/generator",
+            "hf_id": "test/generator",
+            "inputs": {"text": True},
+            "tasks": {"generate": {"context_length": 4096, "max_output_tokens": 512}},
+            "max_sequence_length": 4096,
+            "profiles": {
+                "default": {
+                    "max_batch_tokens": 4096,
+                    "kv_budget_tokens": 2048,
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "adapter_options": {
+                        "runtime": {
+                            "default_sampling": {"temperature": 0.7, "top_p": 0.8},
+                            "stop_tokens": ["</s>"],
+                            "overall_timeout_s": 60,
+                        }
+                    },
+                }
+            },
+        }
+    )
+
+
+def test_generation_runtime_defaults_apply_below_typed_fields() -> None:
+    resolved = apply_generation_runtime_options(
+        _generation_config(),
+        {"profile": "default"},
+        {"prompt": "hi", "temperature": 1.0, "stop": ["DONE"]},
+    )
+
+    assert resolved["temperature"] == 1.0
+    assert resolved["top_p"] == 0.8
+    assert resolved["stop"] == ["DONE", "</s>"]
+    assert "profile" not in resolved
+
+
+def test_generation_request_runtime_overrides_profile_defaults() -> None:
+    resolved = apply_generation_runtime_options(
+        _generation_config(),
+        {"default_sampling": {"temperature": 0.2}},
+        {"prompt": "hi"},
+    )
+
+    assert resolved["temperature"] == 0.2
+    assert resolved["top_p"] == 0.8
+
+
+def test_generation_profile_default_min_new_tokens_caps_to_explicit_max() -> None:
+    config = _generation_config()
+    config.profiles["default"].adapter_options.runtime["default_sampling"]["min_new_tokens"] = 10
+
+    resolved = apply_generation_runtime_options(
+        config,
+        None,
+        {"prompt": "hi", "max_new_tokens": 1},
+    )
+
+    assert resolved["max_new_tokens"] == 1
+    assert resolved["min_tokens"] == 1
+
+
+def test_generation_request_sampling_min_new_tokens_above_max_fails() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"options\.default_sampling\.min_new_tokens.*must not exceed max_new_tokens",
+    ):
+        apply_generation_runtime_options(
+            _generation_config(),
+            {"default_sampling": {"min_new_tokens": 10}},
+            {"prompt": "hi", "max_new_tokens": 1},
+        )
+
+
+def test_generation_explicit_min_tokens_above_max_fails() -> None:
+    config = _generation_config()
+    del config.profiles["default"].adapter_options.runtime["default_sampling"]
+
+    with pytest.raises(
+        ValueError,
+        match=r"min_tokens \(10\) must not exceed max_new_tokens \(1\)",
+    ):
+        apply_generation_runtime_options(
+            config,
+            None,
+            {"prompt": "hi", "max_new_tokens": 1, "min_tokens": 10},
+        )
+
+
+def test_generation_non_default_profile_requires_model_variant_identity() -> None:
+    with pytest.raises(ValueError, match="model:profile"):
+        apply_generation_runtime_options(
+            _generation_config(),
+            {"profile": "fast"},
+            {"prompt": "hi"},
+        )
+
+
+def test_generation_unknown_option_fails_closed() -> None:
+    with pytest.raises(ValueError, match="unsupported generation option"):
+        apply_generation_runtime_options(
+            _generation_config(),
+            {"not_executable": True},
+            {"prompt": "hi"},
+        )
+
+
+@pytest.mark.parametrize(
+    "sampling",
+    [
+        {"temperature": "0.7"},
+        {"top_p": None},
+        {"presence_penalty": float("inf")},
+        {"top_k": True},
+        {"min_new_tokens": -1},
+    ],
+)
+def test_generation_invalid_sampling_option_fails_closed(sampling: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="invalid value"):
+        apply_generation_runtime_options(
+            _generation_config(),
+            {"default_sampling": sampling},
+            {"prompt": "hi"},
+        )
+
+
+def test_generation_non_finite_timeout_fails_closed() -> None:
+    with pytest.raises(ValueError, match="positive number"):
+        apply_generation_runtime_options(_generation_config(), {"overall_timeout_s": float("inf")}, {"prompt": "hi"})

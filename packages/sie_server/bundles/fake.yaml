@@ -1,0 +1,7 @@
+# Fake Engine bundle (#1836/#1847): deterministic weightless fakes only.
+# Boots the full serving surface with zero model downloads and zero GPUs:
+#   mise run serve -- -b fake
+name: fake
+priority: 5
+adapters:
+- sie_server.adapters.fake.adapter

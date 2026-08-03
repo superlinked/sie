@@ -175,7 +175,7 @@ class PEFTLoRAMixin:
         """
         return True
 
-    def load_lora(self, lora_path: str) -> int:
+    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
         """Load a LoRA adapter using PEFT.
 
         On first call, wraps the base model with PeftModel.
@@ -184,6 +184,9 @@ class PEFTLoRAMixin:
         Args:
             lora_path: HuggingFace path (e.g., "org/lora-name") or local path.
                 This path is the public LoRA id used for switching.
+            revision: Pinned 40-hex commit SHA (#2113) forwarded to PEFT's Hub
+                fetches; ``None`` resolves the default branch, as before. The
+                public LoRA id stays the bare ``lora_path``.
 
         Returns:
             Memory usage of the loaded LoRA in bytes.
@@ -215,7 +218,7 @@ class PEFTLoRAMixin:
 
         # Fail loudly on a LoRA the serving forward would silently ignore
         # (target_modules ∩ called modules = ∅) before any PEFT wrapping.
-        self._validate_lora_target_modules(lora_path)
+        self._validate_lora_target_modules(lora_path, revision)
 
         peft_adapter_name = self._peft_adapter_name(lora_path)
 
@@ -226,6 +229,7 @@ class PEFTLoRAMixin:
                 base_model,
                 lora_path,
                 adapter_name=peft_adapter_name,
+                revision=revision,
             )
             # Update self._model to point to the PEFT-wrapped model
             # This ensures encode() uses the LoRA-enhanced model
@@ -233,7 +237,7 @@ class PEFTLoRAMixin:
         else:
             # Additional LoRA - add to existing PeftModel
             logger.debug("Adding adapter to existing PeftModel")
-            self._peft_model.load_adapter(lora_path, adapter_name=peft_adapter_name)
+            self._peft_model.load_adapter(lora_path, adapter_name=peft_adapter_name, revision=revision)
 
         self._loaded_loras.add(lora_path)
         self._lora_adapter_names[lora_path] = peft_adapter_name
@@ -251,7 +255,7 @@ class PEFTLoRAMixin:
 
         return memory_bytes
 
-    def _validate_lora_target_modules(self, lora_path: str) -> None:
+    def _validate_lora_target_modules(self, lora_path: str, revision: str | None = None) -> None:
         """Check the LoRA's ``target_modules`` against the called-module set.
 
         No-op when the adapter does not declare
@@ -269,7 +273,7 @@ class PEFTLoRAMixin:
         try:
             from peft import PeftConfig
 
-            peft_config = PeftConfig.from_pretrained(lora_path)
+            peft_config = PeftConfig.from_pretrained(lora_path, revision=revision)
             target_modules = getattr(peft_config, "target_modules", None)
         except Exception as e:  # noqa: BLE001 — config fetch is best-effort
             logger.warning(

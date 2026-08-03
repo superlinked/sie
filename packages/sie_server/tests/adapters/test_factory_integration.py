@@ -100,7 +100,7 @@ class TestAdapterFactoryIntegration:
         config = _make_config(
             "test-qwen2",
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-            "sie_server.adapters.qwen2_flash_cross_encoder:Qwen2FlashCrossEncoderAdapter",
+            "sie_server.adapters.qwen2_flash_cross_encoder.adapter:Qwen2FlashCrossEncoderAdapter",
             score=True,
         )
 
@@ -180,7 +180,7 @@ class TestAdapterFactoryIntegration:
         config = _make_config(
             "test-colbert-modernbert",
             "answerdotai/ModernBERT-base",
-            "sie_server.adapters.colbert_modernbert_flash:ColBERTModernBERTFlashAdapter",
+            "sie_server.adapters.colbert_modernbert_flash.adapter:ColBERTModernBERTFlashAdapter",
             multivector_dim=128,
         )
 
@@ -206,7 +206,7 @@ class TestAdapterFactoryIntegration:
         config = _make_config(
             "test-splade",
             "naver/splade-v3",
-            "sie_server.adapters.splade_flash:SPLADEFlashAdapter",
+            "sie_server.adapters.splade_flash.adapter:SPLADEFlashAdapter",
             sparse_dim=30522,
         )
 

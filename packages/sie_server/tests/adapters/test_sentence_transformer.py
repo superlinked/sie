@@ -158,6 +158,55 @@ class TestSentenceTransformerDenseAdapter:
         assert call_args[0][0] == ["search: query"]
 
     @patch("sie_server.adapters.sentence_transformer.SentenceTransformer")
+    def test_encode_uses_runtime_default_instruction_and_normalize(
+        self,
+        mock_st_class: MagicMock,
+        adapter: SentenceTransformerDenseAdapter,
+        mock_st_model: MagicMock,
+    ) -> None:
+        """Runtime defaults preserved by vanilla profiles affect inference."""
+        mock_st_class.return_value = mock_st_model
+        adapter.load("cpu")
+
+        adapter.encode(
+            [Item(text="query")],
+            output_types=["dense"],
+            is_query=True,
+            options={
+                "query_template": "Instruct: {instruction}\nQuery: {text}",
+                "default_instruction": "retrieve a skill",
+                "normalize": False,
+            },
+        )
+
+        call_args = mock_st_model.encode.call_args
+        assert call_args.args[0] == ["Instruct: retrieve a skill\nQuery: query"]
+        assert call_args.kwargs["normalize_embeddings"] is False
+
+    @patch("sie_server.adapters.sentence_transformer.SentenceTransformer")
+    def test_encode_does_not_apply_query_default_instruction_to_documents(
+        self,
+        mock_st_class: MagicMock,
+        adapter: SentenceTransformerDenseAdapter,
+        mock_st_model: MagicMock,
+    ) -> None:
+        """A query-only runtime default leaves corpus text unchanged."""
+        mock_st_class.return_value = mock_st_model
+        adapter.load("cpu")
+
+        adapter.encode(
+            [Item(text="skill body")],
+            output_types=["dense"],
+            is_query=False,
+            options={
+                "query_template": "Instruct: {instruction}\nQuery: {text}",
+                "default_instruction": "retrieve a skill",
+            },
+        )
+
+        assert mock_st_model.encode.call_args.args[0] == ["skill body"]
+
+    @patch("sie_server.adapters.sentence_transformer.SentenceTransformer")
     def test_encode_unsupported_output_type(
         self,
         mock_st_class: MagicMock,

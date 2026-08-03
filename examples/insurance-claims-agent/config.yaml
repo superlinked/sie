@@ -1,0 +1,46 @@
+cluster:
+  url: "http://localhost:8080"
+  generation_url: ""
+  api_key: ""
+  request_timeout_s: 900
+  provision_timeout_s: 900
+
+models:
+  parse: "docling"
+  extract: "fastino/gliner2-large-v1"
+  rerank: "BAAI/bge-reranker-v2-m3"
+  vision: "IDEA-Research/grounding-dino-tiny"
+  review: "Qwen/Qwen3.5-4B:no-spec"
+
+retrieval:
+  candidate_chunks: 16
+  result_chunks: 4
+  chunk_characters: 1800
+
+sources:
+  - slug: "nfip-proof-of-loss"
+    title: "NFIP Proof of Loss, FEMA Form 086-0-09"
+    file_name: "nfip-proof-of-loss.pdf"
+    media_type: "application/pdf"
+    url: "https://www.fema.gov/sites/default/files/2020-07/FEMA-Form_086-0-09_proof-of-loss.pdf"
+    source_page: "https://www.fema.gov/flood-insurance/find-form/claims"
+    rights: "U.S. federal government work. Do not imply FEMA or DHS endorsement."
+    fixture_file: "fixtures/sources/nfip-proof-of-loss.pdf"
+
+  - slug: "sfip-dwelling-policy"
+    title: "Standard Flood Insurance Policy, Dwelling Form"
+    file_name: "sfip-dwelling-policy.pdf"
+    media_type: "application/pdf"
+    url: "https://www.fema.gov/sites/default/files/documents/fema_F-122-Dwelling-SFIP_2021.pdf"
+    source_page: "https://www.fema.gov/flood-insurance/find-form/underwriting"
+    rights: "U.S. federal government work. Do not imply FEMA or DHS endorsement."
+    fixture_file: "fixtures/sources/sfip-dwelling-policy.pdf"
+
+  - slug: "flooded-house-interior"
+    title: "Flooded house interior"
+    file_name: "flooded-house-interior.jpg"
+    media_type: "image/jpeg"
+    url: "https://upload.wikimedia.org/wikipedia/commons/0/01/Flooded_house_interior.jpg"
+    source_page: "https://commons.wikimedia.org/wiki/File:Flooded_house_interior.jpg"
+    rights: "Public domain U.S. Fish and Wildlife Service photograph."
+    fixture_file: "fixtures/sources/flooded-house-interior.jpg"

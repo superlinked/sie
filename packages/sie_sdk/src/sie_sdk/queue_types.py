@@ -144,6 +144,9 @@ class WorkResult(_WorkResultRequired, total=False):
             taken post-tokenization — never a bytes/4-style estimate.
             Optional: absent on results from workers that don't emit it,
             so the wire shape stays backward-compatible.
+        execution_identity_sha256: Opaque worker-origin SHA-256 binding the
+            successful result to one immutable managed deployment/resource
+            identity. Optional for rolling and self-host compatibility.
     """
 
     result_msgpack: bytes | None
@@ -163,6 +166,8 @@ class WorkResult(_WorkResultRequired, total=False):
     # Authoritative unit counts for metering (see docstring). Optional —
     # older workers omit it and decoders ignore unknown keys.
     units: dict[str, int] | None
+
+    execution_identity_sha256: str | None
 
 
 # -- NATS subject helpers ---------------------------------------------------

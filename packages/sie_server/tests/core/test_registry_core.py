@@ -1,8 +1,9 @@
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
+from sie_server.core.load_errors import ModelLoadTimeoutError
 from sie_server.core.registry import ModelRegistry
 
 
@@ -51,6 +52,33 @@ class TestModelRegistry:
         assert registry.model_names == []
         assert registry.loaded_model_names == []
 
+    def test_empty_model_filter_advertises_zero_models(self, tmp_path: Path) -> None:
+        """model_filter=[] means ZERO models, not "no filter".
+
+        A bundle whose adapters match no onboarded model (first case:
+        transformers514 before its pilot lands) produces an empty filter; a
+        truthiness check would collapse it to None and advertise the entire
+        catalog from a worker that can serve none of it.
+        """
+        (tmp_path / "model-a.yaml").write_text("""
+sie_id: model-a
+hf_id: org/model-a
+tasks:
+  encode:
+    dense:
+      dim: 384
+profiles:
+  default:
+    adapter_path: "sie_server.adapters.sentence_transformer:SentenceTransformerDenseAdapter"
+    max_batch_tokens: 8192
+""")
+
+        filtered = ModelRegistry(models_dir=tmp_path, model_filter=[])
+        assert filtered.model_names == []
+
+        unfiltered = ModelRegistry(models_dir=tmp_path, model_filter=None)
+        assert unfiltered.model_names == ["model-a"]
+
     def test_add_config(self) -> None:
         """Can add config programmatically."""
         registry = ModelRegistry()
@@ -61,6 +89,41 @@ class TestModelRegistry:
 
         assert registry.has_model("test-model")
         assert registry.get_config("test-model") == config
+
+    @pytest.mark.asyncio
+    async def test_add_modify_delete_refresh_the_authoritative_metric_catalog(self) -> None:
+        registry = ModelRegistry()
+        original = _make_config(name="test-model", dense_dim=384)
+        modified = _make_config(name="test-model", dense_dim=1024)
+
+        with patch("sie_server.core.registry.refresh_worker_metric_context") as refresh:
+            registry.add_config(original)
+            await registry.add_config_async(modified)
+            removed = await registry.remove_config_async("test-model")
+
+        assert removed == {"test-model"}
+        assert refresh.call_count == 3
+        snapshots = [call.kwargs["configs"] for call in refresh.call_args_list]
+        assert snapshots[0]["test-model"].tasks.encode.dense.dim == 384
+        assert snapshots[1]["test-model"].tasks.encode.dense.dim == 1024
+        assert snapshots[2] == {}
+
+    def test_rescan_refreshes_modified_and_deleted_catalog_entries(self) -> None:
+        original = _make_config(name="test-model", dense_dim=384)
+        modified = _make_config(name="test-model", dense_dim=1024)
+        with patch(
+            "sie_server.core.registry.load_model_configs",
+            side_effect=[{"test-model": original}, {"test-model": modified}, {}],
+        ):
+            registry = ModelRegistry(models_dir=Path("/fake/models"))
+            with patch("sie_server.core.registry.refresh_worker_metric_context") as refresh:
+                assert registry.rescan_configs() == []
+                assert registry.get_config("test-model").tasks.encode.dense.dim == 1024
+                assert registry.rescan_configs() == []
+
+        snapshots = [call.kwargs["configs"] for call in refresh.call_args_list]
+        assert snapshots[0]["test-model"].tasks.encode.dense.dim == 1024
+        assert snapshots[1] == {}
 
     def test_add_config_expands_profile_variants(self) -> None:
         """Programmatic config updates expose non-default profile aliases."""
@@ -153,6 +216,23 @@ class TestModelRegistry:
         assert changed == {"test-model", "test-model:fast"}
         assert not registry.has_model("test-model")
         assert registry.has_model("test-model:fast")
+
+    @pytest.mark.asyncio
+    async def test_add_config_async_unloads_loaded_model_when_revision_changes(self) -> None:
+        """A new immutable revision must not keep serving already-loaded weights."""
+        registry = ModelRegistry()
+        first = _make_config(name="test-model", hf_id="org/test")
+        first.hf_revision = "0123456789abcdef0123456789abcdef01234567"
+        registry.add_config(first)
+        registry._loaded["test-model"] = MagicMock()
+        registry._do_unload = AsyncMock()
+
+        second = _make_config(name="test-model", hf_id="org/test")
+        second.hf_revision = "89abcdef0123456789abcdef0123456789abcdef"
+        await registry.add_config_async(second)
+
+        registry._do_unload.assert_awaited_once_with("test-model", reason="config_change")
+        assert registry.get_config("test-model").hf_revision == second.hf_revision
 
     def test_load_from_directory(self, tmp_path: Path) -> None:
         """Can load configs from directory."""
@@ -294,6 +374,62 @@ profiles:
         assert adapter is mock_adapter
         mock_adapter.load.assert_called_once_with("cpu")
         assert registry.is_loaded("test")
+
+    @patch("sie_server.core.model_loader.load_adapter")
+    def test_sync_load_records_managed_duration_outcome(
+        self,
+        mock_load_adapter: MagicMock,
+        mock_adapter: MagicMock,
+    ) -> None:
+        telemetry = MagicMock()
+        mock_load_adapter.return_value = mock_adapter
+        registry = ModelRegistry()
+        registry.add_config(_make_config(name="test"))
+
+        with patch("sie_server.core.registry.worker_telemetry", return_value=telemetry):
+            registry.load("test", device="cpu")
+
+        telemetry.model_load_completed.assert_called_once()
+        kwargs = telemetry.model_load_completed.call_args.kwargs
+        assert kwargs["model"] == "test"
+        assert kwargs["duration_s"] >= 0
+        assert kwargs["outcome"] == "success"
+        assert kwargs["stage"] == "total"
+
+    @pytest.mark.parametrize(
+        ("error", "outcome", "stage"),
+        [
+            (RuntimeError("load failed"), "error", "total"),
+            (
+                ModelLoadTimeoutError(model="test", stage="instantiate", elapsed_s=11.0, timeout_s=10.0),
+                "timeout",
+                "instantiate",
+            ),
+        ],
+    )
+    def test_sync_load_records_managed_failure_outcome(
+        self,
+        error: BaseException,
+        outcome: str,
+        stage: str,
+    ) -> None:
+        telemetry = MagicMock()
+        registry = ModelRegistry()
+        registry.add_config(_make_config(name="test"))
+
+        with (
+            patch.object(registry._loader, "instantiate_adapter", side_effect=error),
+            patch("sie_server.core.registry.worker_telemetry", return_value=telemetry),
+            pytest.raises(type(error)),
+        ):
+            registry.load("test", device="cpu")
+
+        telemetry.model_load_completed.assert_called_once()
+        kwargs = telemetry.model_load_completed.call_args.kwargs
+        assert kwargs["model"] == "test"
+        assert kwargs["duration_s"] >= 0
+        assert kwargs["outcome"] == outcome
+        assert kwargs["stage"] == stage
 
     @patch("sie_server.core.model_loader.load_adapter")
     def test_get_loaded_model(self, mock_load_adapter: MagicMock, mock_adapter: MagicMock) -> None:

@@ -1,4 +1,5 @@
 {{- $root := . -}}
+{{- $_ := include "sie-cluster.worker.validateLanes" $root -}}
 {{/*
 Safety guard: the worker-sidecar container is the production data path (NATS ->
 Rust sidecar -> UDS IPC -> colocated adapter process). The sidecar needs
@@ -30,27 +31,41 @@ fast at render time.
 {{- if le $workerLivenessBudgetS $modelReadyTimeoutS }}
 {{- fail (printf "workers.common.modelReadyTimeoutSec=%d must be lower than the adapter worker liveness budget (%d * %d = %ds); increase workers.common.probes.liveness.failureThreshold/periodSeconds or lower modelReadyTimeoutSec" $modelReadyTimeoutS $workerLivenessFailures $workerLivenessPeriodS $workerLivenessBudgetS) }}
 {{- end }}
+{{- $reservedOtelEnv := include "sie-cluster.otel.reservedEnvNames" $root | fromJsonArray -}}
+{{- $reservedWorkerEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_TYPE" "SIE_MACHINE_PROFILE" "SIE_POOL" "SIE_WORKER_ID") -}}
+{{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_OTEL_LANE" "SIE_POOL" "SIE_WORKER_ID") -}}
+{{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.extraEnv" "entries" $root.Values.workers.common.extraEnv "reserved" $reservedWorkerEnv) -}}
+{{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.workerSidecar.extraEnv" "entries" $root.Values.workers.common.workerSidecar.extraEnv "reserved" $reservedSidecarEnv) -}}
 {{- range $poolName, $pool := .Values.workers.pools }}
 {{- if $pool.enabled }}
 {{- if not $pool.bundles }}
 {{- fail (printf "workers.pools.%s: missing required `bundles:` map. Define at least one bundle under the pool (e.g. `bundles: { default: { minReplicas: 0, maxReplicas: 1 } }`)." $poolName) }}
 {{- end }}
 {{- $platform := default $root.Values.workers.common.platform $pool.platform }}
-{{- $machineProfile := default $poolName $pool.machineProfile }}
-{{- $queuePool := default (default "default" $root.Values.workers.common.queuePool) $pool.queuePool | lower }}
 {{- $payloadStoreUrl := include "sie-cluster.payloadStoreUrl" $root }}
 {{- range $bundleName, $bundleCfg := $pool.bundles }}
 {{- if dig "enabled" true $bundleCfg }}
+{{- $lane := include "sie-cluster.worker.lane" (dict "root" $root "poolName" $poolName "pool" $pool "bundleName" $bundleName) | fromJson }}
+{{- $queuePool := $lane.queuePool }}
+{{- $machineProfile := $lane.machineProfile }}
+{{- $bundle := $lane.bundle }}
+{{- $workerTargetName := printf "%s-worker-%s-%s" (include "sie-cluster.fullname" $root) $poolName $bundleName -}}
+{{- include "sie-cluster.env.assertNoReserved" (dict "path" (printf "workers.pools.%s.bundles.%s.extraEnv" $poolName $bundleName) "entries" $bundleCfg.extraEnv "reserved" $reservedWorkerEnv) -}}
 {{- if not (hasKey $bundleCfg "minReplicas") }}
 {{- fail (printf "workers.pools.%s.bundles.%s: missing required `minReplicas`." $poolName $bundleName) }}
 {{- end }}
 {{- if not (hasKey $bundleCfg "maxReplicas") }}
 {{- fail (printf "workers.pools.%s.bundles.%s: missing required `maxReplicas`." $poolName $bundleName) }}
 {{- end }}
+{{- if lt (int $bundleCfg.minReplicas) 0 }}
+{{- fail (printf "workers.pools.%s.bundles.%s: `minReplicas` (%d) must be >= 0." $poolName $bundleName (int $bundleCfg.minReplicas)) }}
+{{- end }}
+{{- if lt (int $bundleCfg.maxReplicas) 1 }}
+{{- fail (printf "workers.pools.%s.bundles.%s: `maxReplicas` (%d) must be >= 1 for StatefulSet and KEDA/HPA validity." $poolName $bundleName (int $bundleCfg.maxReplicas)) }}
+{{- end }}
 {{- if lt (int $bundleCfg.maxReplicas) (int $bundleCfg.minReplicas) }}
 {{- fail (printf "workers.pools.%s.bundles.%s: `maxReplicas` (%d) must be >= `minReplicas` (%d)." $poolName $bundleName (int $bundleCfg.maxReplicas) (int $bundleCfg.minReplicas)) }}
 {{- end }}
-{{- $bundle := $bundleName }}
 {{- $preloadModels := $root.Values.workers.common.preloadModels }}
 {{- if hasKey $pool "preloadModels" }}
 {{- $preloadModels = $pool.preloadModels }}
@@ -59,9 +74,9 @@ fast at render time.
 {{- $preloadModels = $bundleCfg.preloadModels }}
 {{- end }}
 {{- /* imageBundle decouples the image-tag suffix from the logical bundle name.
-       Defaults to $bundle, but bundles whose logical name has no dedicated
-       Docker image (e.g. `sglang-embedding`, which shares deps and image with
-       `sglang`) set this to the bundle whose image they reuse. Labels, env
+       Defaults to $bundle, but bundles whose logical name has no dedicated Docker
+       image (e.g. `sglang-embedding` and `sglang-vision-extract`, which share deps
+       and image with `sglang`) set this to the bundle whose image they reuse. Labels, env
        vars, --bundle flag, and metrics still use $bundle. */ -}}
 {{- $imageBundle := default $bundle $bundleCfg.imageBundle }}
 {{- /* Fail fast when a bundle is placed on a platform whose image the release
@@ -110,7 +125,7 @@ fast at render time.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "sie-cluster.fullname" $root }}-worker-{{ $poolName }}-{{ $bundleName }}
+  name: {{ $workerTargetName }}
   namespace: {{ include "sie-cluster.namespace" $root }}
   labels:
     {{- include "sie-cluster.worker.labels" $root | nindent 4 }}
@@ -118,10 +133,21 @@ metadata:
     sie.superlinked.com/machine-profile: {{ $machineProfile | quote }}
     sie.superlinked.com/bundle: {{ $bundle | quote }}
     sie.superlinked.com/engine: {{ $engine | quote }}
+    # Keep the published v0.6.20 selector identity immutable. Physical queue
+    # identity has its own label and continues to drive runtime/telemetry env.
     sie.superlinked.com/pool: {{ $poolName | quote }}
+    sie.superlinked.com/queue-pool: {{ $queuePool | quote }}
 spec:
   serviceName: {{ include "sie-cluster.worker.serviceName" $root }}
-  replicas: {{ $bundleCfg.minReplicas }}
+  {{- $workerReplicas := int $bundleCfg.minReplicas }}
+  {{- if $root.Values.autoscaling.enabled }}
+  {{- with (lookup "apps/v1" "StatefulSet" (include "sie-cluster.namespace" $root) $workerTargetName) }}
+  {{- $workerReplicas = int .spec.replicas }}
+  {{- end }}
+  {{- end }}
+  # Helm 0.6.20 owned this field. Preserve the live HPA count during an
+  # autoscaling-enabled upgrade instead of resetting it to the static floor.
+  replicas: {{ $workerReplicas }}
   podManagementPolicy: Parallel
   selector:
     matchLabels:
@@ -142,11 +168,9 @@ spec:
         sie.superlinked.com/bundle: {{ $bundle | quote }}
         sie.superlinked.com/engine: {{ $engine | quote }}
         sie.superlinked.com/pool: {{ $poolName | quote }}
+        sie.superlinked.com/queue-pool: {{ $queuePool | quote }}
       annotations:
-        # Prometheus scraping
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
-        prometheus.io/path: "/metrics"
+        checksum/otel-resource: {{ include "sie-cluster.otel.resourceChecksum" $root | quote }}
     spec:
       {{- include "sie-cluster.imagePullSecrets" $root | nindent 6 }}
       {{- if $pool.runtimeClassName }}
@@ -179,7 +203,11 @@ spec:
         {{- if and $multiWorkerChildren (gt $gpuCount 0) }}
         {{- $containerGpuCount = 1 }}
         {{- end }}
-        - name: {{ if $multiWorkerChildren }}worker-{{ $workerIndex }}{{ else }}worker{{ end }}
+        {{- $workerContainerName := "worker" }}
+        {{- if $multiWorkerChildren }}
+        {{- $workerContainerName = printf "worker-%d" $workerIndex }}
+        {{- end }}
+        - name: {{ $workerContainerName }}
           {{- $imageTag := default $root.Chart.AppVersion $root.Values.workers.common.image.tag }}
           {{- $rust := $root.Values.workers.common.rust }}
           {{- if eq $engine "candle" }}
@@ -318,8 +346,8 @@ spec:
               value: "1"
             {{- end }}
             {{- end }}
-            {{- if $root.Values.observability.tracing.enabled }}
-            {{- include "sie-cluster.tracing.env" (dict "root" $root "serviceName" $root.Values.observability.tracing.serviceName.worker) | nindent 12 }}
+            {{- if eq (include "sie-cluster.otel.signalsEnabled" $root) "true" }}
+            {{- include "sie-cluster.otel.env" (dict "root" $root "serviceName" $root.Values.observability.otel.serviceName.worker "instanceSuffix" $workerContainerName) | nindent 12 }}
             {{- end }}
             {{- with $root.Values.workers.common.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -380,17 +408,25 @@ spec:
         # the adapter worker process(es) over shared Unix sockets.
         - name: worker-sidecar
           {{- $rs := $root.Values.workers.common.workerSidecar }}
+          {{- if and (hasKey $rs "metricsPort") (ne (int $rs.metricsPort) (int $rs.probePort)) }}
+          {{- fail "legacy workers.common.workerSidecar.metricsPort is not consumed; map it to workers.common.workerSidecar.probePort (or explicitly retain the new default) before upgrading" }}
+          {{- end }}
+          {{- $legacyHealthPublish := default (dict) $rs.healthPublish }}
+          {{- $legacyHealthMachineProfile := default "" (get $legacyHealthPublish "machineProfile") | toString | trim }}
+          {{- if and $legacyHealthMachineProfile (ne $legacyHealthMachineProfile $machineProfile) }}
+          {{- fail (printf "legacy workers.common.workerSidecar.healthPublish.machineProfile=%q conflicts with canonical pool machineProfile=%q; reconcile the pool identity and remove the legacy override before upgrading" $legacyHealthMachineProfile $machineProfile) }}
+          {{- end }}
           {{- $configReconcile := default dict $rs.configReconcile }}
           {{- $rsTag := default $root.Chart.AppVersion $rs.image.tag }}
           image: {{ printf "%s:%s" $rs.image.repository $rsTag }}
           imagePullPolicy: {{ $rs.image.pullPolicy }}
           ports:
-            - name: metrics
-              containerPort: {{ $rs.metricsPort }}
+            - name: probe
+              containerPort: {{ $rs.probePort }}
               protocol: TCP
           env:
-            - name: SIE_WORKER_METRICS_PORT
-              value: {{ $rs.metricsPort | quote }}
+            - name: SIE_WORKER_PROBE_PORT
+              value: {{ $rs.probePort | quote }}
             - name: SIE_IPC_SOCKET_PATH
               value: {{ index $ipcSocketPaths 0 | quote }}
             - name: SIE_TOKENIZER_STAGING_DIR
@@ -403,6 +439,8 @@ spec:
               value: {{ $queuePool | quote }}
             - name: SIE_BUNDLE
               value: {{ $bundle | quote }}
+            - name: SIE_OTEL_LANE
+              value: {{ printf "%s|%s|%s" $queuePool $machineProfile $bundle | quote }}
             # Shared cold-load timeout used by Rust EnsureModelReady IPC calls.
             - name: SIE_MODEL_READY_TIMEOUT_S
               value: {{ $modelReadyTimeoutS | quote }}
@@ -490,6 +528,10 @@ spec:
             - name: SIE_MAX_CONCURRENT_BATCHES
               value: {{ $rs.maxConcurrentBatches | quote }}
             {{- end }}
+            {{- if $rs.audioPrepPermits }}
+            - name: SIE_AUDIO_PREP_PERMITS
+              value: {{ $rs.audioPrepPermits | quote }}
+            {{- end }}
             {{- if $rs.ipcPoolSize }}
             # Size of the sidecar-to-adapter IPC connection pool. Should match
             # (or exceed) SIE_MAX_CONCURRENT_BATCHES so the IPC layer
@@ -522,7 +564,7 @@ spec:
               value: {{ $rs.healthPublish.intervalMs | quote }}
             {{- end }}
             - name: SIE_MACHINE_PROFILE
-              value: {{ $rs.healthPublish.machineProfile | default $machineProfile | quote }}
+              value: {{ $machineProfile | quote }}
             {{- if $pool.gpu }}
             {{- if $pool.gpu.count }}
             - name: SIE_GPU_COUNT
@@ -572,8 +614,8 @@ spec:
               value: {{ $rs.adaptive.targetP50Ms | quote }}
             {{- end }}
             {{- end }}
-            {{- if $root.Values.observability.tracing.enabled }}
-            {{- include "sie-cluster.tracing.env" (dict "root" $root "serviceName" $root.Values.observability.tracing.serviceName.workerSidecar) | nindent 12 }}
+            {{- if eq (include "sie-cluster.otel.signalsEnabled" $root) "true" }}
+            {{- include "sie-cluster.otel.env" (dict "root" $root "serviceName" $root.Values.observability.otel.serviceName.workerSidecar "instanceSuffix" "worker-sidecar") | nindent 12 }}
             {{- end }}
             {{- with $rs.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -585,13 +627,13 @@ spec:
           startupProbe:
             httpGet:
               path: /healthz
-              port: metrics
+              port: probe
             periodSeconds: {{ $rs.probes.startup.periodSeconds | default 5 }}
             failureThreshold: {{ $rs.probes.startup.failureThreshold | default 60 }}
           livenessProbe:
             httpGet:
               path: /healthz
-              port: metrics
+              port: probe
             initialDelaySeconds: {{ $rs.probes.liveness.initialDelaySeconds | default 10 }}
             periodSeconds: {{ $rs.probes.liveness.periodSeconds | default 30 }}
             timeoutSeconds: {{ $rs.probes.liveness.timeoutSeconds | default 5 }}
@@ -599,7 +641,7 @@ spec:
           readinessProbe:
             httpGet:
               path: /readyz
-              port: metrics
+              port: probe
             initialDelaySeconds: {{ $rs.probes.readiness.initialDelaySeconds | default 3 }}
             periodSeconds: {{ $rs.probes.readiness.periodSeconds | default 5 }}
             timeoutSeconds: {{ $rs.probes.readiness.timeoutSeconds | default 3 }}

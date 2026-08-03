@@ -11,7 +11,8 @@
 {{- $fullname := include "sie-cluster.fullname" . }}
 {{- $ns := include "sie-cluster.namespace" . }}
 {{- $saName := include "sie-cluster.certManagerConflict.serviceAccountName" . }}
-{{- $crName := printf "%s-cm-conflict-check" $fullname | trunc 63 | trimSuffix "-" }}
+{{- $crName := include "sie-cluster.keda.suffixedName" (dict "base" $fullname "suffix" "-cm-conflict-check") }}
+{{- $jobName := include "sie-cluster.keda.suffixedName" (dict "base" $fullname "suffix" (printf "-cm-conflict-check-%d" .Release.Revision)) }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -64,7 +65,7 @@ subjects:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ printf "%s-cm-conflict-check-%d" $fullname .Release.Revision | trunc 63 | trimSuffix "-" }}
+  name: {{ $jobName }}
   namespace: {{ $ns }}
   labels:
     app.kubernetes.io/name: sie-cm-conflict-check

@@ -1,0 +1,26 @@
+sie_id: naver/v-splade-quality
+hf_id: naver/v-splade-quality
+hf_revision: 99bdc93f42460e595b2fb1e78b96edd44e898441
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense: null
+    sparse:
+      dim: 50368
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 7999
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: float32
+    adapter_path: sie_server.adapters.st_sparse_vision.adapter:SparseEncoderVisionAdapter
+    adapter_options:
+      loadtime:
+        trust_remote_code: true
+      runtime: {}

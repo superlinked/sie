@@ -149,6 +149,13 @@ workers:
         sglang:
           minReplicas: 0
           maxReplicas: 4
+        # SGLang-backed vision extraction is non-generation work and must not
+        # share the generation worker. It reuses the identical SGLang image but
+        # has its own logical bundle, queue lane, and scale-to-zero workers.
+        sglang-vision-extract:
+          imageBundle: sglang
+          minReplicas: 0
+          maxReplicas: 4
 
 # ServiceAccount — Helm manages creation; IRSA annotation must be injected at deploy time.
 # NAMING CONTRACT: name must match module.sie_irsa_role namespace_service_accounts

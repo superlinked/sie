@@ -102,8 +102,8 @@ struct Cli {
     #[arg(long, env = "SIE_POOL_ADMISSION_STALE_AFTER_S", default_value = "30.0")]
     pool_admission_stale_after_s: f64,
 
-    #[arg(long, env = "SIE_WORKER_METRICS_PORT", default_value = "9095")]
-    metrics_port: u16,
+    #[arg(long, env = "SIE_WORKER_PROBE_PORT", default_value = "9095")]
+    probe_port: u16,
 
     #[arg(long, env = "SIE_WORKER_ID")]
     worker_id: Option<String>,
@@ -219,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         pool_admission_pause_ms: seconds_to_millis(cli.pool_admission_pause_s, 100),
         pool_admission_stale_after_ms: seconds_to_millis(cli.pool_admission_stale_after_s, 0),
-        metrics_port: cli.metrics_port,
+        probe_port: cli.probe_port,
         worker_id: cli.worker_id.unwrap_or_else(|| {
             std::env::var("HOSTNAME").unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()))
         }),

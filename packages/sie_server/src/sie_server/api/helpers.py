@@ -1,6 +1,5 @@
 import logging
-import uuid
-from dataclasses import dataclass
+import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -14,8 +13,8 @@ from sie_server.api.serialization import MsgPackResponse, _convert_for_json
 from sie_server.core.oom import is_oom_error
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError
-from sie_server.observability.metrics import record_request
 from sie_server.observability.tracing import get_current_trace_id
+from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 from sie_server.types.responses import ErrorCode
 
 if TYPE_CHECKING:
@@ -84,7 +83,7 @@ _sdk_version_warned: set[str] = set()
 _MIN_VERSION_PARTS = 2  # major.minor required for skew check
 
 
-def _check_sdk_version(http_request: Request) -> None:
+def check_sdk_version(http_request: Request) -> None:
     sdk_version = http_request.headers.get(SDK_VERSION_HEADER)
     if not sdk_version:
         return
@@ -107,65 +106,6 @@ def _check_sdk_version(http_request: Request) -> None:
             _sdk_version_warned.add(key)
     except (ValueError, IndexError):
         pass
-
-
-def _mask_api_key(key: str) -> str:
-    """Mask an API key, showing only the last 4 characters."""
-    mask = "****"
-    if len(key) <= len(mask):
-        return mask
-    return f"{mask}{key[-4:]}"
-
-
-@dataclass(frozen=True)
-class RequestContext:
-    """Request-scoped context for structured logging."""
-
-    request_id: str
-    api_key: str | None
-    queue_depth: int | None
-
-
-def extract_request_context(
-    http_request: Request,
-    model: str,
-    registry: "ModelRegistry",
-) -> RequestContext:
-    """Extract request context from HTTP request for structured logging.
-
-    Args:
-        http_request: FastAPI request object.
-        model: Model name (for queue depth lookup).
-        registry: ModelRegistry to get queue depth.
-
-    Returns:
-        RequestContext with request_id, masked api_key, and queue_depth.
-    """
-    _check_sdk_version(http_request)
-
-    # request_id: from X-Request-ID header or generate new
-    request_id = http_request.headers.get("x-request-id") or str(uuid.uuid4())
-
-    # api_key: from Authorization header, masked
-    auth_header = http_request.headers.get("authorization")
-    api_key: str | None = None
-    if auth_header:
-        token = (auth_header[7:] if auth_header.lower().startswith("bearer ") else auth_header).strip()
-        if token:
-            api_key = _mask_api_key(token)
-
-    # queue_depth: from worker's pending_count. Best-effort: endpoints call this
-    # before check_exists(), so an unknown model must fall through to their 404
-    # instead of KeyError-500ing here.
-    queue_depth: int | None = None
-    try:
-        worker = registry.get_worker(model)
-    except KeyError:
-        worker = None
-    if worker is not None:
-        queue_depth = worker.pending_count
-
-    return RequestContext(request_id=request_id, api_key=api_key, queue_depth=queue_depth)
 
 
 class ContentNegotiator:
@@ -217,6 +157,7 @@ class RequestParser:
         Raises:
             HTTPException: 400 if parsing or validation fails.
         """
+        check_sdk_version(http_request)
         content_type = http_request.headers.get("content-type")
         body = await http_request.body()
 
@@ -426,8 +367,9 @@ class InferenceErrorHandler:
         model: str,
         endpoint: str,
         span: "Span",
-        ctx: RequestContext | None = None,
         oom_retry_after_s: int = _OOM_DEFAULT_RETRY_AFTER_S,
+        profile: str = "default",
+        item_count: int = 1,
     ) -> None:
         """Initialize handler.
 
@@ -435,7 +377,6 @@ class InferenceErrorHandler:
             model: Model name for metrics.
             endpoint: Endpoint name for metrics (encode, score, extract).
             span: OpenTelemetry span for error attributes.
-            ctx: Optional request context for structured logging.
             oom_retry_after_s: Value for the ``Retry-After`` header on
                 ``RESOURCE_EXHAUSTED`` (503) responses. Defaults to the
                 module constant; route handlers pass
@@ -445,18 +386,24 @@ class InferenceErrorHandler:
         self.model = model
         self.endpoint = endpoint
         self.span = span
-        self.ctx = ctx
         self.oom_retry_after_s = oom_retry_after_s
+        self.profile = profile
+        self.item_count = item_count
+        self._started_at = time.perf_counter() if worker_telemetry_enabled() else None
 
-    def _log_kwargs(self) -> dict[str, Any]:
-        """Build kwargs for record_request from context."""
-        if self.ctx is None:
-            return {}
-        return {
-            "request_id": self.ctx.request_id,
-            "api_key": self.ctx.api_key,
-            "queue_depth": self.ctx.queue_depth,
-        }
+    def _record_completion(self, outcome: str) -> None:
+        """Emit the one semantic engine-completion event for an error path."""
+        started_at = self._started_at
+        if started_at is None:
+            return
+        worker_telemetry().item_completed(
+            operation=self.endpoint,
+            outcome=outcome,
+            model=self.model,
+            profile=self.profile,
+            duration_s=time.perf_counter() - started_at,
+            item_count=self.item_count,
+        )
 
     def handle_queue_full(self, error: QueueFullError) -> HTTPException:
         """Handle queue full backpressure error.
@@ -468,7 +415,7 @@ class InferenceErrorHandler:
             HTTPException with 503 status.
         """
         self.span.set_attribute("error", "queue_full")
-        record_request(model=self.model, endpoint=self.endpoint, status="error", **self._log_kwargs())
+        self._record_completion("retry")
         return HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
@@ -487,7 +434,7 @@ class InferenceErrorHandler:
             HTTPException with 400 status.
         """
         self.span.set_attribute("error", "invalid_input")
-        record_request(model=self.model, endpoint=self.endpoint, status="error", **self._log_kwargs())
+        self._record_completion("error")
         return HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -498,7 +445,7 @@ class InferenceErrorHandler:
 
     def handle_input_too_long(self, error: InputTooLongError) -> HTTPException:
         self.span.set_attribute("error", "input_too_long")
-        record_request(model=self.model, endpoint=self.endpoint, status="error", **self._log_kwargs())
+        self._record_completion("error")
         return HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -533,7 +480,7 @@ class InferenceErrorHandler:
                 error,
             )
             self.span.set_attribute("error", "resource_exhausted")
-            record_request(model=self.model, endpoint=self.endpoint, status="error", **self._log_kwargs())
+            self._record_completion("retry")
             return HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
@@ -545,7 +492,7 @@ class InferenceErrorHandler:
 
         logger.exception("%s error for model %s", operation, self.model)
         self.span.set_attribute("error", "inference_error")
-        record_request(model=self.model, endpoint=self.endpoint, status="error", **self._log_kwargs())
+        self._record_completion("error")
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={

@@ -9,6 +9,7 @@ PUBLIC_INFERENCE_METHODS = (
     "score",
     "extract",
     "generate",
+    "responses",
     "chat_completions",
 )
 

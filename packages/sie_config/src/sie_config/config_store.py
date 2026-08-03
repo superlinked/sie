@@ -62,11 +62,11 @@ class ConfigStore:
     def increment_epoch(self) -> int:
         """Increment epoch by 1 and return the new value. Single-writer only.
 
-        On success, mirrors the new epoch into the
-        `sie_config_epoch` Prometheus gauge. On backend write
-        failure, bumps `sie_config_store_writes_total{op="increment_epoch",result="failure"}`
-        and re-raises so the caller (the write handler) returns 5xx
-        rather than silently losing the epoch bump.
+        On success, records the new epoch through the canonical
+        `sie.config.epoch` OTel gauge. On backend write failure, records
+        `sie.config.store.writes{operation="increment_epoch",outcome="failure"}`
+        through the same facade and re-raises so the caller (the write handler)
+        returns 5xx rather than silently losing the epoch bump.
         """
         current = self.read_epoch()
         new_epoch = current + 1
@@ -147,6 +147,36 @@ class ConfigStore:
         except Exception:  # noqa: BLE001 -- read failure should not crash
             logger.warning("Failed to read model config: %s", model_id)
             return None
+
+    def delete_model(self, model_id: str) -> bool:
+        """Delete one API-persisted model config.
+
+        Returns ``True`` only when a stored file/object existed. A repeated
+        delete is a successful no-op. The caller owns write serialization and
+        the subsequent registry mutation + epoch bump.
+
+        Raises:
+            ValueError: If model_id contains reserved sequence ``__``.
+        """
+        self._validate_model_id(model_id)
+        filename = model_id.replace("/", "__") + ".yaml"
+        filepath = join_path(self._models_path, filename)
+        if not self._backend.exists(filepath):
+            return False
+        try:
+            self._backend.delete_file(filepath)
+        except Exception:
+            sie_metrics.record_store_write(
+                sie_metrics.STORE_OP_DELETE_MODEL,
+                sie_metrics.STORE_RESULT_FAILURE,
+            )
+            raise
+        sie_metrics.record_store_write(
+            sie_metrics.STORE_OP_DELETE_MODEL,
+            sie_metrics.STORE_RESULT_SUCCESS,
+        )
+        logger.debug("Deleted model config: %s", filepath)
+        return True
 
     def list_models(self) -> list[str]:
         """List all stored model IDs.

@@ -20,13 +20,14 @@ use tracing::{debug, info, warn};
 
 use crate::backend::AdapterWorkerPool;
 use crate::config_subscriber::{
-    advertised_bundle_hash, replace_via_ipc_with_retry, ConfigApplyState, MAX_MODEL_CONFIG_BYTES,
+    replace_via_ipc_with_retry, verified_applied_bundle_hash, ConfigApplyState,
+    MAX_MODEL_CONFIG_BYTES,
 };
 use crate::ipc_client::IpcError;
 use crate::ipc_types::{
     ReplaceModelConfigEntry, ReplaceModelConfigsRequest, ReplaceModelConfigsResponse,
 };
-use crate::metrics::MetricsRegistry;
+use crate::observability::metrics::SidecarTelemetry;
 use crate::shutdown::Shutdown;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -155,7 +156,7 @@ struct ReconcileRuntime<'a> {
     pool: &'a str,
     ipc: Arc<AdapterWorkerPool>,
     state: Arc<ConfigApplyState>,
-    metrics: Arc<MetricsRegistry>,
+    telemetry: SidecarTelemetry,
     shutdown: Arc<Shutdown>,
 }
 
@@ -214,11 +215,14 @@ impl ReconcileClient {
     }
 }
 
-fn record_reconcile(metrics: &MetricsRegistry, result: &str) {
-    metrics
-        .config_deltas_total
-        .with_label_values(&["export", result])
-        .inc();
+fn record_reconcile(
+    telemetry: &SidecarTelemetry,
+    operation: &str,
+    result: &str,
+    applied_epoch: Option<u64>,
+) {
+    debug!(result, "worker-config: export reconcile outcome");
+    telemetry.config_apply("export", operation, result, applied_epoch);
 }
 
 fn normalize_pool_name(raw: &str) -> String {
@@ -289,7 +293,7 @@ pub fn spawn(
     config: Option<ReconcilerConfig>,
     ipc: Arc<AdapterWorkerPool>,
     state: Arc<ConfigApplyState>,
-    metrics: Arc<MetricsRegistry>,
+    telemetry: SidecarTelemetry,
     shutdown: Arc<Shutdown>,
 ) -> Option<JoinHandle<()>> {
     let config = config?;
@@ -302,7 +306,7 @@ pub fn spawn(
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "worker-config: failed to build export reconciler client");
-                record_reconcile(&metrics, "client_error");
+                record_reconcile(&telemetry, "full_export", "client_error", None);
                 return;
             }
         };
@@ -322,7 +326,7 @@ pub fn spawn(
             pool: &config.pool,
             ipc: Arc::clone(&ipc),
             state: Arc::clone(&state),
-            metrics: Arc::clone(&metrics),
+            telemetry,
             shutdown: Arc::clone(&shutdown),
         };
         let mut last_successful_export: Option<Instant> = None;
@@ -363,7 +367,7 @@ pub fn spawn(
             }
             Err(e) => {
                 warn!(error = %e, "worker-config: startup export reconcile failed; will retry");
-                record_reconcile(&metrics, "fetch_error");
+                record_reconcile(&runtime.telemetry, "full_export", "fetch_error", None);
             }
         }
 
@@ -381,7 +385,7 @@ pub fn spawn(
                         Ok(snapshot) => snapshot,
                         Err(e) => {
                             warn!(error = %e, "worker-config: epoch poll failed");
-                            record_reconcile(&metrics, "epoch_error");
+                            record_reconcile(&runtime.telemetry, "poll", "epoch_error", None);
                             continue;
                         }
                     };
@@ -461,7 +465,7 @@ pub fn spawn(
                         }
                         Err(e) => {
                             warn!(error = %e, reason, "worker-config: export reconcile failed");
-                            record_reconcile(&metrics, "fetch_error");
+                            record_reconcile(&runtime.telemetry, "full_export", "fetch_error", None);
                         }
                     }
                 }
@@ -486,7 +490,7 @@ async fn reconcile_export(
             pool: runtime.pool,
         },
         &runtime.state,
-        &runtime.metrics,
+        &runtime.telemetry,
         ExportReconcileOptions {
             force_epoch,
             reason,
@@ -505,7 +509,7 @@ async fn reconcile_export_snapshot<F, Fut>(
     snapshot: ExportSnapshot,
     scope: ReconcileScope<'_>,
     state: &ConfigApplyState,
-    metrics: &MetricsRegistry,
+    telemetry: &SidecarTelemetry,
     options: ExportReconcileOptions<'_>,
     mut apply: F,
 ) -> ExportOutcome
@@ -516,7 +520,7 @@ where
     let _apply_guard = state.lock_apply().await;
 
     if !options.force_epoch && snapshot.epoch < state.epoch() {
-        record_reconcile(metrics, "stale_export");
+        record_reconcile(telemetry, "full_export", "stale_export", None);
         return ExportOutcome {
             epoch: snapshot.epoch,
             applied: 0,
@@ -542,8 +546,6 @@ where
         ),
         None => snapshot.bundle_config_hashes.get(scope.bundle).cloned(),
     };
-    let mut first_hash_mismatch: Option<String> = None;
-
     for model in snapshot.models {
         if !model.targets_bundle(scope.bundle) || !model.targets_pool(&normalized_pool) {
             skipped += 1;
@@ -598,7 +600,7 @@ where
         && export_signature.is_some()
         && export_signature == options.previous_export_signature
     {
-        record_reconcile(metrics, "no_change");
+        record_reconcile(telemetry, "full_export", "no_change", Some(snapshot.epoch));
         debug!(
             epoch = snapshot.epoch,
             skipped, "worker-config: periodic export unchanged; skipping replace"
@@ -624,7 +626,7 @@ where
         let resp = match apply(req, snapshot.epoch).await {
             Ok(Some(resp)) => resp,
             Ok(None) => {
-                record_reconcile(metrics, "shutdown");
+                record_reconcile(telemetry, "full_export", "shutdown", None);
                 return ExportOutcome {
                     epoch: snapshot.epoch,
                     applied,
@@ -641,7 +643,7 @@ where
                     error = %e,
                     "worker-config: exported model replace failed"
                 );
-                record_reconcile(metrics, "partial");
+                record_reconcile(telemetry, "full_export", "partial", None);
                 return ExportOutcome {
                     epoch: snapshot.epoch,
                     applied,
@@ -659,7 +661,7 @@ where
                 epoch = snapshot.epoch,
                 "worker-config: exported model replace returned applied=false"
             );
-            record_reconcile(metrics, "partial");
+            record_reconcile(telemetry, "full_export", "partial", None);
             return ExportOutcome {
                 epoch: snapshot.epoch,
                 applied,
@@ -671,47 +673,50 @@ where
             };
         }
 
-        if let Some(hash) = &control_plane_hash {
-            if !resp.bundle_config_hash.is_empty() && resp.bundle_config_hash != *hash {
-                first_hash_mismatch = Some(resp.bundle_config_hash.clone());
-            }
-        }
-        let advertised_hash =
-            advertised_bundle_hash(control_plane_hash.as_deref(), &resp.bundle_config_hash);
         applied = resp.applied_models.len();
-
-        if let (Some(control_hash), Some(applied_hash)) = (
-            control_plane_hash.as_deref(),
-            first_hash_mismatch.as_deref(),
-        ) {
+        let Some(applied_hash) =
+            verified_applied_bundle_hash(control_plane_hash.as_deref(), &resp.bundle_config_hash)
+        else {
             warn!(
                 epoch = snapshot.epoch,
-                advertised_hash = %control_hash,
-                applied_hash = %applied_hash,
-                "worker-config: worker config hash differs from control-plane export hash; advertising control-plane hash"
+                control_plane_hash = %control_plane_hash.as_deref().unwrap_or_default(),
+                applied_hash = %resp.bundle_config_hash,
+                "worker-config: worker config hash differs from control-plane export hash; advertised state not advanced"
             );
-        }
-        let state_updated = state.mark_export_reconciled(
-            snapshot.epoch,
-            Some(advertised_hash),
-            options.force_epoch,
-        );
+            record_reconcile(telemetry, "full_export", "hash_mismatch", None);
+            return ExportOutcome {
+                epoch: snapshot.epoch,
+                applied,
+                failed: failed + 1,
+                skipped,
+                shutdown: false,
+                state_updated: false,
+                export_signature: None,
+            };
+        };
+        let state_updated =
+            state.mark_export_reconciled(snapshot.epoch, Some(applied_hash), options.force_epoch);
         if state_updated {
-            metrics.config_epoch.set(snapshot.epoch as i64);
+            // Activate only the catalog belonging to the trusted, committed
+            // worker state. Cardinality overflow remains fail-open for serving.
+            telemetry.replace_catalog(&resp.applied_models, &resp.applied_profiles);
         }
+        let result = if applied == 0 {
+            "no_relevant_models"
+        } else if state_updated {
+            "applied"
+        } else {
+            "stale_export"
+        };
         record_reconcile(
-            metrics,
-            if applied == 0 {
-                "no_relevant_models"
-            } else if state_updated {
-                "applied"
-            } else {
-                "stale_export"
-            },
+            telemetry,
+            "full_export",
+            result,
+            state_updated.then_some(snapshot.epoch),
         );
         state_updated
     } else {
-        record_reconcile(metrics, "partial");
+        record_reconcile(telemetry, "full_export", "partial", None);
         false
     };
 
@@ -776,10 +781,6 @@ mod tests {
 
     fn scope<'a>(bundle: &'a str, pool: &'a str) -> ReconcileScope<'a> {
         ReconcileScope { bundle, pool }
-    }
-
-    fn metrics() -> MetricsRegistry {
-        MetricsRegistry::new().expect("metrics registry")
     }
 
     fn reconcile_options(reason: &'static str) -> ExportReconcileOptions<'static> {
@@ -889,14 +890,14 @@ mod tests {
             ],
         };
         let state = ConfigApplyState::new("old".into());
-        let metrics = metrics();
+        let telemetry = SidecarTelemetry::for_tests(&["seed-model"]);
         let applied = Arc::new(Mutex::new(Vec::new()));
 
         let outcome = reconcile_export_snapshot(
             snapshot,
             scope("default", "default"),
             &state,
-            &metrics,
+            &telemetry,
             reconcile_options("test"),
             {
                 let applied = Arc::clone(&applied);
@@ -908,7 +909,11 @@ mod tests {
                             applied: true,
                             bundle_config_hash: "hash-7".into(),
                             config_version: 7,
-                            applied_models: vec!["target-model".into()],
+                            applied_models: vec![
+                                "target-model".into(),
+                                "target-model:fast-profile".into(),
+                            ],
+                            applied_profiles: vec!["default".into(), "fast-profile".into()],
                         }))
                     }
                 }
@@ -916,7 +921,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcome.applied, 1);
+        assert_eq!(outcome.applied, 2);
         assert_eq!(outcome.failed, 0);
         assert_eq!(outcome.skipped, 1);
         assert!(outcome.state_updated);
@@ -926,6 +931,14 @@ mod tests {
             "hash-7"
         );
         assert!(state.loaded_models().read().unwrap().is_empty());
+        assert!(telemetry.model_allowed_for_tests("target-model"));
+        assert!(telemetry.model_allowed_for_tests("target-model:fast-profile"));
+        assert!(telemetry.profile_allowed_for_tests("default"));
+        assert!(telemetry.profile_allowed_for_tests("fast-profile"));
+        assert!(!telemetry.model_allowed_for_tests("other-model"));
+        assert!(!telemetry.model_allowed_for_tests("seed-model"));
+        assert_eq!(telemetry.allowed_model_count_for_tests(), 1);
+        assert_eq!(telemetry.allowed_pair_count_for_tests(), 2);
 
         let applied = applied.lock().await;
         assert_eq!(applied.len(), 1);
@@ -956,14 +969,14 @@ mod tests {
             ],
         };
         let state = ConfigApplyState::new("old".into());
-        let metrics = metrics();
+        let telemetry = SidecarTelemetry::for_tests(&[]);
         let applied = Arc::new(Mutex::new(Vec::new()));
 
         let outcome = reconcile_export_snapshot(
             snapshot,
             scope("candle", "default"),
             &state,
-            &metrics,
+            &telemetry,
             reconcile_options("test"),
             {
                 let applied = Arc::clone(&applied);
@@ -976,6 +989,7 @@ mod tests {
                             bundle_config_hash: "default-pool-hash".into(),
                             config_version: 13,
                             applied_models: vec!["default-model".into()],
+                            applied_profiles: vec!["default".into()],
                         }))
                     }
                 }
@@ -1013,13 +1027,13 @@ mod tests {
             ],
         };
         let state = ConfigApplyState::new("old".into());
-        let metrics = metrics();
+        let telemetry = SidecarTelemetry::for_tests(&["seed-model"]);
 
         let outcome = reconcile_export_snapshot(
             snapshot,
             scope("default", "default"),
             &state,
-            &metrics,
+            &telemetry,
             reconcile_options("test"),
             |req, _epoch| async move {
                 if req.models.iter().any(|model| model.model_id == "bad-model") {
@@ -1034,6 +1048,7 @@ mod tests {
                             .into_iter()
                             .map(|model| model.model_id)
                             .collect(),
+                        applied_profiles: vec!["default".into()],
                     }))
                 }
             },
@@ -1045,6 +1060,44 @@ mod tests {
         assert!(!outcome.state_updated);
         assert_eq!(state.epoch(), 0);
         assert_eq!(state.bundle_config_hash().read().unwrap().as_str(), "old");
+        assert!(telemetry.model_allowed_for_tests("seed-model"));
+        assert!(!telemetry.model_allowed_for_tests("ok-model"));
+        assert!(!telemetry.model_allowed_for_tests("bad-model"));
+    }
+
+    #[tokio::test]
+    async fn export_reconcile_rejected_replace_does_not_change_telemetry_catalog() {
+        let snapshot = ExportSnapshot {
+            epoch: 8,
+            bundle_config_hashes: HashMap::new(),
+            bundle_pool_config_hashes: HashMap::new(),
+            models: vec![exported_model("target-model", &["default"])],
+        };
+        let state = ConfigApplyState::new("old".into());
+        let telemetry = SidecarTelemetry::for_tests(&["seed-model"]);
+
+        let outcome = reconcile_export_snapshot(
+            snapshot,
+            scope("default", "default"),
+            &state,
+            &telemetry,
+            reconcile_options("test"),
+            |_req, _epoch| async move {
+                Ok(Some(ReplaceModelConfigsResponse {
+                    applied: false,
+                    bundle_config_hash: "hash-8".into(),
+                    config_version: 8,
+                    applied_models: vec!["target-model".into()],
+                    applied_profiles: vec!["default".into()],
+                }))
+            },
+        )
+        .await;
+
+        assert_eq!(outcome.failed, 1);
+        assert!(!outcome.state_updated);
+        assert!(telemetry.model_allowed_for_tests("seed-model"));
+        assert!(!telemetry.model_allowed_for_tests("target-model"));
     }
 
     #[tokio::test]
@@ -1056,14 +1109,14 @@ mod tests {
             models: vec![exported_model("target-model", &["default"])],
         };
         let state = ConfigApplyState::new("old".into());
+        let telemetry = SidecarTelemetry::for_tests(&[]);
         state.force_epoch(9);
-        let metrics = metrics();
 
         let outcome = reconcile_export_snapshot(
             snapshot,
             scope("default", "default"),
             &state,
-            &metrics,
+            &telemetry,
             ExportReconcileOptions {
                 force_epoch: true,
                 ..reconcile_options("test")
@@ -1074,6 +1127,7 @@ mod tests {
                     bundle_config_hash: "hash-3".into(),
                     config_version: 3,
                     applied_models: vec!["target-model".into()],
+                    applied_profiles: vec!["default".into()],
                 }))
             },
         )
@@ -1090,7 +1144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_reconcile_advertises_control_plane_hash_when_worker_hash_differs() {
+    async fn export_reconcile_rejects_control_plane_worker_hash_mismatch() {
         let snapshot = ExportSnapshot {
             epoch: 11,
             bundle_config_hashes: HashMap::from([(
@@ -1101,13 +1155,13 @@ mod tests {
             models: vec![exported_model("target-model", &["default"])],
         };
         let state = ConfigApplyState::new("old".into());
-        let metrics = metrics();
+        let telemetry = SidecarTelemetry::for_tests(&[]);
 
         let outcome = reconcile_export_snapshot(
             snapshot,
             scope("default", "default"),
             &state,
-            &metrics,
+            &telemetry,
             reconcile_options("test"),
             |_req, _epoch| async move {
                 Ok(Some(ReplaceModelConfigsResponse {
@@ -1115,18 +1169,18 @@ mod tests {
                     bundle_config_hash: "python-hash".into(),
                     config_version: 11,
                     applied_models: vec!["target-model".into()],
+                    applied_profiles: vec!["default".into()],
                 }))
             },
         )
         .await;
 
-        assert_eq!(outcome.failed, 0);
-        assert!(outcome.state_updated);
-        assert_eq!(state.epoch(), 11);
-        assert_eq!(
-            state.bundle_config_hash().read().unwrap().as_str(),
-            "control-hash"
-        );
+        assert_eq!(outcome.applied, 1);
+        assert_eq!(outcome.failed, 1);
+        assert!(!outcome.state_updated);
+        assert!(outcome.export_signature.is_none());
+        assert_eq!(state.epoch(), 0);
+        assert_eq!(state.bundle_config_hash().read().unwrap().as_str(), "old");
     }
 
     #[tokio::test]
@@ -1138,14 +1192,14 @@ mod tests {
             models: vec![exported_model("other-model", &["vision"])],
         };
         let state = ConfigApplyState::new("old".into());
-        let metrics = metrics();
+        let telemetry = SidecarTelemetry::for_tests(&["seed-model"]);
         let replace_calls = Arc::new(Mutex::new(Vec::new()));
 
         let outcome = reconcile_export_snapshot(
             snapshot,
             scope("default", "default"),
             &state,
-            &metrics,
+            &telemetry,
             reconcile_options("test"),
             {
                 let replace_calls = Arc::clone(&replace_calls);
@@ -1158,6 +1212,7 @@ mod tests {
                             bundle_config_hash: String::new(),
                             config_version: 12,
                             applied_models: vec![],
+                            applied_profiles: vec![],
                         }))
                     }
                 }
@@ -1171,6 +1226,7 @@ mod tests {
         assert!(outcome.state_updated);
         assert_eq!(state.bundle_config_hash().read().unwrap().as_str(), "");
         assert!(state.loaded_models().read().unwrap().is_empty());
+        assert_eq!(telemetry.allowed_model_count_for_tests(), 0);
 
         let replace_calls = replace_calls.lock().await;
         assert_eq!(replace_calls.len(), 1);
@@ -1180,7 +1236,7 @@ mod tests {
     #[tokio::test]
     async fn export_reconcile_skips_unchanged_periodic_snapshot_before_ipc() {
         let state = ConfigApplyState::new("old".into());
-        let metrics = metrics();
+        let telemetry = SidecarTelemetry::for_tests(&[]);
         let replace_calls = Arc::new(Mutex::new(Vec::new()));
 
         let initial = reconcile_export_snapshot(
@@ -1195,7 +1251,7 @@ mod tests {
             },
             scope("default", "default"),
             &state,
-            &metrics,
+            &telemetry,
             reconcile_options("startup"),
             {
                 let replace_calls = Arc::clone(&replace_calls);
@@ -1208,6 +1264,7 @@ mod tests {
                             bundle_config_hash: "control-hash".into(),
                             config_version: 1,
                             applied_models: vec!["target-model".into()],
+                            applied_profiles: vec!["default".into()],
                         }))
                     }
                 }
@@ -1228,7 +1285,7 @@ mod tests {
             },
             scope("default", "default"),
             &state,
-            &metrics,
+            &telemetry,
             ExportReconcileOptions {
                 previous_export_signature: Some(signature),
                 ..reconcile_options("periodic_export")
@@ -1244,6 +1301,7 @@ mod tests {
                             bundle_config_hash: "control-hash".into(),
                             config_version: 2,
                             applied_models: vec!["target-model".into()],
+                            applied_profiles: vec!["default".into()],
                         }))
                     }
                 }
@@ -1260,7 +1318,7 @@ mod tests {
     #[tokio::test]
     async fn export_reconcile_applies_epoch_zero_periodic_snapshot_when_body_changes() {
         let state = ConfigApplyState::new("old".into());
-        let metrics = metrics();
+        let telemetry = SidecarTelemetry::for_tests(&[]);
         let replace_calls = Arc::new(Mutex::new(Vec::new()));
 
         let initial = reconcile_export_snapshot(
@@ -1279,7 +1337,7 @@ mod tests {
             },
             scope("default", "default"),
             &state,
-            &metrics,
+            &telemetry,
             reconcile_options("startup"),
             {
                 let replace_calls = Arc::clone(&replace_calls);
@@ -1292,6 +1350,7 @@ mod tests {
                             bundle_config_hash: "stable-routing-hash".into(),
                             config_version: 1,
                             applied_models: vec!["target-model".into()],
+                            applied_profiles: vec!["default".into()],
                         }))
                     }
                 }
@@ -1316,7 +1375,7 @@ mod tests {
             },
             scope("default", "default"),
             &state,
-            &metrics,
+            &telemetry,
             ExportReconcileOptions {
                 previous_export_signature: Some(signature),
                 ..reconcile_options("periodic_export")
@@ -1337,6 +1396,7 @@ mod tests {
                             bundle_config_hash: "stable-routing-hash".into(),
                             config_version: 2,
                             applied_models,
+                            applied_profiles: vec!["default".into()],
                         }))
                     }
                 }

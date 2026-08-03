@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import torch
-from sie_server.adapters.colbert_modernbert_flash import ColBERTModernBERTFlashAdapter
+from sie_server.adapters.colbert_modernbert_flash.adapter import ColBERTModernBERTFlashAdapter
 
 
 def _bare_adapter() -> ColBERTModernBERTFlashAdapter:

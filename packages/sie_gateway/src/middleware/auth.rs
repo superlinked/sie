@@ -9,15 +9,22 @@ use subtle::ConstantTimeEq;
 use tower::{Layer, Service};
 
 use crate::http_error::code as err_code;
+use crate::observability::metrics::{AdmissionOutcome, AdmissionOutcomeSlot};
 
 use crate::config::Config;
 
-/// Paths that are always exempt from auth. Kubernetes liveness/readiness
-/// probes carry no credentials; gating them would take the pod out of
-/// rotation during an auth misconfiguration. `/health` (rich status JSON
-/// with worker URLs, bundle assignments, queue depth, GPU inventory) is
+/// Probe paths shared by every gateway surface (auth exemption here,
+/// audit classification in `middleware::audit`, OpenAPI security
+/// patching in `openapi`, and the managed cloud gateway's key auth /
+/// route classifier). Kubernetes liveness/readiness probes carry no
+/// credentials; gating them would take the pod out of rotation during
+/// an auth misconfiguration. `/health` (rich status JSON with worker
+/// URLs, bundle assignments, queue depth, GPU inventory) is
 /// intentionally NOT in this list — see `EXEMPT_OPERATIONAL_PATHS`.
-const EXEMPT_PROBE_PATHS: &[&str] = &["/healthz", "/readyz"];
+/// `/livez` (#1025) is a server-side probe, not a gateway route, so it
+/// is deliberately absent. Consumers with deliberate extras compose
+/// them explicitly instead of re-declaring this pair.
+pub const PROBE_PATHS: &[&str] = &["/healthz", "/readyz"];
 
 /// Public API description + rendered reference. Keep client-codegen,
 /// discovery, and the browsable `/docs` page usable even when request auth
@@ -25,10 +32,10 @@ const EXEMPT_PROBE_PATHS: &[&str] = &["/healthz", "/readyz"];
 /// so exempting it carries no token-leak risk.
 const EXEMPT_DOC_PATHS: &[&str] = &["/openapi.json", "/docs", "/docs/redoc.standalone.js"];
 
-/// Paths that expose operational data (status page, rich `/health`,
-/// `/metrics`, `/ws/*`). Exempt from auth only when
+/// Paths that expose operational data (status page, rich `/health`, `/ws/*`).
+/// Exempt from auth only when
 /// `SIE_AUTH_EXEMPT_OPERATIONAL=true`; default is fail-closed.
-const EXEMPT_OPERATIONAL_PATHS: &[&str] = &["/", "/health", "/metrics"];
+const EXEMPT_OPERATIONAL_PATHS: &[&str] = &["/", "/health"];
 
 #[derive(Clone)]
 pub struct AuthLayer {
@@ -82,7 +89,7 @@ where
 
             let path = req.uri().path();
 
-            if EXEMPT_PROBE_PATHS.contains(&path) || EXEMPT_DOC_PATHS.contains(&path) {
+            if PROBE_PATHS.contains(&path) || EXEMPT_DOC_PATHS.contains(&path) {
                 return inner.call(req).await;
             }
 
@@ -93,6 +100,7 @@ where
             }
 
             if config.auth_tokens.is_empty() {
+                record_admission_rejection(&req, AdmissionOutcome::AuthMisconfigured);
                 return Ok(error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     err_code::GATEWAY_AUTH_MISCONFIGURED,
@@ -103,6 +111,7 @@ where
             let token = match extract_bearer_token(req.headers()) {
                 Some(t) => t,
                 None => {
+                    record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
                     return Ok(error_response(
                         StatusCode::UNAUTHORIZED,
                         err_code::UNAUTHORIZED,
@@ -115,6 +124,7 @@ where
 
             if is_admin {
                 if config.admin_token.is_empty() {
+                    record_admission_rejection(&req, AdmissionOutcome::Forbidden);
                     return Ok(error_response(
                         StatusCode::FORBIDDEN,
                         err_code::FORBIDDEN,
@@ -123,6 +133,7 @@ where
                 }
 
                 if !constant_time_eq_str(&token, &config.admin_token) {
+                    record_admission_rejection(&req, AdmissionOutcome::Forbidden);
                     return Ok(error_response(
                         StatusCode::FORBIDDEN,
                         err_code::FORBIDDEN,
@@ -139,6 +150,7 @@ where
                 .any(|valid_token| constant_time_eq_str(&token, valid_token));
 
             if !valid {
+                record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
                 return Ok(error_response(
                     StatusCode::UNAUTHORIZED,
                     err_code::UNAUTHORIZED,
@@ -148,6 +160,12 @@ where
 
             inner.call(req).await
         })
+    }
+}
+
+fn record_admission_rejection(req: &Request<Body>, outcome: AdmissionOutcome) {
+    if let Some(slot) = req.extensions().get::<AdmissionOutcomeSlot>() {
+        slot.set(outcome);
     }
 }
 
@@ -173,7 +191,12 @@ fn is_admin_endpoint(method: &Method, path: &str) -> bool {
     path.starts_with("/v1/config") || path.starts_with("/v1/admin") || path.starts_with("/v1/pools")
 }
 
-fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+/// Extract the token from an `Authorization` header, accepting
+/// `Bearer <token>` (case-insensitive prefix) or a raw token value.
+///
+/// Canonical shared implementation: also consumed by `handlers::proxy`
+/// and the managed cloud gateway (`sie_gateway_cloud::key_auth`).
+pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     let header = headers
         .get("authorization")?
         .to_str()
@@ -192,6 +215,25 @@ fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
         None
     } else {
         Some(token)
+    }
+}
+
+/// Mask a token for logs/audit records: keep the last 4 characters,
+/// star the rest; tokens of 4 chars or fewer are fully starred.
+///
+/// Canonical shared implementation: also consumed by `handlers::proxy`
+/// and `middleware::audit`.
+pub fn mask_token(token: &str) -> String {
+    // Char-based, not byte-based: byte slicing panics on a UTF-8 boundary
+    // for non-ASCII header values, and this runs in the per-request audit
+    // path. Identical output for ASCII tokens; mirrors the Python
+    // `sie_sdk.redaction.mask_token`.
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() <= 4 {
+        "****".to_string()
+    } else {
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{}{tail}", "*".repeat(chars.len() - 4))
     }
 }
 
@@ -243,6 +285,65 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_bearer_token_case_insensitive_prefix() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "bearer my-token".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), Some("my-token".into()));
+    }
+
+    #[test]
+    fn test_extract_bearer_token_empty_value() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), None);
+    }
+
+    #[test]
+    fn test_extract_bearer_token_bearer_only() {
+        // "Bearer " trims to "Bearer", which doesn't start with "bearer " (missing trailing space),
+        // so it's treated as a raw token value.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "Bearer ".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), Some("Bearer".into()));
+    }
+
+    #[test]
+    fn test_extract_bearer_token_whitespace_trimmed() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "  Bearer  my-token  ".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), Some("my-token".into()));
+    }
+
+    #[test]
+    fn test_mask_token_long() {
+        assert_eq!(mask_token("secret-token-123"), "************-123");
+    }
+
+    #[test]
+    fn test_mask_token_short() {
+        assert_eq!(mask_token("abc"), "****");
+        assert_eq!(mask_token(""), "****");
+    }
+
+    #[test]
+    fn test_mask_token_exactly_4() {
+        assert_eq!(mask_token("abcd"), "****");
+    }
+
+    #[test]
+    fn test_mask_token_5_chars() {
+        assert_eq!(mask_token("12345"), "*2345");
+    }
+
+    #[test]
+    fn test_mask_token_multibyte_does_not_panic() {
+        // A multibyte char straddling the old byte-index cut point must not
+        // panic and must mask by characters.
+        assert_eq!(mask_token("secrèt-tokén"), "********okén");
+        assert_eq!(mask_token("ééé"), "****");
+    }
+
+    #[test]
     fn test_constant_time_eq() {
         assert!(constant_time_eq_str("abc", "abc"));
         assert!(!constant_time_eq_str("abc", "def"));
@@ -286,15 +387,13 @@ mod tests {
     #[test]
     fn test_exempt_paths_partitioned() {
         // Probe paths are always exempt; operational paths are not.
-        assert!(EXEMPT_PROBE_PATHS.contains(&"/healthz"));
-        assert!(EXEMPT_PROBE_PATHS.contains(&"/readyz"));
+        assert!(PROBE_PATHS.contains(&"/healthz"));
+        assert!(PROBE_PATHS.contains(&"/readyz"));
         assert!(EXEMPT_DOC_PATHS.contains(&"/openapi.json"));
         assert!(EXEMPT_DOC_PATHS.contains(&"/docs"));
         assert!(EXEMPT_DOC_PATHS.contains(&"/docs/redoc.standalone.js"));
-        assert!(!EXEMPT_PROBE_PATHS.contains(&"/health"));
-        assert!(!EXEMPT_PROBE_PATHS.contains(&"/metrics"));
+        assert!(!PROBE_PATHS.contains(&"/health"));
         assert!(EXEMPT_OPERATIONAL_PATHS.contains(&"/"));
-        assert!(EXEMPT_OPERATIONAL_PATHS.contains(&"/metrics"));
         assert!(EXEMPT_OPERATIONAL_PATHS.contains(&"/health"));
     }
 
@@ -323,7 +422,6 @@ mod tests {
         Arc::new(Config {
             host: String::new(),
             port: 0,
-            metrics_port: None,
             worker_urls: Vec::new(),
             use_kubernetes: false,
             k8s_namespace: String::new(),
@@ -347,6 +445,7 @@ mod tests {
             stream_max_age_s: 0,
             configured_gpus: Vec::new(),
             gpu_profile_map: HashMap::new(),
+            configured_physical_lanes: Default::default(),
             static_queue_pools: Vec::new(),
             model_aliases: HashMap::new(),
             bundles_dir: String::new(),
@@ -355,6 +454,7 @@ mod tests {
             config_service_token: None,
             config_modal_proxy_token: None,
             payload_store_url: String::new(),
+            public_base_url: None,
         })
     }
 
@@ -367,7 +467,6 @@ mod tests {
             .route("/readyz", get(|| async { "ready" }))
             .route("/", get(|| async { "index" }))
             .route("/health", get(|| async { "rich-health" }))
-            .route("/metrics", get(|| async { "metrics" }))
             .route("/openapi.json", get(|| async { "{}" }))
             .route("/ws/cluster-status", get(|| async { "ws" }))
             .route("/v1/encode/{*model}", post(|| async { "encoded" }))
@@ -427,11 +526,6 @@ mod tests {
         );
         let r = test_router(Arc::clone(&cfg));
         assert_eq!(
-            send(r, Method::GET, "/metrics", None).await,
-            StatusCode::UNAUTHORIZED
-        );
-        let r = test_router(Arc::clone(&cfg));
-        assert_eq!(
             send(r, Method::GET, "/", None).await,
             StatusCode::UNAUTHORIZED
         );
@@ -447,8 +541,6 @@ mod tests {
         let cfg = cfg_for_middleware("token", vec!["user"], "admin", true);
         let r = test_router(Arc::clone(&cfg));
         assert_eq!(send(r, Method::GET, "/health", None).await, StatusCode::OK);
-        let r = test_router(Arc::clone(&cfg));
-        assert_eq!(send(r, Method::GET, "/metrics", None).await, StatusCode::OK);
         let r = test_router(Arc::clone(&cfg));
         assert_eq!(send(r, Method::GET, "/", None).await, StatusCode::OK);
         let r = test_router(cfg);
@@ -476,6 +568,33 @@ mod tests {
         assert_eq!(
             send(r, Method::POST, "/v1/encode/any", None).await,
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn middleware_marks_bounded_admission_outcomes_when_outer_slot_is_present() {
+        let unauthenticated = AdmissionOutcomeSlot::default();
+        let r = test_router(cfg_for_middleware("token", vec!["user"], "admin", false))
+            .layer(axum::Extension(unauthenticated.clone()));
+        assert_eq!(
+            send(r, Method::POST, "/v1/encode/any", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            unauthenticated.get(),
+            Some(AdmissionOutcome::Unauthenticated)
+        );
+
+        let misconfigured = AdmissionOutcomeSlot::default();
+        let r = test_router(cfg_for_middleware("token", vec![], "admin", false))
+            .layer(axum::Extension(misconfigured.clone()));
+        assert_eq!(
+            send(r, Method::POST, "/v1/encode/any", Some("whatever")).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            misconfigured.get(),
+            Some(AdmissionOutcome::AuthMisconfigured)
         );
     }
 

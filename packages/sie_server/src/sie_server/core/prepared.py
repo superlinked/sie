@@ -51,14 +51,26 @@ class ImagePayload(Payload):
 
 @dataclass(slots=True)
 class AudioPayload(Payload):
-    """Preprocessed audio ready for batching (future).
+    """Canonical mono PCM16 audio prepared by the Rust media boundary."""
 
-    Contains waveform data after resampling/normalization.
-    """
-
-    waveform: Any  # torch.Tensor
+    pcm_s16le: bytes
     sample_rate: int
-    duration_s: float
+    sample_count: int
+    duration_ms: int
+    source_sample_rate: int
+    source_sample_count: int
+    source_channels: int
+    container: str
+
+    @property
+    def duration_s(self) -> float:
+        """Exact prepared duration expressed in seconds for model APIs."""
+        return self.duration_ms / 1_000
+
+    @property
+    def duration_cost_ms(self) -> int:
+        """Exact integer audio duration used for scheduling and usage."""
+        return self.duration_ms
 
 
 @dataclass(slots=True)

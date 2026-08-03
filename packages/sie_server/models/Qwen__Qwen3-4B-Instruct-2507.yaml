@@ -56,9 +56,10 @@ tasks:
       enable_thinking: false
     # Schemas/regexes the worker pre-compiles at model load so the first
     # request hitting them skips the Outlines compile (cold TTFT win).
-    # Failures here log + bump ``sie_worker_grammar_prewarm_total{outcome="failed"}``
-    # without blocking model load — add entries only for shapes you
-    # know are hot.
+    # Failures here log and record
+    # ``sie.worker.generation.grammar.compile.duration`` with
+    # ``phase="prewarm", outcome="error"`` without blocking model load — add
+    # entries only for shapes you know are hot.
     prewarm_grammars:
       # NOTE: the worker only prewarms the Outlines backend (XGrammar compiles
       # are cheap and done on demand), so under ``grammar_backend: xgrammar``

@@ -140,6 +140,80 @@ def _validate_profile_name(profile_name: str) -> None:
         raise ValueError(msg)
 
 
+# Mirror of sie_server's immutable-revision rule (config/model.py, #2113). The
+# config service validates raw dicts before they ever reach a server's pydantic
+# schema, and the two packages deliberately do not import each other's schema
+# modules — the server's rule is the authority; this copy is the early refusal.
+_IMMUTABLE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _validate_profile_lora_pins(profiles: dict) -> None:
+    """Mirror sie_server's pinned-LoRA spelling rules (#2113) on raw dicts.
+
+    The dict form of ``adapter_options.loadtime.lora_paths`` may pin a ref as
+    ``{id, revision}`` where ``revision`` is a 40-hex commit SHA; the list form
+    and the legacy scalar ``runtime.lora_id`` are bare-only. Across profiles one
+    LoRA id maps to one revision (pin beats bare; two different pins conflict).
+    """
+    pinned: dict[str, str] = {}
+    for profile_name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        options = profile.get("adapter_options")
+        if not isinstance(options, dict):
+            continue
+        loadtime = options.get("loadtime")
+        if not isinstance(loadtime, dict):
+            continue
+        paths = loadtime.get("lora_paths")
+        if isinstance(paths, dict):
+            for served, value in paths.items():
+                if not isinstance(value, dict):
+                    continue
+                unknown = set(value) - {"id", "revision"}
+                if unknown:
+                    msg = (
+                        f"Profile '{profile_name}' loadtime.lora_paths[{served!r}] has unknown key(s) "
+                        f"{sorted(unknown)!r}; a pinned LoRA ref is exactly "
+                        "{id: <hf repo>, revision: <40-hex commit SHA>}"
+                    )
+                    raise ValueError(msg)
+                ref_id = value.get("id")
+                if not isinstance(ref_id, str) or not ref_id:
+                    msg = (
+                        f"Profile '{profile_name}' loadtime.lora_paths[{served!r}] must set 'id' to a "
+                        f"non-empty repo id string, got {ref_id!r}"
+                    )
+                    raise ValueError(msg)
+                revision = value.get("revision")
+                if revision is None:
+                    continue
+                if not isinstance(revision, str) or not _IMMUTABLE_REVISION_RE.match(revision):
+                    msg = (
+                        f"Profile '{profile_name}' loadtime.lora_paths[{served!r}] pins revision="
+                        f"{revision!r}, which is not an immutable 40-char commit SHA — branch/tag "
+                        "names drift on the Hub. Pin the resolved commit SHA or omit 'revision'."
+                    )
+                    raise ValueError(msg)
+                if pinned.get(ref_id, revision) != revision:
+                    msg = (
+                        f"LoRA '{ref_id}' is pinned to two different revisions across profiles "
+                        f"({pinned[ref_id]} vs {revision}, latest in profile '{profile_name}'). "
+                        "One id maps to one adapter; pin a single SHA."
+                    )
+                    raise ValueError(msg)
+                pinned[ref_id] = revision
+        elif isinstance(paths, (list, tuple)):
+            for value in paths:
+                if isinstance(value, dict):
+                    msg = (
+                        f"Profile '{profile_name}' loadtime.lora_paths list entries must be bare id "
+                        "strings; the pinned {id, revision} spelling is only valid in the "
+                        "served-name -> ref dict form"
+                    )
+                    raise ValueError(msg)
+
+
 def _effective_adapter_path(profiles: dict, profile_name: str) -> str | None:
     """Return the adapter path for a profile, following ``extends`` if needed."""
     current: str | None = profile_name
@@ -961,6 +1035,8 @@ class ModelRegistry:
             msg = "Field 'profiles' must be a mapping of profile_name -> profile_config"
             raise ValueError(msg)
 
+        _validate_profile_lora_pins(profiles)
+
         for profile_name, profile in profiles.items():
             _validate_profile_name(str(profile_name))
             if not isinstance(profile, dict):
@@ -1258,6 +1334,8 @@ class ModelRegistry:
             msg = "Field 'profiles' must be a mapping of profile_name -> profile_config"
             raise ValueError(msg)
 
+        _validate_profile_lora_pins(profiles)
+
         for profile_name, profile in profiles.items():
             _validate_profile_name(str(profile_name))
             if not isinstance(profile, dict):
@@ -1286,6 +1364,11 @@ class ModelRegistry:
         if unroutable:
             msg = f"Adapter(s) not in any known bundle: {', '.join(sorted(unroutable))}"
             raise ValueError(msg)
+
+    def validate_model_config_replacement(self, config: dict) -> None:
+        """Validate a wholesale replacement without mutating registry state."""
+        with self._lock:
+            self._validate_structure_locked(config)
 
     def replace_model_config(self, config: dict) -> list[str]:
         """Replace a model's config wholesale (the catalog-convergence path).
@@ -1407,6 +1490,70 @@ class ModelRegistry:
             )
             return affected_bundles
 
+    def remove_model_config(self, model_id: str, *, fallback_config: dict | None = None) -> list[str]:
+        """Remove one API-backed model from the live registry.
+
+        ``fallback_config`` is the baked filesystem config, when one exists.
+        Removing an API override must reveal that baseline immediately just as
+        the next process restart would; in that case this delegates to the
+        wholesale replace path. Without a fallback, all base/profile route
+        identities and hash inputs for the model are removed atomically.
+
+        Returns the sorted union of bundles whose hashes may have changed. A
+        missing model with no fallback is an idempotent no-op.
+        """
+        with self._lock:
+            if fallback_config is not None:
+                if fallback_config.get("sie_id") != model_id:
+                    raise ValueError("fallback config sie_id must match the removed model id")
+                return self.replace_model_config(fallback_config)
+            if model_id not in self._models:
+                return []
+
+            affected_bundles = _matching_bundle_names(
+                self._model_adapter_modules.get(model_id, set()),
+                self._bundles,
+            )
+            removed_variants = {name for name, base in self._profile_variant_base_models.items() if base == model_id}
+            for variant in removed_variants:
+                info = self._profile_variant_models.get(variant)
+                if info is not None:
+                    affected_bundles.extend(info.bundles)
+
+            self._models = {name: info for name, info in self._models.items() if name != model_id}
+            self._model_names_lower = {
+                lower: name for lower, name in self._model_names_lower.items() if name != model_id
+            }
+            self._profile_variant_models = {
+                name: info for name, info in self._profile_variant_models.items() if name not in removed_variants
+            }
+            self._profile_variant_names_lower = {
+                lower: name for lower, name in self._profile_variant_names_lower.items() if name not in removed_variants
+            }
+            self._profile_variant_base_models = {
+                name: base for name, base in self._profile_variant_base_models.items() if base != model_id
+            }
+            self._model_adapter_modules = {
+                name: modules for name, modules in self._model_adapter_modules.items() if name != model_id
+            }
+            self._model_profiles = {
+                name: profiles for name, profiles in self._model_profiles.items() if name != model_id
+            }
+            self._model_profile_configs = {
+                name: profiles for name, profiles in self._model_profile_configs.items() if name != model_id
+            }
+            self._model_full_configs = {
+                name: config for name, config in self._model_full_configs.items() if name != model_id
+            }
+            self._unrouteable_models = {
+                name: modules for name, modules in self._unrouteable_models.items() if name != model_id
+            }
+            self._bundle_hash_cache = {}
+
+            affected_bundles = sorted(set(affected_bundles))
+            logger.info("Removed model config: %s (bundles=%s)", model_id, affected_bundles)
+            return affected_bundles
+
     def get_model_profile_names(self, model_name: str) -> set[str]:
         """Get known profile names for a model."""
         with self._lock:
@@ -1518,6 +1665,7 @@ class ModelRegistry:
                 items.append(
                     {
                         "sie_id": model_name,
+                        "revision": full_config.get("hf_revision"),
                         "profiles": profiles_for_hash,
                     }
                 )

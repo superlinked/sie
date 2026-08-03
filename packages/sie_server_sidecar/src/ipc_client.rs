@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -57,7 +57,11 @@ use crate::ipc_types::{
     METHOD_SIGNAL_GENERATE_CANCEL, METHOD_WORKER_CAPABILITIES,
 };
 use crate::log_util::ErrChain;
-use crate::metrics::MetricsRegistry;
+use crate::observability::metrics::SidecarTelemetry;
+use crate::protocol::response_chunks::{
+    response_frame_is_exact_chunk, AssembledResponse, ResponseAssembler, ResponseChunkBudget,
+    ResponseChunkError, ResponseChunkLimits, ResponseFrameStatus, IPC_RESPONSE_CHUNK_KIND_V1,
+};
 
 const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
@@ -68,15 +72,16 @@ const DEFAULT_POOL_SIZE: usize = 1;
 
 /// WARN threshold for "slow" RPCs — emits one structured line per slow
 /// call so an operator scanning `kubectl logs` sees backend-side
-/// stalls without having to open Grafana. The `ipc_request_seconds`
-/// histogram is the primary source of truth; this is the ergonomic
+/// stalls without having to open Grafana. The canonical
+/// `sie.worker.ipc.request.duration` histogram is the primary source of truth;
+/// this is the ergonomic
 /// shortcut for live debugging. Keep the budget generous: model
 /// loading (ensure_model_ready) can legitimately take 10+ seconds, so
 /// we deliberately do NOT pick a threshold low enough to flag that
 /// path; it'd be pure noise. We do flag ping / per-batch inference.
 const SLOW_RPC_WARN_MS: u128 = 2_000;
 
-/// A bounded label for the `result` dimension on `ipc_request_seconds`.
+/// A bounded result used by the canonical IPC completion facade.
 /// Keeps cardinality low (no raw messages).
 fn error_label(e: &IpcError) -> &'static str {
     match e {
@@ -85,6 +90,7 @@ fn error_label(e: &IpcError) -> &'static str {
         IpcError::Decode(_) => "decode",
         IpcError::Timeout => "timeout",
         IpcError::FrameTooLarge(_) => "frame_too_large",
+        IpcError::ResponseChunk(_) => "response_chunk",
         IpcError::Server(_) => "server",
         IpcError::VersionMismatch { .. } => "version_mismatch",
     }
@@ -129,6 +135,15 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, IpcError> {
     Ok(resp_buf)
 }
 
+fn request_frame_len(payload_len: usize) -> Result<u32, IpcError> {
+    if payload_len > MAX_FRAME_BYTES {
+        return Err(IpcError::FrameTooLarge(
+            u32::try_from(payload_len).unwrap_or(u32::MAX),
+        ));
+    }
+    u32::try_from(payload_len).map_err(|_| IpcError::FrameTooLarge(u32::MAX))
+}
+
 #[derive(Debug, Error)]
 pub enum IpcError {
     #[error("io: {0}")]
@@ -141,10 +156,71 @@ pub enum IpcError {
     Timeout,
     #[error("frame too large: {0} > {MAX_FRAME_BYTES}")]
     FrameTooLarge(u32),
+    #[error("response chunk protocol: {0}")]
+    ResponseChunk(String),
     #[error("server returned error: {0}")]
     Server(String),
     #[error("envelope version mismatch: got {got}, expected {IPC_VERSION}")]
     VersionMismatch { got: u32 },
+}
+
+#[derive(Deserialize)]
+struct TypedResponseEnvelope<B> {
+    version: u32,
+    request_id: String,
+    ok: bool,
+    #[serde(default = "none_typed_response_body")]
+    body: Option<B>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+fn none_typed_response_body<B>() -> Option<B> {
+    None
+}
+
+enum DecodedResponseFrame<B> {
+    Legacy(B),
+    Chunk,
+}
+
+fn decode_response_frame<B: DeserializeOwned>(
+    frame: &[u8],
+    expected_request_id: &str,
+    chunk_limits: ResponseChunkLimits,
+) -> Result<DecodedResponseFrame<B>, IpcError> {
+    let envelope: TypedResponseEnvelope<B> = match rmp_serde::from_slice(frame) {
+        Ok(envelope) => envelope,
+        Err(decode_error) => {
+            return match response_frame_is_exact_chunk(frame, chunk_limits) {
+                Ok(true) => Ok(DecodedResponseFrame::Chunk),
+                Ok(false) => Err(IpcError::Decode(decode_error)),
+                Err(error) => Err(IpcError::ResponseChunk(error.to_string())),
+            };
+        }
+    };
+    if envelope.kind.as_deref() == Some(IPC_RESPONSE_CHUNK_KIND_V1) {
+        return Ok(DecodedResponseFrame::Chunk);
+    }
+    if envelope.version != IPC_VERSION {
+        return Err(IpcError::VersionMismatch {
+            got: envelope.version,
+        });
+    }
+    if envelope.request_id != expected_request_id {
+        return Err(IpcError::ResponseChunk(
+            ResponseChunkError::RequestIdMismatch.to_string(),
+        ));
+    }
+    if !envelope.ok {
+        return Err(IpcError::Server(envelope.error.unwrap_or_default()));
+    }
+    envelope
+        .body
+        .map(DecodedResponseFrame::Legacy)
+        .ok_or_else(|| IpcError::Server("response ok=true but body missing".to_string()))
 }
 
 /// One physical UDS connection, identified by its slot index. Only ever
@@ -187,25 +263,21 @@ struct Pool {
     capacity: usize,
     slots: StdMutex<VecDeque<Slot>>,
     permits: Arc<Semaphore>,
-    metrics: Option<Arc<MetricsRegistry>>,
+    telemetry: Option<SidecarTelemetry>,
 }
 
 impl Pool {
-    fn new(capacity: usize, metrics: Option<Arc<MetricsRegistry>>) -> Self {
+    fn new(capacity: usize, telemetry: Option<SidecarTelemetry>) -> Self {
         assert!(capacity >= 1, "IPC pool capacity must be ≥ 1");
         let mut slots = VecDeque::with_capacity(capacity);
         for id in 0..capacity {
             slots.push_back(Slot::new(id));
         }
-        if let Some(m) = &metrics {
-            m.ipc_pool_size.set(capacity as i64);
-            m.ipc_pool_inflight.set(0);
-        }
         Self {
             capacity,
             slots: StdMutex::new(slots),
             permits: Arc::new(Semaphore::new(capacity)),
-            metrics,
+            telemetry,
         }
     }
 
@@ -214,7 +286,7 @@ impl Pool {
     /// after an unrecoverable error) they can still drop the guard —
     /// the slot's socket is either still usable or already `None`.
     async fn acquire(self: &Arc<Self>) -> SlotGuard {
-        let start = std::time::Instant::now();
+        let started = self.telemetry.as_ref().map(|_| std::time::Instant::now());
         let permit = Arc::clone(&self.permits)
             .acquire_owned()
             .await
@@ -227,10 +299,8 @@ impl Pool {
                  being released before the slot is pushed back)",
             )
         };
-        if let Some(m) = &self.metrics {
-            m.ipc_pool_acquire_wait_seconds
-                .observe(start.elapsed().as_secs_f64());
-            m.ipc_pool_inflight.inc();
+        if let (Some(telemetry), Some(started)) = (&self.telemetry, started) {
+            telemetry.ipc_acquired("pool", "success", started.elapsed());
         }
         SlotGuard {
             slot: Some(slot),
@@ -333,8 +403,9 @@ impl Drop for SlotGuard {
             }
             let mut q = self.pool.slots.lock().expect("pool slot mutex poisoned");
             q.push_back(slot);
-            if let Some(m) = &self.pool.metrics {
-                m.ipc_pool_inflight.dec();
+            drop(q);
+            if let Some(telemetry) = &self.pool.telemetry {
+                telemetry.ipc_released("pool");
             }
         }
     }
@@ -357,11 +428,15 @@ pub struct IpcClient {
     next_request_id: AtomicU64,
     request_timeout: Duration,
     model_ready_timeout: Duration,
-    metrics: Option<Arc<MetricsRegistry>>,
+    telemetry: Option<SidecarTelemetry>,
     /// When `Some`, every `call(…)` is delegated to the multiplexed
     /// transport instead of acquiring a slot from the pool. Lazily
     /// initialised so unit tests that never opt in pay no cost.
     mux: Option<Arc<MuxClient>>,
+    /// Shared by pool and mux transports so concurrent oversized responses
+    /// cannot reserve unbounded sidecar heap.
+    response_chunk_budget: Arc<ResponseChunkBudget>,
+    response_chunk_limits: ResponseChunkLimits,
 }
 
 impl IpcClient {
@@ -376,12 +451,16 @@ impl IpcClient {
     pub fn new_pool(socket_path: impl Into<PathBuf>, pool_size: usize) -> Self {
         let capacity = pool_size.max(1);
         let socket_path = socket_path.into();
+        let response_chunk_budget = ResponseChunkBudget::production();
         let mux = if mux_enabled() {
             info!(
                 socket = %socket_path.display(),
                 "ipc_client: SIE_IPC_MUX=1 — using multiplexed transport"
             );
-            Some(Arc::new(MuxClient::spawn(socket_path.clone())))
+            Some(Arc::new(MuxClient::spawn_with_budget(
+                socket_path.clone(),
+                Arc::clone(&response_chunk_budget),
+            )))
         } else {
             None
         };
@@ -391,8 +470,10 @@ impl IpcClient {
             next_request_id: AtomicU64::new(1),
             request_timeout: Duration::from_secs(60),
             model_ready_timeout: Duration::from_secs(60),
-            metrics: None,
+            telemetry: None,
             mux,
+            response_chunk_budget,
+            response_chunk_limits: ResponseChunkLimits::production(),
         }
     }
 
@@ -406,26 +487,26 @@ impl IpcClient {
         self
     }
 
-    /// Attach a metrics registry so each RPC records per-method latency,
-    /// frame sizes, and connect/reconnect events — plus pool saturation
-    /// (`ipc_pool_inflight`, `ipc_pool_acquire_wait_seconds`). No-op if
-    /// unset.
-    pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
-        // Rebuild the pool so the metrics handle threads all the way
-        // down to the pool-side gauges. We haven't started serving any
-        // RPCs yet (this is a builder), so dropping the old pool is
-        // cheap and correctness-preserving.
-        self.pool = Arc::new(Pool::new(self.pool.capacity, Some(Arc::clone(&metrics))));
-        // Re-spawn the multiplexer with metrics threaded through so
-        // its connect/reconnect counters land on the same registry
-        // as the pool variant.
-        if self.mux.is_some() {
-            self.mux = Some(Arc::new(MuxClient::spawn_with_metrics(
-                self.socket_path.clone(),
-                Some(Arc::clone(&metrics)),
-            )));
+    /// Attach the canonical telemetry facade used for one logical completion
+    /// observation per RPC and negotiated response-chunk transfer.
+    pub fn with_telemetry(mut self, telemetry: SidecarTelemetry) -> Self {
+        if !telemetry.is_enabled() {
+            self.pool = Arc::new(Pool::new(self.pool.capacity, None));
+            self.telemetry = None;
+            return self;
         }
-        self.metrics = Some(metrics);
+        if let Some(mux) = &self.mux {
+            // The slot pool is inactive in mux mode. Keep it telemetry-free so
+            // dashboards never show capacity for a transport that cannot run.
+            self.pool = Arc::new(Pool::new(self.pool.capacity, None));
+            mux.attach_telemetry(telemetry.clone());
+        } else {
+            self.response_chunk_budget
+                .attach_telemetry(telemetry.clone());
+            self.pool = Arc::new(Pool::new(self.pool.capacity, Some(telemetry.clone())));
+            telemetry.ipc_transport_registered("pool", self.pool.capacity);
+        }
+        self.telemetry = Some(telemetry);
         self
     }
 
@@ -433,9 +514,19 @@ impl IpcClient {
     /// parsed from env in `main.rs` after `IpcClient::new` was chosen
     /// for a reasonable default. Clamped to `>= 1`.
     pub fn with_pool_size(mut self, pool_size: usize) -> Self {
+        let previous_capacity = self.pool.capacity;
         let capacity = pool_size.max(1);
-        let metrics = self.metrics.clone();
-        self.pool = Arc::new(Pool::new(capacity, metrics));
+        let pool_telemetry = if self.mux.is_none() {
+            self.telemetry.clone()
+        } else {
+            None
+        };
+        self.pool = Arc::new(Pool::new(capacity, pool_telemetry));
+        if self.mux.is_none() {
+            if let Some(telemetry) = &self.telemetry {
+                telemetry.ipc_transport_resized("pool", previous_capacity, capacity);
+            }
+        }
         self
     }
 
@@ -443,8 +534,7 @@ impl IpcClient {
         &self.socket_path
     }
 
-    /// Configured pool capacity (≥ 1). Observable via the
-    /// `sie_worker_ipc_pool_size` gauge as well.
+    /// Configured pool capacity (≥ 1).
     pub fn pool_size(&self) -> usize {
         self.pool.capacity
     }
@@ -512,14 +602,11 @@ impl IpcClient {
             version: IPC_VERSION,
             method,
             request_id: request_id.clone(),
+            accepts_ipc_response_chunks_v1: true,
             body,
         };
         let payload = rmp_serde::to_vec_named(&envelope)?;
-        if let Some(m) = &self.metrics {
-            m.ipc_request_bytes
-                .with_label_values(&[method])
-                .observe(payload.len() as f64);
-        }
+        request_frame_len(payload.len())?;
         debug!(method, request_id = %request_id, bytes = payload.len(), "ipc request");
 
         let start = std::time::Instant::now();
@@ -548,9 +635,6 @@ impl IpcClient {
                         error = %ErrChain(&e),
                         "mux IPC transport error — retrying once"
                     );
-                    if let Some(m) = &self.metrics {
-                        m.ipc_reconnect_total.inc();
-                    }
                     match self
                         .mux_call::<Resp>(mux, method, request_id, &payload, request_timeout)
                         .await
@@ -579,7 +663,7 @@ impl IpcClient {
         slot_guard.arm();
         let first = timeout(
             request_timeout,
-            self.call_inner::<Resp>(method, &payload, slot_guard.slot_mut()),
+            self.call_inner::<Resp>(method, &request_id, &payload, slot_guard.slot_mut()),
         )
         .await;
         let first = match first {
@@ -614,14 +698,11 @@ impl IpcClient {
                 // different slot. With pool_size=1 this is the same
                 // slot (will reconnect on the retry's ensure path).
                 drop(slot_guard);
-                if let Some(m) = &self.metrics {
-                    m.ipc_reconnect_total.inc();
-                }
                 let mut retry_guard = self.pool.acquire().await;
                 retry_guard.arm();
                 let second = timeout(
                     request_timeout,
-                    self.call_inner::<Resp>(method, &payload, retry_guard.slot_mut()),
+                    self.call_inner::<Resp>(method, &request_id, &payload, retry_guard.slot_mut()),
                 )
                 .await;
                 match second {
@@ -652,7 +733,10 @@ impl IpcClient {
                 // desynchronized, so leave the guard armed → Drop
                 // clears it. For Server / VersionMismatch / Encode
                 // the protocol completed cleanly, so disarm.
-                if !matches!(e, IpcError::Decode(_) | IpcError::FrameTooLarge(_)) {
+                if !matches!(
+                    e,
+                    IpcError::Decode(_) | IpcError::FrameTooLarge(_) | IpcError::ResponseChunk(_)
+                ) {
                     slot_guard.disarm();
                 }
                 drop(slot_guard);
@@ -669,7 +753,7 @@ impl IpcClient {
     async fn mux_call<Resp>(
         &self,
         mux: &MuxClient,
-        method: &str,
+        _method: &str,
         request_id: String,
         payload: &[u8],
         request_timeout: Duration,
@@ -677,7 +761,12 @@ impl IpcClient {
     where
         Resp: DeserializeOwned,
     {
-        let raw = match timeout(request_timeout, mux.call_raw(request_id, payload.to_vec())).await {
+        let raw = match timeout(
+            request_timeout,
+            mux.call_assembled(request_id.clone(), payload.to_vec()),
+        )
+        .await
+        {
             Ok(r) => r,
             Err(_) => return Err(IpcError::Timeout),
         };
@@ -685,6 +774,7 @@ impl IpcClient {
             Ok(f) => f,
             Err(MuxError::Io(e)) => return Err(IpcError::Io(e)),
             Err(MuxError::FrameTooLarge(n)) => return Err(IpcError::FrameTooLarge(n)),
+            Err(MuxError::ResponseChunk(e)) => return Err(IpcError::ResponseChunk(e)),
             Err(MuxError::ConnectionLost) => {
                 return Err(IpcError::Io(std::io::Error::new(
                     std::io::ErrorKind::ConnectionReset,
@@ -698,31 +788,22 @@ impl IpcClient {
                 )));
             }
         };
-        if let Some(m) = &self.metrics {
-            m.ipc_response_bytes
-                .with_label_values(&[method])
-                .observe(frame.len() as f64);
+        match decode_response_frame::<Resp>(
+            frame.as_slice(),
+            &request_id,
+            self.response_chunk_limits,
+        )? {
+            DecodedResponseFrame::Legacy(response) => Ok(response),
+            DecodedResponseFrame::Chunk => Err(IpcError::ResponseChunk(
+                "exact v1 chunk escaped mux response assembly".to_string(),
+            )),
         }
-        let envelope: ResponseEnvelope<Resp> = rmp_serde::from_slice(&frame)?;
-        if envelope.version != IPC_VERSION {
-            return Err(IpcError::VersionMismatch {
-                got: envelope.version,
-            });
-        }
-        if !envelope.ok {
-            return Err(IpcError::Server(envelope.error.unwrap_or_default()));
-        }
-        envelope
-            .body
-            .ok_or_else(|| IpcError::Server("response ok=true but body missing".to_string()))
     }
 
     fn record_rpc(&self, method: &str, start: std::time::Instant, result: &str) {
         let elapsed = start.elapsed();
-        if let Some(m) = &self.metrics {
-            m.ipc_request_seconds
-                .with_label_values(&[method, result])
-                .observe(elapsed.as_secs_f64());
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.ipc_completed(method, result, elapsed);
         }
         let elapsed_ms = elapsed.as_millis();
         if elapsed_ms >= SLOW_RPC_WARN_MS && (result == "ok" || result == "ok_after_retry") {
@@ -738,7 +819,8 @@ impl IpcClient {
 
     async fn call_inner<Resp>(
         &self,
-        method: &str,
+        _method: &str,
+        request_id: &str,
         payload: &[u8],
         slot: &mut Slot,
     ) -> Result<Resp, IpcError>
@@ -756,15 +838,9 @@ impl IpcClient {
                         slot = slot.id,
                         "connected IPC socket"
                     );
-                    if let Some(m) = &self.metrics {
-                        m.ipc_connect_total.with_label_values(&["ok"]).inc();
-                    }
                     slot.stream = Some(s);
                 }
                 Err(e) => {
-                    if let Some(m) = &self.metrics {
-                        m.ipc_connect_total.with_label_values(&["error"]).inc();
-                    }
                     warn!(
                         socket = %self.socket_path.display(),
                         slot = slot.id,
@@ -780,37 +856,44 @@ impl IpcClient {
             .as_mut()
             .expect("stream was just populated under exclusive slot ownership");
 
-        let len = u32::try_from(payload.len()).map_err(|_| IpcError::FrameTooLarge(u32::MAX))?;
+        let len = request_frame_len(payload.len())?;
         stream.write_all(&len.to_be_bytes()).await?;
         stream.write_all(payload).await?;
         stream.flush().await?;
 
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).await?;
-        let resp_len = u32::from_be_bytes(len_buf);
-        if resp_len as usize > MAX_FRAME_BYTES {
-            return Err(IpcError::FrameTooLarge(resp_len));
-        }
-        let mut resp_buf = vec![0u8; resp_len as usize];
-        stream.read_exact(&mut resp_buf).await?;
-        if let Some(m) = &self.metrics {
-            m.ipc_response_bytes
-                .with_label_values(&[method])
-                .observe(resp_buf.len() as f64);
+        let first_frame = read_frame(stream).await?;
+        match decode_response_frame::<Resp>(&first_frame, request_id, self.response_chunk_limits)? {
+            DecodedResponseFrame::Legacy(response) => return Ok(response),
+            DecodedResponseFrame::Chunk => {}
         }
 
-        let envelope: ResponseEnvelope<Resp> = rmp_serde::from_slice(&resp_buf)?;
-        if envelope.version != IPC_VERSION {
-            return Err(IpcError::VersionMismatch {
-                got: envelope.version,
-            });
+        let mut assembler = ResponseAssembler::new_with_telemetry_and_limits(
+            request_id,
+            Arc::clone(&self.response_chunk_budget),
+            self.telemetry.clone(),
+            self.response_chunk_limits,
+        );
+        let mut frame = first_frame;
+        let resp_buf: AssembledResponse = loop {
+            match assembler
+                .push(frame)
+                .map_err(|error| IpcError::ResponseChunk(error.to_string()))?
+            {
+                ResponseFrameStatus::Pending => frame = read_frame(stream).await?,
+                ResponseFrameStatus::Complete(bytes) => break bytes,
+            }
+        };
+
+        match decode_response_frame::<Resp>(
+            resp_buf.as_slice(),
+            request_id,
+            self.response_chunk_limits,
+        )? {
+            DecodedResponseFrame::Legacy(response) => Ok(response),
+            DecodedResponseFrame::Chunk => Err(IpcError::ResponseChunk(
+                "exact v1 chunk escaped pool response assembly".to_string(),
+            )),
         }
-        if !envelope.ok {
-            return Err(IpcError::Server(envelope.error.unwrap_or_default()));
-        }
-        envelope
-            .body
-            .ok_or_else(|| IpcError::Server("response ok=true but body missing".to_string()))
     }
 
     /// Process one streaming generation request. Unlike normal IPC RPCs,
@@ -833,14 +916,11 @@ impl IpcClient {
             version: IPC_VERSION,
             method: METHOD_PROCESS_GENERATE,
             request_id: request_id.clone(),
+            accepts_ipc_response_chunks_v1: false,
             body: req,
         };
         let payload = rmp_serde::to_vec_named(&envelope)?;
-        if let Some(m) = &self.metrics {
-            m.ipc_request_bytes
-                .with_label_values(&[METHOD_PROCESS_GENERATE])
-                .observe(payload.len() as f64);
-        }
+        request_frame_len(payload.len())?;
         let start = std::time::Instant::now();
         let result = self
             .process_generate_inner(&request_id, &payload, &mut on_event)
@@ -864,10 +944,7 @@ impl IpcClient {
         Fut: std::future::Future<Output = Result<(), IpcError>>,
     {
         let mut stream = UnixStream::connect(&self.socket_path).await?;
-        if let Some(m) = &self.metrics {
-            m.ipc_connect_total.with_label_values(&["ok"]).inc();
-        }
-        let len = u32::try_from(payload.len()).map_err(|_| IpcError::FrameTooLarge(u32::MAX))?;
+        let len = request_frame_len(payload.len())?;
         stream.write_all(&len.to_be_bytes()).await?;
         stream.write_all(payload).await?;
         stream.flush().await?;
@@ -879,11 +956,6 @@ impl IpcClient {
                 Ok(Err(e)) => return Err(e),
                 Err(_) => return Err(IpcError::Timeout),
             };
-            if let Some(m) = &self.metrics {
-                m.ipc_response_bytes
-                    .with_label_values(&[METHOD_PROCESS_GENERATE])
-                    .observe(resp_buf.len() as f64);
-            }
             let envelope: ResponseEnvelope<GenerateEvent> = rmp_serde::from_slice(&resp_buf)?;
             if envelope.version != IPC_VERSION {
                 return Err(IpcError::VersionMismatch {
@@ -1008,11 +1080,85 @@ impl IpcClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc_types::IpcResponseChunkV1;
+    use crate::protocol::response_chunks::IPC_RESPONSE_CHUNK_KIND_V1;
+    use sha2::{Digest, Sha256};
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
     use tokio::time::Instant;
+
+    #[test]
+    fn disabled_telemetry_is_not_retained_by_ipc_transports() {
+        let client = IpcClient::new(short_sock_path()).with_telemetry(SidecarTelemetry::default());
+
+        assert!(client.telemetry.is_none());
+        assert!(client.pool.telemetry.is_none());
+    }
+
+    #[test]
+    fn request_frame_len_enforces_exact_serialized_limit() {
+        assert_eq!(
+            request_frame_len(MAX_FRAME_BYTES).unwrap(),
+            MAX_FRAME_BYTES as u32
+        );
+        let error = request_frame_len(MAX_FRAME_BYTES + 1).unwrap_err();
+        assert!(
+            matches!(error, IpcError::FrameTooLarge(size) if size == (MAX_FRAME_BYTES + 1) as u32)
+        );
+    }
+
+    #[test]
+    fn maximum_audio_run_batch_fits_ipc_frame() {
+        const MAX_DURATION_SECONDS: u64 = 12 * 60;
+        let sample_count = u64::from(sie_audio_prep::TARGET_SAMPLE_RATE) * MAX_DURATION_SECONDS;
+        let audio = crate::ipc_types::PreparedAudioPcm16 {
+            pcm_s16le: vec![0; sample_count as usize * 2],
+            sample_rate: sie_audio_prep::TARGET_SAMPLE_RATE,
+            sample_count,
+            duration_ms: MAX_DURATION_SECONDS * 1_000,
+            source_sample_rate: 48_000,
+            source_sample_count: 48_000 * MAX_DURATION_SECONDS,
+            source_channels: 2,
+            container: "wav".to_owned(),
+        };
+        let item = crate::ipc_types::ExtractBatchItem {
+            work_item_id: "request.0".to_owned(),
+            request_id: "request".to_owned(),
+            item_index: 0,
+            total_items: 1,
+            timestamp: 0.0,
+            item: rmpv::Value::Map(Vec::new()),
+            labels: None,
+            output_schema: None,
+            instruction: None,
+            options: None,
+            profile_id: None,
+            bundle_config_hash: None,
+            payload_fetch_ms: 0.0,
+            prepared_audio: Some(audio),
+        };
+        let batch = RunBatchRequest {
+            model_id: "openai/whisper-large-v3-turbo".to_owned(),
+            batch_id: 1,
+            lora_key: String::new(),
+            total_cost: MAX_DURATION_SECONDS,
+            items: vec![crate::ipc_types::RunBatchItem::extract(item)],
+            accepts_batched_f16_multivectors: false,
+        };
+        let envelope = RequestEnvelope {
+            version: IPC_VERSION,
+            method: METHOD_RUN_BATCH,
+            request_id: "ipc-request".to_owned(),
+            accepts_ipc_response_chunks_v1: false,
+            body: batch,
+        };
+
+        let payload = rmp_serde::to_vec_named(&envelope).unwrap();
+        request_frame_len(payload.len()).expect("maximum legal audio must fit IPC");
+        assert!(payload.len() < MAX_FRAME_BYTES);
+    }
 
     fn short_sock_path() -> PathBuf {
         // Match the Python test helper — AF_UNIX paths on macOS are <=104 chars.
@@ -1128,6 +1274,57 @@ mod tests {
         rmp_serde::to_vec_named(&envelope).unwrap()
     }
 
+    #[test]
+    fn legacy_response_decodes_directly_and_preserves_wire_bytes() {
+        let frame = rmp_serde::to_vec_named(&serde_json::json!({
+            "version": IPC_VERSION,
+            "request_id": "r-legacy",
+            "ok": true,
+            "body": {"value": [1, 2, 3]},
+            "error": null,
+        }))
+        .unwrap();
+        let original = frame.clone();
+
+        let decoded = decode_response_frame::<serde_json::Value>(
+            &frame,
+            "r-legacy",
+            ResponseChunkLimits::production(),
+        )
+        .unwrap();
+
+        let DecodedResponseFrame::Legacy(body) = decoded else {
+            panic!("ordinary response must stay on the one-decode legacy path");
+        };
+        assert_eq!(body, serde_json::json!({"value": [1, 2, 3]}));
+        assert_eq!(
+            frame, original,
+            "legacy decoding must not rewrite the frame"
+        );
+    }
+
+    #[test]
+    fn exact_chunk_kind_cannot_hide_inside_a_typed_legacy_envelope() {
+        let frame = rmp_serde::to_vec_named(&serde_json::json!({
+            "version": IPC_VERSION,
+            "request_id": "r-chunk",
+            "ok": true,
+            "body": {"value": 1},
+            "error": null,
+            "kind": IPC_RESPONSE_CHUNK_KIND_V1,
+        }))
+        .unwrap();
+
+        let decoded = decode_response_frame::<serde_json::Value>(
+            &frame,
+            "r-chunk",
+            ResponseChunkLimits::production(),
+        )
+        .unwrap();
+
+        assert!(matches!(decoded, DecodedResponseFrame::Chunk));
+    }
+
     #[tokio::test]
     async fn ping_roundtrips_typed() {
         let path = short_sock_path();
@@ -1156,6 +1353,55 @@ mod tests {
         let resp = client.ping(42.0).await.unwrap();
         assert_eq!(resp.worker_id, "echo");
         assert_eq!(resp.timestamp_ms, 999.0);
+    }
+
+    #[tokio::test]
+    async fn pool_call_negotiates_and_reassembles_chunked_response() {
+        let path = short_sock_path();
+        let _ = tokio::fs::remove_file(&path).await;
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut len = [0_u8; 4];
+            socket.read_exact(&mut len).await.unwrap();
+            let mut request = vec![0_u8; u32::from_be_bytes(len) as usize];
+            socket.read_exact(&mut request).await.unwrap();
+            let request: serde_json::Value = rmp_serde::from_slice(&request).unwrap();
+            assert_eq!(request["accepts_ipc_response_chunks_v1"], true);
+            let request_id = request["request_id"].as_str().unwrap();
+            let response =
+                ping_reply_bytes(&rmp_serde::to_vec_named(&request).unwrap(), "chunked-pool");
+            let digest = Sha256::digest(&response).to_vec();
+            let split = response.len() / 2;
+            for (index, payload) in [&response[..split], &response[split..]]
+                .into_iter()
+                .enumerate()
+            {
+                let frame = rmp_serde::to_vec_named(&IpcResponseChunkV1 {
+                    version: IPC_VERSION,
+                    request_id: request_id.to_owned(),
+                    transfer_digest: digest.clone(),
+                    chunk_index: index as u32,
+                    chunk_count: 2,
+                    total_bytes: response.len() as u64,
+                    payload: payload.to_vec(),
+                    kind: IPC_RESPONSE_CHUNK_KIND_V1.to_owned(),
+                })
+                .unwrap();
+                socket
+                    .write_all(&(frame.len() as u32).to_be_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(&frame).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+
+        let mut client = IpcClient::new(path);
+        client.response_chunk_limits = ResponseChunkLimits::relaxed_for_small_fixtures();
+        let response = client.ping(42.0).await.unwrap();
+        assert_eq!(response.worker_id, "chunked-pool");
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1770,8 +2016,7 @@ mod tests {
         .await;
         tokio::task::yield_now().await;
 
-        let metrics = Arc::new(MetricsRegistry::new().unwrap());
-        let client = Arc::new(IpcClient::new_pool(path, POOL).with_metrics(Arc::clone(&metrics)));
+        let client = Arc::new(IpcClient::new_pool(path, POOL));
         assert_eq!(client.pool_size(), POOL);
 
         let mut handles = Vec::with_capacity(CONCURRENCY);
@@ -1784,15 +2029,6 @@ mod tests {
                 .unwrap_or_else(|e| panic!("task {i} panicked: {e:?}"))
                 .unwrap_or_else(|e| panic!("task {i} ping failed: {e:?}"));
         }
-
-        // After full drain: pool_inflight must be back to 0 and
-        // pool_size must still equal POOL.
-        assert_eq!(
-            metrics.ipc_pool_inflight.get(),
-            0,
-            "inflight gauge leaked after {CONCURRENCY} completed calls"
-        );
-        assert_eq!(metrics.ipc_pool_size.get(), POOL as i64);
 
         // Same client still works after the storm — slots weren't
         // corrupted.
@@ -1824,8 +2060,7 @@ mod tests {
         .await;
         tokio::task::yield_now().await;
 
-        let metrics = Arc::new(MetricsRegistry::new().unwrap());
-        let client = Arc::new(IpcClient::new_pool(path, POOL).with_metrics(Arc::clone(&metrics)));
+        let client = Arc::new(IpcClient::new_pool(path, POOL));
 
         // Burn both pool slots with calls that will be cancelled.
         for i in 0..POOL {
@@ -1839,16 +2074,6 @@ mod tests {
         // Let Drop run and any server-side IO settle.
         tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(30)).await;
-
-        // Key invariants:
-        //  1. inflight gauge back to zero → no slot leaked.
-        //  2. Subsequent calls succeed → slots were reconnected
-        //     cleanly despite mid-I/O cancellation.
-        assert_eq!(
-            metrics.ipc_pool_inflight.get(),
-            0,
-            "slot leaked after cancelled futures"
-        );
 
         // Fire POOL+2 sequential calls on the "poisoned" slots — each
         // must get a clean response, not a stale half-frame.
@@ -1912,19 +2137,12 @@ mod tests {
         });
 
         tokio::task::yield_now().await;
-        let metrics = Arc::new(MetricsRegistry::new().unwrap());
-        let client = Arc::new(
-            IpcClient::new_pool(path, POOL)
-                .with_timeout(Duration::from_millis(50))
-                .with_metrics(Arc::clone(&metrics)),
-        );
+        let client =
+            Arc::new(IpcClient::new_pool(path, POOL).with_timeout(Duration::from_millis(50)));
 
         // First call: times out inside IpcClient::call.
         let err = client.ping(1.0).await.unwrap_err();
         assert!(matches!(err, IpcError::Timeout), "got {err:?}");
-        // Slot returned; no leak.
-        assert_eq!(metrics.ipc_pool_inflight.get(), 0);
-
         // Second call: must get a brand new connection (the hung
         // socket was clobbered by arm+Drop), not hang on the
         // still-alive but desynchronized old stream.
@@ -1932,7 +2150,6 @@ mod tests {
         // Worker id baked into the reply proves we reached the
         // "later connection" branch of the server.
         assert_eq!(ok.worker_id, "timeout-reuse");
-        assert_eq!(metrics.ipc_pool_inflight.get(), 0);
         // We should have seen at least two connections: the
         // original (hung) and the reconnect.
         assert!(
@@ -1995,14 +2212,9 @@ mod tests {
         );
     }
 
-    /// Metric invariant: `sie_worker_ipc_pool_inflight` must never go
-    /// negative, and must return to exactly 0 after every burst
-    /// (including bursts containing errors). Decrements happen
-    /// inside `SlotGuard::Drop`; an extra decrement on an error
-    /// path would cause an underflow that Prometheus would silently
-    /// clamp, hiding the bug in prod.
+    /// Mixed success and failure paths must release every pool permit.
     #[tokio::test]
-    async fn inflight_metric_returns_to_zero_after_mixed_burst() {
+    async fn mixed_burst_releases_pool_permits() {
         const POOL: usize = 4;
         let path = short_sock_path();
 
@@ -2057,11 +2269,10 @@ mod tests {
         });
 
         tokio::task::yield_now().await;
-        let metrics = Arc::new(MetricsRegistry::new().unwrap());
-        let client = Arc::new(IpcClient::new_pool(path, POOL).with_metrics(Arc::clone(&metrics)));
+        let client = Arc::new(IpcClient::new_pool(path, POOL));
 
-        // Fire 32 concurrent calls. We don't care about individual
-        // outcomes — we care that the gauge reconciles at the end.
+        // Fire 32 concurrent calls. Individual failures are expected from the
+        // fault-injecting server; all tasks must nevertheless settle.
         let mut handles = Vec::new();
         for i in 0..32 {
             let c = Arc::clone(&client);
@@ -2072,14 +2283,11 @@ mod tests {
         for h in handles {
             let _ = h.await;
         }
-        // Let all Drops settle.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let inflight = metrics.ipc_pool_inflight.get();
-        assert_eq!(
-            inflight, 0,
-            "inflight gauge did not reconcile to zero after mixed burst: {inflight}"
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), client.ping(999.0))
+                .await
+                .is_ok(),
+            "pool permit leaked after mixed burst"
         );
-        assert!(inflight >= 0, "inflight gauge went negative: {inflight}");
     }
 }

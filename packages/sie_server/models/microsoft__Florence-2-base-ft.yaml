@@ -1,5 +1,6 @@
 sie_id: microsoft/Florence-2-base-ft
 hf_id: microsoft/Florence-2-base-ft
+hf_revision: f6c1a25888ffc1d945ee8a1a77ac833c7303d46e
 inputs:
   text: false
   image: true

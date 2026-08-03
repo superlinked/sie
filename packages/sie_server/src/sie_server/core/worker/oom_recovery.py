@@ -17,7 +17,8 @@ from sie_server.core.oom import (
     is_oom_error,
 )
 from sie_server.core.residency import EvictionResult
-from sie_server.observability.metrics import record_oom_recovery_event
+from sie_server.observability.worker_telemetry import worker_telemetry
+from sie_server.types.inputs import InvalidInputError
 
 if TYPE_CHECKING:
     from sie_server.core.batcher import HasCost
@@ -77,11 +78,8 @@ class BatchExecutor:
     the recursive split path to re-invoke dispatch on sub-batches.
     """
 
-    # Strategy values whose per-action metric branch exists in
-    # ``record_oom_recovery_event``. Kept in sync with that function's
-    # if/elif ladder; a typo or new ``OomRecoveryAction`` member without a
-    # matching metric would otherwise surface only mid-incident as a
-    # ``ValueError`` from the metrics layer.
+    # Recovery strategies implemented by this executor. A new enum member must
+    # gain an execution branch before it can enter a production strategy list.
     _RECOGNISED_ACTIONS: frozenset[OomRecoveryAction] = frozenset(
         {
             OomRecoveryAction.CACHE_CLEAR,
@@ -110,10 +108,9 @@ class BatchExecutor:
             stats: Mutable counters; updated in-place as recovery proceeds.
 
         Raises:
-            ValueError: If ``config.strategy`` contains an action that has
-                no matching per-action metric in
-                ``record_oom_recovery_event``. Failing fast at construction
-                (worker boot) is preferable to raising during a real OOM.
+            ValueError: If ``config.strategy`` contains an action that this
+                executor cannot apply. Failing at worker boot is preferable to
+                discovering it during an OOM incident.
         """
         unknown = [a for a in config.strategy if a not in self._RECOGNISED_ACTIONS]
         if unknown:
@@ -146,7 +143,14 @@ class BatchExecutor:
         if not self._config.enabled:
             try:
                 await self._dispatch_and_fan_out(handler, group, dispatch)
+            except InvalidInputError as e:
+                await self._isolate_invalid_input(handler, group, dispatch, e)
             except Exception as e:  # noqa: BLE001 — preserve prior catch-all
+                if is_oom_error(e):
+                    # Future.set_exception preserves the traceback, which pins
+                    # the failed forward's tensors (#2144) — release it for
+                    # OOMs here too; non-OOM errors keep theirs for debugging.
+                    e.__traceback__ = None
                 self._fail_group(group, e)
             return
 
@@ -154,27 +158,42 @@ class BatchExecutor:
         try:
             await self._dispatch_and_fan_out(handler, group, dispatch)
             return
+        except InvalidInputError as e:
+            await self._isolate_invalid_input(handler, group, dispatch, e)
+            return
         except Exception as e:  # noqa: BLE001
             if not is_oom_error(e):
                 self._fail_group(group, e)
                 return
             self._stats.recoveries_attempted += 1
-            record_oom_recovery_event(self._model_name, attempted=True)
             logger.warning(
                 "OOM during dispatch (model=%s, items=%d): %s",
                 self._model_name,
                 len(group[1]),
                 e,
             )
+            # Release the traceback: it pins every frame of the failed
+            # forward — including the batch tensors and model activations as
+            # frame locals — for as long as last_error is held, which is why
+            # cache_clear reclaimed nothing and items=1 retries still OOM'd
+            # (#2144). _wrap_oom only needs str(e).
+            e.__traceback__ = None
             last_error: BaseException = e
 
         # Strategy loop. Each non-split strategy is attempted at most once;
         # ``SPLIT_BATCH`` is recursive and terminal.
+        # Keep an OOM retry pending until we know whether another strategy is
+        # actually attempted. If there is a successor, the prior attempt is
+        # ``failed``; if recovery exhausts here, that same attempt is
+        # ``terminal``. This guarantees one managed outcome per attempt.
+        pending_oom_strategy: str | None = None
         for action in self._config.strategy:
             if action is OomRecoveryAction.CACHE_CLEAR:
+                if pending_oom_strategy is not None:
+                    self._record_recovery(pending_oom_strategy, "failed")
+                    pending_oom_strategy = None
                 self._cache_clear()
                 self._stats.cache_clears += 1
-                record_oom_recovery_event(self._model_name, action="cache_clear")
 
             elif action is OomRecoveryAction.EVICT_LRU:
                 evicted = await self._try_evict_lru()
@@ -182,28 +201,29 @@ class BatchExecutor:
                     # No-op for this strategy; don't bother retrying the
                     # dispatch — go to the next strategy.
                     continue
+                if pending_oom_strategy is not None:
+                    self._record_recovery(pending_oom_strategy, "failed")
+                    pending_oom_strategy = None
                 self._stats.evictions_triggered += 1
-                record_oom_recovery_event(self._model_name, action="evict_lru")
 
             elif action is OomRecoveryAction.SPLIT_BATCH:
+                if pending_oom_strategy is not None:
+                    self._record_recovery(pending_oom_strategy, "failed")
+                    pending_oom_strategy = None
                 # Recursive divide-and-conquer is terminal: each item either
                 # succeeds in some sub-batch or fails individually with
                 # ``ResourceExhaustedError``. Partial success is a real
                 # outcome — half the items can succeed while the other half
-                # terminally fails. We record both signals so dashboards
-                # don't silently undercount either:
-                #   - any successful recovery → ``recoveries_succeeded += 1``
-                #   - any terminal failure → ``terminal_failures += 1``
-                # A fully-mixed split bumps BOTH counters once.
+                # terminally fails. In-memory stats retain both facts; the
+                # contract event is exclusive and gives terminal precedence.
                 self._stats.batch_splits += 1
-                record_oom_recovery_event(self._model_name, action="split_batch")
                 succeeded_count, oom_failed_count = await self._run_split(handler, group, dispatch, depth=0)
                 if succeeded_count > 0:
                     self._stats.recoveries_succeeded += 1
-                    record_oom_recovery_event(self._model_name, succeeded=True)
                 if oom_failed_count > 0:
                     self._stats.terminal_failures += 1
-                    record_oom_recovery_event(self._model_name, terminal=True)
+                managed_outcome = "terminal" if oom_failed_count > 0 else "success" if succeeded_count > 0 else "failed"
+                self._record_recovery(action.value, managed_outcome)
                 return
 
             else:  # pragma: no cover — exhaustive enum
@@ -214,13 +234,19 @@ class BatchExecutor:
             try:
                 await self._dispatch_and_fan_out(handler, group, dispatch)
                 self._stats.recoveries_succeeded += 1
-                record_oom_recovery_event(self._model_name, succeeded=True)
+                self._record_recovery(action.value, "success")
+                return
+            except InvalidInputError as e:
+                await self._isolate_invalid_input(handler, group, dispatch, e)
                 return
             except Exception as e:  # noqa: BLE001
                 if not is_oom_error(e):
+                    self._record_recovery(action.value, "failed")
                     self._fail_group(group, e)
                     return
+                e.__traceback__ = None  # release pinned forward frames (#2144)
                 last_error = e
+                pending_oom_strategy = action.value
                 logger.warning(
                     "OOM persists after %s (model=%s, items=%d): %s",
                     action.value,
@@ -231,8 +257,16 @@ class BatchExecutor:
 
         # All strategies exhausted without a SPLIT_BATCH terminal step.
         self._stats.terminal_failures += 1
-        record_oom_recovery_event(self._model_name, terminal=True)
+        self._record_recovery(pending_oom_strategy or "other", "terminal")
         self._fail_group(group, self._wrap_oom(last_error, attempts=len(self._config.strategy)))
+
+    def _record_recovery(self, strategy: str, outcome: str) -> None:
+        """Emit one resolved strategy attempt through the semantic facade."""
+        worker_telemetry().oom_recovery_completed(
+            model=self._model_name,
+            strategy=strategy,
+            outcome=outcome,
+        )
 
     # ------------------------------------------------------------------
     # Recursive split
@@ -277,6 +311,10 @@ class BatchExecutor:
         try:
             await self._dispatch_and_fan_out(handler, group, dispatch)
             return distinct_count, 0
+        except InvalidInputError as e:
+            await self._isolate_invalid_input(handler, group, dispatch, e)
+            succeeded = len({id(m) for m in metadata_list if not m.future.done()})
+            return succeeded, 0
         except Exception as e:  # noqa: BLE001
             if not is_oom_error(e):
                 # Propagate the non-OOM error onto the slice's futures
@@ -285,6 +323,7 @@ class BatchExecutor:
                 # track OOM-driven terminations.
                 self._fail_group(group, e)
                 return 0, 0
+            e.__traceback__ = None  # release pinned forward frames (#2144)
             last_error: BaseException = e
 
         # Cannot split further: we're at one item or at the depth cap.
@@ -311,6 +350,58 @@ class BatchExecutor:
         self._empty_cuda_cache()
         right_ok, right_oom_fail = await self._run_split(handler, right, dispatch, depth + 1)
         return left_ok + right_ok, left_oom_fail + right_oom_fail
+
+    async def _isolate_invalid_input(
+        self,
+        handler: OperationHandler[Any],
+        group: ConfigGroup,
+        dispatch: DispatchFn,
+        error: InvalidInputError,
+    ) -> None:
+        """Fail only the request that supplied malformed input.
+
+        Dynamic batches may contain several requests, while a score request
+        may contribute several adjacent items. Split by request identity so
+        one adapter-level validation error cannot poison valid siblings and a
+        multi-item request remains atomic.
+        """
+        items, metadata_list, indices, prepared = group
+        request_ids = list(dict.fromkeys(id(metadata) for metadata in metadata_list))
+        if len(request_ids) <= 1:
+            self._fail_group(group, error)
+            return
+
+        left_ids = set(request_ids[: len(request_ids) // 2])
+        left_items: list[Item] = []
+        left_metadata: list[RequestMetadata] = []
+        left_indices: list[int] = []
+        left_prepared: list[HasCost] = []
+        right_items: list[Item] = []
+        right_metadata: list[RequestMetadata] = []
+        right_indices: list[int] = []
+        right_prepared: list[HasCost] = []
+        for item, metadata, index, prepared_item in zip(
+            items,
+            metadata_list,
+            indices,
+            prepared,
+            strict=True,
+        ):
+            if id(metadata) in left_ids:
+                left_items.append(item)
+                left_metadata.append(metadata)
+                left_indices.append(index)
+                left_prepared.append(prepared_item)
+            else:
+                right_items.append(item)
+                right_metadata.append(metadata)
+                right_indices.append(index)
+                right_prepared.append(prepared_item)
+
+        left: ConfigGroup = (left_items, left_metadata, left_indices, left_prepared)
+        right: ConfigGroup = (right_items, right_metadata, right_indices, right_prepared)
+        await self.run(handler, left, dispatch)
+        await self.run(handler, right, dispatch)
 
     # ------------------------------------------------------------------
     # Mitigations

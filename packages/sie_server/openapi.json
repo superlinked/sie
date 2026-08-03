@@ -3,7 +3,7 @@
   "info": {
     "title": "SIE Server",
     "description": "Search Inference Engine - GPU inference server for search workloads",
-    "version": "0.6.19"
+    "version": "0.6.26"
   },
   "paths": {
     "/": {
@@ -291,6 +291,113 @@
         }
       }
     },
+    "/v1/generate/{model}": {
+      "post": {
+        "tags": [
+          "generate"
+        ],
+        "summary": "Generate",
+        "description": "Generate text from a prompt using the named model.\n\nThe ``model`` path segment uses the **SIE-safe** id (double-underscore\nseparator, e.g. ``Qwen__Qwen3-4B-Instruct``). HuggingFace-style slashes\nare rejected with 400 to keep parity with the gateway contract.",
+        "operationId": "generate_v1_generate__model__post",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model"
+            }
+          },
+          {
+            "name": "X-SIE-MACHINE-PROFILE",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sie-Machine-Profile"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Generated text, or a Server-Sent Event stream when stream is true",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateResponseModel"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "SIE-native GenerateChunk events terminated by data: [DONE]"
+                },
+                "x-sie-event-schema": {
+                  "$ref": "#/components/schemas/GenerateChunk"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "413": {
+            "description": "Prompt exceeds the configured UTF-8 size limit (INPUT_TOO_LONG)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateInputTooLongErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the detail envelope: {code, message, error_class, permanent, attempts}. No Retry-After header; clients must not auto-retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateModelLoadFailedErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Model loading or unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateRequestModel"
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/score/{model}": {
       "post": {
         "tags": [
@@ -462,19 +569,113 @@
         }
       }
     },
-    "/metrics": {
-      "get": {
+    "/v1/audio/transcriptions": {
+      "post": {
         "tags": [
-          "metrics"
+          "openai-compat"
         ],
-        "summary": "Metrics",
-        "description": "Expose Prometheus metrics for scraping.\n\nReturns metrics in Prometheus text exposition format.",
-        "operationId": "metrics_metrics_get",
+        "summary": "Create Transcription",
+        "description": "Transcribe a multipart audio upload through SIE's native extract path.",
+        "operationId": "create_transcription_v1_audio_transcriptions_post",
+        "parameters": [
+          {
+            "name": "X-SIE-MACHINE-PROFILE",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sie-Machine-Profile"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Prometheus metrics in text format",
+            "description": "Successful Response",
             "content": {
-              "text/plain": {}
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file",
+                  "model"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "enum": [
+                      "json",
+                      "text",
+                      "srt",
+                      "verbose_json",
+                      "vtt"
+                    ],
+                    "default": "json"
+                  },
+                  "temperature": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "stream": {
+                    "type": "boolean",
+                    "enum": [
+                      false
+                    ],
+                    "default": false
+                  },
+                  "timestamp_granularities[]": {
+                    "type": "array",
+                    "maxItems": 2,
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "word",
+                        "segment"
+                      ]
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
             }
           }
         }
@@ -766,6 +967,27 @@
         "title": "EntityModel",
         "description": "Extracted entity."
       },
+      "ExtractItemErrorModel": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "Stable extraction error code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Sanitized extraction error message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ExtractItemErrorModel",
+        "description": "Stable per-item extraction failure."
+      },
       "ExtractResponseModel": {
         "properties": {
           "model": {
@@ -826,6 +1048,17 @@
             "type": "object",
             "title": "Data",
             "description": "Structured extraction data"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExtractItemErrorModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-item extraction failure"
           }
         },
         "type": "object",
@@ -834,6 +1067,169 @@
         ],
         "title": "ExtractResultModel",
         "description": "Single item extraction result."
+      },
+      "GenerateInputTooLongDetailModel": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "const": "INPUT_TOO_LONG",
+            "title": "Code",
+            "description": "Stable error code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Client-safe error message"
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Param",
+            "description": "Request field that exceeded the limit"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "GenerateInputTooLongDetailModel",
+        "description": "Detail returned when a generation prompt exceeds the worker limit."
+      },
+      "GenerateInputTooLongErrorResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/GenerateInputTooLongDetailModel"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "GenerateInputTooLongErrorResponse",
+        "description": "FastAPI error envelope for an oversized generation prompt."
+      },
+      "GenerateModelLoadFailedDetailModel": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "const": "MODEL_LOAD_FAILED",
+            "title": "Code",
+            "description": "Stable error code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Client-safe error message"
+          },
+          "error_class": {
+            "type": "string",
+            "title": "Error Class",
+            "description": "Classified model-load failure category"
+          },
+          "permanent": {
+            "type": "boolean",
+            "title": "Permanent",
+            "description": "Whether operator action is required before retrying"
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Attempts",
+            "description": "Number of failed model-load attempts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "error_class",
+          "permanent",
+          "attempts"
+        ],
+        "title": "GenerateModelLoadFailedDetailModel",
+        "description": "Detail returned for a terminal generation model-load failure."
+      },
+      "GenerateModelLoadFailedErrorResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/GenerateModelLoadFailedDetailModel"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "GenerateModelLoadFailedErrorResponse",
+        "description": "FastAPI error envelope for a terminal generation model-load failure."
+      },
+      "GenerateResponseModel": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "Model used for generation"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text",
+            "description": "Generated text"
+          },
+          "finish_reason": {
+            "type": "string",
+            "title": "Finish Reason",
+            "description": "Reason generation stopped"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/GenerateUsageModel",
+            "description": "Token usage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model",
+          "text",
+          "finish_reason",
+          "usage"
+        ],
+        "title": "GenerateResponseModel",
+        "description": "Blocking response from the SIE-native generate endpoint."
+      },
+      "GenerateUsageModel": {
+        "properties": {
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Prompt Tokens",
+            "description": "Number of prompt tokens"
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Completion Tokens",
+            "description": "Number of generated tokens"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Tokens",
+            "description": "Total prompt and generated tokens"
+          }
+        },
+        "type": "object",
+        "required": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ],
+        "title": "GenerateUsageModel",
+        "description": "Token usage for one generation request."
       },
       "HTTPValidationError": {
         "properties": {
@@ -1361,6 +1757,17 @@
             "type": "array",
             "title": "Scores",
             "description": "Scores sorted by relevance (descending)"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoreUsageModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Authoritative usage when emitted by the adapter"
           }
         },
         "type": "object",
@@ -1370,6 +1777,35 @@
         ],
         "title": "ScoreResponseModel",
         "description": "Response from score endpoint."
+      },
+      "ScoreUsageModel": {
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "description": "Post-truncation input tokens processed"
+          },
+          "images": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Images",
+            "description": "Images processed across query-document pairs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "input_tokens"
+        ],
+        "title": "ScoreUsageModel",
+        "description": "Authoritative worker-emitted score usage."
       },
       "SparseVectorModel": {
         "properties": {
@@ -1674,7 +2110,7 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/$defs/ImageInputModel"
+                  "$ref": "#/components/schemas/ImageInputModel"
                 },
                 "type": "array"
               },
@@ -1689,7 +2125,7 @@
           "document": {
             "anyOf": [
               {
-                "$ref": "#/$defs/DocumentInputModel"
+                "$ref": "#/components/schemas/DocumentInputModel"
               },
               {
                 "type": "null"
@@ -1734,7 +2170,7 @@
           "items": {
             "description": "Items to encode",
             "items": {
-              "$ref": "#/$defs/ItemModel"
+              "$ref": "#/components/schemas/ItemModel"
             },
             "minItems": 1,
             "title": "Items",
@@ -1743,7 +2179,7 @@
           "params": {
             "anyOf": [
               {
-                "$ref": "#/$defs/EncodeParamsModel"
+                "$ref": "#/components/schemas/EncodeParamsModel"
               },
               {
                 "type": "null"
@@ -1862,7 +2298,7 @@
           "items": {
             "description": "Items to extract from",
             "items": {
-              "$ref": "#/$defs/ItemModel"
+              "$ref": "#/components/schemas/ItemModel"
             },
             "minItems": 1,
             "title": "Items",
@@ -1871,7 +2307,7 @@
           "params": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExtractParamsModel"
+                "$ref": "#/components/schemas/ExtractParamsModel"
               },
               {
                 "type": "null"
@@ -1885,6 +2321,554 @@
           "items"
         ],
         "title": "ExtractRequestModel",
+        "type": "object"
+      },
+      "GenerateChunkErrorModel": {
+        "description": "Terminal error carried by a generation SSE event.",
+        "properties": {
+          "code": {
+            "description": "Stable error code",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "description": "Client-safe error message",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "GenerateChunkErrorModel",
+        "type": "object"
+      },
+      "GenerateChunk": {
+        "description": "One SIE-native Server-Sent Event from a streaming generate request.",
+        "properties": {
+          "request_id": {
+            "description": "Request id shared by every event in the stream",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "seq": {
+            "description": "Monotonic event sequence number",
+            "minimum": 0,
+            "title": "Seq",
+            "type": "integer"
+          },
+          "text_delta": {
+            "description": "Incremental generated text",
+            "title": "Text Delta",
+            "type": "string"
+          },
+          "done": {
+            "description": "True for the terminal event",
+            "title": "Done",
+            "type": "boolean"
+          },
+          "finish_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Termination reason on the terminal event",
+            "title": "Finish Reason"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenerateUsageModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Token usage on the terminal event"
+          },
+          "ttft_ms": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Time to first token on the terminal event",
+            "title": "Ttft Ms"
+          },
+          "logprobs": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Per-token log probabilities aligned with text_delta",
+            "title": "Logprobs"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenerateChunkErrorModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Terminal generation error"
+          }
+        },
+        "required": [
+          "request_id",
+          "seq",
+          "text_delta",
+          "done"
+        ],
+        "title": "GenerateChunk",
+        "type": "object"
+      },
+      "NativeEbnfGrammarModel": {
+        "additionalProperties": false,
+        "description": "EBNF structured-output constraint.",
+        "properties": {
+          "ebnf": {
+            "maxLength": 8192,
+            "title": "Ebnf",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "strict": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Strict"
+          }
+        },
+        "required": [
+          "ebnf"
+        ],
+        "title": "NativeEbnfGrammarModel",
+        "type": "object"
+      },
+      "NativeGenerateImageModel": {
+        "description": "One inline image on the SIE-native generate surface.",
+        "properties": {
+          "data": {
+            "description": "Canonical standard-base64 image bytes, at most 16 MiB decoded",
+            "maxLength": 22369624,
+            "minLength": 1,
+            "title": "Data",
+            "type": "string"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9.+-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Short media-format hint such as png or jpeg",
+            "title": "Format"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "NativeGenerateImageModel",
+        "type": "object"
+      },
+      "NativeJsonSchemaGrammarModel": {
+        "additionalProperties": false,
+        "description": "JSON Schema structured-output constraint.",
+        "properties": {
+          "json_schema": {
+            "additionalProperties": true,
+            "title": "Json Schema",
+            "type": "object"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "strict": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Strict"
+          }
+        },
+        "required": [
+          "json_schema"
+        ],
+        "title": "NativeJsonSchemaGrammarModel",
+        "type": "object"
+      },
+      "NativeRegexGrammarModel": {
+        "additionalProperties": false,
+        "description": "Regular-expression structured-output constraint.",
+        "properties": {
+          "regex": {
+            "maxLength": 4096,
+            "title": "Regex",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "strict": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Strict"
+          }
+        },
+        "required": [
+          "regex"
+        ],
+        "title": "NativeRegexGrammarModel",
+        "type": "object"
+      },
+      "GenerateRequestModel": {
+        "description": "Request body for the SIE-native generate endpoint.",
+        "examples": [
+          {
+            "max_new_tokens": 64,
+            "prompt": "Write one sentence about vector search.",
+            "stream": false,
+            "temperature": 0.7,
+            "top_p": 0.9
+          }
+        ],
+        "properties": {
+          "prompt": {
+            "description": "Prompt text to generate from",
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          },
+          "images": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/NativeGenerateImageModel"
+                },
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional inline images paired with prompt. The worker renders one user turn through the model's native chat template; remote URLs are not accepted.",
+            "title": "Images"
+          },
+          "grammar": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeJsonSchemaGrammarModel"
+              },
+              {
+                "$ref": "#/components/schemas/NativeRegexGrammarModel"
+              },
+              {
+                "$ref": "#/components/schemas/NativeEbnfGrammarModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional structured-output grammar; exactly one of json_schema, regex, or ebnf",
+            "title": "Grammar"
+          },
+          "max_new_tokens": {
+            "description": "Maximum number of tokens to generate",
+            "minimum": 1,
+            "title": "Max New Tokens",
+            "type": "integer"
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Sampling temperature override",
+            "title": "Temperature"
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "maximum": 1,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Nucleus-sampling probability override",
+            "title": "Top P"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Governed generation runtime options; explicit top-level sampler fields override them",
+            "title": "Options"
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Stop sequences",
+            "title": "Stop"
+          },
+          "stream": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Return SIE-native Server-Sent Events when true",
+            "title": "Stream"
+          },
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "maximum": 2,
+                "minimum": -2,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Frequency penalty",
+            "title": "Frequency Penalty"
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "maximum": 2,
+                "minimum": -2,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Presence penalty",
+            "title": "Presence Penalty"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854775807,
+                "minimum": -9223372036854775808,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional signed 64-bit per-request sampling seed. Reproducibility is best effort, not guaranteed, and depends on the active generation backend and deployment configuration. Non-integer or out-of-range values reject with 400 invalid_request.",
+            "format": "int64",
+            "title": "Seed"
+          },
+          "logit_bias": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "maxProperties": 1024,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Token-id string to finite sampler bias in [-100, 100]",
+            "title": "Logit Bias"
+          },
+          "logprobs": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Return per-token log probabilities; supported only with stream true",
+            "title": "Logprobs"
+          },
+          "top_logprobs": {
+            "anyOf": [
+              {
+                "maximum": 20,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Alternative tokens per position; requires logprobs and stream true",
+            "title": "Top Logprobs"
+          },
+          "routing_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional routing hint",
+            "title": "Routing Key"
+          },
+          "prompt_cache_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional prompt-cache routing hint",
+            "title": "Prompt Cache Key"
+          },
+          "safety_identifier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Sensitive client identifier; validated and dropped without logging or forwarding",
+            "title": "Safety Identifier"
+          }
+        },
+        "required": [
+          "prompt",
+          "max_new_tokens"
+        ],
+        "title": "GenerateRequestModel",
         "type": "object"
       },
       "ScoreRequestModel": {
@@ -1906,14 +2890,15 @@
         ],
         "properties": {
           "query": {
-            "$ref": "#/$defs/ItemModel",
+            "$ref": "#/components/schemas/ItemModel",
             "description": "Query item to score against"
           },
           "items": {
             "description": "Items to score",
             "items": {
-              "$ref": "#/$defs/ItemModel"
+              "$ref": "#/components/schemas/ItemModel"
             },
+            "maxItems": 1000,
             "minItems": 1,
             "title": "Items",
             "type": "array"

@@ -13,6 +13,7 @@ import {
   getErrorCode,
   handleError,
   parseCapacityInfo,
+  parseExtractResult,
   parseGenerateResult,
   parseGpuParam,
 } from "../src/internal/parsing.js";
@@ -521,6 +522,42 @@ describe("Capacity info parsing", () => {
     const result = parseCapacityInfo(wireData, "l4");
     expect(result.workers).toHaveLength(2);
   });
+});
+
+describe("parseExtractResult", () => {
+  it("preserves structured data and stable item errors", () => {
+    const result = parseExtractResult({
+      id: "page-1",
+      entities: [],
+      data: { processedPages: 3 },
+      error: {
+        code: "INFERENCE_ERROR",
+        message: "Document export failed",
+      },
+    });
+
+    expect(result.data).toEqual({ processedPages: 3 });
+    expect(result.error).toEqual({
+      code: "INFERENCE_ERROR",
+      message: "Document export failed",
+    });
+  });
+
+  it.each(["not-an-error-object", { code: "INFERENCE_ERROR" }, { code: " ", message: "\t" }])(
+    "preserves malformed item failures",
+    (error) => {
+      const result = parseExtractResult({
+        id: "page-1",
+        entities: [],
+        error: error as never,
+      });
+
+      expect(result.error).toEqual({
+        code: "INTERNAL_ERROR",
+        message: "Malformed extraction item error",
+      });
+    },
+  );
 });
 
 describe("parseGenerateResult usage coercion (BUG 13c)", () => {

@@ -8,6 +8,24 @@
 {{- if gt (len $modesEnabled) 1 }}
   {{- fail (printf "gateway: multiple config delivery modes enabled (%v). Enable only one of: embeddedConfigs, configMap." $modesEnabled) }}
 {{- end }}
+{{- /* Telemetry identity and routing are control-plane-owned. Because
+     gateway.extraEnv is rendered after the canonical block, reject duplicate
+     names instead of relying on Kubernetes's last-entry-wins behavior. */}}
+{{- $reservedGatewayEnv := concat
+      (include "sie-cluster.otel.reservedEnvNames" . | fromJsonArray)
+      (list
+        "SIE_GATEWAY_CONFIGURED_GPUS"
+        "SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES"
+        "SIE_GATEWAY_GPU_ALIASES"
+        "SIE_GATEWAY_HEALTH_MODE"
+        "SIE_GATEWAY_MACHINE_PROFILES"
+        "SIE_GATEWAY_STATIC_QUEUE_POOLS") -}}
+{{- include "sie-cluster.env.assertNoReserved" (dict "path" "gateway.extraEnv" "entries" .Values.gateway.extraEnv "reserved" $reservedGatewayEnv) -}}
+{{- range $annotation := list "checksum/gpu-config" "checksum/otel-resource" -}}
+{{- if hasKey $.Values.gateway.podAnnotations $annotation -}}
+{{- fail (printf "gateway.podAnnotations must not override chart-owned annotation %s" $annotation) -}}
+{{- end -}}
+{{- end -}}
 {{- /* Validate: gateway needs SOME source of bundles/models. Since the image
      no longer bakes a seed, disabling sie-config without also enabling a
      static overlay would leave the gateway permanently empty and 404 every
@@ -60,7 +78,15 @@ metadata:
   labels:
     {{- include "sie-cluster.gateway.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.gateway.replicas }}
+  {{- $gatewayReplicas := int .Values.gateway.replicas }}
+  {{- if .Values.autoscaling.enabled }}
+  {{- with (lookup "apps/v1" "Deployment" (include "sie-cluster.namespace" .) (include "sie-cluster.gateway.serviceName" .)) }}
+  {{- $gatewayReplicas = int .spec.replicas }}
+  {{- end }}
+  {{- end }}
+  # Helm 0.6.20 owned this field. Preserve the live HPA count during an
+  # autoscaling-enabled upgrade instead of resetting it to the static floor.
+  replicas: {{ $gatewayReplicas }}
   selector:
     matchLabels:
       {{- include "sie-cluster.gateway.selectorLabels" . | nindent 6 }}
@@ -73,10 +99,12 @@ spec:
         {{- /* Render selectorLabels last so user-supplied podLabels cannot
                override the Deployment selector contract. */ -}}
         {{- include "sie-cluster.gateway.selectorLabels" . | nindent 8 }}
-      {{- with .Values.gateway.podAnnotations }}
       annotations:
+        {{- with .Values.gateway.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
+        checksum/gpu-config: {{ include (print $.Template.BasePath "/gpu-config.yaml") . | sha256sum | quote }}
+        checksum/otel-resource: {{ include "sie-cluster.otel.resourceChecksum" . | quote }}
     spec:
       {{- include "sie-cluster.imagePullSecrets" . | nindent 6 }}
       serviceAccountName: {{ include "sie-cluster.serviceAccountName" . }}
@@ -132,11 +160,6 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
-            {{- if .Values.serviceMonitor.enabled }}
-            - name: gateway-metrics
-              containerPort: 9090
-              protocol: TCP
-            {{- end }}
           env:
             # Kubernetes-based worker discovery
             - name: SIE_GATEWAY_KUBERNETES
@@ -148,7 +171,7 @@ spec:
             - name: SIE_GATEWAY_K8S_SERVICE
               value: {{ include "sie-cluster.worker.serviceName" . }}
             - name: SIE_MULTI_ROUTER
-              value: {{ gt (int .Values.gateway.replicas) 1 | quote }}
+              value: {{ or .Values.autoscaling.enabled (gt $gatewayReplicas 1) | quote }}
             {{- $defaultHealthMode := ternary "nats" "" (and .Values.nats.enabled .Values.workers.common.workerSidecar.enabled) }}
             {{- $explicitHealthMode := default "" .Values.gateway.healthMode }}
             {{- $healthMode := default $defaultHealthMode $explicitHealthMode }}
@@ -162,6 +185,11 @@ spec:
                 configMapKeyRef:
                   name: {{ include "sie-cluster.fullname" . }}-gpu-config
                   key: available-gpus
+            - name: SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "sie-cluster.fullname" . }}-gpu-config
+                  key: configured-physical-lanes
             - name: SIE_GATEWAY_GPU_ALIASES
               valueFrom:
                 configMapKeyRef:
@@ -197,12 +225,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.gateway.auth.tokenSecretName }}
                   key: {{ .Values.gateway.auth.tokenSecretKey }}
-            {{- end }}
-            {{- if .Values.serviceMonitor.enabled }}
-            # Dedicated metrics listener. Keeps the public 8080 Service auth-gated
-            # while Prometheus scrapes a ClusterIP-only Service without a bearer token.
-            - name: SIE_METRICS_PORT
-              value: "9090"
             {{- end }}
             {{- if .Values.nats.enabled }}
             - name: SIE_NATS_URL
@@ -272,8 +294,8 @@ spec:
             - name: SIE_GATEWAY_POLLING_WATCHER
               value: "true"
             {{- end }}
-            {{- if .Values.observability.tracing.enabled }}
-            {{- include "sie-cluster.tracing.env" (dict "root" . "serviceName" .Values.observability.tracing.serviceName.gateway) | nindent 12 }}
+            {{- if eq (include "sie-cluster.otel.signalsEnabled" .) "true" }}
+            {{- include "sie-cluster.otel.env" (dict "root" . "serviceName" .Values.observability.otel.serviceName.gateway "instanceSuffix" "gateway" "collectorReceiver" "gateway") | nindent 12 }}
             {{- end }}
             {{- with .Values.gateway.extraEnv }}
             # Operator-supplied env passthrough (parity with workers.common.extraEnv).

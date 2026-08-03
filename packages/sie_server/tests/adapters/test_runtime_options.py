@@ -33,11 +33,11 @@ class TestAdapterEncodeAcceptsOptions:
             "sie_server.adapters.colqwen2",
             "sie_server.adapters.nemo_colembed",
             "sie_server.adapters.clip",
-            "sie_server.adapters.siglip",
+            "sie_server.adapters.siglip.adapter",
             "sie_server.adapters.florence2",
             "sie_server.adapters.donut",
-            "sie_server.adapters.owlv2",
-            "sie_server.adapters.grounding_dino",
+            "sie_server.adapters.owlv2.adapter",
+            "sie_server.adapters.grounding_dino.adapter",
             "sie_server.adapters.pytorch_embedding",
         ]
 
@@ -177,6 +177,48 @@ class TestRuntimeOptionsConsumption:
             query_template="custom: {text}",
         )
         assert texts == ["custom: hello"]
+
+    @pytest.mark.parametrize(
+        ("request_instruction", "is_query", "options", "expected"),
+        [
+            (None, True, {"default_instruction": "catalog"}, "catalog"),
+            (None, True, {"instruction": "legacy"}, "legacy"),
+            ("request", True, {"default_instruction": "catalog", "instruction": "legacy"}, "request"),
+            (None, False, {"default_instruction": "catalog"}, None),
+        ],
+    )
+    def test_xlm_roberta_flash_resolves_default_instruction(
+        self,
+        request_instruction: str | None,
+        is_query: bool,
+        options: dict[str, str],
+        expected: str | None,
+    ) -> None:
+        """Request instruction wins, with catalog and legacy runtime fallbacks."""
+        from sie_server.adapters.xlm_roberta_flash import XLMRobertaFlashAdapter
+
+        adapter = XLMRobertaFlashAdapter("test-model")
+        adapter._model = MagicMock()
+        adapter._tokenizer = MagicMock()
+        items = [Item(text="hello")]
+
+        with patch(
+            "sie_server.adapters.xlm_roberta_flash.extract_texts",
+            side_effect=RuntimeError("stop after instruction resolution"),
+        ) as extract:
+            with pytest.raises(RuntimeError, match="stop after instruction resolution"):
+                adapter.encode(
+                    items,
+                    ["dense"],
+                    instruction=request_instruction,
+                    is_query=is_query,
+                    options={
+                        "query_template": "Instruct: {instruction}\\nQuery: {text}",
+                        **options,
+                    },
+                )
+
+        assert extract.call_args.args[1] == expected
 
     def test_resolve_embedding_options_falls_back_to_defaults(self) -> None:
         """resolve_embedding_options returns adapter defaults when no overrides given."""
@@ -467,7 +509,7 @@ class TestRuntimeOptionsWiringRegression:
     # ---- Group A sparse: flash adapters with _extract_texts only ----
 
     _SPARSE_FLASH_ADAPTERS: ClassVar[list[tuple[str, str]]] = [
-        ("splade_flash", "SPLADEFlashAdapter"),
+        ("splade_flash.adapter", "SPLADEFlashAdapter"),
         ("gte_sparse_flash", "GTESparseFlashAdapter"),
     ]
 
@@ -552,7 +594,7 @@ class TestRuntimeOptionsWiringRegression:
         ("qwen2_flash", "Qwen2FlashAdapter"),
         ("rope_flash", "RoPEFlashAdapter"),
         ("xlm_roberta_flash", "XLMRobertaFlashAdapter"),
-        ("splade_flash", "SPLADEFlashAdapter"),
+        ("splade_flash.adapter", "SPLADEFlashAdapter"),
         ("gte_sparse_flash", "GTESparseFlashAdapter"),
         ("pytorch_embedding", "PyTorchEmbeddingAdapter"),
         ("sglang.embedding", "SGLangEmbeddingAdapter"),
@@ -629,7 +671,7 @@ class TestScoreRuntimeOptions:
         ("bert_flash_cross_encoder", "BertFlashCrossEncoderAdapter"),
         ("jina_flash_cross_encoder", "JinaFlashCrossEncoderAdapter"),
         ("modernbert_flash_cross_encoder", "ModernBertFlashCrossEncoderAdapter"),
-        ("qwen2_flash_cross_encoder", "Qwen2FlashCrossEncoderAdapter"),
+        ("qwen2_flash_cross_encoder.adapter", "Qwen2FlashCrossEncoderAdapter"),
     ]
 
     @pytest.mark.parametrize(
@@ -653,7 +695,7 @@ class TestScoreRuntimeOptions:
         ("bert_flash_cross_encoder", "BertFlashCrossEncoderAdapter"),
         ("jina_flash_cross_encoder", "JinaFlashCrossEncoderAdapter"),
         ("modernbert_flash_cross_encoder", "ModernBertFlashCrossEncoderAdapter"),
-        ("qwen2_flash_cross_encoder", "Qwen2FlashCrossEncoderAdapter"),
+        ("qwen2_flash_cross_encoder.adapter", "Qwen2FlashCrossEncoderAdapter"),
     ]
 
     @pytest.mark.parametrize(
@@ -1193,7 +1235,7 @@ class TestExtractRuntimeOptions:
         """GroundingDINO adapter reads box_threshold and text_threshold from options."""
         import inspect
 
-        from sie_server.adapters.grounding_dino import GroundingDINOAdapter
+        from sie_server.adapters.grounding_dino.adapter import GroundingDINOAdapter
 
         source = inspect.getsource(GroundingDINOAdapter.extract)
         assert 'opts.get("box_threshold"' in source, (
@@ -1207,7 +1249,7 @@ class TestExtractRuntimeOptions:
         """OWLv2 adapter reads score_threshold and threshold from options."""
         import inspect
 
-        from sie_server.adapters.owlv2 import Owlv2Adapter
+        from sie_server.adapters.owlv2.adapter import Owlv2Adapter
 
         source = inspect.getsource(Owlv2Adapter.extract)
         assert 'opts.get("score_threshold"' in source, (

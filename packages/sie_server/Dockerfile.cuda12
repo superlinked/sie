@@ -7,6 +7,19 @@
 ARG BUNDLE=default
 ARG UV_VERSION=0.9.28
 
+# Build the internal Rust extension from checked-in source; it is not published
+# to PyPI.
+FROM ghcr.io/pyo3/maturin:v1.13.3 AS audio-prep-builder
+WORKDIR /io
+# The crate is a Cargo workspace member (#2339): its pins live in the root
+# Cargo.lock, and loading the workspace needs every member's manifest+sources.
+COPY Cargo.toml Cargo.lock ./
+COPY packages/sie_audio_prep/ packages/sie_audio_prep/
+COPY packages/sie_gateway/ packages/sie_gateway/
+COPY packages/sie_server_sidecar/ packages/sie_server_sidecar/
+COPY packages/sie_telemetry/ packages/sie_telemetry/
+RUN maturin build --release --locked --out /dist --manifest-path packages/sie_audio_prep/Cargo.toml
+
 # =============================================================================
 # Dependency image: uv and standalone Python 3.12
 # =============================================================================
@@ -43,6 +56,7 @@ WORKDIR /app
 
 COPY packages/sie_sdk/pyproject.toml /tmp/sie_sdk/pyproject.toml
 COPY packages/sie_server/pyproject.toml ./pyproject.toml
+COPY --from=audio-prep-builder /dist /tmp/audio-prep-dist
 
 # Stubs for editable metadata generation — bundles/ and models/ are referenced
 # by force-include in pyproject.toml and must exist; real contents are copied
@@ -55,6 +69,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     python3.12 -m venv .venv \
     && .venv/bin/pip install --upgrade pip \
     && .venv/bin/pip install \
+        /tmp/audio-prep-dist/*.whl \
         -e "/tmp/sie_sdk[storage]" \
         -e ".[gpu-metrics]"
 
@@ -93,7 +108,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Sanity-check shared venv imports — catches breakage introduced by the
 # shared-deps resolver. flash-attn/sglang need a real GPU and are
 # intentionally not imported here.
-RUN .venv/bin/python -c "import torch; print(torch.__version__)"
+RUN .venv/bin/python -c "import sie_audio_prep, torch; print(torch.__version__)"
 
 # Register bundle-libs on sys.path via a .pth file executed by site.py at
 # interpreter startup. `sys.path.insert(0, ...)` puts bundle-libs at
@@ -156,7 +171,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p /app/bundle-libs; \
     if [ -s /tmp/bundle-requirements.txt ]; then \
         case "$BUNDLE" in \
-        sglang | sglang-embedding) \
+        sglang | sglang-embedding | sglang-vision-extract) \
             .venv/bin/pip install \
                 --target=/app/bundle-libs \
                 --no-compile \
@@ -199,6 +214,7 @@ FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04 AS runtime-sglang
 ENV CUDA_HOME=/usr/local/cuda \
     LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
 FROM runtime-sglang AS runtime-sglang-embedding
+FROM runtime-sglang AS runtime-sglang-vision-extract
 # NOTE: the gemma bundle (CUDA 13 / sglang 0.5.13 / torch 2.11 cu130) is built by
 # the separate ``cuda13`` platform — packages/sie_server/Dockerfile.cuda13 — so
 # this CUDA-12 image never produces a (mislabelled) CUDA-13 ``cuda12-gemma``

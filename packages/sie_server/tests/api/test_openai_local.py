@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sie_server.api.openai_local import router
+from sie_server.api.openai_local import _validate_mlx_seed, router
 
 
 def _client() -> TestClient:
@@ -69,6 +70,44 @@ def test_chat_rejects_invalid_max_tokens() -> None:
         assert r.json()["detail"]["param"] == "max_tokens"
 
 
+@pytest.mark.parametrize(
+    ("bad", "message"),
+    [
+        (True, "'seed' must be an integer"),
+        ("1", "'seed' must be an integer"),
+        (1.5, "'seed' must be an integer"),
+        (-(1 << 63) - 1, "'seed' is outside the supported integer range"),
+        (1 << 63, "'seed' is outside the supported integer range"),
+    ],
+)
+def test_chat_rejects_invalid_seed(bad: object, message: str) -> None:
+    msgs = [{"role": "user", "content": "hi"}]
+    r = _client().post("/v1/chat/completions", json={"model": "m", "messages": msgs, "seed": bad})
+    assert r.status_code == 400, bad
+    assert r.json()["detail"] == {
+        "code": "INVALID_INPUT",
+        "message": message,
+        "param": "seed",
+    }
+
+
+@pytest.mark.parametrize(
+    ("seed", "expected"),
+    [
+        (-(1 << 63), 1 << 63),
+        (-1, (1 << 64) - 1),
+        (0, 0),
+        ((1 << 63) - 1, (1 << 63) - 1),
+    ],
+)
+def test_validate_mlx_seed_preserves_signed_bit_pattern(seed: int, expected: int) -> None:
+    assert _validate_mlx_seed(seed) == expected
+
+
+def test_validate_mlx_seed_preserves_absent_value() -> None:
+    assert _validate_mlx_seed(None) is None
+
+
 # -- /v1/rerank validation ----------------------------------------------------
 
 
@@ -84,8 +123,18 @@ def test_rerank_requires_query() -> None:
     assert r.json()["detail"]["param"] == "query"
 
 
+def test_rerank_rejects_blank_model_and_query() -> None:
+    for body, param in [
+        ({"model": "   ", "query": "q", "documents": ["a"]}, "model"),
+        ({"model": "m", "query": "   ", "documents": ["a"]}, "query"),
+    ]:
+        r = _client().post("/v1/rerank", json=body)
+        assert r.status_code == 400
+        assert r.json()["detail"]["param"] == param
+
+
 def test_rerank_requires_nonempty_string_documents() -> None:
-    for docs in ([], "not-a-list", [1, 2], ["ok", 3]):
+    for docs in ([], "not-a-list", [1, 2], ["ok", 3], ["   "]):
         r = _client().post("/v1/rerank", json={"model": "m", "query": "q", "documents": docs})
         assert r.status_code == 400, docs
         assert r.json()["detail"]["param"] == "documents"
@@ -111,3 +160,9 @@ def test_rerank_rejects_non_bool_return_documents() -> None:
     r = _client().post("/v1/rerank", json={"model": "m", "query": "q", "documents": ["a"], "return_documents": "true"})
     assert r.status_code == 400
     assert r.json()["detail"]["param"] == "return_documents"
+
+
+def test_rerank_rejects_unknown_fields() -> None:
+    r = _client().post("/v1/rerank", json={"model": "m", "query": "q", "documents": ["a"], "priority": 1})
+    assert r.status_code == 400
+    assert r.json()["detail"]["param"] == "priority"

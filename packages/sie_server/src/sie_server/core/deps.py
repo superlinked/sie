@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 from sie_sdk.bundle_utils import match_bundle_models
+
+from sie_server.bundle_requirements import resolve_bundle_requirements
 
 logger = logging.getLogger(__name__)
 
@@ -69,14 +70,6 @@ def discover_model_configs(models_dir: Path) -> dict[str, Path]:
 # =============================================================================
 # Bundle Dependency Resolution
 # =============================================================================
-
-# CUDA-only package names (normalized) - these are excluded when building CPU images
-_CUDA_ONLY_PACKAGES = frozenset(
-    {
-        "flash-attn",
-        "xformers",
-    }
-)
 
 
 @dataclass
@@ -144,38 +137,7 @@ def collect_bundle_deps(
     bundle = load_bundle(bundle_path)
     bundle_deps = bundle.get("deps", {})
 
-    # Build requirements from bundle deps
-    requirements: list[str] = []
-    for pkg, constraint in bundle_deps.items():
-        normalized = re.sub(r"[-_.]+", "-", pkg.lower())
-
-        # Skip CUDA-only packages when building CPU images
-        if exclude_cuda and normalized in _CUDA_ONLY_PACKAGES:
-            logger.debug("Excluding CUDA-only package: %s", pkg)
-            continue
-
-        # Handle dict-style deps (e.g., flash-attn with url+marker, or sglang with version+marker)
-        if isinstance(constraint, dict):
-            url = constraint.get("url", "")
-            marker = constraint.get("marker", "")
-            version = constraint.get("version", "")
-            if url:
-                dep_str = f"{pkg} @ {url}"
-                if marker:
-                    dep_str += f" ; {marker}"
-                requirements.append(dep_str)
-            elif version:
-                dep_str = f"{pkg}{version}"
-                if marker:
-                    dep_str += f" ; {marker}"
-                requirements.append(dep_str)
-            continue
-
-        # Simple version constraint
-        if constraint:
-            requirements.append(f"{pkg}{constraint}")
-        else:
-            requirements.append(pkg)
+    requirements = resolve_bundle_requirements(bundle_deps, exclude_cuda=exclude_cuda)
 
     # Discover model names that match this bundle's adapters (for the result)
     model_names = match_bundle_models(bundle_path, models_dir, pool_name=pool_name)

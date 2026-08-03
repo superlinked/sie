@@ -72,6 +72,7 @@ class TestSync504Retry:
 
             assert result["dense"].shape == (4,)
             assert mock_client.return_value.post.call_count == 2
+            assert client.last_retry_count == 1
             client.close()
 
     def test_504_not_retried_when_wait_for_capacity_false(self) -> None:

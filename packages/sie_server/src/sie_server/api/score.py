@@ -9,22 +9,20 @@ from sie_server.api.helpers import (
     ModelStateChecker,
     RequestParser,
     ResponseBuilder,
-    extract_request_context,
     oom_retry_after_from_registry,
 )
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.core.inference_output import ScoreOutput
-from sie_server.core.score_cost import build_score_prepared_items
-from sie_server.core.timing import RequestTiming
+from sie_server.core.score_cost import build_score_prepared_items_timed
 from sie_server.core.worker import QueueFullError, WorkerResult
-from sie_server.observability.metrics import record_request
 from sie_server.observability.tracing import tracer
+from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 from sie_server.types.inputs import Item
 from sie_server.types.openapi import ScoreResponseModel
 from sie_server.types.requests import ScoreRequest
-from sie_server.types.responses import ErrorCode, ScoreEntry, ScoreResponse
+from sie_server.types.responses import ErrorCode, ScoreEntry, ScoreResponse, ScoreUsage
 
 if TYPE_CHECKING:
     from sie_server.core.registry import ModelRegistry
@@ -39,6 +37,7 @@ def _build_response(
     query_id: str | None,
     items: list[Any],
     scores: list[float],
+    usage: ScoreUsage | None = None,
 ) -> ScoreResponse:
     """Build ScoreResponse from adapter scores.
 
@@ -64,11 +63,24 @@ def _build_response(
             )
         )
 
-    return ScoreResponse(
+    response = ScoreResponse(
         model=model,
         query_id=query_id,
         scores=entries,
     )
+    if usage is not None:
+        response["usage"] = usage
+    return response
+
+
+def score_usage_from_output(output: ScoreOutput) -> ScoreUsage | None:
+    """Return exact post-tokenization score usage, never a character estimate."""
+    if output.input_token_counts is None:
+        return None
+    usage = ScoreUsage(input_tokens=sum(output.input_token_counts))
+    if output.input_image_counts is not None:
+        usage["images"] = sum(output.input_image_counts)
+    return usage
 
 
 async def _score_via_worker(
@@ -96,13 +108,9 @@ async def _score_via_worker(
     Returns:
         WorkerResult containing score results and timing information.
     """
-    # Create timing tracker for this request
-    timing = RequestTiming()
-
-    # Create PreparedItems for batching.
-    timing.start_tokenization()  # Using tokenization timing for prep phase
-    prepared_items = build_score_prepared_items(query, items)
-    timing.end_tokenization()
+    # Build score PreparedItems + tokenization timing via the shared helper
+    # (same source of truth as the sidecar IPC path in queue_executor).
+    prepared_items, timing = build_score_prepared_items_timed(query, items)
 
     # Start worker if not running
     worker = await registry.start_worker(model)
@@ -199,9 +207,6 @@ async def score(
         registry = http_request.app.state.registry
         device = registry.device
 
-        # Extract request context for structured logging
-        ctx = extract_request_context(http_request, model, registry)
-
         # Validate model state using helper (split to check capability before loading)
         model_checker = ModelStateChecker(registry, model, span)
         model_checker.check_exists()
@@ -227,6 +232,7 @@ async def score(
         # Resolve profile and merge runtime options (outside inference try/except
         # so ValueError from invalid profiles returns 400, not 500)
         instruction = request.instruction
+        profile_name = str(request.options.get("profile") or "default") if request.options else "default"
         options = resolve_runtime_options(config, request.options, span)
 
         # Request-level instruction takes precedence; fall back to profile instruction
@@ -241,8 +247,9 @@ async def score(
             model,
             "score",
             span,
-            ctx=ctx,
             oom_retry_after_s=oom_retry_after_from_registry(registry),
+            profile=profile_name,
+            item_count=len(items),
         )
         try:
             worker_result = await _score_via_worker(
@@ -266,18 +273,29 @@ async def score(
 
         # Build response
         query_id = query.id
-        response = _build_response(model, query_id, items, scores)
+        response = _build_response(model, query_id, items, scores, score_usage_from_output(score_output))
 
-        # Record successful request
-        record_request(
-            model=model,
-            endpoint="score",
-            status="success",
-            timing=timing,
-            request_id=ctx.request_id,
-            api_key=ctx.api_key,
-            queue_depth=ctx.queue_depth,
-        )
+        if worker_telemetry_enabled():
+            units = None
+            token_counts = score_output.input_token_counts
+            if (
+                isinstance(token_counts, list)
+                and len(token_counts) == len(items)
+                and all(isinstance(count, int) and not isinstance(count, bool) for count in token_counts)
+            ):
+                units = {"input_tokens": sum(token_counts)}
+            worker_telemetry().item_completed(
+                operation="score",
+                outcome="success",
+                model=model,
+                profile=profile_name,
+                duration_s=timing.total_ms / 1000.0,
+                item_count=len(items),
+                tokenization_s=timing.tokenization_ms / 1000.0,
+                inference_s=timing.inference_ms / 1000.0,
+                postprocessing_s=timing.postprocessing_ms / 1000.0,
+                units=units,
+            )
 
         # Build response headers and return
         headers = ResponseBuilder.build_headers(timing)

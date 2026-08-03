@@ -2,22 +2,27 @@ FROM rust:1.97.0-slim-bookworm AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
+# The build runs at the workspace root (#2339): the root Cargo.toml/Cargo.lock
+# plus every member's manifest+sources must be present for cargo to load the
+# workspace, and the binary is selected with `-p sie-gateway`.
 FROM chef AS planner
-COPY packages/sie_gateway/Cargo.toml packages/sie_gateway/Cargo.lock ./
-COPY packages/sie_gateway/src/ src/
+COPY Cargo.toml Cargo.lock ./
+COPY packages/sie_audio_prep/ packages/sie_audio_prep/
+COPY packages/sie_gateway/ packages/sie_gateway/
+COPY packages/sie_server_sidecar/ packages/sie_server_sidecar/
+COPY packages/sie_telemetry/ packages/sie_telemetry/
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --features cloud-storage --recipe-path recipe.json
-COPY packages/sie_gateway/Cargo.toml packages/sie_gateway/Cargo.lock ./
-COPY packages/sie_gateway/src/ src/
-# Vendored Redoc bundle for the `/docs` page: `openapi.rs` embeds it via
-# `include_str!("../assets/redoc.standalone.js")`, so it must be present for the
-# final compile. (The chef cook step above uses dummy sources and doesn't need it.)
-COPY packages/sie_gateway/assets/ assets/
-RUN cargo build --release --features cloud-storage
+RUN cargo chef cook --release --package sie-gateway --features sie-gateway/cloud-storage --recipe-path recipe.json
+COPY Cargo.toml Cargo.lock ./
+COPY packages/sie_audio_prep/ packages/sie_audio_prep/
+COPY packages/sie_gateway/ packages/sie_gateway/
+COPY packages/sie_server_sidecar/ packages/sie_server_sidecar/
+COPY packages/sie_telemetry/ packages/sie_telemetry/
+RUN cargo build --release --locked --package sie-gateway --features sie-gateway/cloud-storage
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /app/target/release/sie-gateway /sie-gateway

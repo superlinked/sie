@@ -1,9 +1,10 @@
 """Tests for write_text and write_text_if_match in storage backends."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
-from sie_sdk.storage import LocalBackend, StorageBackend
+from sie_sdk.storage import AzureBlobBackend, GCSBackend, LocalBackend, S3Backend, StorageBackend
 
 
 class TestLocalBackendWriteText:
@@ -38,6 +39,55 @@ class TestLocalBackendWriteText:
 
         assert target.exists()
         assert target.read_text() == "nested content"
+
+
+class TestDeleteFile:
+    """Deletion is provider-native and idempotent at the backend contract."""
+
+    def test_local_delete_is_idempotent(self, tmp_path: Path) -> None:
+        backend = LocalBackend()
+        target = tmp_path / "model.yaml"
+        target.write_text("sie_id: test/model")
+
+        backend.delete_file(str(target))
+        backend.delete_file(str(target))
+
+        assert not target.exists()
+
+    def test_s3_delete_targets_exact_object(self) -> None:
+        backend = S3Backend()
+        backend._client = MagicMock()
+
+        backend.delete_file("s3://catalog/models/test__model.yaml")
+
+        backend._client.delete_object.assert_called_once_with(
+            Bucket="catalog",
+            Key="models/test__model.yaml",
+        )
+
+    def test_gcs_delete_targets_exact_object(self) -> None:
+        backend = GCSBackend()
+        backend._client = MagicMock()
+
+        backend.delete_file("gs://catalog/models/test__model.yaml")
+
+        bucket = backend._client.bucket.return_value
+        bucket.blob.assert_called_once_with("models/test__model.yaml")
+        bucket.blob.return_value.delete.assert_called_once_with()
+
+    def test_azure_delete_targets_exact_blob(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        backend = AzureBlobBackend()
+        container = MagicMock()
+        monkeypatch.setattr(
+            backend,
+            "_get_container_client",
+            lambda _path: (container, "catalog", "account", "models/test__model.yaml"),
+        )
+
+        backend.delete_file("abfss://catalog@account.dfs.core.windows.net/models/test__model.yaml")
+
+        container.get_blob_client.assert_called_once_with("models/test__model.yaml")
+        container.get_blob_client.return_value.delete_blob.assert_called_once_with()
 
 
 class TestLocalBackendWriteTextIfMatch:
@@ -140,3 +190,6 @@ class TestStorageBackendWriteTextIfMatch:
         stub = StubBackend()
         with pytest.raises(NotImplementedError, match="StubBackend must override write_text_if_match"):
             stub.write_text_if_match("/some/path", "new", "old")
+
+        with pytest.raises(NotImplementedError, match="StubBackend does not support file deletion"):
+            stub.delete_file("/some/path")

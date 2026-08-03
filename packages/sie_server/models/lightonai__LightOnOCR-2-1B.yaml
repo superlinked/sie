@@ -1,5 +1,6 @@
 sie_id: lightonai/LightOnOCR-2-1B
 hf_id: lightonai/LightOnOCR-2-1B
+hf_revision: c97bd377f04481830395218fa8951df9deaba756
 inputs:
   text: false
   image: true
@@ -9,13 +10,30 @@ tasks:
   encode: null
   score: null
   extract: {}
+max_sequence_length: 16384
 profiles:
+  transformers:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.lighton_ocr.adapter:LightOnOCRAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        max_new_tokens: 4096
+        num_beams: 1
   default:
     max_batch_tokens: 16384
     compute_precision: bfloat16
-    adapter_path: sie_server.adapters.lighton_ocr:LightOnOCRAdapter
+    adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
     adapter_options:
-      loadtime: {}
+      loadtime:
+        mem_fraction_static: 0.85
+        served_model_name: lightonai/LightOnOCR-2-1B
+        max_concurrent_requests: 16
+        meter_pages: true
+        system_prompt: You are an OCR engine. Return the markdown representation of the document.
+        extra_env:
+          SIE_SGLANG_LIGHTON_OCR_COMPAT: "1"
       runtime:
         max_new_tokens: 4096
         num_beams: 1

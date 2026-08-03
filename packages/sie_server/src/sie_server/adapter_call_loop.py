@@ -78,6 +78,7 @@ fails.
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from opentelemetry import propagate, trace
@@ -94,6 +95,7 @@ from sie_server.ipc_types import (
     RunBatchItem,
     RunBatchRequest,
 )
+from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 
 if TYPE_CHECKING:
     from sie_server.queue_executor import QueueExecutor
@@ -109,6 +111,55 @@ RUN_BATCH_EMPTY = "run_batch_empty"
 RUN_BATCH_MIXED_OP = "run_batch_mixed_op"
 RUN_BATCH_UNKNOWN_OP = "run_batch_unknown_op"
 RUN_BATCH_INVALID_ITEM = "run_batch_invalid_item"
+
+
+def _batch_profile(req: RunBatchRequest) -> str:
+    """Return the release profile for a homogeneous batch, else ``other``."""
+    profiles: set[str] = set()
+    for item in req.items:
+        payload = item.encode or item.score or item.extract
+        if payload is not None:
+            profiles.add(str(payload.profile_id or "default"))
+    return profiles.pop() if len(profiles) == 1 else "other"
+
+
+def _record_run_batch_metrics(req: RunBatchRequest, result: BatchOutcome, duration_s: float) -> None:
+    """Emit one engine completion event per outcome, never sidecar queue/batch."""
+    if not worker_telemetry_enabled():
+        return
+    operations = {item.op for item in req.items}
+    operation = operations.pop() if len(operations) == 1 else "other"
+    profile = _batch_profile(req)
+    for outcome in result.outcomes:
+        managed_outcome = (
+            "success"
+            if outcome.disposition == "publish_and_ack"
+            else "retry"
+            if outcome.disposition == "nak_retry"
+            else "error"
+        )
+        units = None
+        if managed_outcome == "success" and outcome.units is not None:
+            units = {
+                key: value
+                for key, value in (
+                    ("input_tokens", outcome.units.input_tokens),
+                    ("pages", outcome.units.pages),
+                    ("images", outcome.units.images),
+                )
+                if value is not None
+            }
+        worker_telemetry().item_completed(
+            operation=operation,
+            outcome=managed_outcome,
+            model=req.model_id,
+            profile=profile,
+            duration_s=duration_s,
+            tokenization_s=(outcome.tokenization_ms / 1000.0 if outcome.tokenization_ms is not None else None),
+            inference_s=(outcome.inference_ms / 1000.0 if outcome.inference_ms is not None else None),
+            postprocessing_s=(outcome.postprocessing_ms / 1000.0 if outcome.postprocessing_ms is not None else None),
+            units=units,
+        )
 
 
 def _merge_lora_into_options(
@@ -183,6 +234,8 @@ async def handle_run_batch(
     so the Rust publisher path is identical regardless of which RPC
     produced the result (``process_*_batch`` or ``RunBatch``).
     """
+    telemetry_enabled = worker_telemetry_enabled()
+    started = time.perf_counter() if telemetry_enabled else None
     if not req.items:
         logger.warning(
             "run_batch received empty items list (model=%s, batch_id=%d, lora=%r)",
@@ -204,7 +257,10 @@ async def handle_run_batch(
             req.batch_id,
             sorted({i.op for i in req.items}),
         )
-        return _reject_all(req, RUN_BATCH_MIXED_OP, "mixed-op run_batch is not supported")
+        result = _reject_all(req, RUN_BATCH_MIXED_OP, "mixed-op run_batch is not supported")
+        if started is not None:
+            _record_run_batch_metrics(req, result, time.perf_counter() - started)
+        return result
 
     # W3C Trace Context propagation (mirrors the streaming path in
     # ``processors/streaming.py``). The gateway serialises its span into
@@ -229,19 +285,23 @@ async def handle_run_batch(
         },
     ):
         if op == "encode":
-            return await _dispatch_encode(executor, req)
-        if op == "score":
-            return await _dispatch_score(executor, req)
-        if op == "extract":
-            return await _dispatch_extract(executor, req)
+            result = await _dispatch_encode(executor, req)
+        elif op == "score":
+            result = await _dispatch_score(executor, req)
+        elif op == "extract":
+            result = await _dispatch_extract(executor, req)
+        else:
+            logger.error(
+                "run_batch got unknown op=%r (model=%s, batch_id=%d)",
+                op,
+                req.model_id,
+                req.batch_id,
+            )
+            result = _reject_all(req, RUN_BATCH_UNKNOWN_OP, f"unknown op {op!r}")
 
-        logger.error(
-            "run_batch got unknown op=%r (model=%s, batch_id=%d)",
-            op,
-            req.model_id,
-            req.batch_id,
-        )
-        return _reject_all(req, RUN_BATCH_UNKNOWN_OP, f"unknown op {op!r}")
+        if started is not None:
+            _record_run_batch_metrics(req, result, time.perf_counter() - started)
+        return result
 
 
 def _extract_batch_trace_context(
@@ -343,9 +403,16 @@ async def _dispatch_encode(
     if not items:
         return BatchOutcome(outcomes=invalid)
 
-    inner = ProcessEncodeBatchRequest(model_id=req.model_id, items=items)
+    inner = ProcessEncodeBatchRequest(
+        model_id=req.model_id,
+        items=items,
+        accepts_batched_f16_multivectors=req.accepts_batched_f16_multivectors,
+    )
     outcome = await executor.process_encode_batch(inner)
-    return BatchOutcome(outcomes=[*invalid, *outcome.outcomes])
+    return BatchOutcome(
+        outcomes=[*invalid, *outcome.outcomes],
+        batched_f16_multivectors=outcome.batched_f16_multivectors,
+    )
 
 
 async def _dispatch_score(

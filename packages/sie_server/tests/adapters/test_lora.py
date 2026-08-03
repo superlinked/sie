@@ -234,6 +234,7 @@ class TestPEFTLoRAMixin:
                     base_model,
                     "org/my-lora",
                     adapter_name=peft_adapter_name,
+                    revision=None,
                 )
                 assert peft_adapter_name.startswith("sie_lora_")
                 assert "/" not in peft_adapter_name
@@ -262,7 +263,9 @@ class TestPEFTLoRAMixin:
                 adapter.load_lora("org/lora2")
 
                 second_adapter_name = adapter._lora_adapter_names["org/lora2"]
-                mock_peft_model.load_adapter.assert_called_once_with("org/lora2", adapter_name=second_adapter_name)
+                mock_peft_model.load_adapter.assert_called_once_with(
+                    "org/lora2", adapter_name=second_adapter_name, revision=None
+                )
                 assert "org/lora1" in adapter._loaded_loras
                 assert "org/lora2" in adapter._loaded_loras
                 assert adapter._lora_adapter_names["org/lora1"] != second_adapter_name
@@ -418,9 +421,10 @@ class TestModelLoaderProfileLoras:
 
         config = MagicMock()
         config.profiles = {}
+        config.lora_revisions.return_value = {}
 
         result = loader._collect_profile_loras(config)
-        assert result == set()
+        assert result == {}
 
     def test_collect_profile_loras_with_loras(self) -> None:
         """Test collecting LoRAs from profiles."""
@@ -448,9 +452,10 @@ class TestModelLoaderProfileLoras:
             "medical": profile2,
             "default": profile3,
         }
+        config.lora_revisions.return_value = {}
 
         result = loader._collect_profile_loras(config)
-        assert result == {"org/lora1", "org/lora2"}
+        assert result == {"org/lora1": None, "org/lora2": None}
 
     def test_collect_profile_loras_deduplicates(self) -> None:
         """Test that duplicate LoRAs are deduplicated."""
@@ -474,9 +479,10 @@ class TestModelLoaderProfileLoras:
             "legal": profile1,
             "medical": profile2,
         }
+        config.lora_revisions.return_value = {}
 
         result = loader._collect_profile_loras(config)
-        assert result == {"org/shared-lora"}
+        assert result == {"org/shared-lora": None}
 
     @staticmethod
     def _make_loader() -> Any:
@@ -495,36 +501,49 @@ class TestModelLoaderProfileLoras:
         profile.adapter_options.loadtime = loadtime or {}
         return profile
 
+    @staticmethod
+    def _config(profiles: dict, revisions: dict | None = None) -> MagicMock:
+        config = MagicMock()
+        config.profiles = profiles
+        config.lora_revisions.return_value = revisions or {}
+        return config
+
     def test_collect_canonical_loadtime_lora_paths_list(self) -> None:
         """Canonical key: adapter_options.loadtime["lora_paths"] as a list of paths."""
         loader = self._make_loader()
-        config = MagicMock()
-        config.profiles = {
-            "byo": self._profile(loadtime={"lora_paths": ["org/lora-a", "org/lora-b"]}),
-        }
+        config = self._config({"byo": self._profile(loadtime={"lora_paths": ["org/lora-a", "org/lora-b"]})})
 
-        assert loader._collect_profile_loras(config) == {"org/lora-a", "org/lora-b"}
+        assert loader._collect_profile_loras(config) == {"org/lora-a": None, "org/lora-b": None}
 
     def test_collect_canonical_loadtime_lora_paths_dict(self) -> None:
         """The sglang dict shape (served-name -> path) contributes its paths."""
         loader = self._make_loader()
-        config = MagicMock()
-        config.profiles = {
-            "byo": self._profile(loadtime={"lora_paths": {"banking": "org/lora-a"}}),
-        }
+        config = self._config({"byo": self._profile(loadtime={"lora_paths": {"banking": "org/lora-a"}})})
 
-        assert loader._collect_profile_loras(config) == {"org/lora-a"}
+        assert loader._collect_profile_loras(config) == {"org/lora-a": None}
+
+    def test_collect_pinned_dict_entry_surfaces_revision(self) -> None:
+        """A pinned {id, revision} dict-form value yields (id -> revision) (#2113)."""
+        loader = self._make_loader()
+        sha = "a" * 40
+        config = self._config(
+            {"byo": self._profile(loadtime={"lora_paths": {"banking": {"id": "org/lora-a", "revision": sha}}})},
+            revisions={"org/lora-a": sha},
+        )
+
+        assert loader._collect_profile_loras(config) == {"org/lora-a": sha}
 
     def test_collect_canonical_and_legacy_alias_union(self) -> None:
         """Canonical loadtime.lora_paths and the deprecated runtime.lora_id merge."""
         loader = self._make_loader()
-        config = MagicMock()
-        config.profiles = {
-            "new-style": self._profile(loadtime={"lora_paths": ["org/lora-new"]}),
-            "legacy": self._profile(runtime={"lora_id": "org/lora-legacy"}),
-        }
+        config = self._config(
+            {
+                "new-style": self._profile(loadtime={"lora_paths": ["org/lora-new"]}),
+                "legacy": self._profile(runtime={"lora_id": "org/lora-legacy"}),
+            }
+        )
 
-        assert loader._collect_profile_loras(config) == {"org/lora-new", "org/lora-legacy"}
+        assert loader._collect_profile_loras(config) == {"org/lora-new": None, "org/lora-legacy": None}
 
     def test_include_loadtime_paths_false_skips_canonical_only(self) -> None:
         """Engine-owned adapters (sglang) must not double-load loadtime.lora_paths.
@@ -534,27 +553,29 @@ class TestModelLoaderProfileLoras:
         only the legacy runtime.lora_id survives collection for it.
         """
         loader = self._make_loader()
-        config = MagicMock()
-        config.profiles = {
-            "engine-owned": self._profile(
-                runtime={"lora_id": "org/lora-legacy"},
-                loadtime={"lora_paths": ["org/lora-engine"]},
-            ),
-        }
+        config = self._config(
+            {
+                "engine-owned": self._profile(
+                    runtime={"lora_id": "org/lora-legacy"},
+                    loadtime={"lora_paths": ["org/lora-engine"]},
+                ),
+            }
+        )
 
         result = loader._collect_profile_loras(config, include_loadtime_paths=False)
-        assert result == {"org/lora-legacy"}
+        assert result == {"org/lora-legacy": None}
 
     def test_collect_ignores_empty_lora_paths_entries(self) -> None:
         """Empty entries and non-list/dict shapes are skipped, not crashed on."""
         loader = self._make_loader()
-        config = MagicMock()
-        config.profiles = {
-            "empties": self._profile(loadtime={"lora_paths": ["", None]}),
-            "scalar-shape": self._profile(loadtime={"lora_paths": "org/not-a-list"}),
-        }
+        config = self._config(
+            {
+                "empties": self._profile(loadtime={"lora_paths": ["", None]}),
+                "scalar-shape": self._profile(loadtime={"lora_paths": "org/not-a-list"}),
+            }
+        )
 
-        assert loader._collect_profile_loras(config) == set()
+        assert loader._collect_profile_loras(config) == {}
 
 
 # =============================================================================
@@ -733,7 +754,7 @@ class TestMixinTargetModulesValidation:
 
             adapter.load_lora("org/matching-lora")
 
-            peft.PeftConfig.from_pretrained.assert_called_once_with("org/matching-lora")
+            peft.PeftConfig.from_pretrained.assert_called_once_with("org/matching-lora", revision=None)
             peft.PeftModel.from_pretrained.assert_called_once()
             assert "org/matching-lora" in adapter._loaded_loras
 
@@ -763,3 +784,86 @@ class TestMixinTargetModulesValidation:
 
             peft.PeftConfig.from_pretrained.assert_not_called()
             peft.PeftModel.from_pretrained.assert_called_once()
+
+
+# =============================================================================
+# Pinned-revision serving tests (#2113)
+# =============================================================================
+
+
+class TestPinnedLoraServing:
+    """Pins are honored on the hot-reload preload path and rejected elsewhere."""
+
+    SHA = "a" * 40
+
+    def _pinned_config(self) -> Any:
+        from sie_server.config.model import (
+            AdapterOptions,
+            EmbeddingDim,
+            EncodeTask,
+            ModelConfig,
+            ProfileConfig,
+            Tasks,
+        )
+
+        return ModelConfig(
+            sie_id="t/pinned",
+            hf_id="org/base",
+            tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=8))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="mod:Cls",
+                    max_batch_tokens=8,
+                    adapter_options=AdapterOptions(
+                        loadtime={"lora_paths": {"bank": {"id": "acme/l", "revision": self.SHA}}}
+                    ),
+                )
+            },
+        )
+
+    @staticmethod
+    def _finish_load_adapter(lora_cap: Any) -> MagicMock:
+        adapter = MagicMock()
+        adapter.get_postprocessors.return_value = None
+        adapter.get_preprocessor.return_value = None
+        adapter.memory_footprint.return_value = 0
+        adapter.lora_capability.return_value = lora_cap
+        return adapter
+
+    @staticmethod
+    def _loader() -> Any:
+        from sie_server.core.model_loader import ModelLoader
+
+        return ModelLoader(
+            preprocessor_registry=MagicMock(),
+            postprocessor_registry=MagicMock(),
+            all_configs={},
+        )
+
+    def test_hot_reload_preload_passes_the_pinned_revision(self) -> None:
+        lora_cap = MagicMock()
+        lora_cap.supports_hot_lora_reload.return_value = True
+        lora_cap.load_lora.return_value = 0
+        adapter = self._finish_load_adapter(lora_cap)
+
+        loaded = self._loader()._finish_load("t/pinned", "cpu", adapter, self._pinned_config())
+
+        lora_cap.load_lora.assert_called_once_with("acme/l", revision=self.SHA)
+        assert "acme/l" in loaded.loras
+
+    def test_engine_owned_adapter_rejects_a_pin_loudly(self) -> None:
+        """Sglang consumes bare ids at engine launch — a pin it cannot apply must
+        fail the load, not silently resolve the default branch (#2113).
+        """
+        lora_cap = MagicMock()
+        lora_cap.supports_hot_lora_reload.return_value = False
+        adapter = self._finish_load_adapter(lora_cap)
+
+        with pytest.raises(ValueError, match="cannot honor a pin"):
+            self._loader()._finish_load("t/pinned", "cpu", adapter, self._pinned_config())
+
+    def test_lora_less_adapter_rejects_a_pin_loudly(self) -> None:
+        adapter = self._finish_load_adapter(None)
+
+        with pytest.raises(ValueError, match="cannot honor a pin"):
+            self._loader()._finish_load("t/pinned", "cpu", adapter, self._pinned_config())

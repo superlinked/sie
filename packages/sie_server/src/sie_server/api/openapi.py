@@ -9,7 +9,13 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
-from sie_server.types.openapi import EncodeRequestModel, ExtractRequestModel, ScoreRequestModel
+from sie_server.types.openapi import (
+    EncodeRequestModel,
+    ExtractRequestModel,
+    GenerateChunk,
+    GenerateRequestModel,
+    ScoreRequestModel,
+)
 
 
 def setup_custom_openapi_schema(app: FastAPI) -> None:
@@ -44,7 +50,7 @@ def setup_custom_openapi_schema(app: FastAPI) -> None:
 
 
 def _add_request_body_schemas(openapi_schema: dict[str, Any]) -> None:
-    """Add request body model schemas to OpenAPI components."""
+    """Add schemas referenced by manually documented request and SSE bodies."""
     # Ensure components.schemas exists
     if "components" not in openapi_schema:
         openapi_schema["components"] = {}
@@ -53,12 +59,18 @@ def _add_request_body_schemas(openapi_schema: dict[str, Any]) -> None:
 
     schemas = openapi_schema["components"]["schemas"]
 
-    # Add request model schemas using Pydantic's model_json_schema
-    for model_class in [EncodeRequestModel, ExtractRequestModel, ScoreRequestModel]:
+    # Add supplemental schemas using Pydantic's model_json_schema.
+    for model_class in [
+        EncodeRequestModel,
+        ExtractRequestModel,
+        GenerateChunk,
+        GenerateRequestModel,
+        ScoreRequestModel,
+    ]:
         model_name = model_class.__name__
         if model_name not in schemas:
             # Get the full schema including $defs for nested models
-            full_schema = model_class.model_json_schema()
+            full_schema = model_class.model_json_schema(ref_template="#/components/schemas/{model}")
             # Extract and add any nested definitions
             if "$defs" in full_schema:
                 for def_name, def_schema in full_schema["$defs"].items():

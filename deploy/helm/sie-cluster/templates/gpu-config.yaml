@@ -1,4 +1,5 @@
-# ConfigMap containing available GPU types and machine profiles for the cluster
+{{- $_ := include "sie-cluster.worker.validateLanes" . -}}
+# ConfigMap containing available GPU types and physical worker lanes for the cluster
 # Gateway reads this to report available GPUs/profiles even when workers are scaled to zero
 apiVersion: v1
 kind: ConfigMap
@@ -13,9 +14,18 @@ data:
   # GPU labels and WorkerGroup names do not leak into default.spec.gpus.
   {{- $gpuTypes := list }}
   {{- $gpuAliases := dict }}
+  {{- $physicalLanes := list }}
   {{- range $poolName, $pool := .Values.workers.pools }}
   {{- if $pool.enabled }}
-  {{- $machineProfile := default $poolName $pool.machineProfile }}
+  {{- $machineProfile := "" }}
+  {{- range $bundleName, $bundleCfg := $pool.bundles }}
+  {{- if dig "enabled" true $bundleCfg }}
+  {{- $lane := include "sie-cluster.worker.lane" (dict "root" $ "poolName" $poolName "pool" $pool "bundleName" $bundleName) | fromJson }}
+  {{- $physicalLanes = append $physicalLanes (dict "pool" $lane.queuePool "machineProfile" $lane.machineProfile "bundle" $lane.bundle) }}
+  {{- if eq $machineProfile "" }}{{- $machineProfile = $lane.machineProfile }}{{- end }}
+  {{- end }}
+  {{- end }}
+  {{- if $machineProfile }}
   {{- $gpuTypes = append $gpuTypes $machineProfile }}
   {{- $_ := set $gpuAliases $machineProfile $machineProfile }}
   {{- if and $pool.gpuType (ne $pool.gpuType $machineProfile) (not (hasKey $gpuAliases $pool.gpuType)) }}
@@ -26,8 +36,12 @@ data:
   {{- end }}
   {{- end }}
   {{- end }}
+  {{- end }}
   available-gpus: {{ join "," ($gpuTypes | uniq) | quote }}
   gpu-aliases: {{ $gpuAliases | toJson | quote }}
+  # Exact finite lane catalog shared by routing, KEDA state, and rejection
+  # labels. The gateway fails closed when a tuple is absent.
+  configured-physical-lanes: {{ $physicalLanes | toJson | quote }}
   # Machine profiles JSON for gateway (used for pool validation and routing)
   # Format: {"profile_name": {"gpuType": "...", "machineType": "...", "spot": bool}}
   machine-profiles: |

@@ -147,7 +147,11 @@ pub struct AuditEntry {
     pub body_bytes: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+// `Default` lets a synthetic census entry be built as a struct literal with
+// `..Default::default()` instead of round-tripping through `serde_json`. Every
+// field is already `#[serde(default)]`, so the derived value is exactly what a
+// minimal heartbeat deserializes to — the two stay in step by construction.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct WorkerStatusMessage {
     #[serde(default)]
     pub name: String,

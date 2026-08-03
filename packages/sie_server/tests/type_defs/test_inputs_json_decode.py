@@ -4,13 +4,14 @@
 and a base64-encoded image must base64-decode the inner `data` field into
 `bytes`, exactly like the msgpack path. msgspec only base64-decodes a JSON
 string when the target field is *typed* `bytes` — so ``Item`` must reference the
-``*Input`` TypedDicts (whose ``data`` is ``bytes``) rather than
+typed media input definitions (whose ``data`` is ``bytes``) rather than
 ``dict[str, Any]``. With ``Any``, the string flows straight into the
 preprocessor's ``io.BytesIO(...)`` and raises
 ``TypeError: a bytes-like object is required, not 'str'``.
 """
 
 import base64
+from typing import Any
 
 import msgspec
 import pytest
@@ -73,6 +74,85 @@ def test_json_score_query_and_items_image_data_decodes_to_bytes() -> None:
     assert isinstance(request.items[0].images[0]["data"], bytes)
 
 
+@pytest.mark.parametrize(
+    ("encode", "decode"),
+    [
+        pytest.param(msgspec.json.encode, msgspec.json.decode, id="json"),
+        pytest.param(msgspec.msgpack.encode, msgspec.msgpack.decode, id="msgpack"),
+    ],
+)
+def test_encode_request_still_decodes_with_runtime_options(encode, decode) -> None:
+    """Score-only nested validation must not affect EncodeRequest construction."""
+    body = encode(
+        {
+            "items": [{"text": "hello"}],
+            "params": {"options": {"is_query": True}},
+        }
+    )
+
+    request = decode(body, type=EncodeRequest)
+
+    assert request.params is not None
+    assert request.params.options == {"is_query": True}
+
+
+@pytest.mark.parametrize(
+    ("encode", "decode"),
+    [
+        pytest.param(msgspec.json.encode, msgspec.json.decode, id="json"),
+        pytest.param(msgspec.msgpack.encode, msgspec.msgpack.decode, id="msgpack"),
+    ],
+)
+@pytest.mark.parametrize("instruction", [None, "", "rank by relevance"])
+def test_score_options_instruction_accepts_only_valid_values(encode, decode, instruction: str | None) -> None:
+    body = encode(
+        {
+            "query": {"text": "query"},
+            "items": [{"text": "document"}],
+            "options": {"instruction": instruction},
+        }
+    )
+
+    request = decode(body, type=ScoreRequest)
+
+    assert request.options == {"instruction": instruction}
+
+
+@pytest.mark.parametrize(
+    ("encode", "decode"),
+    [
+        pytest.param(msgspec.json.encode, msgspec.json.decode, id="json"),
+        pytest.param(msgspec.msgpack.encode, msgspec.msgpack.decode, id="msgpack"),
+    ],
+)
+@pytest.mark.parametrize("instruction", [False, 7, 1.5, [], {}])
+def test_score_options_instruction_rejects_non_string_values(encode, decode, instruction: object) -> None:
+    body = encode(
+        {
+            "query": {"text": "query"},
+            "items": [{"text": "document"}],
+            "instruction": "valid top-level value does not bypass nested validation",
+            "options": {"instruction": instruction},
+        }
+    )
+
+    with pytest.raises(msgspec.ValidationError, match=r"\$\.options\.instruction"):
+        decode(body, type=ScoreRequest)
+
+
+def test_msgpack_score_options_instruction_rejects_binary_value() -> None:
+    body = msgspec.msgpack.encode(
+        {
+            "query": {"text": "query"},
+            "items": [{"text": "document"}],
+            "options": {"instruction": b"binary-is-not-a-string"},
+        }
+    )
+
+    with pytest.raises(msgspec.ValidationError, match=r"\$\.options\.instruction"):
+        msgspec.msgpack.decode(body, type=ScoreRequest)
+
+
 def test_json_audio_video_document_data_decodes_to_bytes() -> None:
     """The sibling media fields share the same latent bug; lock the contract."""
     body = msgspec.json.encode(
@@ -93,3 +173,22 @@ def test_json_audio_video_document_data_decodes_to_bytes() -> None:
     assert isinstance(item.audio["data"], bytes)
     assert isinstance(item.video["data"], bytes)
     assert isinstance(item.document["data"], bytes)
+
+
+@pytest.mark.parametrize("codec", [msgspec.json, msgspec.msgpack])
+def test_audio_rejects_unknown_fields(codec: Any) -> None:
+    data = _PNG_B64 if codec is msgspec.json else _PNG_BYTES
+    body = codec.encode(
+        {"items": [{"audio": {"data": data, "format": "wav", "sample_rate": 16_000, "surprise": True}}]}
+    )
+
+    with pytest.raises(msgspec.ValidationError, match="unknown field `surprise`"):
+        codec.decode(body, type=ExtractRequest)
+
+
+@pytest.mark.parametrize("codec", [msgspec.json, msgspec.msgpack])
+def test_audio_requires_binary_data(codec: Any) -> None:
+    body = codec.encode({"items": [{"audio": {"format": "wav", "sample_rate": 16_000}}]})
+
+    with pytest.raises(msgspec.ValidationError, match="Object missing required field `data`"):
+        codec.decode(body, type=ExtractRequest)

@@ -33,7 +33,16 @@ audit_logger = logging.getLogger("sie.audit")
 router = APIRouter(prefix="/v1/configs", tags=["config"])
 
 _MAX_CONFIG_BODY_BYTES = 1_048_576  # 1 MiB
-_MODEL_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
+# ':' and '@' are admitted because a custom-model NAME may carry a ':variant'
+# and/or '@N' version suffix (control_plane `_MODEL_NAME_RE`, dispatcher
+# `_MODEL_ID_RE`), and the served id `<slug>/<name>` reaches this write-path
+# validator on both add (append) and DELETE (DPA erase tombstone). Rejecting
+# them here 400s the tombstone, which wedges an erase forever (§6.9). They are
+# path-safe: `..`, '\\', and the '/status' route-ambiguity guard in
+# `_validate_model_id` still fire regardless of the class, and ConfigStore maps
+# '/' -> '__' on disk while ':'/'@' are ordinary POSIX filename chars that
+# introduce no separator and cannot escape the models dir.
+_MODEL_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$")
 
 # In-memory idempotency cache: maps Idempotency-Key -> (status_code, response_body, payload_hash).
 # The cache, its guarding lock, and the in-flight event map are all held
@@ -700,7 +709,6 @@ async def add_model(request: Request) -> Response:
                         existing_config = {}
                     if not isinstance(existing_config, dict):
                         existing_config = {}
-
                     merged_config: dict[str, Any] = dict(existing_config)
 
                     conflicting_fields: list[str] = []
@@ -778,7 +786,7 @@ async def add_model(request: Request) -> Response:
             if config_store and created_profiles:
                 epoch = await _await_committed(asyncio.to_thread(config_store.increment_epoch))
 
-            # Refresh the `sie_config_models_total` gauge now that the
+            # Refresh the canonical `sie.config.models` OTel gauge now that the
             # registry has been mutated. Cheap (in-memory dict scan)
             # and inside the write lock so the count we report is the
             # one that corresponds to the epoch we just bumped.
@@ -1029,7 +1037,7 @@ async def replace_model(request: Request, model_id: str) -> Response:
             # Validate WITHOUT the append-only conflict gate — replace is
             # deliberate — so a malformed/unroutable body is still rejected.
             try:
-                model_registry._validate_structure_locked(config)
+                model_registry.validate_model_config_replacement(config)
             except ValueError as e:
                 raise HTTPException(
                     status_code=422,
@@ -1173,6 +1181,183 @@ async def replace_model(request: Request, model_id: str) -> Response:
         model=model_id,
         latency_ms=round(elapsed_ms, 2),
         body_bytes=len(body),
+    )
+
+    if cancellation_deferred:
+        raise asyncio.CancelledError
+
+    return Response(content=response_json, status_code=status_code, media_type="application/json")
+
+
+@router.delete("/models/{model_id:path}")
+async def delete_model(request: Request, model_id: str) -> Response:
+    """Delete one API-persisted model config.
+
+    Deletion is admin-authenticated, idempotent, and serialized with every
+    other config write/export. The durable store is changed first, the live
+    registry second, and the epoch last. A baked filesystem config is never
+    deleted; removing an API override reveals that baseline immediately.
+
+    Model removal is distributed through the authoritative epoch/export path
+    rather than the additive NATS delta, whose wire contract cannot express a
+    tombstone. Gateways and worker sidecars already treat full export as the
+    correctness path and replace their catalog from it.
+    """
+    _check_write_auth(request)
+    start_time = time.monotonic()
+    _validate_model_id(model_id)
+
+    model_registry = _require_model_registry(request)
+    config_store: ConfigStore | None = getattr(request.app.state, "config_store", None)
+    if config_store is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "config_store_required",
+                "message": "Model deletion requires a durable ConfigStore; filesystem model files are immutable.",
+            },
+        )
+
+    idempotency_key = request.headers.get("Idempotency-Key")
+    body_hash = hashlib.sha256(b"DELETE\0" + model_id.encode("utf-8")).hexdigest()
+    idem = _get_idempotency_state(request.app.state) if idempotency_key else None
+    owner_in_flight: _IdempotencyInFlight | None = None
+    if idempotency_key and idem is not None:
+        replay, owner_in_flight = await _idempotency_claim(idem, idempotency_key, body_hash)
+        if replay is not None:
+            return replay
+
+    cancellation_deferred = False
+
+    async def _await_committed(awaitable: Any) -> Any:
+        nonlocal cancellation_deferred
+        task = asyncio.ensure_future(awaitable)
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is None or not current_task.cancelling():
+                    raise
+                cancellation_deferred = True
+                while current_task.cancelling():
+                    current_task.uncancel()
+                if task.done():
+                    return task.result()
+
+    try:
+        write_lock = _get_write_lock(request.app.state)
+        async with write_lock:
+            fallback_config: dict[str, Any] | None = None
+            fallback_yaml = await asyncio.to_thread(
+                _load_filesystem_yaml,
+                model_registry.models_dir,
+                model_id,
+            )
+            if fallback_yaml is not None:
+                try:
+                    parsed_fallback = yaml.safe_load(fallback_yaml)
+                except yaml.YAMLError as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "error": "filesystem_fallback_invalid",
+                            "message": f"Filesystem fallback for {model_id!r} is invalid YAML.",
+                        },
+                    ) from exc
+                if not isinstance(parsed_fallback, dict):
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "error": "filesystem_fallback_invalid",
+                            "message": f"Filesystem fallback for {model_id!r} is not a YAML mapping.",
+                        },
+                    )
+                fallback_id = parsed_fallback.get("sie_id") or parsed_fallback.get("name")
+                if fallback_id != model_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "error": "filesystem_fallback_mismatch",
+                            "message": f"Filesystem fallback identity does not match {model_id!r}.",
+                        },
+                    )
+                parsed_fallback["sie_id"] = model_id
+                try:
+                    model_registry.validate_model_config_replacement(parsed_fallback)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "error": "filesystem_fallback_invalid",
+                            "message": f"Filesystem fallback for {model_id!r} is not routable.",
+                        },
+                    ) from exc
+                fallback_config = parsed_fallback
+
+            deleted = await _await_committed(asyncio.to_thread(config_store.delete_model, model_id))
+            affected_bundles: list[str] = []
+            epoch = await asyncio.to_thread(config_store.read_epoch)
+            if deleted:
+                affected_bundles = model_registry.remove_model_config(
+                    model_id,
+                    fallback_config=fallback_config,
+                )
+                epoch = await _await_committed(asyncio.to_thread(config_store.increment_epoch))
+
+                api_count = len(await _await_committed(asyncio.to_thread(config_store.list_models)))
+                total = len(model_registry.list_models())
+                sie_metrics.update_models_gauge(
+                    api_count=api_count,
+                    filesystem_count=max(total - api_count, 0),
+                )
+
+        response_body: dict[str, Any] = {
+            "model_id": model_id,
+            "deleted": deleted,
+            "unchanged": not deleted,
+            "fallback": "filesystem" if deleted and fallback_config is not None else None,
+            "affected_bundles": affected_bundles,
+            "epoch": epoch,
+            "distribution": "epoch_export",
+        }
+        response_json = orjson.dumps(response_body).decode()
+        status_code = 200
+
+        if idempotency_key and idem is not None and owner_in_flight is not None:
+            await _await_committed(idem.lock.acquire())
+            try:
+                idem.cache[idempotency_key] = (status_code, response_json, body_hash)
+                idem.cache.move_to_end(idempotency_key)
+                while len(idem.cache) > _MAX_IDEMPOTENCY_CACHE_SIZE:
+                    idem.cache.popitem(last=False)
+                owner_in_flight.succeeded = True
+                if idem.in_flight.get(idempotency_key) is owner_in_flight:
+                    idem.in_flight.pop(idempotency_key, None)
+                owner_in_flight.event.set()
+            finally:
+                idem.lock.release()
+
+    except (Exception, asyncio.CancelledError) as exc:
+        if idempotency_key and idem is not None and owner_in_flight is not None:
+            await _await_committed(idem.lock.acquire())
+            try:
+                owner_in_flight.exception = exc
+                if idem.in_flight.get(idempotency_key) is owner_in_flight:
+                    idem.in_flight.pop(idempotency_key, None)
+                owner_in_flight.event.set()
+            finally:
+                idem.lock.release()
+        raise
+
+    elapsed_ms = (time.monotonic() - start_time) * 1000
+    _emit_audit_log(
+        request,
+        event="config.delete_model",
+        status=status_code,
+        model=model_id,
+        latency_ms=round(elapsed_ms, 2),
+        body_bytes=0,
     )
 
     if cancellation_deferred:
@@ -1385,6 +1570,7 @@ async def export_snapshot(request: Request) -> Response:
     write_lock = _get_write_lock(request.app.state)
     async with write_lock:
         epoch = (await asyncio.to_thread(config_store.read_epoch)) if config_store else 0
+        api_models = set(await asyncio.to_thread(config_store.list_models)) if config_store else set()
 
         models = []
         for model_name in model_registry.list_models():
@@ -1425,6 +1611,7 @@ async def export_snapshot(request: Request) -> Response:
                     "raw_yaml": raw_yaml,
                     "affected_bundles": model_registry.get_model_export_bundles(model_name),
                     "pool": model_registry.get_model_pool_name(model_name),
+                    "source": "api" if model_name in api_models else "filesystem",
                 }
             )
 

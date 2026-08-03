@@ -1,5 +1,6 @@
 sie_id: lightonai/Reason-ModernColBERT
 hf_id: lightonai/Reason-ModernColBERT
+hf_revision: b0e5f1aa8d8dee8626f183b9e3b8241badf51664
 inputs:
   text: true
   image: false
@@ -18,7 +19,7 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: null
-    adapter_path: sie_server.adapters.colbert_modernbert_flash:ColBERTModernBERTFlashAdapter
+    adapter_path: sie_server.adapters.colbert_modernbert_flash.adapter:ColBERTModernBERTFlashAdapter
     adapter_options:
       loadtime:
         muvera_config:
@@ -30,6 +31,7 @@ profiles:
         normalize: true
         query_max_length: 32
         skip_special_tokens: false
+        doc_punctuation_skiplist: false
       runtime: {}
   muvera:
     extends: default

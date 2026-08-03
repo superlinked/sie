@@ -1,7 +1,52 @@
-{{- /* An explicit tracing.endpoint points pods at an external backend, so the bundled collector is suppressed to avoid an orphaned Deployment/Service/ConfigMap. */ -}}
-{{- if and .Values.observability.tracing.enabled .Values.observability.tracing.collector.install (not .Values.observability.tracing.endpoint) }}
-{{- $fullname := include "sie-cluster.fullname" . }}
-{{- $exp := include "sie-cluster.tracing.collectorExporterEndpoint" . }}
+{{- $collectorEnabled := eq (include "sie-cluster.otel.collectorEnabled" .) "true" -}}
+{{- if $collectorEnabled }}
+{{- $metricsEnabled := eq (include "sie-cluster.otel.metricsEnabled" .) "true" -}}
+{{- $logsEnabled := eq (include "sie-cluster.otel.logsEnabled" .) "true" -}}
+{{- $tracesEnabled := .Values.observability.tracing.enabled -}}
+{{- $signalsEnabled := or $tracesEnabled $metricsEnabled $logsEnabled -}}
+{{- $collector := .Values.observability.otel.collector -}}
+{{- $applicationPrometheusEnabled := eq (include "sie-cluster.otel.applicationPrometheusEnabled" .) "true" -}}
+{{- $prometheusEnabled := and $metricsEnabled (or $applicationPrometheusEnabled $collector.prometheus.enabled) -}}
+{{- $traceEndpoint := include "sie-cluster.otel.collectorTraceEndpoint" . -}}
+{{- $logEndpoint := include "sie-cluster.otel.collectorLogEndpoint" . -}}
+{{- $betterStack := $collector.betterStack -}}
+{{- $deploymentEnvironment := include "sie-cluster.otel.deploymentEnvironment" . -}}
+{{- $cloudRegion := include "sie-cluster.otel.cloudRegion" . -}}
+{{- $configuredDeploymentEnvironment := default "" .Values.observability.otel.resource.deploymentEnvironment | toString | trim | lower -}}
+{{- $configuredCloudRegion := default "" .Values.observability.otel.resource.cloudRegion | toString | trim | lower -}}
+{{- if not $signalsEnabled -}}
+{{- fail "observability.otel.collector.install=true requires at least one enabled trace, metric, or log signal" -}}
+{{- end -}}
+{{- if and $betterStack.enabled (not $betterStack.endpoint) -}}
+{{- fail "observability.otel.collector.betterStack.enabled=true requires betterStack.endpoint" -}}
+{{- end -}}
+{{- if and $betterStack.enabled (not $betterStack.existingSecret) -}}
+{{- fail "observability.otel.collector.betterStack.enabled=true requires betterStack.existingSecret" -}}
+{{- end -}}
+{{- if and $betterStack.enabled (not (regexMatch "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/?$" $betterStack.endpoint)) -}}
+{{- $testHttpEndpoint := regexMatch "^http://(127[.]0[.]0[.]1|localhost|host[.]docker[.]internal)(:[0-9]+)?(/.*)?$" $betterStack.endpoint -}}
+{{- if not (and $betterStack.allowInsecureTestEndpoint $testHttpEndpoint (eq $configuredDeploymentEnvironment "dev")) -}}
+{{- fail "observability.otel.collector.betterStack.endpoint must be a bare HTTPS origin; loopback HTTP requires allowInsecureTestEndpoint=true, deploymentEnvironment=dev, and is test-only" -}}
+{{- end -}}
+{{- end -}}
+{{- if and $betterStack.enabled (not (has $configuredDeploymentEnvironment (list "dev" "staging" "prod"))) -}}
+{{- fail "observability.otel.collector.betterStack.enabled=true requires observability.otel.resource.deploymentEnvironment to be explicitly one of dev, staging, prod" -}}
+{{- end -}}
+{{- if and $betterStack.enabled (or (not $configuredCloudRegion) (eq $configuredCloudRegion "unknown")) -}}
+{{- fail "observability.otel.collector.betterStack.enabled=true requires observability.otel.resource.cloudRegion to be explicitly non-empty and not unknown" -}}
+{{- end -}}
+{{- if and $metricsEnabled (not $prometheusEnabled) (not $betterStack.enabled) -}}
+{{- fail "OTLP metrics require the collector Prometheus exporter or Better Stack exporter" -}}
+{{- end -}}
+{{- $localTraceExporters := list -}}
+{{- if $traceEndpoint }}{{- $localTraceExporters = append $localTraceExporters "otlp/traces" -}}{{- end -}}
+{{- if and $tracesEnabled (not $betterStack.enabled) (eq (len $localTraceExporters) 0) }}{{- $localTraceExporters = append $localTraceExporters "debug/traces" -}}{{- end -}}
+{{- $logExporters := list -}}
+{{- if $logEndpoint }}{{- $logExporters = append $logExporters "otlphttp/logs" -}}{{- end -}}
+{{- if $betterStack.enabled }}{{- $logExporters = append $logExporters "otlphttp/betterstack" -}}{{- end -}}
+{{- if and $logsEnabled (eq (len $logExporters) 0) }}{{- $logExporters = append $logExporters "debug/logs" -}}{{- end -}}
+{{- $collectorConfig := include "sie-cluster.otel.collectorConfig" (dict "metricsEnabled" $metricsEnabled "logsEnabled" $logsEnabled "tracesEnabled" $tracesEnabled "prometheusEnabled" $prometheusEnabled "collector" $collector "traceEndpoint" $traceEndpoint "logEndpoint" $logEndpoint "betterStack" $betterStack "deploymentEnvironment" $deploymentEnvironment "cloudRegion" $cloudRegion "localTraceExporters" $localTraceExporters "logExporters" $logExporters) | trim -}}
+{{- $fullname := include "sie-cluster.fullname" . -}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -12,33 +57,8 @@ metadata:
     {{- include "sie-cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: otel-collector
 data:
-  collector.yaml: |
-    receivers:
-      otlp:
-        protocols:
-          grpc:
-            endpoint: "0.0.0.0:4317"
-
-    exporters:
-    {{- if $exp }}
-      otlp:
-        endpoint: {{ $exp | quote }}
-        tls:
-          insecure: {{ .Values.observability.tracing.collector.exporterInsecure }}
-    {{- else }}
-      debug:
-        verbosity: detailed
-    {{- end }}
-
-    service:
-      pipelines:
-        traces:
-          receivers: [otlp]
-    {{- if $exp }}
-          exporters: [otlp]
-    {{- else }}
-          exporters: [debug]
-    {{- end }}
+  collector.yaml: |-
+{{- $collectorConfig | nindent 4 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -49,30 +69,72 @@ metadata:
     {{- include "sie-cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: otel-collector
 spec:
+  # The Prometheus exporter accumulates OTLP DELTA sums/histograms in memory.
+  # Keep exactly one active cache; KEDA freshness/fallback covers the brief
+  # recreate gap and collector_generation isolates each new cache as a new
+  # Prometheus series generation.
   replicas: 1
+  {{- if $prometheusEnabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "sie-cluster.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: otel-collector
   template:
     metadata:
+      annotations:
+        checksum/otel-config: {{ $collectorConfig | sha256sum | quote }}
       labels:
         {{- include "sie-cluster.labels" . | nindent 8 }}
         app.kubernetes.io/component: otel-collector
     spec:
       containers:
         - name: otel-collector
-          image: "{{ .Values.observability.tracing.collector.image.repository }}:{{ .Values.observability.tracing.collector.image.tag }}"
+          image: "{{ $collector.image.repository }}:{{ $collector.image.tag }}"
           args:
             - "--config=/etc/otel/collector.yaml"
           ports:
-            - name: otlp-grpc
+            - name: otlp-gw-grpc
               containerPort: 4317
               protocol: TCP
+            - name: otlp-gw-http
+              containerPort: 4318
+              protocol: TCP
+            - name: otlp-app-grpc
+              containerPort: 4327
+              protocol: TCP
+            {{- if $prometheusEnabled }}
+            - name: prometheus
+              containerPort: {{ $collector.prometheus.port }}
+              protocol: TCP
+            {{- end }}
+            - name: health
+              containerPort: 13133
+              protocol: TCP
+          {{- if $betterStack.enabled }}
+          env:
+            - name: BETTERSTACK_OTLP_ENDPOINT
+              value: {{ $betterStack.endpoint | quote }}
+            - name: BETTERSTACK_SOURCE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $betterStack.existingSecret | quote }}
+                  key: {{ $betterStack.tokenKey | quote }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
           volumeMounts:
             - name: config
               mountPath: /etc/otel
-          {{- with .Values.observability.tracing.collector.resources }}
+          {{- with $collector.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -90,12 +152,27 @@ metadata:
     {{- include "sie-cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: otel-collector
 spec:
+  type: ClusterIP
   selector:
     {{- include "sie-cluster.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: otel-collector
   ports:
-    - name: otlp-grpc
+    - name: otlp-gw-grpc
       port: 4317
-      targetPort: 4317
+      targetPort: otlp-gw-grpc
       protocol: TCP
+    - name: otlp-gw-http
+      port: 4318
+      targetPort: otlp-gw-http
+      protocol: TCP
+    - name: otlp-app-grpc
+      port: 4327
+      targetPort: otlp-app-grpc
+      protocol: TCP
+    {{- if $prometheusEnabled }}
+    - name: prometheus
+      port: {{ $collector.prometheus.port }}
+      targetPort: prometheus
+      protocol: TCP
+    {{- end }}
 {{- end }}

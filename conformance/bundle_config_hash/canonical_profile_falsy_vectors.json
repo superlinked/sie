@@ -1,0 +1,44 @@
+{
+  "_comment": "Shared conformance vectors for bundle_config_hash adapter_options canonicalization (issue #1542). Loaded by the Rust gateway (`packages/sie_gateway/src/types/model.rs`), the sie_config config service (`_canonical_adapter_options`), and the sie_server worker (`api.ws._compact_adapter_options_for_hash`). A divergence here makes a worker's advertised bundle_config_hash never match the gateway's expected hash, leaving it in pending_workers forever. `strip_to_none` and `keep_unchanged` exercise the GENERIC flat canonicalizers (gateway + config service), which strip an options map to None when every value is falsy (null/false/0/0.0/\"\"/[]/{}) and otherwise drop empty nested maps. `transform` exercises the loadtime/runtime compaction that real profiles use (adapter_options is always shaped {loadtime, runtime}); all three implementations — including the worker, whose canonicalizer is loadtime/runtime-structured rather than flat — must agree on it.",
+  "strip_to_none": [
+    { "name": "null_only", "adapter_options": { "x": null } },
+    { "name": "false_only", "adapter_options": { "enabled": false } },
+    { "name": "zero_int", "adapter_options": { "x": 0 } },
+    { "name": "zero_float", "adapter_options": { "x": 0.0 } },
+    { "name": "empty_string", "adapter_options": { "x": "" } },
+    { "name": "empty_list", "adapter_options": { "x": [] } },
+    { "name": "empty_object", "adapter_options": { "x": {} } },
+    { "name": "empty_options", "adapter_options": {} },
+    { "name": "all_falsy_mixed", "adapter_options": { "x": null, "y": false, "z": 0 } }
+  ],
+  "keep_unchanged": [
+    { "name": "nonzero_int", "adapter_options": { "x": 1 } },
+    { "name": "true_flag", "adapter_options": { "enabled": true } },
+    { "name": "nonempty_string", "adapter_options": { "attention_backend": "triton" } },
+    { "name": "nonempty_list", "adapter_options": { "extra_launch_args": ["--flag"] } },
+    { "name": "nonempty_object", "adapter_options": { "loadtime": { "mem_fraction_static": 0.9 } } },
+    { "name": "one_truthy_among_falsy", "adapter_options": { "x": 0, "y": 5, "z": null } }
+  ],
+  "transform": [
+    {
+      "name": "drops_empty_loadtime",
+      "adapter_options": { "loadtime": {}, "runtime": { "pooling": "cls" } },
+      "expected": { "runtime": { "pooling": "cls" } }
+    },
+    {
+      "name": "drops_empty_runtime",
+      "adapter_options": { "loadtime": { "mem_fraction_static": 0.9 }, "runtime": {} },
+      "expected": { "loadtime": { "mem_fraction_static": 0.9 } }
+    },
+    {
+      "name": "both_empty_to_none",
+      "adapter_options": { "loadtime": {}, "runtime": {} },
+      "expected": null
+    },
+    {
+      "name": "keeps_both_nonempty",
+      "adapter_options": { "loadtime": { "mem_fraction_static": 0.9 }, "runtime": { "pooling": "cls" } },
+      "expected": { "loadtime": { "mem_fraction_static": 0.9 }, "runtime": { "pooling": "cls" } }
+    }
+  ]
+}

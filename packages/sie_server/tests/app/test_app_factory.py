@@ -102,11 +102,12 @@ class TestAllRoutersAlwaysMounted:
         app = AppFactory.create_app(AppStateConfig())
         assert "/ws/status" in self._route_paths(app)
 
-    def test_probe_and_metrics_routes_are_always_mounted(self) -> None:
+    def test_probe_routes_are_mounted_and_application_metrics_route_is_absent(self) -> None:
         app = AppFactory.create_app(AppStateConfig())
         paths = self._route_paths(app)
-        for path in ("/healthz", "/readyz", "/metrics"):
-            assert path in paths, f"{path} missing — breaks K8s probes/Prometheus"
+        for path in ("/healthz", "/readyz"):
+            assert path in paths, f"{path} missing — breaks K8s probes"
+        assert "/metrics" not in paths
 
     def test_inference_routers_are_mounted(self) -> None:
         """Inference routers stay mounted unconditionally.
@@ -229,6 +230,14 @@ class TestDirectServerHttpPath:
         app = AppFactory.create_app(AppStateConfig())
         paths = {getattr(route, "path", "") for route in app.routes}
         assert "/v1/generate/{model:path}" in paths
+
+        operation = app.openapi()["paths"]["/v1/generate/{model}"]["post"]
+        assert operation["requestBody"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/GenerateRequestModel"
+        }
+        event_stream = operation["responses"]["200"]["content"]["text/event-stream"]
+        assert event_stream["x-sie-event-schema"] == {"$ref": "#/components/schemas/GenerateChunk"}
+        assert {"413", "502"} <= operation["responses"].keys()
 
     def test_app_factory_direct_encode_path_without_sidecar(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("SIE_IPC_REQUIRE_HEARTBEAT", raising=False)
@@ -375,6 +384,49 @@ class TestPinnedModels:
         registry.load_async.assert_not_called()
 
 
+class TestModelFilterEnvRoundTrip:
+    """model_filter env serialization must distinguish [] (zero models) from None."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch) -> None:
+        for var in (
+            "SIE_PRELOAD_MODELS",
+            "SIE_MODELS_DIR",
+            "SIE_MODEL_FILTER",
+            "SIE_DEVICE",
+            "SIE_DEVICES",
+            "SIE_POOL",
+            "SIE_PINNED_MODELS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_empty_model_filter_env_round_trip(self) -> None:
+        """[] survives the uvicorn-factory env rebuild instead of collapsing to None.
+
+        A zero-match bundle (transformers514 before its pilot model lands)
+        produces model_filter=[]; losing it to None would re-advertise the
+        full catalog from a worker that can serve none of it.
+        """
+        config = AppStateConfig(model_filter=[])
+        config.save_to_env_vars()
+        restored = AppStateConfig.from_env_vars()
+        assert restored.model_filter == []
+
+    def test_model_filter_env_round_trip(self) -> None:
+        config = AppStateConfig(model_filter=["org/model-a", "org/model-b"])
+        config.save_to_env_vars()
+        restored = AppStateConfig.from_env_vars()
+        assert restored.model_filter == ["org/model-a", "org/model-b"]
+
+    def test_absent_model_filter_stays_none(self, monkeypatch) -> None:
+        """save_to_env_vars must also CLEAR a stale filter left in the env."""
+        monkeypatch.setenv("SIE_MODEL_FILTER", "org/stale-model")
+        config = AppStateConfig(model_filter=None)
+        config.save_to_env_vars()
+        restored = AppStateConfig.from_env_vars()
+        assert restored.model_filter is None
+
+
 class TestPreloadModelsEnvRoundTrip:
     """Tests for preload_models env var serialization."""
 
@@ -491,6 +543,9 @@ class TestPreloadModelsEnvRoundTrip:
 
 class TestModelRegistryConfig:
     class _FakeRegistry:
+        def get_configs_snapshot(self) -> dict[str, ModelConfig]:
+            return {}
+
         async def start_memory_monitor(self) -> None:
             pass
 

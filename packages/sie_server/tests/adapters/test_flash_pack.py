@@ -7,6 +7,7 @@ pin it to be bit-identical to those loops (zero-based and padding-offset) across
 
 from __future__ import annotations
 
+import pytest
 import torch
 from sie_server.adapters._flash_pack import build_position_ids, mean_pool_packed
 
@@ -45,6 +46,32 @@ def test_result_is_int64() -> None:
 def test_single_token_sequences() -> None:
     cu = torch.tensor([0, 1, 2, 3])
     assert torch.equal(build_position_ids(cu), torch.tensor([0, 0, 0]))
+
+
+def test_known_total_matches_default_path() -> None:
+    cu = torch.tensor([0, 2, 2, 5], dtype=torch.int32)
+    assert torch.equal(
+        build_position_ids(cu, offset=2, total_tokens=5),
+        build_position_ids(cu, offset=2),
+    )
+
+
+def test_known_total_avoids_item() -> None:
+    class ItemForbiddenTensor(torch.Tensor):
+        def item(self) -> int:
+            raise AssertionError("known-total path must not read a device scalar")
+
+    cu = torch.tensor([0, 2, 2, 5], dtype=torch.int32).as_subclass(ItemForbiddenTensor)
+    got = build_position_ids(cu, offset=2, total_tokens=5)
+
+    assert torch.equal(got, torch.tensor([2, 3, 2, 3, 4]))
+
+
+def test_known_total_must_match_cumulative_lengths() -> None:
+    cu = torch.tensor([0, 2, 5], dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="allocated size does not match required size"):
+        build_position_ids(cu, total_tokens=4)
 
 
 def _mean_loop(hidden: torch.Tensor, cu: torch.Tensor, num_seqs: int) -> torch.Tensor:

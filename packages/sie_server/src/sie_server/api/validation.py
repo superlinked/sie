@@ -1,7 +1,20 @@
+from typing import Any
+
 from fastapi import HTTPException, status
 
 from sie_server.observability.gpu import get_worker_gpu_type
 from sie_server.types.responses import ErrorCode
+
+
+def validate_signed_i64(value: Any, *, param: str) -> int | None:
+    """Validate an optional signed 64-bit integer without choosing an API error envelope."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"'{param}' must be an integer")
+    if value < -(1 << 63) or value > (1 << 63) - 1:
+        raise ValueError(f"'{param}' is outside the supported integer range")
+    return value
 
 
 def validate_machine_profile_header(x_machine_profile: str | None) -> None:

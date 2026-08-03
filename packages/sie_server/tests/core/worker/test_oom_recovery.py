@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+import sie_server.core.worker.oom_recovery as oom_recovery_module
 from sie_server.core.oom import (
     OomRecoveryAction,
     OomRecoveryConfig,
@@ -13,13 +15,7 @@ from sie_server.core.oom import (
 )
 from sie_server.core.residency import EvictionResult
 from sie_server.core.worker.oom_recovery import BatchExecutor, ConfigGroup
-from sie_server.observability.metrics import (
-    OOM_BATCH_SPLITS,
-    OOM_CACHE_CLEARS,
-    OOM_EVICTIONS_TRIGGERED,
-    OOM_RECOVERIES_ATTEMPTED,
-    OOM_RECOVERIES_SUCCEEDED,
-)
+from sie_server.types.inputs import InvalidInputError
 
 # --------------------------------------------------------------------------
 # Test fixtures
@@ -61,11 +57,18 @@ def _make_group(size: int) -> tuple[ConfigGroup, list[_FakeMetadata]]:
     items = list(range(size))
     indices = list(range(size))
     prepared = list(range(size))
-    return (items, metas, indices, prepared), metas  # type: ignore[return-value]
+    return cast("ConfigGroup", (items, metas, indices, prepared)), metas
 
 
 def _oom() -> RuntimeError:
     return RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+
+def _capture_recovery_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    telemetry = SimpleNamespace(oom_recovery_completed=lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(oom_recovery_module, "worker_telemetry", lambda: telemetry)
+    return calls
 
 
 # --------------------------------------------------------------------------
@@ -104,6 +107,81 @@ async def test_cache_clear_succeeds_on_retry() -> None:
     for m in metas:
         assert m._partial_results is not None
         assert ("sliced", "ok", 0) in m._partial_results.values() or len(m._partial_results) == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_oom_metric_records_bounded_strategy_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture_recovery_events(monkeypatch)
+    executor = BatchExecutor(
+        model_name="m",
+        registry=None,
+        config=OomRecoveryConfig(strategy=(OomRecoveryAction.CACHE_CLEAR,)),
+        stats=OomRecoveryStats(),
+    )
+    group, _ = _make_group(1)
+    attempts = 0
+
+    async def dispatch(_handler: Any, _group: ConfigGroup) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _oom()
+        return "ok"
+
+    await executor.run(_FakeHandler(), group, dispatch)
+
+    assert calls == [{"model": "m", "strategy": "cache_clear", "outcome": "success"}]
+
+
+@pytest.mark.asyncio
+async def test_managed_oom_final_attempt_records_terminal_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture_recovery_events(monkeypatch)
+    executor = BatchExecutor(
+        model_name="m",
+        registry=None,
+        config=OomRecoveryConfig(strategy=(OomRecoveryAction.CACHE_CLEAR,)),
+        stats=OomRecoveryStats(),
+    )
+    group, metas = _make_group(1)
+
+    async def dispatch(_handler: Any, _group: ConfigGroup) -> str:
+        raise _oom()
+
+    await executor.run(_FakeHandler(), group, dispatch)
+
+    assert calls == [{"model": "m", "strategy": "cache_clear", "outcome": "terminal"}]
+    assert isinstance(metas[0].future.exception(), ResourceExhaustedError)
+
+
+@pytest.mark.asyncio
+async def test_managed_oom_records_one_outcome_per_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture_recovery_events(monkeypatch)
+    registry = AsyncMock()
+    registry.evict_lru_excluding = AsyncMock(return_value=EvictionResult.EVICTED)
+    executor = BatchExecutor(
+        model_name="m",
+        registry=registry,
+        config=OomRecoveryConfig(
+            strategy=(OomRecoveryAction.CACHE_CLEAR, OomRecoveryAction.EVICT_LRU),
+        ),
+        stats=OomRecoveryStats(),
+    )
+    group, _ = _make_group(1)
+    attempts = 0
+
+    async def dispatch(_handler: Any, _group: ConfigGroup) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise _oom()
+        return "ok"
+
+    await executor.run(_FakeHandler(), group, dispatch)
+
+    assert calls == [
+        {"model": "m", "strategy": "cache_clear", "outcome": "failed"},
+        {"model": "m", "strategy": "evict_lru", "outcome": "success"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -311,87 +389,71 @@ async def test_non_oom_error_propagates_immediately() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prometheus_counters_fire_on_recovery() -> None:
-    """Recovery activity bumps the Prometheus counters in lockstep with stats.
-
-    Without this, dashboards built on ``sie_oom_recoveries_*`` would
-    silently undercount (the in-memory ``OomRecoveryStats`` would still
-    be correct, but operators rely on the prom metric).
-    """
-    config = OomRecoveryConfig(strategy=(OomRecoveryAction.CACHE_CLEAR,))
+async def test_invalid_input_isolates_fused_requests_when_oom_recovery_disabled() -> None:
+    config = OomRecoveryConfig(enabled=False)
     stats = OomRecoveryStats()
-    executor = BatchExecutor(model_name="prom-test", registry=None, config=config, stats=stats)
+    executor = BatchExecutor(model_name="m", registry=None, config=config, stats=stats)
 
-    group, _ = _make_group(2)
+    bad = _FakeMetadata()
+    good = _FakeMetadata()
+    group = cast("ConfigGroup", (["bad", "good"], [bad, good], [0, 0], [0, 1]))
     handler = _FakeHandler()
+    sentinel = InvalidInputError("blank reranker candidate")
+    seen_sizes: list[int] = []
 
-    call_count = 0
-
-    async def dispatch(_h: Any, _g: ConfigGroup) -> str:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise _oom()
+    async def dispatch(_h: Any, candidate_group: ConfigGroup) -> str:
+        seen_sizes.append(len(candidate_group[0]))
+        if "bad" in candidate_group[0]:
+            raise sentinel
         return "ok"
-
-    # Snapshot before/after — Counter doesn't expose .get() directly; use
-    # ``_value.get()`` on the labelled child. ``labels(...).inc()`` bumps it.
-    attempted_before = OOM_RECOVERIES_ATTEMPTED.labels(model="prom-test")._value.get()
-    succeeded_before = OOM_RECOVERIES_SUCCEEDED.labels(model="prom-test")._value.get()
-    cache_before = OOM_CACHE_CLEARS.labels(model="prom-test")._value.get()
-    splits_before = OOM_BATCH_SPLITS.labels(model="prom-test")._value.get()
 
     await executor.run(handler, group, dispatch)
 
-    assert OOM_RECOVERIES_ATTEMPTED.labels(model="prom-test")._value.get() == attempted_before + 1
-    assert OOM_RECOVERIES_SUCCEEDED.labels(model="prom-test")._value.get() == succeeded_before + 1
-    assert OOM_CACHE_CLEARS.labels(model="prom-test")._value.get() == cache_before + 1
-    # No split happened — counter must be unchanged.
-    assert OOM_BATCH_SPLITS.labels(model="prom-test")._value.get() == splits_before
+    assert seen_sizes == [2, 1, 1]
+    assert bad.future.exception() is sentinel
+    assert good._partial_results == {0: ("sliced", "ok", 0)}
+    assert not good.future.done()
+    assert stats.recoveries_attempted == 0
+    assert stats.batch_splits == 0
 
 
 @pytest.mark.asyncio
-async def test_prometheus_counters_fire_for_evict_and_split_actions() -> None:
-    """Per-strategy counters bump for evict_lru and split_batch.
+async def test_invalid_input_keeps_multi_item_request_atomic() -> None:
+    config = OomRecoveryConfig(enabled=False)
+    stats = OomRecoveryStats()
+    executor = BatchExecutor(model_name="m", registry=None, config=config, stats=stats)
 
-    Companion to ``test_prometheus_counters_fire_on_recovery`` (which only
-    covers cache_clear). Verifies ``record_oom_recovery_event(action=...)``
-    routes to the right counter for every strategy.
-    """
-    # Force an OOM that walks evict_lru → split_batch.
-    config = OomRecoveryConfig(
-        strategy=(OomRecoveryAction.EVICT_LRU, OomRecoveryAction.SPLIT_BATCH),
-        max_split_depth=2,
+    bad = _FakeMetadata(item_count=2)
+    good = _FakeMetadata()
+    group = cast(
+        "ConfigGroup",
+        (
+            ["bad-0", "bad-1", "good"],
+            [bad, bad, good],
+            [0, 1, 0],
+            [0, 1, 2],
+        ),
     )
-    stats = OomRecoveryStats()
-    registry = AsyncMock()
-    registry.evict_lru_excluding = AsyncMock(return_value=EvictionResult.EVICTED)
-    executor = BatchExecutor(model_name="prom-evict-split", registry=registry, config=config, stats=stats)
-
-    group, _ = _make_group(2)
     handler = _FakeHandler()
+    sentinel = InvalidInputError("malformed image")
+    seen_groups: list[list[object]] = []
 
-    call_count = 0
-
-    async def dispatch(_h: Any, g: ConfigGroup) -> str:
-        # OOM persists through evict; then split halves to size 1 and succeeds.
-        nonlocal call_count
-        call_count += 1
-        if len(g[1]) > 1:
-            raise _oom()
+    async def dispatch(_h: Any, candidate_group: ConfigGroup) -> str:
+        seen_groups.append(list(candidate_group[0]))
+        if bad in candidate_group[1]:
+            raise sentinel
         return "ok"
-
-    evict_before = OOM_EVICTIONS_TRIGGERED.labels(model="prom-evict-split")._value.get()
-    split_before = OOM_BATCH_SPLITS.labels(model="prom-evict-split")._value.get()
 
     await executor.run(handler, group, dispatch)
 
-    assert OOM_EVICTIONS_TRIGGERED.labels(model="prom-evict-split")._value.get() == evict_before + 1
-    assert OOM_BATCH_SPLITS.labels(model="prom-evict-split")._value.get() == split_before + 1
+    assert seen_groups == [["bad-0", "bad-1", "good"], ["bad-0", "bad-1"], ["good"]]
+    assert bad.future.exception() is sentinel
+    assert good._partial_results == {0: ("sliced", "ok", 0)}
+    assert not good.future.done()
 
 
 @pytest.mark.asyncio
-async def test_partial_split_bumps_both_succeeded_and_terminal() -> None:
+async def test_partial_split_bumps_both_succeeded_and_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     """A partial-success split bumps recoveries_succeeded AND terminal_failures.
 
     Regression guard for the metric semantics fix: half the items succeed
@@ -402,6 +464,7 @@ async def test_partial_split_bumps_both_succeeded_and_terminal() -> None:
     config = OomRecoveryConfig(strategy=(OomRecoveryAction.SPLIT_BATCH,), max_split_depth=2)
     stats = OomRecoveryStats()
     executor = BatchExecutor(model_name="m", registry=None, config=config, stats=stats)
+    managed_calls = _capture_recovery_events(monkeypatch)
 
     group, metas = _make_group(2)
     handler = _FakeHandler()
@@ -421,6 +484,9 @@ async def test_partial_split_bumps_both_succeeded_and_terminal() -> None:
     assert metas[0].future.done()
     assert metas[0].future.exception() is not None
     assert metas[1]._partial_results is not None
+    # The managed per-attempt outcome is exclusive even though the legacy
+    # component counters above intentionally retain both facts.
+    assert managed_calls == [{"model": "m", "strategy": "split_batch", "outcome": "terminal"}]
 
 
 @pytest.mark.asyncio
@@ -494,3 +560,77 @@ async def test_eviction_lock_timeout_is_swallowed() -> None:
     assert call_count == 2
     assert stats.evictions_triggered == 0
     assert stats.cache_clears == 1
+
+
+# --------------------------------------------------------------------------
+# OOM traceback release (#2144)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_oom_traceback_released_when_recovery_disabled() -> None:
+    """Disabled-recovery branch clears the OOM traceback before _fail_group.
+
+    Future.set_exception preserves the traceback, whose frame locals pin the
+    failed forward's batch tensors and activations (#2144).
+    """
+    config = OomRecoveryConfig(enabled=False)
+    stats = OomRecoveryStats()
+    executor = BatchExecutor(model_name="m", registry=None, config=config, stats=stats)
+
+    group, metas = _make_group(2)
+    handler = _FakeHandler()
+
+    async def dispatch(_h: Any, _g: ConfigGroup) -> str:
+        raise _oom()
+
+    await executor.run(handler, group, dispatch)
+
+    for m in metas:
+        err = m.future.exception()
+        assert isinstance(err, RuntimeError)
+        assert err.__traceback__ is None
+
+
+@pytest.mark.asyncio
+async def test_non_oom_traceback_preserved_when_recovery_disabled() -> None:
+    """Non-OOM errors keep their traceback for debugging."""
+    config = OomRecoveryConfig(enabled=False)
+    stats = OomRecoveryStats()
+    executor = BatchExecutor(model_name="m", registry=None, config=config, stats=stats)
+
+    group, metas = _make_group(1)
+    handler = _FakeHandler()
+
+    async def dispatch(_h: Any, _g: ConfigGroup) -> str:
+        raise ValueError("not an OOM")
+
+    await executor.run(handler, group, dispatch)
+
+    err = metas[0].future.exception()
+    assert isinstance(err, ValueError)
+    assert err.__traceback__ is not None
+
+
+@pytest.mark.asyncio
+async def test_oom_tracebacks_released_across_enabled_recovery() -> None:
+    """Every OOM raised through the enabled strategy loop is released."""
+    config = OomRecoveryConfig(strategy=(OomRecoveryAction.CACHE_CLEAR,))
+    stats = OomRecoveryStats()
+    executor = BatchExecutor(model_name="m", registry=None, config=config, stats=stats)
+
+    group, _metas = _make_group(2)
+    handler = _FakeHandler()
+
+    raised: list[BaseException] = []
+
+    async def dispatch(_h: Any, _g: ConfigGroup) -> str:
+        e = _oom()
+        raised.append(e)
+        raise e
+
+    await executor.run(handler, group, dispatch)
+
+    # Original attempt + cache_clear retry, both OOM'd and both released.
+    assert len(raised) == 2
+    assert all(e.__traceback__ is None for e in raised)

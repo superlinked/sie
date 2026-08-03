@@ -51,6 +51,11 @@ fn wrap_err<E: std::fmt::Display>(e: E) -> SentinelError {
 /// host, which is what the SDK expects.
 pub const DTYPE_F32: &str = "<f4";
 
+/// msgpack-numpy dtype string for a contiguous little-endian float16
+/// array. This is `numpy.dtype("float16").str` on a little-endian
+/// host.
+pub const DTYPE_F16: &str = "<f2";
+
 /// msgpack-numpy dtype string for int32 little-endian, used for
 /// sparse indices.
 pub const DTYPE_I32: &str = "<i4";
@@ -142,6 +147,93 @@ pub fn write_f32_matrix_2d(
     write_numpy_sentinel(buf, DTYPE_F32, &[rows, cols], &bytes)
 }
 
+/// Convenience: write a 2-D float16 matrix `[rows, cols]` as a numpy
+/// sentinel, rounding the supplied f32 values to IEEE 754 half
+/// precision.
+pub fn write_f16_matrix_2d_from_f32(
+    buf: &mut Vec<u8>,
+    data: &[f32],
+    rows: u32,
+    cols: u32,
+) -> Result<(), SentinelError> {
+    let expected = (rows as usize).saturating_mul(cols as usize);
+    if data.len() != expected {
+        return Err(SentinelError::InvalidMatrixShape {
+            expected,
+            actual: data.len(),
+        });
+    }
+    let mut bytes = Vec::with_capacity(data.len() * 2);
+    for &f in data {
+        bytes
+            .write_all(&f32_to_f16_bits(f).to_le_bytes())
+            .map_err(wrap_err)?;
+    }
+    write_numpy_sentinel(buf, DTYPE_F16, &[rows, cols], &bytes)
+}
+
+/// Convenience: write a 2-D float16 matrix `[rows, cols]` from
+/// already-rounded little-endian f16 bytes.
+pub fn write_f16_matrix_2d_from_le_bytes(
+    buf: &mut Vec<u8>,
+    data: &[u8],
+    rows: u32,
+    cols: u32,
+) -> Result<(), SentinelError> {
+    let expected = (rows as usize)
+        .saturating_mul(cols as usize)
+        .saturating_mul(2);
+    if data.len() != expected {
+        return Err(SentinelError::InvalidMatrixShape {
+            expected,
+            actual: data.len(),
+        });
+    }
+    write_numpy_sentinel(buf, DTYPE_F16, &[rows, cols], data)
+}
+
+fn f32_to_f16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x7f_ffff;
+
+    if exponent == 0xff {
+        if mantissa == 0 {
+            return sign | 0x7c00;
+        }
+        let payload = (mantissa >> 13).max(1) as u16;
+        return sign | 0x7c00 | payload;
+    }
+
+    let half_exp = exponent - 127 + 15;
+    if half_exp >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if half_exp <= 0 {
+        if half_exp < -10 {
+            return sign;
+        }
+        let mantissa = mantissa | 0x80_0000;
+        let shift = (14 - half_exp) as u32;
+        let mut half_mantissa = (mantissa >> shift) as u16;
+        let round_bit = 1u32 << (shift - 1);
+        let remainder = mantissa & (round_bit - 1);
+        if (mantissa & round_bit) != 0 && (remainder != 0 || (half_mantissa & 1) != 0) {
+            half_mantissa = half_mantissa.wrapping_add(1);
+        }
+        return sign | half_mantissa;
+    }
+
+    let mut half = sign | ((half_exp as u16) << 10) | ((mantissa >> 13) as u16);
+    let round_bit = 0x0000_1000;
+    let remainder = mantissa & (round_bit - 1);
+    if (mantissa & round_bit) != 0 && (remainder != 0 || (half & 1) != 0) {
+        half = half.wrapping_add(1);
+    }
+    half
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +298,27 @@ mod tests {
             }
         ));
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn f16_matrix_uses_float16_dtype_and_half_bytes() {
+        let mut buf = Vec::new();
+        write_f16_matrix_2d_from_f32(&mut buf, &[1.0, -2.0], 1, 2).unwrap();
+        assert!(
+            buf.windows(DTYPE_F16.len())
+                .any(|window| window == DTYPE_F16.as_bytes()),
+            "sentinel must carry <f2 dtype"
+        );
+        assert!(
+            buf.windows(4)
+                .any(|window| window == [0x00, 0x3c, 0x00, 0xc0]),
+            "sentinel data must contain little-endian f16 bytes for [1.0, -2.0]"
+        );
+    }
+
+    #[test]
+    fn f16_conversion_uses_round_to_nearest_even() {
+        assert_eq!(f32_to_f16_bits(1.000_488_3), 0x3c00);
+        assert_eq!(f32_to_f16_bits(1.001_464_8), 0x3c02);
     }
 }

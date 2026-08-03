@@ -1,5 +1,6 @@
 sie_id: ibm-granite/granite-guardian-3.0-2b
 hf_id: ibm-granite/granite-guardian-3.0-2b
+hf_revision: e48b7b8acf438d24daa2271ada6df945b5b8895e
 inputs:
   text: true
   image: false
@@ -8,16 +9,18 @@ inputs:
 tasks:
   # CHECK POLICY job: a generative guard model. It takes a conversation (or a
   # single user message) and *generates* a one-token verdict — "Yes" (unsafe)
-  # or "No" (safe) — under a risk taxonomy. Its chat template defaults to the
-  # ``harm`` risk when no ``guardian_config`` is supplied, so the standard
-  # OpenAI ``/v1/chat/completions`` path elicits a moderation verdict with no
-  # special kwargs. Served on the same SGLang generation adapter as the other
+  # or "No" (safe) — under a risk taxonomy. The shipped task explicitly fixes
+  # the taxonomy to ``harm`` so tokenizer defaults cannot silently change the
+  # catalog contract. Served on the same SGLang generation adapter as the other
   # decoder-only LLMs (architecture: GraniteForCausalLM).
   generate:
     context_length: 8192
     # Moderation needs only a couple of tokens ("Yes"/"No"); the cap is a
     # generous ceiling, not a target.
     max_output_tokens: 512
+    chat_template_kwargs:
+      guardian_config:
+        risk_name: harm
     capabilities:
       # Guard verdicts are free-form single tokens — no grammar/tools needed.
       grammar: []

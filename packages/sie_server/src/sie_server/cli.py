@@ -29,10 +29,20 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from sie_sdk.bundle_utils import find_bundle_for_models, match_bundle_models
+from sie_sdk.bundle_utils import (
+    ModelAdapterInventory,
+    find_bundle_for_model_adapters,
+    find_bundle_for_models,
+    match_bundle_model_adapters,
+    match_bundle_models,
+)
 
 import sie_server
+from sie_server.api.generate import router as generate_router
+from sie_server.api.openai_audio import router as openai_audio_router
 from sie_server.app.app_state_config import ENV_DEVICES, ENV_POOL, AppStateConfig
+from sie_server.config.model import ModelConfig
+from sie_server.core.deps import collect_bundle_deps
 from sie_server.core.loader import load_model_configs
 from sie_server.main import run_server
 
@@ -52,6 +62,16 @@ def _resolve_default_dir(name: str) -> Path:
 
 _DEFAULT_BUNDLES_DIR = _resolve_default_dir("bundles")
 DEFAULT_MODELS_DIR = str(_resolve_default_dir("models"))
+
+
+def _model_adapter_inventory(configs: dict[str, ModelConfig]) -> ModelAdapterInventory:
+    """Build bundle-matching inputs from local or cloud-loaded model configs."""
+    inventory: ModelAdapterInventory = {}
+    for name, config in configs.items():
+        adapter_path = config.resolve_profile("default").adapter_path
+        adapter_module = adapter_path.split(":", maxsplit=1)[0]
+        inventory[name] = ({adapter_module}, config.pool)
+    return inventory
 
 
 def detect_device() -> str:
@@ -202,7 +222,6 @@ def openapi_export(
     from sie_server.api.encode import router as encode_router
     from sie_server.api.extract import router as extract_router
     from sie_server.api.health import router as health_router
-    from sie_server.api.metrics import router as metrics_router
     from sie_server.api.models import router as models_router
     from sie_server.api.openai_compat import router as openai_router
     from sie_server.api.openapi import setup_custom_openapi_schema
@@ -212,10 +231,10 @@ def openapi_export(
 
     # Build a lightweight FastAPI app for the PUBLISHED API surface — no lifespan (no GPU
     # init, model registry, telemetry, or NATS). NOTE: the local-only convenience routes are
-    # intentionally excluded from the committed openapi.json — the native ``generate`` router
-    # and the ``openai_local`` router (/v1/chat/completions + /v1/rerank) are a single-node/dev
-    # surface mounted on the worker's own app, not part of the cluster API (the Rust gateway is
-    # the production OpenAPI authority). They still appear at runtime /docs on a local server.
+    # intentionally excluded from the committed openapi.json — the ``openai_local`` router
+    # (/v1/chat/completions + /v1/rerank) is a single-node/dev convenience surface. The
+    # SIE-native ``generate`` route is part of the worker contract and is published here even
+    # though the Rust gateway remains the production cluster API authority.
     app_ = FastAPI(
         title="SIE Server",
         description="Search Inference Engine - GPU inference server for search workloads",
@@ -225,10 +244,11 @@ def openapi_export(
     app_.include_router(health_router)
     app_.include_router(encode_router)
     app_.include_router(extract_router)
+    app_.include_router(generate_router)
     app_.include_router(score_router)
     app_.include_router(models_router)
-    app_.include_router(metrics_router)
     app_.include_router(ws_router)
+    app_.include_router(openai_audio_router)
     app_.include_router(openai_router)
     setup_custom_openapi_schema(app_)
 
@@ -297,7 +317,6 @@ def serve(
 
     # Resolve device (auto-detect if needed)
     resolved_device = resolve_device(device)
-    pool_name = os.environ.get(ENV_POOL) or None
     resolved_devices = parse_devices(os.environ.get(ENV_DEVICES))
     pool_name = os.environ.get(ENV_POOL) or None
 
@@ -307,13 +326,45 @@ def serve(
         typer.echo("Error: Cannot specify both --bundle and --models", err=True)
         raise typer.Exit(1)
 
+    runtime_bundle = os.environ.get("SIE_BUNDLE")
+    baked_bundle = (
+        runtime_bundle if runtime_bundle and (_DEFAULT_BUNDLES_DIR / f"{runtime_bundle}.yaml").exists() else None
+    )
+    if bundle and baked_bundle and bundle != baked_bundle:
+        typer.echo(
+            f"Error: Bundle '{bundle}' is incompatible with baked bundle '{baked_bundle}'; "
+            f"use an image built for bundle '{bundle}'",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Release images declare their baked dependency bundle through SIE_BUNDLE,
+    # while the local ``mise run serve`` path resolves the default bundle when
+    # neither selector is provided. Honour both here so the advertised catalog
+    # never includes models whose adapter dependencies are absent.
+    if not bundle and not models:
+        bundle = baked_bundle or "default"
+
+    all_configs: dict[str, ModelConfig] | None = None
+    model_adapters: ModelAdapterInventory | None = None
+    if is_cloud_path(models_dir_resolved):
+        all_configs = load_model_configs(models_dir_resolved)
+        model_adapters = _model_adapter_inventory(all_configs)
+
     if bundle:
         bundles_dir = _DEFAULT_BUNDLES_DIR
         if not bundles_dir.exists():
             typer.echo(f"Error: Bundles directory not found: {bundles_dir}", err=True)
             raise typer.Exit(1)
         try:
-            model_filter = load_bundle(bundle, bundles_dir, models_dir_resolved, pool_name=pool_name)
+            if model_adapters is not None:
+                model_filter = match_bundle_model_adapters(
+                    bundles_dir / f"{bundle}.yaml",
+                    model_adapters,
+                    pool_name=pool_name,
+                )
+            else:
+                model_filter = load_bundle(bundle, bundles_dir, models_dir_resolved, pool_name=pool_name)
             typer.echo(f"Bundle '{bundle}': {len(model_filter)} models")
         except FileNotFoundError as e:
             typer.echo(f"Error: {e}", err=True)
@@ -323,7 +374,8 @@ def serve(
         model_filter = [m.strip() for m in models.split(",") if m.strip()]
         typer.echo(f"Model filter: {len(model_filter)} models")
         # Validate model names exist by loading configs and checking
-        all_configs = load_model_configs(models_dir_resolved)
+        if all_configs is None:
+            all_configs = load_model_configs(models_dir_resolved)
         unknown = [m for m in model_filter if m not in all_configs]
         if unknown:
             typer.echo(f"Error: Unknown model(s): {', '.join(unknown)}", err=True)
@@ -342,7 +394,8 @@ def serve(
     extra_models_env = os.environ.get("SIE_EXTRA_MODELS")
     if extra_models_env and model_filter is not None:
         extras = [m.strip() for m in extra_models_env.split(",") if m.strip()]
-        all_configs = load_model_configs(models_dir_resolved)
+        if all_configs is None:
+            all_configs = load_model_configs(models_dir_resolved)
         unknown_extra = [m for m in extras if m not in all_configs]
         if unknown_extra:
             typer.echo(f"Error: SIE_EXTRA_MODELS unknown model(s): {', '.join(unknown_extra)}", err=True)
@@ -350,8 +403,84 @@ def serve(
         model_filter = sorted(set(model_filter) | set(extras))
         typer.echo(f"Extra models added to filter: {', '.join(extras)}")
 
+    # Explicit selectors must not escape a release image's dependency boundary.
+    # Local ``mise run serve -m ...`` has no initial known bundle and keeps the
+    # ad-hoc dependency-resolution path in tools/mise_tasks/serve.bash.
+    if baked_bundle and model_filter is not None:
+        if model_adapters is not None:
+            baked_models = set(
+                match_bundle_model_adapters(
+                    _DEFAULT_BUNDLES_DIR / f"{baked_bundle}.yaml",
+                    model_adapters,
+                    pool_name=pool_name,
+                )
+            )
+        else:
+            baked_models = set(
+                load_bundle(baked_bundle, _DEFAULT_BUNDLES_DIR, models_dir_resolved, pool_name=pool_name)
+            )
+        incompatible: list[str] = []
+        for selected_model in sorted(set(model_filter) - baked_models):
+            if model_adapters is not None:
+                selected_bundle = find_bundle_for_model_adapters(
+                    [selected_model],
+                    _DEFAULT_BUNDLES_DIR,
+                    model_adapters,
+                    pool_name=pool_name,
+                )
+            else:
+                selected_bundle = find_bundle_for_models(
+                    [selected_model],
+                    _DEFAULT_BUNDLES_DIR,
+                    Path(models_dir_resolved),
+                    pool_name=pool_name,
+                )
+            # A dependency-free bundle adds only adapter/config selection; its
+            # code already ships in the base server image. This keeps the
+            # weightless Fake Engine usable in default-image Docker tests
+            # without allowing a dependency-bearing bundle such as
+            # transformers5 to escape the image's baked environment.
+            if selected_bundle:
+                selected_deps = collect_bundle_deps(
+                    selected_bundle,
+                    _DEFAULT_BUNDLES_DIR,
+                    Path(DEFAULT_MODELS_DIR) if model_adapters is not None else Path(models_dir_resolved),
+                    pool_name=pool_name,
+                )
+                if not selected_deps.conflicts and not selected_deps.requirements:
+                    continue
+            incompatible.append(selected_model)
+        if incompatible:
+            if model_adapters is not None:
+                recommended = find_bundle_for_model_adapters(
+                    model_filter,
+                    _DEFAULT_BUNDLES_DIR,
+                    model_adapters,
+                    pool_name=pool_name,
+                )
+            else:
+                recommended = find_bundle_for_models(
+                    model_filter,
+                    _DEFAULT_BUNDLES_DIR,
+                    Path(models_dir_resolved),
+                    pool_name=pool_name,
+                )
+            recommendation = (
+                f"; use an image built for bundle '{recommended}'"
+                if recommended
+                else "; use an image whose bundle contains all selected models"
+            )
+            typer.echo(
+                f"Error: Model(s) {', '.join(incompatible)} are incompatible with baked bundle "
+                f"'{baked_bundle}'{recommendation}",
+                err=True,
+            )
+            raise typer.Exit(1)
+
     os.environ["SIE_INSTRUMENTATION"] = "true" if instrumentation else "false"
-    if bundle:
+    if baked_bundle:
+        os.environ["SIE_BUNDLE"] = baked_bundle
+    elif bundle:
         os.environ["SIE_BUNDLE"] = bundle
     elif model_filter:
         digest = hashlib.sha256(",".join(sorted(model_filter)).encode("utf-8")).hexdigest()[:12]

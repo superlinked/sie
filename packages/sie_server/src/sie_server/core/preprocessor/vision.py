@@ -29,6 +29,7 @@ from sie_server.core.preprocessor.base import get_image_executor
 from sie_server.types.inputs import media_bytes
 
 if TYPE_CHECKING:
+    import torch
     from PIL import Image as PILImage
 
     from sie_server.config.model import ModelConfig
@@ -39,6 +40,40 @@ logger = logging.getLogger(__name__)
 # Constants for NemoColEmbed preprocessing (from NVIDIA's code)
 _SIGLIP_MEAN = (0.5, 0.5, 0.5)
 _SIGLIP_STD = (0.5, 0.5, 0.5)
+
+
+def collect_detection_prepared_items(
+    prepared_items: list[Any],
+) -> tuple[torch.Tensor, torch.Tensor, list[tuple[int, int]], list[int]] | None:
+    """Pad valid detection payloads and preserve their fused-batch positions."""
+    import torch  # deferred: torch is an optional server dependency
+
+    valid_items = [
+        (index, prepared)
+        for index, prepared in enumerate(prepared_items)
+        if hasattr(prepared, "payload") and prepared.payload is not None
+    ]
+    if not valid_items:
+        return None
+
+    tensors = [prepared.payload.pixel_values for _, prepared in valid_items]
+    max_height = max(tensor.shape[-2] for tensor in tensors)
+    max_width = max(tensor.shape[-1] for tensor in tensors)
+    pixel_values = tensors[0].new_zeros((len(tensors), tensors[0].shape[0], max_height, max_width))
+    pixel_mask = torch.zeros(
+        (len(tensors), max_height, max_width),
+        dtype=torch.long,
+        device=tensors[0].device,
+    )
+    for index, tensor in enumerate(tensors):
+        height, width = tensor.shape[-2:]
+        pixel_values[index, :, :height, :width] = tensor
+        pixel_mask[index, :height, :width] = 1
+    original_sizes = [prepared.payload.original_size for _, prepared in valid_items]
+    # PreparedItem.original_index is request-local and can repeat in a
+    # cross-request fused batch. The worker aligns these lists.
+    image_indices = [index for index, _ in valid_items]
+    return pixel_values, pixel_mask, original_sizes, image_indices
 
 
 def _load_rgb(media: object) -> PILImage.Image:

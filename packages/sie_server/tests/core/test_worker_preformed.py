@@ -10,12 +10,14 @@ single-instance HTTP serving.
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput, ScoreOutput
 from sie_server.core.prepared import TextPreparedItem, make_text_item
 from sie_server.core.worker import ModelWorker, WorkerConfig
+from sie_server.core.worker import model_worker as model_worker_module
 from sie_server.core.worker.model_worker import PreformedExtractRequest, PreformedScoreRequest
 from sie_server.types.inputs import Item
 
@@ -60,8 +62,12 @@ def prepared_item() -> TextPreparedItem:
 
 @pytest.mark.asyncio
 async def test_preformed_submit_dispatches_immediately(
-    adapter: RecordingAdapter, prepared_item: TextPreparedItem
+    adapter: RecordingAdapter,
+    prepared_item: TextPreparedItem,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    telemetry = MagicMock()
+    monkeypatch.setattr(model_worker_module, "worker_telemetry", lambda: telemetry)
     worker = ModelWorker(adapter, WorkerConfig())
     await worker.start()
     try:
@@ -79,6 +85,7 @@ async def test_preformed_submit_dispatches_immediately(
         assert adapter.encode_calls == [(1, None)]
         assert worker.pending_count == 0
         assert worker._process_task is None
+        telemetry.queue_released.assert_not_called()
     finally:
         await worker.stop()
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import transformers
-from sie_server.adapters.colbert_modernbert_flash import ColBERTModernBERTFlashAdapter
+from sie_server.adapters.colbert_modernbert_flash.adapter import ColBERTModernBERTFlashAdapter
 
 
 def test_load_tokenizer_happy_path_uses_auto_tokenizer(monkeypatch) -> None:
@@ -10,7 +12,8 @@ def test_load_tokenizer_happy_path_uses_auto_tokenizer(monkeypatch) -> None:
 
     sentinel_auto = object()
 
-    def fake_auto(*_args, **_kwargs):
+    def fake_auto(*_args, **kwargs):
+        assert kwargs["trust_remote_code"] is False
         return sentinel_auto
 
     def fail_fast(*_args, **_kwargs):
@@ -42,3 +45,29 @@ def test_load_tokenizer_falls_back_when_auto_cannot_resolve_class(monkeypatch) -
     monkeypatch.setattr(transformers.PreTrainedTokenizerFast, "from_pretrained", staticmethod(fake_fast))
 
     assert adapter._load_tokenizer() is sentinel_fast
+
+
+def test_load_disables_remote_repository_code(monkeypatch) -> None:
+    adapter = ColBERTModernBERTFlashAdapter(
+        "lightonai/GTE-ModernColBERT-v1",
+        revision="cbbe53366e564450558f5e639dd499171f127538",
+    )
+    model = MagicMock()
+    model.config.hidden_size = 768
+
+    def fake_model(*_args, **kwargs):
+        assert kwargs["trust_remote_code"] is False
+        assert kwargs["revision"] == "cbbe53366e564450558f5e639dd499171f127538"
+        return model
+
+    monkeypatch.setattr(transformers.AutoModel, "from_pretrained", staticmethod(fake_model))
+    monkeypatch.setattr(adapter, "_load_tokenizer", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        "sie_server.adapters.colbert_modernbert_flash.adapter.load_pylate_dense_chain",
+        MagicMock(return_value=None),
+    )
+
+    adapter.load("cuda")
+
+    model.to.assert_called_once_with("cuda")
+    model.eval.assert_called_once_with()

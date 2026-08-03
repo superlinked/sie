@@ -1,5 +1,6 @@
 sie_id: IDEA-Research/grounding-dino-base
 hf_id: IDEA-Research/grounding-dino-base
+hf_revision: 12bdfa3120f3e7ec7b434d90674b3396eccf88eb
 inputs:
   text: true
   image: true
@@ -13,7 +14,7 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: float16
-    adapter_path: sie_server.adapters.grounding_dino:GroundingDINOAdapter
+    adapter_path: sie_server.adapters.grounding_dino.adapter:GroundingDINOAdapter
     adapter_options:
       loadtime: {}
       runtime:

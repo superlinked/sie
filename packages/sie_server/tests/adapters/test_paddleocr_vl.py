@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +14,8 @@ from sie_server.types.inputs import ImageInput, Item
 _ = transformers.AutoProcessor
 _ = transformers.AutoModelForCausalLM
 _ = transformers.masking_utils.create_causal_mask
+
+_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "PaddlePaddle__PaddleOCR-VL-1.5.yaml"
 
 
 class TestPaddleOCRVLAdapter:
@@ -329,8 +332,7 @@ class TestPaddleOCRVLAdapter:
         import yaml
         from sie_server.config.model import ModelConfig
 
-        path = "packages/sie_server/models/PaddlePaddle__PaddleOCR-VL-1.5.yaml"
-        with open(path) as f:
+        with _MODEL_PATH.open() as f:
             data = yaml.safe_load(f)
         config = ModelConfig(**data)
         assert config.sie_id == "PaddlePaddle/PaddleOCR-VL-1.5"
@@ -338,5 +340,8 @@ class TestPaddleOCRVLAdapter:
         assert config.hf_revision == "6819afc8509ac9afa50e91b34627a7cf8f7900bb"
         assert config.inputs.image is True
         resolved = config.resolve_profile("default")
-        assert resolved.adapter_path == "sie_server.adapters.paddleocr_vl:PaddleOCRVLAdapter"
+        assert resolved.adapter_path == "sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter"
         assert resolved.compute_precision == "bfloat16"
+        fallback = config.resolve_profile("transformers")
+        assert fallback.adapter_path == "sie_server.adapters.paddleocr_vl:PaddleOCRVLAdapter"
+        assert fallback.compute_precision == "bfloat16"

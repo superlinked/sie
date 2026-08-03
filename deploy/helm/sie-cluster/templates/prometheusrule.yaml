@@ -1,13 +1,17 @@
 {{- if or (index .Values "kube-prometheus-stack" "install") .Values.alertRules.enabled }}
+{{- $fullname := include "sie-cluster.fullname" . -}}
+# Application rules below read the collector's Prometheus compatibility
+# exporter. The shared applicationPrometheusEnabled gate therefore also
+# renders the collector and ServiceMonitor whenever this resource is enabled.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ include "sie-cluster.fullname" . }}-alerts
+  name: {{ $fullname }}-alerts
   namespace: {{ include "sie-cluster.namespace" . }}
   labels:
     {{- include "sie-cluster.labels" . | nindent 4 }}
     app.kubernetes.io/component: alert
     prometheus: kube-prometheus
 spec:
-{{ .Files.Get "files/alerts/sie-rules.yaml" | replace "__NAMESPACE__" (include "sie-cluster.namespace" .) | indent 2 }}
+{{ .Files.Get "files/alerts/sie-rules.yaml" | replace "__NAMESPACE__" (include "sie-cluster.namespace" .) | replace "__FULLNAME__" $fullname | replace "__COLLECTOR_SERVICE__" (printf "%s-otel-collector" $fullname) | indent 2 }}
 {{- end }}

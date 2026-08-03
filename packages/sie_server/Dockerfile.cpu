@@ -7,6 +7,19 @@
 
 ARG BUNDLE=default
 
+# Build the internal Rust extension from checked-in source; it is not published
+# to PyPI.
+FROM ghcr.io/pyo3/maturin:v1.13.3 AS audio-prep-builder
+WORKDIR /io
+# The crate is a Cargo workspace member (#2339): its pins live in the root
+# Cargo.lock, and loading the workspace needs every member's manifest+sources.
+COPY Cargo.toml Cargo.lock ./
+COPY packages/sie_audio_prep/ packages/sie_audio_prep/
+COPY packages/sie_gateway/ packages/sie_gateway/
+COPY packages/sie_server_sidecar/ packages/sie_server_sidecar/
+COPY packages/sie_telemetry/ packages/sie_telemetry/
+RUN maturin build --release --locked --out /dist --manifest-path packages/sie_audio_prep/Cargo.toml
+
 # =============================================================================
 # Dependency image: pyproject-only cache seed
 # =============================================================================
@@ -38,6 +51,7 @@ WORKDIR /app
 # Dependency specs first — this layer caches as long as pyproject.toml is unchanged.
 COPY packages/sie_sdk/pyproject.toml /tmp/sie_sdk/pyproject.toml
 COPY packages/sie_server/pyproject.toml ./pyproject.toml
+COPY --from=audio-prep-builder /dist /tmp/audio-prep-dist
 
 # Stub source trees so pip accepts the editable installs during dep resolution.
 # Also create empty bundles/ and models/ — referenced by force-include in
@@ -53,6 +67,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && .venv/bin/pip install \
         --index-url https://download.pytorch.org/whl/cpu \
         --extra-index-url https://pypi.org/simple \
+        /tmp/audio-prep-dist/*.whl \
         -e "/tmp/sie_sdk[storage]" \
         -e ".[gpu-metrics]"
 
@@ -84,7 +99,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Sanity-check shared venv imports — catches breakage introduced by the
 # shared-deps resolver.
-RUN .venv/bin/python -c "import torch; print(torch.__version__)"
+RUN .venv/bin/python -c "import sie_audio_prep, torch; print(torch.__version__)"
 
 # Register bundle-libs on sys.path. Content is identical across bundles.
 RUN echo "import sys; sys.path.insert(0, '/app/bundle-libs')" \

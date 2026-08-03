@@ -1,5 +1,6 @@
 sie_id: Qwen/Qwen3-Reranker-4B
 hf_id: Qwen/Qwen3-Reranker-4B
+hf_revision: 22e683669bc0f0bd69640a1354a6d0aebcfeede5
 inputs:
   text: true
   image: false
@@ -14,7 +15,7 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: bfloat16
-    adapter_path: sie_server.adapters.qwen2_flash_cross_encoder:Qwen2FlashCrossEncoderAdapter
+    adapter_path: sie_server.adapters.qwen2_flash_cross_encoder.adapter:Qwen2FlashCrossEncoderAdapter
     adapter_options:
       loadtime:
         yes_token: "yes"

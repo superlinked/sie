@@ -11,6 +11,19 @@ from sie_server.core.prepared import (
 )
 
 
+def _audio_payload() -> AudioPayload:
+    return AudioPayload(
+        pcm_s16le=b"\x00\x00" * 16_000,
+        sample_rate=16_000,
+        sample_count=16_000,
+        duration_ms=1_000,
+        source_sample_rate=48_000,
+        source_sample_count=48_000,
+        source_channels=1,
+        container="wav",
+    )
+
+
 class TestTextPayload:
     """Tests for TextPayload."""
 
@@ -46,16 +59,15 @@ class TestAudioPayload:
     """Tests for AudioPayload."""
 
     def test_creation(self):
-        """AudioPayload stores waveform and metadata."""
-        waveform = torch.randn(1, 16000)
-        payload = AudioPayload(
-            waveform=waveform,
-            sample_rate=16000,
-            duration_s=1.0,
-        )
-        assert payload.waveform.shape == (1, 16000)
-        assert payload.sample_rate == 16000
+        """AudioPayload stores canonical PCM and source metadata."""
+        payload = _audio_payload()
+        assert len(payload.pcm_s16le) == 32_000
+        assert payload.sample_rate == 16_000
+        assert payload.sample_count == 16_000
+        assert payload.duration_ms == 1_000
         assert payload.duration_s == 1.0
+        assert payload.duration_cost_ms == 1_000
+        assert payload.source_sample_count == 48_000
 
 
 class TestPreparedItem:
@@ -180,11 +192,7 @@ class TestMixedPayload:
                 pixel_values=torch.randn(3, 224, 224),
                 original_size=(640, 480),
             ),
-            audio=AudioPayload(
-                waveform=torch.randn(1, 16000),
-                sample_rate=16000,
-                duration_s=1.0,
-            ),
+            audio=_audio_payload(),
         )
         assert payload.modalities == ["text", "image", "audio"]
 

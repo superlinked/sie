@@ -36,15 +36,18 @@ profiles:
         normalize: true
         query_max_length: 32
         skip_special_tokens: false
+        doc_punctuation_skiplist: true
         query_expansion: false
-        query_prefix: '[Q] '
-        doc_prefix: '[D] '
+        query_prefix: '[unused0]'
+        doc_prefix: '[unused1]'
       runtime:
+        query_max_length: 32
         muvera: null
   muvera:
     extends: default
     adapter_options:
       runtime:
+        query_max_length: 32
         muvera: {}
         output_types:
         - dense

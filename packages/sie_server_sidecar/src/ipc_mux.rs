@@ -44,18 +44,21 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
-use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::log_util::ErrChain;
-use crate::metrics::MetricsRegistry;
+use crate::observability::metrics::SidecarTelemetry;
+use crate::protocol::response_chunks::{
+    response_frame_route, AssembledResponse, ResponseAssembler, ResponseChunkBudget,
+    ResponseChunkLimits, ResponseFrameStatus,
+};
 
 /// Same upper bound the pool transport uses; matches Python's
 /// `_MAX_FRAME_BYTES` so a misconfigured caller can't OOM either side.
@@ -84,83 +87,158 @@ pub enum MuxError {
     Io(std::io::Error),
     #[error("frame too large: {0} > {MAX_FRAME_BYTES}")]
     FrameTooLarge(u32),
+    #[error("response chunk protocol: {0}")]
+    ResponseChunk(String),
     #[error("connection lost while waiting for response")]
     ConnectionLost,
     #[error("multiplexer shutting down")]
     Shutdown,
 }
 
-/// Minimal envelope view — just the field needed to demux responses
-/// back to their callers. We deliberately keep this tiny and
-/// `#[serde(default)]` everything we don't read so a malformed frame
-/// doesn't kill the reader task.
-#[derive(Deserialize)]
-struct EnvelopeHead {
-    #[serde(default)]
-    request_id: String,
-}
-
 /// One pending response, registered before the request frame goes on
 /// the wire and consumed exactly once by either the reader (success
 /// path) or the actor's reconnect handler (drain path).
-type Pending = oneshot::Sender<Result<Vec<u8>, MuxError>>;
+type Pending = oneshot::Sender<Result<AssembledResponse, MuxError>>;
+
+struct PendingResponse {
+    respond: Option<Pending>,
+    assembler: ResponseAssembler,
+}
 
 /// Map of in-flight requests indexed by `request_id`.
-type Inflight = Arc<StdMutex<HashMap<String, Pending>>>;
+type Inflight = Arc<StdMutex<HashMap<String, Arc<StdMutex<PendingResponse>>>>>;
 
 /// Command sent from `MuxClient::call` to the writer task.
 struct Command {
     request_id: String,
     payload: Vec<u8>,
     respond: Pending,
+    cancelled: Arc<AtomicBool>,
 }
 
-/// RAII guard that decrements `ipc_mux_inflight` on drop. Survives
-/// every early-return / cancellation path in `MuxClient::call_raw`,
-/// so the gauge is always balanced (no need for manual `dec` after
-/// every `?`).
-struct InflightGuard {
-    gauge: prometheus::IntGauge,
+/// Removes a pending mux response when its caller future is cancelled.
+///
+/// The atomic closes the enqueue-before-registration race: if cancellation
+/// happens while the command is still waiting in the writer queue, the writer
+/// observes it and skips registration entirely. If registration already
+/// happened, direct map removal drops the assembler and its memory reservation.
+struct PendingCallGuard {
+    request_id: String,
+    inflight: Inflight,
+    cancelled: Arc<AtomicBool>,
+    armed: bool,
 }
 
-impl Drop for InflightGuard {
+impl PendingCallGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingCallGuard {
     fn drop(&mut self) {
-        self.gauge.dec();
+        if !self.armed {
+            return;
+        }
+        self.cancelled.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.inflight.lock() {
+            guard.remove(&self.request_id);
+        }
     }
 }
 
 /// Caller-facing handle. Cheap to clone (just a few `Arc`s); intended
 /// to be wrapped by [`crate::ipc_client::IpcClient`]. The actor task
-/// owns the I/O and reconnect logic. The handle owns the command
-/// sender plus an optional `MetricsRegistry` clone so `call_raw` can
-/// inc/dec `ipc_mux_inflight` without crossing the channel.
+/// owns the I/O and reconnect logic.
 pub struct MuxClient {
     cmd_tx: mpsc::Sender<Command>,
     next_id: AtomicU64,
-    metrics: Option<Arc<MetricsRegistry>>,
+    telemetry: Arc<OnceLock<SidecarTelemetry>>,
+    inflight: Inflight,
+    response_chunk_budget: Arc<ResponseChunkBudget>,
+}
+
+struct MuxInflightGuard(Option<SidecarTelemetry>);
+
+impl Drop for MuxInflightGuard {
+    fn drop(&mut self) {
+        if let Some(telemetry) = &self.0 {
+            telemetry.ipc_released("mux");
+        }
+    }
 }
 
 impl MuxClient {
     /// Spawn a multiplexer pointed at `socket_path`. The actor task
     /// owns the connection; this handle owns only the command sender.
     pub fn spawn(socket_path: impl Into<PathBuf>) -> Self {
-        Self::spawn_with_metrics(socket_path, None)
+        Self::spawn_with_budget(socket_path, ResponseChunkBudget::production())
     }
 
-    pub fn spawn_with_metrics(
+    pub(crate) fn spawn_with_budget(
         socket_path: impl Into<PathBuf>,
-        metrics: Option<Arc<MetricsRegistry>>,
+        budget: Arc<ResponseChunkBudget>,
+    ) -> Self {
+        Self::spawn_with_budget_and_limits(socket_path, budget, ResponseChunkLimits::production())
+    }
+
+    #[cfg(test)]
+    fn spawn_with_test_chunk_limits(
+        socket_path: impl Into<PathBuf>,
+        budget: Arc<ResponseChunkBudget>,
+    ) -> Self {
+        Self::spawn_with_budget_and_limits(
+            socket_path,
+            budget,
+            ResponseChunkLimits::relaxed_for_small_fixtures(),
+        )
+    }
+
+    fn spawn_with_budget_and_limits(
+        socket_path: impl Into<PathBuf>,
+        budget: Arc<ResponseChunkBudget>,
+        chunk_limits: ResponseChunkLimits,
     ) -> Self {
         let socket_path = socket_path.into();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(MAX_INFLIGHT);
-        let actor_metrics = metrics.clone();
+        let telemetry = Arc::new(OnceLock::new());
+        let actor_telemetry = Arc::clone(&telemetry);
+        let inflight: Inflight = Arc::new(StdMutex::new(HashMap::new()));
+        let actor_inflight = Arc::clone(&inflight);
+        let actor_budget = Arc::clone(&budget);
         tokio::spawn(async move {
-            mux_actor(socket_path, cmd_rx, actor_metrics).await;
+            mux_actor(
+                socket_path,
+                cmd_rx,
+                actor_telemetry,
+                actor_inflight,
+                actor_budget,
+                chunk_limits,
+            )
+            .await;
         });
         Self {
             cmd_tx,
             next_id: AtomicU64::new(1),
-            metrics,
+            telemetry,
+            inflight,
+            response_chunk_budget: budget,
+        }
+    }
+
+    /// Attach the process-local facade after the transport is selected by the
+    /// outer IPC builder. The once-cell prevents a live mux from changing its
+    /// observation sink.
+    pub fn attach_telemetry(&self, telemetry: SidecarTelemetry) {
+        if !telemetry.is_enabled() {
+            return;
+        }
+        if self.telemetry.set(telemetry).is_ok() {
+            if let Some(telemetry) = self.telemetry.get() {
+                self.response_chunk_budget
+                    .attach_telemetry(telemetry.clone());
+                telemetry.ipc_transport_registered("mux", MAX_INFLIGHT);
+            }
         }
     }
 
@@ -171,55 +249,57 @@ impl MuxClient {
         format!("mw-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Send `payload` (a fully-serialized [`crate::ipc_types::RequestEnvelope`])
-    /// and await the response frame as raw bytes. The caller is
-    /// responsible for typed deserialization on the way out.
-    ///
-    /// Three failure modes:
-    /// * channel send fails → mux actor exited (shutdown).
-    /// * `oneshot::Receiver` resolves with `Err` → I/O error or
-    ///   reconnect drained this request.
-    /// * `oneshot::Receiver` resolves with `Ok(bytes)` → caller decodes.
-    pub async fn call_raw(
+    /// Test-only convenience wrapper. Production callers use
+    /// [`Self::call_assembled`] so the chunk reservation stays alive through
+    /// typed response decoding.
+    #[cfg(test)]
+    async fn call_raw(&self, request_id: String, payload: Vec<u8>) -> Result<Vec<u8>, MuxError> {
+        self.call_assembled(request_id, payload)
+            .await
+            .map(|response| response.as_slice().to_vec())
+    }
+
+    pub(crate) async fn call_assembled(
         &self,
         request_id: String,
         payload: Vec<u8>,
-    ) -> Result<Vec<u8>, MuxError> {
-        // Increment the inflight gauge for the duration of this call.
-        // RAII drop guard protects the gauge against any early return,
-        // including a cancelled future or an `Err` from `cmd_tx.send`.
-        let _inflight = self.metrics.as_ref().map(|m| {
-            m.ipc_mux_inflight.inc();
-            InflightGuard {
-                gauge: m.ipc_mux_inflight.clone(),
-            }
-        });
-        // Acquire-wait observation point. There is no cap today, so
-        // the histogram only records the trivial setup time (well
-        // below the smallest bucket). Once the
-        // `SIE_IPC_MUX_MAX_INFLIGHT_PER_POD` semaphore lands, the
-        // permit acquisition will be wrapped here and the histogram
-        // becomes the primary signal for tuning the cap.
-        let acquire_started = std::time::Instant::now();
-        if let Some(m) = self.metrics.as_ref() {
-            m.ipc_mux_acquire_wait_seconds
-                .observe(acquire_started.elapsed().as_secs_f64());
-        }
+    ) -> Result<AssembledResponse, MuxError> {
+        let acquire_started = self.telemetry.get().map(|_| std::time::Instant::now());
         let (respond, wait) = oneshot::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut cancellation = PendingCallGuard {
+            request_id: request_id.clone(),
+            inflight: Arc::clone(&self.inflight),
+            cancelled: Arc::clone(&cancelled),
+            armed: true,
+        };
         let cmd = Command {
             request_id,
             payload,
             respond,
+            cancelled,
         };
         if self.cmd_tx.send(cmd).await.is_err() {
+            if let (Some(telemetry), Some(acquire_started)) =
+                (self.telemetry.get(), acquire_started)
+            {
+                telemetry.ipc_acquired("mux", "error", acquire_started.elapsed());
+            }
             return Err(MuxError::Shutdown);
         }
-        match wait.await {
+        let telemetry = self.telemetry.get().cloned();
+        if let (Some(telemetry), Some(acquire_started)) = (&telemetry, acquire_started) {
+            telemetry.ipc_acquired("mux", "success", acquire_started.elapsed());
+        }
+        let _inflight = MuxInflightGuard(telemetry);
+        let result = match wait.await {
             Ok(r) => r,
             // Sender dropped without sending — actor torn down with
             // this request still pending. Treat as connection lost.
             Err(_) => Err(MuxError::ConnectionLost),
-        }
+        };
+        cancellation.disarm();
+        result
     }
 
     /// Approximate pool-size analog for parity with the slot pool's
@@ -235,10 +315,11 @@ impl MuxClient {
 async fn mux_actor(
     socket_path: PathBuf,
     mut cmd_rx: mpsc::Receiver<Command>,
-    metrics: Option<Arc<MetricsRegistry>>,
+    telemetry: Arc<OnceLock<SidecarTelemetry>>,
+    inflight: Inflight,
+    budget: Arc<ResponseChunkBudget>,
+    chunk_limits: ResponseChunkLimits,
 ) {
-    let inflight: Inflight = Arc::new(StdMutex::new(HashMap::new()));
-
     loop {
         // (Re)connect.
         let stream = match UnixStream::connect(&socket_path).await {
@@ -247,9 +328,6 @@ async fn mux_actor(
                     socket = %socket_path.display(),
                     "mux: connected to ipc_server"
                 );
-                if let Some(m) = &metrics {
-                    m.ipc_connect_total.with_label_values(&["ok"]).inc();
-                }
                 s
             }
             Err(e) => {
@@ -258,9 +336,6 @@ async fn mux_actor(
                     error = %ErrChain(&e),
                     "mux: connect failed — backing off"
                 );
-                if let Some(m) = &metrics {
-                    m.ipc_connect_total.with_label_values(&["error"]).inc();
-                }
                 tokio::time::sleep(RECONNECT_BACKOFF).await;
                 continue;
             }
@@ -268,7 +343,7 @@ async fn mux_actor(
 
         let (read_half, write_half) = stream.into_split();
         let reader_inflight = Arc::clone(&inflight);
-        let mut reader_task = tokio::spawn(reader_loop(read_half, reader_inflight));
+        let mut reader_task = tokio::spawn(reader_loop(read_half, reader_inflight, chunk_limits));
 
         let writer_inflight = Arc::clone(&inflight);
         // Writer borrows cmd_rx exclusively for this connection's
@@ -282,41 +357,52 @@ async fn mux_actor(
         // would park the writer on `cmd_rx.recv()` and any caller
         // waiting on a previously-sent request would hang until its
         // own `request_timeout` (60s) fires.
-        let writer_fut = writer_loop(write_half, &mut cmd_rx, writer_inflight);
+        let writer_fut = writer_loop(
+            write_half,
+            &mut cmd_rx,
+            writer_inflight,
+            Arc::clone(&budget),
+            Arc::clone(&telemetry),
+            chunk_limits,
+        );
         tokio::pin!(writer_fut);
-        let writer_outcome = tokio::select! {
-            o = &mut writer_fut => o,
+        let (writer_outcome, reader_exited) = tokio::select! {
+            o = &mut writer_fut => (o, false),
             _ = &mut reader_task => {
                 // Reader exited (EOF / IO / oversized frame). The
                 // connection is dead — abandon the writer (its
                 // pinned future is dropped on the way out of this
                 // select), drain, reconnect.
                 debug!("mux: reader exited before writer — connection lost");
-                WriterOutcome::IoError
+                (WriterOutcome::IoError, true)
             }
         };
 
-        // Stop the reader (no-op if it already exited on EOF / error).
-        reader_task.abort();
-        let _ = reader_task.await;
+        // Stop the reader only when the writer won the race. A completed
+        // JoinHandle cannot be polled a second time on current Tokio.
+        if !reader_exited {
+            reader_task.abort();
+            let _ = reader_task.await;
+        }
 
         // Drain all still-pending requests with ConnectionLost so
         // callers don't hang forever. The actor is the single owner
         // of the inflight map at this point — the reader task is
         // gone and the writer returned.
-        let drained: Vec<(String, Pending)> = {
+        let drained: Vec<(String, Arc<StdMutex<PendingResponse>>)> = {
             let mut guard = inflight
                 .lock()
                 .expect("mux: inflight mutex poisoned during drain");
             guard.drain().collect()
         };
         let drained_count = drained.len();
-        for (rid, tx) in drained {
+        for (rid, pending) in drained {
             debug!(request_id = %rid, "mux: draining inflight on reconnect");
-            let _ = tx.send(Err(MuxError::ConnectionLost));
-        }
-        if let Some(m) = &metrics {
-            m.ipc_reconnect_total.inc();
+            if let Ok(mut pending) = pending.lock() {
+                if let Some(respond) = pending.respond.take() {
+                    let _ = respond.send(Err(MuxError::ConnectionLost));
+                }
+            }
         }
         if drained_count > 0 {
             warn!(
@@ -348,20 +434,42 @@ async fn writer_loop(
     mut write_half: tokio::net::unix::OwnedWriteHalf,
     cmd_rx: &mut mpsc::Receiver<Command>,
     inflight: Inflight,
+    budget: Arc<ResponseChunkBudget>,
+    telemetry: Arc<OnceLock<SidecarTelemetry>>,
+    chunk_limits: ResponseChunkLimits,
 ) -> WriterOutcome {
     while let Some(cmd) = cmd_rx.recv().await {
         let Command {
             request_id,
             payload,
             respond,
+            cancelled,
         } = cmd;
+
+        if cancelled.load(Ordering::Acquire) {
+            continue;
+        }
 
         // Register the responder BEFORE writing the frame: if the
         // reader gets the response back faster than this thread can
         // schedule (test scenarios with in-process echo do hit this),
         // the lookup must already succeed.
         if let Ok(mut guard) = inflight.lock() {
-            guard.insert(request_id.clone(), respond);
+            if cancelled.load(Ordering::Acquire) {
+                continue;
+            }
+            let _ = guard.insert(
+                request_id.clone(),
+                Arc::new(StdMutex::new(PendingResponse {
+                    respond: Some(respond),
+                    assembler: ResponseAssembler::new_with_telemetry_and_limits(
+                        request_id.clone(),
+                        Arc::clone(&budget),
+                        telemetry.get().cloned(),
+                        chunk_limits,
+                    ),
+                })),
+            );
         } else {
             // Mutex poisoned — surface to caller and bail. A poisoned
             // mutex means a previous panic in this actor; further I/O
@@ -379,8 +487,12 @@ async fn writer_loop(
                     .lock()
                     .expect("mux: inflight mutex poisoned")
                     .remove(&request_id);
-                if let Some(tx) = tx {
-                    let _ = tx.send(Err(MuxError::FrameTooLarge(too_big)));
+                if let Some(pending) = tx {
+                    if let Ok(mut pending) = pending.lock() {
+                        if let Some(respond) = pending.respond.take() {
+                            let _ = respond.send(Err(MuxError::FrameTooLarge(too_big)));
+                        }
+                    }
                 }
                 continue;
             }
@@ -391,24 +503,36 @@ async fn writer_loop(
             // effectively lost; ConnectionLost will fire on the
             // actor's drain path next.
             if let Ok(mut guard) = inflight.lock() {
-                if let Some(tx) = guard.remove(&request_id) {
-                    let _ = tx.send(Err(MuxError::Io(e)));
+                if let Some(pending) = guard.remove(&request_id) {
+                    if let Ok(mut pending) = pending.lock() {
+                        if let Some(respond) = pending.respond.take() {
+                            let _ = respond.send(Err(MuxError::Io(e)));
+                        }
+                    }
                 }
             }
             return WriterOutcome::IoError;
         }
         if let Err(e) = write_half.write_all(&payload).await {
             if let Ok(mut guard) = inflight.lock() {
-                if let Some(tx) = guard.remove(&request_id) {
-                    let _ = tx.send(Err(MuxError::Io(e)));
+                if let Some(pending) = guard.remove(&request_id) {
+                    if let Ok(mut pending) = pending.lock() {
+                        if let Some(respond) = pending.respond.take() {
+                            let _ = respond.send(Err(MuxError::Io(e)));
+                        }
+                    }
                 }
             }
             return WriterOutcome::IoError;
         }
         if let Err(e) = write_half.flush().await {
             if let Ok(mut guard) = inflight.lock() {
-                if let Some(tx) = guard.remove(&request_id) {
-                    let _ = tx.send(Err(MuxError::Io(e)));
+                if let Some(pending) = guard.remove(&request_id) {
+                    if let Ok(mut pending) = pending.lock() {
+                        if let Some(respond) = pending.respond.take() {
+                            let _ = respond.send(Err(MuxError::Io(e)));
+                        }
+                    }
                 }
             }
             return WriterOutcome::IoError;
@@ -418,7 +542,11 @@ async fn writer_loop(
     WriterOutcome::ChannelClosed
 }
 
-async fn reader_loop(mut read_half: tokio::net::unix::OwnedReadHalf, inflight: Inflight) {
+async fn reader_loop(
+    mut read_half: tokio::net::unix::OwnedReadHalf,
+    inflight: Inflight,
+    chunk_limits: ResponseChunkLimits,
+) {
     loop {
         let mut len_buf = [0u8; 4];
         if let Err(e) = read_half.read_exact(&mut len_buf).await {
@@ -439,37 +567,81 @@ async fn reader_loop(mut read_half: tokio::net::unix::OwnedReadHalf, inflight: I
             debug!(error = %ErrChain(&e), "mux reader: read of body failed");
             return;
         }
-        // Cheap header decode just to extract `request_id`. Body
-        // payload stays on the wire-bytes path; the wrapping client
-        // re-deserializes the full envelope into the typed response.
-        let head: EnvelopeHead = match rmp_serde::from_slice(&frame) {
-            Ok(h) => h,
+        // Parse only the identity needed to select the per-request assembler.
+        // A malformed envelope is a connection-level protocol failure: there
+        // is no safe request to which we could deliver it, so reconnect and
+        // fail every pending caller instead of leaving one to time out.
+        let route = match response_frame_route(&frame, chunk_limits) {
+            Ok(route) => route,
             Err(e) => {
-                warn!(error = %ErrChain(&e), "mux reader: malformed envelope; dropping frame");
-                continue;
+                warn!(error = %ErrChain(&e), "mux reader: malformed envelope; reconnecting");
+                return;
             }
         };
-        if head.request_id.is_empty() {
-            warn!("mux reader: response envelope missing request_id; dropping frame");
-            continue;
+        let request_id = route.request_id;
+
+        enum Delivery {
+            Pending,
+            Complete(Pending, AssembledResponse),
+            Error(Pending, String),
+            Unknown,
         }
+
+        // Clone one per-request entry under the global map lock, then perform
+        // payload copies and final SHA-256 verification under only that
+        // request's lock. Other responses, writer registration, and caller
+        // cancellation therefore never queue behind a large transfer hash.
         let pending = match inflight.lock() {
-            Ok(mut g) => g.remove(&head.request_id),
-            Err(_) => return, // mutex poisoned — bail and let the actor reconnect
+            Ok(guard) => guard.get(&request_id).cloned(),
+            Err(_) => return,
         };
-        match pending {
-            Some(tx) => {
-                // `send` returns Err if the caller's oneshot::Receiver
-                // was dropped (caller's future cancelled). That's a
-                // no-op — nothing to clean up.
-                let _ = tx.send(Ok(frame));
+        let Some(pending) = pending else {
+            warn!(
+                request_id = %request_id,
+                "mux reader: response with no inflight handler — late delivery after drain?"
+            );
+            continue;
+        };
+        let delivery = match pending.lock() {
+            Ok(mut pending) => match if route.requires_chunk_parser {
+                pending.assembler.push(frame)
+            } else {
+                pending.assembler.push_legacy(frame)
+            } {
+                Ok(ResponseFrameStatus::Pending) => Delivery::Pending,
+                Ok(ResponseFrameStatus::Complete(response)) => match pending.respond.take() {
+                    Some(respond) => Delivery::Complete(respond, response),
+                    None => Delivery::Unknown,
+                },
+                Err(error) => match pending.respond.take() {
+                    Some(respond) => Delivery::Error(respond, error.to_string()),
+                    None => Delivery::Unknown,
+                },
+            },
+            Err(_) => return,
+        };
+
+        if !matches!(delivery, Delivery::Pending) {
+            let mut guard = match inflight.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            let is_same = guard
+                .get(&request_id)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &pending));
+            if is_same {
+                guard.remove(&request_id);
             }
-            None => {
-                warn!(
-                    request_id = %head.request_id,
-                    "mux reader: response with no inflight handler — late delivery after drain?"
-                );
+        }
+        match delivery {
+            Delivery::Pending => {}
+            Delivery::Complete(tx, bytes) => {
+                let _ = tx.send(Ok(bytes));
             }
+            Delivery::Error(tx, error) => {
+                let _ = tx.send(Err(MuxError::ResponseChunk(error)));
+            }
+            Delivery::Unknown => {}
         }
     }
 }
@@ -493,10 +665,28 @@ impl From<std::io::Error> for MuxError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::Serialize;
+    use crate::ipc_types::{IpcResponseChunkV1, IPC_VERSION};
+    use crate::protocol::response_chunks::IPC_RESPONSE_CHUNK_KIND_V1;
+    use serde::{Deserialize, Serialize};
+    use sha2::{Digest, Sha256};
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
     use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn disabled_telemetry_does_not_fill_mux_once_cell() {
+        let client = MuxClient::spawn(short_sock_path());
+
+        client.attach_telemetry(SidecarTelemetry::default());
+
+        assert!(client.telemetry.get().is_none());
+    }
+
+    #[derive(Deserialize)]
+    struct EnvelopeHead {
+        #[serde(default)]
+        request_id: String,
+    }
 
     fn short_sock_path() -> PathBuf {
         let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
@@ -581,6 +771,164 @@ mod tests {
             "error": serde_json::Value::Null,
         });
         rmp_serde::to_vec_named(&resp).unwrap()
+    }
+
+    fn build_two_response_chunks(request_id: &str, response: &[u8]) -> [Vec<u8>; 2] {
+        let split = response.len() / 2;
+        let digest = Sha256::digest(response).to_vec();
+        std::array::from_fn(|index| {
+            let payload = if index == 0 {
+                &response[..split]
+            } else {
+                &response[split..]
+            };
+            rmp_serde::to_vec_named(&IpcResponseChunkV1 {
+                version: IPC_VERSION,
+                request_id: request_id.to_owned(),
+                transfer_digest: digest.clone(),
+                chunk_index: index as u32,
+                chunk_count: 2,
+                total_bytes: response.len() as u64,
+                payload: payload.to_vec(),
+                kind: IPC_RESPONSE_CHUNK_KIND_V1.to_owned(),
+            })
+            .unwrap()
+        })
+    }
+
+    async fn write_test_frame(stream: &mut UnixStream, frame: &[u8]) {
+        stream
+            .write_all(&(frame.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(frame).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    async fn read_test_frame(stream: &mut UnixStream) -> Vec<u8> {
+        let mut len = [0_u8; 4];
+        stream.read_exact(&mut len).await.unwrap();
+        let mut frame = vec![0_u8; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut frame).await.unwrap();
+        frame
+    }
+
+    #[tokio::test]
+    async fn interleaved_chunk_sequences_reassemble_to_the_right_mux_call() {
+        let path = short_sock_path();
+        let _ = tokio::fs::remove_file(&path).await;
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let first: serde_json::Value =
+                rmp_serde::from_slice(&read_test_frame(&mut stream).await).unwrap();
+            let second: serde_json::Value =
+                rmp_serde::from_slice(&read_test_frame(&mut stream).await).unwrap();
+            let first_id = first["request_id"].as_str().unwrap();
+            let second_id = second["request_id"].as_str().unwrap();
+            let first_response = build_response(first_id, serde_json::json!({"which": "first"}));
+            let second_response = build_response(second_id, serde_json::json!({"which": "second"}));
+            let first_chunks = build_two_response_chunks(first_id, &first_response);
+            let second_chunks = build_two_response_chunks(second_id, &second_response);
+
+            // Each per-request sequence remains ordered, but the two transfers
+            // are deliberately interleaved on the single UDS connection.
+            write_test_frame(&mut stream, &first_chunks[0]).await;
+            write_test_frame(&mut stream, &second_chunks[0]).await;
+            write_test_frame(&mut stream, &second_chunks[1]).await;
+            write_test_frame(&mut stream, &first_chunks[1]).await;
+
+            (
+                first_id.to_owned(),
+                first_response,
+                second_id.to_owned(),
+                second_response,
+            )
+        });
+
+        let client = Arc::new(MuxClient::spawn_with_test_chunk_limits(
+            path,
+            ResponseChunkBudget::production(),
+        ));
+        let first_id = client.next_request_id();
+        let second_id = client.next_request_id();
+        let first_call = {
+            let client = Arc::clone(&client);
+            let request_id = first_id.clone();
+            tokio::spawn(async move {
+                client
+                    .call_raw(request_id.clone(), build_request("First", request_id))
+                    .await
+            })
+        };
+        let second_call = {
+            let client = Arc::clone(&client);
+            let request_id = second_id.clone();
+            tokio::spawn(async move {
+                client
+                    .call_raw(request_id.clone(), build_request("Second", request_id))
+                    .await
+            })
+        };
+
+        let first_actual = first_call.await.unwrap().unwrap();
+        let second_actual = second_call.await.unwrap().unwrap();
+        let (wire_first_id, wire_first, wire_second_id, wire_second) = server.await.unwrap();
+        let expected_by_id =
+            HashMap::from([(wire_first_id, wire_first), (wire_second_id, wire_second)]);
+        assert_eq!(first_actual, expected_by_id[&first_id]);
+        assert_eq!(second_actual, expected_by_id[&second_id]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_mux_call_releases_partial_chunk_reservation() {
+        let path = short_sock_path();
+        let _ = tokio::fs::remove_file(&path).await;
+        let listener = UnixListener::bind(&path).unwrap();
+        let budget = Arc::new(ResponseChunkBudget::new(16 * 1024));
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: serde_json::Value =
+                rmp_serde::from_slice(&read_test_frame(&mut stream).await).unwrap();
+            let request_id = request["request_id"].as_str().unwrap();
+            let response =
+                build_response(request_id, serde_json::json!({"blob": "x".repeat(1024)}));
+            let chunks = build_two_response_chunks(request_id, &response);
+            write_test_frame(&mut stream, &chunks[0]).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let client = Arc::new(MuxClient::spawn_with_test_chunk_limits(
+            path,
+            Arc::clone(&budget),
+        ));
+        let request_id = client.next_request_id();
+        let call = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .call_raw(request_id.clone(), build_request("Cancelled", request_id))
+                    .await
+            })
+        };
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while budget.used() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first chunk should reserve the declared response bytes");
+        call.abort();
+        let _ = call.await;
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while budget.used() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelling the caller must release its partial assembler");
+        server.abort();
     }
 
     /// In-order single RPC roundtrip — sanity check that the actor
@@ -723,18 +1071,11 @@ mod tests {
         }
     }
 
-    /// A malformed (zero-length) frame on the wire must NOT kill the
-    /// reader — we log + drop and keep going. The first request
-    /// stays pending forever (caller's responsibility to apply a
-    /// timeout, which `IpcClient::call` does), but subsequent calls
-    /// on the same connection still succeed.
-    ///
-    /// The connection-loss + drain path itself is not exercised here
-    /// because that requires hooking the actor's reconnect; covered
-    /// indirectly by the `IpcClient` integration path which retries
-    /// once on transport errors.
+    /// A malformed frame cannot be assigned to one request safely. The mux
+    /// therefore drops the connection and drains all pending calls promptly;
+    /// the actor then reconnects and serves subsequent requests.
     #[tokio::test]
-    async fn malformed_frame_does_not_kill_connection() {
+    async fn malformed_frame_drains_then_reconnects() {
         let path = short_sock_path();
         let arrived = Arc::new(AtomicUsize::new(0));
         let arrived_h = Arc::clone(&arrived);
@@ -746,13 +1087,8 @@ mod tests {
                 let head: EnvelopeHead = rmp_serde::from_slice(&req_bytes).unwrap();
                 let n = arrived.fetch_add(1, Ordering::Relaxed);
                 if n == 0 {
-                    // Force "no response": empty bytes. The handler
-                    // shape forces the reply to be a complete frame,
-                    // so we instead return a length-0 frame; the
-                    // mux reader will see a malformed envelope and
-                    // drop it (does NOT close the connection in
-                    // production, but the inflight remains pending
-                    // forever — exercises the drain via shutdown).
+                    // Force one malformed response frame. The reader cannot
+                    // route it and must tear down this connection.
                     Vec::new()
                 } else {
                     build_response(&head.request_id, serde_json::json!({"n": n}))
@@ -763,81 +1099,20 @@ mod tests {
 
         let client = MuxClient::spawn(path.clone());
 
-        // First call: server writes a length-0 frame, mux reader logs
-        // "missing request_id", inflight stays pending. We bound the
-        // wait so the test doesn't hang if anything regressed.
+        // First call is drained promptly when the malformed frame closes the
+        // current mux connection.
         let rid1 = client.next_request_id();
         let p1 = build_request("First", rid1.clone());
-        let r1 = tokio::time::timeout(Duration::from_millis(200), client.call_raw(rid1, p1)).await;
-        assert!(
-            r1.is_err(),
-            "first call should hang because server replied with empty frame"
-        );
+        let r1 = tokio::time::timeout(Duration::from_millis(500), client.call_raw(rid1, p1))
+            .await
+            .expect("malformed response must drain promptly");
+        assert!(matches!(r1, Err(MuxError::ConnectionLost)));
 
-        // Second call must still go through on the same connection —
-        // the reader keeps reading frames after a malformed one (we
-        // don't drop the connection on a single bad frame).
+        // The actor reconnects and the next call succeeds.
         let rid2 = client.next_request_id();
         let p2 = build_request("Second", rid2.clone());
         let r2 = client.call_raw(rid2, p2).await.expect("second call ok");
         let head: EnvelopeHead = rmp_serde::from_slice(&r2).unwrap();
         assert!(!head.request_id.is_empty());
-    }
-
-    /// `ipc_mux_inflight` must rise during concurrent calls and fall
-    /// back to zero when they all complete — RAII guard correctness
-    /// across the success path. A bug here would surface in
-    /// production as a monotonically-growing gauge that never
-    /// returns to zero, which would hide a leak in the cap (when
-    /// added) by always making it look saturated.
-    #[tokio::test]
-    async fn inflight_gauge_is_balanced() {
-        let path = short_sock_path();
-        // Server holds responses for 50 ms before answering, giving
-        // the test a window to observe the gauge above zero.
-        let _server = spawn_mux_echo(path.clone(), |req_bytes| async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let head: EnvelopeHead = rmp_serde::from_slice(&req_bytes).unwrap();
-            build_response(&head.request_id, serde_json::json!({"ok": true}))
-        })
-        .await;
-
-        let metrics = Arc::new(MetricsRegistry::new().unwrap());
-        let client = MuxClient::spawn_with_metrics(path.clone(), Some(Arc::clone(&metrics)));
-
-        // Wait for the connection to come up so the first call's send
-        // doesn't race the connect.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        // Fire 8 calls concurrently via JoinSet so we don't pull in
-        // an extra crate just for the test.
-        let client = Arc::new(client);
-        let mut set = tokio::task::JoinSet::new();
-        for _ in 0..8u32 {
-            let c = Arc::clone(&client);
-            set.spawn(async move {
-                let rid = c.next_request_id();
-                let payload = build_request("Concurrent", rid.clone());
-                c.call_raw(rid, payload).await.unwrap();
-            });
-        }
-
-        // Sample mid-flight — must be >0 while server is sleeping.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let mid = metrics.ipc_mux_inflight.get();
-        assert!(
-            mid > 0,
-            "ipc_mux_inflight should be positive during concurrent calls, got {mid}"
-        );
-
-        while let Some(res) = set.join_next().await {
-            res.unwrap();
-        }
-
-        // After all calls complete, the gauge must return to zero —
-        // any leak here is the InflightGuard misbehaving on a return
-        // path (early err, cancellation, etc.).
-        let final_val = metrics.ipc_mux_inflight.get();
-        assert_eq!(final_val, 0, "gauge must rebalance to 0 after all calls");
     }
 }

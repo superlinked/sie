@@ -171,8 +171,8 @@ class TestWebSocketEndpoint:
             assert "server" in data
             assert "gpus" in data
             assert "models" in data
-            assert "counters" in data
-            assert "histograms" in data
+            assert "counters" not in data
+            assert "histograms" not in data
 
             # Verify server info
             server = data["server"]
@@ -232,6 +232,18 @@ class TestWebSocketEndpoint:
             assert "queue_depth" not in data
             for model in data.get("models", []):
                 assert "queue_depth" in model
+
+
+class TestStatusMessageContract:
+    @pytest.mark.asyncio
+    async def test_status_contract_omits_request_telemetry(self) -> None:
+        """Request-rate and latency series are exported through OTel, not status."""
+        from sie_server.api import ws
+
+        msg = await ws.build_status_message(ModelRegistry())
+
+        assert "counters" not in msg
+        assert "histograms" not in msg
 
 
 class TestStatusReadyReflectsGpuHealth:

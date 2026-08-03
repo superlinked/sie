@@ -1,5 +1,6 @@
 sie_id: mynkchaudhry/Florence-2-FT-DocVQA
 hf_id: mynkchaudhry/Florence-2-FT-DocVQA
+hf_revision: 5f26407bc2a9735eb947ec4731c2a1f0fd4605ba
 inputs:
   text: true
   image: true

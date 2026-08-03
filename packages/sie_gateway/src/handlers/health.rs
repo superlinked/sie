@@ -56,7 +56,7 @@ pub async fn status_page(State(state): State<Arc<AppState>>) -> impl IntoRespons
 </table>
 <h2>Models</h2>
 <ul>{models_html}</ul>
-<p><a href="/ws/cluster-status">WebSocket feed</a> | <a href="/metrics">Prometheus metrics</a> | <a href="/health">Health JSON</a></p>
+<p><a href="/ws/cluster-status">WebSocket feed</a> | <a href="/health">Health JSON</a></p>
 </body></html>"#,
         status_str = status_str,
         wc = cluster.worker_count,

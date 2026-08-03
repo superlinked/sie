@@ -75,8 +75,8 @@ const MAX_POOL_NAME_LEN: usize = 128;
 /// A model declares ``tasks.generate.grammar_profile`` (surfaced as
 /// ``ModelInfoExtras::grammar_profile`` on its *base* entry) naming the profile
 /// that honours SGLang's Outlines grammar FSM. Speculative-decoding profiles
-/// (NEXTN/MTP) bypass that FSM, so every grammar request — whatever id it names
-/// — must land on ``{base}:{grammar_profile}``.
+/// (NEXTN/MTP) bypass that FSM, so grammar requests use that profile unless
+/// the requested variant inherits it and preserves its grammar-safe settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrammarRoute {
     /// Rewrite the dispatch id to this ``{base}:{grammar_profile}`` variant.
@@ -99,16 +99,36 @@ struct RegistrySnapshot {
     bundle_pool_config_hashes: HashMap<(String, String), String>,
 }
 
+/// Opaque handle to one immutable [`ModelRegistry`] snapshot generation.
+///
+/// Derived-state publishers can compute every value from this handle, perform
+/// asynchronous work, then publish through
+/// [`ModelRegistry::with_current_generation`]. Holding the `Arc` also prevents
+/// pointer reuse, so the identity check is ABA-safe.
+#[allow(dead_code)] // consumed by the managed gateway wrapper, not the standalone binary
+pub struct ModelRegistryGeneration {
+    snapshot: Arc<RegistrySnapshot>,
+}
+
+impl ModelRegistryGeneration {
+    /// Compute a pool-scoped bundle hash from this captured generation.
+    #[allow(dead_code)] // consumed by the managed gateway wrapper
+    pub fn compute_bundle_config_hash_for_pool(&self, bundle_id: &str, pool_name: &str) -> String {
+        ModelRegistry::bundle_config_hash_for_pool(&self.snapshot, bundle_id, pool_name)
+    }
+}
+
 pub struct ModelRegistry {
     bundles_dir: PathBuf,
     models_dir: PathBuf,
     snapshot: ArcSwap<RegistrySnapshot>,
-    /// Serializes the read-modify-write path. All mutators
-    /// (`add_model_config`, `reload`) take this before `snapshot.load()` and
-    /// release it after `snapshot.store(...)` so two concurrent writers
-    /// cannot both build derived snapshots off the same base and lose each
-    /// other's mutations. Readers still use `snapshot.load()` unlocked and
-    /// see a consistent `Arc<RegistrySnapshot>` per access.
+    /// Serializes every snapshot write. All mutators take this before
+    /// `snapshot.load()` and release it after `snapshot.store(...)` so two
+    /// concurrent writers cannot both build derived snapshots off the same
+    /// base and lose each other's mutations. Generation-fenced publishers also
+    /// hold it across the identity check and publication linearization point.
+    /// Ordinary readers remain lock-free and see one consistent snapshot per
+    /// access.
     write_lock: Mutex<()>,
 }
 
@@ -136,6 +156,36 @@ impl ModelRegistry {
 
     pub fn models_dir(&self) -> &Path {
         &self.models_dir
+    }
+
+    /// Capture one immutable snapshot generation for coherent derived reads.
+    #[allow(dead_code)] // consumed by the managed gateway wrapper
+    pub fn capture_generation(&self) -> ModelRegistryGeneration {
+        ModelRegistryGeneration {
+            snapshot: self.snapshot.load_full(),
+        }
+    }
+
+    /// Run `publish` only while `generation` is still current.
+    ///
+    /// The registry write lock remains held through the closure, making the
+    /// identity check and publication one linearized operation. The closure
+    /// must stay synchronous and must not call a registry mutator.
+    #[allow(dead_code)] // consumed by the managed gateway wrapper
+    pub fn with_current_generation<T>(
+        &self,
+        generation: &ModelRegistryGeneration,
+        publish: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let _write = self
+            .write_lock
+            .lock()
+            .expect("ModelRegistry write_lock poisoned");
+        let current = self.snapshot.load_full();
+        if !Arc::ptr_eq(&current, &generation.snapshot) {
+            return None;
+        }
+        Some(publish())
     }
 
     fn canonical_model_name(snapshot: &RegistrySnapshot, model: &str) -> Option<String> {
@@ -435,8 +485,10 @@ impl ModelRegistry {
     /// the variant inherits the union and the lora_adapter gate accepts
     /// adapters that are only configured on a sibling profile (M10 bug).
     /// Native Rust variants also narrow the advertised output surface to the
-    /// adapter class (`dense` for embeddings, `score` for rerankers)
-    /// because the base model may carry PyTorch-only capabilities.
+    /// adapter class because the base model may carry PyTorch-only
+    /// capabilities. Candle dense profiles expose only dense encode, while a
+    /// multivector profile exposes score only when its resolved load-time
+    /// configuration explicitly selects the native ColBERT MaxSim strategy.
     fn narrow_info_extras_to_profile(
         base: &ModelInfoExtras,
         profile_name: &str,
@@ -451,6 +503,7 @@ impl ModelRegistry {
         // (see ``base_grammar_profile``), so a sibling variant such as
         // ``…:a100-40gb`` still reroutes to ``{base}:{grammar_profile}``.
         narrowed.grammar_profile = None;
+        narrowed.profile_parents.clear();
         if let Some(map) = base.profile_lora_adapters.as_ref() {
             let scoped = map.get(profile_name).cloned().unwrap_or_default();
             if scoped.is_empty() {
@@ -470,8 +523,21 @@ impl ModelRegistry {
                 narrowed.profile_lora_adapters = Some(single);
             }
         }
+        if let Some(max_sequence_length) = Self::profile_max_sequence_length(profile_config) {
+            narrowed.max_sequence_length = Some(max_sequence_length);
+        }
         Self::narrow_native_outputs_to_profile(&mut narrowed, profile_config);
         narrowed
+    }
+
+    fn profile_max_sequence_length(profile_config: &CanonicalProfile) -> Option<u64> {
+        profile_config
+            .adapter_options
+            .as_ref()?
+            .get("loadtime")?
+            .get("max_seq_length")?
+            .as_u64()
+            .filter(|value| *value > 0)
     }
 
     fn narrow_native_outputs_to_profile(
@@ -484,11 +550,36 @@ impl ModelRegistry {
         if !adapter_path.starts_with("sie_server_rust.adapters.candle") {
             return;
         }
-        if !extras.outputs.iter().any(|name| name == "dense") {
-            return;
-        }
-        extras.outputs = vec!["dense".to_string()];
-        extras.dims.retain(|name, _| name == "dense");
+        // Match the native worker's capability rule. Runtime output_types are
+        // request defaults, not a way to enable a projection the adapter does
+        // not implement. Preserve the existing dense/multivector precedence
+        // for hybrid configs; sparse is native only on sparse-only profiles.
+        let native_encode_output = if extras.outputs.iter().any(|name| name == "dense") {
+            Some("dense")
+        } else if extras.outputs.iter().any(|name| name == "multivector") {
+            Some("multivector")
+        } else if extras.outputs.iter().any(|name| name == "sparse") {
+            Some("sparse")
+        } else {
+            None
+        };
+        let has_multivector = extras.outputs.iter().any(|name| name == "multivector");
+        let score_strategy = profile_config
+            .adapter_options
+            .as_ref()
+            .and_then(|options| options.get("loadtime"))
+            .and_then(|loadtime| loadtime.get("score_strategy"))
+            .and_then(serde_json::Value::as_str);
+        let supports_native_score = native_encode_output == Some("multivector")
+            && has_multivector
+            && score_strategy == Some("colbert_maxsim");
+        extras.outputs.retain(|name| {
+            Some(name.as_str()) == native_encode_output
+                || (name == "score" && supports_native_score)
+        });
+        extras
+            .dims
+            .retain(|name, _| Some(name.as_str()) == native_encode_output);
     }
 
     fn model_entry_from_config(config: &ModelConfig) -> Result<ModelEntry, String> {
@@ -944,14 +1035,15 @@ impl ModelRegistry {
     /// ``ModelInfoExtras::grammar_profile``), grammar requests must run on the
     /// ``{base}:{grammar_profile}`` profile variant rather than a speculative
     /// one — NEXTN/MTP speculative decoding bypasses SGLang's Outlines grammar
-    /// FSM, so the constraint must be enforced on a profile that honours it
-    /// (e.g. ``no-spec``).
+    /// FSM. An explicit variant that inherits the grammar profile, uses its
+    /// adapter/backend, and keeps speculation disabled remains selected.
     ///
     /// The routing target is resolved off the request's *base* model, so the
     /// rewrite fires regardless of which id the caller named:
     /// - base id (``Qwen/Qwen3.5-4B``)            → ``…:no-spec``
     /// - sibling variant (``…:a100-40gb``, NEXTN) → ``…:no-spec``
     /// - target variant (``…:no-spec``)           → ``Keep`` (already safe)
+    /// - inheriting variant (``…:h100-fp8``)      → ``Keep`` (already safe)
     /// - no ``grammar_profile`` declared          → ``Keep``
     /// - target variant missing from registry     → ``MissingVariant`` (degrade)
     ///
@@ -996,12 +1088,73 @@ impl ModelRegistry {
         }
         // Otherwise it may be a variant ``{base}:{profile}`` (variants clear the
         // hint). Strip the trailing ``:profile`` and read the base entry's hint.
-        let (base, _profile) = canonical.rsplit_once(':')?;
-        let gp = snap
-            .models
-            .get(base)
-            .and_then(|e| e.info_extras.grammar_profile.clone())?;
-        Some((base.to_string(), gp))
+        let (base, source_profile) = canonical.rsplit_once(':')?;
+        let base_entry = snap.models.get(base)?;
+        let gp = base_entry.info_extras.grammar_profile.clone()?;
+        let target_profile = if base_entry
+            .info_extras
+            .profile_parents
+            .get(source_profile)
+            .is_some_and(|parent| parent == &gp)
+            && Self::profile_is_grammar_compatible(base_entry, source_profile, &gp)
+        {
+            source_profile.to_string()
+        } else {
+            gp
+        };
+        Some((base.to_string(), target_profile))
+    }
+
+    fn profile_is_grammar_compatible(
+        entry: &ModelEntry,
+        profile: &str,
+        grammar_profile: &str,
+    ) -> bool {
+        let (Some(candidate), Some(grammar)) = (
+            entry.profile_configs.get(profile),
+            entry.profile_configs.get(grammar_profile),
+        ) else {
+            return false;
+        };
+        candidate.adapter_path == grammar.adapter_path
+            && Self::profile_explicitly_disables_speculation(candidate)
+            && Self::profile_loadtime_value(candidate, "grammar_backend")
+                == Self::profile_loadtime_value(grammar, "grammar_backend")
+            && Self::profile_extra_launch_args_are_compatible(candidate, grammar)
+    }
+
+    fn profile_explicitly_disables_speculation(profile: &CanonicalProfile) -> bool {
+        matches!(
+            Self::profile_loadtime_value(profile, "speculative")
+                .and_then(|value| value.get("enabled")),
+            Some(serde_json::Value::Bool(false))
+        )
+    }
+
+    fn profile_extra_launch_args_are_compatible(
+        candidate: &CanonicalProfile,
+        grammar: &CanonicalProfile,
+    ) -> bool {
+        let candidate_args = Self::profile_loadtime_value(candidate, "extra_launch_args");
+        if candidate_args == Self::profile_loadtime_value(grammar, "extra_launch_args") {
+            return true;
+        }
+        matches!(
+            candidate_args
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice),
+            Some([
+                serde_json::Value::String(flag),
+                serde_json::Value::String(value),
+            ]) if flag == "--quantization" && value == "fp8"
+        )
+    }
+
+    fn profile_loadtime_value<'a>(
+        profile: &'a CanonicalProfile,
+        key: &str,
+    ) -> Option<&'a serde_json::Value> {
+        profile.adapter_options.as_ref()?.get("loadtime")?.get(key)
     }
 
     /// Resolve a caller-supplied model id to the registry's canonical
@@ -1139,6 +1292,17 @@ impl ModelRegistry {
         snap.models.get(&canonical).cloned()
     }
 
+    /// Return the immutable weights revision for a model/profile variant.
+    ///
+    /// Only a full lowercase commit SHA loaded from the model YAML is stored;
+    /// unpinned development and package-backed models intentionally return
+    /// `None` so callers cannot mistake a mutable label for provenance.
+    pub fn get_model_revision(&self, model: &str) -> Option<String> {
+        let snap = self.snapshot.load();
+        let canonical = Self::canonical_model_name(&snap, model)?;
+        Self::immutable_model_revision(snap.models.get(&canonical)?)
+    }
+
     pub fn get_model_pool_name(&self, model: &str) -> Option<String> {
         let snap = self.snapshot.load();
         let canonical = Self::canonical_model_name(&snap, model)?;
@@ -1168,16 +1332,64 @@ impl ModelRegistry {
 
     pub fn compute_bundle_config_hash_for_pool(&self, bundle_id: &str, pool_name: &str) -> String {
         let snap = self.snapshot.load();
-        let pool_name = pool_name.trim().to_lowercase();
-        let pool_name = if pool_name.is_empty() {
-            DEFAULT_MODEL_POOL.to_string()
-        } else {
-            pool_name
-        };
+        Self::bundle_config_hash_for_pool(&snap, bundle_id, pool_name)
+    }
+
+    fn bundle_config_hash_for_pool(
+        snap: &RegistrySnapshot,
+        bundle_id: &str,
+        pool_name: &str,
+    ) -> String {
+        let pool_name = Self::normalize_pool_name(pool_name);
         snap.bundle_pool_config_hashes
             .get(&(bundle_id.to_string(), pool_name))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Return the routing hash and immutable model revision from one registry
+    /// snapshot. Keeping these values in one read is required for response
+    /// provenance: a config delta must not pair hash A with revision B.
+    pub fn bundle_execution_evidence(
+        &self,
+        bundle_id: &str,
+        pool_name: &str,
+        model: &str,
+    ) -> (String, Option<String>) {
+        let snap = self.snapshot.load();
+        let pool_name = Self::normalize_pool_name(pool_name);
+        let bundle_config_hash = snap
+            .bundle_pool_config_hashes
+            .get(&(bundle_id.to_string(), pool_name))
+            .cloned()
+            .unwrap_or_default();
+        let revision = Self::canonical_model_name(&snap, model)
+            .and_then(|canonical| snap.models.get(&canonical))
+            .and_then(Self::immutable_model_revision);
+        (bundle_config_hash, revision)
+    }
+
+    fn normalize_pool_name(pool_name: &str) -> String {
+        let pool_name = pool_name.trim().to_lowercase();
+        if pool_name.is_empty() {
+            DEFAULT_MODEL_POOL.to_string()
+        } else {
+            pool_name
+        }
+    }
+
+    fn immutable_model_revision(entry: &ModelEntry) -> Option<String> {
+        entry
+            .info_extras
+            .revision
+            .as_ref()
+            .filter(|value| {
+                value.len() == 40
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .cloned()
     }
 
     pub fn install_bundle_config_hashes(&self, hashes: HashMap<String, String>) {
@@ -1416,6 +1628,11 @@ impl ModelRegistry {
 
             let mut item = BTreeMap::new();
             item.insert("profiles", serde_json::to_value(profiles_for_hash).unwrap());
+            item.insert(
+                "revision",
+                serde_json::to_value(&model_entry.info_extras.revision)
+                    .unwrap_or(serde_json::Value::Null),
+            );
             item.insert(
                 "sie_id",
                 serde_json::Value::String(hash_model_name.to_string()),
@@ -1823,12 +2040,16 @@ impl ModelRegistry {
         if config.inputs.is_none()
             && config.tasks.is_none()
             && config.max_sequence_length.is_none()
+            && config.hf_revision.is_none()
             && !touches_profiles
         {
             return;
         }
 
         let refreshed = ModelInfoExtras::from_model_config(config);
+        if config.hf_revision.is_some() {
+            existing.revision = refreshed.revision;
+        }
         if config.inputs.is_some() {
             existing.inputs = refreshed.inputs;
         }
@@ -1861,6 +2082,12 @@ impl ModelRegistry {
         // incoming) instead so the published capability map matches what
         // the worker has actually loaded.
         if touches_profiles {
+            for profile_name in config.profiles.keys() {
+                existing.profile_parents.remove(profile_name);
+            }
+            existing
+                .profile_parents
+                .extend(refreshed.profile_parents.clone());
             let mut merged_config = config.clone();
             merged_config.profiles = merged_profiles.clone();
             let lora_refreshed = ModelInfoExtras::from_model_config(&merged_config);
@@ -1909,6 +2136,69 @@ mod tests {
     }
 
     #[test]
+    fn test_model_revision_is_loaded_for_base_and_profile_variant() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        fs::write(
+            models_dir.join("revisioned.yaml"),
+            format!(
+                "sie_id: org/revisioned\nhf_revision: {revision}\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.sentence_transformer:Adapter\n  bf16:\n    adapter_path: sie_server.adapters.sentence_transformer:Adapter\n"
+            ),
+        )
+        .unwrap();
+
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+
+        assert_eq!(
+            registry.get_model_revision("org/revisioned").as_deref(),
+            Some(revision)
+        );
+        assert_eq!(
+            registry
+                .get_model_revision("org/revisioned:bf16")
+                .as_deref(),
+            Some(revision)
+        );
+    }
+
+    #[test]
+    fn test_model_revision_rejects_mutable_labels() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            models_dir.join("mutable.yaml"),
+            "sie_id: org/mutable\nhf_revision: main\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.sentence_transformer:Adapter\n",
+        )
+        .unwrap();
+
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+
+        assert_eq!(registry.get_model_revision("org/mutable"), None);
+    }
+
+    #[test]
+    fn test_generation_fenced_publish_holds_writer_lock() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, false);
+        let generation = registry.capture_generation();
+
+        assert_eq!(
+            registry.with_current_generation(&generation, || {
+                registry.write_lock.try_lock().is_err()
+            }),
+            Some(true),
+            "publication must run while snapshot writers are excluded"
+        );
+
+        registry.install_bundles(Vec::new());
+        let mut stale_published = false;
+        assert_eq!(
+            registry.with_current_generation(&generation, || stale_published = true),
+            None
+        );
+        assert!(!stale_published, "a stale generation must not publish");
+    }
+
+    #[test]
     fn test_has_any_models_flips_after_add() {
         use crate::types::model::{ModelConfig, ProfileConfig};
         use std::collections::HashMap as StdHashMap;
@@ -1939,6 +2229,7 @@ mod tests {
         registry
             .add_model_config(ModelConfig {
                 name: "org/x".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -1977,7 +2268,48 @@ mod tests {
         // profiles that run NEXTN) and the grammar-safe ``no-spec`` target each
         // expand into ``org/g:<profile>`` variant entries.
         profiles.insert("a100-40gb".to_string(), mk());
-        profiles.insert("no-spec".to_string(), mk());
+        let mut no_spec = mk();
+        no_spec.adapter_options = Some(serde_json::json!({
+            "loadtime": {
+                "grammar_backend": "outlines",
+                "speculative": {"enabled": false},
+            },
+        }));
+        profiles.insert("no-spec".to_string(), no_spec);
+        let mut insert_child = |name: &str, loadtime: serde_json::Value| {
+            let mut profile = mk();
+            profile.extends = Some("no-spec".to_string());
+            profile.adapter_options = Some(serde_json::json!({"loadtime": loadtime}));
+            profiles.insert(name.to_string(), profile);
+        };
+        insert_child(
+            "h100-fp8",
+            serde_json::json!({
+                "grammar_backend": "outlines",
+                "speculative": {"enabled": false},
+                "extra_launch_args": ["--quantization", "fp8"],
+            }),
+        );
+        insert_child(
+            "unsafe-inheritor",
+            serde_json::json!({"speculative": {"enabled": true}}),
+        );
+        insert_child(
+            "incompatible-backend",
+            serde_json::json!({"grammar_backend": "xgrammar"}),
+        );
+        insert_child(
+            "malformed-enabled",
+            serde_json::json!({"speculative": {"enabled": "true", "algorithm": "nextn"}}),
+        );
+        insert_child(
+            "raw-speculative-override",
+            serde_json::json!({"extra_launch_args": ["--speculative-algo", "NEXTN"]}),
+        );
+        insert_child(
+            "raw-grammar-override",
+            serde_json::json!({"extra_launch_args": ["--grammar-backend", "xgrammar"]}),
+        );
         // ``tasks.generate.grammar_profile: no-spec`` is the routing hint the
         // gateway reads off the base entry.
         let tasks: serde_yaml::Value =
@@ -1985,6 +2317,7 @@ mod tests {
         registry
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -2012,6 +2345,31 @@ mod tests {
             registry.grammar_route_variant("org/g:a100-40gb"),
             GrammarRoute::Rewrite("org/g:no-spec".to_string())
         );
+        // A non-speculative profile inheriting ``no-spec`` remains selected,
+        // preserving its own hardware/quantization settings.
+        assert_eq!(
+            registry.grammar_route_variant("org/g:h100-fp8"),
+            GrammarRoute::Keep
+        );
+        assert_eq!(
+            registry.grammar_route_variant("ORG/G:H100-FP8"),
+            GrammarRoute::Keep
+        );
+        // Inheritance is only a signal, not proof: incompatible structured or
+        // raw launch settings must still fall back to ``no-spec``.
+        for profile in [
+            "unsafe-inheritor",
+            "incompatible-backend",
+            "malformed-enabled",
+            "raw-speculative-override",
+            "raw-grammar-override",
+        ] {
+            assert_eq!(
+                registry.grammar_route_variant(&format!("org/g:{profile}")),
+                GrammarRoute::Rewrite("org/g:no-spec".to_string()),
+                "{profile}",
+            );
+        }
         // The grammar-safe target variant itself → no-op (no recursive reroute
         // to ``org/g:no-spec:no-spec``).
         assert_eq!(
@@ -2048,6 +2406,7 @@ mod tests {
         registry
             .add_model_config(ModelConfig {
                 name: "org/n".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -2059,6 +2418,45 @@ mod tests {
             .unwrap();
 
         assert_eq!(registry.grammar_route_variant("org/n"), GrammarRoute::Keep);
+    }
+
+    #[test]
+    fn test_grammar_route_variant_from_filesystem_profile_inheritance() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sentence_transformer\n",
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("grammar.yaml"),
+            r#"
+sie_id: org/filesystem
+tasks:
+  generate:
+    grammar_profile: no-spec
+profiles:
+  default: {adapter_path: "sie_server.adapters.sentence_transformer:Adapter", max_batch_tokens: 4096}
+  no-spec:
+    adapter_path: "sie_server.adapters.sentence_transformer:Adapter"
+    max_batch_tokens: 4096
+    adapter_options: {loadtime: {grammar_backend: outlines, speculative: {enabled: false}}}
+  h100-fp8:
+    extends: no-spec
+    adapter_options: {loadtime: {grammar_backend: outlines, speculative: {enabled: false}, extra_launch_args: [--quantization, fp8]}}
+"#,
+        )
+        .unwrap();
+
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        assert_eq!(
+            registry.grammar_route_variant("org/filesystem"),
+            GrammarRoute::Rewrite("org/filesystem:no-spec".to_string()),
+        );
+        assert_eq!(
+            registry.grammar_route_variant("org/filesystem:h100-fp8"),
+            GrammarRoute::Keep,
+        );
     }
 
     #[test]
@@ -2095,6 +2493,7 @@ mod tests {
         registry
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -2156,6 +2555,7 @@ mod tests {
         let err = registry
             .add_model_config(ModelConfig {
                 name: "org/x".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -2305,6 +2705,7 @@ profiles:
         registry
             .add_model_config(ModelConfig {
                 name: "org/profile-only".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -2434,6 +2835,9 @@ profiles:
   candle:
     adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
     max_batch_tokens: 8192
+    adapter_options:
+      runtime:
+        output_types: [multivector]
 "#,
         )
         .unwrap();
@@ -2472,6 +2876,196 @@ profiles:
                 .unwrap(),
             "candle"
         );
+    }
+
+    #[test]
+    fn test_candle_sparse_only_profile_narrows_outputs_to_sparse() {
+        let config: ModelConfig = serde_yaml::from_str(
+            r#"
+sie_id: acme/sparse
+tasks:
+  encode:
+    sparse:
+      dim: 30522
+  score: {}
+profiles:
+  candle:
+    adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
+    adapter_options:
+      runtime:
+        output_types: [sparse]
+"#,
+        )
+        .unwrap();
+
+        let entries = ModelRegistry::expand_model_config_into_profile_variants(&config).unwrap();
+        let variant = entries
+            .iter()
+            .find(|entry| entry.name == "acme/sparse:candle")
+            .unwrap();
+
+        assert_eq!(variant.info_extras.outputs, vec!["sparse".to_string()]);
+        assert_eq!(variant.info_extras.dims.get("sparse"), Some(&30522));
+        assert!(!variant.info_extras.dims.contains_key("dense"));
+        assert!(!variant.info_extras.dims.contains_key("multivector"));
+    }
+
+    #[test]
+    fn test_candle_multivector_profile_drops_unsupported_sparse_output() {
+        let config: ModelConfig = serde_yaml::from_str(
+            r#"
+sie_id: acme/sparse-multivector
+tasks:
+  encode:
+    sparse:
+      dim: 30522
+    multivector:
+      dim: 128
+  score: {}
+profiles:
+  candle:
+    adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
+    adapter_options:
+      loadtime:
+        score_strategy: colbert_maxsim
+      runtime:
+        output_types: [sparse, multivector]
+"#,
+        )
+        .unwrap();
+
+        let entries = ModelRegistry::expand_model_config_into_profile_variants(&config).unwrap();
+        let variant = entries
+            .iter()
+            .find(|entry| entry.name == "acme/sparse-multivector:candle")
+            .unwrap();
+
+        assert_eq!(
+            variant.info_extras.outputs,
+            vec!["multivector".to_string(), "score".to_string()]
+        );
+        assert_eq!(variant.info_extras.dims.get("multivector"), Some(&128));
+        assert!(!variant.info_extras.dims.contains_key("sparse"));
+    }
+
+    #[test]
+    fn test_candle_multivector_score_requires_resolved_colbert_maxsim_strategy() {
+        let config: ModelConfig = serde_yaml::from_str(
+            r#"
+sie_id: acme/multivector
+tasks:
+  encode:
+    multivector:
+      dim: 128
+  score: {}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.colbert:ColBERTAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        score_strategy: colbert_maxsim
+  python_variant:
+    extends: default
+  candle_inherited:
+    extends: default
+    adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
+  candle_replaced:
+    extends: default
+    adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
+    adapter_options:
+      loadtime:
+        max_seq_length: 8192
+  candle_unknown:
+    extends: default
+    adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
+    adapter_options:
+      loadtime:
+        score_strategy: dot_product
+"#,
+        )
+        .unwrap();
+
+        let entries = ModelRegistry::expand_model_config_into_profile_variants(&config).unwrap();
+        let outputs = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .info_extras
+                .outputs
+                .clone()
+        };
+
+        let multivector_and_score = vec!["multivector".to_string(), "score".to_string()];
+        assert_eq!(outputs("acme/multivector"), multivector_and_score);
+        assert_eq!(
+            outputs("acme/multivector:python_variant"),
+            multivector_and_score,
+            "non-Candle profiles preserve the model-level score capability"
+        );
+        assert_eq!(
+            outputs("acme/multivector:candle_inherited"),
+            multivector_and_score,
+            "the resolved profile inherits its parent's recognized strategy"
+        );
+        assert_eq!(
+            outputs("acme/multivector:candle_replaced"),
+            vec!["multivector".to_string()],
+            "a non-empty child loadtime block replaces the parent and must not retain score"
+        );
+        assert_eq!(
+            outputs("acme/multivector:candle_unknown"),
+            vec!["multivector".to_string()],
+            "an unrecognized native score strategy must not be advertised"
+        );
+    }
+
+    #[test]
+    fn test_profile_variant_advertises_profile_max_sequence_length() {
+        let config: ModelConfig = serde_yaml::from_str(include_str!(
+            "../../../sie_server/models/topk-io__Iso-ModernColBERT.yaml"
+        ))
+        .unwrap();
+        let entries = ModelRegistry::expand_model_config_into_profile_variants(&config).unwrap();
+        let base = entries
+            .iter()
+            .find(|entry| entry.name == "topk-io/Iso-ModernColBERT")
+            .unwrap();
+        let candle = entries
+            .iter()
+            .find(|entry| entry.name == "topk-io/Iso-ModernColBERT:candle")
+            .unwrap();
+        assert_eq!(base.info_extras.max_sequence_length, Some(8192));
+        assert_eq!(candle.info_extras.max_sequence_length, Some(8192));
+        assert_eq!(
+            candle.info_extras.outputs,
+            vec!["multivector".to_string(), "score".to_string()]
+        );
+        assert_eq!(
+            candle.to_model_info_value(false)["max_sequence_length"],
+            serde_json::json!(8192)
+        );
+    }
+
+    #[test]
+    fn test_profile_variant_can_advertise_larger_profile_max_sequence_length() {
+        let base = ModelInfoExtras {
+            max_sequence_length: Some(4096),
+            ..ModelInfoExtras::default()
+        };
+        let profile = CanonicalProfile {
+            adapter_path: None,
+            max_batch_tokens: None,
+            compute_precision: None,
+            adapter_options: Some(serde_json::json!({
+                "loadtime": {"max_seq_length": 32768}
+            })),
+        };
+
+        let variant = ModelRegistry::narrow_info_extras_to_profile(&base, "long", &profile);
+
+        assert_eq!(variant.max_sequence_length, Some(32768));
     }
 
     #[test]
@@ -2518,6 +3112,7 @@ profiles:
         let err = registry
             .add_model_config(ModelConfig {
                 name: "org/broken".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -2575,6 +3170,7 @@ profiles:
                     );
                     let cfg = ModelConfig {
                         name: name.clone(),
+                        hf_revision: None,
                         adapter_module: None,
                         default_bundle: None,
                         pool: None,
@@ -2826,6 +3422,7 @@ adapters:
 
         let config = ModelConfig {
             name: "test/model".to_string(),
+            hf_revision: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
@@ -2891,6 +3488,7 @@ adapters:
         registry
             .add_model_config(ModelConfig {
                 name: "test/model".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -2940,6 +3538,7 @@ encode:
         registry
             .add_model_config(ModelConfig {
                 name: "test/model".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -2996,6 +3595,7 @@ adapters:
         registry
             .add_model_config(ModelConfig {
                 name: "test/model".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3040,6 +3640,7 @@ encode:
         registry
             .add_model_config(ModelConfig {
                 name: "test/model".to_string(),
+                hf_revision: None,
                 adapter_module: None,
                 default_bundle: None,
                 pool: None,
@@ -3063,6 +3664,7 @@ encode:
     fn cfg_for_test_model(adapter_path: &str, max_batch_tokens: u32) -> ModelConfig {
         ModelConfig {
             name: "test/model".to_string(),
+            hf_revision: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
@@ -3187,7 +3789,7 @@ adapters:
 
     /// Regression: a delta apply whose new profile ``extends`` a profile that
     /// only lives in ``existing.profile_configs`` (not in the incoming config)
-    /// must still resolve. Pre-fix this hit "Profile 'a100-40gb' has a missing
+    /// must still resolve. Pre-fix this hit "Profile 'h100-fp8' has a missing
     /// parent or an inheritance cycle" because resolution only walked
     /// ``config.profiles``.
     #[test]
@@ -3205,51 +3807,64 @@ adapters:
         .unwrap();
         let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
 
-        // Seed: one config carrying the ``default`` profile.
+        // Seed: ``default`` plus the grammar-safe parent. The later delta only
+        // carries the child, so ``no-spec`` exists solely in stored state.
+        let seed: ModelConfig = serde_yaml::from_str(
+            r#"
+sie_id: test/model
+tasks: {generate: {grammar_profile: no-spec}}
+profiles:
+  default: {adapter_path: "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter", max_batch_tokens: 4096}
+  no-spec:
+    adapter_path: "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"
+    max_batch_tokens: 4096
+    adapter_options: {loadtime: {grammar_backend: outlines, speculative: {enabled: false}}}
+"#,
+        )
+        .unwrap();
         registry
-            .add_model_config(cfg_for_test_model(
-                "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter",
-                4096,
-            ))
-            .expect("seed apply with default profile");
+            .add_model_config(seed)
+            .expect("seed apply with grammar profile");
 
-        // Delta: a second config bringing only ``a100-40gb`` which extends
-        // ``default``. ``default`` lives only in ``existing.profile_configs``
+        // Delta: a second config bringing only ``h100-fp8`` which extends
+        // ``no-spec``. ``no-spec`` lives only in ``existing.profile_configs``
         // at this point.
-        let delta = ModelConfig {
-            name: "test/model".to_string(),
-            adapter_module: None,
-            default_bundle: None,
-            pool: None,
-            profiles: {
-                let mut m = HashMap::new();
-                m.insert(
-                    "a100-40gb".to_string(),
-                    crate::types::model::ProfileConfig {
-                        adapter_path: None,
-                        max_batch_tokens: Some(8192),
-                        compute_precision: None,
-                        adapter_options: None,
-                        extends: Some("default".to_string()),
-                    },
-                );
-                m
-            },
-            inputs: None,
-            max_sequence_length: None,
-            tasks: None,
-        };
+        let delta: ModelConfig = serde_yaml::from_str(
+            r#"
+sie_id: test/model
+profiles:
+  h100-fp8:
+    extends: no-spec
+    max_batch_tokens: 8192
+    adapter_options: {loadtime: {grammar_backend: outlines, speculative: {enabled: false}, extra_launch_args: [--quantization, fp8]}}
+"#,
+        )
+        .unwrap();
 
         let (created, _skipped, _bundles) = registry
             .add_model_config(delta.clone())
             .expect("delta apply must resolve extends against existing.profile_configs");
-        assert_eq!(created, vec!["a100-40gb".to_string()]);
+        assert_eq!(created, vec!["h100-fp8".to_string()]);
+        assert_eq!(
+            registry.grammar_route_variant("test/model:h100-fp8"),
+            GrammarRoute::Keep,
+        );
 
         // Same delta under the test-only authoritative path must also succeed
         // because the override path uses the same merged resolution map.
         registry
             .add_model_config_authoritative(delta)
             .expect("authoritative replay of the same delta must also resolve cleanly");
+
+        let base = registry.get_model_info("test/model").expect("base model");
+        assert_eq!(
+            base.info_extras
+                .profile_parents
+                .get("h100-fp8")
+                .map(String::as_str),
+            Some("no-spec"),
+            "delta apply must retain the profile inheritance relationship",
+        );
     }
 
     /// M10 follow-up: a delta-update that adds a profile with new
@@ -3278,6 +3893,7 @@ adapters:
         // Seed: ``default`` profile with one LoRA adapter ``base-a``.
         let seed = ModelConfig {
             name: "test/model".to_string(),
+            hf_revision: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
@@ -3335,6 +3951,7 @@ adapters:
         // full reload.
         let delta = ModelConfig {
             name: "test/model".to_string(),
+            hf_revision: None,
             adapter_module: None,
             default_bundle: None,
             pool: None,
@@ -3486,6 +4103,97 @@ profiles:
     }
 
     #[test]
+    fn test_compute_bundle_config_hash_changes_with_model_revision() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\nadapters:\n  - sie_server.adapters.sentence_transformer\n",
+        )
+        .unwrap();
+        let model_path = models_dir.join("revisioned.yaml");
+        let write_model = |revision: &str| {
+            fs::write(
+                &model_path,
+                format!(
+                    "sie_id: org/revisioned\nhf_revision: {revision}\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.sentence_transformer:Adapter\n"
+                ),
+            )
+            .unwrap();
+        };
+        write_model("0123456789abcdef0123456789abcdef01234567");
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let first = registry.compute_bundle_config_hash("default");
+
+        write_model("89abcdef0123456789abcdef0123456789abcdef");
+        registry.reload();
+        let second = registry.compute_bundle_config_hash("default");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_revision_only_delta_updates_identity_and_bundle_hash() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\nadapters:\n  - sie_server.adapters.sentence_transformer\n",
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("revisioned.yaml"),
+            "sie_id: org/revisioned\nhf_revision: 0123456789abcdef0123456789abcdef01234567\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.sentence_transformer:Adapter\n",
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let (first, first_revision) =
+            registry.bundle_execution_evidence("default", "default", "org/revisioned");
+        assert_eq!(
+            first_revision.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+
+        registry
+            .add_model_config(ModelConfig {
+                name: "org/revisioned".to_string(),
+                hf_revision: Some("89abcdef0123456789abcdef0123456789abcdef".to_string()),
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles: HashMap::from([(
+                    "default".to_string(),
+                    profile(
+                        Some("sie_server.adapters.sentence_transformer:Adapter"),
+                        None,
+                        None,
+                    ),
+                )]),
+                inputs: None,
+                max_sequence_length: None,
+                tasks: None,
+            })
+            .expect("revision-only delta");
+
+        assert_eq!(
+            registry.get_model_revision("org/revisioned").as_deref(),
+            Some("89abcdef0123456789abcdef0123456789abcdef")
+        );
+        let (second, second_revision) =
+            registry.bundle_execution_evidence("default", "default", "org/revisioned");
+        assert_ne!(first, second);
+        assert_eq!(
+            second_revision.as_deref(),
+            Some("89abcdef0123456789abcdef0123456789abcdef")
+        );
+        // Evidence captured for an in-flight A request remains A after the
+        // registry advances; response construction receives this owned tuple
+        // rather than consulting the now-B registry again.
+        assert_eq!(
+            first_revision.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
     fn test_compute_bundle_config_hash_for_pool_filters_model_pool() {
         let (_dir, bundles_dir, models_dir) = create_test_dirs();
 
@@ -3599,7 +4307,7 @@ profiles:
 
         assert_eq!(
             registry.compute_bundle_config_hash("default"),
-            "a4ce038148c529799f88014dde9360175c9e9536f353162cf3bc312c09f4cd23"
+            "e335bda2f2b7fae3a2755c60c3b2ce5add0735259266e0f3aaf9a705e4cffbf5"
         );
     }
 
@@ -3737,6 +4445,7 @@ adapters:
             handles.push(thread::spawn(move || {
                 let config = ModelConfig {
                     name: format!("race/model-{i}"),
+                    hf_revision: None,
                     adapter_module: None,
                     default_bundle: None,
                     pool: None,

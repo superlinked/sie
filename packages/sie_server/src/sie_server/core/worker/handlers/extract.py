@@ -30,7 +30,7 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
     def make_config_key(self, metadata: RequestMetadata) -> tuple[Any, ...]:
         """Create config key for batching extract requests.
 
-        Items with the same (labels, instruction, options) can be batched together.
+        Items with the same (labels, output_schema, instruction, options) can be batched together.
 
         Args:
             metadata: Request metadata.
@@ -40,9 +40,11 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
         """
         # Label order is part of the model input for label-conditioned extractors.
         labels_key = tuple(metadata.labels) if metadata.labels else None
+        schema_key = make_hashable(metadata.output_schema) if metadata.output_schema is not None else None
         options_key = make_hashable(metadata.options) if metadata.options else None
         return (
             labels_key,
+            schema_key,
             metadata.instruction,
             options_key,
         )
@@ -67,13 +69,15 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
         Returns:
             ExtractOutput with entities.
         """
-        labels_tuple, instruction, options_tuple = config_key
+        labels_tuple, _schema_key, instruction, options_tuple = config_key
         labels = list(labels_tuple) if labels_tuple else None
         options = dict(options_tuple) if options_tuple else None
+        output_schema = metadata_list[0].output_schema
 
         return adapter.extract(
             items,
             labels=labels,
+            output_schema=output_schema,
             instruction=instruction,
             options=options,
             prepared_items=prepared_items,
@@ -93,6 +97,7 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
         relations = [output.relations[index]] if output.relations is not None else None
         objects = [output.objects[index]] if output.objects is not None else None
         data = [output.data[index]] if output.data is not None else None
+        errors = [output.errors[index]] if output.errors is not None else None
         # Unit-meter counts are positional like ``entities``; slice them with
         # the item so fused cross-request batches keep each doc's real token
         # count attributed to the right work item (see EncodeHandler).
@@ -109,6 +114,7 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
             relations=relations,
             objects=objects,
             data=data,
+            errors=errors,
             batch_size=1,
             input_token_counts=sliced_counts,
             pages=sliced_pages,
@@ -169,6 +175,16 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
                 p_data = partials[i].data
                 data.append(p_data[0] if p_data is not None else {})
 
+        # Unlike unit counts, item errors may cover only failed positions.
+        # Preserve successful siblings as None entries in the aligned list.
+        has_errors = any(p.errors is not None for p in partials.values())
+        errors = None
+        if has_errors:
+            errors = []
+            for i in range(batch_size):
+                partial_errors = partials[i].errors
+                errors.append(partial_errors[0] if partial_errors is not None else None)
+
         # Reassemble per-item unit counts (see slice_output). All-or-nothing:
         # a partial without a count means the meter cannot attribute the item
         # exactly, so no counts are surfaced (metering falls back to its
@@ -198,6 +214,7 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
             relations=relations,
             objects=objects,
             data=data,
+            errors=errors,
             batch_size=batch_size,
             input_token_counts=assembled_counts or None,
             pages=assembled_pages or None,
@@ -225,5 +242,9 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
                 item["data"] = output.data[i]
             else:
                 item["data"] = {}
+            if output.errors is not None:
+                error = output.errors[i]
+                if error is not None:
+                    item["error"] = {"code": error.code, "message": error.message}
             results.append(item)
         return results

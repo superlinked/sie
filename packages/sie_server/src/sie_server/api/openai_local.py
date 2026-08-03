@@ -29,12 +29,13 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sie_sdk.queue_types import denormalize_model_id
 
-from sie_server.adapters.mlx.generation import MLXGenerationAdapter
+from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
 from sie_server.api.helpers import ModelStateChecker
 from sie_server.api.options import resolve_runtime_options
-from sie_server.api.validation import validate_machine_profile_header
+from sie_server.api.score import score_usage_from_output
+from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.core.inference_output import ScoreOutput
-from sie_server.core.score_cost import build_score_prepared_items
+from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
 from sie_server.observability.tracing import tracer
 from sie_server.types.inputs import Item
@@ -52,9 +53,8 @@ _PROXY_TIMEOUT = httpx.Timeout(connect=10.0, read=_PROXY_READ_TIMEOUT_S, write=1
 # Cap the request body so a huge messages/documents array can't be buffered/forwarded
 # unbounded (the gateway caps prod ingress; these local routes must cap themselves).
 _MAX_BODY_BYTES = int(os.environ.get("SIE_CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
-# Ceiling on rerank candidates so a single request can't push an unbounded batch
-# through the score worker.
-_MAX_RERANK_DOCS = int(os.environ.get("SIE_RERANK_MAX_DOCS", "1000"))
+# Compatibility requests project onto the same native score bound.
+_MAX_RERANK_DOCS = MAX_SCORE_ITEMS
 
 
 def _bad_request(message: str, *, param: str | None = None, code: str | None = None) -> HTTPException:
@@ -62,6 +62,15 @@ def _bad_request(message: str, *, param: str | None = None, code: str | None = N
     if param is not None:
         detail["param"] = param
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
+def _validate_mlx_seed(value: Any) -> int | None:
+    """Validate the public signed-i64 seed and convert it for MLX's uint64 API."""
+    try:
+        validated = validate_signed_i64(value, param="seed")
+    except ValueError as exc:
+        raise _bad_request(str(exc), param="seed") from exc
+    return None if validated is None else normalize_mlx_seed(validated)
 
 
 async def _read_json_body(http_request: Request) -> dict[str, Any]:
@@ -140,6 +149,7 @@ async def chat_completions(
         isinstance(max_tokens_opt, bool) or not isinstance(max_tokens_opt, int) or max_tokens_opt <= 0
     ):
         raise _bad_request("'max_tokens' must be a positive integer", param="max_tokens")
+    mlx_seed = _validate_mlx_seed(body.get("seed"))
 
     registry = http_request.app.state.registry
     device = registry.device
@@ -179,6 +189,8 @@ async def chat_completions(
         # so a huge value can't drive an unbounded generation / OOM (gen_task is non-None here).
         proxied = dict(body)
         proxied["model"] = adapter.mlx_repo
+        if mlx_seed is not None:
+            proxied["seed"] = mlx_seed
         cap = gen_task.max_output_tokens
         # max_tokens_opt is a positive int or None (validated above). Make the per-model cap
         # authoritative: clamp a valid value, and fill the cap in when omitted so the child's
@@ -260,15 +272,20 @@ async def rerank(
     validate_machine_profile_header(x_machine_profile)
 
     body = await _read_json_body(http_request)
+    allowed_fields = {"model", "query", "documents", "top_n", "return_documents", "options"}
+    unknown_fields = body.keys() - allowed_fields
+    if unknown_fields:
+        unknown = sorted(unknown_fields)[0]
+        raise _bad_request(f"field '{unknown}' is not supported", param=unknown)
 
     model = body.get("model")
-    if not isinstance(model, str) or not model:
+    if not isinstance(model, str) or not model.strip():
         raise _bad_request("'model' must be a non-empty string", param="model")
     query = body.get("query")
-    if not isinstance(query, str) or not query:
+    if not isinstance(query, str) or not query.strip():
         raise _bad_request("'query' must be a non-empty string", param="query")
     documents = body.get("documents")
-    if not isinstance(documents, list) or not documents or not all(isinstance(d, str) for d in documents):
+    if not isinstance(documents, list) or not documents or not all(isinstance(d, str) and d.strip() for d in documents):
         raise _bad_request("'documents' must be a non-empty array of strings", param="documents")
     if len(documents) > _MAX_RERANK_DOCS:
         raise _bad_request(f"'documents' exceeds the maximum of {_MAX_RERANK_DOCS} per request", param="documents")
@@ -332,6 +349,12 @@ async def rerank(
 
         score_output: ScoreOutput = worker_result.output
         scores = [float(score_output.scores[i]) for i in range(score_output.batch_size)]
+        usage = score_usage_from_output(score_output)
+        if usage is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"code": "inference_error", "message": "score response missing authoritative usage"},
+            )
 
     ranked = sorted(enumerate(scores), key=lambda pair: pair[1], reverse=True)
     if top_n is not None:
@@ -347,6 +370,6 @@ async def rerank(
         content={
             "model": getattr(config, "name", None) or registry_key,
             "results": results,
-            "usage": {"total_tokens": sum(len(d) // 4 + 1 for d in documents)},
+            "usage": usage,
         }
     )

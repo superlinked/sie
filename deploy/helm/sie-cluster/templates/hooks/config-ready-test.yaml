@@ -1,21 +1,8 @@
-{{- if and .Values.healthGates.enabled .Values.config.enabled }}
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ include "sie-cluster.healthGate.config.serviceAccountName" . }}
-  namespace: {{ include "sie-cluster.namespace" . }}
-  labels:
-    app.kubernetes.io/name: sie-health-test
-    app.kubernetes.io/component: config
-  annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-    helm.sh/hook-weight: "4"
----
+{{- if and (eq (include "sie-cluster.healthGates.enabled" .) "true") .Values.config.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ printf "%s-health-config-%d" (include "sie-cluster.fullname" .) .Release.Revision | trunc 63 | trimSuffix "-" }}
+  name: {{ include "sie-cluster.keda.suffixedName" (dict "base" (include "sie-cluster.fullname" .) "suffix" (printf "-health-config-%d" .Release.Revision)) }}
   namespace: {{ include "sie-cluster.namespace" . }}
   labels:
     app.kubernetes.io/name: sie-health-test
@@ -34,7 +21,7 @@ spec:
         app.kubernetes.io/name: sie-health-test
         app.kubernetes.io/component: config
     spec:
-      serviceAccountName: {{ include "sie-cluster.healthGate.config.serviceAccountName" . }}
+      automountServiceAccountToken: false
       restartPolicy: Never
       containers:
         - name: test

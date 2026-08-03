@@ -1,0 +1,21 @@
+sie_id: openai/whisper-large-v3-turbo
+hf_id: openai/whisper-large-v3-turbo
+hf_revision: 41f01f3fe87f28c78e2fbf8b568835947dd65ed9
+inputs:
+  text: false
+  image: false
+  audio: true
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 448
+profiles:
+  default:
+    max_batch_tokens: 720000
+    compute_precision: float16
+    adapter_path: sie_server.adapters.whisper.adapter:WhisperAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

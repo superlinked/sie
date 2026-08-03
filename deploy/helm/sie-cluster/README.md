@@ -29,6 +29,21 @@ helm install sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
 - **sie-config**: Authoritative control plane for model/bundle configuration. Serves `/v1/configs/*` writes and publishes NATS deltas to the gateway and workers. Deployed as a singleton (`replicas: 1`, `strategy: Recreate`).
 - **Worker Pools**: StatefulSets per enabled worker group, each with KEDA autoscaling. Routing, metrics, and KEDA scale on the full `(queuePool, machineProfile, bundle)` lane.
 
+Helm resolves that physical lane once and reuses it for worker/sidecar env,
+heartbeats, physical queue-pool pod metadata, gateway configured profiles, and
+every KEDA query. Immutable workload selectors retain the logical pool/bundle
+identity published by v0.6.20. Tokens are trimmed, limited to 63 characters, validated against
+`^[A-Za-z0-9_-]+$`, and lowercased. Defaults apply only to omitted
+`queuePool`/`machineProfile` fields; explicit blank values fail rendering, as do
+two enabled entries that normalize to the same physical tuple.
+The same render publishes at most 1024 exact tuples to the gateway in
+`SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES`; pending demand and scale-related
+rejections are recorded only for a catalog-resolved tuple.
+Worker-pool and bundle map keys remain stable Kubernetes/KEDA object identities
+and must be lowercase DNS-1123 labels; KEDA's internal `metricName` and object
+names use only those validated identities, while PromQL always uses the
+canonical physical tuple.
+
 ## Cold Start Expectations
 
 When scaling from zero, expect the following latencies:
@@ -120,11 +135,111 @@ autoscaling:
   pollingInterval: 15
 ```
 
+`autoscaling.enabled=true` is a complete telemetry dependency: it turns on
+canonical OTLP metric emission, the bundled collector's Prometheus exporter,
+and the collector ServiceMonitor. `keda.install` controls only whether this
+chart installs the bundled KEDA controller; it does not control the chart's
+ScaledObject manifests.
+The ServiceMonitor uses a five-second interval and a timeout no greater than
+that interval so KEDA never evaluates a stale or invalid scrape path.
+Whenever `autoscaling.enabled=true`, the chart also renders mandatory
+post-install/post-upgrade gates for every canonical Prometheus query and exact
+KEDA ScaledObject/HPA health. `healthGates.enabled` independently enables the
+optional gateway/config HTTP smoke Jobs; Helm `--wait` still requires those
+workloads' Kubernetes readiness.
+
+The chart stores hook-applied ScaledObjects in deterministic Helm-owned
+ConfigMap shards of at most 32 worker lanes. Chart-managed autoscaling admits
+192 physical worker lanes when KEDA and Prometheus are external, or 96 when
+either dependency is installed by this release; the gateway's telemetry
+runtime can still represent 1,024. These chart limits keep the complete Helm
+release record conservative with maximum-length, high-entropy identities. With
+Helm 3.16.4, the external profile encodes 192 lanes to about 840 KiB and the
+worst bundled profile encodes 96 lanes to about 853 KiB, each leaving at least
+64 KiB below the 917,504-byte release budget at this revision.
+The ordinary post-install/post-upgrade hook applies the target shards and
+prunes removed release-managed ScaledObjects. It refuses to adopt a same-name
+object unless that object already carries this Helm release's exact identity.
+Because those manifests are intentionally non-secret ConfigMaps, restrict
+write access in the workload namespace to trusted control-plane principals.
+
+When autoscaling is enabled, the gateway Deployment and worker StatefulSets
+use Helm `lookup` during an upgrade to render their current live replica counts.
+Fresh installs and offline/client-only renders use the configured initial
+floors. This prevents Helm's resource patch from resetting the observed live
+KEDA/HPA-controlled count without
+storing a permanent replica-pin map in Helm. Use an actual Helm upgrade, or
+`helm upgrade --dry-run=server` for a faithful preview; `helm template` and
+client-only dry runs cannot exercise the live lookup.
+
+The first migration from canonical `sie-cluster-0.6.20` KEDA metrics to the
+collector-backed OTLP topology is one ordinary, supervised forward Helm
+upgrade. Schedule a maintenance window, stop new caller demand, suspend other
+reconcilers, and keep the release name, namespace, name overrides, worker/lane
+keys, enabled lanes, scale targets, Prometheus backend, and KEDA ownership
+(`keda.install`) unchanged. The only
+exception is the documented over-limit catalog reduction below. Then run the
+normal target upgrade with hooks and waiting enabled:
+
+```bash
+helm upgrade <RELEASE> oci://ghcr.io/superlinked/charts/sie-cluster \
+  --namespace <NAMESPACE> \
+  --version <TARGET_CHART_VERSION> \
+  -f <REVIEWED_TARGET_VALUES_FILE> \
+  --wait --timeout 20m
+```
+
+The mandatory Prometheus gate first proves the collector-backed metrics. The
+target apply hook then updates the existing ScaledObjects in place with the same
+names and scale targets, and the KEDA/HPA gate proves their queries before Helm
+succeeds.
+
+Do not use `helm rollback`, `helm upgrade --atomic`, `--cleanup-on-fail`, or
+`--no-hooks` across this boundary. If a hook fails, keep demand stopped, repair
+the collector, Prometheus, KEDA, image, quota, or permission issue, and rerun
+the same forward upgrade. There is no extra migration command, pause
+annotation, values overlay, second release, or target-owned migration state.
+Canonical `0.6.20` can leave one inert hook ConfigMap containing obsolete
+manifest text; remove it once after success using the upgrade runbook's exact
+post-success check. Fresh installs and later compatible releases use the normal
+Helm procedure as well.
+
+The complete preflight, external-dependency requirements, over-limit lane
+reduction, verification, and one-time inert ConfigMap cleanup are in the
+[upgrade runbook](../../upgrade-runbook.md).
+
+Disabling autoscaling or uninstalling runs a small hook that deletes only
+ScaledObjects carrying this release's managed identity or the exact canonical
+`0.6.20` identity. Do not pass
+`--no-hooks`. If the same operation also moves `global.namespace`, disable
+autoscaling in the old namespace first, then move the already-static release.
+Foreign, repackaged, or manually relabelled historical ScaledObjects remain an
+explicit cluster-administrator cleanup responsibility.
+
+Gateway/config Deployment, worker StatefulSet, and image-prepull DaemonSet
+selectors retain the published `0.6.20` label identity because Kubernetes
+selectors are immutable. Physical queue identity lives in the separate
+`sie.superlinked.com/queue-pool` label. Target KEDA queries are
+collector-backed and canonical-only; the temporary compatibility is the
+unchanged ScaledObject name and scale target, not a second metric path.
+
+The KEDA readiness hook selects the exact-revision ScaledObjects and all
+release-owned HPAs, then requires their names and ownership labels to match
+one-for-one. It waits a complete trigger-failure window and
+requires every trigger to be `Happy` with zero failures. Reads are paged in
+batches of 32 through the 192-lane chart domain. Near that maximum, use a Helm
+client timeout of at least 20 minutes. Helm applies that timeout to each
+Kubernetes operation/hook; it exceeds the longest default 15-minute Job. With
+a custom `pollingInterval` above 30 seconds, also make the timeout exceed the
+KEDA health deadline of `3 * pollingInterval + 240` seconds.
+
 ### Scale-from-Zero Trigger
 
-The gateway exposes `sie_gateway_pending_demand{pool="...",machine_profile="...",bundle="..."}`
-when requests arrive for queue lanes with no available workers. KEDA uses this
-to trigger scale-up even when there are 0 workers (and thus no worker metrics).
+The gateway emits `sie.gateway.pending_demand` over OTLP when requests arrive
+for queue lanes with no available workers. The collector exposes that one
+observation as
+`sie_gateway_pending_demand{pool="...",machine_profile="...",bundle="..."}`;
+KEDA uses it to trigger scale-up even when there are 0 workers.
 For gpu-agnostic cold requests, including `X-SIE-Pool` requests that omit
 `X-SIE-MACHINE-PROFILE`, the gateway emits concrete lane signals for every
 machine profile the backing pool can provision. Multi-profile pools therefore
@@ -136,47 +251,80 @@ label that KEDA cannot match.
 | Metric | Source | Purpose |
 |--------|--------|---------|
 | `sie_gateway_pending_demand` | Gateway | Trigger scale from 0 |
-| `sie_gateway_worker_queue_depth` | Gateway worker registry | Scale up on queued work in the exact pool/profile/bundle lane |
+| `sie_gateway_lane_queue_depth` | Gateway JetStream backlog reconciler | Scale up on exact durable-consumer `num_pending + num_ack_pending`, including work held by a dead/loading worker |
+| `sie_gateway_lane_queue_snapshot_timestamp_seconds` | Gateway JetStream backlog reconciler | Prove that the exact lane queue value, including zero, came from a fresh successful broker read |
 | `sie_gateway_active_lease_gpus` | Gateway pool manager | Hold distinct assigned-worker capacity for active pool leases in the exact pool/profile/bundle lane |
-| `sie_gateway_worker_pending_cost` | Gateway worker registry | Track worker-local scheduler pressure by cost, not only item count |
-| `sie_gateway_worker_ready_gpu_slots` | Gateway worker registry | Show how many GPU slots in a worker pod are ready to receive work |
-| `sie_gateway_worker_inflight_batches` | Gateway worker registry | Show batches currently executing inside worker pods |
+| `sie_gateway_pool_warm_floor` | Gateway pool manager | Enforce a configured per-lane minimum without bypassing KEDA |
 | `sie_gateway_rejected_requests_total` | Gateway | Scale up on sustained capacity/no-worker rejections after retryable cold-load reasons are excluded |
+| `sie_gateway_requests_total` | Gateway request facade | Scale the gateway Deployment from its release-scoped request rate |
+| `sie_gateway_capacity_snapshot_timestamp_seconds` | Gateway capacity reconciler | Reject stale gateway-to-collector state before it can drive scaling |
+
+The bundled collector separates OTLP ingress by trust class. Gateway pods in
+the exact Helm release use `4317`/`4318`; config and worker pods use the
+application receiver on `4327`. A generated ingress `NetworkPolicy` enforces
+the release/component selectors, while Prometheus exposition stays reachable
+only to same-namespace pods and explicitly configured scrape namespace names
+(`observability.otel.collector.prometheus.networkPolicy.scrapeNamespaceNames`).
+A bundled Prometheus in another namespace is admitted by its exact
+operator-owned identity. An external Prometheus is not: autoscaling renders
+only when the list explicitly names every namespace containing scraper pods
+(including the workload namespace when that is where external Prometheus
+runs). Kubelet health probes need no `13133` ingress rule.
+Treat the effective workload namespace (`global.namespace` when set,
+otherwise the Helm release namespace) as a workload trust boundary and do not grant
+untrusted principals pod-create or label-spoofing rights there.
+
+Every application selector is bound to this release's exact collector target
+with `namespace`, `service`, `endpoint="prometheus"`, and
+`producer_service="sie-gateway"`. The ServiceMonitor makes its target labels
+authoritative (`honorLabels: false`) and copies collector-exported producer
+identity into `producer_service`/`producer_instance`. Before HA aggregation,
+each non-queue business series is joined on `producer_instance` to the global
+capacity timestamp from that same gateway process. The lane queue series uses
+its stricter same-label broker-snapshot timestamp and requires a matching sample
+count greater than zero, so a successful explicit zero differs from a missing
+read. Every value is returned only while the collector target is up and at
+least one release-scoped global snapshot is less than 20 seconds old. This
+prevents retained points from a terminated gateway replica from being
+legitimized by a fresh replica. Empty results are errors
+(`ignoreNullValues: "false"`), so worker ScaledObjects enter their bounded
+fallback instead of treating a broken or stale telemetry path as zero.
+
+For a lane configured with `minReplicas: 0`, the chart renders
+`idleReplicaCount: 0` plus a non-zero `minReplicaCount` equal to that lane's
+bounded fallback floor. KEDA therefore still scales an inactive, healthy lane
+to zero, but its HPA has a safe activation/fallback floor when Prometheus or the
+gateway-to-collector path fails. Lanes with a positive configured minimum keep
+that static minimum and omit `idleReplicaCount`. `autoscaling.fallbackReplicas`
+must be at least one and is clamped to each lane's declared maximum.
 
 KEDA scales worker StatefulSet replicas. It does not add or remove Python
 processes or containers inside a running worker pod, so a multi-GPU worker is
 one larger scaling unit with richer per-replica pressure metrics.
 
-### Worker-sidecar Metrics
+`alertRules.enabled=true` and the bundled `kube-prometheus-stack` are also
+complete application-metrics consumers: either setting enables canonical OTLP
+metrics, the bundled collector Prometheus exporter, and its ServiceMonitor.
+The chart therefore cannot render collector-scoped application alerts without
+a scrape path.
+
+### Worker-sidecar Telemetry
 
 When `workers.common.workerSidecar.enabled=true`, each worker Pod includes a
 `worker-sidecar` container. The sidecar image is
 `ghcr.io/superlinked/sie-server-sidecar`, the Rust binary is
-`sie-server-sidecar`, and Prometheus families use the `sie_worker_*` prefix
-because they describe worker-side runtime behavior.
-
-The chart wires sidecar scraping as:
-
-- `worker-sidecar` container port `metrics` on `SIE_WORKER_METRICS_PORT`
-  (default `9095`)
-- worker Service port `worker-metrics`
-- worker ServiceMonitor endpoint `worker-metrics`
+`sie-server-sidecar`. The application emits canonical `sie.worker.*` metrics
+once over OTLP. The collector translates those observations to the
+`sie_worker_*` Prometheus families; the worker Service has no metrics port and
+Prometheus never scrapes application containers.
 
 For multi-child workers, the same worker Service also exposes adapter child
 metrics ports `http-1` through `http-(N-1)` in addition to the baseline `http`
-port, and the worker ServiceMonitor scrapes each of those endpoints. That keeps
-adapter-native metrics visible for every child container, while sidecar
-`sie_worker_child_*` gauges remain the placement/queue-depth source of truth.
-
-Alert rules that need the sidecar scrape target match
-`endpoint="worker-metrics"` rather than an old `job="sie-worker"` label.
-
-Multi-child sidecars also expose child-level GPU slot gauges with a `child`
-label: `sie_worker_child_ready`, `sie_worker_child_models`,
-`sie_worker_child_queue_depth`, `sie_worker_child_pending_cost`, and
-`sie_worker_child_inflight_batches`. The gateway receives the pod-level
-heartbeat fields; these sidecar metrics are the per-child view used to audit
-placement and queue pressure inside one worker pod.
+port, but those ports are for request traffic, not Prometheus. Availability
+alerts use kube-state-metrics, while queue pressure comes from the
+gateway-owned KEDA contract. Runtime pressure still travels in the worker
+heartbeat that feeds the gateway; it is not duplicated as application
+Prometheus instrumentation.
 
 ## Configuration
 
@@ -206,6 +354,8 @@ rtx6000 default bundle scales 3–10 — see
 # assigned logical pool is backed by that queue.
 # Each worker group renders its own StatefulSet + ScaledObject named
 # worker-<pool>-<bundle>.
+# Physical lane tokens are canonicalized once (trim, validate, lowercase), and
+# duplicate canonical queuePool/machineProfile/bundle tuples fail rendering.
 workers:
   pools:
     l4:
@@ -349,7 +499,7 @@ distinguishable from the new ones by the absence of the
 `sie.superlinked.com/bundle` label:
 
 ```bash
-NS=sie  # release namespace
+NS=sie  # effective workload namespace: global.namespace or release namespace
 
 # Pre-refactor worker family (no bundle label) — delete before/after upgrade
 kubectl -n "$NS" delete statefulset,pdb,daemonset \
@@ -359,8 +509,8 @@ kubectl -n "$NS" delete statefulset,pdb,daemonset \
 kubectl -n "$NS" delete daemonset \
   -l 'app.kubernetes.io/component=image-prepull,!sie.superlinked.com/bundle'
 
-# Pre-refactor KEDA ScaledObjects (the chart's apply Job only creates;
-# it never deletes obsolete entries)
+# Pre-refactor KEDA ScaledObjects. Current managed revisions are pruned by the
+# chart; these older unlabeled objects remain an explicit one-time cleanup.
 kubectl -n "$NS" delete scaledobject \
   -l 'app.kubernetes.io/component=worker,!sie.superlinked.com/bundle'
 ```
@@ -710,6 +860,75 @@ telemetry:
 
 Observability components (Prometheus, Grafana, Loki, Tempo, DCGM Exporter, Alloy, Event Exporter) are included as optional sub-chart dependencies. Enable them in your values overlay (e.g. `kube-prometheus-stack.install: true`, `observability.logs.install: true`, `observability.tracing.tempo.install: true`, or `kubernetes-event-exporter.install: true`).
 
+Every enabled OpenTelemetry producer and every bundled-collector branch uses
+the same canonical resource identity. Local installs may fall back to
+`unknown`; a Better Stack forwarding collector fails Helm rendering unless the
+dedicated environment is exactly `dev`, `staging`, or `prod` and the region is
+explicit and non-unknown:
+
+```yaml
+observability:
+  otel:
+    resource:
+      deploymentEnvironment: dev
+      cloudRegion: us-east-1
+```
+
+### Better Stack OTLP destination
+
+Use the Telemetry source's ingestion token. A Better Stack settings-management
+API token and an Uptime API token are not runtime OTLP credentials. Copy the
+bare HTTPS OTLP origin shown by that source; do not guess or hardcode a global
+Better Stack hostname. Create one source and one Secret per environment and
+region in the effective workload namespace:
+
+```bash
+WORKLOAD_NAMESPACE=sie
+BETTER_STACK_SECRET=sie-betterstack-otlp-dev-us-east-1
+read -rsp 'Better Stack Telemetry source token: ' BETTER_STACK_SOURCE_TOKEN
+printf '\n'
+printf '%s' "$BETTER_STACK_SOURCE_TOKEN" |
+  kubectl create secret generic "$BETTER_STACK_SECRET" \
+    -n "$WORKLOAD_NAMESPACE" --from-file=token=/dev/stdin \
+    --dry-run=client -o yaml |
+  kubectl apply -f -
+unset BETTER_STACK_SOURCE_TOKEN
+```
+
+Reference it without placing the token in Helm values:
+
+```yaml
+observability:
+  otel:
+    resource:
+      deploymentEnvironment: dev
+      cloudRegion: us-east-1
+    collector:
+      betterStack:
+        enabled: true
+        endpoint: "<BARE_HTTPS_OTLP_ORIGIN_FROM_SOURCE_UI>"
+        existingSecret: sie-betterstack-otlp-dev-us-east-1
+        tokenKey: token
+```
+
+Only the collector Pod receives this Secret. Application producers receive the
+collector endpoint, never the Better Stack token. Keep dev, staging, and prod
+sources, dashboards, and Secrets isolated per region.
+
+For remote logs and traces, those operated-environment values are
+collector-authoritative rather than trusted from an application resource. The
+gateway-only receiver also authors `service.name=sie-gateway`; the application
+trace receiver accepts only the declared config, dispatcher, worker, and
+worker-sidecar service names. Only the gateway receiver is connected to the
+allowlisted request-completion log pipeline. A simultaneous local Tempo trace
+pipeline intentionally bypasses these remote-only identity and privacy
+processors and receives the producer trace unchanged.
+
+The collector Deployment annotation `checksum/otel-config` is the SHA-256 of
+the exact `collector.yaml` ConfigMap value mounted into the pod. Any collector
+configuration change therefore creates a new pod template and rolls the
+singleton collector instead of leaving it on stale mounted configuration.
+
 Pre-configured dashboards:
 
 - Cluster overview (QPS, latency, GPU utilization)
@@ -724,13 +943,16 @@ Pre-configured dashboards:
 
 Distributed tracing is **off by default** — the rendered chart is unchanged unless you opt in. Enabling injects the OpenTelemetry exporter env onto the gateway, worker sidecar, adapter worker, and Rust worker so a request is traced end to end (OTLP gRPC, `:4317`). Queue-mode endpoints (encode/score/extract/embeddings) publish through `gateway.publish` before `sidecar.dispatch` and `worker.run_batch`; generation (`/v1/generate`, `/v1/chat/completions`) also opens gateway-originated spans for the streaming path. Sampling defaults to a head-based parent sampler (`parentbased_traceidratio` at `0.05`), which honors an inbound `traceparent` decision and otherwise samples 5% of new traces.
 
-**Bring your own collector** (Tempo, Jaeger, or an existing OTel Collector) — recommended:
+**Bring your own collector** (Tempo, Jaeger, or an existing OTel Collector) is
+available only when the bundled collector is not required by metrics, logs, or
+KEDA:
 
 ```yaml
 observability:
   tracing:
     enabled: true
-    endpoint: "http://tempo:4317"   # OTLP gRPC
+  otel:
+    endpoint: "http://tempo:4317"   # OTLP gRPC producer destination
 ```
 
 Or with `--set`:
@@ -738,41 +960,63 @@ Or with `--set`:
 ```bash
 helm upgrade ... \
   --set observability.tracing.enabled=true \
-  --set observability.tracing.endpoint=http://tempo:4317
+  --set observability.otel.endpoint=http://tempo:4317
 ```
 
-**Bundled collector** (opt-in; never installed by default) — renders a minimal OTel Collector and points the pods at it automatically. Leave `collector.exporterEndpoint` empty to debug-log spans in the collector pod (handy for a first run), or set it to forward to Tempo/Jaeger:
+**Bundled collector** is installed explicitly or implied by application
+Prometheus consumers such as KEDA. Leave
+`observability.otel.collector.traces.endpoint` empty to debug-log spans in the
+collector pod (handy for a first run), or set it to forward to Tempo/Jaeger:
 
 ```yaml
 observability:
   tracing:
     enabled: true
+  otel:
     collector:
       install: true
-      exporterEndpoint: "http://tempo:4317"   # optional downstream; omit to debug-log
-      exporterInsecure: true                   # set false for a TLS-enabled downstream
+      traces:
+        endpoint: "http://tempo:4317"   # optional downstream; omit to debug-log
+        insecure: true                  # false for a TLS-enabled downstream
 ```
 
-The bundled collector forwards over plaintext by default (`exporterInsecure: true`); set it to `false` when `exporterEndpoint` targets a TLS-enabled backend. Setting an explicit top-level `endpoint` takes precedence and **suppresses** the bundled collector even if `collector.install: true`, so pods export straight to your external backend and no unused collector is rendered.
+The bundled collector forwards over plaintext by default (`insecure: true`);
+set it to `false` when the trace endpoint uses TLS.
+`observability.otel.endpoint` is mutually exclusive with the bundled collector;
+it does not suppress a collector forced by autoscaling, ServiceMonitor, alert
+rules, kube-prometheus-stack, or `observability.otel.collector.install`.
 
-**Bundled Tempo backend** (opt-in; never installed by default) — renders Grafana Tempo as an in-cluster trace backend via the `grafana-community/tempo` 2.2.3 chart (Tempo app 2.10.7) from the grafana-community repo. With tracing enabled and no explicit endpoint or bundled collector, the gateway and workers automatically export OTLP gRPC spans to `http://tempo:4317`. The Tempo query API is exposed at `http://tempo:3200`, and the chart renders a Grafana Tempo datasource ConfigMap for the already-enabled Grafana datasource sidecar:
+**Bundled Tempo backend** (opt-in; never installed by default) — renders Grafana Tempo as an in-cluster trace backend via the `grafana-community/tempo` 2.2.3 chart (Tempo app 2.10.7) from the grafana-community repo. With tracing enabled and no explicit endpoint or bundled collector, the gateway and workers automatically export OTLP gRPC spans to the namespace-qualified Tempo Service on port 4317. The Tempo query API is exposed on port 3200, and the chart renders a Grafana Tempo datasource ConfigMap for the already-enabled Grafana datasource sidecar. Namespace-qualified DNS keeps this working when `global.namespace` differs from the Helm namespace:
 
 ```yaml
 observability:
   tracing:
     enabled: true       # required for gateway/worker span emission
     tempo:
-      install: true     # installs Tempo and defaults pods to http://tempo:4317
+      install: true     # installs Tempo and defaults pods to its OTLP Service
 kube-prometheus-stack:
   install: true         # required for bundled Grafana to pick up the datasource
 ```
 
-Installing Tempo without `observability.tracing.enabled=true` is allowed; it creates an idle backend and, when bundled Grafana is installed, a datasource. Installing both the bundled collector and bundled Tempo points pods at the collector and makes the collector forward to `http://tempo:4317` unless `collector.exporterEndpoint` is set. An explicit top-level `observability.tracing.endpoint` always wins over both bundled modes.
+Installing Tempo without `observability.tracing.enabled=true` is allowed; it
+creates an idle backend and, when bundled Grafana is installed, a datasource.
+Installing both the bundled collector and bundled Tempo points pods at the
+collector and makes the collector forward to Tempo's namespace-qualified OTLP
+Service unless `observability.otel.collector.traces.endpoint` is set. A direct
+`observability.otel.endpoint` is valid only without the bundled collector. The
+downstream trace endpoint must not name this release's own OTel collector
+Service; the chart rejects that export loop.
 
-The SIE Tracing dashboard renders with the standard dashboards gate (`dashboards.enabled=true` or `kube-prometheus-stack.install=true`). Its Tempo panels require a Grafana datasource with `uid: tempo`; the chart auto-provisions that datasource only when both `observability.tracing.tempo.install=true` and `kube-prometheus-stack.install=true`. External Grafana installs, or bundled Grafana pointed at an external Tempo via `observability.tracing.endpoint`, must provision the datasource themselves or the trace panels will report "datasource not found".
+The SIE Tracing dashboard renders with the standard dashboards gate (`dashboards.enabled=true` or `kube-prometheus-stack.install=true`). Its Tempo panels require a Grafana datasource with `uid: tempo`; the chart auto-provisions that datasource only when both `observability.tracing.tempo.install=true` and `kube-prometheus-stack.install=true`. External Grafana installs, or bundled Grafana pointed at an external Tempo through an OTel endpoint, must provision the datasource themselves or the trace panels will report "datasource not found".
 
 Bundled Tempo enables a persistent volume (`~10Gi`) and requires a default StorageClass in the target cluster; otherwise the Tempo pod will not schedule. The upstream chart also exposes unused legacy receiver Service ports (`9411`, `55680`, `55681`) even though SIE only configures OTLP gRPC ingest on `4317` and the query API on `3200`.
 
-Tunables: `observability.tracing.sampler` / `samplerArg` (sampling), and `observability.tracing.serviceName.{gateway,worker,workerSidecar}` (the `OTEL_SERVICE_NAME` shown in the backend, defaulting to `sie-gateway` / `sie-server` / `sie-worker-sidecar`). When `enabled: true` you must set `endpoint`, `collector.install: true`, or `tempo.install: true`, or the chart fails fast.
+Tunables: `observability.tracing.sampler` / `samplerArg` (sampling), and
+`observability.otel.serviceName.{gateway,config,worker,workerSidecar}` for the
+canonical cross-signal `service.name`. Defaults are `sie-gateway`, `sie-config`,
+`sie-worker`, and `sie-worker-sidecar`; the collector's allowlist is built
+around those identities. When tracing is enabled, configure
+`observability.otel.endpoint`, install/require the bundled collector, or install
+Tempo, otherwise the chart fails fast.
 
 Local / non-Helm note: the gateway, Python worker, and Rust worker-sidecar all require `SIE_TRACING_ENABLED=true` and an OTLP endpoint (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT`) before exporting traces. Setting only one yields no traces rather than a partial trace. In-cluster, the Helm chart sets both for you.

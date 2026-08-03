@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin==1.13.3"]
+build-backend = "maturin"
+
+[project]
+name = "sie-audio-prep"
+version = "0.6.26"
+description = "Bounded, shared audio decoding and resampling for SIE workers."
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+
+[tool.maturin]
+features = ["python"]

@@ -7,6 +7,7 @@
 //! preserving the same wire behavior.
 
 pub mod error;
+pub mod media;
 pub mod numpy_sentinel;
 pub mod outcome;
 pub mod output_types;

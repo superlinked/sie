@@ -7,6 +7,8 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+ModelAdapterInventory = dict[str, tuple[set[str], str | None]]
+
 
 def _adapter_module_from_path(adapter_path: object) -> str | None:
     if not isinstance(adapter_path, str) or not adapter_path:
@@ -44,7 +46,7 @@ def _base_route_adapter_modules(profiles: dict) -> set[str]:
     return _profile_adapter_modules(profiles, "default")
 
 
-def _scan_model_adapters(models_dir: Path) -> dict[str, tuple[set[str], str | None]]:
+def _scan_model_adapters(models_dir: Path) -> ModelAdapterInventory:
     """Scan model config YAMLs and return adapter modules per route identity.
 
     Args:
@@ -55,7 +57,7 @@ def _scan_model_adapters(models_dir: Path) -> dict[str, tuple[set[str], str | No
         ``modules`` is the set of effective adapter module paths for that route and
         ``pool`` is the optional configured pool name.
     """
-    result: dict[str, tuple[set[str], str | None]] = {}
+    result: ModelAdapterInventory = {}
     if not models_dir.exists():
         return result
 
@@ -88,8 +90,32 @@ def _scan_model_adapters(models_dir: Path) -> dict[str, tuple[set[str], str | No
     return result
 
 
+def match_bundle_model_adapters(
+    bundle_path: Path,
+    model_adapters: ModelAdapterInventory,
+    *,
+    pool_name: str | None = None,
+) -> list[str]:
+    """Match an in-memory model-adapter inventory to a bundle."""
+    with bundle_path.open() as f:
+        data = yaml.safe_load(f) or {}
+
+    adapter_modules = set(data.get("adapters", []))
+    if not adapter_modules:
+        return []
+
+    matches: list[str] = []
+    normalized_pool_name = pool_name.strip().lower() if pool_name is not None else None
+    for name, (modules, pool) in model_adapters.items():
+        if normalized_pool_name is not None and (pool or "default") != normalized_pool_name:
+            continue
+        if modules & adapter_modules:
+            matches.append(name)
+    return matches
+
+
 def match_bundle_models(bundle_path: Path, models_dir: Path, *, pool_name: str | None = None) -> list[str]:
-    """Match models to a bundle by adapter module paths.
+    """Match models from a local catalog directory to a bundle by adapter module paths.
 
     Loads the bundle YAML to get its adapter module list, then scans
     model config YAMLs to find models whose adapter_path module matches.
@@ -102,22 +128,52 @@ def match_bundle_models(bundle_path: Path, models_dir: Path, *, pool_name: str |
         List of model names (sie_id or derived from filename) whose adapters
         match the bundle's adapter list.
     """
-    with bundle_path.open() as f:
-        data = yaml.safe_load(f) or {}
+    return match_bundle_model_adapters(bundle_path, _scan_model_adapters(models_dir), pool_name=pool_name)
 
-    adapter_modules = set(data.get("adapters", []))
-    if not adapter_modules:
-        return []
 
-    model_adapters = _scan_model_adapters(models_dir)
-    matches: list[str] = []
+def find_bundle_for_model_adapters(
+    model_names: list[str],
+    bundles_dir: Path,
+    model_adapters: ModelAdapterInventory,
+    *,
+    pool_name: str | None = None,
+) -> str | None:
+    """Find the most specific bundle covering models in an adapter inventory."""
+    if not model_names or not bundles_dir.exists():
+        return None
+
+    needed_adapters: set[str] = set()
     normalized_pool_name = pool_name.strip().lower() if pool_name is not None else None
-    for name, (modules, pool) in model_adapters.items():
+    for name in model_names:
+        modules, pool = model_adapters.get(name, (set(), None))
         if normalized_pool_name is not None and (pool or "default") != normalized_pool_name:
             continue
-        if modules & adapter_modules:
-            matches.append(name)
-    return matches
+        needed_adapters |= modules
+
+    if not needed_adapters:
+        return None
+
+    best_name: str | None = None
+    best_extra = float("inf")
+    best_priority = float("inf")
+
+    for bundle_path in sorted(bundles_dir.glob("*.yaml")):
+        try:
+            data = yaml.safe_load(bundle_path.read_text()) or {}
+        except Exception:
+            logger.exception("Failed to parse bundle %s", bundle_path.name)
+            continue
+        bundle_adapters = set(data.get("adapters", []))
+        if not needed_adapters <= bundle_adapters:
+            continue
+        extra = len(bundle_adapters - needed_adapters)
+        priority = data.get("priority", 50)
+        if extra < best_extra or (extra == best_extra and priority < best_priority):
+            best_name = bundle_path.stem
+            best_extra = extra
+            best_priority = priority
+
+    return best_name
 
 
 def find_bundle_for_models(
@@ -151,38 +207,5 @@ def find_bundle_for_models(
     if not model_names or not bundles_dir.exists() or not models_dir.exists():
         return None
 
-    # Collect adapter modules needed by the requested models
     model_adapters = _scan_model_adapters(models_dir)
-    needed_adapters: set[str] = set()
-    normalized_pool_name = pool_name.strip().lower() if pool_name is not None else None
-    for name in model_names:
-        modules, pool = model_adapters.get(name, (set(), None))
-        if normalized_pool_name is not None and (pool or "default") != normalized_pool_name:
-            continue
-        needed_adapters |= modules
-
-    if not needed_adapters:
-        return None
-
-    # Score each bundle: must cover all needed adapters
-    best_name: str | None = None
-    best_extra = float("inf")
-    best_priority = float("inf")
-
-    for bundle_path in sorted(bundles_dir.glob("*.yaml")):
-        try:
-            data = yaml.safe_load(bundle_path.read_text()) or {}
-        except Exception:
-            logger.exception("Failed to parse bundle %s", bundle_path.name)
-            continue
-        bundle_adapters = set(data.get("adapters", []))
-        if not needed_adapters <= bundle_adapters:
-            continue  # doesn't cover all needed adapters
-        extra = len(bundle_adapters - needed_adapters)
-        priority = data.get("priority", 50)
-        if extra < best_extra or (extra == best_extra and priority < best_priority):
-            best_name = bundle_path.stem
-            best_extra = extra
-            best_priority = priority
-
-    return best_name
+    return find_bundle_for_model_adapters(model_names, bundles_dir, model_adapters, pool_name=pool_name)

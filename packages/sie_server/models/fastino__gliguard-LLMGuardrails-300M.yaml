@@ -1,0 +1,26 @@
+sie_id: fastino/gliguard-LLMGuardrails-300M
+hf_id: fastino/gliguard-LLMGuardrails-300M
+hf_revision: 4c03acfe6fcef7bb806d0ae721742d593ddba387
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.gliner2.classification:GLiNER2ClassificationAdapter
+    adapter_options:
+      loadtime:
+        classification_task: prompt_safety
+        default_labels:
+          - safe
+          - unsafe
+        multi_label: false
+      runtime: {}

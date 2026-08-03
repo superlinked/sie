@@ -1,4 +1,4 @@
-//! Sidecar-side observability: OTLP tracing + W3C Trace Context.
+//! Sidecar-side observability: bounded OTLP metrics, tracing, and W3C Trace Context.
 //!
 //! The sidecar sits on the queue hop between the gateway and the
 //! adapter worker. It owns the OpenTelemetry tracer-provider setup, the
@@ -11,5 +11,6 @@
 //! work envelope (the sidecar has no inbound `HeaderMap`), so the
 //! extractor here is `HashMap`-backed rather than header-backed.
 
+pub mod metrics;
 pub mod propagation;
 pub mod tracing;

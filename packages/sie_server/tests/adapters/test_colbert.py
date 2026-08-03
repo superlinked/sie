@@ -13,9 +13,9 @@ import pytest
 import torch
 from safetensors.torch import save_file
 from sie_server.adapters.colbert import ColBERTAdapter
-from sie_server.adapters.colbert_modernbert_flash import ColBERTModernBERTFlashAdapter
+from sie_server.adapters.colbert_modernbert_flash.adapter import ColBERTModernBERTFlashAdapter
 from sie_server.adapters.colbert_rotary_flash import ColBERTRotaryFlashAdapter
-from sie_server.core.inference_output import ScoreOutput
+from sie_server.core.inference_output import EncodeOutput, ScoreOutput
 from sie_server.types.inputs import Item
 
 # Create a random generator for tests
@@ -106,6 +106,7 @@ class TestColBERTAdapter:
         mock_model = MagicMock()
         mock_model.config.hidden_size = 384
         mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)
         mock_model_class.from_pretrained.return_value = mock_model
 
         mock_tokenizer = MagicMock()
@@ -119,6 +120,141 @@ class TestColBERTAdapter:
         mock_model_class.from_pretrained.assert_called_once()
         call_kwargs = mock_model_class.from_pretrained.call_args
         assert call_kwargs.kwargs["attn_implementation"] == "eager"
+
+    @patch("transformers.AutoConfig")
+    @patch("transformers.AutoModel")
+    @patch("transformers.AutoTokenizer")
+    def test_external_code_revision_survives_rotary_flash_fallback(
+        self,
+        mock_tokenizer_class: MagicMock,
+        mock_model_class: MagicMock,
+        mock_config_class: MagicMock,
+        stub_chain_loader: None,
+    ) -> None:
+        mock_config = MagicMock(hidden_size=384)
+        mock_config_class.from_pretrained.return_value = mock_config
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 384
+        mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)
+        mock_model_class.from_pretrained.return_value = mock_model
+        mock_tokenizer = MagicMock(mask_token_id=None, vocab={})
+        mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
+
+        adapter = ColBERTRotaryFlashAdapter.create_for_device(
+            "cpu",
+            model_name_or_path="jinaai/jina-colbert-v2",
+            revision="model-sha",
+            code_revision="code-sha",
+        )
+        assert isinstance(adapter, ColBERTAdapter)
+        assert adapter._require_standalone_projection is True
+        projection = torch.nn.Linear(384, 128, bias=False)
+        with patch(
+            "sie_server.adapters.colbert.load_standalone_colbert_projection",
+            return_value=projection,
+        ) as projection_loader:
+            adapter.load("cpu")
+
+        for loader in (mock_tokenizer_class, mock_config_class, mock_model_class):
+            kwargs = loader.from_pretrained.call_args.kwargs
+            assert kwargs["revision"] == "model-sha"
+            assert kwargs["code_revision"] == "code-sha"
+        projection_loader.assert_called_once_with(
+            "jinaai/jina-colbert-v2",
+            revision="model-sha",
+            device="cpu",
+            dtype=torch.float32,
+            expected_in_features=384,
+            expected_out_features=128,
+            allow_bias=False,
+            required=True,
+        )
+
+    @patch("transformers.AutoConfig")
+    @patch("transformers.AutoModel")
+    @patch("transformers.AutoTokenizer")
+    def test_exact_prefix_markers_reuse_trained_ids_without_vocab_growth(
+        self,
+        mock_tokenizer_class: MagicMock,
+        mock_model_class: MagicMock,
+        mock_config_class: MagicMock,
+        stub_chain_loader: None,
+    ) -> None:
+        """Exact whitespace-bearing markers win over stripped vocabulary entries."""
+        mock_config = MagicMock(hidden_size=384)
+        mock_config_class.from_pretrained.return_value = mock_config
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 384
+        mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)
+        mock_model_class.from_pretrained.return_value = mock_model
+
+        marker_ids = {"[Q] ": 50368, "[D] ": 50369, "[Q]": 7, "[D]": 8}
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.mask_token_id = 103
+        mock_tokenizer.unk_token_id = 100
+        mock_tokenizer.vocab = marker_ids
+        mock_tokenizer.convert_tokens_to_ids.side_effect = lambda tokens: [marker_ids[tokens[0]]]
+        mock_tokenizer.encode.return_value = [42]
+        mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
+
+        adapter = ColBERTAdapter(
+            "test-colbert-model",
+            query_prefix="[Q] ",
+            doc_prefix="[D] ",
+            doc_punctuation_skiplist=False,
+        )
+        adapter.load("cpu")
+
+        mock_tokenizer.add_tokens.assert_not_called()
+        mock_model.resize_token_embeddings.assert_not_called()
+        assert adapter._query_prefix_id == 50368
+        assert adapter._doc_prefix_id == 50369
+
+    @patch("transformers.AutoConfig")
+    @patch("transformers.AutoModel")
+    @patch("transformers.AutoTokenizer")
+    def test_stripped_legacy_prefix_markers_do_not_resize_embeddings(
+        self,
+        mock_tokenizer_class: MagicMock,
+        mock_model_class: MagicMock,
+        mock_config_class: MagicMock,
+        stub_chain_loader: None,
+    ) -> None:
+        """Whitespace-suffixed legacy markers fall back to their stripped IDs."""
+        mock_config = MagicMock()
+        mock_config.hidden_size = 384
+        mock_config_class.from_pretrained.return_value = mock_config
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 384
+        mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)
+        mock_model_class.from_pretrained.return_value = mock_model
+
+        marker_ids = {"[unused0]": 1, "[unused1]": 2}
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.mask_token_id = 103
+        mock_tokenizer.unk_token_id = 100
+        mock_tokenizer.vocab = marker_ids
+        mock_tokenizer.convert_tokens_to_ids.side_effect = lambda tokens: [marker_ids[tokens[0]]]
+        mock_tokenizer.encode.return_value = [42]
+        mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
+
+        adapter = ColBERTAdapter(
+            "test-colbert-model",
+            query_prefix="[unused0] ",
+            doc_prefix="[unused1] ",
+            doc_punctuation_skiplist=False,
+        )
+        adapter.load("cpu")
+
+        mock_tokenizer.add_tokens.assert_not_called()
+        mock_model.resize_token_embeddings.assert_not_called()
+        assert adapter._query_prefix_id == 1
+        assert adapter._doc_prefix_id == 2
 
     def test_should_use_native_mode_modernbert(self, adapter: ColBERTAdapter) -> None:
         """ModernBERT auto-detects native mode (the manual flash loop is BERT-only)."""
@@ -200,6 +336,50 @@ class TestColBERTAdapter:
 
         call_kwargs = mock_model_class.from_pretrained.call_args
         assert call_kwargs.kwargs["attn_implementation"] == "flash_attention_2"
+        assert call_kwargs.kwargs["torch_dtype"] == torch.float16
+
+    @patch("transformers.AutoConfig")
+    @patch("transformers.AutoModel")
+    @patch("transformers.AutoTokenizer")
+    def test_native_load_float32_uses_sdpa_when_flash_attn_is_available(
+        self,
+        mock_tokenizer_class: MagicMock,
+        mock_model_class: MagicMock,
+        mock_config_class: MagicMock,
+        stub_chain_loader: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Native FP32 must use SDPA even when FlashAttention2 is installed."""
+        mock_config = MagicMock()
+        mock_config.hidden_size = 384
+        mock_config.model_type = "modernbert"
+        mock_config_class.from_pretrained.return_value = mock_config
+
+        mock_model = MagicMock()
+        mock_model.config.hidden_size = 384
+        mock_model.named_modules.return_value = []
+        mock_model.linear = torch.nn.Linear(384, 128)  # keep the projection probe offline
+        mock_model_class.from_pretrained.return_value = mock_model
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.mask_token_id = 103
+        mock_tokenizer.vocab = {}
+        mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
+
+        monkeypatch.setattr("sie_server.core.inference.is_flash_attention_available", lambda _device=None: True)
+        monkeypatch.setattr("sie_server.core.inference.is_sdpa_available", lambda: True)
+
+        adapter = ColBERTAdapter(
+            "test-colbert-model",
+            token_dim=128,
+            compute_precision="float32",
+            use_native_attention=True,
+        )
+        adapter.load("cuda")
+
+        call_kwargs = mock_model_class.from_pretrained.call_args
+        assert call_kwargs.kwargs["attn_implementation"] == "sdpa"
+        assert call_kwargs.kwargs["torch_dtype"] == torch.float32
 
     @patch("transformers.AutoConfig")
     @patch("transformers.AutoModel")
@@ -298,12 +478,16 @@ class TestColBERTAdapter:
         assert out_expanded[0].shape[0] == 4
         assert out_expanded[1].shape[0] == 4  # expansion keeps all rows
 
-    def test_fallback_kwargs_overrides_disable_expansion_and_skiplist(self) -> None:
-        """The flash adapter's fallback overrides align ColBERTAdapter with the flash
-        path (no expansion, no doc skiplist, matching max length) without changing
-        the defaults of directly-configured ColBERTAdapter models.
+    def test_fallback_kwargs_overrides_disable_expansion(self) -> None:
+        """The flash adapter's fallback disables expansion and preserves the
+        catalog model's explicit skiplist policy and max length.
         """
-        yaml_kwargs = {"model_name_or_path": "x", "token_dim": 64, "skip_special_tokens": False}
+        yaml_kwargs = {
+            "model_name_or_path": "x",
+            "token_dim": 64,
+            "skip_special_tokens": False,
+            "doc_punctuation_skiplist": False,
+        }
         merged = {**yaml_kwargs, **ColBERTModernBERTFlashAdapter.fallback_kwargs_overrides}
         fallback = ColBERTAdapter(**merged)
         assert fallback._query_expansion is False
@@ -315,6 +499,37 @@ class TestColBERTAdapter:
         assert plain._query_expansion is True
         assert plain._doc_punctuation_skiplist is True
         assert plain._max_seq_length == 512
+
+    def test_runtime_lengths_are_profile_overridable_and_capacity_bounded(self) -> None:
+        adapter = ColBERTAdapter("x", max_seq_length=8192, query_max_length=8192)
+        adapter._model = MagicMock()
+        adapter._tokenizer = MagicMock()
+        adapter._actual_token_dim = 128
+        adapter._is_cuda = False
+        adapter._native_mode = True
+        adapter._encode_native = MagicMock(return_value=[np.ones((1, 128), dtype=np.float32)])
+
+        adapter.encode(
+            [Item(text="query")],
+            ["multivector"],
+            is_query=True,
+            options={"query_max_length": 32},
+        )
+        assert adapter._encode_native.call_args.args[1] == 32
+
+        adapter.encode(
+            [Item(text="document")],
+            ["multivector"],
+            options={"max_seq_length": 300},
+        )
+        assert adapter._encode_native.call_args.args[1] == 300
+
+        adapter.encode(
+            [Item(text="document")],
+            ["multivector"],
+            options={"max_seq_length": 9000},
+        )
+        assert adapter._encode_native.call_args.args[1] == 8192
 
     @patch("transformers.AutoConfig")
     @patch("transformers.AutoModel")
@@ -339,8 +554,9 @@ class TestColBERTAdapter:
 
         mock_tokenizer = MagicMock()
         mock_tokenizer.mask_token_id = 103
+        mock_tokenizer.unk_token_id = 100
         mock_tokenizer.vocab = {}
-        mock_tokenizer.encode.return_value = [42]
+        mock_tokenizer.convert_tokens_to_ids.return_value = 42
         mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
 
         disabled = ColBERTAdapter("test-colbert-model", doc_punctuation_skiplist=False)
@@ -603,9 +819,8 @@ class TestColBERTScoreMethod:
         assert scores[0] > scores[1]
 
 
-# Encode-time runtime options resolved from the colbert/muvera profiles. These
-# are irrelevant to MaxSim scoring; score_pairs() must accept-and-ignore them
-# instead of inheriting BaseAdapter.score_pairs()'s NotImplementedError guard.
+# Runtime options resolved from the colbert/muvera profiles. Output-selection
+# keys do not affect MaxSim; sequence-length keys still reach encode().
 _ENCODE_OPTIONS = {
     "muvera": {},
     "output_types": ["dense"],
@@ -614,10 +829,10 @@ _ENCODE_OPTIONS = {
 
 
 class TestColBERTScorePairsOptions:
-    """score_pairs() ignores encode-time options instead of raising (#1430)."""
+    """score_pairs() accepts runtime options instead of raising (#1430)."""
 
     def test_score_pairs_with_nonempty_options_does_not_raise(self) -> None:
-        """Non-empty encode-time options are accepted and ignored."""
+        """Non-empty runtime options reach the grouped score call."""
         adapter = ColBERTAdapter("test-model")
         adapter._model = MagicMock()
         adapter._device = "cpu"
@@ -633,8 +848,7 @@ class TestColBERTScorePairsOptions:
 
         assert isinstance(out, ScoreOutput)
         assert out.scores.shape == (2,)
-        # Options must NOT be threaded into score().
-        assert "options" not in mock_score.call_args.kwargs
+        assert mock_score.call_args.kwargs["options"] == _ENCODE_OPTIONS
 
     @pytest.mark.parametrize("options", [None, {}])
     def test_score_pairs_with_empty_options_returns_score_output(self, options: dict[str, object] | None) -> None:
@@ -654,12 +868,12 @@ class TestColBERTScorePairsOptions:
         assert out.scores.shape == (2,)
 
     def test_modernbert_flash_score_pairs_with_nonempty_options_does_not_raise(self) -> None:
-        """Flash ColBERT adapter accepts-and-ignores encode-time options."""
+        """Flash ColBERT adapter forwards runtime options to score()."""
         adapter = ColBERTModernBERTFlashAdapter("test-model")
         adapter._model = MagicMock()
         adapter._device = "cpu"
 
-        with patch.object(adapter, "score", return_value=[0.5, 0.3]):
+        with patch.object(adapter, "score", return_value=[0.5, 0.3]) as mock_score:
             out = adapter.score_pairs(
                 queries=[Item(text="q"), Item(text="q")],
                 docs=[Item(text="d1"), Item(text="d2")],
@@ -668,9 +882,69 @@ class TestColBERTScorePairsOptions:
 
         assert isinstance(out, ScoreOutput)
         assert out.scores.shape == (2,)
+        assert mock_score.call_args.kwargs["options"] == _ENCODE_OPTIONS
+
+    def test_modernbert_flash_runtime_lengths_select_query_and_document_caps(self) -> None:
+        adapter = ColBERTModernBERTFlashAdapter(
+            "test-model",
+            normalize=False,
+            skip_special_tokens=False,
+            max_seq_length=8192,
+            query_max_length=8192,
+        )
+        adapter._model = SimpleNamespace()
+        adapter._device = "cpu"
+        adapter._tokenizer = MagicMock(return_value={"input_ids": torch.tensor([[1, 2, 3]])})
+        adapter._run_embeddings = MagicMock(return_value=torch.ones((3, 4)))
+        adapter._compute_rope = MagicMock(return_value=(torch.ones((3, 4)), torch.ones((3, 4))))
+        adapter._run_transformer_flash = MagicMock(return_value=torch.ones((3, 128)))
+
+        adapter.encode(
+            [Item(text="query")],
+            ["multivector"],
+            is_query=True,
+            options={"query_max_length": 32},
+        )
+        assert adapter._tokenizer.call_args.kwargs["max_length"] == 32
+
+        adapter.encode(
+            [Item(text="document")],
+            ["multivector"],
+            options={"max_seq_length": 300},
+        )
+        assert adapter._tokenizer.call_args.kwargs["max_length"] == 300
+
+    def test_modernbert_flash_filters_punctuation_from_documents_only(self) -> None:
+        adapter = ColBERTModernBERTFlashAdapter("test-model", skip_special_tokens=False)
+        adapter._device = "cpu"
+        adapter._doc_skiplist_ids = {7}
+        adapter._tokenizer = MagicMock()
+        hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        offsets = torch.tensor([0, 3], dtype=torch.int32)
+        input_ids = torch.tensor([1, 7, 2])
+
+        query = adapter._split_embeddings(hidden, offsets, [3], input_ids, is_query=True)
+        document = adapter._split_embeddings(hidden, offsets, [3], input_ids, is_query=False)
+
+        assert query[0].shape == (3, 4)
+        assert document[0].shape == (2, 4)
+        np.testing.assert_array_equal(document[0], hidden[[0, 2]].numpy())
+
+    def test_modernbert_flash_empty_encode_returns_empty_output(self) -> None:
+        adapter = ColBERTModernBERTFlashAdapter("test-model")
+        adapter._model = MagicMock()
+        adapter._tokenizer = MagicMock()
+        adapter._device = "cuda"
+
+        output = adapter.encode([], ["multivector"])
+
+        assert output.multivector == []
+        assert output.batch_size == 0
+        assert output.multivector_token_dim == 128
+        assert output.extra == {"input_token_counts": []}
 
     def test_rotary_flash_score_pairs_with_nonempty_options_does_not_raise(self) -> None:
-        """Rotary-flash ColBERT adapter (jina-colbert-v2) accepts-and-ignores options."""
+        """Rotary-flash ColBERT forwards runtime options to score()."""
         adapter = ColBERTRotaryFlashAdapter("test-model")
         adapter._model = MagicMock()
         adapter._device = "cpu"
@@ -684,8 +958,95 @@ class TestColBERTScorePairsOptions:
 
         assert isinstance(out, ScoreOutput)
         assert out.scores.shape == (2,)
-        # Options must NOT be threaded into score().
-        assert "options" not in mock_score.call_args.kwargs
+        assert mock_score.call_args.kwargs["options"] == _ENCODE_OPTIONS
+
+    def test_rotary_flash_score_forwards_options_to_query_and_document_encode(self) -> None:
+        adapter = ColBERTRotaryFlashAdapter("test-model")
+        adapter._model = MagicMock()
+        adapter._device = "cpu"
+        query_output = EncodeOutput(multivector=[np.ones((2, 4), dtype=np.float32)])
+        doc_output = EncodeOutput(multivector=[np.ones((3, 4), dtype=np.float32)])
+
+        with patch.object(adapter, "encode", side_effect=[query_output, doc_output]) as encode:
+            adapter.score(Item(text="q"), [Item(text="d")], options=_ENCODE_OPTIONS)
+
+        assert encode.call_args_list[0].kwargs["options"] == _ENCODE_OPTIONS
+        assert encode.call_args_list[1].kwargs["options"] == _ENCODE_OPTIONS
+
+    def test_rotary_flash_runtime_lengths_are_capacity_bounded(self) -> None:
+        adapter = ColBERTRotaryFlashAdapter(
+            "test-model",
+            normalize=False,
+            skip_special_tokens=False,
+            max_seq_length=8192,
+            query_max_length=8192,
+        )
+        adapter._model = SimpleNamespace()
+        adapter._device = "cpu"
+        adapter._query_prefix_id = None
+        adapter._doc_prefix_id = None
+        adapter._expansion_token_id = None
+        adapter._tokenizer = MagicMock(return_value={"input_ids": torch.tensor([[1, 2, 3]])})
+        adapter._run_embeddings = MagicMock(return_value=torch.ones((3, 4)))
+        adapter._compute_rope = MagicMock(return_value=(torch.ones((3, 4)), torch.ones((3, 4))))
+        adapter._run_transformer_flash = MagicMock(return_value=torch.ones((3, 128)))
+        adapter._linear = torch.nn.Linear(128, 128, bias=False)
+
+        adapter.encode(
+            [Item(text="query")],
+            ["multivector"],
+            is_query=True,
+            options={"query_max_length": 32},
+        )
+        assert adapter._tokenizer.call_args.kwargs["max_length"] == 32
+
+        adapter.encode(
+            [Item(text="document")],
+            ["multivector"],
+            options={"max_seq_length": 300},
+        )
+        assert adapter._tokenizer.call_args.kwargs["max_length"] == 300
+
+        adapter.encode(
+            [Item(text="document")],
+            ["multivector"],
+            options={"max_seq_length": 9000},
+        )
+        assert adapter._tokenizer.call_args.kwargs["max_length"] == 8192
+
+    def test_rotary_flash_projects_before_normalizing(self) -> None:
+        adapter = ColBERTRotaryFlashAdapter("test-model", token_dim=2)
+        adapter._linear = torch.nn.Linear(3, 2, bias=False)
+        adapter._linear.weight.data.copy_(torch.tensor([[1.0, 2.0, 0.0], [0.0, 1.0, 3.0]]))
+        hidden = torch.tensor([[2.0, 1.0, 4.0], [1.0, 3.0, 2.0]])
+
+        actual = adapter._project_and_normalize(hidden)
+        expected = torch.nn.functional.normalize(adapter._linear(hidden), p=2, dim=-1)
+
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(torch.linalg.vector_norm(actual, dim=-1), torch.ones(2))
+
+    def test_rotary_flash_projection_path_fails_closed_when_unloaded(self) -> None:
+        adapter = ColBERTRotaryFlashAdapter("test-model")
+
+        with pytest.raises(RuntimeError, match="projection is not loaded"):
+            adapter._project_and_normalize(torch.ones((1, 1024)))
+
+    def test_rotary_flash_filters_punctuation_from_documents_only(self) -> None:
+        adapter = ColBERTRotaryFlashAdapter("test-model", skip_special_tokens=False)
+        adapter._device = "cpu"
+        adapter._doc_skiplist_ids = {7}
+        adapter._tokenizer = MagicMock()
+        hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        offsets = torch.tensor([0, 3], dtype=torch.int32)
+        input_ids = torch.tensor([1, 7, 2])
+
+        query = adapter._split_embeddings(hidden, offsets, [3], input_ids, is_query=True)
+        document = adapter._split_embeddings(hidden, offsets, [3], input_ids, is_query=False)
+
+        assert query[0].shape == (3, 4)
+        assert document[0].shape == (2, 4)
+        np.testing.assert_array_equal(document[0], hidden[[0, 2]].numpy())
 
 
 class _ReentrancyDetectingTokenizer:
@@ -749,6 +1110,219 @@ class _ReentrancyDetectingTokenizer:
 class _FakeTensorBatch(dict):
     def to(self, _device: str) -> _FakeTensorBatch:
         return self
+
+
+def _loaded_rotary_adapter(tokenizer: Any, *, query_expansion: bool = False) -> ColBERTRotaryFlashAdapter:
+    adapter = ColBERTRotaryFlashAdapter(
+        "test-model",
+        token_dim=4,
+        normalize=False,
+        skip_special_tokens=False,
+        query_expansion=query_expansion,
+    )
+    adapter._model = SimpleNamespace()
+    adapter._tokenizer = tokenizer
+    adapter._device = "cpu"
+    adapter._query_prefix_id = None
+    adapter._doc_prefix_id = None
+    adapter._expansion_token_id = 103 if query_expansion else None
+    adapter._run_embeddings = lambda input_ids: torch.ones((input_ids.shape[0], 4))
+    adapter._compute_rope = lambda position_ids: (torch.ones_like(position_ids), torch.ones_like(position_ids))
+    adapter._run_transformer_flash = lambda hidden, *_args: hidden
+    adapter._linear = torch.nn.Identity()
+    return adapter
+
+
+class TestColBERTRotaryTokenizerGuard:
+    def test_encode_and_metering_serialize_tokenizer_access(self) -> None:
+        adapter = _loaded_rotary_adapter(_ReentrancyDetectingTokenizer())
+        items = [Item(text="a"), Item(text="the quick brown fox")]
+        errors: list[BaseException] = []
+
+        def encode_loop() -> None:
+            try:
+                for _ in range(20):
+                    adapter.encode(items, ["multivector"])
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def metering_loop() -> None:
+            try:
+                for _ in range(20):
+                    assert adapter.count_input_tokens(items) is not None
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=encode_loop) for _ in range(2)]
+        threads += [threading.Thread(target=metering_loop) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert not errors, f"tokenizer collision under concurrency: {errors!r}"
+        assert all(not thread.is_alive() for thread in threads)
+
+    def test_query_expansion_restores_pad_token_id_on_error(self) -> None:
+        tokenizer = _RaisingExpansionTokenizer()
+        adapter = _loaded_rotary_adapter(tokenizer, query_expansion=True)
+        original_pad_id = tokenizer.pad_token_id
+
+        with pytest.raises(RuntimeError, match="tokenizer boom"):
+            adapter.encode([Item(text="query")], ["multivector"], is_query=True)
+
+        assert tokenizer.pad_token_id == original_pad_id
+        assert tokenizer.pad_token_id != adapter._expansion_token_id
+
+    def test_prefix_reservation_never_uses_zero_max_length(self) -> None:
+        tokenizer = MagicMock(side_effect=RuntimeError("stop after tokenization"))
+        adapter = _loaded_rotary_adapter(tokenizer)
+        adapter._query_prefix_id = 7
+
+        with pytest.raises(RuntimeError, match="stop after tokenization"):
+            adapter.encode(
+                [Item(text="query")],
+                ["multivector"],
+                is_query=True,
+                options={"query_max_length": 1},
+            )
+
+        assert tokenizer.call_args.kwargs["max_length"] == 1
+
+
+def _identity_bert_model_for_flash() -> SimpleNamespace:
+    layer = SimpleNamespace(
+        attention=SimpleNamespace(
+            self=SimpleNamespace(
+                query=torch.nn.Identity(),
+                key=torch.nn.Identity(),
+                value=torch.nn.Identity(),
+            ),
+            output=SimpleNamespace(
+                dense=torch.nn.Identity(),
+                dropout=torch.nn.Identity(),
+                LayerNorm=torch.nn.Identity(),
+            ),
+        ),
+        intermediate=SimpleNamespace(
+            dense=torch.nn.Identity(),
+            intermediate_act_fn=torch.nn.Identity(),
+        ),
+        output=SimpleNamespace(
+            dense=torch.nn.Identity(),
+            dropout=torch.nn.Identity(),
+            LayerNorm=torch.nn.Identity(),
+        ),
+    )
+    return SimpleNamespace(
+        config=SimpleNamespace(num_attention_heads=2, hidden_size=4),
+        encoder=SimpleNamespace(layer=[layer]),
+    )
+
+
+class TestColBERTManualFlashExpansionMask:
+    def test_expansion_threads_full_queries_and_real_token_key_layout(self) -> None:
+        adapter = ColBERTAdapter("test-model", normalize=False, skip_special_tokens=False)
+        adapter._device = "cpu"
+        adapter._model = SimpleNamespace()
+        adapter._tokenizer = _ReentrancyDetectingTokenizer()  # ty: ignore[invalid-assignment]
+        adapter._expansion_token_id = 103
+
+        hidden = torch.arange(64 * 4, dtype=torch.float32).reshape(64, 4)
+        adapter._run_embeddings = MagicMock(return_value=hidden)
+        adapter._run_transformer_flash = MagicMock(return_value=hidden)
+
+        output = adapter._encode_manual_flash(
+            ["a", "one two three"],
+            max_length=32,
+            use_expansion=True,
+            prefix_id=7,
+            is_query=True,
+        )
+
+        assert [vectors.shape[0] for vectors in output] == [32, 32]
+        call = adapter._run_transformer_flash.call_args
+        assert torch.equal(call.args[1], torch.tensor([0, 32, 64], dtype=torch.int32))
+        assert call.args[2:] == (32, 64)
+        assert torch.equal(
+            call.kwargs["key_mask_packed"],
+            torch.tensor([1, 1, 1, 1, *([0] * 28), 1, 1, 1, 1, 1, 1, *([0] * 26)], dtype=torch.bool),
+        )
+        assert torch.equal(call.kwargs["cu_seqlens_k"], torch.tensor([0, 4, 10], dtype=torch.int32))
+        assert call.kwargs["max_seqlen_k"] == 6
+
+    def test_masked_expansion_positions_are_queries_but_not_keys_or_values(self) -> None:
+        adapter = ColBERTAdapter("test-model")
+        adapter._model = _identity_bert_model_for_flash()
+        hidden = torch.arange(64 * 4, dtype=torch.float32).reshape(64, 4)
+        key_mask = torch.zeros(64, dtype=torch.bool)
+        key_mask[:3] = True
+        key_mask[32:37] = True
+        calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]] = []
+
+        def flash_attention(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            **kwargs: Any,
+        ) -> torch.Tensor:
+            calls.append((query, key, value, kwargs))
+            return torch.zeros_like(query)
+
+        with patch.dict(
+            "sys.modules",
+            {"flash_attn": SimpleNamespace(flash_attn_varlen_func=flash_attention)},
+        ):
+            adapter._run_transformer_flash(
+                hidden,
+                torch.tensor([0, 32, 64], dtype=torch.int32),
+                32,
+                64,
+                key_mask_packed=key_mask,
+                cu_seqlens_k=torch.tensor([0, 3, 8], dtype=torch.int32),
+                max_seqlen_k=5,
+            )
+
+        query, key, value, kwargs = calls[0]
+        assert query.shape == (64, 2, 2)
+        assert key.shape == value.shape == (8, 2, 2)
+        assert torch.equal(query.reshape(64, 4), hidden)
+        assert torch.equal(key.reshape(8, 4), hidden[key_mask])
+        assert torch.equal(value.reshape(8, 4), hidden[key_mask])
+        assert not torch.any(torch.all(key.reshape(8, 4) == hidden[3], dim=1))
+        assert torch.equal(kwargs["cu_seqlens_q"], torch.tensor([0, 32, 64], dtype=torch.int32))
+        assert torch.equal(kwargs["cu_seqlens_k"], torch.tensor([0, 3, 8], dtype=torch.int32))
+        assert kwargs["max_seqlen_q"] == 32
+        assert kwargs["max_seqlen_k"] == 5
+
+    def test_no_mask_preserves_shared_query_key_layout(self) -> None:
+        adapter = ColBERTAdapter("test-model")
+        adapter._model = _identity_bert_model_for_flash()
+        hidden = torch.arange(8 * 4, dtype=torch.float32).reshape(8, 4)
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+        calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]] = []
+
+        def flash_attention(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            **kwargs: Any,
+        ) -> torch.Tensor:
+            calls.append((query, key, value, kwargs))
+            return torch.zeros_like(query)
+
+        with patch.dict(
+            "sys.modules",
+            {"flash_attn": SimpleNamespace(flash_attn_varlen_func=flash_attention)},
+        ):
+            adapter._run_transformer_flash(hidden, cu_seqlens, 5, 8)
+
+        query, key, value, kwargs = calls[0]
+        assert torch.equal(query, key)
+        assert torch.equal(query, value)
+        assert torch.equal(kwargs["cu_seqlens_q"], cu_seqlens)
+        assert torch.equal(kwargs["cu_seqlens_k"], cu_seqlens)
+        assert kwargs["max_seqlen_q"] == kwargs["max_seqlen_k"] == 5
 
 
 class TestColBERTTokenizerConcurrencyGuard:
@@ -817,6 +1391,39 @@ class TestColBERTTokenizerConcurrencyGuard:
         for t in threads:
             t.join(timeout=30)
         stop.set()
+
+        assert not errors, f"tokenizer collision under concurrency: {errors!r}"
+
+    def test_modernbert_flash_encode_and_metering_do_not_collide(self) -> None:
+        """The packed ModernBERT path shares the same tokenizer guard."""
+        adapter = ColBERTModernBERTFlashAdapter("test-model")
+        tokenizer = _ReentrancyDetectingTokenizer()
+        adapter._tokenizer = tokenizer  # ty: ignore[invalid-assignment]
+        texts = ["a", "the quick brown fox", "x"]
+        items = [Item(text=text) for text in texts]
+        errors: list[BaseException] = []
+
+        def encode_loop() -> None:
+            try:
+                for _ in range(40):
+                    adapter._tokenize_inputs(texts, 64)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        def metering_loop() -> None:
+            try:
+                for _ in range(40):
+                    counts = adapter.count_input_tokens(items)
+                    assert counts is not None
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=encode_loop) for _ in range(2)]
+        threads += [threading.Thread(target=metering_loop) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
 
         assert not errors, f"tokenizer collision under concurrency: {errors!r}"
 
@@ -948,3 +1555,22 @@ class TestColBERTExpansionPadTokenRestore:
             adapter._encode_manual_flash(["query one two"], max_length=8, use_expansion=True, is_query=True)
         assert adapter._tokenizer.pad_token_id == original
         assert adapter._tokenizer.pad_token_id != adapter._expansion_token_id
+
+    @pytest.mark.parametrize("method_name", ["_encode_native", "_encode_manual_flash"])
+    def test_prefix_reservation_never_passes_zero_length_to_tokenizer(self, method_name: str) -> None:
+        adapter = ColBERTAdapter("test-model", query_expansion=False)
+        adapter._device = "cpu"
+        adapter._model = MagicMock()
+        tokenizer = MagicMock(side_effect=RuntimeError("stop after tokenization"))
+        adapter._tokenizer = tokenizer
+
+        with pytest.raises(RuntimeError, match="stop after tokenization"):
+            getattr(adapter, method_name)(
+                ["query"],
+                max_length=1,
+                use_expansion=False,
+                prefix_id=7,
+                is_query=True,
+            )
+
+        assert tokenizer.call_args.kwargs["max_length"] == 1

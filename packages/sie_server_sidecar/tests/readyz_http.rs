@@ -1,4 +1,4 @@
-//! End-to-end HTTP coverage for the sidecar metrics server's probe routes.
+//! End-to-end HTTP coverage for the sidecar probe server.
 //!
 //! This test stands up only the metrics HTTP plane and shared readiness
 //! state. It does not require NATS or the Python IPC harness.
@@ -8,8 +8,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sie_server_sidecar::metrics::{spawn_metrics_server, MetricsRegistry};
 use sie_server_sidecar::readiness::Readiness;
+use sie_server_sidecar::runtime_state::spawn_probe_server;
 use sie_server_sidecar::shutdown::Shutdown;
 
 fn pick_free_port() -> u16 {
@@ -38,9 +38,8 @@ fn http_get(port: u16, path: &str) -> std::io::Result<(String, String)> {
 
 async fn start_server(readiness: Arc<Readiness>) -> u16 {
     let port = pick_free_port();
-    let metrics = Arc::new(MetricsRegistry::new().unwrap());
     let shutdown = Arc::new(Shutdown::new());
-    let _handle = spawn_metrics_server(port, metrics, readiness, shutdown).expect("spawn server");
+    let _handle = spawn_probe_server(port, readiness, shutdown).expect("spawn server");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
@@ -52,7 +51,7 @@ async fn start_server(readiness: Arc<Readiness>) -> u16 {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("metrics server did not bind on port {port} within budget");
+    panic!("probe server did not bind on port {port} within budget");
 }
 
 async fn http_get_async(port: u16, path: &str) -> std::io::Result<(String, String)> {

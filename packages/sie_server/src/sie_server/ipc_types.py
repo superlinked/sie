@@ -25,6 +25,24 @@ class ResponseEnvelope(msgspec.Struct, tag_field="kind", tag="response"):
     error: str | None = None
 
 
+class IpcResponseChunkV1(msgspec.Struct):
+    """One negotiated chunk of an oversized serialized ``ResponseEnvelope``.
+
+    ``payload`` is a byte slice of the complete, already-serialized response.
+    The sidecar must reconstruct those exact bytes and verify the SHA-256
+    ``transfer_digest`` before decoding the ordinary response envelope.
+    """
+
+    version: int
+    request_id: str
+    transfer_digest: bytes
+    chunk_index: int
+    chunk_count: int
+    total_bytes: int
+    payload: bytes
+    kind: str = "ipc_response_chunk_v1"
+
+
 # -----------------------------------------------------------------------------
 # Methods
 # -----------------------------------------------------------------------------
@@ -188,6 +206,7 @@ class ReplaceModelConfigsResponse(msgspec.Struct):
     bundle_config_hash: str
     config_version: int = 0
     applied_models: list[str] = msgspec.field(default_factory=list)
+    applied_profiles: list[str] = msgspec.field(default_factory=list)
 
 
 # -----------------------------------------------------------------------------
@@ -321,6 +340,10 @@ class EncodeBatchItem(msgspec.Struct):
 class ProcessEncodeBatchRequest(msgspec.Struct):
     model_id: str
     items: list[EncodeBatchItem]
+    # Opt-in for the additive shared-buffer multivector response. Keeping
+    # this false by default preserves a safe per-item fallback while a
+    # worker and sidecar are rolled independently.
+    accepts_batched_f16_multivectors: bool = False
 
 
 # -----------------------------------------------------------------------------
@@ -356,6 +379,17 @@ class ProcessScoreBatchRequest(msgspec.Struct):
 # -----------------------------------------------------------------------------
 
 
+class PreparedAudioPcm16(msgspec.Struct):
+    pcm_s16le: bytes
+    sample_rate: int
+    sample_count: int
+    duration_ms: int
+    source_sample_rate: int
+    source_sample_count: int
+    source_channels: int
+    container: str
+
+
 class ExtractBatchItem(msgspec.Struct):
     work_item_id: str
     request_id: str
@@ -370,6 +404,7 @@ class ExtractBatchItem(msgspec.Struct):
     profile_id: str | None = None
     bundle_config_hash: str | None = None
     payload_fetch_ms: float = 0.0
+    prepared_audio: PreparedAudioPcm16 | None = None
 
 
 class ProcessExtractBatchRequest(msgspec.Struct):
@@ -443,17 +478,19 @@ class SparseOutput(msgspec.Struct):
 
 
 class MultivectorOutput(msgspec.Struct):
-    # Flattened ``[num_tokens, token_dims]`` float32 matrix in C
-    # (row-major) order — same byte order as ``arr.tobytes()`` on a
-    # contiguous ndarray. The Rust shaper rebuilds the 2-D shape.
+    # Flattened ``[num_tokens, token_dims]`` matrix in C (row-major)
+    # order. ``dtype`` defaults to ``float32`` for older producers;
+    # ``float16`` asks the Rust shaper to round values and write an
+    # f16 msgpack-numpy sentinel.
+    # ``values_f16`` is an optional little-endian f16 byte buffer for
+    # native Rust/Candle producers that already materialized half
+    # values; Python producers can keep using ``values``.
     #
-    # Float32 is the supported Rust-framed path; ``float16`` and the
-    # bit-packed binary variant (``shape[1] < token_dims``) stay on the legacy
-    # Python-framed path via the ``_maybe_multivector_raw_output``
-    # gate in ``queue_executor``.
     values: list[float]
     num_tokens: int
     token_dims: int
+    dtype: str = "float32"
+    values_f16: bytes = b""
 
 
 class RawOutput(msgspec.Struct):
@@ -487,13 +524,18 @@ class UnitCounts(msgspec.Struct):
     authoritative count for it. ``pages`` (docling parse/OCR) and ``images``
     (vision extract/encode) are populated by the queue executor when the
     pipeline surfaces per-item counts (see ``queue_executor._with_pages`` /
-    ``_with_images`` / ``_per_item_image_counts``); they stay ``None`` for
-    work that carries no such count.
+    ``_with_images`` / ``_per_item_image_counts``). ``audio_ms`` is the exact
+    accepted audio duration in integer milliseconds; it is populated only
+    after media validation/preprocessing accepts the input. Dimensions stay
+    ``None`` for work that carries no such count.
     """
 
     input_tokens: int | None = None
     pages: int | None = None
     images: int | None = None
+    audio_ms: int | None = None
+    # Additive tail field: never insert before the four legacy positional slots.
+    pairs: int | None = None
 
 
 class ItemOutcome(msgspec.Struct):
@@ -521,8 +563,24 @@ class ItemOutcome(msgspec.Struct):
     units: UnitCounts | None = None
 
 
+class BatchedF16MultivectorItem(msgspec.Struct):
+    work_item_id: str
+    byte_offset: int
+    byte_len: int
+    num_tokens: int
+    token_dims: int
+
+
+class BatchedF16MultivectorOutput(msgspec.Struct):
+    values_f16: bytes
+    items: list[BatchedF16MultivectorItem]
+
+
 class BatchOutcome(msgspec.Struct):
     outcomes: list[ItemOutcome]
+    # Native Candle f16 multivectors can share one contiguous buffer across
+    # a batch. The sidecar owns slicing and final public wire framing.
+    batched_f16_multivectors: list[BatchedF16MultivectorOutput] = msgspec.field(default_factory=list)
 
 
 # -----------------------------------------------------------------------------
@@ -580,6 +638,9 @@ class RunBatchRequest(msgspec.Struct):
     # Sum of per-item costs, as computed by the Rust scheduler.
     total_cost: int
     items: list[RunBatchItem]
+    # Same capability gate as ``ProcessEncodeBatchRequest``, carried by the
+    # scheduler's production RPC path.
+    accepts_batched_f16_multivectors: bool = False
 
 
 # -----------------------------------------------------------------------------

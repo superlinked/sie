@@ -3,6 +3,7 @@ use std::env;
 
 use serde::Deserialize;
 
+use crate::state::demand_tracker::PhysicalLaneCatalog;
 use crate::types::pool::PoolSpec;
 
 /// Modal platform proxy-auth credential (superlinked/sie-internal #1740).
@@ -47,7 +48,6 @@ pub struct Config {
     // Server
     pub host: String,
     pub port: u16,
-    pub metrics_port: Option<u16>,
 
     // Discovery
     pub worker_urls: Vec<String>,
@@ -74,8 +74,8 @@ pub struct Config {
     pub auth_mode: String,
     pub auth_tokens: Vec<String>,
     pub admin_token: String,
-    /// Opt-in bypass for operational surfaces (`/`, `/health`,
-    /// `/metrics`, `/ws/*`) when auth is enabled. Kubernetes probes
+    /// Opt-in bypass for operational surfaces (`/`, `/health`, `/ws/*`)
+    /// when auth is enabled. Kubernetes probes
     /// (`/healthz`, `/readyz`) are always exempt regardless. Defaults
     /// to `false` (fail-closed); set `SIE_AUTH_EXEMPT_OPERATIONAL=true`
     /// only when these endpoints are already network-isolated (e.g.
@@ -101,6 +101,9 @@ pub struct Config {
     pub configured_gpus: Vec<String>,
     // Pre-computed lowercase→original map for GPU profile resolution (avoids HashMap rebuild per request)
     pub gpu_profile_map: HashMap<String, String>,
+    /// Exact Helm/KEDA physical lane catalog. Scale-driving state and
+    /// telemetry labels fail closed unless their full tuple resolves here.
+    pub configured_physical_lanes: PhysicalLaneCatalog,
 
     // Helm-declared queue pools that are long-lived admission boundaries.
     // API-created pools remain lease-based; these specs do not expire.
@@ -140,6 +143,13 @@ pub struct Config {
     // Payload store (local path, s3://bucket/prefix, gs://bucket/prefix, or
     // abfs(s)://container@account.dfs.core.windows.net/prefix)
     pub payload_store_url: String,
+
+    // The gateway's own EXTERNAL https origin (`SIE_GATEWAY_PUBLIC_URL`,
+    // scheme+host, no trailing slash) — what absolute client-facing URLs are
+    // minted against (e.g. the managed jobs API's §8 chunk-result capability
+    // refs). `None` = unconfigured; callers derive the origin from the
+    // request's Host headers instead.
+    pub public_base_url: Option<String>,
 }
 
 /// Render a secret string for `Debug` output: an empty value stays empty (so
@@ -165,7 +175,6 @@ impl std::fmt::Debug for Config {
         f.debug_struct("Config")
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("metrics_port", &self.metrics_port)
             .field("worker_urls", &self.worker_urls)
             .field("use_kubernetes", &self.use_kubernetes)
             .field("k8s_namespace", &self.k8s_namespace)
@@ -197,6 +206,7 @@ impl std::fmt::Debug for Config {
             .field("stream_max_age_s", &self.stream_max_age_s)
             .field("configured_gpus", &self.configured_gpus)
             .field("gpu_profile_map", &self.gpu_profile_map)
+            .field("configured_physical_lanes", &self.configured_physical_lanes)
             .field("static_queue_pools", &self.static_queue_pools)
             .field("model_aliases", &self.model_aliases)
             .field("bundles_dir", &self.bundles_dir)
@@ -210,6 +220,7 @@ impl std::fmt::Debug for Config {
             // `ModalProxyToken`'s own `Debug` redacts both halves.
             .field("config_modal_proxy_token", &self.config_modal_proxy_token)
             .field("payload_store_url", &self.payload_store_url)
+            .field("public_base_url", &self.public_base_url)
             .finish()
     }
 }
@@ -221,15 +232,115 @@ fn env_bool(key: &str) -> bool {
     }
 }
 
+/// Parse `raw` as an absolute HTTPS **origin** — `scheme://host[:port]` and
+/// NOTHING else — returning the normalized origin (no trailing slash) or
+/// `None`.
+///
+/// This is the ONE public-origin rule shared across the codebase (the cloud
+/// gateway's request-origin derivation and the deploy-side validators mirror
+/// it): HTTPS is required; plain `http` is allowed ONLY for loopback hosts
+/// (`localhost` / `127.0.0.0/8` / `::1`) for local dev. A path, query string,
+/// fragment, or userinfo is rejected — such an "origin" would mint broken or
+/// credential-leaking capability URLs (the signature is bearer-equivalent, so
+/// it must never ride a plaintext or malformed origin).
+pub fn parse_https_origin(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains(char::is_whitespace) {
+        return None;
+    }
+    let (scheme, rest) = raw.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    // Authority = up to the first `/`, `?`, or `#`. The remainder must be
+    // empty or a single bare trailing `/` (the empty/root path, origin-
+    // equivalent) — any real path, query, or fragment means this is not a bare
+    // origin and is rejected.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let remainder = &rest[authority_end..];
+    if !(remainder.is_empty() || remainder == "/") {
+        return None;
+    }
+    // No userinfo.
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let (host, port, is_ipv6) = split_host_port(authority)?;
+    if host.is_empty() {
+        return None;
+    }
+    let host_ok = if is_ipv6 {
+        host.bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+    } else {
+        host.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    };
+    if !host_ok {
+        return None;
+    }
+    if let Some(port) = port {
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if port.parse::<u16>().is_err() {
+            return None;
+        }
+    }
+    if scheme == "http" && !host_is_loopback(host) {
+        return None;
+    }
+    Some(format!("{scheme}://{authority}"))
+}
+
+/// Split an authority (no userinfo) into `(host, optional port, is_ipv6)`.
+/// A bracketed `[..]` prefix marks an IPv6 literal (its host is the bracketed
+/// content, port follows `]`); otherwise the last `:` separates an optional
+/// port. `None` on a malformed bracket form.
+fn split_host_port(authority: &str) -> Option<(&str, Option<&str>, bool)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        match after {
+            "" => Some((host, None, true)),
+            _ => Some((host, Some(after.strip_prefix(':')?), true)),
+        }
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) => Some((host, Some(port), false)),
+            None => Some((authority, None, false)),
+        }
+    }
+}
+
+/// Loopback host test for the `http`-allowed exception.
+/// The ONE canonical loopback rule, shared by every capability-URL origin
+/// check (this crate's `parse_https_origin` AND the cloud gateway's
+/// request-origin derivation via [`authority_is_loopback`]): the exact
+/// hostname `localhost` (case-insensitive), OR an IP LITERAL whose value is
+/// loopback — `Ipv4Addr::is_loopback` (all of 127.0.0.0/8) or
+/// `Ipv6Addr::is_loopback` (`::1` only; an IPv4-mapped `::ffff:127.0.0.1` is
+/// NOT loopback, matching `IpAddr::is_loopback`).
+///
+/// NEVER a prefix match: `127.attacker.example` is a routable DNS name, so it
+/// must not earn the plaintext-`http` exception (which would leak the
+/// bearer-equivalent capability sig in transit). `host` is a bare host — no
+/// port, IPv6 unbracketed.
+pub fn host_is_loopback(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|a| a.is_loopback())
+        .unwrap_or(false)
+}
+
 fn env_int(key: &str, fallback: u16) -> u16 {
     env::var(key)
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(fallback)
-}
-
-fn env_optional_int(key: &str) -> Option<u16> {
-    env::var(key).ok().and_then(|s| s.parse().ok())
 }
 
 fn env_float(key: &str, fallback: f64) -> f64 {
@@ -273,6 +384,31 @@ fn env_json_string_map(key: &str) -> HashMap<String, String> {
         }
         _ => HashMap::new(),
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PhysicalLaneEnvSpec {
+    pool: String,
+    machine_profile: String,
+    bundle: String,
+}
+
+fn env_physical_lane_catalog(key: &str) -> PhysicalLaneCatalog {
+    let parsed = match env::var(key) {
+        Ok(value) if !value.trim().is_empty() => {
+            serde_json::from_str::<Vec<PhysicalLaneEnvSpec>>(&value).unwrap_or_else(|error| {
+                panic!("failed to parse {key}: {error}; fix or unset {key}")
+            })
+        }
+        _ => Vec::new(),
+    };
+
+    let lanes = parsed
+        .into_iter()
+        .map(|lane| (lane.pool, lane.machine_profile, lane.bundle));
+    PhysicalLaneCatalog::try_from_raw(lanes)
+        .unwrap_or_else(|error| panic!("invalid {key} lane: {error}; fix or unset {key}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -418,6 +554,8 @@ impl Config {
             auth_tokens = env_csv("SIE_AUTH_TOKEN");
         }
         let configured_gpus = env_csv("SIE_GATEWAY_CONFIGURED_GPUS");
+        let configured_physical_lanes =
+            env_physical_lane_catalog("SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES");
         let gpu_profile_map = build_gpu_profile_map(
             &configured_gpus,
             env_json_string_map("SIE_GATEWAY_GPU_ALIASES"),
@@ -427,7 +565,6 @@ impl Config {
         Self {
             host: "0.0.0.0".to_string(),
             port: 8080,
-            metrics_port: env_optional_int("SIE_METRICS_PORT"),
 
             worker_urls: env_csv("SIE_GATEWAY_WORKERS"),
             use_kubernetes: env_bool("SIE_GATEWAY_KUBERNETES"),
@@ -472,6 +609,7 @@ impl Config {
 
             configured_gpus,
             gpu_profile_map,
+            configured_physical_lanes,
             static_queue_pools: env_static_queue_pools("SIE_GATEWAY_STATIC_QUEUE_POOLS"),
             model_aliases,
 
@@ -509,6 +647,30 @@ impl Config {
             },
 
             payload_store_url: env_default("SIE_PAYLOAD_STORE_URL", ""),
+
+            // Validated fail-closed: only an exact HTTPS origin is accepted
+            // (see `parse_https_origin`). An unset value, or one carrying a
+            // path/query/fragment/userinfo or a non-loopback `http://` scheme,
+            // resolves to `None` (the minter then derives the origin from the
+            // request's Host headers). A capability signature is bearer-
+            // equivalent, so a plaintext origin must never mint it.
+            public_base_url: {
+                let raw = env_default("SIE_GATEWAY_PUBLIC_URL", "");
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    None
+                } else {
+                    let origin = parse_https_origin(raw);
+                    if origin.is_none() {
+                        tracing::warn!(
+                            "SIE_GATEWAY_PUBLIC_URL is not a bare HTTPS origin \
+                             (scheme+host[:port] only, https outside loopback) — ignoring it; \
+                             client-facing URLs will be derived from request Host headers"
+                        );
+                    }
+                    origin
+                }
+            },
         }
     }
 
@@ -562,7 +724,7 @@ impl Config {
         if is_enabled && self.auth_exempt_operational {
             issues.push((
                 AuditLevel::Warn,
-                "SIE_AUTH_EXEMPT_OPERATIONAL=true: status page, /health, /metrics, and /ws/* bypass auth. Use only when those endpoints are already network-isolated.".to_string(),
+                "SIE_AUTH_EXEMPT_OPERATIONAL=true: status page, /health, and /ws/* bypass auth. Use only when those endpoints are already network-isolated.".to_string(),
             ));
         }
 
@@ -777,6 +939,48 @@ mod tests {
         with_env(&[("_TEST_JSON_MAP", "not-json")], || {
             assert!(env_json_string_map("_TEST_JSON_MAP").is_empty());
         });
+    }
+
+    #[test]
+    fn test_env_physical_lane_catalog_resolves_exact_canonical_tuple() {
+        with_env(
+            &[(
+                "_TEST_PHYSICAL_LANES",
+                r#"[{"pool":" Customer_A ","machineProfile":" CPU_One ","bundle":" DEFAULT "}]"#,
+            )],
+            || {
+                let catalog = env_physical_lane_catalog("_TEST_PHYSICAL_LANES");
+                let lane = catalog
+                    .resolve("customer_a", "cpu_one", "default")
+                    .expect("rendered KEDA lane should resolve");
+                assert_eq!(lane.to_string(), "customer_a|cpu_one|default");
+                assert!(catalog
+                    .resolve("customer_a", "caller-profile", "default")
+                    .is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_physical_lane_catalog_invalid_input_panics() {
+        with_env(
+            &[(
+                "_TEST_PHYSICAL_LANES",
+                r#"[{"pool":"default","machineProfile":"l4/spot","bundle":"default"}]"#,
+            )],
+            || {
+                let result = std::panic::catch_unwind(|| {
+                    let _ = env_physical_lane_catalog("_TEST_PHYSICAL_LANES");
+                });
+                let panic = result.expect_err("invalid KEDA lane catalog must fail fast");
+                let message = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("");
+                assert!(message.contains("invalid _TEST_PHYSICAL_LANES lane"));
+            },
+        );
     }
 
     #[test]
@@ -1031,35 +1235,161 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_port_from_env() {
-        with_env(&[("SIE_METRICS_PORT", "9090")], || {
+    fn test_public_base_url_default_is_none() {
+        without_env(&["SIE_GATEWAY_PUBLIC_URL"], || {
             let cfg = Config::load();
-            assert_eq!(cfg.metrics_port, Some(9090));
+            assert!(cfg.public_base_url.is_none());
         });
     }
 
     #[test]
-    fn test_metrics_port_unset_is_none() {
-        without_env(&["SIE_METRICS_PORT"], || {
+    fn test_public_base_url_trims_trailing_slash() {
+        with_env(
+            &[("SIE_GATEWAY_PUBLIC_URL", "https://api.example.com/")],
+            || {
+                let cfg = Config::load();
+                assert_eq!(
+                    cfg.public_base_url.as_deref(),
+                    Some("https://api.example.com")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_public_base_url_empty_is_none() {
+        with_env(&[("SIE_GATEWAY_PUBLIC_URL", "")], || {
             let cfg = Config::load();
-            assert_eq!(cfg.metrics_port, None);
+            assert!(cfg.public_base_url.is_none());
         });
     }
 
     #[test]
-    fn test_metrics_port_invalid_is_none() {
-        with_env(&[("SIE_METRICS_PORT", "not-a-number")], || {
-            let cfg = Config::load();
-            assert_eq!(cfg.metrics_port, None);
-        });
+    fn test_public_base_url_rejects_invalid_origins() {
+        // Fail closed on anything that is not a bare HTTPS origin: a capability
+        // signature is bearer-equivalent, so a plaintext/path-bearing/userinfo
+        // origin must never mint it (CodeRabbit #1).
+        for bad in [
+            "http://api.example.com",            // non-loopback http
+            "http://127.attacker.example",       // prefix-bypass: routable DNS, NOT loopback
+            "http://127.0.0.1.attacker.example", // ditto
+            "https://api.example.com/v1",        // path
+            "https://api.example.com?x=1",       // query
+            "https://api.example.com#f",         // fragment
+            "https://user:pass@api.example.com", // userinfo
+            "https://user@api.example.com",      // userinfo
+            "ftp://api.example.com",             // wrong scheme
+            "api.example.com",                   // no scheme
+            "https://",                          // no host
+            "https://api example.com",           // whitespace
+            "https://api.example.com:notaport",  // bad port
+        ] {
+            with_env(&[("SIE_GATEWAY_PUBLIC_URL", bad)], || {
+                assert!(
+                    Config::load().public_base_url.is_none(),
+                    "expected {bad:?} to be rejected"
+                );
+            });
+        }
     }
 
     #[test]
-    fn test_metrics_port_out_of_range_is_none() {
-        with_env(&[("SIE_METRICS_PORT", "70000")], || {
-            let cfg = Config::load();
-            assert_eq!(cfg.metrics_port, None);
-        });
+    fn test_public_base_url_accepts_valid_origins() {
+        for (raw, want) in [
+            ("https://api.example.com", "https://api.example.com"),
+            (
+                "https://api.example.com:8443",
+                "https://api.example.com:8443",
+            ),
+            ("http://localhost:8080", "http://localhost:8080"),
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+            ("HTTPS://api.example.com", "https://api.example.com"),
+        ] {
+            with_env(&[("SIE_GATEWAY_PUBLIC_URL", raw)], || {
+                assert_eq!(
+                    Config::load().public_base_url.as_deref(),
+                    Some(want),
+                    "{raw}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn test_parse_https_origin_unit() {
+        assert_eq!(
+            parse_https_origin("https://a.b/"),
+            Some("https://a.b".to_string())
+        );
+        assert_eq!(
+            parse_https_origin("http://[::1]:9"),
+            Some("http://[::1]:9".to_string())
+        );
+        assert_eq!(
+            parse_https_origin("http://[2001:db8::1]"),
+            None,
+            "non-loopback ipv6 http"
+        );
+        assert_eq!(
+            parse_https_origin("https://[2001:db8::1]:443"),
+            Some("https://[2001:db8::1]:443".to_string())
+        );
+        assert_eq!(parse_https_origin("https://a.b/x"), None);
+        assert_eq!(parse_https_origin("https://a.b#"), None);
+    }
+
+    #[test]
+    fn test_parse_https_origin_loopback_is_ip_literal_not_prefix() {
+        // The http exception is IP-literal-loopback or exact `localhost` ONLY.
+        assert_eq!(
+            parse_https_origin("http://127.0.0.1"),
+            Some("http://127.0.0.1".to_string())
+        );
+        assert_eq!(
+            parse_https_origin("http://127.5.5.5:9"),
+            Some("http://127.5.5.5:9".to_string()),
+            "the whole 127.0.0.0/8 block is loopback"
+        );
+        assert_eq!(
+            parse_https_origin("http://localhost"),
+            Some("http://localhost".to_string())
+        );
+        // localhost is case-insensitive (parity with the Python mirror, which
+        // gets a lowercased host from urlsplit).
+        assert_eq!(
+            parse_https_origin("http://LOCALHOST"),
+            Some("http://LOCALHOST".to_string())
+        );
+        // An IPv4-mapped IPv6 literal is NOT loopback (IpAddr::is_loopback does
+        // not unwrap the mapping — only ::1 / 127.0.0.0/8 count).
+        assert_eq!(parse_https_origin("http://[::ffff:127.0.0.1]"), None);
+        // Prefix-bypass hosts are routable DNS names — must be rejected.
+        assert_eq!(parse_https_origin("http://127.attacker.example"), None);
+        assert_eq!(
+            parse_https_origin("http://127.0.0.1.attacker.example"),
+            None
+        );
+        assert_eq!(
+            parse_https_origin("http://localhost.attacker.example"),
+            None
+        );
+        // https to those hosts is still fine (scheme is safe).
+        assert_eq!(
+            parse_https_origin("https://127.attacker.example"),
+            Some("https://127.attacker.example".to_string())
+        );
+    }
+
+    #[test]
+    fn test_host_is_loopback_canonical() {
+        assert!(host_is_loopback("localhost"));
+        assert!(host_is_loopback("LocalHost"));
+        assert!(host_is_loopback("127.0.0.1"));
+        assert!(host_is_loopback("127.5.5.5")); // whole 127.0.0.0/8
+        assert!(host_is_loopback("::1"));
+        assert!(!host_is_loopback("::ffff:127.0.0.1")); // mapped v6: not ::1
+        assert!(!host_is_loopback("127.attacker.example"));
+        assert!(!host_is_loopback("10.0.0.1"));
     }
 
     #[test]
@@ -1225,7 +1555,6 @@ mod tests {
         let mut cfg = Config {
             host: String::new(),
             port: 0,
-            metrics_port: None,
             worker_urls: Vec::new(),
             use_kubernetes: false,
             k8s_namespace: String::new(),
@@ -1249,6 +1578,7 @@ mod tests {
             stream_max_age_s: 0,
             configured_gpus: Vec::new(),
             gpu_profile_map: HashMap::new(),
+            configured_physical_lanes: PhysicalLaneCatalog::default(),
             static_queue_pools: Vec::new(),
             model_aliases: HashMap::new(),
             bundles_dir: String::new(),
@@ -1257,6 +1587,7 @@ mod tests {
             config_service_token: None,
             config_modal_proxy_token: None,
             payload_store_url: String::new(),
+            public_base_url: None,
         };
         // Silence the "unused mut" warning on the path where we don't mutate.
         let _ = &mut cfg;

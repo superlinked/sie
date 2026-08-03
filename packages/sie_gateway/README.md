@@ -19,7 +19,7 @@ See [`docs/architecture-guide.md`](docs/architecture-guide.md) for the authorita
 - **Config distribution** — authoritative deltas arrive on `sie.config.models.*` from `sie-config`; the gateway applies them to its in-memory registry
 - **Auth** — static-token auth via `SIE_AUTH_TOKEN[S]`; config write idempotency belongs to `sie-config`
 - **Demand tracking and readiness** — provisioning responses, pending-demand metrics, and worker ack checks after config changes
-- **Observability** — Prometheus metrics, structured logging, audit middleware, and HTML/WebSocket status surfaces
+- **Observability** — canonical OpenTelemetry metrics, privacy-safe logs, distributed tracing, audit middleware, and HTML/WebSocket status surfaces
 - **Optional cloud storage** — `cloud-storage` feature enables S3/GCS/Azure Blob payload backends; the Docker build enables it
 
 ## Quick Start
@@ -35,13 +35,13 @@ cargo build --release
 
 # Run with static workers
 SIE_NATS_URL=nats://localhost:4222 \
-./packages/sie_gateway/target/release/sie-gateway serve \
+./target/release/sie-gateway serve \
   -w http://worker1:8080 \
   -w http://worker2:8080
 
 # Run with Kubernetes discovery
 SIE_NATS_URL=nats://localhost:4222 \
-./packages/sie_gateway/target/release/sie-gateway serve \
+./target/release/sie-gateway serve \
   --kubernetes \
   --k8s-namespace sie \
   --k8s-service sie-worker
@@ -94,7 +94,7 @@ Each `--flag` above has a matching `SIE_*` environment variable (see next sectio
 | `SIE_AUTH_TOKENS` | | CSV of valid bearer tokens for inference and pool/config read endpoints. If unset, the singular `SIE_AUTH_TOKEN` is used as a fallback. When auth is enabled and this list is empty, non-probe requests return `500` |
 | `SIE_AUTH_TOKEN` | | Singular alias for `SIE_AUTH_TOKENS` (fallback only; prefer the plural form) |
 | `SIE_ADMIN_TOKEN` | | Admin bearer token the gateway (1) presents **as a client** to `sie-config` on `GET /v1/configs/export` and `GET /v1/configs/epoch`, and (2) requires inbound for admin-gated mutations: `POST/PUT/DELETE` on `/v1/configs/*`, `/v1/admin/*`, `/v1/pools/*`. If empty and an inbound request targets one of those paths, the middleware fails closed with `403` |
-| `SIE_AUTH_EXEMPT_OPERATIONAL` | `false` | When `true`, `/`, `/health`, `/metrics`, and `/ws/*` are exempt from auth (they expose worker URLs, queue depth, GPU inventory). `/healthz` and `/readyz` are always exempt (K8s probes carry no creds). Default is fail-closed |
+| `SIE_AUTH_EXEMPT_OPERATIONAL` | `false` | When `true`, `/`, `/health`, and `/ws/*` are exempt from auth (they expose worker URLs, queue depth, GPU inventory). `/healthz` and `/readyz` are always exempt (K8s probes carry no creds). Default is fail-closed |
 | `SIE_NATS_CONFIG_TRUSTED_PRODUCERS` | `sie-config` | CSV allowlist of `producer_id` values trusted to publish on `sie.config.models._all`. Matches exact OR K8s pod-name prefix (`sie-config` also matches `sie-config-5f7b6d8c-kxwvr`). Untrusted notifications are dropped; the epoch poller still closes the gap |
 | `SIE_NATS_CONFIG_TRUST_ANY_PRODUCER` | `false` | Disable producer validation entirely (dev/local only). `main` emits a startup audit warning when on |
 | `SIE_LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
@@ -108,6 +108,7 @@ Each `--flag` above has a matching `SIE_*` environment variable (see next sectio
 | `SIE_CONFIG_SERVICE_URL` | unset | Base URL of `sie-config`. When set, the gateway runs a background `GET /v1/configs/export` bootstrap on startup and a 30 s `GET /v1/configs/epoch` drift poller. When unset, the bootstrap/poller tasks no-op and the gateway runs filesystem-seed-only |
 | `SIE_MULTI_ROUTER` | `false` | Multi-gateway coordination flag (wire-compatible name retained) |
 | `SIE_GATEWAY_CONFIGURED_GPUS` | | CSV of canonical machine profiles used for validation and default pool display |
+| `SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES` | `[]` | JSON array of exact queue/KEDA lanes, for example `[{"pool":"default","machineProfile":"cpu","bundle":"default"}]`. Queue routing fails closed when its resolved tuple is absent. Helm and the managed Modal gateway derive this catalog from their deployment manifests; standalone queue deployments must set it explicitly |
 | `SIE_GATEWAY_GPU_ALIASES` | | JSON map of request aliases to canonical machine profiles |
 | `SIE_BUNDLES_DIR` | `bundles` | Optional bundle filesystem seed. Unset in default Helm deploys: the gateway pulls bundles from `sie-config` via `GET /v1/configs/bundles{,/{id}}` at startup and the registry's filesystem reload is a no-op. Only set by the `gateway.embeddedConfigs` / `gateway.configMap` overlays which mount a ConfigMap at `/configs/bundles`. |
 | `SIE_MODELS_DIR` | `models` | Optional model filesystem seed. Same semantics as `SIE_BUNDLES_DIR`: unset in default deploys, runtime model writes always go to `sie-config` and the gateway replays them via `GET /v1/configs/export`. |
@@ -123,7 +124,6 @@ Each `--flag` above has a matching `SIE_*` environment variable (see next sectio
 | GET | `/healthz` | Liveness — **`200`**, **`text/plain`** body **`ok`** |
 | GET | `/readyz` | Readiness — **`200`** + **`ok`** once the gateway process is serving (**`text/plain`**); worker availability is exposed by `/health` |
 | GET | `/health` | Cluster health JSON |
-| GET | `/metrics` | Prometheus metrics |
 | GET | `/openapi.json` | OpenAPI 3 contract for gateway-owned HTTP routes |
 | GET | `/ws/cluster-status` | WebSocket cluster status feed |
 | GET | `/v1/models` | List available models |
@@ -218,7 +218,8 @@ src/
   server.rs              Axum routes and AppState
   config.rs              Config loading from env/CLI
   error.rs               AppError -> HTTP status mapping
-  metrics.rs             Prometheus metrics
+  metrics.rs             Compatibility aliases for canonical telemetry types
+  observability/metrics.rs  Canonical OpenTelemetry metric facade
   handlers/
     health.rs            Health and status endpoints
     models.rs            GET /v1/models helpers
@@ -260,5 +261,5 @@ src/
 - [clap](https://github.com/clap-rs/clap) — CLI parsing
 - [async-nats](https://github.com/nats-io/nats.rs) — NATS/JetStream client
 - [kube](https://github.com/kube-rs/kube) — Kubernetes client
-- [prometheus](https://github.com/tikv/rust-prometheus) — metrics
+- [OpenTelemetry](https://opentelemetry.io/) — canonical OTLP telemetry
 - `serde`, `serde_json`, `serde_yaml` — config and payload serialization

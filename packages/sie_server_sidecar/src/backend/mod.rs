@@ -143,8 +143,8 @@ impl BackendError {
 /// surface the load state through [`InferenceBackend::ensure_model_ready`].
 #[async_trait]
 pub trait InferenceBackend: Send + Sync {
-    /// Short, stable name for logs and metrics (e.g. `"python-ipc"`,
-    /// `"native-bert"`). Must be a valid Prometheus label value.
+    /// Short, stable name for routing logs (e.g. `"python-ipc"`,
+    /// `"native-bert"`).
     fn name(&self) -> &'static str;
 
     /// Cheap, synchronous check: does this backend handle `model_id`?

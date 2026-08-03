@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sie_sdk.bundle_utils import find_bundle_for_models, match_bundle_models
+from sie_sdk.bundle_utils import (
+    find_bundle_for_model_adapters,
+    find_bundle_for_models,
+    match_bundle_model_adapters,
+    match_bundle_models,
+)
 
 
 def _write_model(models_dir: Path, name: str, *, pool: str | None = None) -> None:
@@ -80,3 +85,17 @@ profiles:
     assert match_bundle_models(candle_bundle, models_dir) == ["org/candle-only:candle"]
     assert find_bundle_for_models(["org/candle-only"], bundles_dir, models_dir) is None
     assert find_bundle_for_models(["org/candle-only:candle"], bundles_dir, models_dir) == "candle"
+
+
+def test_match_bundle_model_adapters_supports_in_memory_catalogs(tmp_path: Path) -> None:
+    bundles_dir = tmp_path / "bundles"
+    bundles_dir.mkdir()
+    bundle_path = bundles_dir / "transformers5.yaml"
+    bundle_path.write_text("adapters:\n  - pkg.adapters.transformers5\n")
+    inventory = {
+        "org/default": ({"pkg.adapters.default"}, None),
+        "org/lighton": ({"pkg.adapters.transformers5"}, None),
+    }
+
+    assert match_bundle_model_adapters(bundle_path, inventory) == ["org/lighton"]
+    assert find_bundle_for_model_adapters(["org/lighton"], bundles_dir, inventory) == "transformers5"

@@ -27,7 +27,6 @@ from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, Profi
 from sie_server.core.memory import MemoryConfig
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.residency import EvictionResult
-from sie_server.observability.metrics import IDLE_EVICTIONS_TOTAL
 
 
 def _make_config(name: str = "test", hf_id: str | None = "org/test") -> ModelConfig:
@@ -156,11 +155,7 @@ async def test_start_worker_rejects_model_being_unloaded(mock_load_adapter: Magi
 @pytest.mark.asyncio
 @patch("sie_server.core.model_loader.load_adapter")
 async def test_idle_eviction_unloads_stale_model(mock_load_adapter: MagicMock) -> None:
-    """A model whose last_used_at exceeds idle_evict_s gets unloaded.
-
-    Also verifies the ``sie_idle_evictions_total`` Prometheus counter is
-    bumped — operators dashboard this metric to validate the TTL knob.
-    """
+    """A model whose last_used_at exceeds idle_evict_s gets unloaded."""
 
     def make_adapter() -> MagicMock:
         m = MagicMock()
@@ -180,11 +175,6 @@ async def test_idle_eviction_unloads_stale_model(mock_load_adapter: MagicMock) -
     assert info_a is not None
     info_a.last_used_at = time.monotonic() - 100.0
 
-    # Snapshot per-model counters; the metric is process-global so other
-    # tests in the suite may have already incremented it for ``model-b``.
-    metric_before = IDLE_EVICTIONS_TOTAL.labels(model="model-a")._value.get()
-    metric_before_b = IDLE_EVICTIONS_TOTAL.labels(model="model-b")._value.get()
-
     await reg.start_idle_evictor()
     # Wait for at least one full tick of the loop.
     await asyncio.sleep(0.05)
@@ -192,10 +182,6 @@ async def test_idle_eviction_unloads_stale_model(mock_load_adapter: MagicMock) -
 
     assert not reg.is_loaded("model-a")
     assert reg.is_loaded("model-b")
-    # Counter must have moved.
-    assert IDLE_EVICTIONS_TOTAL.labels(model="model-a")._value.get() == metric_before + 1
-    # And NOT for model-b.
-    assert IDLE_EVICTIONS_TOTAL.labels(model="model-b")._value.get() == metric_before_b
 
 
 @pytest.mark.asyncio
@@ -424,7 +410,7 @@ async def test_evict_lru_excluding_evicts_sibling(mock_load_adapter: MagicMock) 
 
     reg._do_unload = AsyncMock()
     assert await reg.evict_lru_excluding("keep-me") is EvictionResult.EVICTED
-    reg._do_unload.assert_awaited_once_with("evict-me")
+    reg._do_unload.assert_awaited_once_with("evict-me", reason="oom_recovery")
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import torch
 import yaml
 from sie_server.adapters.bge_m3_flash import BGEM3FlashAdapter
 from sie_server.config.model import ModelConfig
@@ -89,6 +90,144 @@ class TestBGEM3YamlConfig:
 
     def test_score_in_outputs(self, config: ModelConfig) -> None:
         assert "score" in config.outputs
+
+
+class TestBGEM3Packing:
+    """CPU-only equivalence guards for BGE-M3's Flash varlen input packing."""
+
+    def test_encode_batches_tokenization_and_preserves_packed_tensors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        adapter = BGEM3FlashAdapter(max_seq_length=6)
+        tokenizer = MagicMock()
+        # Post-special-token, post-truncation IDs for two unequal sequences.
+        # These are the exact lists a batched HF tokenizer hands the adapter.
+        tokenizer.return_value = {
+            "input_ids": [
+                [0, 11, 2],
+                [0, 21, 22, 23, 2],
+            ]
+        }
+        adapter._model = MagicMock()
+        adapter._tokenizer = tokenizer
+        adapter._device = "cpu"
+
+        hidden = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        run_embeddings = MagicMock(return_value=hidden)
+        run_transformer = MagicMock(return_value=hidden)
+        compute_embeddings = MagicMock(
+            return_value={"dense": torch.zeros((2, adapter.DENSE_DIM), dtype=torch.bfloat16)}
+        )
+        build_positions = MagicMock(wraps=adapter._build_position_ids)
+        monkeypatch.setattr(adapter, "_build_position_ids", build_positions)
+        monkeypatch.setattr(adapter, "_run_embeddings", run_embeddings)
+        monkeypatch.setattr(adapter, "_run_transformer_flash", run_transformer)
+        monkeypatch.setattr(adapter, "_compute_embeddings", compute_embeddings)
+
+        output = adapter.encode(
+            [Item(text="alpha"), Item(text="beta")],
+            ["dense"],
+            instruction="query:",
+        )
+
+        tokenizer.assert_called_once_with(
+            ["query: alpha", "query: beta"],
+            max_length=6,
+            truncation=True,
+            padding=False,
+            return_attention_mask=False,
+        )
+
+        packed_ids, position_ids = run_embeddings.call_args.args
+        assert torch.equal(packed_ids, torch.tensor([0, 11, 2, 0, 21, 22, 23, 2]))
+        assert packed_ids.dtype == torch.long
+        assert packed_ids.is_contiguous()
+        assert torch.equal(position_ids, torch.tensor([2, 3, 4, 2, 3, 4, 5, 6]))
+        assert position_ids.dtype == torch.long
+        position_args = build_positions.call_args.args
+        assert position_args[1:] == (2,)
+        assert build_positions.call_args.kwargs == {"total_tokens": 8}
+
+        transformer_args = run_transformer.call_args.args
+        assert transformer_args[0] is hidden
+        cu_seqlens = transformer_args[1]
+        assert torch.equal(cu_seqlens, torch.tensor([0, 3, 8], dtype=torch.int32))
+        assert cu_seqlens.dtype == torch.int32
+        assert cu_seqlens.device == packed_ids.device
+        assert cu_seqlens.is_contiguous()
+        assert transformer_args[2:] == (5, 8)
+
+        compute_args = compute_embeddings.call_args.args
+        assert compute_args[0] is hidden
+        assert torch.equal(compute_args[1], packed_ids)
+        assert torch.equal(compute_args[2], cu_seqlens)
+        assert compute_args[3:] == ([3, 5], ["dense"])
+        assert compute_embeddings.call_args.kwargs == {"normalize": True}
+
+        assert output.dense is not None
+        assert output.dense.shape == (2, adapter.DENSE_DIM)
+        assert output.dense.dtype == np.float32
+        assert output.extra["input_token_counts"] == [3, 5]
+
+    def test_encode_rejects_empty_items_before_batched_tokenizer(self) -> None:
+        adapter = BGEM3FlashAdapter()
+        tokenizer = MagicMock()
+        adapter._model = MagicMock()
+        adapter._tokenizer = tokenizer
+        adapter._device = "cpu"
+
+        with pytest.raises(ValueError, match="requires at least one item"):
+            adapter.encode([], ["dense"])
+
+        tokenizer.assert_not_called()
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_cpu_first_output_conversion_matches_gpu_first_semantics(self, dtype: torch.dtype) -> None:
+        adapter = BGEM3FlashAdapter()
+        dense = torch.arange(2 * adapter.DENSE_DIM, dtype=torch.float32).reshape(2, adapter.DENSE_DIM).to(dtype)
+        multivectors = [
+            torch.arange(2 * adapter.MULTIVECTOR_DIM, dtype=torch.float32)
+            .reshape(2, adapter.MULTIVECTOR_DIM)
+            .to(dtype),
+            torch.arange(adapter.MULTIVECTOR_DIM, dtype=torch.float32).reshape(1, adapter.MULTIVECTOR_DIM).to(dtype),
+        ]
+        expected_dense = dense.float().cpu().numpy()
+        expected_multivectors = [vecs.float().cpu().numpy() for vecs in multivectors]
+
+        output = adapter._to_inference_output(
+            {"dense": dense, "multivector": multivectors},
+            ["dense", "multivector"],
+            batch_size=2,
+            is_query=False,
+        )
+
+        assert output.dense is not None
+        assert output.multivector is not None
+        np.testing.assert_array_equal(output.dense, expected_dense)
+        assert output.dense.dtype == np.float32
+        for actual, expected in zip(output.multivector, expected_multivectors, strict=True):
+            np.testing.assert_array_equal(actual, expected)
+            assert actual.dtype == np.float32
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_cpu_first_sparse_conversion_preserves_weights(self, dtype: torch.dtype) -> None:
+        adapter = BGEM3FlashAdapter()
+        tokenizer = MagicMock()
+        tokenizer.cls_token_id = 0
+        tokenizer.eos_token_id = 2
+        tokenizer.pad_token_id = 1
+        tokenizer.unk_token_id = 3
+        adapter._tokenizer = tokenizer
+
+        result = adapter._compute_sparse_weights(
+            torch.tensor([0.0, 0.5, 0.25, 0.0], dtype=dtype),
+            torch.tensor([0, 10, 10, 2], dtype=torch.long),
+            torch.tensor([0, 4], dtype=torch.int32),
+            [4],
+        )
+
+        assert result == [{10: 0.5}]
 
 
 class TestResolveScoreMode:

@@ -14,7 +14,12 @@ from __future__ import annotations
 import torch
 
 
-def build_position_ids(cu_seqlens: torch.Tensor, *, offset: int = 0) -> torch.Tensor:
+def build_position_ids(
+    cu_seqlens: torch.Tensor,
+    *,
+    offset: int = 0,
+    total_tokens: int | None = None,
+) -> torch.Tensor:
     """Position ids for a varlen-packed batch, restarting per sequence.
 
     Given ``cu_seqlens`` (cumulative token counts, shape ``[num_seqs + 1]``),
@@ -29,13 +34,21 @@ def build_position_ids(cu_seqlens: torch.Tensor, *, offset: int = 0) -> torch.Te
         cu_seqlens: Cumulative sequence lengths, shape ``[num_seqs + 1]``.
         offset: Base position of each sequence. ``0`` for most encoders;
             ``padding_idx + 1`` for XLM-RoBERTa-style position ids.
+        total_tokens: Optional host-known final cumulative token count. This
+            must equal ``cu_seqlens[-1]``; supplying it avoids a device-to-host
+            synchronization when ``cu_seqlens`` is on CUDA.
 
     Returns:
         A 1-D ``int64`` tensor of length ``cu_seqlens[-1]`` on ``cu_seqlens.device``.
     """
-    total_tokens = int(cu_seqlens[-1].item())
+    if total_tokens is None:
+        total_tokens = int(cu_seqlens[-1].item())
     positions = torch.arange(total_tokens, device=cu_seqlens.device)
-    seq_starts = torch.repeat_interleave(cu_seqlens[:-1], cu_seqlens[1:] - cu_seqlens[:-1])
+    seq_starts = torch.repeat_interleave(
+        cu_seqlens[:-1],
+        cu_seqlens[1:] - cu_seqlens[:-1],
+        output_size=total_tokens,
+    )
     positions = positions - seq_starts
     return positions + offset if offset else positions
 

@@ -55,9 +55,10 @@ from sie_server.adapters._generation_base import (
     GenerationChunk,
     ToolCallDelta,
 )
+from sie_server.core.runtime_options import apply_generation_runtime_options
 from sie_server.core.text_tokens import estimate_tokens_from_chars
-from sie_server.core.tokenizer import load_tokenizer
-from sie_server.observability import metrics as _metrics
+from sie_server.core.tokenizer import image_first_chat_message, load_tokenizer
+from sie_server.observability import worker_telemetry as _metrics
 from sie_server.processors.grammar_cache import GrammarLRU
 from sie_server.processors.grammar_compile import compile_outlines
 from sie_server.processors.tool_call_grammar import (
@@ -159,6 +160,7 @@ _CANCEL_TOMBSTONE_MAX = 1024
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+    from sie_server.config.model import ModelConfig
     from sie_server.core.registry import ModelRegistry
 
     TokenizerLike = PreTrainedTokenizer | PreTrainedTokenizerFast
@@ -557,6 +559,22 @@ class _ValidationError:
     message: str
 
 
+@dataclass
+class _GenerationCompletion:
+    """One attempt's shared worker-completion observation state.
+
+    Terminal publication is the authoritative seam: a generation has not
+    completed from the worker's perspective until its success/error/cancelled
+    chunk reaches the reply transport. ``completed`` is a defensive exactly-once
+    latch should a future path attempt a second terminal publication.
+    """
+
+    model_id: str
+    profile_id: str
+    started_at: float
+    completed: bool = False
+
+
 @dataclass(frozen=True)
 class _GenerateRequestParams:
     """Worker-side decoded view of ``WorkItem.generate``.
@@ -607,9 +625,9 @@ class _GenerateRequestParams:
     tools: tuple[dict[str, Any], ...] | None = None
     tool_choice: dict[str, Any] | str | None = None
     parallel_tool_calls: bool = True
-    # OpenAI ``seed`` — best-effort sampler determinism (gateway-validated
-    # as a u64; reinterpreted from i64 on the gateway side so negative
-    # seeds round-trip). Forwarded to SGLang ``sampling_params["seed"]``.
+    # OpenAI ``seed`` — signed 64-bit per-request sampling seed, validated by
+    # the gateway and forwarded unchanged. Reproducibility semantics are
+    # owned by the active generation backend.
     seed: int | None = None
     # OpenAI ``logit_bias`` — ``{token_id_str: bias_float}``, gateway
     # range-validates ``[-100.0, 100.0]`` and caps the map size.
@@ -654,10 +672,16 @@ class StreamingProcessor:
         kv_budget_tokens: int | None = None,
         admission_enabled: bool = False,
         admission_resolver: Callable[[str], tuple[int | None, bool | None]] | None = None,
+        record_worker_completion: bool = True,
     ) -> None:
         self._nc = nc
         self._registry = registry
         self._worker_id = worker_id
+        # The NATS/sidecar path owns completion when the terminal reaches its
+        # reply publisher. A transport wrapper that synthesizes client-facing
+        # terminals (the dedicated Modal generation lane) can take ownership
+        # instead, so one logical attempt is never counted twice.
+        self._record_worker_completion = record_worker_completion
         # request_id → {attempt_id → asyncio.Event} for in-flight generations.
         # The worker-sidecar's cancel-subscription listener calls
         # ``signal_cancel(request_id)`` when a cancel.* message arrives, which
@@ -723,6 +747,7 @@ class StreamingProcessor:
                 "kv_budget_tokens is resolved per-request",
             )
         self._reserved: int = 0
+        self._generation_inflight: int = 0
         self._admission_lock = asyncio.Lock()
         # Per-released-request sentinel: guards against double-release in
         # the (defensive) case that two finally blocks both try to drop
@@ -740,6 +765,7 @@ class StreamingProcessor:
         # an entry. Order is *roughly* insertion (Python 3.7+ dict guarantee);
         # cleanup is lazy on insert.
         self._cancel_tombstones: dict[str, float] = {}
+        self._completion_by_attempt: dict[str, _GenerationCompletion] = {}
 
     # -- Grammar prewarm -------------------------------------------
 
@@ -830,16 +856,36 @@ class StreamingProcessor:
         # ``prewarm_grammars_for_model`` call after hot-reload) skip the
         # compile rather than double-counting.
         if self._grammar_cache.get(key) is not None:
+            _metrics.worker_telemetry().grammar_cache_lookup(
+                model=model_id,
+                backend="outlines",
+                grammar=kind,
+                phase="prewarm",
+                result="hit",
+            )
             logger.debug("prewarm: cache already populated for %s/%s; skipping", model_id, name)
             return
 
+        _metrics.worker_telemetry().grammar_cache_lookup(
+            model=model_id,
+            backend="outlines",
+            grammar=kind,
+            phase="prewarm",
+            result="miss",
+        )
         t0 = time.monotonic()
         try:
             tok = await self._get_tokenizer(model_id)
         except Exception as exc:  # noqa: BLE001
             elapsed = time.monotonic() - t0
-            _metrics.GRAMMAR_PREWARM_SECONDS.labels(model=model_id, kind=kind).observe(elapsed)
-            _metrics.GRAMMAR_PREWARM_TOTAL.labels(model=model_id, kind=kind, outcome="failed").inc()
+            _metrics.worker_telemetry().grammar_compile_completed(
+                model=model_id,
+                backend="outlines",
+                grammar=kind,
+                phase="prewarm",
+                outcome="error",
+                duration_s=elapsed,
+            )
             logger.error(
                 "prewarm: tokenizer load failed for %s/%s (%.3fs): %s",
                 model_id,
@@ -859,8 +905,14 @@ class StreamingProcessor:
             compiled = await loop.run_in_executor(_GRAMMAR_EXECUTOR, compile_outlines, tok, grammar)
         except Exception as exc:  # noqa: BLE001
             elapsed = time.monotonic() - t0
-            _metrics.GRAMMAR_PREWARM_SECONDS.labels(model=model_id, kind=kind).observe(elapsed)
-            _metrics.GRAMMAR_PREWARM_TOTAL.labels(model=model_id, kind=kind, outcome="failed").inc()
+            _metrics.worker_telemetry().grammar_compile_completed(
+                model=model_id,
+                backend="outlines",
+                grammar=kind,
+                phase="prewarm",
+                outcome="error",
+                duration_s=elapsed,
+            )
             # ERROR not WARNING: a misconfigured prewarm entry is operator-
             # actionable and should not be lost in info-level noise.
             logger.error(
@@ -874,8 +926,14 @@ class StreamingProcessor:
 
         elapsed = time.monotonic() - t0
         self._grammar_cache.put(key, compiled)
-        _metrics.GRAMMAR_PREWARM_SECONDS.labels(model=model_id, kind=kind).observe(elapsed)
-        _metrics.GRAMMAR_PREWARM_TOTAL.labels(model=model_id, kind=kind, outcome="success").inc()
+        _metrics.worker_telemetry().grammar_compile_completed(
+            model=model_id,
+            backend="outlines",
+            grammar=kind,
+            phase="prewarm",
+            outcome="success",
+            duration_s=elapsed,
+        )
         logger.info(
             "prewarm: %s/%s (%s) compiled in %.3fs",
             model_id,
@@ -943,10 +1001,11 @@ class StreamingProcessor:
             # level in production logs. The metric counter lets a
             # dashboard surface the rate of resolver failures.
             logger.warning("Failed to resolve generation admission for %s", model_id, exc_info=True)
-            try:
-                _metrics.GENERATION_ADMISSION_RESOLVER_ERRORS.labels(model=model_id).inc()
-            except Exception:  # noqa: BLE001 — metric may not be registered in older builds
-                logger.debug("admission resolver error metric unavailable", exc_info=True)
+            _metrics.worker_telemetry().admission_decided(
+                model=model_id,
+                outcome="error",
+                reason="resolver_error",
+            )
             return None, None
         if not isinstance(budget, int) or budget <= 0:
             budget = None
@@ -966,31 +1025,31 @@ class StreamingProcessor:
         Reads the adapter's ``_grammar_backend`` (the same field used to
         drive the SGLang ``--grammar-backend`` flag). Anything that
         isn't one of the known SGLang backends collapses to
-        ``"unknown"`` to keep the Prometheus label cardinality bounded.
+        ``"other"`` to keep the telemetry label cardinality bounded.
         """
         backend = getattr(adapter, "_grammar_backend", None)
         if backend in ("outlines", "xgrammar", "llguidance"):
             return str(backend)
-        return "unknown"
+        return "other"
 
     def _record_grammar_observed(
         self,
         adapter: GenerationAdapter,
         grammar: GrammarSpec,
+        model_id: str,
     ) -> None:
-        """Record per-request grammar observability signal.
+        """Record one bounded structured-output request event.
 
         Runs on every structured-output request, regardless of whether
-        the legacy preflight is enabled. Cheap — one counter increment
-        per request. Backend label is bounded to the known SGLang
-        backends; unknown values collapse to ``"unknown"``.
+        diagnostic preflight is enabled. No schema hash, name, or payload
+        becomes an attribute.
         """
         backend = self._resolve_grammar_backend_label(adapter)
-        mode = grammar.kind
-        try:
-            _metrics.GRAMMAR_UNIQUE_SCHEMA_TOTAL.labels(backend=backend, mode=mode).inc()
-        except Exception:  # noqa: BLE001 — metric must never break the request path
-            logger.debug("grammar unique-schema metric increment failed", exc_info=True)
+        _metrics.worker_telemetry().grammar_requested(
+            model=model_id,
+            backend=backend,
+            grammar=grammar.kind,
+        )
 
     def _resolve_tool_call_format(self, model_id: str) -> ToolCallFormat:
         """Resolve the on-wire tool-call format from the model config.
@@ -1096,11 +1155,26 @@ class StreamingProcessor:
                     "resolved — admission gate is inert; check config-load.",
                     model_id,
                 )
+                _metrics.worker_telemetry().admission_decided(
+                    model=model_id,
+                    outcome="error",
+                    reason="missing_budget",
+                )
             if admission_enabled and budget is not None and self._reserved + reserve_tokens > budget:
                 return False
             self._reserved += reserve_tokens
-            _metrics.GENERATION_KV_RESERVED_TOKENS.labels(model=model_id).set(self._reserved)
-            _metrics.GENERATION_IN_FLIGHT.labels(model=model_id).inc()
+            self._generation_inflight += 1
+            _metrics.worker_telemetry().state_changed(
+                model=model_id,
+                reserved_tokens=self._reserved,
+                inflight=self._generation_inflight,
+                budget_tokens=budget,
+            )
+            _metrics.worker_telemetry().admission_decided(
+                model=model_id,
+                outcome="admitted",
+                reason="none",
+            )
             dedup_key = self._release_dedup_key(request_id, attempt_id)
             if dedup_key is not None:
                 # Allow ``_release_reservation`` to act exactly once for
@@ -1116,6 +1190,7 @@ class StreamingProcessor:
         *,
         request_id: str | None = None,
         attempt_id: str | None = None,
+        budget_tokens: int | None = None,
     ) -> None:
         """Release a previously-acquired KV reservation.
 
@@ -1138,8 +1213,13 @@ class StreamingProcessor:
                 while len(self._released_requests) > _RELEASED_REQUESTS_MAX:
                     self._released_requests.popitem(last=False)
             self._reserved = max(0, self._reserved - reserve_tokens)
-            _metrics.GENERATION_KV_RESERVED_TOKENS.labels(model=model_id).set(self._reserved)
-            _metrics.GENERATION_IN_FLIGHT.labels(model=model_id).dec()
+            self._generation_inflight = max(0, self._generation_inflight - 1)
+            _metrics.worker_telemetry().state_changed(
+                model=model_id,
+                reserved_tokens=self._reserved,
+                inflight=self._generation_inflight,
+                budget_tokens=budget_tokens,
+            )
 
     # -- Cancel registration (called by the sidecar cancel subscriber) --------
 
@@ -1263,6 +1343,12 @@ class StreamingProcessor:
         # worker crash produces a new attempt; the gateway latches the first
         # attempt_id it observes and drops chunks from any other.
         attempt_id = uuid.uuid4().hex
+        if self._record_worker_completion and _metrics.worker_telemetry_enabled():
+            self._completion_by_attempt[attempt_id] = _GenerationCompletion(
+                model_id=model_id,
+                profile_id=str(wi.get("profile_id") or "default"),
+                started_at=time.perf_counter(),
+            )
 
         # W3C Trace Context propagation. If the gateway populated
         # the ``traceparent`` (and optionally ``tracestate``) fields on
@@ -1283,17 +1369,20 @@ class StreamingProcessor:
             carrier["tracestate"] = ts
         parent_ctx = propagate.extract(carrier)
         tracer = _otel_trace.get_tracer("sie_server.processors.streaming")
-        with tracer.start_as_current_span(
-            "worker.streaming_processor",
-            context=parent_ctx,
-            attributes={
-                "sie.request_id": request_id,
-                "sie.attempt_id": attempt_id,
-                "sie.model": model_id,
-                "sie.adapter": "streaming",
-            },
-        ):
-            await self._process_inner(msg, model_id, wi, reply_subject, request_id, attempt_id)
+        try:
+            with tracer.start_as_current_span(
+                "worker.streaming_processor",
+                context=parent_ctx,
+                attributes={
+                    "sie.request_id": request_id,
+                    "sie.attempt_id": attempt_id,
+                    "sie.model": model_id,
+                    "sie.adapter": "streaming",
+                },
+            ):
+                await self._process_inner(msg, model_id, wi, reply_subject, request_id, attempt_id)
+        finally:
+            self._completion_by_attempt.pop(attempt_id, None)
 
     async def _process_inner(
         self,
@@ -1373,7 +1462,10 @@ class StreamingProcessor:
         # not redeliver indefinitely.
         if self._check_and_consume_tombstone(request_id):
             pool_label = str(wi.get("pool_name") or "default")
-            _metrics.GENERATION_FALLBACK_DUPLICATE_TOTAL.labels(model=model_id, pool=pool_label).inc()
+            _metrics.worker_telemetry().duplicate_prevented(
+                model=model_id,
+                path="first_chunk_fallback",
+            )
             logger.warning(
                 "cancel-tombstone hit: refusing to decode request_id=%s model=%s pool=%s "
                 "(cancel arrived before this worker registered; pool-republished attempt is authoritative)",
@@ -1462,7 +1554,11 @@ class StreamingProcessor:
         _ = wi.get("routing_key")  # routing-affinity hint
         _ = wi.get("prompt_cache_key")  # prompt-cache hint
 
-        validation = self._validate_generate_params(wi)
+        try:
+            config = self._registry.get_config(model_id)
+        except (KeyError, AttributeError):
+            config = None
+        validation = self._validate_generate_params(wi, config)
         if isinstance(validation, _ValidationError):
             await self._terminal_error_then_settle(
                 reply_subject,
@@ -1626,11 +1722,10 @@ class StreamingProcessor:
         # for diagnostic use only — see ``_grammar_preflight_debug_enabled``
         # and ``docs/adr/0002-sglang-owns-request-time-grammar.md``.
         #
-        # The cheap observability bits (unique-schema counter) always run
-        # so operators see schema-cardinality signal regardless of the
-        # debug flag.
+        # One bounded request event always runs so operators see structured-
+        # output traffic regardless of the debug flag.
         if effective_grammar is not None:
-            self._record_grammar_observed(adapter, effective_grammar)
+            self._record_grammar_observed(adapter, effective_grammar, model_id)
 
             if self._adapter_uses_outlines_grammar(adapter) and _grammar_preflight_debug_enabled():
                 ready = await self._ensure_grammar_ready(
@@ -1673,6 +1768,7 @@ class StreamingProcessor:
         # footprint instead of just the short placeholder text.
         image_reserve = (len(request_images) if request_images else 0) * _VISION_TOKENS_PER_IMAGE_ESTIMATE
         reserve_tokens = estimate_tokens_from_chars(prompt_str) + params.max_new_tokens + image_reserve
+        effective_budget = budget_override if budget_override is not None else self._kv_budget_tokens
         admitted = await self._try_reserve(
             model_id,
             reserve_tokens,
@@ -1682,7 +1778,6 @@ class StreamingProcessor:
             attempt_id=attempt_id,
         )
         if not admitted:
-            effective_budget = budget_override if budget_override is not None else self._kv_budget_tokens
             logger.info(
                 "Admission reject for %s/%s: reserved=%d + req=%d > budget=%s",
                 request_id,
@@ -1691,7 +1786,11 @@ class StreamingProcessor:
                 reserve_tokens,
                 effective_budget,
             )
-            _metrics.GENERATION_ADMISSION_REJECTED.labels(model=model_id, reason="kv_budget").inc()
+            _metrics.worker_telemetry().admission_decided(
+                model=model_id,
+                outcome="rejected",
+                reason="kv_budget",
+            )
             nak_ok = await self._publish_nak_envelope(
                 reply_subject,
                 request_id=request_id,
@@ -1751,7 +1850,13 @@ class StreamingProcessor:
             # ``attempt_id`` so the release dedup is per-attempt and a
             # concurrent same-request_id attempt's release isn't swallowed
             # (BUG 2/7).
-            await self._release_reservation(model_id, reserve_tokens, request_id=request_id, attempt_id=attempt_id)
+            await self._release_reservation(
+                model_id,
+                reserve_tokens,
+                request_id=request_id,
+                attempt_id=attempt_id,
+                budget_tokens=effective_budget,
+            )
 
     # -- Streaming core ------------------------------------------------------
 
@@ -2109,20 +2214,6 @@ class StreamingProcessor:
                 # Record first-text timing for TTFT.
                 if chunk.text_delta and first_text_at is None:
                     first_text_at = time.monotonic()
-                    # Structured-output TTFT is the proxy for
-                    # SGLang's server-side grammar-construction cost. Only
-                    # observe when this request actually carries a
-                    # grammar; non-structured requests already feed the
-                    # general ``sie_worker_generation_ttft_seconds`` so
-                    # adding them here would double-count.
-                    if grammar is not None:
-                        try:
-                            backend = self._resolve_grammar_backend_label(adapter)
-                            _metrics.STRUCTURED_OUTPUT_TTFT_SECONDS.labels(backend=backend, mode=grammar.kind).observe(
-                                first_text_at - publish_at
-                            )
-                        except Exception:  # noqa: BLE001
-                            logger.debug("structured-output TTFT metric failed", exc_info=True)
                 if chunk.text_delta and not first_yield_done:
                     first_yield_done = True
 
@@ -2385,11 +2476,60 @@ class StreamingProcessor:
                 return saw_terminal
             payload, is_terminal = item
             try:
-                await self._nc.publish(reply_subject, payload)
+                if is_terminal:
+                    await self._publish_terminal_envelope(reply_subject, payload)
+                else:
+                    # Nonterminal chunks are the high-volume path. Keep their
+                    # disabled-mode cost identical to the pre-telemetry path.
+                    await self._nc.publish(reply_subject, payload)
                 saw_terminal = saw_terminal or is_terminal
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to publish generation chunk on %s", reply_subject, exc_info=True)
                 return False
+
+    async def _publish_terminal_envelope(self, reply_subject: str, payload: bytes) -> None:
+        """Publish a terminal and observe completion only after transport success."""
+        await self._nc.publish(reply_subject, payload)
+        # Empty in disabled mode, so no msgpack decode or attribute work lands
+        # on the default serving path.
+        if self._completion_by_attempt:
+            self._record_published_terminal(payload)
+
+    def _record_published_terminal(self, payload: bytes) -> None:
+        """Emit exactly one shared worker completion for a published terminal.
+
+        Generation-specific TTFT/TPOT/token observations remain owned by the
+        adapter stream timer. This is the common engine-completion seam for
+        ``sie.worker.requests`` and ``sie.worker.request.duration``: no metric is
+        emitted for an unconfirmed terminal publish or a NAK that another worker
+        may retry.
+        """
+        try:
+            envelope = msgpack.unpackb(payload, raw=False)
+        except (ValueError, msgpack.exceptions.UnpackException):
+            logger.warning("could not decode a published generation terminal for telemetry")
+            return
+        if not isinstance(envelope, dict) or envelope.get("kind") != "chunk" or envelope.get("done") is not True:
+            return
+        attempt_id = str(envelope.get("attempt_id") or "")
+        completion = self._completion_by_attempt.get(attempt_id)
+        if completion is None or completion.completed:
+            return
+        completion.completed = True
+        finish_reason = str(envelope.get("finish_reason") or "stop")
+        if finish_reason == "cancelled":
+            outcome = "cancelled"
+        elif finish_reason == "error" or envelope.get("error") is not None:
+            outcome = "error"
+        else:
+            outcome = "success"
+        _metrics.worker_telemetry().item_completed(
+            operation="generate",
+            outcome=outcome,
+            model=completion.model_id,
+            profile=completion.profile_id,
+            duration_s=time.perf_counter() - completion.started_at,
+        )
 
     async def _enqueue_transport_failure(
         self,
@@ -2453,7 +2593,11 @@ class StreamingProcessor:
         return None
 
     @classmethod
-    def _validate_generate_params(cls, wi: WorkItem) -> _GenerateRequestParams | _ValidationError:
+    def _validate_generate_params(
+        cls,
+        wi: WorkItem,
+        config: ModelConfig | None = None,
+    ) -> _GenerateRequestParams | _ValidationError:
         """Decode and validate the ``generate`` payload.
 
         Accepts two mutually-exclusive input shapes:
@@ -2474,6 +2618,15 @@ class StreamingProcessor:
                     "(prompt + max_new_tokens or messages + max_new_tokens required)"
                 ),
             )
+
+        options = wi.get("options")
+        if options is not None and not isinstance(options, dict):
+            return _ValidationError(code="invalid_request", message="'options' must be an object")
+        if config is not None:
+            try:
+                params = apply_generation_runtime_options(config, options, params)
+            except ValueError as exc:
+                return _ValidationError(code="invalid_request", message=str(exc))
 
         max_new_tokens = params.get("max_new_tokens")
         if not isinstance(max_new_tokens, int) or max_new_tokens <= 0:
@@ -2608,41 +2761,32 @@ class StreamingProcessor:
                 )
             input_value = _PromptInput(prompt=prompt)
 
-        # Optional sampling knobs — bad values fall back to defaults
-        # rather than failing the request (consistent with the streaming wire contract).
-        # Each fallback emits a single debug-level log so misconfigured
-        # clients can find the silent rewrite in worker logs.
+        # Repeat strict gateway checks for queue-bypass callers and profile defaults.
+        # Omitted values have already resolved from model runtime or fall back to 1.0.
         temperature_raw = params.get("temperature", 1.0)
         top_p_raw = params.get("top_p", 1.0)
-        try:
-            temperature = float(temperature_raw) if temperature_raw is not None else 1.0
-        except (TypeError, ValueError):
-            logger.debug(
-                "generate request: non-numeric temperature %r — falling back to 1.0",
-                temperature_raw,
+        if isinstance(temperature_raw, bool) or not isinstance(temperature_raw, int | float):
+            return _ValidationError(
+                code="invalid_request",
+                message="'temperature' must be a finite number >= 0",
             )
-            temperature = 1.0
-        try:
-            top_p = float(top_p_raw) if top_p_raw is not None else 1.0
-        except (TypeError, ValueError):
-            logger.debug(
-                "generate request: non-numeric top_p %r — falling back to 1.0",
-                top_p_raw,
+        temperature = float(temperature_raw)
+        if not math.isfinite(temperature) or temperature < 0:
+            return _ValidationError(
+                code="invalid_request",
+                message="'temperature' must be a finite number >= 0",
             )
-            top_p = 1.0
+        if isinstance(top_p_raw, bool) or not isinstance(top_p_raw, int | float):
+            return _ValidationError(code="invalid_request", message="'top_p' must be a number in (0, 1]")
+        top_p = float(top_p_raw)
+        if not math.isfinite(top_p) or not 0 < top_p <= 1:
+            return _ValidationError(code="invalid_request", message="'top_p' must be a number in (0, 1]")
         stop_raw = params.get("stop")
         stop: list[str] | None
         if isinstance(stop_raw, list) and all(isinstance(s, str) for s in stop_raw):
             stop = [s for s in stop_raw if isinstance(s, str)] or None
         elif stop_raw is not None:
-            # Non-list / mixed-type stop: silently drop, but log so an
-            # accidental ``stop: "</s>"`` (a string, not a list) shows up
-            # in worker debug output.
-            logger.debug(
-                "generate request: invalid stop value %r — ignoring",
-                stop_raw,
-            )
-            stop = None
+            return _ValidationError(code="invalid_request", message="'stop' must be an array of strings")
         else:
             stop = None
 
@@ -2785,19 +2929,20 @@ class StreamingProcessor:
 
         # OpenAI ``seed`` / ``logit_bias`` / ``logprobs`` / ``top_logprobs``
         # round-trips. Gateway is the authority for shape validation
-        # (u64 / range / cap); the worker only coerces defensively.
+        # (signed i64 / range / cap); the worker only coerces defensively.
         seed_raw = params.get("seed")
         seed: int | None
         if seed_raw is None:
             seed = None
-        elif isinstance(seed_raw, int):
-            seed = seed_raw
-        else:
-            try:
-                seed = int(seed_raw)
-            except (TypeError, ValueError):
-                logger.debug("generate request: non-integer seed %r — dropping", seed_raw)
+        elif isinstance(seed_raw, int) and not isinstance(seed_raw, bool):
+            if -(1 << 63) <= seed_raw <= (1 << 63) - 1:
+                seed = seed_raw
+            else:
+                logger.debug("generate request: invalid signed i64 seed %r — dropping", seed_raw)
                 seed = None
+        else:
+            logger.debug("generate request: invalid signed i64 seed %r — dropping", seed_raw)
+            seed = None
 
         logit_bias_raw = params.get("logit_bias")
         logit_bias: dict[str, float] | None
@@ -3074,10 +3219,7 @@ class StreamingProcessor:
                 # key off the ``"image"`` part type; the bytes travel separately
                 # as ``image_data``). Images lead, then the text — the flat image
                 # order the adapter receives.
-                content_parts: list[dict[str, Any]] = [{"type": "image"} for _ in m.images]
-                if m.content:
-                    content_parts.append({"type": "text", "text": m.content})
-                d = {"role": role, "content": content_parts}
+                d = image_first_chat_message(role=role, text=m.content, image_count=len(m.images))
             else:
                 d = {"role": role, "content": m.content}
             if m.tool_calls:
@@ -3285,11 +3427,13 @@ class StreamingProcessor:
             return False
         cached = self._grammar_cache.get(key)
         if cached is not None:
-            _metrics.GRAMMAR_CACHE_HITS.labels(model=model_id).inc()
-            try:
-                _metrics.GRAMMAR_CACHE_HITS_STRUCTURED_OUTPUT.labels(backend="outlines").inc()
-            except Exception:  # noqa: BLE001
-                logger.debug("structured-output grammar cache-hit metric failed", exc_info=True)
+            _metrics.worker_telemetry().grammar_cache_lookup(
+                model=model_id,
+                backend="outlines",
+                grammar=grammar.kind,
+                phase="request",
+                result="hit",
+            )
             return True
 
         # Single-flight: if another coroutine is already compiling this
@@ -3331,12 +3475,22 @@ class StreamingProcessor:
                     msg=msg,
                 )
                 return False
-            _metrics.GRAMMAR_CACHE_HITS.labels(model=model_id).inc()
-            try:
-                _metrics.GRAMMAR_CACHE_HITS_STRUCTURED_OUTPUT.labels(backend="outlines").inc()
-            except Exception:  # noqa: BLE001
-                logger.debug("structured-output grammar cache-hit metric failed", exc_info=True)
+            _metrics.worker_telemetry().grammar_cache_lookup(
+                model=model_id,
+                backend="outlines",
+                grammar=grammar.kind,
+                phase="request",
+                result="hit",
+            )
             return True
+
+        _metrics.worker_telemetry().grammar_cache_lookup(
+            model=model_id,
+            backend="outlines",
+            grammar=grammar.kind,
+            phase="request",
+            result="miss",
+        )
 
         # Leader path: load tokenizer + run the bounded-pool compile.
         # The whole leader body is wrapped so that even on
@@ -3388,9 +3542,22 @@ class StreamingProcessor:
         the caller's ``finally`` so this body can return/raise freely
         without leaking a never-resolved future to followers.
         """
+        started_at = time.monotonic()
+
+        def record_compile(outcome: str) -> None:
+            _metrics.worker_telemetry().grammar_compile_completed(
+                model=model_id,
+                backend="outlines",
+                grammar=grammar.kind,
+                phase="request",
+                outcome=outcome,
+                duration_s=time.monotonic() - started_at,
+            )
+
         try:
             tok = await self._get_tokenizer(model_id)
         except Exception as exc:  # noqa: BLE001
+            record_compile("error")
             future_to_await.set_exception(exc)
             await self._terminal_error_then_settle(
                 reply_subject,
@@ -3403,7 +3570,6 @@ class StreamingProcessor:
             )
             return False
 
-        t0 = time.monotonic()
         try:
             # Submit the blocking compile to the dedicated executor
             # (bounded at 4 threads). ``run_in_executor`` returns a
@@ -3416,6 +3582,7 @@ class StreamingProcessor:
                 timeout=5.0,
             )
         except TimeoutError as exc:
+            record_compile("timeout")
             future_to_await.set_exception(exc)
             logger.warning(
                 "grammar compile for %s exceeded 5s — thread continues until Outlines returns",
@@ -3432,6 +3599,7 @@ class StreamingProcessor:
             )
             return False
         except GrammarValidationError as exc:
+            record_compile("error")
             future_to_await.set_exception(exc)
             await self._terminal_error_then_settle(
                 reply_subject,
@@ -3448,6 +3616,7 @@ class StreamingProcessor:
             # wrapped by :func:`compile_outlines`. Surface as
             # ``grammar_compile_failed`` so the client sees a stable
             # code rather than ``inference_error``.
+            record_compile("error")
             future_to_await.set_exception(exc)
             await self._terminal_error_then_settle(
                 reply_subject,
@@ -3460,19 +3629,7 @@ class StreamingProcessor:
             )
             return False
 
-        elapsed = time.monotonic() - t0
-        _metrics.GRAMMAR_COMPILE_SECONDS.labels(model=model_id, kind=grammar.kind).observe(elapsed)
-        _metrics.GRAMMAR_CACHE_MISSES.labels(model=model_id).inc()
-        # Structured-output grammar metrics: the preflight only runs when
-        # ``SIE_GRAMMAR_PREFLIGHT_DEBUG=1``, so these observations are
-        # diagnostic-only by construction.
-        try:
-            _metrics.GRAMMAR_COMPILE_SECONDS_STRUCTURED_OUTPUT.labels(backend="outlines", mode=grammar.kind).observe(
-                elapsed
-            )
-            _metrics.GRAMMAR_CACHE_MISSES_STRUCTURED_OUTPUT.labels(backend="outlines").inc()
-        except Exception:  # noqa: BLE001
-            logger.debug("structured-output grammar compile/miss metric failed", exc_info=True)
+        record_compile("success")
         self._grammar_cache.put(key, compiled)
         future_to_await.set_result(compiled)
         return True
@@ -3512,6 +3669,9 @@ class StreamingProcessor:
             use_bin_type=True,
         )
         try:
+            # A NAK is a retry handoff, not a completed generation. Do not
+            # route it through the terminal-completion seam; the redelivered
+            # attempt will own the eventual success/error/cancelled outcome.
             await self._nc.publish(reply_subject, payload)
         except Exception:  # noqa: BLE001
             logger.warning(
@@ -3583,7 +3743,7 @@ class StreamingProcessor:
             finish_reason="cancelled",
         )
         try:
-            await self._nc.publish(reply_subject, payload)
+            await self._publish_terminal_envelope(reply_subject, payload)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to publish cancelled terminal chunk for %s/%s — skipping ACK so JetStream redelivers",
@@ -3626,7 +3786,7 @@ class StreamingProcessor:
             error_message=message,
         )
         try:
-            await self._nc.publish(reply_subject, payload)
+            await self._publish_terminal_envelope(reply_subject, payload)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to publish terminal error chunk for %s/%s (code=%s) — skipping ACK so JetStream redelivers",

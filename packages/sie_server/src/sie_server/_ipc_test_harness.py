@@ -53,10 +53,25 @@ logger = logging.getLogger(__name__)
 
 # Fixed canned result the Rust smoke test can pattern-match on.
 _CANNED_RESULT = {"smoke": "ok", "source": "ipc_test_harness"}
+_IPC_TEST_RESULT_BYTES_OPTION = "ipc_test_result_bytes"
+_MAX_IPC_TEST_RESULT_BYTES = 40 * 1024 * 1024
 
 
 def _canned_result_bytes() -> bytes:
     return msgpack.packb(_CANNED_RESULT, use_bin_type=True)
+
+
+def _requested_test_result_bytes(item: Any) -> int:
+    """Return the bounded test-only result size requested on an IPC item."""
+    options = getattr(item, "options", None)
+    if not isinstance(options, dict) or _IPC_TEST_RESULT_BYTES_OPTION not in options:
+        return 0
+    value = options[_IPC_TEST_RESULT_BYTES_OPTION]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{_IPC_TEST_RESULT_BYTES_OPTION} must be an integer")
+    if not 0 <= value <= _MAX_IPC_TEST_RESULT_BYTES:
+        raise ValueError(f"{_IPC_TEST_RESULT_BYTES_OPTION} must be between 0 and {_MAX_IPC_TEST_RESULT_BYTES}")
+    return value
 
 
 class _StubGenerationTasks:
@@ -273,7 +288,11 @@ def _canned_batch_outcome_echoing_prepared_tokens(items: list[Any]) -> BatchOutc
                 "input_ids_first_seq": None,
                 "max_seq_len": None,
             }
-        payload = msgpack.packb({**_CANNED_RESULT, "prepared_tokens": pt_echo}, use_bin_type=True)
+        payload_shape: dict[str, Any] = {**_CANNED_RESULT, "prepared_tokens": pt_echo}
+        requested_bytes = _requested_test_result_bytes(item)
+        if requested_bytes:
+            payload_shape["test_blob"] = b"x" * requested_bytes
+        payload = msgpack.packb(payload_shape, use_bin_type=True)
         outcomes.append(
             ItemOutcome(
                 work_item_id=item.work_item_id,

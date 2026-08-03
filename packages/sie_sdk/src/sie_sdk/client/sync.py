@@ -42,20 +42,23 @@ import threading
 import time
 import weakref
 from collections.abc import Iterator, Mapping, Sequence
+from functools import partial
 from pathlib import Path
-from typing import IO, Any, Literal, Self, overload
+from typing import IO, Any, Literal, Self, cast, overload
 from urllib.parse import urlencode
 
 import httpx
 import msgpack
 import msgpack_numpy as m
 
+from sie_sdk.audio import convert_item_audio
 from sie_sdk.documents import convert_item_document
 from sie_sdk.files import resolve_upload
-from sie_sdk.images import convert_item_images
+from sie_sdk.images import ImageLike, convert_images_for_json, convert_item_images
 from sie_sdk.jobs import TERMINAL_JOB_STATES, build_job_body, decode_chunk_bytes, job_chunks
 from sie_sdk.types import (
     Batch,
+    BatchList,
     CapacityInfo,
     ChatCompletion,
     ChatCompletionChunk,
@@ -63,12 +66,17 @@ from sie_sdk.types import (
     Connection,
     ConnectionCreated,
     ConnectionRevoked,
+    CostEstimate,
     EncodeResult,
     ExtractResult,
     File,
     FileDeleted,
+    FileList,
     GenerateChunk,
+    GenerateGrammar,
+    GenerateImage,
     GenerateResult,
+    GenerationUsage,
     Item,
     JobResults,
     JobStatus,
@@ -77,6 +85,9 @@ from sie_sdk.types import (
     OutputType,
     PoolInfo,
     PoolSpec,
+    RequestMetadata,
+    ResponseInputMessage,
+    ResponseResult,
     ScoreResult,
     StatusMessage,
     WorkerInfo,
@@ -85,6 +96,7 @@ from sie_sdk.types import (
 from ._shared import (
     DEFAULT_LEASE_RENEWAL_INTERVAL_S,
     DEFAULT_PROVISION_TIMEOUT_S,
+    ESTIMATE_PATH,
     HTTP_CLIENT_ERROR,
     HTTP_GATEWAY_TIMEOUT,
     JSON_CONTENT_TYPE,
@@ -93,6 +105,7 @@ from ._shared import (
     LORA_LOADING_MAX_RETRIES,
     MODEL_LOADING_DEFAULT_DELAY_S,
     MODEL_LOADING_ERROR_CODE,
+    MODEL_REVISION_HEADER,
     MSGPACK_CONTENT_TYPE,
     PROVISIONING_ERROR_CODE,
     RESOURCE_EXHAUSTED_ERROR_CODE,
@@ -100,11 +113,16 @@ from ._shared import (
     SDK_VERSION_HEADER,
     SERVER_VERSION_HEADER,
     _coerce_token_count,
+    attach_request_metadata,
+    base_url_accepts_origin_credentials,
     build_chat_body,
+    build_estimate_envelope,
+    build_responses_body,
     check_version_skew,
     compute_oom_backoff,
     compute_retry_delay,
     convert_score_images_for_wire,
+    copy_base_url_headers,
     get_error_code,
     get_retry_after,
     get_sdk_version,
@@ -114,14 +132,22 @@ from ._shared import (
     parse_encode_results,
     parse_extract_results,
     parse_gpu_param,
+    parse_request_metadata,
     parse_score_result,
+    parse_terminal_json_object,
     provisioning_retry_delay,
+    raise_if_estimate_unroutable,
     raise_if_input_too_long,
     raise_if_model_load_failed,
+    request_matches_base_url_origin,
     retry_after_or_default,
+    settled_charge_from_usage,
     sse_chunk_error,
     sse_headers,
     validate_encode_result_count,
+    validate_generate_grammar,
+    validate_generate_request_body,
+    websocket_matches_base_url_origin,
 )
 from ._sse import iter_sse_payloads
 from .errors import (
@@ -159,7 +185,11 @@ _LEASE_RENEWAL_MAX_RETRIES = 5
 _NUMPY_PATCHED = False
 
 
-def _parse_generate_result(data: dict[str, Any]) -> GenerateResult:
+def _parse_generate_result(
+    data: dict[str, Any],
+    *,
+    request: RequestMetadata | None = None,
+) -> GenerateResult:
     """Build a :class:`GenerateResult` from the gateway's JSON envelope.
 
     The gateway shape (streaming): ``{model, text, finish_reason, usage,
@@ -172,11 +202,11 @@ def _parse_generate_result(data: dict[str, Any]) -> GenerateResult:
     model = data.get("model")
     if not isinstance(model, str):
         msg = f"Generate response missing string 'model' field: got {type(model).__name__}"
-        raise RequestError(msg)
+        raise RequestError(msg, request=request)
     text = data.get("text")
     if not isinstance(text, str):
         msg = f"Generate response missing string 'text' field: got {type(text).__name__}"
-        raise RequestError(msg)
+        raise RequestError(msg, request=request)
     result: GenerateResult = {
         "model": model,
         "text": text,
@@ -186,11 +216,15 @@ def _parse_generate_result(data: dict[str, Any]) -> GenerateResult:
         result["finish_reason"] = finish  # type: ignore[typeddict-item]
     usage = data.get("usage")
     if isinstance(usage, dict):
-        result["usage"] = {
+        parsed_usage: GenerationUsage = {
             "prompt_tokens": _coerce_token_count(usage.get("prompt_tokens")),
             "completion_tokens": _coerce_token_count(usage.get("completion_tokens")),
             "total_tokens": _coerce_token_count(usage.get("total_tokens")),
         }
+        settled = settled_charge_from_usage(usage)
+        if settled is not None:
+            parsed_usage["credits_charged"], parsed_usage["rate_book_version"] = settled
+        result["usage"] = parsed_usage
     attempt_id = data.get("attempt_id")
     if isinstance(attempt_id, str):
         result["attempt_id"] = attempt_id
@@ -211,6 +245,19 @@ def _close_transport(transport: httpx.Client) -> None:
     """
     with contextlib.suppress(Exception):
         transport.close()
+
+
+def _attach_origin_scoped_headers(
+    request: httpx.Request,
+    *,
+    base_url: str,
+    headers: Mapping[str, str],
+) -> None:
+    """Attach edge headers only to a non-control-plane request at the gateway origin."""
+    if request.extensions.get("sie_skip_base_url_headers"):
+        return
+    if request_matches_base_url_origin(base_url, str(request.url)):
+        request.headers.update(headers)
 
 
 def _handle_oom_retry(
@@ -238,7 +285,12 @@ def _handle_oom_retry(
     elapsed = time.monotonic() - start_time
     if oom_retries >= max_oom_retries or elapsed >= timeout:
         msg = f"Server resource exhausted after {oom_retries} retry attempt(s) for model '{model}'"
-        raise ResourceExhaustedError(msg, model=model, retries=oom_retries)
+        raise ResourceExhaustedError(
+            msg,
+            model=model,
+            retries=oom_retries,
+            request=parse_request_metadata(response.headers),
+        )
     retry_after = get_retry_after(response)
     raw_delay = compute_oom_backoff(retry_after, oom_retries)
     remaining = timeout - elapsed
@@ -262,7 +314,12 @@ def _handle_oom_retry(
             timeout,
         )
         msg = f"Server resource exhausted after {oom_retries} retry attempt(s) for model '{model}'"
-        raise ResourceExhaustedError(msg, model=model, retries=oom_retries)
+        raise ResourceExhaustedError(
+            msg,
+            model=model,
+            retries=oom_retries,
+            request=parse_request_metadata(response.headers),
+        )
     delay = raw_delay
     # First retry surfaces at WARNING so a user with default log level
     # can see "the SDK is retrying you" — without this they may spend
@@ -293,6 +350,12 @@ class SIEClient:
         options: Options dict for requests. Merged with per-call options (per-call wins).
         pool: DEPRECATED. Use create_pool() instead. Resource pool spec for isolated
             capacity. Format: {"name": "pool-name", "gpus": {"l4": 2}}.
+        max_connections: Optional maximum number of HTTP connections. Uses
+            httpx defaults when omitted.
+        base_url_headers: Optional additional headers for the configured gateway
+            origin. Values are copied at construction and never forwarded to a
+            control-plane URL, external payload-store reference, or redirect
+            target. Same-origin capability refs receive only these edge headers.
 
     Example:
         >>> client = SIEClient("http://localhost:8080")
@@ -327,8 +390,10 @@ class SIEClient:
         gpu: str | None = None,
         options: dict[str, Any] | None = None,
         pool: PoolSpec | None = None,
+        max_connections: int | None = None,
         control_plane_url: str | None = None,
         org: str | None = None,
+        base_url_headers: Mapping[str, str] | None = None,
     ) -> None:
         # Ensure msgpack-numpy hooks are installed (once per process).
         # Done lazily here instead of at module level to avoid monkey-patching
@@ -340,6 +405,10 @@ class SIEClient:
 
         # Normalize base_url (remove trailing slash)
         self._base_url = base_url.rstrip("/")
+        self._base_url_headers = copy_base_url_headers(base_url_headers)
+        if self._base_url_headers and not base_url_accepts_origin_credentials(self._base_url):
+            msg = "base_url_headers require an absolute https base_url without embedded credentials"
+            raise ValueError(msg)
         self._timeout = timeout_s
         self._default_gpu = gpu
         self._default_options = options
@@ -380,11 +449,31 @@ class SIEClient:
 
         self._headers = headers.copy()
 
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            timeout=timeout_s,
-            headers=headers,
-        )
+        client_kwargs: dict[str, Any] = {
+            "base_url": self._base_url,
+            "timeout": timeout_s,
+            "headers": headers,
+            "follow_redirects": False,
+        }
+        if self._base_url_headers:
+            client_kwargs["event_hooks"] = {
+                "request": [
+                    partial(
+                        _attach_origin_scoped_headers,
+                        base_url=self._base_url,
+                        headers=self._base_url_headers,
+                    )
+                ]
+            }
+        if max_connections is not None:
+            client_kwargs["limits"] = httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_connections,
+            )
+        self._client = httpx.Client(**client_kwargs)
+        # Per-thread request evidence lets benchmark callers account for SDK
+        # retries without changing normal response payloads.
+        self._request_state = threading.local()
 
         # Safety net: ensure transport is closed even if close() is never called.
         # Uses weakref.finalize so the reference doesn't prevent GC.
@@ -407,7 +496,31 @@ class SIEClient:
         """Return the base URL of the SIE server."""
         return self._base_url
 
+    @property
+    def last_retry_count(self) -> int:
+        """Return SDK retries performed by the latest call in this thread."""
+        return int(getattr(self._request_state, "last_retry_count", 0))
+
+    @property
+    def last_model_revision(self) -> str | None:
+        """Return the deployed execution revision observed on the latest call in this thread.
+
+        The property name is retained for wire compatibility with
+        ``X-SIE-Model-Revision``.
+        """
+        value = getattr(self._request_state, "last_model_revision", None)
+        return str(value) if value is not None else None
+
+    def _reset_retry_count(self) -> None:
+        self._request_state.last_retry_count = 0
+        self._request_state.last_model_revision = None
+
+    def _record_retry(self) -> None:
+        self._request_state.last_retry_count = self.last_retry_count + 1
+
     def _check_server_version(self, response: httpx.Response) -> None:
+        revision = response.headers.get(MODEL_REVISION_HEADER)
+        self._request_state.last_model_revision = revision if isinstance(revision, str) and revision else None
         if SIEClient._version_warning_logged:
             return
         server_version = response.headers.get(SERVER_VERSION_HEADER)
@@ -636,8 +749,9 @@ class SIEClient:
             bundle: Optional bundle filter. When set, only workers running this
                 bundle will be assigned to the pool.
             minimum_worker_count: Per-pool warm floor (minimum machines kept warm).
-                The gateway publishes it as ``sie_gateway_pool_warm_floor`` for KEDA,
-                which keeps that many machines warm. Defaults to 0 (scale to zero).
+                The gateway emits canonical ``sie.gateway.pool.warm_floor``
+                telemetry; the collector exposes ``sie_gateway_pool_warm_floor``
+                to KEDA. Defaults to 0 (scale to zero).
             pinned_models: Optional set of model ids to keep loaded so the first
                 request to them pays no cold model-load. Each id must be a model the
                 gateway already tracks and may be profile-qualified
@@ -1077,6 +1191,7 @@ class SIEClient:
             ...     {"images": ["photo.jpg"]},
             ... )
         """
+        self._reset_retry_count()
         # Track if single item was passed
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
@@ -1161,6 +1276,7 @@ class SIEClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         time.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -1174,6 +1290,7 @@ class SIEClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         time.sleep(delay_s)
                         continue
                 if isinstance(e, httpx.TimeoutException):
@@ -1208,6 +1325,7 @@ class SIEClient:
                         actual_delay,
                         timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
@@ -1229,6 +1347,7 @@ class SIEClient:
                         lora_retries,
                         LORA_LOADING_MAX_RETRIES,
                     )
+                    self._record_retry()
                     time.sleep(delay)
                     continue
 
@@ -1250,6 +1369,7 @@ class SIEClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
@@ -1262,6 +1382,7 @@ class SIEClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
 
             # Handle 504 (gateway timeout): queued work was published, but the
@@ -1281,6 +1402,7 @@ class SIEClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
@@ -1301,13 +1423,24 @@ class SIEClient:
 
         # Parse results and inject timing into each
         results = parse_encode_results(response_data["items"])
+        response_model = response_data.get("model")
+        if isinstance(response_model, str) and response_model:
+            for result in results:
+                result["model"] = response_model
         # Guard the 1:1 input↔output contract before any positional access
         # (``results[0]`` below, or batch reassembly in callers). A desynced
         # count otherwise surfaces as a context-free ``IndexError`` (#1526).
-        validate_encode_result_count(results, len(items_list), model)
+        validate_encode_result_count(
+            results,
+            len(items_list),
+            model,
+            request=parse_request_metadata(response.headers),
+        )
         if timing:
             for result in results:
                 result["timing"] = timing
+
+        attach_request_metadata(results, response.headers, response_data)
 
         # Return single result if single item was passed
         return results[0] if single_item else results
@@ -1345,6 +1478,90 @@ class SIEClient:
 
         data = response.json()
         return data["models"]
+
+    def estimate(
+        self,
+        endpoint: str,
+        request: Mapping[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> CostEstimate:
+        """Price a request WITHOUT running it (``POST /v1/estimate``).
+
+        The gateway plans the request through the same reservation planner the
+        metered path runs, against the same active rate book, and returns the
+        plan instead of holding it: no dispatch, no reservation, no credits
+        consumed. The quote is the CONSERVATIVE ceiling the live path would
+        hold — settlement bills the authoritative counts against that plan and
+        releases the rest, so the real charge is at most ``estimated_credits``.
+
+        Args:
+            endpoint: The exact target path, e.g. ``"/v1/encode/BAAI/bge-m3"``
+                (native, model in the path) or ``"/v1/chat/completions"``
+                (OpenAI-compatible, model in ``request["model"]``).
+            request: The verbatim body you would send to ``endpoint``. Passed
+                through untouched — a body the SDK reshaped would be a quote
+                for a request you never send.
+            timeout: Per-call timeout override in seconds.
+
+        Returns:
+            :class:`~sie_sdk.types.CostEstimate` with the planned per-dimension
+            units, the applied rational rates, the credits, and the active rate
+            book's version + digest.
+
+        Raises:
+            ValueError: If the envelope arguments are malformed client-side.
+            EstimateUnroutableError: If the active book cannot price the
+                request. This is the same verdict the real request would get —
+                the message names the unpriced identity or the dimension the
+                planner could not bound.
+            RequestError: If the target body is invalid (4xx), with the same
+                status/code the target route itself would return. In particular
+                a ``404 MODEL_NOT_FOUND`` means this data plane does not serve
+                the model at all — the estimate checks routability, not just
+                priceability, so it never quotes a request that would 404.
+            SIEConnectionError: If unable to connect to the server.
+            ServerError: For other 5xx responses.
+
+        Example:
+            >>> quote = client.estimate(
+            ...     "/v1/encode/BAAI/bge-m3",
+            ...     {"items": [{"text": "Hello"}]},
+            ... )
+            >>> quote["estimated_credits"]
+            1
+            >>> quote["rate_book_version"]
+            '2026-07-26-production-bootstrap-v2'
+        """
+        # Every other public method opens with this. Without it `estimate()`
+        # inherits whatever `last_retry_count` / `last_model_revision` the
+        # PREVIOUS call left on this thread, so a quote taken right after a
+        # retried `encode()` reports that encode's retries as its own —
+        # contradicting the properties' own "latest call in this thread".
+        self._reset_retry_count()
+        body = build_estimate_envelope(endpoint, request)
+        try:
+            response = self._client.post(
+                ESTIMATE_PATH,
+                json=body,
+                headers={
+                    "Accept": JSON_CONTENT_TYPE,
+                    "Content-Type": JSON_CONTENT_TYPE,
+                },
+                timeout=timeout if timeout is not None else self._timeout,
+            )
+        except httpx.ConnectError as e:
+            msg = f"Failed to connect to {self._base_url}: {e}"
+            raise SIEConnectionError(msg) from e
+        except httpx.TimeoutException as e:
+            msg = f"Request timed out: {e}"
+            raise SIEConnectionError(msg) from e
+
+        if response.status_code >= HTTP_CLIENT_ERROR:
+            raise_if_estimate_unroutable(response)
+            handle_error(response)
+
+        return cast("CostEstimate", response.json())
 
     def get_model(self, model: str) -> ModelInfo:
         """Get details for a specific model.
@@ -1418,6 +1635,15 @@ class SIEClient:
             rest = self._base_url
         return f"{scheme}{rest}{path}"
 
+    def _websocket_headers(self, websocket_url: str) -> dict[str, str]:
+        """Build edge-confined headers for one WebSocket handshake."""
+        headers: dict[str, str] = {}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        if self._base_url_headers and websocket_matches_base_url_origin(self._base_url, websocket_url):
+            headers.update(self._base_url_headers)
+        return headers
+
     def watch(
         self,
         *,
@@ -1443,14 +1669,10 @@ class SIEClient:
         else:
             paths = ["/ws/status"]
 
-        headers = {}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-
         for path in paths:
             ws_url = self._ws_url(path)
             try:
-                with connect(ws_url, additional_headers=headers) as ws:
+                with connect(ws_url, additional_headers=self._websocket_headers(ws_url)) as ws:
                     for message in ws:
                         if isinstance(message, bytes):
                             payload = message.decode("utf-8")
@@ -1726,6 +1948,7 @@ class SIEClient:
             ...     items=[{"text": "ML is AI..."}, {"text": "Python is..."}],
             ... )
         """
+        self._reset_retry_count()
         # Resolve defaults and pool
         pool_name, resolved_gpu = self._resolve_pool_and_gpu(gpu)
         resolved_options = self._resolve_options(options)
@@ -1783,6 +2006,7 @@ class SIEClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         time.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -1796,6 +2020,7 @@ class SIEClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         time.sleep(delay_s)
                         continue
                 if isinstance(e, httpx.TimeoutException):
@@ -1826,6 +2051,7 @@ class SIEClient:
                         actual_delay,
                         timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
@@ -1847,6 +2073,7 @@ class SIEClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
@@ -1859,6 +2086,7 @@ class SIEClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
 
             # Handle 504 (gateway timeout): queued work was published, but the
@@ -1878,6 +2106,7 @@ class SIEClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
@@ -1894,7 +2123,9 @@ class SIEClient:
         response_data = msgpack.unpackb(response.content, raw=False)
 
         # Build ScoreResult
-        return parse_score_result(response_data)
+        result = parse_score_result(response_data)
+        attach_request_metadata([result], response.headers, response_data)
+        return result
 
     def generate(
         self,
@@ -1902,9 +2133,20 @@ class SIEClient:
         prompt: str,
         *,
         max_new_tokens: int,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        images: Sequence[ImageLike | GenerateImage | dict[str, Any]] | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
         stop: list[str] | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        grammar: GenerateGrammar | Mapping[str, Any] | None = None,
+        seed: int | None = None,
+        logit_bias: dict[str, float] | None = None,
+        routing_key: str | None = None,
+        prompt_cache_key: str | None = None,
+        safety_identifier: str | None = None,
+        lora_adapter: str | None = None,
+        options: dict[str, Any] | None = None,
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
@@ -1927,9 +2169,30 @@ class SIEClient:
                 helpers in the SDK (use the OpenAI SDK against
                 ``/v1/chat/completions`` for chat-shaped requests).
             max_new_tokens: Hard cap on output tokens.
-            temperature: Sampling temperature.
-            top_p: Nucleus sampling cutoff.
+            images: Optional native image inputs. When present, the worker
+                renders one user turn containing the images and ``prompt``
+                through the model's own chat template before generation.
+            temperature: Sampling temperature override. Omit to use the
+                selected model profile's default.
+            top_p: Nucleus sampling cutoff override. Omit to use the selected
+                model profile's default.
             stop: Optional list of stop strings.
+            frequency_penalty: OpenAI-compatible frequency penalty in ``[-2, 2]``.
+            presence_penalty: OpenAI-compatible presence penalty in ``[-2, 2]``.
+            grammar: Optional native structured-output grammar. Set exactly
+                one of ``json_schema``, ``regex``, or ``ebnf``.
+            seed: Optional signed 64-bit per-request sampling seed. Exact
+                reproducibility depends on the active generation backend and
+                deployment configuration.
+            logit_bias: Optional token-id-to-bias map.
+            routing_key: Optional stable request routing key.
+            prompt_cache_key: Optional prompt cache affinity key.
+            safety_identifier: Optional opaque privacy-preserving safety id.
+            lora_adapter: Optional served LoRA adapter name.
+            options: Governed generation runtime options. Client defaults are
+                shallow-merged below per-call values, and explicit typed
+                sampler arguments win. Select non-default profiles through the
+                ``model:profile`` identity rather than ``options.profile``.
             gpu: Target GPU type / pool spec; see ``encode``.
             wait_for_capacity: Auto-retry 503 PROVISIONING / MODEL_LOADING responses
                 under ``provision_timeout_s``. See ``encode``. Unlike the
@@ -1937,7 +2200,9 @@ class SIEClient:
                 timeout is NOT retried here: generation is non-idempotent
                 and a 504 is a post-publish timeout, so retrying could
                 double-bill an inference. A ``504`` is surfaced as a
-                terminal :class:`ServerError`.
+                terminal :class:`ServerError`. Pass ``False`` to surface
+                pre-execution provisioning and model-loading responses without
+                retrying them.
             provision_timeout_s: Maximum time to wait for capacity.
 
         Returns:
@@ -1948,18 +2213,37 @@ class SIEClient:
             ServerError: On a ``504`` gateway timeout (post-publish, not
                 retried) or other 5xx responses.
         """
+        self._reset_retry_count()
+        resolved_grammar = validate_generate_grammar(grammar) if grammar is not None else None
         pool_name, resolved_gpu = self._resolve_pool_and_gpu(gpu)
 
         safe_model = model.replace("/", "__")
 
+        resolved_options = self._resolve_options(options)
         request_body: dict[str, Any] = {
             "prompt": prompt,
             "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
         }
+        if images is not None:
+            request_body["images"] = convert_images_for_json(images)
         if stop is not None:
             request_body["stop"] = stop
+        optional_fields = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "options": resolved_options,
+            "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
+            "grammar": resolved_grammar,
+            "seed": seed,
+            "logit_bias": logit_bias,
+            "routing_key": routing_key,
+            "prompt_cache_key": prompt_cache_key,
+            "safety_identifier": safety_identifier,
+            "lora_adapter": lora_adapter,
+        }
+        request_body.update({key: value for key, value in optional_fields.items() if value is not None})
+        validate_generate_request_body(request_body)
 
         body = json.dumps(request_body).encode("utf-8")
         headers: dict[str, str] = {"content-type": JSON_CONTENT_TYPE, "accept": JSON_CONTENT_TYPE}
@@ -1998,6 +2282,7 @@ class SIEClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         time.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2031,10 +2316,11 @@ class SIEClient:
                         start_time=start_time,
                         timeout=timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
-                if error_code == MODEL_LOADING_ERROR_CODE:
+                if error_code == MODEL_LOADING_ERROR_CODE and wait_for_capacity:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
@@ -2042,6 +2328,7 @@ class SIEClient:
                     retry_after = get_retry_after(response)
                     delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
                     actual_delay = min(delay, timeout - elapsed)
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
                 if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
@@ -2053,6 +2340,7 @@ class SIEClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
 
             # Do NOT retry 504 here. Unlike the idempotent encode/score/extract
@@ -2064,14 +2352,20 @@ class SIEClient:
             # surface it as a terminal ServerError instead (same reasoning as
             # the mid-flight transport-error block above). The pre-execution
             # 503 MODEL_LOADING / PROVISIONING retries above remain because
-            # those fire *before* any generation can have started.
+            # those fire *before* any generation can have started and the
+            # caller has opted into capacity waiting.
             if response.status_code == HTTP_GATEWAY_TIMEOUT:
                 msg = (
                     "Gateway timed out (504) after the generate request was published to the "
                     "queue; a worker may already be generating. Not retried because generation "
                     "is non-idempotent (retrying could double-bill). Re-issue manually if needed."
                 )
-                raise ServerError(msg, code=get_error_code(response), status_code=response.status_code)
+                raise ServerError(
+                    msg,
+                    code=get_error_code(response),
+                    status_code=response.status_code,
+                    request=parse_request_metadata(response.headers),
+                )
 
             if response.status_code >= HTTP_CLIENT_ERROR:
                 handle_error(response)
@@ -2080,11 +2374,136 @@ class SIEClient:
 
         self._check_server_version(response)
 
-        data = response.json()
-        if not isinstance(data, dict):
-            msg = f"Unexpected generate response shape: {type(data).__name__}"
-            raise RequestError(msg)
-        return _parse_generate_result(data)
+        data = parse_terminal_json_object(response, owner="generate")
+        result = _parse_generate_result(data, request=parse_request_metadata(response.headers, data))
+        attach_request_metadata([result], response.headers, data)
+        return result
+
+    def responses(
+        self,
+        model: str,
+        input: str | Sequence[ResponseInputMessage],
+        *,
+        max_output_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        seed: int | None = None,
+        gpu: str | None = None,
+        wait_for_capacity: bool = True,
+        provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+    ) -> ResponseResult:
+        """Create one non-streaming OpenAI-compatible Responses result.
+
+        The gateway's Responses MVP is stateless and text-only. ``input`` may
+        be a raw prompt or a sequence of role/content messages; content-part
+        arrays accept text parts only. Streaming, tools, stateful threading,
+        reasoning, metadata, instructions, and multimodal parts are not
+        supported by this surface.
+
+        Generation is non-idempotent. Only explicit pre-execution 503
+        PROVISIONING / MODEL_LOADING / RESOURCE_EXHAUSTED responses and
+        connect-before-send failures are retried. Mid-flight transport errors
+        and post-publish 504 responses are terminal so a retry cannot
+        double-bill or create a second completion.
+
+        Args:
+            model: Model name to use for generation.
+            input: Raw prompt string or typed role/content messages.
+            max_output_tokens: Optional hard cap on output tokens.
+            temperature: Optional sampling temperature override.
+            top_p: Optional nucleus sampling cutoff override.
+            seed: Optional signed 64-bit per-request sampling seed.
+            gpu: Target GPU type or pool spec; see :meth:`encode`.
+            wait_for_capacity: Auto-retry ``503 PROVISIONING`` responses
+                under ``provision_timeout_s``. Worker-side model loading and
+                resource-exhaustion retries follow their own bounded policies.
+            provision_timeout_s: Maximum time to wait for capacity.
+            max_oom_retries: Maximum number of worker-side
+                ``503 RESOURCE_EXHAUSTED`` retries.
+
+        Returns:
+            A typed :class:`ResponseResult`.
+
+        Raises:
+            ProvisioningError: If capacity is unavailable and waiting is
+                disabled, or the provisioning timeout is exceeded.
+            ModelLoadingError: If worker-side model-loading retries time out.
+            ResourceExhaustedError: If worker-side OOM retries are exhausted.
+            ServerError: On post-publish ``504`` or other server errors.
+            SIEConnectionError: If the request cannot be sent safely or the
+                connection fails after sending.
+        """
+        self._reset_retry_count()
+        pool_name, resolved_gpu = self._resolve_pool_and_gpu(gpu)
+        body = json.dumps(
+            build_responses_body(
+                model,
+                input,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                seed=seed,
+            )
+        ).encode("utf-8")
+        headers: dict[str, str] = {"content-type": JSON_CONTENT_TYPE, "accept": JSON_CONTENT_TYPE}
+        if resolved_gpu:
+            headers["X-SIE-MACHINE-PROFILE"] = resolved_gpu
+        if pool_name:
+            headers["X-SIE-Pool"] = pool_name
+
+        timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
+        start_time = time.monotonic()
+        oom_retries = 0
+        while True:
+            remaining = timeout - (time.monotonic() - start_time)
+            if remaining <= 0:
+                msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
+                raise ProvisioningError(msg, gpu=resolved_gpu)
+            try:
+                response = self._client.post(
+                    "/v1/responses",
+                    content=body,
+                    headers=headers,
+                    timeout=min(self._timeout, remaining),
+                )
+            except httpx.ConnectError as e:
+                if wait_for_capacity and is_transient_connect_error(e):
+                    delay_s = compute_retry_delay(
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Connect error",
+                        error=e,
+                    )
+                    if delay_s is not None:
+                        self._record_retry()
+                        time.sleep(delay_s)
+                        continue
+                msg = f"Failed to connect to {self._base_url}: {e}"
+                raise SIEConnectionError(msg) from e
+            except _RETRYABLE_TRANSPORT_ERRORS as e:
+                msg = f"Connection lost mid-request ({type(e).__name__}): {e}"
+                raise SIEConnectionError(msg) from e
+
+            if response.status_code == 200:
+                break
+            delay, oom_retries = next_stream_retry_delay(
+                response,
+                model=model,
+                gpu=resolved_gpu,
+                wait_for_capacity=wait_for_capacity,
+                start_time=start_time,
+                timeout=timeout,
+                oom_retries=oom_retries,
+                max_oom_retries=max_oom_retries,
+            )
+            self._record_retry()
+            time.sleep(delay)
+
+        self._check_server_version(response)
+        data = parse_terminal_json_object(response, owner="Responses")
+        attach_request_metadata([data], response.headers, data)
+        return cast("ResponseResult", data)
 
     def chat_completions(
         self,
@@ -2132,6 +2551,7 @@ class SIEClient:
         still merged last for forward-compat fields the typed surface does
         not name yet.
         """
+        self._reset_retry_count()
         pool_name, resolved_gpu = self._resolve_pool_and_gpu(gpu)
         body = json.dumps(
             build_chat_body(
@@ -2190,6 +2610,7 @@ class SIEClient:
                         start_time=start_time, timeout=timeout, error_label="Connect error", error=e
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         time.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2212,14 +2633,13 @@ class SIEClient:
                 oom_retries=oom_retries,
                 max_oom_retries=max_oom_retries,
             )
+            self._record_retry()
             time.sleep(delay)
 
         self._check_server_version(response)
-        data = response.json()
-        if not isinstance(data, dict):
-            msg = f"Unexpected chat completion response shape: {type(data).__name__}"
-            raise RequestError(msg)
-        return data  # type: ignore[return-value]
+        data = parse_terminal_json_object(response, owner="chat completion")
+        attach_request_metadata([data], response.headers, data)
+        return cast("ChatCompletion", data)
 
     def stream_chat_completions(
         self,
@@ -2315,10 +2735,23 @@ class SIEClient:
         prompt: str,
         *,
         max_new_tokens: int,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        images: Sequence[ImageLike | GenerateImage | dict[str, Any]] | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
         stop: list[str] | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        grammar: GenerateGrammar | Mapping[str, Any] | None = None,
+        seed: int | None = None,
+        logit_bias: dict[str, float] | None = None,
+        logprobs: bool = False,
+        top_logprobs: int | None = None,
+        routing_key: str | None = None,
+        prompt_cache_key: str | None = None,
+        safety_identifier: str | None = None,
+        lora_adapter: str | None = None,
         gpu: str | None = None,
+        options: dict[str, Any] | None = None,
         extra_body: dict[str, Any] | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
@@ -2330,19 +2763,44 @@ class SIEClient:
         ``done: true`` plus ``usage`` / ``ttft_ms``. Error semantics match
         :meth:`stream_chat_completions`.
         """
+        resolved_grammar = validate_generate_grammar(grammar) if grammar is not None else None
         pool_name, resolved_gpu = self._resolve_pool_and_gpu(gpu)
         safe_model = model.replace("/", "__")
+        resolved_options = self._resolve_options(options)
         req: dict[str, Any] = {
             "prompt": prompt,
             "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
             "stream": True,
         }
+        if images is not None:
+            req["images"] = convert_images_for_json(images)
         if stop is not None:
             req["stop"] = stop
+        optional_fields = {
+            "frequency_penalty": frequency_penalty,
+            "temperature": temperature,
+            "top_p": top_p,
+            "options": resolved_options,
+            "presence_penalty": presence_penalty,
+            "grammar": resolved_grammar,
+            "seed": seed,
+            "logit_bias": logit_bias,
+            "routing_key": routing_key,
+            "prompt_cache_key": prompt_cache_key,
+            "safety_identifier": safety_identifier,
+            "lora_adapter": lora_adapter,
+        }
+        req.update({key: value for key, value in optional_fields.items() if value is not None})
+        if logprobs:
+            req["logprobs"] = True
+            if top_logprobs is not None:
+                req["top_logprobs"] = top_logprobs
         if extra_body:
             req.update(extra_body)
+        validate_generate_request_body(req)
+        if not req.get("logprobs"):
+            req.pop("top_logprobs", None)
+        req.update(prompt=prompt, max_new_tokens=max_new_tokens, stream=True)
         body = json.dumps(req).encode("utf-8")
         headers = sse_headers(resolved_gpu, pool_name)
         yield from self._stream_sse_chunks(
@@ -2376,6 +2834,7 @@ class SIEClient:
         ``with`` keeps the stream open while the caller consumes it; an early
         ``break`` tears the context down and the worker sees the disconnect.
         """
+        self._reset_retry_count()
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
         start_time = time.monotonic()
         oom_retries = 0
@@ -2403,6 +2862,7 @@ class SIEClient:
                             oom_retries=oom_retries,
                             max_oom_retries=max_oom_retries,
                         )
+                        self._record_retry()
                     else:
                         self._check_server_version(response)
                         for payload in iter_sse_payloads(response.iter_lines()):
@@ -2424,6 +2884,7 @@ class SIEClient:
                         start_time=start_time, timeout=timeout, error_label="Connect error", error=e
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         time.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2565,16 +3026,19 @@ class SIEClient:
             ...     labels=["person", "organization"],
             ... )
         """
+        self._reset_retry_count()
         # Track if single item was passed
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
 
-        # Convert images and documents to wire format (bytes + format hint)
+        # Convert media and documents to wire format (bytes + format hint)
         items_for_wire = []
         for item in items_list:
             wire_item: dict[str, Any] = {**item}  # ty: ignore[invalid-argument-type]
             if "images" in wire_item:
                 wire_item = convert_item_images(wire_item)
+            if "audio" in wire_item:
+                wire_item = convert_item_audio(wire_item)
             if "document" in wire_item:
                 wire_item = convert_item_document(wire_item)
             items_for_wire.append(wire_item)
@@ -2641,6 +3105,7 @@ class SIEClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         time.sleep(delay_s)
                         continue
                 msg = f"Failed to connect to {self._base_url}: {e}"
@@ -2654,6 +3119,7 @@ class SIEClient:
                         error=e,
                     )
                     if delay_s is not None:
+                        self._record_retry()
                         time.sleep(delay_s)
                         continue
                 if isinstance(e, httpx.TimeoutException):
@@ -2687,6 +3153,7 @@ class SIEClient:
                         actual_delay,
                         timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
@@ -2708,6 +3175,7 @@ class SIEClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
@@ -2720,6 +3188,7 @@ class SIEClient:
                         timeout=timeout,
                         model=model,
                     )
+                    self._record_retry()
                     continue
 
             # Handle 504 (gateway timeout): queued work was published, but the
@@ -2739,6 +3208,7 @@ class SIEClient:
                         elapsed,
                         timeout,
                     )
+                    self._record_retry()
                     time.sleep(actual_delay)
                     continue
 
@@ -2756,6 +3226,12 @@ class SIEClient:
 
         # Parse results
         results = parse_extract_results(response_data["items"])
+        response_model = response_data.get("model")
+        if isinstance(response_model, str) and response_model:
+            for result in results:
+                result["model"] = response_model
+
+        attach_request_metadata(results, response.headers, response_data)
 
         # Return single result if single item was passed
         return results[0] if single_item else results
@@ -2781,6 +3257,7 @@ class _SyncNamespace:
         *,
         json_body: Any = None,
         timeout_s: float | None = None,
+        include_base_url_headers: bool = True,
     ) -> Any:
         """One JSON request over the client's httpx transport (bearer auth reused)."""
         headers = {"Accept": JSON_CONTENT_TYPE, "Content-Type": JSON_CONTENT_TYPE}
@@ -2791,6 +3268,7 @@ class _SyncNamespace:
                 json=json_body,
                 headers=headers,
                 timeout=timeout_s if timeout_s is not None else self._c._timeout,
+                extensions={"sie_skip_base_url_headers": not include_base_url_headers},
             )
         except httpx.ConnectError as e:
             msg = f"Failed to connect to {url}: {e}"
@@ -2919,16 +3397,21 @@ class _SyncJobs(_SyncNamespace):
     def _read_ref(self, ref: str) -> bytes:
         """Retrieve a chunk's payload-store ref (local path or http(s) URL, POC).
 
-        http(s) refs are fetched with a bare request that does NOT carry the
-        client's ``Authorization`` header: a ref points at the payload store,
-        not the SIE API, so the bearer token must never leak to the ref host
-        (matches the TS SDK, which fetches refs with a plain ``fetch``).
+        http(s) refs are fetched without the client's ``Authorization`` header.
+        An exact gateway-origin capability ref receives the configured edge
+        headers (for example Modal proxy auth); external refs remain bare. Ref
+        redirects are never followed, so neither credential can reach a redirect
+        target.
         """
         if ref.startswith(("http://", "https://")):
+            headers = {"Accept": "application/octet-stream"}
+            if self._c._base_url_headers and request_matches_base_url_origin(self._c._base_url, ref):
+                headers.update(self._c._base_url_headers)
             response = httpx.get(
                 ref,
-                headers={"Accept": "application/octet-stream"},
+                headers=headers,
                 timeout=self._c._client.timeout,
+                follow_redirects=False,
             )
             if response.status_code >= HTTP_CLIENT_ERROR:
                 handle_error(response)
@@ -2960,18 +3443,18 @@ class _SyncConnections(_SyncNamespace):
     def add(self, name: str, type: str, secret: str) -> ConnectionCreated:
         """Create an org-scoped connection (connector auth). ``type`` is the connector family."""
         body = {"type": type, "name": name, "secret": secret}
-        return self._request_json("POST", self._base(), json_body=body)
+        return self._request_json("POST", self._base(), json_body=body, include_base_url_headers=False)
 
     def list(self) -> Sequence[Connection]:
         """List the org's active connections (secrets redacted)."""
-        data = self._request_json("GET", self._base())
+        data = self._request_json("GET", self._base(), include_base_url_headers=False)
         if isinstance(data, dict):
             return data.get("connections", [])
         return data if isinstance(data, list) else []
 
     def revoke(self, name: str) -> ConnectionRevoked:
         """Revoke (soft-delete) a connection; frees the name for reuse."""
-        return self._request_json("DELETE", f"{self._base()}/{name}")
+        return self._request_json("DELETE", f"{self._base()}/{name}", include_base_url_headers=False)
 
 
 # ---------------------------------------------------------------------------
@@ -3039,6 +3522,49 @@ class _SyncFiles(_SyncNamespace):
         """Fetch a file's metadata (``GET /v1/files/{id}``)."""
         return self._request_json("GET", f"/v1/files/{file_id}")
 
+    def list(
+        self,
+        *,
+        after: str | None = None,
+        limit: int | None = None,
+        order: Literal["asc", "desc"] | None = None,
+        purpose: str | None = None,
+    ) -> Sequence[File]:
+        """List the org's live files with OpenAI cursor/filter arguments."""
+        return self.list_page(after=after, limit=limit, order=order, purpose=purpose).get("data", [])
+
+    def list_page(
+        self,
+        *,
+        after: str | None = None,
+        limit: int | None = None,
+        order: Literal["asc", "desc"] | None = None,
+        purpose: str | None = None,
+    ) -> FileList:
+        """Return one file cursor page, including pagination metadata."""
+        params = {
+            key: value
+            for key, value in {
+                "after": after,
+                "limit": limit,
+                "order": order,
+                "purpose": purpose,
+            }.items()
+            if value is not None
+        }
+        path = f"/v1/files?{urlencode(params)}" if params else "/v1/files"
+        data = self._request_json("GET", path)
+        if isinstance(data, dict):
+            return cast("FileList", data)
+        files = data if isinstance(data, list) else []
+        return {
+            "object": "list",
+            "data": files,
+            "first_id": files[0].get("id") if files else None,
+            "last_id": files[-1].get("id") if files else None,
+            "has_more": False,
+        }
+
     def content(self, file_id: str) -> bytes:
         """Download a file's raw bytes (``GET /v1/files/{id}/content``)."""
         try:
@@ -3099,12 +3625,25 @@ class _SyncBatches(_SyncNamespace):
         """Fetch a batch's status (``GET /v1/batches/{id}``)."""
         return self._request_json("GET", f"/v1/batches/{batch_id}")
 
-    def list(self) -> Sequence[Batch]:
-        """List the org's batches (``GET /v1/batches``; additive OpenAI-parity)."""
-        data = self._request_json("GET", "/v1/batches")
+    def list(self, *, after: str | None = None, limit: int | None = None) -> Sequence[Batch]:
+        """List the org's batches while preserving the historical sequence return."""
+        return self.list_page(after=after, limit=limit).get("data", [])
+
+    def list_page(self, *, after: str | None = None, limit: int | None = None) -> BatchList:
+        """Return one batch cursor page, including pagination metadata."""
+        params = {key: value for key, value in {"after": after, "limit": limit}.items() if value is not None}
+        path = f"/v1/batches?{urlencode(params)}" if params else "/v1/batches"
+        data = self._request_json("GET", path)
         if isinstance(data, dict):
-            return data.get("data", [])
-        return data if isinstance(data, list) else []
+            return cast("BatchList", data)
+        batches = data if isinstance(data, list) else []
+        return {
+            "object": "list",
+            "data": batches,
+            "first_id": batches[0].get("id") if batches else None,
+            "last_id": batches[-1].get("id") if batches else None,
+            "has_more": False,
+        }
 
     def cancel(self, batch_id: str) -> Batch:
         """Cancel a batch (``POST /v1/batches/{id}/cancel``; additive OpenAI-parity)."""

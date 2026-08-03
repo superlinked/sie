@@ -10,7 +10,7 @@ These types support flexible Python inputs
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, Never, NotRequired, Required, TypedDict
 
 import numpy as np
 
@@ -122,7 +122,8 @@ class Item(TypedDict, total=False):
     video: VideoInput | bytes | str | Path
     document: DocumentInput | bytes | str | Path
     metadata: dict[str, Any]
-    multivector: NDArray[np.float32]  # Pre-encoded multivector (for use with scoring.maxsim)
+    # Pre-encoded multivector (for use with scoring.maxsim).
+    multivector: NDArray[np.float16] | NDArray[np.float32]
 
 
 class SparseResult(TypedDict):
@@ -141,6 +142,61 @@ class TimingInfo(TypedDict, total=False):
     inference_ms: float
 
 
+class RequestUsage(TypedDict, total=False):
+    """Authoritative metered units for one completed inference request.
+
+    ``credits_charged``/``rate_book_version`` are the SETTLED charge as this
+    response BODY reported it — never an estimate, never a reservation, and
+    never fabricated. They are published whenever the gateway could write them
+    into this body, including on a billing-fault response, where dispatches
+    that rated cleanly are burned before the fault is returned, so the charge
+    is real even though the result was not delivered. An explicit ``0`` is a
+    settlement that cost nothing.
+
+    Their ABSENCE means the body did not carry a settled charge — NOT that
+    nothing was charged. A body the gateway must leave byte-for-byte intact
+    (an opaque content type, one it cannot safely rewrite or buffer) still
+    settles and still charges, and reports the debit only in the
+    ``x-sie-credits-debited`` header. Read
+    :attr:`RequestMetadata.credits_debited` for the authoritative answer: the
+    SDK fills it from this block when present and from that header otherwise,
+    so it is absent only when nothing was charged.
+    """
+
+    input_tokens: int
+    pairs: int
+    images: int
+    pages: int
+    output_tokens: int
+    audio_ms: int
+    credits_charged: int
+    rate_book_version: str
+
+
+class RequestMetadata(TypedDict, total=False):
+    """Gateway metadata from the successful terminal response.
+
+    For batch encode/extract calls, each item repeats this request-scoped
+    metadata; the values describe the whole HTTP request, not one item.
+    """
+
+    id: str
+    usage: RequestUsage
+    #: Exact committed debit — the authoritative charge for this request.
+    #: Body-first (``usage.credits_charged``), falling back to the
+    #: ``x-sie-credits-debited`` header, which the gateway sets on every
+    #: non-streamed response whose settlement committed (including
+    #: billing-fault responses and bodies it left untouched). The two always
+    #: agree when both are present. Absence here — unlike absence inside
+    #: ``usage`` — does mean nothing was charged. Streamed responses carry no
+    #: headers at all: their charge rides the terminal usage chunk.
+    credits_debited: int
+    #: Immutable rate-book version that rated ``credits_debited``, when the
+    #: response reported one.
+    rate_book_version: str
+    execution_identity_sha256: str
+
+
 class EncodeResult(TypedDict, total=False):
     """Result of encoding a single item.
 
@@ -148,17 +204,24 @@ class EncodeResult(TypedDict, total=False):
     output representations depending on what was requested.
 
     Attributes:
+        model: Model identity returned by the server.
         id: Item ID (echoed from request if provided).
         dense: Dense embedding as numpy array, shape [dims].
         sparse: Sparse embedding with indices and values.
-        multivector: Multi-vector embedding as numpy array, shape [num_tokens, token_dims].
+        multivector: Multi-vector embedding as a float16 or float32 numpy array,
+            shape [num_tokens, token_dims]. The resolved model profile chooses
+            the default dtype; an explicit output_dtype request overrides it.
+        request: Request-scoped id, metered usage, and settled debit when
+            supplied by the gateway.
     """
 
+    model: str
     id: str
     dense: NDArray[np.float32]
     sparse: SparseResult
-    multivector: NDArray[np.float32]
+    multivector: NDArray[np.float16] | NDArray[np.float32]
     timing: TimingInfo
+    request: RequestMetadata
 
 
 class ModelDims(TypedDict, total=False):
@@ -208,6 +271,7 @@ class ModelInfo(TypedDict, total=False):
     outputs: list[str]  # ["dense"], ["dense", "sparse"], etc.
     dims: ModelDims
     max_sequence_length: int
+    revision: str | None
     capabilities: ModelCapabilities
 
 
@@ -225,6 +289,13 @@ class ScoreEntry(TypedDict):
     rank: int
 
 
+class ScoreUsage(TypedDict):
+    """Authoritative usage reported by a score adapter."""
+
+    input_tokens: Required[int]
+    images: NotRequired[int]
+
+
 class ScoreResult(TypedDict, total=False):
     """Result of scoring items against a query.
 
@@ -232,11 +303,15 @@ class ScoreResult(TypedDict, total=False):
         model: Model used for scoring.
         query_id: Query ID (echoed from request if provided).
         scores: List of score entries, sorted by relevance (descending).
+        request: Request-scoped id, metered usage, and settled debit when
+            supplied by the gateway.
     """
 
     model: str
     query_id: str
     scores: list[ScoreEntry]
+    usage: ScoreUsage
+    request: RequestMetadata
 
 
 class Entity(TypedDict, total=False):
@@ -301,24 +376,38 @@ class DetectedObject(TypedDict):
     bbox: list[int]
 
 
+class ExtractItemErrorDetail(TypedDict):
+    """Stable per-item extraction failure."""
+
+    code: str
+    message: str
+
+
 class ExtractResult(TypedDict, total=False):
     """Result of extraction for a single item.
 
     Attributes:
+        model: Model identity returned by the server.
         id: Item ID (echoed from request or auto-generated).
         entities: List of extracted entities (NER spans).
         relations: List of extracted relation triples.
         classifications: List of classification results.
         objects: List of detected objects with bounding boxes.
         data: Additional structured extraction data (if output_schema was provided).
+        error: Stable per-item failure when extraction did not complete.
+        request: Request-scoped id, metered usage, and settled debit when
+            supplied by the gateway.
     """
 
+    model: str
     id: str
     entities: list[Entity]
     relations: list[Relation]
     classifications: list[Classification]
     objects: list[DetectedObject]
     data: dict[str, Any]
+    error: ExtractItemErrorDetail
+    request: RequestMetadata
 
 
 # Streaming generation result. Streaming happens inside the gateway/worker;
@@ -328,12 +417,72 @@ class ExtractResult(TypedDict, total=False):
 FinishReason = Literal["stop", "length", "cancelled", "content_filter", "error"]
 
 
+class GenerateImage(TypedDict):
+    """One image paired with a native generation prompt."""
+
+    data: Image.Image | NDArray[Any] | bytes | str | Path
+    format: NotRequired[str]
+
+
+class JsonSchemaGrammar(TypedDict):
+    """Constrain generation to a JSON Schema."""
+
+    json_schema: dict[str, Any]
+    regex: NotRequired[Never]
+    ebnf: NotRequired[Never]
+    label: NotRequired[str | None]
+    strict: NotRequired[bool | None]
+
+
+class RegexGrammar(TypedDict):
+    """Constrain generation to a regular expression."""
+
+    json_schema: NotRequired[Never]
+    regex: str
+    ebnf: NotRequired[Never]
+    label: NotRequired[str | None]
+    strict: NotRequired[bool | None]
+
+
+class EbnfGrammar(TypedDict):
+    """Constrain generation to an EBNF grammar."""
+
+    json_schema: NotRequired[Never]
+    regex: NotRequired[Never]
+    ebnf: str
+    label: NotRequired[str | None]
+    strict: NotRequired[bool | None]
+
+
+GenerateGrammar = JsonSchemaGrammar | RegexGrammar | EbnfGrammar
+"""Native structured-output grammar. Exactly one grammar variant is set."""
+
+
 class GenerationUsage(TypedDict):
-    """Token usage for a single generation call."""
+    """Token usage for a single generation call.
+
+    ``credits_charged``/``rate_book_version`` ride the same block on a settled
+    response — including the terminal chunk of a stream, the only place a
+    streamed request can report what it cost. An explicit ``0`` is a settlement
+    that cost nothing; nothing here is ever an estimate or a fabricated zero.
+
+    Absence means this block did not carry the charge, NOT that nothing was
+    charged. On a buffered call read :attr:`RequestMetadata.credits_debited`,
+    which also covers responses whose body the gateway left untouched. On a
+    stream there is no header to fall back to, and a chat/completions stream
+    carries the charge only when it opted into
+    ``stream_options.include_usage`` — without that there is no usage chunk at
+    all. Native generate always carries usage on its terminal chunk. A stream
+    whose terminal settle did not commit in time reports its tokens without a
+    charge rather than guessing one; ``GET /me/usage`` remains the balance
+    authority.
+    """
 
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    credits_charged: NotRequired[int]
+    rate_book_version: NotRequired[str]
 
 
 class GenerateResult(TypedDict, total=False):
@@ -348,6 +497,9 @@ class GenerateResult(TypedDict, total=False):
             correlate gateway logs with worker logs across redelivery.
         ttft_ms: Time-to-first-token in milliseconds (worker-measured).
         tpot_ms: Average time per output token in milliseconds.
+        request: Request-scoped id, metered usage, and settled debit when
+            supplied by the gateway. This is distinct from the model-native
+            token summary in ``usage``.
     """
 
     model: str
@@ -357,6 +509,7 @@ class GenerateResult(TypedDict, total=False):
     attempt_id: str | None
     ttft_ms: float | None
     tpot_ms: float | None
+    request: RequestMetadata
 
 
 class GenerateChunk(TypedDict, total=False):
@@ -372,6 +525,7 @@ class GenerateChunk(TypedDict, total=False):
         request_id: Gateway request id (stable across the stream).
         seq: Monotonic per-attempt chunk sequence number.
         text_delta: Incremental text for this chunk.
+        logprobs: Per-token log probabilities aligned with ``text_delta``.
         done: ``True`` on the terminal chunk.
         finish_reason: Termination reason (terminal chunk only).
         usage: Prompt / completion / total token counts (terminal chunk only).
@@ -382,6 +536,7 @@ class GenerateChunk(TypedDict, total=False):
     request_id: str
     seq: int
     text_delta: str
+    logprobs: list[dict[str, Any]]
     done: bool
     finish_reason: FinishReason
     usage: GenerationUsage
@@ -463,6 +618,7 @@ class ChatCompletion(TypedDict, total=False):
     system_fingerprint: str | None
     choices: list[ChatChoice]
     usage: ChatUsage
+    request: RequestMetadata
 
 
 class ChatDelta(TypedDict, total=False):
@@ -497,6 +653,65 @@ class ChatCompletionChunk(TypedDict, total=False):
     system_fingerprint: str | None
     choices: list[ChatChunkChoice]
     usage: ChatUsage
+
+
+# --- Responses (OpenAI-compatible) — /v1/responses -------------------------
+
+
+class ResponseInputContentPart(TypedDict):
+    """One text-only content part accepted by the Responses MVP."""
+
+    type: Literal["text", "input_text"]
+    text: str
+
+
+ResponseInputRole = Literal["system", "user", "assistant", "developer"]
+
+
+class ResponseInputMessage(TypedDict):
+    """One stateless text message accepted by the Responses MVP."""
+
+    role: ResponseInputRole
+    content: str | list[ResponseInputContentPart]
+
+
+class ResponseOutputText(TypedDict):
+    """One text content part returned by the Responses MVP."""
+
+    type: Literal["output_text"]
+    text: str
+    annotations: list[dict[str, Any]]
+
+
+class ResponseOutputMessage(TypedDict):
+    """One completed assistant message returned by the Responses MVP."""
+
+    type: Literal["message"]
+    id: str
+    role: Literal["assistant"]
+    status: Literal["completed"]
+    content: list[ResponseOutputText]
+
+
+class ResponseUsage(TypedDict):
+    """Token usage returned by the Responses MVP."""
+
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+class ResponseResult(TypedDict, total=False):
+    """Non-streaming result from :meth:`SIEClient.responses`."""
+
+    id: str
+    object: Literal["response"]
+    created_at: int
+    model: str
+    status: Literal["completed"]
+    output: list[ResponseOutputMessage]
+    usage: ResponseUsage
+    request: RequestMetadata
 
 
 class WorkerInfo(TypedDict, total=False):
@@ -578,8 +793,9 @@ class PoolSpec(TypedDict, total=False):
         gpu_caps: Optional maximum assigned workers per GPU type.
         bundle: Optional bundle filter for worker assignment.
         minimum_worker_count: Per-pool warm floor (minimum machines kept warm). The
-            gateway publishes it as ``sie_gateway_pool_warm_floor`` for KEDA, which keeps
-            that many machines warm. Defaults to 0 (scale to zero).
+            gateway emits canonical ``sie.gateway.pool.warm_floor`` telemetry; the
+            collector exposes ``sie_gateway_pool_warm_floor`` to KEDA. Defaults to 0
+            (scale to zero).
         pinned_models: Per-pool set of model ids kept loaded so the first request to
             them pays no cold model-load. Each id must be a model the gateway already
             tracks (see ``GET /v1/configs/models``) and may be profile-qualified
@@ -881,6 +1097,10 @@ class WorkerStatusMessage(TypedDict, total=False):
     - Gateway (extracts machine_profile, bundle, loaded_models for routing)
     - sie-top in worker mode (displays full details)
 
+    Request-rate and latency telemetry are intentionally not part of this
+    status snapshot; consumers read those signals from the configured OTel
+    destination.
+
     Attributes:
         timestamp: Unix timestamp of this status snapshot.
         ready: True when worker is ready to accept traffic. Gateway only routes to
@@ -902,8 +1122,6 @@ class WorkerStatusMessage(TypedDict, total=False):
         models: Per-model status.
         max_batch_requests: Maximum number of requests the worker can batch in a
             single inference call (minimum across loaded models).
-        counters: Prometheus counter values for QPS calculation.
-        histograms: Prometheus histogram data for latency percentiles.
         saturated: Admission backpressure signal for direct-dispatch routing. True when the worker is
             at or above its high-water mark and the gateway should temporarily
             exclude it from the HRW direct-dispatch ring. The worker owns
@@ -924,8 +1142,6 @@ class WorkerStatusMessage(TypedDict, total=False):
     gpus: list[GPUMetrics]
     models: list[ModelStatus]
     max_batch_requests: int
-    counters: dict[str, dict[str, float]]
-    histograms: dict[str, dict[str, dict[str, Any]]]
     saturated: bool
 
 
@@ -980,6 +1196,64 @@ class JobPreflight(TypedDict, total=False):
     estimate_basis: str
 
 
+class AppliedRate(TypedDict):
+    """One priced dimension's exact rational rate from the active rate book.
+
+    Credits are integers, so rates are exact rationals rather than floats:
+    ``rate_numerator / rate_denominator`` credits per unit. Multiply and round
+    once, never per-unit, if you re-derive a total client-side.
+    """
+
+    unit: str
+    rate_numerator: int
+    rate_denominator: int
+
+
+class CostEstimate(TypedDict):
+    """A dispatch-free quote from ``POST /v1/estimate``.
+
+    The gateway prices the request through the SAME reservation planner the
+    metered path runs, against the SAME active rate book, and returns the plan
+    instead of holding it — no dispatch, no reservation, no credits consumed.
+
+    ``estimated_credits`` is the CONSERVATIVE ceiling the live path would hold.
+    Settlement bills the worker-authoritative counts against that plan and
+    releases the remainder, so the real charge is at most this number.
+
+    ``minimum_billed_units`` is present only for duration-priced (sealed custom
+    lane, ``gpu_second``) identities, where a dry run cannot know the request's
+    duration: there the quote is a rate card — ``applied_rates`` plus this
+    per-request floor — and ``unit_ceilings`` is the whole-window hold, not a
+    prediction. ``estimate_basis`` says which of the two you are looking at.
+
+    Every field except ``minimum_billed_units`` is always present: the gateway
+    serializes a whole ``ReservationPlan`` projection, so a partial quote is not
+    a shape the server can produce. Mirrors the TypeScript ``CostEstimate``.
+    """
+
+    endpoint: str
+    identity: RateIdentity
+    estimated_credits: int
+    unit_ceilings: dict[str, int]
+    applied_rates: list[AppliedRate]
+    rate_book_version: str
+    rate_book_sha256: str
+    rounding_rule: str
+    estimate_basis: str
+    # `null` on every non-duration-priced identity, so it is always serialized
+    # but never meaningful outside the sealed rate card.
+    minimum_billed_units: NotRequired[dict[str, int] | None]
+
+
+class RateIdentity(TypedDict):
+    """The rate-book row set a request is priced under."""
+
+    model: str
+    profile: str
+    operation: str
+    region: str
+
+
 class JobChunk(TypedDict, total=False):
     """One spawned chunk's settle metadata (``output.chunks[]``; results-as-refs).
 
@@ -992,7 +1266,13 @@ class JobChunk(TypedDict, total=False):
     state: str
     ref: str | None
     units: int | None
-    credits: int | None
+    #: Exact credits committed for this chunk, or ``None`` until the chunk's
+    #: settlement is acknowledged. A job settles per chunk, so these sum to the
+    #: job's ``settled_credits`` exactly.
+    credits_charged: int | None
+    #: Immutable rate-book version that rated ``credits_charged``. Present
+    #: exactly when ``credits_charged`` is.
+    rate_book_version: str | None
     error: Any
 
 
@@ -1120,6 +1400,16 @@ class File(TypedDict, total=False):
     expires_at: int
 
 
+class FileList(TypedDict, total=False):
+    """The listing envelope from ``GET /v1/files`` (OpenAI cursor page)."""
+
+    object: str
+    data: list[File]
+    first_id: str | None
+    last_id: str | None
+    has_more: bool
+
+
 class FileDeleted(TypedDict, total=False):
     """The envelope from deleting a file (OpenAI ``FileDeleted``)."""
 
@@ -1178,6 +1468,6 @@ class BatchList(TypedDict, total=False):
 
     object: str
     data: list[Batch]
-    first_id: str
-    last_id: str
+    first_id: str | None
+    last_id: str | None
     has_more: bool

@@ -4,6 +4,8 @@ use async_nats::jetstream;
 use futures_util::StreamExt;
 use tracing::{debug, error, info, warn};
 
+use crate::observability::metrics::{self as telemetry, QueueEvent, QueueEventOutcome};
+
 const DLQ_STREAM_NAME: &str = "DEAD_LETTERS";
 const DLQ_SUBJECT: &str = "sie.dlq.>";
 const DLQ_RETENTION_SECS: u64 = 86400; // 24 hours
@@ -154,6 +156,10 @@ impl DlqListener {
             };
             match publish_result {
                 Ok(ack) if ack.duplicate => {
+                    telemetry::record_queue_event(
+                        QueueEvent::DlqForward,
+                        QueueEventOutcome::Deduplicated,
+                    );
                     debug!(
                         subject = %dlq_subject,
                         stream = %stream_name,
@@ -163,9 +169,10 @@ impl DlqListener {
                     );
                 }
                 Ok(_) => {
-                    crate::metrics::DLQ_EVENTS
-                        .with_label_values(&[stream_name, consumer_name])
-                        .inc();
+                    telemetry::record_queue_event(
+                        QueueEvent::DlqForward,
+                        QueueEventOutcome::Success,
+                    );
                     info!(
                         subject = %dlq_subject,
                         stream = %stream_name,
@@ -174,14 +181,12 @@ impl DlqListener {
                     );
                 }
                 Err(e) => {
+                    telemetry::record_queue_event(QueueEvent::DlqForward, QueueEventOutcome::Error);
                     error!(
                         subject = %dlq_subject,
                         error = %e,
                         "failed to publish to DLQ"
                     );
-                    crate::metrics::DLQ_REPUBLISH_FAILURES
-                        .with_label_values(&[stream_name, consumer_name])
-                        .inc();
                 }
             }
         }

@@ -1,3 +1,5 @@
+import hashlib
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -344,7 +346,7 @@ class TestBuildAdapterKwargs:
     def test_package_backed_passes_none_for_model_path(self) -> None:
         """package_backed adapters get model_name_or_path=None — they ship their own weights."""
         profile = ProfileConfig(
-            adapter_path="sie_server.adapters.docling:DoclingAdapter",
+            adapter_path="sie_server.adapters.docling.adapter:DoclingAdapter",
             max_batch_tokens=1,
         )
         config = ModelConfig(
@@ -357,6 +359,71 @@ class TestBuildAdapterKwargs:
         kwargs = _build_adapter_kwargs(config, "float16")
 
         assert kwargs["model_name_or_path"] is None
+
+    def test_package_backed_staged_manifest_is_verified_and_passed_to_adapter(self, tmp_path: Path) -> None:
+        artifact = tmp_path / "layout" / "model.bin"
+        artifact.parent.mkdir()
+        artifact.write_bytes(b"model")
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "artifacts": [
+                        {
+                            "path": "layout/model.bin",
+                            "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                            "size_bytes": artifact.stat().st_size,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        config = ModelConfig(
+            sie_id="package/model",
+            package_backed=True,
+            tasks=Tasks(extract=ExtractTask()),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:Adapter",
+                    max_batch_tokens=1,
+                    adapter_options=AdapterOptions(
+                        loadtime={
+                            "package_artifact_mode": "staged",
+                            "package_artifact_manifest_path": str(manifest),
+                            "package_artifact_manifest_sha256": manifest_sha256,
+                        }
+                    ),
+                )
+            },
+        )
+
+        kwargs = _build_adapter_kwargs(config, "float16")
+
+        assert kwargs["package_artifact_root"] == tmp_path
+        assert kwargs["package_artifact_manifest_sha256"] == manifest_sha256
+        assert "package_artifact_mode" not in kwargs
+        assert "package_artifact_manifest_path" not in kwargs
+
+    def test_package_backed_live_downloads_are_rejected_offline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = ModelConfig(
+            sie_id="package/model",
+            package_backed=True,
+            tasks=Tasks(extract=ExtractTask()),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:Adapter",
+                    max_batch_tokens=1,
+                    adapter_options=AdapterOptions(loadtime={"package_artifact_mode": "live"}),
+                )
+            },
+        )
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+        with pytest.raises(ValueError, match="live external downloads"):
+            _build_adapter_kwargs(config, "float16")
 
 
 class TestLoadAdapter:

@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod config_api;
 pub mod grammar;
 pub mod health;

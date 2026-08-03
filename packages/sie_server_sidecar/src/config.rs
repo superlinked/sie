@@ -82,8 +82,8 @@ pub struct WorkerConfig {
     /// transient gateway/status errors.
     pub pool_admission_stale_after_ms: u64,
 
-    /// Prometheus metrics HTTP port.
-    pub metrics_port: u16,
+    /// Liveness/readiness probe HTTP port.
+    pub probe_port: u16,
 
     /// Stable worker identifier surfaced in logs / `WorkResult.worker_id` /
     /// IPC `Ping`.
@@ -229,7 +229,7 @@ mod tests {
             pool_admission_check_interval_ms: 5_000,
             pool_admission_pause_ms: 1_000,
             pool_admission_stale_after_ms: 30_000,
-            metrics_port: 9095,
+            probe_port: 9095,
             worker_id: "worker-test".into(),
             ping_interval_ms: 2000,
             ready_stale_mult: 3,

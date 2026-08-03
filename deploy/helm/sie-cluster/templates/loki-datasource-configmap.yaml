@@ -1,0 +1,21 @@
+{{- if and (eq (include "sie-cluster.otel.lokiEnabled" .) "true") (index .Values "kube-prometheus-stack" "install") }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sie-cluster.fullname" . }}-datasource-loki
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: datasource
+data:
+  loki-datasource.yaml: |-
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        uid: loki
+        type: loki
+        access: proxy
+        url: {{ include "sie-cluster.loki.httpEndpoint" . }}
+        isDefault: false
+{{- end }}

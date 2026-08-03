@@ -1,0 +1,202 @@
+[
+  {
+    "agent_id": "netops-agent",
+    "timestamp": "2023-11-14T22:13:20+00:00",
+    "action_type": "firewall_rule_change",
+    "target": "fw-corp-https",
+    "change": {
+      "before": null,
+      "after": {
+        "port": 443
+      }
+    },
+    "source": "generic",
+    "raw_ref": "evt-0000"
+  },
+  {
+    "agent_id": "netops-agent",
+    "timestamp": "2023-11-14T22:14:20+00:00",
+    "action_type": "firewall_rule_change",
+    "target": "fw-corp-dns",
+    "change": {
+      "before": null,
+      "after": {
+        "port": 53
+      }
+    },
+    "source": "generic",
+    "raw_ref": "evt-0001"
+  },
+  {
+    "agent_id": "netops-agent",
+    "timestamp": "2023-11-14T22:15:20+00:00",
+    "action_type": "route_change",
+    "target": "rt-corp-to-dmz",
+    "change": {
+      "before": null,
+      "after": {
+        "next_hop": "10.0.0.1"
+      }
+    },
+    "source": "generic",
+    "raw_ref": "evt-0002"
+  },
+  {
+    "agent_id": "netops-agent",
+    "timestamp": "2023-11-14T22:16:20+00:00",
+    "action_type": "route_change",
+    "target": "rt-corp-default",
+    "change": {
+      "before": null,
+      "after": null
+    },
+    "source": "generic",
+    "raw_ref": "evt-0003"
+  },
+  {
+    "agent_id": "netops-agent",
+    "timestamp": "2023-11-14T22:17:20+00:00",
+    "action_type": "firewall_rule_change",
+    "target": "fw-temp-debug",
+    "change": {
+      "before": {
+        "port": 22
+      },
+      "after": null
+    },
+    "source": "generic",
+    "raw_ref": "evt-0004"
+  },
+  {
+    "agent_id": "segment-agent",
+    "timestamp": "2023-11-14T22:18:20+00:00",
+    "action_type": "segment_change",
+    "target": "seg-corporate",
+    "change": {
+      "before": null,
+      "after": {
+        "cidr": "10.0.10.0/24"
+      }
+    },
+    "source": "generic",
+    "raw_ref": "evt-0005"
+  },
+  {
+    "agent_id": "segment-agent",
+    "timestamp": "2023-11-14T22:19:20+00:00",
+    "action_type": "segment_change",
+    "target": "seg-corporate",
+    "change": {
+      "before": null,
+      "after": {
+        "cidr": "10.0.10.0/23"
+      }
+    },
+    "source": "generic",
+    "raw_ref": "evt-0006"
+  },
+  {
+    "agent_id": "segment-agent",
+    "timestamp": "2023-11-14T22:20:20+00:00",
+    "action_type": "segment_change",
+    "target": "seg-corp-staging",
+    "change": {
+      "before": null,
+      "after": null
+    },
+    "source": "generic",
+    "raw_ref": "evt-0007"
+  },
+  {
+    "agent_id": "iam-agent",
+    "timestamp": "2023-11-14T22:21:20+00:00",
+    "action_type": "role_assignment",
+    "target": "ra-netops-reader",
+    "change": {
+      "before": null,
+      "after": {
+        "role": "reader"
+      }
+    },
+    "source": "generic",
+    "raw_ref": "evt-0008"
+  },
+  {
+    "agent_id": "iam-agent",
+    "timestamp": "2023-11-14T22:22:20+00:00",
+    "action_type": "role_assignment",
+    "target": "ra-segment-contributor",
+    "change": {
+      "before": null,
+      "after": null
+    },
+    "source": "generic",
+    "raw_ref": "evt-0009"
+  },
+  {
+    "agent_id": "netops-agent",
+    "timestamp": "2023-11-14T22:23:20+00:00",
+    "action_type": "firewall_rule_change",
+    "target": "fw-corp-https",
+    "change": {
+      "before": null,
+      "after": {
+        "port": 443
+      }
+    },
+    "source": "generic",
+    "raw_ref": "evt-0010"
+  },
+  {
+    "agent_id": "netops-agent",
+    "timestamp": "2023-11-14T22:24:20+00:00",
+    "action_type": "route_change",
+    "target": "rt-corp-to-monitoring",
+    "change": {
+      "before": null,
+      "after": null
+    },
+    "source": "generic",
+    "raw_ref": "evt-0011"
+  },
+  {
+    "agent_id": "segment-agent",
+    "timestamp": "2023-11-14T22:25:20+00:00",
+    "action_type": "segment_change",
+    "target": "seg-corporate",
+    "change": {
+      "before": null,
+      "after": null
+    },
+    "source": "generic",
+    "raw_ref": "evt-0012"
+  },
+  {
+    "agent_id": "iam-agent",
+    "timestamp": "2023-11-14T22:26:20+00:00",
+    "action_type": "role_assignment",
+    "target": "ra-stale-temp",
+    "change": {
+      "before": {
+        "role": "reader"
+      },
+      "after": null
+    },
+    "source": "generic",
+    "raw_ref": "evt-0013"
+  },
+  {
+    "agent_id": "netops-agent",
+    "timestamp": "2023-11-14T22:27:20+00:00",
+    "action_type": "port_change",
+    "target": "fw-corp-dns",
+    "change": {
+      "before": null,
+      "after": {
+        "port": 53
+      }
+    },
+    "source": "generic",
+    "raw_ref": "evt-0014"
+  }
+]

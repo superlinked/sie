@@ -36,19 +36,21 @@ import time
 import warnings
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import IO, Any, Literal, Self, overload
+from typing import IO, Any, Literal, Self, cast, overload
 from urllib.parse import urlencode
 
 import aiohttp
 import msgpack
 import msgpack_numpy as m
 
+from sie_sdk.audio import convert_item_audio
 from sie_sdk.documents import convert_item_document
 from sie_sdk.files import resolve_upload
-from sie_sdk.images import convert_item_images
+from sie_sdk.images import ImageLike, convert_images_for_json, convert_item_images
 from sie_sdk.jobs import TERMINAL_JOB_STATES, build_job_body, decode_chunk_bytes, job_chunks
 from sie_sdk.types import (
     Batch,
+    BatchList,
     CapacityInfo,
     ChatCompletion,
     ChatCompletionChunk,
@@ -56,12 +58,17 @@ from sie_sdk.types import (
     Connection,
     ConnectionCreated,
     ConnectionRevoked,
+    CostEstimate,
     EncodeResult,
     ExtractResult,
     File,
     FileDeleted,
+    FileList,
     GenerateChunk,
+    GenerateGrammar,
+    GenerateImage,
     GenerateResult,
+    GenerationUsage,
     Item,
     JobResults,
     JobStatus,
@@ -70,6 +77,9 @@ from sie_sdk.types import (
     OutputType,
     PoolInfo,
     PoolSpec,
+    RequestMetadata,
+    ResponseInputMessage,
+    ResponseResult,
     ScoreResult,
     StatusMessage,
     WorkerInfo,
@@ -78,6 +88,7 @@ from sie_sdk.types import (
 from ._shared import (
     DEFAULT_LEASE_RENEWAL_INTERVAL_S,
     DEFAULT_PROVISION_TIMEOUT_S,
+    ESTIMATE_PATH,
     HTTP_CLIENT_ERROR,
     HTTP_GATEWAY_TIMEOUT,
     JSON_CONTENT_TYPE,
@@ -93,11 +104,16 @@ from ._shared import (
     SDK_VERSION_HEADER,
     SERVER_VERSION_HEADER,
     _coerce_token_count,
+    attach_request_metadata,
+    base_url_accepts_origin_credentials,
     build_chat_body,
+    build_estimate_envelope,
+    build_responses_body,
     check_version_skew,
     compute_oom_backoff,
     compute_retry_delay,
     convert_score_images_for_wire,
+    copy_base_url_headers,
     get_error_code,
     get_retry_after,
     get_sdk_version,
@@ -107,14 +123,22 @@ from ._shared import (
     parse_encode_results,
     parse_extract_results,
     parse_gpu_param,
+    parse_request_metadata,
     parse_score_result,
+    parse_terminal_json_object,
     provisioning_retry_delay,
+    raise_if_estimate_unroutable,
     raise_if_input_too_long,
     raise_if_model_load_failed,
+    request_matches_base_url_origin,
     retry_after_or_default,
+    settled_charge_from_usage,
     sse_chunk_error,
     sse_headers,
     validate_encode_result_count,
+    validate_generate_grammar,
+    validate_generate_request_body,
+    websocket_matches_base_url_origin,
 )
 from ._sse import aiter_sse_payloads
 from .errors import (
@@ -179,7 +203,11 @@ _LEASE_RENEWAL_MAX_RETRIES = 5
 _NUMPY_PATCHED = False
 
 
-def _parse_generate_result_async(data: dict[str, Any]) -> GenerateResult:
+def _parse_generate_result_async(
+    data: dict[str, Any],
+    *,
+    request: RequestMetadata | None = None,
+) -> GenerateResult:
     """Build a :class:`GenerateResult` from the gateway's JSON envelope.
 
     ``model`` and ``text`` are required strings; missing or null values are
@@ -189,11 +217,11 @@ def _parse_generate_result_async(data: dict[str, Any]) -> GenerateResult:
     model = data.get("model")
     if not isinstance(model, str):
         msg = f"Generate response missing string 'model' field: got {type(model).__name__}"
-        raise RequestError(msg)
+        raise RequestError(msg, request=request)
     text = data.get("text")
     if not isinstance(text, str):
         msg = f"Generate response missing string 'text' field: got {type(text).__name__}"
-        raise RequestError(msg)
+        raise RequestError(msg, request=request)
     result: GenerateResult = {
         "model": model,
         "text": text,
@@ -203,11 +231,15 @@ def _parse_generate_result_async(data: dict[str, Any]) -> GenerateResult:
         result["finish_reason"] = finish  # type: ignore[typeddict-item]
     usage = data.get("usage")
     if isinstance(usage, dict):
-        result["usage"] = {
+        parsed_usage: GenerationUsage = {
             "prompt_tokens": _coerce_token_count(usage.get("prompt_tokens")),
             "completion_tokens": _coerce_token_count(usage.get("completion_tokens")),
             "total_tokens": _coerce_token_count(usage.get("total_tokens")),
         }
+        settled = settled_charge_from_usage(usage)
+        if settled is not None:
+            parsed_usage["credits_charged"], parsed_usage["rate_book_version"] = settled
+        result["usage"] = parsed_usage
     attempt_id = data.get("attempt_id")
     if isinstance(attempt_id, str):
         result["attempt_id"] = attempt_id
@@ -245,7 +277,12 @@ async def _handle_oom_retry(
     elapsed = time.monotonic() - start_time
     if oom_retries >= max_oom_retries or elapsed >= timeout:
         msg = f"Server resource exhausted after {oom_retries} retry attempt(s) for model '{model}'"
-        raise ResourceExhaustedError(msg, model=model, retries=oom_retries)
+        raise ResourceExhaustedError(
+            msg,
+            model=model,
+            retries=oom_retries,
+            request=parse_request_metadata(response.headers),
+        )
     retry_after = get_retry_after(response)
     raw_delay = compute_oom_backoff(retry_after, oom_retries)
     remaining = timeout - elapsed
@@ -260,7 +297,12 @@ async def _handle_oom_retry(
             timeout,
         )
         msg = f"Server resource exhausted after {oom_retries} retry attempt(s) for model '{model}'"
-        raise ResourceExhaustedError(msg, model=model, retries=oom_retries)
+        raise ResourceExhaustedError(
+            msg,
+            model=model,
+            retries=oom_retries,
+            request=parse_request_metadata(response.headers),
+        )
     delay = raw_delay
     # First retry surfaces at WARNING so a user with default log level
     # can see "the SDK is retrying you" — without this they may spend
@@ -335,6 +377,10 @@ class SIEAsyncClient:
         options: Options dict for requests. Merged with per-call options (per-call wins).
         pool: Resource pool spec for isolated capacity. Created lazily on first request.
             Format: {"name": "pool-name", "gpus": {"l4": 2, "a100-40gb": 1}}.
+        base_url_headers: Optional additional headers for the configured gateway
+            origin. Values are copied at construction and never forwarded to a
+            control-plane URL, external payload-store reference, or redirect
+            target. Same-origin capability refs receive only these edge headers.
 
     Example:
         >>> async with SIEAsyncClient("http://localhost:8080") as client:
@@ -373,6 +419,7 @@ class SIEAsyncClient:
         max_concurrency: int | None = None,
         control_plane_url: str | None = None,
         org: str | None = None,
+        base_url_headers: Mapping[str, str] | None = None,
     ) -> None:
         # Ensure msgpack-numpy hooks are installed (once per process).
         # Done lazily here instead of at module level to avoid monkey-patching
@@ -384,6 +431,10 @@ class SIEAsyncClient:
 
         # Normalize base_url (remove trailing slash)
         self._base_url = base_url.rstrip("/")
+        self._base_url_headers = copy_base_url_headers(base_url_headers)
+        if self._base_url_headers and not base_url_accepts_origin_credentials(self._base_url):
+            msg = "base_url_headers require an absolute https base_url without embedded credentials"
+            raise ValueError(msg)
         self._timeout = timeout_s
         self._default_gpu = gpu
         self._default_options = options
@@ -453,7 +504,7 @@ class SIEAsyncClient:
 
     def __del__(self) -> None:
         """Warn if the client was not closed explicitly."""
-        if not self._closed:
+        if not getattr(self, "_closed", True):
             warnings.warn(
                 f"Unclosed {self.__class__.__name__}. Call 'await client.close()' "
                 "or use 'async with' to avoid resource leaks.",
@@ -487,16 +538,19 @@ class SIEAsyncClient:
         json_data: Any = None,
         headers: dict[str, str] | None = None,
         timeout_s: float | None = None,
+        include_base_url_headers: bool = True,
     ) -> _AioResponse:
         kw: dict[str, Any] = {}
         if data is not None:
             kw["data"] = data
         if json_data is not None:
             kw["json"] = json_data
-        if headers:
-            kw["headers"] = headers
+        request_headers = self._headers_for_request(url, headers, include_base_url_headers=include_base_url_headers)
+        if request_headers:
+            kw["headers"] = request_headers
         if timeout_s is not None:
             kw["timeout"] = aiohttp.ClientTimeout(total=timeout_s)
+        kw["allow_redirects"] = False
         async with self._throttle(), self._ensure_session().post(url, **kw) as resp:
             body = await resp.read()
             return _AioResponse(resp.status, body, resp.headers)
@@ -506,10 +560,13 @@ class SIEAsyncClient:
         url: str,
         *,
         headers: dict[str, str] | None = None,
+        include_base_url_headers: bool = True,
     ) -> _AioResponse:
         kw: dict[str, Any] = {}
-        if headers:
-            kw["headers"] = headers
+        request_headers = self._headers_for_request(url, headers, include_base_url_headers=include_base_url_headers)
+        if request_headers:
+            kw["headers"] = request_headers
+        kw["allow_redirects"] = False
         async with self._throttle(), self._ensure_session().get(url, **kw) as resp:
             body = await resp.read()
             return _AioResponse(resp.status, body, resp.headers)
@@ -519,13 +576,29 @@ class SIEAsyncClient:
         url: str,
         *,
         headers: dict[str, str] | None = None,
+        include_base_url_headers: bool = True,
     ) -> _AioResponse:
         kw: dict[str, Any] = {}
-        if headers:
-            kw["headers"] = headers
+        request_headers = self._headers_for_request(url, headers, include_base_url_headers=include_base_url_headers)
+        if request_headers:
+            kw["headers"] = request_headers
+        kw["allow_redirects"] = False
         async with self._throttle(), self._ensure_session().delete(url, **kw) as resp:
             body = await resp.read()
             return _AioResponse(resp.status, body, resp.headers)
+
+    def _headers_for_request(
+        self,
+        url: str,
+        headers: Mapping[str, str] | None,
+        *,
+        include_base_url_headers: bool = True,
+    ) -> dict[str, str]:
+        """Build detached request headers with exact-origin edge credentials."""
+        merged = dict(headers or {})
+        if include_base_url_headers and self._base_url_headers and request_matches_base_url_origin(self._base_url, url):
+            merged.update(self._base_url_headers)
+        return merged
 
     def _check_server_version(self, response: _AioResponse) -> None:
         if SIEAsyncClient._version_warning_logged:
@@ -756,8 +829,9 @@ class SIEAsyncClient:
             bundle: Optional bundle filter. When set, only workers running this
                 bundle will be assigned to the pool.
             minimum_worker_count: Per-pool warm floor (minimum machines kept warm).
-                The gateway publishes it as ``sie_gateway_pool_warm_floor`` for KEDA,
-                which keeps that many machines warm. Defaults to 0 (scale to zero).
+                The gateway emits canonical ``sie.gateway.pool.warm_floor``
+                telemetry; the collector exposes ``sie_gateway_pool_warm_floor``
+                to KEDA. Defaults to 0 (scale to zero).
             pinned_models: Optional set of model ids to keep loaded so the first
                 request to them pays no cold model-load. Each id must be a model the
                 gateway already tracks and may be profile-qualified
@@ -1353,10 +1427,17 @@ class SIEAsyncClient:
         # Guard the 1:1 input↔output contract before any positional access
         # (``results[0]`` below, or batch reassembly in callers). A desynced
         # count otherwise surfaces as a context-free ``IndexError`` (#1526).
-        validate_encode_result_count(results, len(items_list), model)
+        validate_encode_result_count(
+            results,
+            len(items_list),
+            model,
+            request=parse_request_metadata(response.headers),
+        )
         if timing:
             for result in results:
                 result["timing"] = timing
+
+        attach_request_metadata(results, response.headers, response_data)
 
         # Return single result if single item was passed
         return results[0] if single_item else results
@@ -1380,6 +1461,41 @@ class SIEAsyncClient:
 
         data = response.json()
         return data["models"]
+
+    async def estimate(
+        self,
+        endpoint: str,
+        request: Mapping[str, Any],
+        *,
+        # ASYNC109: the transport's own per-call timeout (aiohttp
+        # ClientTimeout), mirroring the sync twin's `timeout` keyword; not a
+        # caller-supplied cancellation budget.
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> CostEstimate:
+        """Async version of estimate(). See SIEClient.estimate() for details."""
+        body = build_estimate_envelope(endpoint, request)
+        try:
+            response = await self._post(
+                ESTIMATE_PATH,
+                json_data=body,
+                headers={
+                    "Accept": JSON_CONTENT_TYPE,
+                    "Content-Type": JSON_CONTENT_TYPE,
+                },
+                timeout_s=timeout if timeout is not None else self._timeout,
+            )
+        except TimeoutError as e:
+            msg = f"Request timed out: {e}"
+            raise SIEConnectionError(msg) from e
+        except (aiohttp.ClientError, OSError) as e:
+            msg = f"Failed to connect to {self._base_url}: {e}"
+            raise SIEConnectionError(msg) from e
+
+        if response.status_code >= HTTP_CLIENT_ERROR:
+            raise_if_estimate_unroutable(response)
+            handle_error(response)
+
+        return cast("CostEstimate", response.json())
 
     async def get_model(self, model: str) -> ModelInfo:
         """Async version of get_model(). See SIEClient.get_model() for details."""
@@ -1432,6 +1548,15 @@ class SIEAsyncClient:
             rest = self._base_url
         return f"{scheme}{rest}{path}"
 
+    def _websocket_headers(self, websocket_url: str) -> dict[str, str]:
+        """Build edge-confined headers for one WebSocket handshake."""
+        headers: dict[str, str] = {}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        if self._base_url_headers and websocket_matches_base_url_origin(self._base_url, websocket_url):
+            headers.update(self._base_url_headers)
+        return headers
+
     async def watch(
         self,
         *,
@@ -1439,6 +1564,12 @@ class SIEAsyncClient:
     ) -> AsyncIterator[StatusMessage]:
         """Stream real-time status updates from the server or gateway."""
         import websockets
+
+        class _NoRedirectConnect(websockets.connect):
+            """WebSocket connector that never forwards edge credentials to redirects."""
+
+            def process_redirect(self, exc: Exception) -> Exception:
+                return exc
 
         if mode == "auto":
             detected = await self._detect_endpoint_type()
@@ -1448,14 +1579,13 @@ class SIEAsyncClient:
         else:
             paths = ["/ws/status"]
 
-        headers = {}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-
         for path in paths:
             ws_url = self._ws_url(path)
             try:
-                async with websockets.connect(ws_url, additional_headers=headers) as ws:
+                async with _NoRedirectConnect(
+                    ws_url,
+                    additional_headers=self._websocket_headers(ws_url),
+                ) as ws:
                     async for message in ws:
                         if isinstance(message, bytes):
                             payload = message.decode("utf-8")
@@ -1762,7 +1892,9 @@ class SIEAsyncClient:
 
         response_data = msgpack.unpackb(response.content, raw=False)
 
-        return parse_score_result(response_data)
+        result = parse_score_result(response_data)
+        attach_request_metadata([result], response.headers, response_data)
+        return result
 
     async def generate(
         self,
@@ -1770,9 +1902,20 @@ class SIEAsyncClient:
         prompt: str,
         *,
         max_new_tokens: int,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        images: Sequence[ImageLike | GenerateImage | dict[str, Any]] | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
         stop: list[str] | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        grammar: GenerateGrammar | Mapping[str, Any] | None = None,
+        seed: int | None = None,
+        logit_bias: dict[str, float] | None = None,
+        routing_key: str | None = None,
+        prompt_cache_key: str | None = None,
+        safety_identifier: str | None = None,
+        lora_adapter: str | None = None,
+        options: dict[str, Any] | None = None,
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
@@ -1781,22 +1924,39 @@ class SIEAsyncClient:
         """Async sibling of :meth:`SIEClient.generate`.
 
         See the sync docstring for parameter semantics. This method
-        awaits the aggregated outcome; chunk-streaming to the caller
-        lands in a later slice (current path: worker streams to gateway,
-        gateway aggregates, SDK returns assembled result).
+        awaits the aggregated outcome; use :meth:`stream_generate` for
+        SIE-native chunk streaming.
         """
+        resolved_grammar = validate_generate_grammar(grammar) if grammar is not None else None
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
 
         safe_model = model.replace("/", "__")
 
+        resolved_options = self._resolve_options(options)
         request_body: dict[str, Any] = {
             "prompt": prompt,
             "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
         }
+        if images is not None:
+            request_body["images"] = convert_images_for_json(images)
         if stop is not None:
             request_body["stop"] = stop
+        optional_fields = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "options": resolved_options,
+            "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
+            "grammar": resolved_grammar,
+            "seed": seed,
+            "logit_bias": logit_bias,
+            "routing_key": routing_key,
+            "prompt_cache_key": prompt_cache_key,
+            "safety_identifier": safety_identifier,
+            "lora_adapter": lora_adapter,
+        }
+        request_body.update({key: value for key, value in optional_fields.items() if value is not None})
+        validate_generate_request_body(request_body)
 
         body = json.dumps(request_body).encode("utf-8")
         headers: dict[str, str] = {"content-type": JSON_CONTENT_TYPE, "accept": JSON_CONTENT_TYPE}
@@ -1823,8 +1983,9 @@ class SIEAsyncClient:
                     self._ensure_session().post(
                         f"/v1/generate/{safe_model}",
                         data=body,
-                        headers=headers,
+                        headers=self._headers_for_request(f"/v1/generate/{safe_model}", headers),
                         timeout=aiohttp.ClientTimeout(total=request_timeout_s),
+                        allow_redirects=False,
                     ) as raw,
                 ):
                     content = await raw.read()
@@ -1879,7 +2040,7 @@ class SIEAsyncClient:
                     await asyncio.sleep(delay)
                     continue
 
-                if error_code == MODEL_LOADING_ERROR_CODE:
+                if error_code == MODEL_LOADING_ERROR_CODE and wait_for_capacity:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
@@ -1908,14 +2069,20 @@ class SIEAsyncClient:
             # surface it as a terminal ServerError instead (same reasoning as
             # the mid-flight transport-error block above). The pre-execution
             # 503 MODEL_LOADING / PROVISIONING retries above remain because
-            # those fire *before* any generation can have started.
+            # those fire *before* any generation can have started and the
+            # caller has opted into capacity waiting.
             if response.status_code == HTTP_GATEWAY_TIMEOUT:
                 msg = (
                     "Gateway timed out (504) after the generate request was published to the "
                     "queue; a worker may already be generating. Not retried because generation "
                     "is non-idempotent (retrying could double-bill). Re-issue manually if needed."
                 )
-                raise ServerError(msg, code=get_error_code(response), status_code=response.status_code)
+                raise ServerError(
+                    msg,
+                    code=get_error_code(response),
+                    status_code=response.status_code,
+                    request=parse_request_metadata(response.headers),
+                )
 
             if response.status_code >= HTTP_CLIENT_ERROR:
                 handle_error(response)
@@ -1923,11 +2090,106 @@ class SIEAsyncClient:
 
         self._check_server_version(response)
 
-        data = response.json()
-        if not isinstance(data, dict):
-            msg = f"Unexpected generate response shape: {type(data).__name__}"
-            raise RequestError(msg)
-        return _parse_generate_result_async(data)
+        data = parse_terminal_json_object(response, owner="generate")
+        result = _parse_generate_result_async(data, request=parse_request_metadata(response.headers, data))
+        attach_request_metadata([result], response.headers, data)
+        return result
+
+    async def responses(
+        self,
+        model: str,
+        input: str | Sequence[ResponseInputMessage],
+        *,
+        max_output_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        seed: int | None = None,
+        gpu: str | None = None,
+        wait_for_capacity: bool = True,
+        provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+    ) -> ResponseResult:
+        """Async counterpart of :meth:`SIEClient.responses`.
+
+        The gateway's Responses MVP is stateless, text-only, and
+        non-streaming. Retry behavior matches the sync method: only explicit
+        pre-execution capacity signals and connect-before-send failures are
+        retried; mid-flight failures and post-publish 504 responses are
+        terminal because generation is non-idempotent.
+        """
+        pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
+        body = json.dumps(
+            build_responses_body(
+                model,
+                input,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                seed=seed,
+            )
+        ).encode("utf-8")
+        headers: dict[str, str] = {"content-type": JSON_CONTENT_TYPE, "accept": JSON_CONTENT_TYPE}
+        if resolved_gpu:
+            headers["X-SIE-MACHINE-PROFILE"] = resolved_gpu
+        if pool_name:
+            headers["X-SIE-Pool"] = pool_name
+
+        timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
+        start_time = time.monotonic()
+        oom_retries = 0
+        while True:
+            remaining = timeout - (time.monotonic() - start_time)
+            if remaining <= 0:
+                msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
+                raise ProvisioningError(msg, gpu=resolved_gpu)
+            try:
+                async with (
+                    self._throttle(),
+                    self._ensure_session().post(
+                        "/v1/responses",
+                        data=body,
+                        headers=self._headers_for_request("/v1/responses", headers),
+                        timeout=aiohttp.ClientTimeout(total=min(self._timeout, remaining)),
+                        allow_redirects=False,
+                    ) as raw,
+                ):
+                    content = await raw.read()
+                    response = _AioResponse(raw.status, content, raw.headers)
+            except aiohttp.ClientConnectorError as e:
+                if wait_for_capacity and is_transient_connect_error(e):
+                    delay_s = compute_retry_delay(
+                        start_time=start_time,
+                        timeout=timeout,
+                        error_label="Connect error",
+                        error=e,
+                    )
+                    if delay_s is not None:
+                        await asyncio.sleep(delay_s)
+                        continue
+                msg = f"Failed to connect to {self._base_url}: {e}"
+                raise SIEConnectionError(msg) from e
+            except (aiohttp.ClientError, OSError) as e:
+                msg = f"Request failed: {e}"
+                raise SIEConnectionError(msg) from e
+
+            if response.status_code == 200:
+                break
+            delay, oom_retries = next_stream_retry_delay(
+                response,
+                model=model,
+                gpu=resolved_gpu,
+                wait_for_capacity=wait_for_capacity,
+                start_time=start_time,
+                timeout=timeout,
+                oom_retries=oom_retries,
+                max_oom_retries=max_oom_retries,
+            )
+            await asyncio.sleep(delay)
+
+        self._check_server_version(response)
+        data = parse_terminal_json_object(response, owner="Responses")
+        attach_request_metadata([data], response.headers, data)
+        return cast("ResponseResult", data)
 
     async def chat_completions(
         self,
@@ -2025,8 +2287,9 @@ class SIEAsyncClient:
                     self._ensure_session().post(
                         "/v1/chat/completions",
                         data=body,
-                        headers=headers,
+                        headers=self._headers_for_request("/v1/chat/completions", headers),
                         timeout=aiohttp.ClientTimeout(total=min(self._timeout, remaining)),
+                        allow_redirects=False,
                     ) as raw,
                 ):
                     content = await raw.read()
@@ -2062,11 +2325,9 @@ class SIEAsyncClient:
             await asyncio.sleep(delay)
 
         self._check_server_version(response)
-        data = response.json()
-        if not isinstance(data, dict):
-            msg = f"Unexpected chat completion response shape: {type(data).__name__}"
-            raise RequestError(msg)
-        return data  # type: ignore[return-value]
+        data = parse_terminal_json_object(response, owner="chat completion")
+        attach_request_metadata([data], response.headers, data)
+        return cast("ChatCompletion", data)
 
     async def stream_chat_completions(
         self,
@@ -2161,10 +2422,23 @@ class SIEAsyncClient:
         prompt: str,
         *,
         max_new_tokens: int,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        images: Sequence[ImageLike | GenerateImage | dict[str, Any]] | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
         stop: list[str] | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        grammar: GenerateGrammar | Mapping[str, Any] | None = None,
+        seed: int | None = None,
+        logit_bias: dict[str, float] | None = None,
+        logprobs: bool = False,
+        top_logprobs: int | None = None,
+        routing_key: str | None = None,
+        prompt_cache_key: str | None = None,
+        safety_identifier: str | None = None,
+        lora_adapter: str | None = None,
         gpu: str | None = None,
+        options: dict[str, Any] | None = None,
         extra_body: dict[str, Any] | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
@@ -2174,19 +2448,44 @@ class SIEAsyncClient:
 
         Async counterpart of :meth:`SIEClient.stream_generate`.
         """
+        resolved_grammar = validate_generate_grammar(grammar) if grammar is not None else None
         pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
         safe_model = model.replace("/", "__")
+        resolved_options = self._resolve_options(options)
         req: dict[str, Any] = {
             "prompt": prompt,
             "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
             "stream": True,
         }
+        if images is not None:
+            req["images"] = convert_images_for_json(images)
         if stop is not None:
             req["stop"] = stop
+        optional_fields = {
+            "frequency_penalty": frequency_penalty,
+            "temperature": temperature,
+            "top_p": top_p,
+            "options": resolved_options,
+            "presence_penalty": presence_penalty,
+            "grammar": resolved_grammar,
+            "seed": seed,
+            "logit_bias": logit_bias,
+            "routing_key": routing_key,
+            "prompt_cache_key": prompt_cache_key,
+            "safety_identifier": safety_identifier,
+            "lora_adapter": lora_adapter,
+        }
+        req.update({key: value for key, value in optional_fields.items() if value is not None})
+        if logprobs:
+            req["logprobs"] = True
+            if top_logprobs is not None:
+                req["top_logprobs"] = top_logprobs
         if extra_body:
             req.update(extra_body)
+        validate_generate_request_body(req)
+        if not req.get("logprobs"):
+            req.pop("top_logprobs", None)
+        req.update(prompt=prompt, max_new_tokens=max_new_tokens, stream=True)
         body = json.dumps(req).encode("utf-8")
         headers = sse_headers(resolved_gpu, pool_name)
         async for chunk in self._stream_sse_chunks(
@@ -2235,8 +2534,9 @@ class SIEAsyncClient:
                     self._ensure_session().post(
                         url,
                         data=body,
-                        headers=headers,
+                        headers=self._headers_for_request(url, headers),
                         timeout=aiohttp.ClientTimeout(total=min(self._timeout, remaining)),
+                        allow_redirects=False,
                     ) as raw,
                 ):
                     if raw.status != 200:
@@ -2337,12 +2637,14 @@ class SIEAsyncClient:
         single_item = not isinstance(items, list)
         items_list = [items] if single_item else items
 
-        # Convert images and documents to wire format (bytes + format hint)
+        # Convert media and documents to wire format (bytes + format hint)
         items_for_wire = []
         for item in items_list:
             wire_item: dict[str, Any] = {**item}  # ty: ignore[invalid-argument-type]
             if "images" in wire_item:
                 wire_item = convert_item_images(wire_item)
+            if "audio" in wire_item:
+                wire_item = convert_item_audio(wire_item)
             if "document" in wire_item:
                 wire_item = convert_item_document(wire_item)
             items_for_wire.append(wire_item)
@@ -2522,6 +2824,8 @@ class SIEAsyncClient:
 
         results = parse_extract_results(response_data["items"])
 
+        attach_request_metadata(results, response.headers, response_data)
+
         return results[0] if single_item else results
 
 
@@ -2538,7 +2842,13 @@ class _AsyncNamespace:
         self._c = client
 
     async def _request_json(
-        self, method: str, url: str, *, json_body: Any = None, timeout_s: float | None = None
+        self,
+        method: str,
+        url: str,
+        *,
+        json_body: Any = None,
+        timeout_s: float | None = None,
+        include_base_url_headers: bool = True,
     ) -> Any:
         """One JSON request over the client's aiohttp session (bearer auth reused).
 
@@ -2548,9 +2858,17 @@ class _AsyncNamespace:
         """
         try:
             if method == "GET":
-                response = await self._c._get(url, headers={"Accept": JSON_CONTENT_TYPE})
+                response = await self._c._get(
+                    url,
+                    headers={"Accept": JSON_CONTENT_TYPE},
+                    include_base_url_headers=include_base_url_headers,
+                )
             elif method == "DELETE":
-                response = await self._c._delete(url, headers={"Accept": JSON_CONTENT_TYPE})
+                response = await self._c._delete(
+                    url,
+                    headers={"Accept": JSON_CONTENT_TYPE},
+                    include_base_url_headers=include_base_url_headers,
+                )
             else:
                 # Pre-serialize so the Content-Type is unambiguously application/json.
                 response = await self._c._post(
@@ -2558,6 +2876,7 @@ class _AsyncNamespace:
                     data=json.dumps(json_body).encode("utf-8"),
                     headers={"Accept": JSON_CONTENT_TYPE, "Content-Type": JSON_CONTENT_TYPE},
                     timeout_s=timeout_s,
+                    include_base_url_headers=include_base_url_headers,
                 )
         except TimeoutError as e:
             msg = f"Request timed out: {e}"
@@ -2659,16 +2978,20 @@ class _AsyncJobs(_AsyncNamespace):
     async def _read_ref(self, ref: str) -> bytes:
         """Retrieve a chunk's payload-store ref (local path or http(s) URL, POC).
 
-        http(s) refs are fetched on a bare session that does NOT carry the
-        client's ``Authorization`` header: a ref points at the payload store,
-        not the SIE API, so the bearer token must never leak to the ref host
-        (matches the TS SDK, which fetches refs with a plain ``fetch``).
+        http(s) refs are fetched without the client's ``Authorization`` header.
+        An exact gateway-origin capability ref receives the configured edge
+        headers (for example Modal proxy auth); external refs remain bare. Ref
+        redirects are never followed, so neither credential can reach a redirect
+        target.
         """
         if ref.startswith(("http://", "https://")):
             timeout = aiohttp.ClientTimeout(total=self._c._timeout)
+            headers = {"Accept": "application/octet-stream"}
+            if self._c._base_url_headers and request_matches_base_url_origin(self._c._base_url, ref):
+                headers.update(self._c._base_url_headers)
             async with (
                 aiohttp.ClientSession(timeout=timeout) as session,
-                session.get(ref, headers={"Accept": "application/octet-stream"}) as resp,
+                session.get(ref, headers=headers, allow_redirects=False) as resp,
             ):
                 response = _AioResponse(resp.status, await resp.read(), resp.headers)
             if response.status_code >= HTTP_CLIENT_ERROR:
@@ -2696,18 +3019,18 @@ class _AsyncConnections(_AsyncNamespace):
     async def add(self, name: str, type: str, secret: str) -> ConnectionCreated:
         """Async ``connections.add``."""
         body = {"type": type, "name": name, "secret": secret}
-        return await self._request_json("POST", self._base(), json_body=body)
+        return await self._request_json("POST", self._base(), json_body=body, include_base_url_headers=False)
 
     async def list(self) -> Sequence[Connection]:
         """Async ``connections.list`` (secrets redacted)."""
-        data = await self._request_json("GET", self._base())
+        data = await self._request_json("GET", self._base(), include_base_url_headers=False)
         if isinstance(data, dict):
             return data.get("connections", [])
         return data if isinstance(data, list) else []
 
     async def revoke(self, name: str) -> ConnectionRevoked:
         """Async ``connections.revoke``."""
-        return await self._request_json("DELETE", f"{self._base()}/{name}")
+        return await self._request_json("DELETE", f"{self._base()}/{name}", include_base_url_headers=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2763,6 +3086,50 @@ class _AsyncFiles(_AsyncNamespace):
         """Async ``files.retrieve`` (``GET /v1/files/{id}``)."""
         return await self._request_json("GET", f"/v1/files/{file_id}")
 
+    async def list(
+        self,
+        *,
+        after: str | None = None,
+        limit: int | None = None,
+        order: Literal["asc", "desc"] | None = None,
+        purpose: str | None = None,
+    ) -> Sequence[File]:
+        """List the org's live files with OpenAI cursor/filter arguments."""
+        page = await self.list_page(after=after, limit=limit, order=order, purpose=purpose)
+        return page.get("data", [])
+
+    async def list_page(
+        self,
+        *,
+        after: str | None = None,
+        limit: int | None = None,
+        order: Literal["asc", "desc"] | None = None,
+        purpose: str | None = None,
+    ) -> FileList:
+        """Return one file cursor page, including pagination metadata."""
+        params = {
+            key: value
+            for key, value in {
+                "after": after,
+                "limit": limit,
+                "order": order,
+                "purpose": purpose,
+            }.items()
+            if value is not None
+        }
+        path = f"/v1/files?{urlencode(params)}" if params else "/v1/files"
+        data = await self._request_json("GET", path)
+        if isinstance(data, dict):
+            return cast("FileList", data)
+        files = data if isinstance(data, list) else []
+        return {
+            "object": "list",
+            "data": files,
+            "first_id": files[0].get("id") if files else None,
+            "last_id": files[-1].get("id") if files else None,
+            "has_more": False,
+        }
+
     async def content(self, file_id: str) -> bytes:
         """Async ``files.content`` — download a file's raw bytes (``GET /v1/files/{id}/content``)."""
         try:
@@ -2810,12 +3177,26 @@ class _AsyncBatches(_AsyncNamespace):
         """Async ``batches.retrieve`` (``GET /v1/batches/{id}``)."""
         return await self._request_json("GET", f"/v1/batches/{batch_id}")
 
-    async def list(self) -> Sequence[Batch]:
-        """Async ``batches.list`` (``GET /v1/batches``; additive OpenAI-parity)."""
-        data = await self._request_json("GET", "/v1/batches")
+    async def list(self, *, after: str | None = None, limit: int | None = None) -> Sequence[Batch]:
+        """List the org's batches while preserving the historical sequence return."""
+        page = await self.list_page(after=after, limit=limit)
+        return page.get("data", [])
+
+    async def list_page(self, *, after: str | None = None, limit: int | None = None) -> BatchList:
+        """Return one batch cursor page, including pagination metadata."""
+        params = {key: value for key, value in {"after": after, "limit": limit}.items() if value is not None}
+        path = f"/v1/batches?{urlencode(params)}" if params else "/v1/batches"
+        data = await self._request_json("GET", path)
         if isinstance(data, dict):
-            return data.get("data", [])
-        return data if isinstance(data, list) else []
+            return cast("BatchList", data)
+        batches = data if isinstance(data, list) else []
+        return {
+            "object": "list",
+            "data": batches,
+            "first_id": batches[0].get("id") if batches else None,
+            "last_id": batches[-1].get("id") if batches else None,
+            "has_more": False,
+        }
 
     async def cancel(self, batch_id: str) -> Batch:
         """Async ``batches.cancel`` (``POST /v1/batches/{id}/cancel``; additive OpenAI-parity)."""
