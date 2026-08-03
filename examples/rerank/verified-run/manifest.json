@@ -30,7 +30,7 @@
     "cases": "data/cases.json",
     "cases_sha256": "3922fa3ad22c5d963d9e89d9d5e8ae65fabda2d7d432766c67efc10710dfce85",
     "sources": "data/sources.json",
-    "sources_sha256": "4c1bf7f1c8d0d5a53e9ac186798570ddefeb13b7a66b61822fbd7a85437ec63d",
+    "sources_sha256": "205c0557df820e18a6daa6b9c7f29ac10817c75bd9ef70117005b2109a880928",
     "synthetic_or_paraphrased_evidence": false
   },
   "artifacts": {

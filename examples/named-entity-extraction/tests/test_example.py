@@ -90,6 +90,15 @@ class NamedEntityExampleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid score"):
             run.validate_response(case_id, cases["cases"][case_id], response)
 
+    def test_boolean_offsets_fail_closed(self) -> None:
+        cases, _ = run.load_and_verify_inputs()
+        case_id = "scotus_two_contracts"
+        response = run.read_json(ROOT / "verified-run" / "raw" / "supreme-court-caption.json")
+        response["entities"][0]["start"] = True
+
+        with self.assertRaisesRegex(TypeError, "Non-integer offsets"):
+            run.validate_response(case_id, cases["cases"][case_id], response)
+
     def test_non_finite_scores_fail_closed(self) -> None:
         cases, _ = run.load_and_verify_inputs()
         case_id = "scotus_two_contracts"

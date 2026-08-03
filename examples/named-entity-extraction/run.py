@@ -164,7 +164,7 @@ def validate_response(
             raise ValueError(f"Unrequested label at entity {index}: {label}")
         start = entity.get("start")
         end = entity.get("end")
-        if not isinstance(start, int) or not isinstance(end, int):
+        if type(start) is not int or type(end) is not int:
             raise TypeError(f"Non-integer offsets at entity {index}")
         if start < 0 or end <= start or end > len(text):
             raise ValueError(f"Invalid offsets at entity {index}")

@@ -6,6 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_SPEC = importlib.util.spec_from_file_location("rerank_run", ROOT / "run.py")
@@ -71,6 +72,19 @@ class RerankExampleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Invalid score"):
             run.validate_response(case_id, case, response)
+
+    def test_manifest_rejects_rewritten_excerpt_and_declared_hash(self) -> None:
+        cases = run.read_json(run.CASES_PATH)
+        sources = run.read_json(run.SOURCES_PATH)
+        candidate = cases["cases"]["scotus_two_contracts"]["candidates"][0]
+        candidate["text"] += " tampered"
+        candidate["sha256"] = run.sha256_bytes(candidate["text"].encode("utf-8"))
+
+        with (
+            mock.patch.object(run, "read_json", side_effect=[cases, sources]),
+            self.assertRaisesRegex(ValueError, "Canonical excerpt changed"),
+        ):
+            run.load_and_verify_inputs()
 
     def test_manifest_pins_every_artifact(self) -> None:
         manifest = run.read_json(ROOT / "verified-run" / "manifest.json")

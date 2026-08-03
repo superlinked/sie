@@ -11,7 +11,25 @@
       "accession": "0000907471-25-000083",
       "filed": "2025-08-29",
       "sha256": "eed8ca33bfaea864627fef65e0da305323e7d72e8640d47cb6c8781e3181b01a",
-      "byte_length": 9711929
+      "byte_length": 9711929,
+      "excerpts": {
+        "sec-amendment-scope": {
+          "locator": "Explanatory Note, normalized visible-text line 5374",
+          "sha256": "de8ab0a0e06207ac8b441f74a37de0fe604f1a8d20f663d5fb41bdf11db4fb6b"
+        },
+        "sec-non-reliance": {
+          "locator": "Restatement Background, normalized visible-text line 5376",
+          "sha256": "0534acbc7edb26f346f6306b3ebf3edc55f4e3d95119db5178cd704c05fb2767"
+        },
+        "sec-accounting-errors": {
+          "locator": "Restatement Background, normalized visible-text line 5377",
+          "sha256": "e1039015d0fd5e2fc438a28fff88b57d5fa23311ed04db2483667140b9357524"
+        },
+        "sec-material-weakness": {
+          "locator": "Restatement Background, normalized visible-text line 5379",
+          "sha256": "e49c23c3f2802795dae9392b621cd4914e8a012ab22f25b408856629e360d921"
+        }
+      }
     },
     "cms_lower_limb": {
       "file": "cms-lower-limb-orthoses.html",
@@ -20,7 +38,29 @@
       "document": "Lower Limb Orthoses",
       "page_last_modified": "2026-02-11",
       "sha256": "27ececf8b249af6f01a8785c03aeda27235bf40a6b62e5e7b77be06e0724df28",
-      "byte_length": 217383
+      "byte_length": 217383,
+      "excerpts": {
+        "cms-six-month-requirement": {
+          "locator": "Billing & Coding Criteria, normalized visible-text line 1232",
+          "sha256": "36e54e61854afbe95b719bfe7f4bcd42df5380805a03aff54b71550273cf3c73"
+        },
+        "cms-claim-description": {
+          "locator": "Example of Improper Payments, normalized visible-text line 1242",
+          "sha256": "805697f59fd70019041766d758d611606a07fe4c48ee047ae6043367b07fb34a"
+        },
+        "cms-seven-month-evidence": {
+          "locator": "Example of Improper Payments, normalized visible-text line 1245",
+          "sha256": "02ea6561a2f2593960d9b67bc0c32a73dde6d1ea65bb32c91a77c33169335ed7"
+        },
+        "cms-missing-documentation": {
+          "locator": "What Documentation Was Missing?, normalized visible-text line 1247",
+          "sha256": "cb7e39136bdd070855759fa8caeb7b915f877638deeb6eb29ff1cf3d7ca072bb"
+        },
+        "cms-recoupment": {
+          "locator": "What Happens Next?, normalized visible-text line 1249",
+          "sha256": "0ddc7dda57a2fcbf6b01a6f411888c1fa23404bc6d8a5c8c0f5b3276f025b89d"
+        }
+      }
     },
     "ntsb_east_palestine": {
       "file": "ntsb-east-palestine-digest.pdf",
@@ -29,7 +69,25 @@
       "document": "Norfolk Southern Railway Train Derailment with Subsequent Hazardous Material Release and Fires, Illustrated Digest",
       "report_number": "SPC-24-06",
       "sha256": "8c7dc02006f8a9ce21b77657553c8f14e6a7a00ec94b0c6ad05d60eec297d89f",
-      "byte_length": 5205715
+      "byte_length": 5205715,
+      "excerpts": {
+        "ntsb-sebring-no-alert": {
+          "locator": "PDF page 3 (printed pages 4–5), \"Sebring\"",
+          "sha256": "58ec7805f08ff98282a31680b98a4f0bb131565b5d9df1ebb2d41643820930eb"
+        },
+        "ntsb-salem-noncritical": {
+          "locator": "PDF page 3 (printed pages 4–5), \"Salem\"",
+          "sha256": "bdcb66ca5dd4ceb3033d229dfc7c2b286f065f6b7cb33da001f57f9dfebdac4b"
+        },
+        "ntsb-east-palestine-critical": {
+          "locator": "PDF page 3 (printed pages 4–5), \"East Palestine\"",
+          "sha256": "2dc95188d1b5c64256c4cb91566bb6ba5386fa0e1c71ab0b5017a0fc0bc09e16"
+        },
+        "ntsb-help-desk-process": {
+          "locator": "PDF page 3 (printed pages 4–5), \"The Wayside Help Desk\"",
+          "sha256": "ef13dd88ead7354a32982862ac590b843c9221d66801b9e1150c8f77512b69e4"
+        }
+      }
     },
     "scotus_coinbase_suski": {
       "file": "scotus-coinbase-v-suski.pdf",
@@ -39,7 +97,25 @@
       "docket": "23-3",
       "decided": "2024-05-23",
       "sha256": "591f0fdecf41cb297427288a18fd72230e14d4aefe9af4f2d86d6c64dcc4476f",
-      "byte_length": 111243
+      "byte_length": 111243,
+      "excerpts": {
+        "scotus-one-contract-rule": {
+          "locator": "Slip opinion page 8, Opinion of the Court",
+          "sha256": "7d9037437b5a840973c09770d94f96ec0df0f6a86338d0011b62994b648b08e6"
+        },
+        "scotus-arbitration-clause": {
+          "locator": "Slip opinion page 2, quoted User Agreement",
+          "sha256": "841b401364eb1d80739db61b992f22cfe47111aaf2574cae8d315f4d8659f78c"
+        },
+        "scotus-forum-clause": {
+          "locator": "Slip opinion page 3, quoted Official Rules",
+          "sha256": "078b6b6e3c9ad0f5739a846563af8dbe587b835b52baa745c74d1497bc101990"
+        },
+        "scotus-two-contract-holding": {
+          "locator": "Slip opinion page 8, Opinion of the Court",
+          "sha256": "421ec0cffca2e46f484a7caadc4bdc5d16913a644641778920d1a097801543d9"
+        }
+      }
     }
   }
 }

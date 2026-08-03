@@ -70,7 +70,7 @@ def load_and_verify_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
     if set(cases["cases"]) != set(ARTIFACT_NAMES):
         raise ValueError("Case set changed")
 
-    known_sources = set(sources["sources"])
+    known_sources = sources["sources"]
     for case_id, case in cases["cases"].items():
         if not case["query_provenance"].startswith("authored evaluation query"):
             raise ValueError(f"Missing query provenance for {case_id}")
@@ -80,11 +80,17 @@ def load_and_verify_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
             if candidate_id in candidate_ids:
                 raise ValueError(f"Duplicate candidate {candidate_id}")
             candidate_ids.add(candidate_id)
-            if candidate["source_id"] not in known_sources:
+            source = known_sources.get(candidate["source_id"])
+            if source is None:
                 raise ValueError(f"Unknown source for {candidate_id}")
             actual = sha256_bytes(candidate["text"].encode("utf-8"))
             if actual != candidate["sha256"]:
                 raise ValueError(f"Source excerpt changed for {candidate_id}")
+            canonical = source.get("excerpts", {}).get(candidate_id)
+            if canonical is None:
+                raise ValueError(f"Missing canonical excerpt for {candidate_id}")
+            if candidate["locator"] != canonical["locator"] or actual != canonical["sha256"]:
+                raise ValueError(f"Canonical excerpt changed for {candidate_id}")
         if case["expected_top_candidate_id"] not in candidate_ids:
             raise ValueError(f"Expected top candidate missing for {case_id}")
     return cases, sources
