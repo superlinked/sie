@@ -49,6 +49,10 @@ We welcome contributions. To add your project to the gallery:
 3. **Keep it self-contained** - include a `requirements.txt` or `package.json`, a docker-compose if needed, and sample data or instructions to fetch it
 4. **Open a PR** against `main`
 
+### Review workflow
+
+Maintainers apply the `coderabbit-direct` label to eligible PRs that change content under `examples/**` or the root `README.md`. The label opts the PR into CodeRabbit review and allows CodeRabbit to formally approve it once review comments are resolved and required checks pass.
+
 Projects can be anything: a search engine, a RAG pipeline, a benchmark, a migration guide, a CLI tool. If it uses SIE, it belongs here.
 
 ## Links
