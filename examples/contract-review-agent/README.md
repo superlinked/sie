@@ -42,9 +42,11 @@ For each agent turn, the adapter builds a strict JSON Schema whose valid result
 is either one declared function call or a final answer. SIE performs the
 schema-constrained generation through its native primitive; the Agents SDK
 executes declared Python tools and passes their results into the next turn.
-Structured final output uses the agent's declared Pydantic schema. The example
-never calls an OpenAI-compatible endpoint, sends data to `api.openai.com`, or
-executes model-generated code.
+Structured final output uses the agent's declared Pydantic schema. The example never calls an OpenAI-compatible endpoint or sends data to
+`api.openai.com`. The text-to-SQL tool may execute model-generated SQL only
+after enforcing one SELECT statement; it never executes generated Python or
+shell code. The SDK normalizes slash-form catalog IDs into wire-safe paths,
+but the example never substitutes one catalog model for another.
 
 The flow is **two agents**:
 
@@ -106,12 +108,12 @@ The default corpus is **[CUAD](https://www.atticusprojectai.org/cuad/)** (Contra
 
 > CUAD: An Expert-Annotated NLP Dataset for Legal Contract Review. Dan Hendrycks, Collin Burns, Anya Chen, Spencer Ball. arXiv:2103.06268. Licensed CC BY 4.0.
 
-`uv run make-sample` builds a fully synthetic, offline alternative (an Acme MSA, an NDA, and an SOW) so the demo runs with no network.
+`uv run make-sample` builds a fully synthetic, offline input corpus (an Acme MSA, an NDA, and an SOW) so the demo runs with no network.
 
 ## Notes
 
 - Agent planning, tool selection, structured output, vision questions, and text-to-SQL all use native `generate`.
-- `sql.mode: chat` combines system/user instructions; `sql.mode: prompt` sends a specialist's raw template. Both use the same native primitive.
+- `sql.mode: instruct` builds one role-labelled raw prompt; `sql.mode: prompt` sends a specialist's raw template. Both use the same native primitive.
 - This is a demo of inference orchestration, **not legal advice**.
 
 Apache-2.0, like the rest of SIE.

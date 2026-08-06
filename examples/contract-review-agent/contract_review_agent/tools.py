@@ -19,7 +19,7 @@ from agents import RunContextWrapper, Runner, function_tool
 from sie_sdk import Item
 
 from .data.make_sample import SCHEMA_DDL, TODAY
-from .runtime import AppContext, GenResult, chat_once, prompt_once
+from .runtime import AppContext, GenResult, instruct_once, prompt_once
 
 
 def _tok(n: int | None) -> str:
@@ -102,7 +102,7 @@ async def classify_document(ctx: RunContextWrapper[AppContext]) -> str:
     one-line reason. A fast first-pass triage over the loaded contract."""
     app = ctx.context
     model = app.cfg["models"]["triage"]
-    res = await chat_once(
+    res = await instruct_once(
         app,
         model,
         [
@@ -136,7 +136,7 @@ async def read_signature_page(ctx: RunContextWrapper[AppContext], question: str)
     app = ctx.context
     model = app.cfg["models"]["vision"]
     data = base64.b64encode(Path(app.scan_path).read_bytes()).decode()
-    res = await chat_once(
+    res = await instruct_once(
         app,
         model,
         [
@@ -323,7 +323,7 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Text-to-SQL tool (chat-shaped or raw specialist prompt)
+# Text-to-SQL tool (role-labelled instruction or raw specialist prompt)
 # ──────────────────────────────────────────────────────────────────────────
 _SQLCODER_PROMPT = """### Task
 Generate a SQLite SQL query to answer [QUESTION]{question}[/QUESTION]
@@ -387,7 +387,7 @@ async def query_obligations_db(
     outstanding payments by counterparty'."""
     app = ctx.context
     model = app.cfg["models"]["sql"]
-    mode = (app.cfg.get("sql") or {}).get("mode", "chat")
+    mode = (app.cfg.get("sql") or {}).get("mode", "instruct")
     if mode == "prompt":
         prompt = _SQLCODER_PROMPT.format(
             question=question,
@@ -401,8 +401,8 @@ async def query_obligations_db(
             max_tokens=256,
             stop=[";", "```", "\n\n\n"],
         )
-    elif mode == "chat":
-        res = await chat_once(
+    elif mode == "instruct":
+        res = await instruct_once(
             app,
             model,
             [
@@ -421,7 +421,7 @@ async def query_obligations_db(
             max_tokens=256,
         )
     else:
-        raise ValueError("sql.mode must be 'chat' or 'prompt'")
+        raise ValueError("sql.mode must be 'instruct' or 'prompt'")
     app.ledger.record(
         "Text-to-SQL",
         model,

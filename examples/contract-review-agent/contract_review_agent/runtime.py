@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import time
 from dataclasses import dataclass, field
@@ -10,6 +11,11 @@ from typing import Any
 from sie_sdk import SIEAsyncClient
 
 from .native_model import SIENativeModel
+
+
+def provision_timeout_from(cfg: dict[str, Any]) -> float:
+    """Return the configured capacity-wait timeout."""
+    return float(cfg["cluster"].get("provision_timeout_s", 900))
 
 
 def model_for(
@@ -107,7 +113,7 @@ class AppContext:
 
     @property
     def provision_timeout_s(self) -> float:
-        return float(self.cfg["cluster"].get("provision_timeout_s", 900))
+        return provision_timeout_from(self.cfg)
 
 
 def _data_uri_image(value: str) -> tuple[bytes, str]:
@@ -118,9 +124,15 @@ def _data_uri_image(value: str) -> tuple[bytes, str]:
     return base64.b64decode(encoded, validate=True), image_format
 
 
-def _native_prompt_and_images(
+def _instruction_prompt_and_images(
     messages: list[dict[str, Any]],
 ) -> tuple[str, list[dict[str, Any]]]:
+    """Build the role-labelled raw prompt accepted by native generate.
+
+    Native text-only generation intentionally preserves raw-prompt execution.
+    Image-bearing requests are rendered as one user turn by the server-side
+    model chat template, as required by the native API contract.
+    """
     sections: list[str] = []
     images: list[dict[str, Any]] = []
     for message in messages:
@@ -172,7 +184,7 @@ def _generation_result(result: dict[str, Any], elapsed_s: float) -> GenResult:
     )
 
 
-async def chat_once(
+async def instruct_once(
     app: AppContext,
     model: str,
     messages: list[dict[str, Any]],
@@ -182,10 +194,10 @@ async def chat_once(
     timeout_s: float | None = None,
     **extra: Any,
 ) -> GenResult:
-    """Run a chat-shaped task through the native generate primitive."""
-    prompt, images = _native_prompt_and_images(messages)
+    """Run a role-labelled instruction through native generate."""
+    prompt, images = _instruction_prompt_and_images(messages)
     started = time.monotonic()
-    result = await app.sie.generate(
+    call = app.sie.generate(
         model,
         prompt,
         max_new_tokens=max_tokens,
@@ -196,6 +208,11 @@ async def chat_once(
             timeout_s if timeout_s is not None else app.provision_timeout_s
         ),
         **extra,
+    )
+    result = (
+        await asyncio.wait_for(call, timeout=timeout_s)
+        if timeout_s is not None
+        else await call
     )
     return _generation_result(result, time.monotonic() - started)
 

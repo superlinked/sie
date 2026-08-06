@@ -24,7 +24,7 @@ from .app import (
 from .config import load_config
 from .data import make_sample
 from .data.paths import CUAD_DIR, GENERATED_DIR, MANIFEST_PATH
-from .runtime import AppContext, Ledger, chat_once
+from .runtime import AppContext, Ledger, instruct_once
 
 console = Console()
 
@@ -188,7 +188,7 @@ async def _warm(app: AppContext) -> None:
             f"Warming {model} (first call provisions it on a cold cluster)..."
         ):
             try:
-                await chat_once(
+                await instruct_once(
                     app,
                     model,
                     [{"role": "user", "content": "ok"}],
@@ -249,7 +249,7 @@ async def _run(args) -> None:
                 Panel(
                     f"{type(exc).__name__}: {exc}",
                     border_style="red",
-                    title="Run failed (model unavailable)",
+                    title="Run failed",
                 )
             )
             _print_ledger(ledger)

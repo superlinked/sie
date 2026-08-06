@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from typing import Any
 from uuid import uuid4
 
@@ -131,6 +132,38 @@ def _selected_tools(
     raise ModelBehaviorError(f"Unsupported tool choice: {choice!r}")
 
 
+def _namespace_schema_defs(
+    schema: dict[str, Any],
+    namespace: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Move local definitions to collision-free root names."""
+    normalized = deepcopy(schema)
+    raw_defs = normalized.pop("$defs", None)
+    if raw_defs is None:
+        return normalized, {}
+    if not isinstance(raw_defs, dict):
+        raise ModelBehaviorError("JSON Schema $defs must be an object")
+
+    names = {name: f"{namespace}__{name}" for name in raw_defs}
+    refs = {f"#/$defs/{name}": f"#/$defs/{names[name]}" for name in raw_defs}
+
+    def rewrite(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: refs.get(item, item)
+                if key == "$ref" and isinstance(item, str)
+                else rewrite(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        return value
+
+    return rewrite(normalized), {
+        names[name]: rewrite(definition) for name, definition in raw_defs.items()
+    }
+
+
 def _turn_schema(
     tools: list[FunctionTool],
     output_schema: AgentOutputSchemaBase | None,
@@ -138,14 +171,20 @@ def _turn_schema(
     allow_final: bool,
 ) -> dict[str, Any]:
     branches: list[dict[str, Any]] = []
-    for tool in tools:
+    root_defs: dict[str, Any] = {}
+    for index, tool in enumerate(tools):
+        arguments, definitions = _namespace_schema_defs(
+            tool.params_json_schema,
+            f"tool_{index}",
+        )
+        root_defs.update(definitions)
         branches.append(
             {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string", "const": "tool_call"},
                     "name": {"type": "string", "const": tool.name},
-                    "arguments": tool.params_json_schema,
+                    "arguments": arguments,
                 },
                 "required": ["kind", "name", "arguments"],
                 "additionalProperties": False,
@@ -157,7 +196,11 @@ def _turn_schema(
         if output_schema is None or output_schema.is_plain_text():
             final_schema = {"type": "string"}
         else:
-            final_schema = output_schema.json_schema()
+            final_schema, definitions = _namespace_schema_defs(
+                output_schema.json_schema(),
+                "output",
+            )
+            root_defs.update(definitions)
         branches.append(
             {
                 "type": "object",
@@ -174,9 +217,10 @@ def _turn_schema(
         raise ModelBehaviorError(
             "The turn permits neither a tool call nor a final response"
         )
-    if len(branches) == 1:
-        return branches[0]
-    return {"oneOf": branches}
+    schema = branches[0] if len(branches) == 1 else {"oneOf": branches}
+    if root_defs:
+        schema["$defs"] = root_defs
+    return schema
 
 
 def _tool_catalog(tools: list[FunctionTool]) -> str:
@@ -406,5 +450,7 @@ class SIENativeModel(Model):
         raise ModelBehaviorError(
             "Streaming is not supported by the SIE native agent adapter"
         )
+        # Unreachable: preserve async-generator behavior so this error is
+        # raised on first iteration rather than when the method is called.
         if False:
             yield None

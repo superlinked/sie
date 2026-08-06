@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 import pytest
-from agents import Agent, Runner, function_tool, set_tracing_disabled
+from agents import (
+    Agent,
+    ModelBehaviorError,
+    ModelSettings,
+    ModelTracing,
+    Runner,
+    function_tool,
+    set_tracing_disabled,
+)
 from pydantic import BaseModel
 
 from contract_review_agent.native_model import SIENativeModel
-from contract_review_agent.runtime import AppContext, Ledger, chat_once
+from contract_review_agent.runtime import AppContext, Ledger, instruct_once
 
 set_tracing_disabled(True)
 
@@ -93,9 +102,15 @@ async def test_agents_runner_executes_native_tool_turn_then_finishes() -> None:
     assert client.calls[1]["kwargs"]["wait_for_capacity"] is True
 
 
+class Risk(BaseModel):
+    clause: str
+    severity: str
+
+
 class Review(BaseModel):
     recommendation: str
     executed: bool
+    risks: list[Risk]
 
 
 @pytest.mark.asyncio
@@ -109,6 +124,7 @@ async def test_agents_runner_validates_native_structured_output() -> None:
                         "output": {
                             "recommendation": "Review renewal clause",
                             "executed": True,
+                            "risks": [{"clause": "8.2", "severity": "high"}],
                         },
                     }
                 ),
@@ -132,17 +148,18 @@ async def test_agents_runner_validates_native_structured_output() -> None:
     assert result.final_output_as(Review) == Review(
         recommendation="Review renewal clause",
         executed=True,
+        risks=[Risk(clause="8.2", severity="high")],
     )
     schema = client.calls[0]["kwargs"]["grammar"]["json_schema"]
-    assert (
-        schema["properties"]["output"]["properties"]["recommendation"]["type"]
-        == "string"
-    )
+    output = schema["properties"]["output"]
+    assert "$defs" not in output
+    assert output["properties"]["risks"]["items"]["$ref"] == ("#/$defs/output__Risk")
+    assert schema["$defs"]["output__Risk"]["properties"]["severity"]["type"] == "string"
     assert client.calls[0]["kwargs"]["provision_timeout_s"] == 30
 
 
 @pytest.mark.asyncio
-async def test_chat_helper_uses_native_multimodal_generate() -> None:
+async def test_instruction_helper_uses_native_multimodal_generate() -> None:
     client = FakeSIE([generated("signed", "request-vision")])
     app = AppContext(
         sie=client,  # type: ignore[arg-type]
@@ -153,7 +170,7 @@ async def test_chat_helper_uses_native_multimodal_generate() -> None:
         db_path="obligations.db",
     )
 
-    result = await chat_once(
+    result = await instruct_once(
         app,
         "Qwen/Qwen3.5-4B",
         [
@@ -179,3 +196,118 @@ async def test_chat_helper_uses_native_multimodal_generate() -> None:
     assert call["kwargs"]["provision_timeout_s"] == 42
     assert result.text == "signed"
     assert result.request_id == "request-vision"
+
+
+async def _get_response(
+    model: SIENativeModel,
+    *,
+    tools: list[Any] | None = None,
+    handoffs: list[Any] | None = None,
+    prompt: Any = None,
+) -> Any:
+    return await model.get_response(
+        None,
+        "Process clause",
+        ModelSettings(),
+        tools or [],  # type: ignore[arg-type]
+        None,
+        handoffs or [],  # type: ignore[arg-type]
+        ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=prompt,
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_model_rejects_handoffs_and_stored_prompts() -> None:
+    model = SIENativeModel(
+        "Qwen/Qwen3.5-4B",
+        FakeSIE([]),  # type: ignore[arg-type]
+        provision_timeout_s=30,
+    )
+
+    with pytest.raises(ModelBehaviorError, match="does not support handoffs"):
+        await _get_response(model, handoffs=[object()])
+    with pytest.raises(ModelBehaviorError, match="does not support stored prompts"):
+        await _get_response(model, prompt=object())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "match"),
+    [
+        ({"text": None}, "returned no text"),
+        (generated("not-json", "request-invalid"), "invalid agent JSON"),
+    ],
+)
+async def test_native_model_rejects_invalid_response_text(
+    response: dict[str, Any],
+    match: str,
+) -> None:
+    model = SIENativeModel(
+        "Qwen/Qwen3.5-4B",
+        FakeSIE([response]),  # type: ignore[arg-type]
+        provision_timeout_s=30,
+    )
+
+    with pytest.raises(ModelBehaviorError, match=match):
+        await _get_response(model)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("turn", "match"),
+    [
+        (
+            {"kind": "tool_call", "name": "unknown", "arguments": {}},
+            "selected unknown tool",
+        ),
+        (
+            {"kind": "tool_call", "name": "echo", "arguments": []},
+            "tool arguments must be an object",
+        ),
+    ],
+)
+async def test_native_model_rejects_invalid_tool_calls(
+    turn: dict[str, Any],
+    match: str,
+) -> None:
+    @function_tool
+    async def echo(value: str) -> str:
+        """Return one value."""
+        return value
+
+    model = SIENativeModel(
+        "Qwen/Qwen3.5-4B",
+        FakeSIE([generated(json.dumps(turn), "request-invalid-tool")]),  # type: ignore[arg-type]
+        provision_timeout_s=30,
+    )
+
+    with pytest.raises(ModelBehaviorError, match=match):
+        await _get_response(model, tools=[echo])
+
+
+@pytest.mark.asyncio
+async def test_instruction_timeout_bounds_the_full_model_call() -> None:
+    class BlockingSIE:
+        async def generate(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            await asyncio.sleep(60)
+            raise AssertionError("unreachable")
+
+    app = AppContext(
+        sie=BlockingSIE(),  # type: ignore[arg-type]
+        cfg={"cluster": {}},
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+    )
+
+    with pytest.raises(TimeoutError):
+        await instruct_once(
+            app,
+            "Qwen/Qwen3.5-4B",
+            [{"role": "user", "content": "Bound this call."}],
+            timeout_s=0.01,
+        )

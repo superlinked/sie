@@ -141,6 +141,7 @@ def test_classify_listing_runs_two_rankings_then_verifies_the_union() -> None:
     generate_call = client.generate_calls[0]
     assert "TITLE\nManual floor sweeper" in generate_call["prompt"]
     assert generate_call["kwargs"]["images"][0]["data"] == source.image_bytes
+    assert generate_call["kwargs"]["images"][0]["format"] == source.image_format
     assert (
         generate_call["kwargs"]["grammar"]["json_schema"]["additionalProperties"]
         is False
@@ -162,6 +163,32 @@ def test_verify_candidates_rejects_an_empty_union() -> None:
 
     with pytest.raises(ValueError, match="No candidate paths supplied for row 7"):
         verify_candidates(object(), source, [])  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("response", "match"),
+    [
+        ({"text": None}, "SIE verifier returned non-text content"),
+        (
+            {"text": '{"selected_index": 2, "needs_review": false}'},
+            "Invalid selected_index: 2",
+        ),
+    ],
+)
+def test_verify_candidates_rejects_invalid_native_output(
+    response: dict[str, Any],
+    match: str,
+) -> None:
+    class FakeClient:
+        def generate(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return response
+
+    with pytest.raises(ValueError, match=match):
+        verify_candidates(
+            FakeClient(),  # type: ignore[arg-type]
+            listing(reference="A > One"),
+            ["A > One", "A > Two"],
+        )
 
 
 def test_image_cache_key_includes_the_dataset_revision(

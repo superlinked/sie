@@ -1,4 +1,4 @@
-# SIE deployment. Native SIEClient.generate is served by SIE's generation
+# SIE deployment. Native SIEAsyncClient.generate is served by SIE's generation
 # bundle (GPU), so use a CUDA image locally:
 #   docker run --gpus all -p 8080:8080 ghcr.io/superlinked/sie-server:latest-cuda12-default
 # or override with SIE_CLUSTER_URL / SIE_API_KEY to target a managed GPU cluster.
@@ -32,12 +32,7 @@ search:
   top_k_candidates: 12   # clauses retrieved by embedding similarity
   top_k_results: 4       # clauses kept after rerank
 
-guard:
-  # granite-guardian emits a "yes" (unsafe) / "no" (safe) verdict. Trip the
-  # guardrail when P(unsafe) clears this threshold. 0.5 is recall-biased.
-  threshold: 0.5
-
-# Text-to-SQL prompt shape. Both modes use native SIE generate: chat combines
-# system/user instructions, while prompt sends a specialist's raw template.
+# Text-to-SQL prompt shape. Both modes use native SIE generate: instruct builds
+# one role-labelled raw prompt, while prompt sends a specialist's raw template.
 sql:
-  mode: "chat"   # "chat" | "prompt"
+  mode: "instruct"   # "instruct" | "prompt"

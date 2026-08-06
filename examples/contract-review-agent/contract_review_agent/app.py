@@ -10,7 +10,7 @@ from agents import Agent, Runner, RunResult
 from pydantic import BaseModel
 
 from .guardrails import safety_guardrail
-from .runtime import AppContext, model_for
+from .runtime import AppContext, model_for, provision_timeout_from
 from .tools import ALL_TOOLS
 
 
@@ -74,7 +74,7 @@ def build_reasoning_agent(cfg: dict[str, Any], client: Any) -> Agent:
         model=model_for(
             cfg["models"]["reasoning"],
             client,
-            provision_timeout_s=float(cfg["cluster"]["provision_timeout_s"]),
+            provision_timeout_s=provision_timeout_from(cfg),
         ),
     )
 
@@ -87,7 +87,7 @@ def build_investigator(cfg: dict[str, Any], client: Any) -> Agent:
         model=model_for(
             cfg["models"]["orchestrator"],
             client,
-            provision_timeout_s=float(cfg["cluster"]["provision_timeout_s"]),
+            provision_timeout_s=provision_timeout_from(cfg),
         ),
         tools=ALL_TOOLS,
         input_guardrails=[safety_guardrail],
@@ -102,7 +102,7 @@ def build_synthesizer(cfg: dict[str, Any], client: Any) -> Agent:
         model=model_for(
             cfg["models"]["orchestrator"],
             client,
-            provision_timeout_s=float(cfg["cluster"]["provision_timeout_s"]),
+            provision_timeout_s=provision_timeout_from(cfg),
         ),
         output_type=ContractReview,
     )

@@ -14,7 +14,7 @@ from typing import Any
 
 from agents import Agent, GuardrailFunctionOutput, RunContextWrapper, input_guardrail
 
-from .runtime import AppContext, chat_once
+from .runtime import AppContext, instruct_once
 
 
 def _input_text(data: Any) -> str:
@@ -43,7 +43,7 @@ async def safety_guardrail(
     model = app.cfg["models"]["guard"]
     t0 = time.monotonic()
     try:
-        res = await chat_once(
+        res = await instruct_once(
             app,
             model,
             [{"role": "user", "content": _input_text(data)[:6000]}],
