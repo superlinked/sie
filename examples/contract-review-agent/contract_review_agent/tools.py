@@ -19,7 +19,7 @@ from agents import RunContextWrapper, Runner, function_tool
 from sie_sdk import Item
 
 from .data.make_sample import SCHEMA_DDL, TODAY
-from .runtime import AppContext, GenResult, chat_once, complete_once
+from .runtime import AppContext, GenResult, chat_once, prompt_once
 
 
 def _tok(n: int | None) -> str:
@@ -62,7 +62,9 @@ def _split_clauses(text: str, target: int = 900) -> list[str]:
     return out
 
 
-async def _clause_index(app: AppContext, embed_model: str) -> tuple[list[str], np.ndarray]:
+async def _clause_index(
+    app: AppContext, embed_model: str
+) -> tuple[list[str], np.ndarray]:
     """Embed the contract's clauses once and cache (clauses, matrix)."""
     if "matrix" in app.clause_cache:
         return app.clause_cache["clauses"], app.clause_cache["matrix"]
@@ -78,8 +80,12 @@ async def _clause_index(app: AppContext, embed_model: str) -> tuple[list[str], n
     dt = time.monotonic() - t0
     matrix = np.vstack([np.asarray(r["dense"], dtype=np.float32) for r in results])
     app.ledger.record(
-        "Embed clauses (index)", embed_model, "encode",
-        latency_s=dt, sent=f"{len(clauses)} clauses", got=f"{matrix.shape[1]}-dim",
+        "Embed clauses (index)",
+        embed_model,
+        "encode",
+        latency_s=dt,
+        sent=f"{len(clauses)} clauses",
+        got=f"{matrix.shape[1]}-dim",
         throughput=f"{len(clauses) / dt:.1f} items/s" if dt > 0 else "—",
     )
     app.clause_cache["clauses"] = clauses
@@ -97,17 +103,28 @@ async def classify_document(ctx: RunContextWrapper[AppContext]) -> str:
     app = ctx.context
     model = app.cfg["models"]["triage"]
     res = await chat_once(
-        app, model,
+        app,
+        model,
         [
-            {"role": "system", "content": "You label legal documents. Reply with the type only "
-             "(MSA, NDA, SOW, or Other) followed by a short reason."},
+            {
+                "role": "system",
+                "content": "You label legal documents. Reply with the type only "
+                "(MSA, NDA, SOW, or Other) followed by a short reason.",
+            },
             {"role": "user", "content": app.contract_text[:1500]},
         ],
         max_tokens=60,
     )
-    app.ledger.record("Triage: classify document", model, "chat",
-                      warmup_s=res.provision_s, latency_s=res.gen_s,
-                      sent=_tok(res.prompt_tokens), got=_tok(res.completion_tokens), throughput=_tps(res))
+    app.ledger.record(
+        "Triage: classify document",
+        model,
+        "generate",
+        warmup_s=res.provision_s,
+        latency_s=res.gen_s,
+        sent=_tok(res.prompt_tokens),
+        got=_tok(res.completion_tokens),
+        throughput=_tps(res),
+    )
     return res.text.strip()
 
 
@@ -120,20 +137,36 @@ async def read_signature_page(ctx: RunContextWrapper[AppContext], question: str)
     model = app.cfg["models"]["vision"]
     data = base64.b64encode(Path(app.scan_path).read_bytes()).decode()
     res = await chat_once(
-        app, model,
+        app,
+        model,
         [
-            {"role": "system", "content": "You are a meticulous contracts paralegal. Answer only from what is visible in the image."},
-            {"role": "user", "content": [
-                {"type": "text", "text": question},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{data}"}},
-            ]},
+            {
+                "role": "system",
+                "content": "You are a meticulous contracts paralegal. Answer only from what is visible in the image.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": question},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{data}"},
+                    },
+                ],
+            },
         ],
         max_tokens=220,
     )
-    app.ledger.record("Read signature page (vision)", model, "chat + image",
-                      warmup_s=res.provision_s, latency_s=res.gen_s,
-                      sent=f"{Path(app.scan_path).stat().st_size // 1024} KB img + {_tok(res.prompt_tokens)}",
-                      got=_tok(res.completion_tokens), throughput=_tps(res))
+    app.ledger.record(
+        "Read signature page (vision)",
+        model,
+        "generate + image",
+        warmup_s=res.provision_s,
+        latency_s=res.gen_s,
+        sent=f"{Path(app.scan_path).stat().st_size // 1024} KB img + {_tok(res.prompt_tokens)}",
+        got=_tok(res.completion_tokens),
+        throughput=_tps(res),
+    )
     return res.text.strip()
 
 
@@ -155,9 +188,15 @@ async def analyze_clause_risks(ctx: RunContextWrapper[AppContext], clauses: str)
     dt = time.monotonic() - t0
     usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
     out_tok = getattr(usage, "output_tokens", None)
-    app.ledger.record("Clause-risk analysis (specialist sub-agent)", model, "chat",
-                      latency_s=dt, sent=_tok(getattr(usage, "input_tokens", None)), got=_tok(out_tok),
-                      throughput=f"{out_tok / dt:.0f} tok/s" if out_tok and dt > 0 else "—")
+    app.ledger.record(
+        "Clause-risk analysis (specialist sub-agent)",
+        model,
+        "generate",
+        latency_s=dt,
+        sent=_tok(getattr(usage, "input_tokens", None)),
+        got=_tok(out_tok),
+        throughput=f"{out_tok / dt:.0f} tok/s" if out_tok and dt > 0 else "—",
+    )
     return str(result.final_output)
 
 
@@ -173,14 +212,23 @@ async def ocr_signature_page(ctx: RunContextWrapper[AppContext]) -> str:
     model = app.cfg["models"]["ocr"]
     t0 = time.monotonic()
     res = await app.sie.extract(
-        model, Item(images=[app.scan_path]), wait_for_capacity=True, provision_timeout_s=app.provision_timeout_s
+        model,
+        Item(images=[app.scan_path]),
+        wait_for_capacity=True,
+        provision_timeout_s=app.provision_timeout_s,
     )
     dt = time.monotonic() - t0
     entities = res.get("entities") or []
     markdown = entities[0]["text"] if entities else "(no text recognized)"
-    app.ledger.record("OCR signature page → markdown", model, "extract",
-                      latency_s=dt, sent=f"{Path(app.scan_path).stat().st_size // 1024} KB img",
-                      got=f"{len(markdown):,} chars md", throughput=f"{len(markdown) / dt:.0f} chars/s" if dt > 0 else "—")
+    app.ledger.record(
+        "OCR signature page → markdown",
+        model,
+        "extract",
+        latency_s=dt,
+        sent=f"{Path(app.scan_path).stat().st_size // 1024} KB img",
+        got=f"{len(markdown):,} chars md",
+        throughput=f"{len(markdown) / dt:.0f} chars/s" if dt > 0 else "—",
+    )
     return markdown
 
 
@@ -190,19 +238,38 @@ async def extract_entities(ctx: RunContextWrapper[AppContext]) -> str:
     law, notice periods) from the loaded contract using zero-shot NER."""
     app = ctx.context
     model = app.cfg["models"]["entities"]
-    labels = ["party", "effective date", "renewal date", "termination notice period",
-              "monetary amount", "governing law", "term length"]
+    labels = [
+        "party",
+        "effective date",
+        "renewal date",
+        "termination notice period",
+        "monetary amount",
+        "governing law",
+        "term length",
+    ]
     payload = app.contract_text[:6000]
     t0 = time.monotonic()
     res = await app.sie.extract(
-        model, Item(text=payload), labels=labels, wait_for_capacity=True, provision_timeout_s=app.provision_timeout_s
+        model,
+        Item(text=payload),
+        labels=labels,
+        wait_for_capacity=True,
+        provision_timeout_s=app.provision_timeout_s,
     )
     dt = time.monotonic() - t0
     entities = res.get("entities") or []
-    app.ledger.record("Extract entities (zero-shot NER)", model, "extract",
-                      latency_s=dt, sent=f"{len(payload):,} chars", got=f"{len(entities)} entities",
-                      throughput=f"{len(entities) / dt:.1f} ent/s" if dt > 0 else "—")
-    lines = [f"- {e['label']}: {e['text']} (score {e.get('score', 0):.2f})" for e in entities]
+    app.ledger.record(
+        "Extract entities (zero-shot NER)",
+        model,
+        "extract",
+        latency_s=dt,
+        sent=f"{len(payload):,} chars",
+        got=f"{len(entities)} entities",
+        throughput=f"{len(entities) / dt:.1f} ent/s" if dt > 0 else "—",
+    )
+    lines = [
+        f"- {e['label']}: {e['text']} (score {e.get('score', 0):.2f})" for e in entities
+    ]
     return "\n".join(lines) if lines else "(no entities found)"
 
 
@@ -219,8 +286,12 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
 
     clauses, matrix = await _clause_index(app, embed_model)
     q = await app.sie.encode(
-        embed_model, Item(text=query), output_types=["dense"], is_query=True,
-        wait_for_capacity=True, provision_timeout_s=app.provision_timeout_s,
+        embed_model,
+        Item(text=query),
+        output_types=["dense"],
+        is_query=True,
+        wait_for_capacity=True,
+        provision_timeout_s=app.provision_timeout_s,
     )
     qv = np.asarray(q["dense"], dtype=np.float32)
     denom = np.linalg.norm(matrix, axis=1) * (np.linalg.norm(qv) + 1e-9) + 1e-9
@@ -230,20 +301,29 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
 
     t0 = time.monotonic()
     scored = await app.sie.score(
-        rerank_model, Item(text=query), [Item(id=str(i), text=c) for i, c in enumerate(candidates)],
-        wait_for_capacity=True, provision_timeout_s=app.provision_timeout_s,
+        rerank_model,
+        Item(text=query),
+        [Item(id=str(i), text=c) for i, c in enumerate(candidates)],
+        wait_for_capacity=True,
+        provision_timeout_s=app.provision_timeout_s,
     )
     dt = time.monotonic() - t0
-    app.ledger.record("Rerank candidate clauses", rerank_model, "score",
-                      latency_s=dt, sent=f"{len(candidates)} docs", got=f"top {k_res}",
-                      throughput=f"{len(candidates) / dt:.1f} docs/s" if dt > 0 else "—")
+    app.ledger.record(
+        "Rerank candidate clauses",
+        rerank_model,
+        "score",
+        latency_s=dt,
+        sent=f"{len(candidates)} docs",
+        got=f"top {k_res}",
+        throughput=f"{len(candidates) / dt:.1f} docs/s" if dt > 0 else "—",
+    )
     ranked = sorted(scored["scores"], key=lambda s: s["rank"])[:k_res]
     top = [candidates[int(s["item_id"])] for s in ranked]
     return "\n\n---\n\n".join(top) if top else "(no relevant clauses found)"
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Text-to-SQL tool (chat by default; completion-template mode for specialists)
+# Text-to-SQL tool (chat-shaped or raw specialist prompt)
 # ──────────────────────────────────────────────────────────────────────────
 _SQLCODER_PROMPT = """### Task
 Generate a SQLite SQL query to answer [QUESTION]{question}[/QUESTION]
@@ -298,32 +378,60 @@ def _run_select(db_path: str, sql: str) -> tuple[list[str], list[tuple]]:
 
 
 @function_tool
-async def query_obligations_db(ctx: RunContextWrapper[AppContext], question: str) -> str:
+async def query_obligations_db(
+    ctx: RunContextWrapper[AppContext], question: str
+) -> str:
     """Answer a question about tracked contract obligations and deadlines by
     generating SQL (a text-to-SQL specialist model) and running it against the
     obligations database. Good for 'which obligations are due soon?' or 'total
     outstanding payments by counterparty'."""
     app = ctx.context
     model = app.cfg["models"]["sql"]
-    # Chat/instruct models take a chat prompt; completion-only specialists (e.g.
-    # defog/sqlcoder-7b-2) use their native template over /v1/completions. Default
-    # is chat — set sql.mode=completions in config.yaml to use a completion model.
     mode = (app.cfg.get("sql") or {}).get("mode", "chat")
-    if mode == "completions":
-        prompt = _SQLCODER_PROMPT.format(question=question, schema=SCHEMA_DDL, today=TODAY)
-        res = await complete_once(app, model, prompt, max_tokens=256, stop=[";", "```", "\n\n\n"])
-    else:
+    if mode == "prompt":
+        prompt = _SQLCODER_PROMPT.format(
+            question=question,
+            schema=SCHEMA_DDL,
+            today=TODAY,
+        )
+        res = await prompt_once(
+            app,
+            model,
+            prompt,
+            max_tokens=256,
+            stop=[";", "```", "\n\n\n"],
+        )
+    elif mode == "chat":
         res = await chat_once(
-            app, model,
+            app,
+            model,
             [
-                {"role": "system", "content": _SQL_CHAT_SYSTEM.format(today=TODAY)},
-                {"role": "user", "content": _SQL_CHAT_USER.format(schema=SCHEMA_DDL, question=question)},
+                {
+                    "role": "system",
+                    "content": _SQL_CHAT_SYSTEM.format(today=TODAY),
+                },
+                {
+                    "role": "user",
+                    "content": _SQL_CHAT_USER.format(
+                        schema=SCHEMA_DDL,
+                        question=question,
+                    ),
+                },
             ],
             max_tokens=256,
         )
-    app.ledger.record("Text-to-SQL", model, mode,
-                      warmup_s=res.provision_s, latency_s=res.gen_s,
-                      sent=_tok(res.prompt_tokens), got=_tok(res.completion_tokens), throughput=_tps(res))
+    else:
+        raise ValueError("sql.mode must be 'chat' or 'prompt'")
+    app.ledger.record(
+        "Text-to-SQL",
+        model,
+        "generate",
+        warmup_s=res.provision_s,
+        latency_s=res.gen_s,
+        sent=_tok(res.prompt_tokens),
+        got=_tok(res.completion_tokens),
+        throughput=_tps(res),
+    )
 
     sql = _clean_sql(res.text)
     if not sql.lower().startswith("select"):
@@ -335,7 +443,9 @@ async def query_obligations_db(ctx: RunContextWrapper[AppContext], question: str
     if not rows:
         return f"Query ran but returned no rows.\nSQL: {sql}"
     header = " | ".join(cols)
-    body = "\n".join(" | ".join("" if v is None else str(v) for v in row) for row in rows)
+    body = "\n".join(
+        " | ".join("" if v is None else str(v) for v in row) for row in rows
+    )
     return f"SQL: {sql}\n\n{header}\n{body}"
 
 

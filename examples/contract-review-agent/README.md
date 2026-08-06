@@ -1,6 +1,6 @@
 # Contract review with the OpenAI Agents SDK, on one SIE cluster
 
-A multi-agent contract reviewer built with the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) where **every model call is served by SIE**. No `api.openai.com`, no per-token bill. An **investigator** agent autonomously calls tools to gather grounded facts, then a **synthesizer** agent turns them into a structured review. Each step runs on the **right model from the SIE catalog**: a fast triage model, a vision model that reads the scanned signature page, a reasoning sub-agent for clause risk, a text-to-SQL specialist, an OCR model, embedding and reranker models for clause search, a zero-shot entity extractor, and a safety guardrail. Ten specialized jobs, one cluster.
+A multi-agent contract reviewer built with the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) where **every model call is served by SIE**. No `api.openai.com`; managed calls are metered by SIE's native primitives. An **investigator** agent autonomously calls tools to gather grounded facts, then a **synthesizer** agent turns them into a structured review. Each step runs on the **right model from the SIE catalog**: a fast triage model, a vision model that reads the scanned signature page, a reasoning sub-agent for clause risk, a text-to-SQL specialist, an OCR model, embedding and reranker models for clause search, a zero-shot entity extractor, and a safety guardrail. Ten specialized jobs, one cluster.
 
 This is the "one cluster powers every model your agent calls" idea from the [SIE landing page](https://superlinked.com), made real and runnable.
 
@@ -10,12 +10,12 @@ Every value below is a real model in the [SIE catalog](https://superlinked.com/m
 
 | Role in the agent | SIE model | SIE function |
 |---|---|---|
-| Triage: classify the document type | `Qwen/Qwen3.5-4B` | chat |
-| **Orchestrator**: plan, call tools, assemble the review | `Qwen/Qwen3.6-27B` (64K, non-thinking) | chat + tools + JSON schema |
-| Vision: read the scanned signature page | `Qwen/Qwen3.5-4B` | chat + image |
-| Reasoning sub-agent: clause-risk analysis | `Qwen/Qwen3.5-4B` | chat |
-| Text-to-SQL: query the obligations DB | `Qwen/Qwen3.5-4B` (or `defog/sqlcoder-7b-2` with `sql.mode: completions`) | chat |
-| Guardrail: safety / prompt-injection | `ibm-granite/granite-guardian-3.0-2b` (alias `guard`) | chat |
+| Triage: classify the document type | `Qwen/Qwen3.5-4B` | generate |
+| **Orchestrator**: plan, call tools, assemble the review | `Qwen/Qwen3.6-27B` (64K, non-thinking) | generate + tools + JSON schema |
+| Vision: read the scanned signature page | `Qwen/Qwen3.5-4B` | generate + image |
+| Reasoning sub-agent: clause-risk analysis | `Qwen/Qwen3.5-4B` | generate |
+| Text-to-SQL: query the obligations DB | `Qwen/Qwen3.5-4B` (raw-prompt specialists use `sql.mode: prompt`) | generate |
+| Guardrail: safety / prompt-injection | `ibm-granite/granite-guardian-3.0-2b` (alias `guard`) | generate |
 | OCR: scanned page to markdown | `lightonai/LightOnOCR-2-1B` | extract |
 | Clause search: dense embeddings | `BAAI/bge-m3` | encode |
 | Clause rerank: cross-encoder | `Qwen/Qwen3-Reranker-4B` | score |
@@ -23,26 +23,34 @@ Every value below is a real model in the [SIE catalog](https://superlinked.com/m
 
 ## How it works
 
-The whole trick is one idea: **the Agents SDK speaks the OpenAI wire protocol, and SIE serves an OpenAI-compatible `/v1` endpoint.** So we point the SDK at SIE and force chat completions (`contract_review_agent/runtime.py`):
+The Agents SDK accepts any model that implements its model interface. This
+example binds that interface to `SIEAsyncClient.generate` in
+`contract_review_agent/native_model.py`:
 
 ```python
-client = AsyncOpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
-set_default_openai_client(client)        # every agent talks to SIE...
-set_default_openai_api("chat_completions")  # ...over chat completions, not the Responses API...
-set_tracing_disabled(True)               # ...and we never phone home with traces.
+Agent(
+    name="Risk Analyst",
+    model=SIENativeModel(
+        "Qwen/Qwen3.5-4B",
+        sie_client,
+        provision_timeout_s=900,
+    ),
+)
 ```
 
-After that, each `Agent` just names the SIE model it should run on:
-
-```python
-Agent(name="Risk Analyst", model=OpenAIChatCompletionsModel("Qwen/Qwen3.5-4B", openai_client=client), ...)
-```
+For each agent turn, the adapter builds a strict JSON Schema whose valid result
+is either one declared function call or a final answer. SIE performs the
+schema-constrained generation through its native primitive; the Agents SDK
+executes declared Python tools and passes their results into the next turn.
+Structured final output uses the agent's declared Pydantic schema. The example
+never calls an OpenAI-compatible endpoint, sends data to `api.openai.com`, or
+executes model-generated code.
 
 The flow is **two agents**:
 
 1. An **investigator** (on `Qwen3.6-27B`) with seven tools and **no** structured `output_type`, so it can't short-circuit to a hallucinated answer. It must call tools to learn anything about the contract:
    - `classify_document` (triage) · `read_signature_page` (vision) · `analyze_clause_risks` (delegates to the reasoning **sub-agent**): generative LLMs
-   - `ocr_signature_page` · `extract_entities` (`extract`), `search_clauses` (`encode` + `score`), `query_obligations_db` (`chat`): retrieval and extraction
+   - `ocr_signature_page` · `extract_entities` (`extract`), `search_clauses` (`encode` + `score`), `query_obligations_db` (`generate`): retrieval and extraction
    - a `granite-guardian` **input guardrail** screens the request first (and fails open, logged, if the guard model is unavailable).
 2. A **synthesizer** (structured `output_type=ContractReview`, no tools) turns the investigator's grounded findings into the final review (parties, dates, governing law, executed?, key obligations, risk flags with severity plus redlines, recommendation) via SIE's JSON-schema-constrained generation.
 
@@ -59,7 +67,7 @@ docker run --gpus all -p 8080:8080 -v sie-hf-cache:/app/.cache/huggingface \
 
 cd examples/contract-review-agent
 cp .env.example .env          # edit SIE_CLUSTER_URL / SIE_API_KEY if not localhost
-uv sync
+uv sync --frozen
 
 # 2. Fetch a handful of real contracts from CUAD (CC BY 4.0). Downloads a ~18 MB archive once.
 uv run fetch-contracts                 # or: uv run make-sample  (offline synthetic contracts)
@@ -73,7 +81,12 @@ uv run review --contract <slug>        # review a specific one
 
 ## What you'll see
 
-`uv run review` prints the model catalog, runs the agent, then prints the structured review **plus a per-model observability ledger**. Each row carries the step's model, SIE function, **cold-start warm-up**, warm latency, data sent, and **warm throughput (tokens/s)**, so you can watch one cluster fan a single request across the catalog and see how each model performed. (Warm-up is shown separately from throughput for the generative calls; the `encode`/`score`/`extract` calls go through the SIE SDK, which provisions internally, so those show total latency.) Try `--instruction "..."` to change the ask, or feed the guardrail a malicious prompt to watch `granite-guardian` trip the tripwire.
+`uv run review` prints the model catalog, runs the agent, then prints the
+structured review **plus a per-model observability ledger**. Each row carries
+the step's model, native SIE primitive, total latency, data sent, and available
+throughput. Every primitive uses the SDK's governed capacity wait. Try
+`--instruction "..."` to change the ask, or feed the guardrail a malicious
+prompt to watch `granite-guardian` trip the tripwire.
 
 ## Swapping models (the point of the catalog)
 
@@ -81,7 +94,7 @@ uv run review --contract <slug>        # review a specific one
 
 ```yaml
 models:
-  sql: "defog/sqlcoder-7b-2"                  # a text-to-SQL specialist (also set sql.mode: completions)
+  sql: "defog/sqlcoder-7b-2"                  # raw specialist; set sql.mode: prompt
   ocr: "opendatalab/MinerU2.5-Pro-2604-1.2B"  # try a different OCR model
 ```
 
@@ -97,8 +110,8 @@ The default corpus is **[CUAD](https://www.atticusprojectai.org/cuad/)** (Contra
 
 ## Notes
 
-- Chat completions, tool calling, JSON-schema structured output, vision, and `/v1/completions` (set `sql.mode: completions` to route SQL through a completion-only model like `sqlcoder`) are all served over SIE's OpenAI-compatible API.
-- Text-to-SQL runs on `Qwen/Qwen3.5-4B` over chat; to demo the `/v1/completions` path instead, set `sql: "defog/sqlcoder-7b-2"` with `sql.mode: completions`.
+- Agent planning, tool selection, structured output, vision questions, and text-to-SQL all use native `generate`.
+- `sql.mode: chat` combines system/user instructions; `sql.mode: prompt` sends a specialist's raw template. Both use the same native primitive.
 - This is a demo of inference orchestration, **not legal advice**.
 
 Apache-2.0, like the rest of SIE.

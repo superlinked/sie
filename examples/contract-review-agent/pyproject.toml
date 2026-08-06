@@ -9,8 +9,9 @@ dependencies = [
     # unused here) which conflicts with sie-sdk's websockets<15; 0.13.x is the
     # newest line compatible with the SIE SDK and has the same agent API.
     "openai-agents>=0.13,<0.14",
-    "openai>=1.40",
-    "sie-sdk>=0.6.8",
+    # openai 2.45 adds a required usage-detail field that agents 0.13 does not populate.
+    "openai>=2.26,<2.45",
+    "sie-sdk>=0.6.24,<0.7",
     "httpx>=0.27",
     "numpy>=1.26",
     "pydantic>=2.7",
@@ -27,6 +28,8 @@ review = "contract_review_agent.cli:main"
 
 [dependency-groups]
 dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.11.0",
 ]
 

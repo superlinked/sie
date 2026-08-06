@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import io
 import json
@@ -73,17 +72,6 @@ def _image_format(image_bytes: bytes) -> str:
     with Image.open(io.BytesIO(image_bytes)) as image:
         value = (image.format or "jpeg").lower()
     return "jpeg" if value == "jpg" else value
-
-
-def _verifier_data_uri(image_bytes: bytes) -> str:
-    with Image.open(io.BytesIO(image_bytes)) as image:
-        image = image.convert("RGB")
-        image.thumbnail((768, 768))
-        encoded = io.BytesIO()
-        image.save(encoded, format="JPEG", quality=84, optimize=True)
-    return "data:image/jpeg;base64," + base64.b64encode(encoded.getvalue()).decode(
-        "ascii"
-    )
 
 
 def _description_excerpt(description: str) -> str:
@@ -241,47 +229,39 @@ def verify_candidates(
         f"DESCRIPTION\n{listing.description.strip() or '(none)'}\n\n"
         f"CANDIDATE PATHS\n{candidate_lines}"
     )
-    response = client.chat_completions(
+    selection_schema = {
+        "type": "object",
+        "properties": {
+            "selected_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": len(candidates) - 1,
+            },
+            "needs_review": {"type": "boolean"},
+        },
+        "required": ["selected_index", "needs_review"],
+        "additionalProperties": False,
+    }
+    response = client.generate(
         VERIFIER_MODEL,
-        [
-            {"role": "system", "content": VERIFIER_SYSTEM_PROMPT},
+        f"{VERIFIER_SYSTEM_PROMPT}\n\n{user_text}",
+        images=[
             {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": _verifier_data_uri(listing.image_bytes)},
-                    },
-                    {"type": "text", "text": user_text},
-                ],
+                "data": listing.image_bytes,
+                "format": listing.image_format,
             },
         ],
         temperature=0,
-        max_tokens=512,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "taxonomy_selection",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "selected_index": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "maximum": len(candidates) - 1,
-                        },
-                        "needs_review": {"type": "boolean"},
-                    },
-                    "required": ["selected_index", "needs_review"],
-                    "additionalProperties": False,
-                },
-            },
+        max_new_tokens=512,
+        grammar={
+            "json_schema": selection_schema,
+            "label": "taxonomy_selection",
+            "strict": True,
         },
         wait_for_capacity=True,
         provision_timeout_s=PROVISION_TIMEOUT_S,
     )
-    content = response["choices"][0]["message"]["content"]
+    content = response.get("text")
     if not isinstance(content, str):
         raise ValueError("SIE verifier returned non-text content")
     selection = json.loads(content)
@@ -290,7 +270,9 @@ def verify_candidates(
         0 <= selected_index < len(candidates)
     ):
         raise ValueError(f"Invalid selected_index: {selected_index!r}")
-    return selected_index, bool(selection["needs_review"]), response.get("id")
+    request = response.get("request")
+    response_id = request.get("id") if isinstance(request, dict) else None
+    return selected_index, bool(selection["needs_review"]), response_id
 
 
 def classify_listing(

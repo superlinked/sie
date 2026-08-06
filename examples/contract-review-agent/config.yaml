@@ -1,5 +1,5 @@
-# SIE deployment. /v1/chat/completions is served by SIE's generation bundle
-# (GPU), so use a CUDA image locally:
+# SIE deployment. Native SIEClient.generate is served by SIE's generation
+# bundle (GPU), so use a CUDA image locally:
 #   docker run --gpus all -p 8080:8080 ghcr.io/superlinked/sie-server:latest-cuda12-default
 # or override with SIE_CLUSTER_URL / SIE_API_KEY to target a managed GPU cluster.
 cluster:
@@ -14,12 +14,12 @@ cluster:
 models:
   # Generative LLMs, the agent "brains". Two Qwen models, both non-thinking:
   # Qwen3.6-27B (64K ctx) is the brain: plans, reasons over long context, and
-  # synthesizes; Qwen3.5-4B (8K, vision LLM) handles the shorter-context tasks.
+  # synthesizes; Qwen3.5-4B (8K, vision LLM) handles shorter-context tasks.
   triage: "Qwen/Qwen3.5-4B"                          # fast doc-type classifier
-  orchestrator: "Qwen/Qwen3.6-27B"                   # the brain: plans, calls tools, synthesizes (chat + tools + JSON schema; 64K ctx)
+  orchestrator: "Qwen/Qwen3.6-27B"                   # the brain: native generate + tools + JSON schema (64K ctx)
   vision: "Qwen/Qwen3.5-4B"                          # reads scanned / signature pages (text + image); the vision LLM
   reasoning: "Qwen/Qwen3.5-4B"                       # clause-risk analysis (short context)
-  sql: "Qwen/Qwen3.5-4B"                             # text-to-SQL via chat (see sql.mode); or defog/sqlcoder-7b-2 with sql.mode=completions
+  sql: "Qwen/Qwen3.5-4B"                             # text-to-SQL via native generate; raw specialists use sql.mode=prompt
   guard: "ibm-granite/granite-guardian-3.0-2b"       # safety / prompt-injection guardrail (specialist; alias: guard)
   # Retrieval + extraction tools (encode / score / extract):
   ocr: "lightonai/LightOnOCR-2-1B"                   # scanned PDF / image -> markdown (latest OCR model)
@@ -37,9 +37,7 @@ guard:
   # guardrail when P(unsafe) clears this threshold. 0.5 is recall-biased.
   threshold: 0.5
 
-# Text-to-SQL calling convention. Chat/instruct models (Qwen3.5-4B,
-# Qwen3.6-27B) take a chat prompt; completion-only specialists like
-# defog/sqlcoder-7b-2 need their native template over /v1/completions; set
-# mode: completions when you point `sql` at one of those.
+# Text-to-SQL prompt shape. Both modes use native SIE generate: chat combines
+# system/user instructions, while prompt sends a specialist's raw template.
 sql:
-  mode: "chat"   # "chat" | "completions"
+  mode: "chat"   # "chat" | "prompt"

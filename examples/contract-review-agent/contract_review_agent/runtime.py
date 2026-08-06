@@ -1,76 +1,41 @@
-"""Wire the OpenAI Agents SDK to a SIE cluster.
-
-The one idea that makes this whole example work: the Agents SDK speaks the
-OpenAI wire protocol, and SIE serves an OpenAI-compatible ``/v1`` endpoint. So
-we hand every agent an ``AsyncOpenAI`` client whose ``base_url`` points at SIE,
-force the *chat completions* API (SIE doesn't implement the newer Responses
-API), and disable tracing (so nothing is shipped to api.openai.com). After that,
-each agent just names the SIE catalog model it should run on.
-"""
+"""Native SIE runtime helpers for the contract-review agent."""
 
 from __future__ import annotations
 
-import asyncio
+import base64
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import Any
 
-from agents import (
-    OpenAIChatCompletionsModel,
-    set_default_openai_api,
-    set_default_openai_client,
-    set_tracing_disabled,
-)
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 from sie_sdk import SIEAsyncClient
 
-T = TypeVar("T")
+from .native_model import SIENativeModel
 
 
-def make_openai_client(
-    cluster_url: str, api_key: str, *, max_retries: int = 2, timeout_s: float | None = None
-) -> AsyncOpenAI:
-    """An OpenAI client pointed at SIE's OpenAI-compatible endpoint.
-
-    ``max_retries`` matters because Agents-SDK-driven calls can't be wrapped in our
-    own provisioning retry — a client with generous retries survives a model being
-    evicted and reloaded mid-run on a busy cluster.
-    """
-    base_url = cluster_url.rstrip("/") + "/v1"
-    kwargs: dict[str, Any] = {"base_url": base_url, "api_key": api_key or "not-needed", "max_retries": max_retries}
-    if timeout_s is not None:
-        kwargs["timeout"] = timeout_s
-    # SIE ignores the key locally; a managed cluster reads it as a Bearer token.
-    return AsyncOpenAI(**kwargs)
-
-
-def configure_runtime(client: AsyncOpenAI) -> None:
-    """Point the whole Agents SDK at SIE instead of api.openai.com."""
-    set_default_openai_client(client)  # every agent talks to SIE...
-    set_default_openai_api("chat_completions")  # ...over chat completions, not Responses...
-    set_tracing_disabled(True)  # ...and we never phone home with traces.
-
-
-def model_for(model_id: str, client: AsyncOpenAI) -> OpenAIChatCompletionsModel:
-    """Bind one SIE catalog model id to an Agents-SDK model an Agent can use."""
-    return OpenAIChatCompletionsModel(model=model_id, openai_client=client)
+def model_for(
+    model_id: str,
+    client: SIEAsyncClient,
+    *,
+    provision_timeout_s: float,
+) -> SIENativeModel:
+    """Bind one SIE catalog model to the Agents SDK native model interface."""
+    return SIENativeModel(
+        model_id,
+        client,
+        provision_timeout_s=provision_timeout_s,
+    )
 
 
 @dataclass
 class GenResult:
-    """One generation's text plus the metrics we log for observability.
-
-    ``provision_s`` is time spent waiting for the model to be ready — the cold
-    start, measured as the failed 503/504 retries before the request that
-    actually ran. ``gen_s`` is the duration of that successful (warm) call, so
-    throughput is measured warm instead of being blended with the cold start.
-    """
+    """One native generation result plus observability fields."""
 
     text: str
     provision_s: float
     gen_s: float
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    request_id: str | None = None
 
     @property
     def latency_s(self) -> float:
@@ -88,8 +53,8 @@ class LedgerEntry:
     step: str
     model: str
     sie_fn: str
-    warmup_s: float = 0.0  # cold-start / provisioning wait (0 if warm or N/A)
-    latency_s: float = 0.0  # the call itself (warm), excluding warm-up
+    warmup_s: float = 0.0
+    latency_s: float = 0.0
     sent: str = ""
     got: str = ""
     throughput: str = ""
@@ -97,12 +62,7 @@ class LedgerEntry:
 
 @dataclass
 class Ledger:
-    """Per-call observability for one agent run.
-
-    Every tool, guardrail, and sub-agent records the model it used plus latency,
-    how much data it sent, and throughput — so a normal run prints not just
-    *which* models the cluster fanned the request across, but how each performed.
-    """
+    """Per-call observability for one agent run."""
 
     entries: list[LedgerEntry] = field(default_factory=list)
 
@@ -118,24 +78,31 @@ class Ledger:
         got: str = "",
         throughput: str = "",
     ) -> None:
-        self.entries.append(LedgerEntry(step, model, sie_fn, warmup_s, latency_s, sent, got, throughput))
+        self.entries.append(
+            LedgerEntry(
+                step,
+                model,
+                sie_fn,
+                warmup_s,
+                latency_s,
+                sent,
+                got,
+                throughput,
+            )
+        )
 
 
 @dataclass
 class AppContext:
-    """Shared dependencies handed to every tool via ``RunContextWrapper``."""
+    """Shared dependencies handed to every tool through the Agents SDK."""
 
     sie: SIEAsyncClient
-    oai: AsyncOpenAI
     cfg: dict[str, Any]
     ledger: Ledger
-    contract_text: str  # the contract body we have on file (template/clauses)
-    scan_path: str  # the executed signature page, delivered as a scan image
-    db_path: str  # the SQLite obligations database the SQL tool queries
-    reasoning_agent: Any = None  # the risk-analyst sub-agent (set during build)
-    # Cache the clause embeddings in a shared mutable dict, not a reassigned
-    # attribute: the Agents SDK hands each tool call a shallow copy of the context,
-    # so mutating a shared object persists but reassigning `app.x = ...` does not.
+    contract_text: str
+    scan_path: str
+    db_path: str
+    reasoning_agent: Any = None
     clause_cache: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -143,36 +110,66 @@ class AppContext:
         return float(self.cfg["cluster"].get("provision_timeout_s", 900))
 
 
-async def with_provisioning_retry(
-    make_call: Callable[[], Awaitable[T]], deadline: float
-) -> tuple[T, float, float]:
-    """Retry an OpenAI-client call while SIE scales a model from zero.
+def _data_uri_image(value: str) -> tuple[bytes, str]:
+    if not value.startswith("data:image/") or ";base64," not in value:
+        raise ValueError("Native generation accepts inline image data, not remote URLs")
+    header, encoded = value.split(",", 1)
+    image_format = header.removeprefix("data:image/").split(";", 1)[0]
+    return base64.b64decode(encoded, validate=True), image_format
 
-    A cold cluster answers 503/504/202 until the model is resident; we retry until
-    ``deadline`` (monotonic seconds) before giving up. Returns
-    ``(result, provision_s, call_s)``: ``provision_s`` is the time spent in failed
-    retries before the attempt that succeeded (the cold start), ``call_s`` is the
-    duration of that successful call — so callers can report warm-up and warm
-    throughput separately.
-    """
-    start = time.monotonic()
-    while True:
-        attempt_start = time.monotonic()
-        try:
-            result = await make_call()
-            return result, attempt_start - start, time.monotonic() - attempt_start
-        except APIConnectionError:
-            if time.monotonic() < deadline:
-                await asyncio.sleep(5)
-                continue
-            raise
-        except APIStatusError as exc:
-            # 202 accepted (warming), 502/503 unavailable, 504 first_chunk_timeout —
-            # all transient while SIE scales a model from zero.
-            if exc.status_code in (202, 502, 503, 504) and time.monotonic() < deadline:
-                await asyncio.sleep(5)
-                continue
-            raise
+
+def _native_prompt_and_images(
+    messages: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    sections: list[str] = []
+    images: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role", "user"))
+        content = message.get("content", "")
+        texts: list[str] = []
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                    texts.append(part["text"])
+                elif part.get("type") == "image_url":
+                    image_url = part.get("image_url")
+                    url = image_url.get("url") if isinstance(image_url, dict) else None
+                    if not isinstance(url, str):
+                        raise ValueError("Image content part is missing image_url.url")
+                    data, image_format = _data_uri_image(url)
+                    images.append({"data": data, "format": image_format})
+        if texts:
+            sections.append(f"{role.upper()}\n" + "\n".join(texts))
+    if not sections:
+        raise ValueError("Generation messages contain no text")
+    return "\n\n".join(sections), images
+
+
+def _generation_result(result: dict[str, Any], elapsed_s: float) -> GenResult:
+    usage = result.get("usage")
+    usage_row = usage if isinstance(usage, dict) else {}
+    request = result.get("request")
+    request_row = request if isinstance(request, dict) else {}
+    text = result.get("text")
+    if not isinstance(text, str):
+        raise TypeError("SIE native generate returned no text")
+    prompt_tokens = usage_row.get("prompt_tokens")
+    completion_tokens = usage_row.get("completion_tokens")
+    request_id = request_row.get("id")
+    return GenResult(
+        text=text,
+        provision_s=0.0,
+        gen_s=elapsed_s,
+        prompt_tokens=prompt_tokens if isinstance(prompt_tokens, int) else None,
+        completion_tokens=(
+            completion_tokens if isinstance(completion_tokens, int) else None
+        ),
+        request_id=request_id if isinstance(request_id, str) else None,
+    )
 
 
 async def chat_once(
@@ -185,29 +182,25 @@ async def chat_once(
     timeout_s: float | None = None,
     **extra: Any,
 ) -> GenResult:
-    """One OpenAI-compatible chat completion against SIE, with cold-start retry.
-
-    ``timeout_s`` overrides how long to keep retrying a provisioning model (the
-    guardrail uses a short budget so it fails open fast rather than blocking).
-    """
-    deadline = time.monotonic() + (timeout_s if timeout_s is not None else app.provision_timeout_s)
-    resp, provision_s, gen_s = await with_provisioning_retry(
-        lambda: app.oai.chat.completions.create(
-            model=model, messages=messages, max_tokens=max_tokens, temperature=temperature, **extra
+    """Run a chat-shaped task through the native generate primitive."""
+    prompt, images = _native_prompt_and_images(messages)
+    started = time.monotonic()
+    result = await app.sie.generate(
+        model,
+        prompt,
+        max_new_tokens=max_tokens,
+        images=images or None,
+        temperature=temperature,
+        wait_for_capacity=True,
+        provision_timeout_s=(
+            timeout_s if timeout_s is not None else app.provision_timeout_s
         ),
-        deadline,
+        **extra,
     )
-    usage = resp.usage
-    return GenResult(
-        text=resp.choices[0].message.content or "",
-        provision_s=provision_s,
-        gen_s=gen_s,
-        prompt_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
-        completion_tokens=getattr(usage, "completion_tokens", None) if usage else None,
-    )
+    return _generation_result(result, time.monotonic() - started)
 
 
-async def complete_once(
+async def prompt_once(
     app: AppContext,
     model: str,
     prompt: str,
@@ -216,20 +209,15 @@ async def complete_once(
     temperature: float = 0.0,
     stop: list[str] | None = None,
 ) -> GenResult:
-    """One OpenAI-compatible *text completion* against SIE (for completion-only
-    models like sqlcoder that expect a raw prompt, not a chat transcript)."""
-    deadline = time.monotonic() + app.provision_timeout_s
-    resp, provision_s, gen_s = await with_provisioning_retry(
-        lambda: app.oai.completions.create(
-            model=model, prompt=prompt, max_tokens=max_tokens, temperature=temperature, stop=stop
-        ),
-        deadline,
+    """Run a raw specialist prompt through the native generate primitive."""
+    started = time.monotonic()
+    result = await app.sie.generate(
+        model,
+        prompt,
+        max_new_tokens=max_tokens,
+        temperature=temperature,
+        stop=stop,
+        wait_for_capacity=True,
+        provision_timeout_s=app.provision_timeout_s,
     )
-    usage = resp.usage
-    return GenResult(
-        text=resp.choices[0].text or "",
-        provision_s=provision_s,
-        gen_s=gen_s,
-        prompt_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
-        completion_tokens=getattr(usage, "completion_tokens", None) if usage else None,
-    )
+    return _generation_result(result, time.monotonic() - started)

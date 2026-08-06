@@ -16,16 +16,16 @@ category decision:
 1. Rank the supplied candidate paths from listing copy.
 2. Rank the same paths from the product image and copy.
 3. Keep the top two paths from each ranking.
-4. Ask `Qwen/Qwen3.6-27B` to select one path or set `needs_review`.
+4. Use native multimodal `SIEClient.generate` with `Qwen/Qwen3.6-27B` to select one path or set `needs_review`.
 
-The runnable example sends all three model calls through SIE. The final response
-uses a two-field JSON schema, so application code receives one selected index
+The runnable example sends all three model calls through SIE's primary SDK
+primitives. The final response uses a two-field JSON schema, so application code receives one selected index
 and one review flag. The published Shopify label never enters the request.
 
 Run one real listing:
 
 ```bash
-uv sync
+uv sync --frozen
 uv run predict-catalog-agent --offset 54
 ```
 
