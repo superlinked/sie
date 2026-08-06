@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -124,6 +128,10 @@ def test_load_drops_is_embedding(
     assert cmd[cmd.index("--grammar-backend") + 1] == "outlines"
     assert "--served-model-name" in cmd
     assert adapter._server_url == "http://localhost:30005"
+    child_env = mock_popen.call_args.kwargs["env"]
+    assert child_env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] == "1"
+    expected_compat_dir = Path(__file__).resolve().parents[2] / "src/sie_server/adapters/sglang/_compat"
+    assert child_env["PYTHONPATH"].split(os.pathsep)[0] == str(expected_compat_dir)
 
 
 @patch("sie_server.adapters.sglang._server.wait_for_server", return_value=True)
@@ -296,6 +304,28 @@ def test_generate_streams_sse_into_chunks(mock_async_client: MagicMock, adapter)
     assert chunks[-1].finish_reason == "stop"
     assert chunks[-1].prompt_tokens == 5
     assert chunks[-1].completion_tokens == 3
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_surfaces_in_band_sglang_error(mock_async_client: MagicMock, adapter) -> None:
+    stream = _FakeStreamingResponse(
+        [
+            'data: {"error": {"message": "vision processor rejected image"}}',
+            "data: [DONE]",
+        ]
+    )
+    mock_async_client.return_value = _make_client_with_stream(stream)
+    adapter._server_url = "http://localhost:30005"
+
+    async def _collect() -> None:
+        async for _ in adapter.generate(prompt="Hi", max_new_tokens=8):
+            pass
+
+    with pytest.raises(
+        RuntimeError,
+        match="SGLang /generate error: vision processor rejected image",
+    ):
+        asyncio.run(_collect())
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
@@ -1775,3 +1805,64 @@ def test_non_guard_model_streaming_unaffected(mock_async_client: MagicMock, adap
     # Client didn't request logprobs and the model isn't a guard → all None.
     assert all(c.logprobs is None for c in chunks)
     assert any(c.done for c in chunks)
+
+
+def test_mm_process_config_compat_forwards_image_kwargs(tmp_path: Path) -> None:
+    package_root = tmp_path / "fake-package"
+    processors = package_root / "sglang" / "srt" / "multimodal" / "processors"
+    processors.mkdir(parents=True)
+    package_dirs = (
+        package_root / "sglang",
+        package_root / "sglang" / "srt",
+        package_root / "sglang" / "srt" / "multimodal",
+        processors,
+    )
+    for package in package_dirs:
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (processors / "base_processor.py").write_text(
+        """class BaseMultimodalProcessor:
+    def __init__(self):
+        self.image_config = {"max_pixels": 1003520}
+
+    def process_mm_data(self, input_text, images=None, videos=None, audios=None, **kwargs):
+        return kwargs
+""",
+        encoding="utf-8",
+    )
+
+    compat_dir = Path(__file__).resolve().parents[2] / "src/sie_server/adapters/sglang/_compat"
+    script = """import sitecustomize
+
+sitecustomize._install_mm_process_config_compat()
+sitecustomize._install_mm_process_config_compat()
+
+from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+sitecustomize._patch_base_processor_module(__import__(
+    "sglang.srt.multimodal.processors.base_processor",
+    fromlist=["BaseMultimodalProcessor"],
+))
+processor = BaseMultimodalProcessor()
+assert processor.process_mm_data("x", images=[b"image"]) == {
+    "images_kwargs": {"max_pixels": 1003520}
+}
+assert processor.process_mm_data("x", images=None) == {}
+assert not hasattr(BaseMultimodalProcessor.process_mm_data.__wrapped__, "__wrapped__")
+print("mm-process-config-ready")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((str(compat_dir), str(package_root)))
+    env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+
+    completed = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Error in sitecustomize" not in completed.stderr
+    assert completed.stdout.strip() == "mm-process-config-ready"

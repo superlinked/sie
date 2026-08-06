@@ -248,10 +248,12 @@ _MAX_IMAGES_PER_REQUEST = 16
 # admission reservation. The chat template renders each image as a short
 # placeholder, but the vision encoder expands it into many tokens (Qwen-VL:
 # up to ~1280 at max_pixels). Exact counts need the image dimensions + the
-# model's vision tokenizer, which we don't have at this layer — so we use a
-# conservative constant. Over-reserving is safe; under-counting risks a
-# context-window overflow (opaque SGLang error) and admission over-admit.
-_VISION_TOKENS_PER_IMAGE_ESTIMATE = 1024
+# model's vision tokenizer, which we don't have at this layer. Qwen SGLang
+# profiles cap preprocessing at 1280 visual tokens, so this value is both a
+# conservative reservation and a hard upper bound for the image-capable
+# generation family. Under-counting risks a context-window overflow and
+# admission over-admit.
+_VISION_TOKENS_PER_IMAGE_ESTIMATE = 1280
 
 # Hard ceiling on a single decoded image's bytes. Bounds worker memory on the
 # decode path even for the direct-queue caller that bypasses the gateway's

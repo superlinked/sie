@@ -151,6 +151,8 @@ profiles:
         # also sets the SGLANG_ENABLE_SPEC_V2=1 env var when
         # speculative.enabled — both are required as a pair.
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
       runtime:
@@ -198,6 +200,8 @@ profiles:
           eagle_topk: 1
           num_draft_tokens: 4
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
           - "--disable-overlap-schedule"
@@ -235,6 +239,8 @@ profiles:
           eagle_topk: 1
           num_draft_tokens: 4
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
       runtime:
@@ -276,6 +282,8 @@ profiles:
         # identical so a config diff between them shows only the
         # speculative block (the intent of the ablation).
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
       runtime:

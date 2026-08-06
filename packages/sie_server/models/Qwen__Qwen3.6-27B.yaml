@@ -118,6 +118,8 @@ profiles:
         # Keep it paired with ``--disable-overlap-schedule`` for all NEXTN
         # launch profiles.
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
           - "--disable-overlap-schedule"
@@ -160,6 +162,8 @@ profiles:
         # NEXTN + mamba-scheduler ``extra_buffer`` on the hybrid Gated-
         # DeltaNet architecture (same constraint as Qwen3.5-4B).
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
           - "--disable-overlap-schedule"
@@ -200,6 +204,8 @@ profiles:
         speculative:
           enabled: false
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--quantization"
           - "fp8"
   # RTX PRO 6000 (96 GB GDDR7, Blackwell Server Edition, sm_120) profile.
@@ -269,6 +275,8 @@ profiles:
         # companions on the hybrid Gated-DeltaNet architecture. List is the
         # FULL set (production full-replaces ``extra_launch_args``, not merge).
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--quantization"
           - "fp8"
           - "--mamba-scheduler-strategy"
@@ -339,6 +347,8 @@ profiles:
         speculative:
           enabled: false
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--cuda-graph-max-bs"
           - "32"
       runtime:
@@ -375,6 +385,8 @@ profiles:
         speculative:
           enabled: false
         extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"max_pixels":1003520}}'
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
           - "--disable-overlap-schedule"
@@ -382,11 +394,12 @@ profiles:
         first_chunk_timeout_s: 90
         inter_chunk_timeout_s: 15
         overall_timeout_s: 600
+        # A strict grammar may complete valid JSON in fewer than ten tokens.
+        # Do not force post-schema tokens on grammar-routed profiles.
         default_sampling:
           temperature: 0.7
           top_p: 0.8
           top_k: 20
           presence_penalty: 1.5
-          min_new_tokens: 10
         stop_tokens:
           - "<|im_end|>"

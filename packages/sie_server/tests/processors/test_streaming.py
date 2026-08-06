@@ -2910,3 +2910,48 @@ async def test_messages_image_reaches_adapter(monkeypatch: pytest.MonkeyPatch) -
     assert len(adapter.received_images) == 1
     assert adapter.received_images[0]["data"] == b"catbytes"
     assert adapter.received_images[0]["format"] == "png"
+
+
+@pytest.mark.asyncio
+async def test_streaming_processor_reserves_capped_visual_tokens(monkeypatch) -> None:
+    nc = AsyncMock()
+    adapter = _FakeGenAdapter([])
+    registry = _make_registry_with_chat_config(adapter, context_length=1200)
+
+    class _StubTok:
+        def apply_chat_template(self, *args, **kwargs):
+            return "rendered"
+
+        def encode(self, text, *, add_special_tokens):
+            return [0]
+
+    from sie_server.processors import streaming as streaming_mod
+
+    monkeypatch.setattr(streaming_mod, "load_tokenizer", lambda *args, **kwargs: _StubTok())
+
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    wi = _make_work_item(
+        generate={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "inspect this image",
+                    "images": [
+                        {
+                            "data": base64.b64encode(b"image").decode(),
+                            "format": "png",
+                        }
+                    ],
+                }
+            ],
+            "max_new_tokens": 64,
+        }
+    )
+    msg = _make_msg(wi)
+    await proc.process(msg, "test/model")
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["done"] is True
+    assert terminal["error"]["code"] == "context_exceeded"
+    assert "~image_tokens (1280)" in terminal["error"]["message"]
+    msg.ack.assert_awaited_once()

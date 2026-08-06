@@ -156,6 +156,19 @@ def _encode_image_data(images: list[ImageInput] | None) -> list[str] | None:
     return encoded
 
 
+def _raise_for_sglang_event_error(event: Any) -> None:
+    """Propagate an error carried inside SGLang's HTTP-200 SSE stream."""
+    if not isinstance(event, dict) or "error" not in event:
+        return
+    error = event["error"]
+    message = error.get("message") if isinstance(error, dict) else error
+    if not isinstance(message, str) or not message.strip():
+        message = "unknown in-band SGLang error"
+    message = message.strip()[:500]
+    logger.error("SGLang /generate in-band error: %s", message)
+    raise RuntimeError(f"SGLang /generate error: {message}")
+
+
 def _tail_file(path: str, *, max_lines: int = 200) -> str:
     """Return the final lines from a startup log for diagnostics."""
     try:
@@ -498,6 +511,10 @@ class SGLangGenerationAdapter(GenerationAdapter):
                     "speculative_needs_extra_buffer=false (non-DeltaNet models e.g. Gemma 4 "
                     "MTP), or disable speculative.enabled in the model config."
                 )
+        compat_dir = os.path.join(os.path.dirname(__file__), "_compat")
+        inherited_pythonpath = os.environ.get("PYTHONPATH", "")
+        extra_env["PYTHONPATH"] = os.pathsep.join(path for path in (compat_dir, inherited_pythonpath) if path)
+        extra_env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
         logger.warning(
             "Resolved SGLang generation command: %s",
             " ".join(shlex.quote(str(arg)) for arg in cmd),
@@ -1112,6 +1129,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                         event = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    _raise_for_sglang_event_error(event)
                     idx = int(event.get("index", 0))
                     cumulative = event.get("text", "")
                     if not isinstance(cumulative, str):
@@ -1402,6 +1420,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                         logger.warning("SGLang stream: skipping non-JSON line: %s", line[:200])
                         continue
 
+                    _raise_for_sglang_event_error(event)
                     chunk = _chunk_from_sglang_event(
                         event,
                         previous_cumulative_text=last_cumulative_text,
