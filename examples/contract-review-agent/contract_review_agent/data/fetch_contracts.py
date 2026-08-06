@@ -27,8 +27,8 @@ from pathlib import Path
 
 import httpx
 
-from . import CUAD_DIR, DB_PATH, GENERATED_DIR, MANIFEST_PATH
 from .make_sample import SCHEMA_DDL
+from .paths import CUAD_DIR, DB_PATH, GENERATED_DIR, MANIFEST_PATH
 from .render import render_text_page
 
 CUAD_ZIP_URL = "https://raw.githubusercontent.com/TheAtticusProject/cuad/main/data.zip"

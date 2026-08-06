@@ -1,1 +1,0 @@
-"""Taxonomy classification example package."""

@@ -22,7 +22,8 @@ from .app import (
     run_review,
 )
 from .config import load_config
-from .data import CUAD_DIR, GENERATED_DIR, MANIFEST_PATH, make_sample
+from .data import make_sample
+from .data.paths import CUAD_DIR, GENERATED_DIR, MANIFEST_PATH
 from .runtime import AppContext, Ledger, chat_once
 
 console = Console()

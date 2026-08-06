@@ -17,7 +17,7 @@ import textwrap
 
 from PIL import Image, ImageDraw, ImageFont
 
-from contract_review_agent.data import GENERATED_DIR
+from contract_review_agent.data.paths import GENERATED_DIR
 
 # Treat this as "today" for the seeded obligation due dates.
 TODAY = "2026-06-22"
