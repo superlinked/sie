@@ -14,10 +14,12 @@ from agents import (
     function_tool,
     set_tracing_disabled,
 )
+from agents.tool_context import ToolContext
 from pydantic import BaseModel
 
+from contract_review_agent import tools as contract_tools
 from contract_review_agent.native_model import SIENativeModel
-from contract_review_agent.runtime import AppContext, Ledger, instruct_once
+from contract_review_agent.runtime import AppContext, GenResult, Ledger, instruct_once
 
 set_tracing_disabled(True)
 
@@ -311,3 +313,88 @@ async def test_instruction_timeout_bounds_the_full_model_call() -> None:
             [{"role": "user", "content": "Bound this call."}],
             timeout_s=0.01,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected_helper"),
+    [("instruct", "instruct"), ("prompt", "prompt")],
+)
+async def test_query_obligations_db_selects_configured_generation_helper(
+    mode: str,
+    expected_helper: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_instruct(*_args: Any, **_kwargs: Any) -> GenResult:
+        calls.append("instruct")
+        return GenResult("SELECT 7 AS value", 0.0, 0.1)
+
+    async def fake_prompt(*_args: Any, **_kwargs: Any) -> GenResult:
+        calls.append("prompt")
+        return GenResult("SELECT 7 AS value", 0.0, 0.1)
+
+    monkeypatch.setattr(contract_tools, "instruct_once", fake_instruct)
+    monkeypatch.setattr(contract_tools, "prompt_once", fake_prompt)
+    monkeypatch.setattr(
+        contract_tools,
+        "_run_select",
+        lambda _db_path, _sql: (["value"], [(7,)]),
+    )
+    app = AppContext(
+        sie=FakeSIE([]),  # type: ignore[arg-type]
+        cfg={
+            "cluster": {"provision_timeout_s": 30},
+            "models": {"sql": "sql-model"},
+            "sql": {"mode": mode},
+        },
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+    )
+
+    result = await contract_tools.query_obligations_db.on_invoke_tool(
+        ToolContext(
+            app,
+            tool_name="query_obligations_db",
+            tool_call_id="call-query",
+            tool_arguments=json.dumps({"question": "Show one value"}),
+        ),
+        json.dumps({"question": "Show one value"}),
+    )
+
+    assert calls == [expected_helper]
+    assert result.splitlines() == ["SQL: SELECT 7 AS value", "", "value", "7"]
+
+
+@pytest.mark.asyncio
+async def test_query_obligations_db_rejects_unknown_generation_mode() -> None:
+    app = AppContext(
+        sie=FakeSIE([]),  # type: ignore[arg-type]
+        cfg={
+            "cluster": {},
+            "models": {"sql": "sql-model"},
+            "sql": {"mode": "unknown"},
+        },
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+    )
+
+    result = await contract_tools.query_obligations_db.on_invoke_tool(
+        ToolContext(
+            app,
+            tool_name="query_obligations_db",
+            tool_call_id="call-invalid",
+            tool_arguments=json.dumps({"question": "Show one value"}),
+        ),
+        json.dumps({"question": "Show one value"}),
+    )
+
+    assert result == (
+        "An error occurred while running the tool. Please try again. "
+        "Error: sql.mode must be 'instruct' or 'prompt'"
+    )

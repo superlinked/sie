@@ -139,6 +139,7 @@ def test_classify_listing_runs_two_rankings_then_verifies_the_union() -> None:
     assert client.score_calls[1]["query"]["images"][0]["format"] == "jpeg"
     assert len(client.generate_calls) == 1
     generate_call = client.generate_calls[0]
+    assert generate_call["model"] == catalog_agent.VERIFIER_MODEL
     assert "TITLE\nManual floor sweeper" in generate_call["prompt"]
     assert generate_call["kwargs"]["images"][0]["data"] == source.image_bytes
     assert generate_call["kwargs"]["images"][0]["format"] == source.image_format
@@ -146,6 +147,7 @@ def test_classify_listing_runs_two_rankings_then_verifies_the_union() -> None:
         generate_call["kwargs"]["grammar"]["json_schema"]["additionalProperties"]
         is False
     )
+    assert generate_call["kwargs"]["grammar"]["strict"] is True
     assert decision.candidate_union == [
         "Home & Garden > Household Supplies > Power Sweepers",
         "Hardware > Tools > Brooms",
