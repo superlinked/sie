@@ -63,11 +63,14 @@
   "id": "ntsb-detector-2",
   "model": "urchade/gliner_multi-v2.1",
   "request": {
-    "id": "019fe6f1-0782-74b2-8c51-fdbe413b9c32",
-    "usage": {
-      "input_tokens": 100
-    },
+    "id": "019fe887-3397-7ba0-b675-6a96aa9f73df",
     "credits_debited": 1,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "input_tokens": 100,
+      "credits_charged": 1,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

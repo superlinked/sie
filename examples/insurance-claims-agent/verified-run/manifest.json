@@ -1,6 +1,6 @@
 {
-  "run_id": "prod-us-20260809-corrected",
-  "run_at": "2026-08-09T15:49:51.363501+00:00",
+  "run_id": "prod-us-20260809-sdk071",
+  "run_at": "2026-08-09T21:56:15.771230+00:00",
   "public_record": true,
   "endpoints": {
     "cluster": "https://api.superlinked.com",
@@ -22,41 +22,41 @@
       "raw/review-completion.json"
     ],
     "request_ids": [
-      "019fe736-78d0-7aa2-b611-a6cad3e537cd",
-      "019fe736-acef-7a63-b4e8-026b71979556",
-      "019fe736-91f9-7230-839c-909144280718",
-      "019fe736-ae0b-7fc2-ab77-4cef91922b5d",
-      "019fe736-ca17-7971-b371-a8e3ae08b88f"
+      "019fe886-1eed-7862-8255-a72615d7bef5",
+      "019fe886-3dd5-7293-95ef-ab1ce2143601",
+      "019fe886-24c0-7bd0-8e77-b3ad4b134a0c",
+      "019fe886-3eeb-78a0-a41b-c45e293b502a",
+      "019fe886-478c-7991-88ac-6ef00e7dd8d4"
     ],
     "request_versions": {
-      "019fe736-78d0-7aa2-b611-a6cad3e537cd": "2026-07-26-production-bootstrap-v2",
-      "019fe736-acef-7a63-b4e8-026b71979556": "2026-07-26-production-bootstrap-v2",
-      "019fe736-91f9-7230-839c-909144280718": "2026-07-26-production-bootstrap-v2",
-      "019fe736-ae0b-7fc2-ab77-4cef91922b5d": "2026-07-26-production-bootstrap-v2",
-      "019fe736-ca17-7971-b371-a8e3ae08b88f": "2026-07-26-production-bootstrap-v2"
+      "019fe886-1eed-7862-8255-a72615d7bef5": "2026-07-26-production-bootstrap-v2",
+      "019fe886-3dd5-7293-95ef-ab1ce2143601": "2026-07-26-production-bootstrap-v2",
+      "019fe886-24c0-7bd0-8e77-b3ad4b134a0c": "2026-07-26-production-bootstrap-v2",
+      "019fe886-3eeb-78a0-a41b-c45e293b502a": "2026-07-26-production-bootstrap-v2",
+      "019fe886-478c-7991-88ac-6ef00e7dd8d4": "2026-07-26-production-bootstrap-v2"
     }
   },
   "timings_ms": {
-    "parse_appeal_decision_ms": 6617.2,
-    "parse_policy_ms": 7106.0,
-    "extract_claim_facts_ms": 259.4,
-    "rerank_policy_ms": 7052.0,
-    "synthesize_review_ms": 36152.0
+    "parse_appeal_decision_ms": 1552.8,
+    "parse_policy_ms": 6655.6,
+    "extract_claim_facts_ms": 240.6,
+    "rerank_policy_ms": 2057.0,
+    "synthesize_review_ms": 33917.8
   },
   "source_manifest": "source-manifest.json",
   "review": "review.json",
   "artifacts": [
     {
       "path": "claim-facts.json",
-      "sha256": "3850da28528cb254eda9ed7428e3c0248af2c50bb79e8899487f61c53af9c935"
+      "sha256": "8c138347308ce838530bd57cdde36cff8abf50c4fae4fd416124049c0e6957fd"
     },
     {
       "path": "default-stage.json",
-      "sha256": "b725c702bdf78d7d378a74a62b6823fe7ee76bc8ed369b743b28b7232a90c267"
+      "sha256": "ab1fced4dbec79e9880815394479cf85318a6ceb30a5c7423cab69cc42cda0b0"
     },
     {
       "path": "evaluation.json",
-      "sha256": "fa4f8cf1d1bd9376c9c1b08d2206edee3ac1ef820a6c9b25d702fadc3282fd65"
+      "sha256": "5292a9cebdf50b142f888818257d05daf30f7def19669a64c0f261574f067d8c"
     },
     {
       "path": "markdown/appeal_decision.md",
@@ -72,27 +72,27 @@
     },
     {
       "path": "raw/appeal_decision-parse.json",
-      "sha256": "f74979adc762d6bbf2bb5c8bd25f7c5f3d449ce586a19c19d70a35d9e5387634"
+      "sha256": "95bee3732b916589ce0e865434a3713f0d3b52437de112814d68f2be5a78bcd9"
     },
     {
       "path": "raw/claim-facts.json",
-      "sha256": "3850da28528cb254eda9ed7428e3c0248af2c50bb79e8899487f61c53af9c935"
+      "sha256": "8c138347308ce838530bd57cdde36cff8abf50c4fae4fd416124049c0e6957fd"
     },
     {
       "path": "raw/policy-parse.json",
-      "sha256": "3dd10c46dea8eb15e59c930f5c54ef90619dd9f7ff1879da2e48a9ac0273b2ce"
+      "sha256": "b775d5f1422c6e7c8cd0ac24b94bd33e52bf317e0a5e0ff9ae31886d127f32a7"
     },
     {
       "path": "raw/policy-rerank.json",
-      "sha256": "6bf95c8a6d9556e3555c59af080b4be74b2bab7917956eed8035a22e3bd39bfb"
+      "sha256": "7b5063b8e782bf410dc4c372f164ea4fb695ec84ef8f31585c344872a36c4b12"
     },
     {
       "path": "raw/review-completion.json",
-      "sha256": "e70250e7dffeb4b055b2ecb04206269f206f0d68de54d2d7029836e3149c34ff"
+      "sha256": "a92f3244776b970c1f3d339f2684f237a2c4027b8cb92c263aabe80d5161874d"
     },
     {
       "path": "review.json",
-      "sha256": "7f535878688039d58eb455161ee60563981999d08185930f9fae709e9c6c7754"
+      "sha256": "7863fa12b4552cfe311348c16fac208702280d63f8f1dc979de3cbc87b773af2"
     },
     {
       "path": "source-manifest.json",

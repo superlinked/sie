@@ -5,19 +5,28 @@
     "Electric City of Illinois LLC"
   ],
   "effective_date": "1999-09-07",
-  "renewal_terms": "Initial term of 10 years, renewable annually for up to another 10 years on the same terms and conditions",
+  "renewal_terms": "Automatically renewable on an annual basis for one-year terms for up to another 10 years under the same terms and conditions",
   "governing_law": "unknown",
   "executed": false,
   "key_obligations": [
-    "Send renewal or non-renewal notice to LIMEENERGYCO before the term end"
+    "$500,000 irrevocable Letter of Credit required at commencement, renewed bimonthly",
+    "$250,000 minimum monthly purchase order for a 12-month period",
+    "375 units initial volume in the first Product Year (1999)",
+    "Exclusive distributorship within the State of Illinois"
   ],
   "risk_flags": [
     {
-      "clause": "Automatic Renewal & Term Extension",
-      "issue": "Agreement allows automatic annual renewals for up to ten additional years without explicit customer consent or right to terminate early, creating a long-term commitment with no clear exit strategy.",
-      "severity": "High",
-      "suggested_redline": "Add a clause allowing the Distributor to terminate the Agreement upon 90 days' written notice at any time during the Term."
+      "clause": "Section 1.3 (Term and Renewal)",
+      "issue": "Automatic annual renewals for up to ten additional years without explicit customer consent or right to terminate early",
+      "severity": "high",
+      "suggested_redline": "Add a clause allowing the Distributor to terminate the Agreement upon 90 days' written notice at any time during the Term"
+    },
+    {
+      "clause": "Section 5.3 (Indemnification)",
+      "issue": "Broad mutual indemnification scope could expose the Distributor to significant liability for third-party claims",
+      "severity": "medium",
+      "suggested_redline": "Limit indemnification obligations to direct damages only and exclude consequential or indirect damages where possible"
     }
   ],
-  "recommendation": "Do not execute in current form due to high risk from automatic renewals for up to ten additional years without a clear exit strategy. Add a termination clause allowing the Distributor to terminate with 90 days' written notice at any time during the Term."
+  "recommendation": "The document is unsigned and contains high-severity risks related to automatic renewals locking the Distributor into a long-term commitment with limited exit options. Recommend adding a termination clause allowing the Distributor to terminate upon 90 days' written notice at any time during the Term. Also, limit indemnification obligations to direct damages only and exclude consequential or indirect damages where possible."
 }

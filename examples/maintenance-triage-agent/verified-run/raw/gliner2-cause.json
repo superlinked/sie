@@ -15,11 +15,14 @@
   "id": "ranked-ntsb-cause-evidence",
   "model": "fastino/gliner2-large-v1",
   "request": {
-    "id": "019fe6f1-0cf5-7b21-a756-a71bb645eb7b",
-    "usage": {
-      "input_tokens": 69
-    },
+    "id": "019fe887-3852-7310-a86e-ce3ae4b86ac6",
     "credits_debited": 2,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "input_tokens": 69,
+      "credits_charged": 2,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

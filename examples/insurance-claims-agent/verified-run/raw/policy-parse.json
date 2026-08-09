@@ -21081,10 +21081,10 @@
             {
               "page_no": 32,
               "bbox": {
-                "l": 55.43541717529297,
-                "t": 267.05084228515625,
-                "r": 217.82366943359375,
-                "b": 230.1182861328125,
+                "l": 55.4356803894043,
+                "t": 267.05126953125,
+                "r": 217.8233642578125,
+                "b": 230.1185302734375,
                 "coord_origin": "BOTTOMLEFT"
               },
               "charspan": [
@@ -21332,11 +21332,14 @@
   },
   "model": "docling",
   "request": {
-    "id": "019fe736-91f9-7230-839c-909144280718",
-    "usage": {
-      "pages": 32
-    },
+    "id": "019fe886-24c0-7bd0-8e77-b3ad4b134a0c",
     "credits_debited": 1271,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "pages": 32,
+      "credits_charged": 1271,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

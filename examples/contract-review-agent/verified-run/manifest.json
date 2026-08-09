@@ -1,6 +1,6 @@
 {
-  "run_id": "prod-us-20260809",
-  "completed_at": "2026-08-09T14:30:00.903717+00:00",
+  "run_id": "prod-us-20260809-sdk071-retry2",
+  "completed_at": "2026-08-09T22:06:38.329192+00:00",
   "endpoint": "https://api.superlinked.com",
   "execution": "SIE API",
   "models": {
@@ -33,29 +33,29 @@
     }
   ],
   "timing_ms": {
-    "end_to_end": 72127.1
+    "end_to_end": 89995.0
   },
   "timing_note": "Diagnostic run timing, not a benchmark.",
   "artifacts": [
     {
       "path": "api-calls.json",
-      "sha256": "3462a0d5dd9d88fec25b559684346934ddcfe5186ae2a41899b0753a558e477d"
+      "sha256": "038de0c05c8b0837f5df15730dacd4ae0b7d7414376bef223ae4d8d1f3320d53"
     },
     {
       "path": "evaluation.json",
-      "sha256": "c25ce6fd0eb95448a469af483688c3cb5832498c83c363efe38978007ca003c2"
+      "sha256": "3711e9d15a45b33bf645af46bef83c8a5bca5998f54e04f624fc2e026f2ac9c3"
     },
     {
       "path": "investigator-findings.txt",
-      "sha256": "bdeec99720fb56cd6133848400c9d05cb0eb77027bba0c15a36fe64fc125642f"
+      "sha256": "8154c7e6e71d936fe5dd88338129a78340befd576810b0ca53b925c57b85ab58"
     },
     {
       "path": "ledger.json",
-      "sha256": "6215dcf2c8d4f7a2a2179fbd425fee7c4217402e679566a7457632878a0cfef3"
+      "sha256": "66fa2133a4bcb16406e8987c9f7844da8f357395dc07f442d8fe2eed99eeb7d0"
     },
     {
       "path": "review.json",
-      "sha256": "9cc37a6015c40a20fdd5a76c3b6a98881d45c614e7f8af1f0e1ce027a3f3f169"
+      "sha256": "f7e693ae2957a7af64cbdda5e4747714461837844cd25dd161db2ca138a909cf"
     }
   ]
 }

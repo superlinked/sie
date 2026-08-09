@@ -95,11 +95,14 @@
   "id": "ranked-restated-table-evidence",
   "model": "fastino/gliner2-large-v1",
   "request": {
-    "id": "019fe6f0-ffad-75a3-af23-520f4e9e75d3",
-    "usage": {
-      "input_tokens": 430
-    },
+    "id": "019fe896-8d5b-71d1-a135-b6415955aa06",
     "credits_debited": 8,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "input_tokens": 430,
+      "credits_charged": 8,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

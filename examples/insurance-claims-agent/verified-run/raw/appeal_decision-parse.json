@@ -1494,11 +1494,14 @@
   },
   "model": "docling",
   "request": {
-    "id": "019fe736-78d0-7aa2-b611-a6cad3e537cd",
-    "usage": {
-      "pages": 4
-    },
+    "id": "019fe886-1eed-7862-8255-a72615d7bef5",
     "credits_debited": 159,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "pages": 4,
+      "credits_charged": 159,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

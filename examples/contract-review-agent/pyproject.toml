@@ -11,7 +11,7 @@ dependencies = [
     "openai-agents>=0.13,<0.14",
     # openai 2.45 adds a required usage-detail field that agents 0.13 does not populate.
     "openai>=2.26,<2.45",
-    "sie-sdk>=0.6.24,<0.7",
+    "sie-sdk==0.7.1",
     "httpx>=0.27",
     "numpy>=1.26",
     "pydantic>=2.7",

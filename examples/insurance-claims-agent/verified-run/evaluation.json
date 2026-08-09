@@ -29,22 +29,22 @@
     {
       "name": "covered-scope",
       "passed": true,
-      "detail": "Removal of 12 to 15 cubic yards of flood-borne stones from underneath the insured building to the perimeter of the building in the yard"
+      "detail": "Removal of non-owned flood-borne debris (stones) from underneath the insured building to the perimeter of the building in the yard"
     },
     {
       "name": "excluded-scope",
       "passed": true,
-      "detail": "Transportation by barge, handling, disposal, and any increased cost to remove non-owned debris in the yard or cart debris from the perimeter into a barge"
+      "detail": "Transportation, handling, disposal, and yard-work components outside the perimeter footprint; barge transportation costs"
     },
     {
       "name": "price-support",
       "passed": true,
-      "detail": "Additional evidence that the estimated dollar amount from the contractor is limited to the covered scope of work; other debris removal estimates from one or more different contractors"
+      "detail": "Additional evidence that the estimated dollar amount from the contractor is limited to the covered scope of work; other debris removal estimates from one or more different contractors to validate the $3,564 per cubic yard price with sales tax"
     },
     {
       "name": "prior-claim-overlap",
       "passed": true,
-      "detail": "Verify documentation for previous claims with debris removal to ensure no payment overlap; verify debris removal for the same area was performed before the July 2019 flood event"
+      "detail": "Review documentation for previous claims filed on May 20, 2019, May 29, 2019, and June 11, 2019 to verify if debris removal for the same area underneath the building was performed before the July 2019 flood event"
     },
     {
       "name": "finding-categories",

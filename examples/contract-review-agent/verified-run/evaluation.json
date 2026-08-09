@@ -2,6 +2,7 @@
   "passed": true,
   "checks": {
     "structured_review": true,
+    "guardrail_was_accepted": true,
     "parties_identified": true,
     "risk_flags_identified": true,
     "api_calls_have_request_provenance": true,

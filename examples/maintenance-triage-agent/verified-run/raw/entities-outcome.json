@@ -87,11 +87,14 @@
   "id": "ntsb-outcome",
   "model": "urchade/gliner_multi-v2.1",
   "request": {
-    "id": "019fe6f1-085e-7432-823d-8c359c244fe8",
-    "usage": {
-      "input_tokens": 260
-    },
+    "id": "019fe887-347b-7982-b6f2-688f896a768b",
     "credits_debited": 3,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "input_tokens": 260,
+      "credits_charged": 3,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

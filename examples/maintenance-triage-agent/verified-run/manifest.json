@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-08-09T14:33:05.669199+00:00",
+  "created_at": "2026-08-09T21:56:44.385392+00:00",
   "endpoint": "https://api.superlinked.com",
   "models": {
     "parse": "docling",
@@ -33,19 +33,19 @@
     },
     {
       "path": "raw/entities-detector-0.json",
-      "sha256": "71012511d29dc6d73bea194f95b8a0c82c3e0711742108dc29adcdbdadb6ed8f"
+      "sha256": "f5c754d57bb03866b04b94556a71d7cd35ef66cc5aea1edf3344b7111fc13d42"
     },
     {
       "path": "raw/entities-detector-1.json",
-      "sha256": "05d5e69726b6702da651db1aa092ca1c926d9218a182dc827106c23d812f6f65"
+      "sha256": "54d730a0346986eaaa8447173fbeb86f772257e8d8c23263673373e33d938c6a"
     },
     {
       "path": "raw/entities-detector-2.json",
-      "sha256": "60efbca1f1029dccecf96a537e87d3a3376fed1805d79109074ee437ddf2eafb"
+      "sha256": "4a1b9f2f27101e4eaa9e870ff262a8988bcc483d5c173aa61feefb922f2f50db"
     },
     {
       "path": "raw/entities-outcome.json",
-      "sha256": "c3f889196c05c6e519173fc56a01f091fd71922371003198a65e3e41cc4afc11"
+      "sha256": "eaf44344b5cc8bd6597ef87ea1eb38bfaa17031eab8a9ded05fab91c6b2d19a0"
     },
     {
       "path": "raw/entities.json",
@@ -53,27 +53,27 @@
     },
     {
       "path": "raw/gliner2-cause.json",
-      "sha256": "7fd0d64c8498e425333fef1bbdc97319ed81732b47835fe784e700f36fb72174"
+      "sha256": "6e139fe2a418b6d7db3a671d9711e5d9e384ac33452b461522ce4d31c1a9cdda"
     },
     {
       "path": "raw/gliner2-derailment.json",
-      "sha256": "7e0ed83d8aaf62b4cb010b5833fb38c2d293d93da99827a3503621678103948e"
+      "sha256": "f7a4771cc4a1cade6931a69dc331a3daa444d6a6731cc577c7c44cfdedb9ec3d"
     },
     {
       "path": "raw/gliner2-east-palestine.json",
-      "sha256": "e20fd8bae20a2b0658c11dc72d0145417eee73a2a37e4819ba15f95d0755f18d"
+      "sha256": "f3c52c6428a68ba9fffb5d4c9036c3f07b0abb8d7444083b2acd5cfe56edca1f"
     },
     {
       "path": "raw/gliner2-engineer.json",
-      "sha256": "c178768fc8bc2fd7b54b5ed7224499006ef8c8dc94d3e86a7834de9b781cf163"
+      "sha256": "969b5c63453a1a51c999fbe76c3a9b81118cb0ee106842f700870928b1ca655c"
     },
     {
       "path": "raw/gliner2-salem.json",
-      "sha256": "efcc04a91ad273656a812d493f22bfac86c95e7e5266ffc81c8d955f8b5e873c"
+      "sha256": "0974c6716ca4c4e0fa0e5cfb62e3e8fd6a73d61e4e8252a019a61badb125d67d"
     },
     {
       "path": "raw/gliner2-sebring.json",
-      "sha256": "52f7d60dde296f20e8f4874f4de533628bc1ad9d5bee98ec10993d3e4ad0e488"
+      "sha256": "81e3aab65236f0d2aa34d87ce5ec80c765a323303af710f1f83864ab73cc8d2e"
     },
     {
       "path": "raw/mapped.json",
@@ -81,15 +81,15 @@
     },
     {
       "path": "raw/parse.json",
-      "sha256": "b5e7c882cdcbaddcc90fba88242cd1135292aeb87c623533bae6103ef5120bc7"
+      "sha256": "cf5b8089f1e4bea11fd875692df3d649e2677ab99424967d0a303cdb05e2c216"
     },
     {
       "path": "raw/rerank.json",
-      "sha256": "e294ef86f9921f1d74310a86c6dbff1f2d07e202071355d18da32e303363d347"
+      "sha256": "e59340a429e5bd168d9b9bd776eae6d28120f4de0ef5e132d48efabd158694c1"
     },
     {
       "path": "raw/retrieve.json",
-      "sha256": "b8bf9b847b1da365691aabb2f360ab19f0595b15ae6043724ce934748aab2544"
+      "sha256": "95055c8e519af7a4b322bcca8278f6644d24bbed6f3b7c3f9a07a75790a89e47"
     },
     {
       "path": "evaluation.json",
@@ -106,42 +106,42 @@
       "stage": "parse",
       "model": "docling",
       "configured_model": "docling",
-      "latency_ms": 11898.2
+      "latency_ms": 1837.2
     },
     {
       "stage": "retrieve",
       "model": "BAAI/bge-m3",
-      "latency_ms": 3989.6
+      "latency_ms": 3661.6
     },
     {
       "stage": "rerank",
       "model": "Qwen/Qwen3-Reranker-4B",
-      "latency_ms": 733.7
+      "latency_ms": 735.3
     },
     {
       "stage": "entities_detector_0",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 227.9
+      "latency_ms": 248.8
     },
     {
       "stage": "entities_detector_1",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 226.5
+      "latency_ms": 221.3
     },
     {
       "stage": "entities_detector_2",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 222.5
+      "latency_ms": 224.8
     },
     {
       "stage": "entities_outcome",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 373.0
+      "latency_ms": 224.8
     },
     {
       "stage": "gliner2_sebring",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 258.0,
+      "latency_ms": 246.0,
       "source_chunk_ids": [
         "chunk-11"
       ],
@@ -150,7 +150,7 @@
     {
       "stage": "gliner2_salem",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 295.1,
+      "latency_ms": 264.0,
       "source_chunk_ids": [
         "chunk-12"
       ],
@@ -159,7 +159,7 @@
     {
       "stage": "gliner2_east_palestine",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 245.7,
+      "latency_ms": 238.9,
       "source_chunk_ids": [
         "chunk-13"
       ],
@@ -168,7 +168,7 @@
     {
       "stage": "gliner2_cause",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 241.1,
+      "latency_ms": 250.9,
       "source_chunk_ids": [
         "chunk-1"
       ],
@@ -177,7 +177,7 @@
     {
       "stage": "gliner2_engineer",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 254.8,
+      "latency_ms": 236.8,
       "source_chunk_ids": [
         "chunk-14"
       ],
@@ -186,7 +186,7 @@
     {
       "stage": "gliner2_derailment",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 229.0,
+      "latency_ms": 245.4,
       "source_chunk_ids": [
         "chunk-15"
       ],

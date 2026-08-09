@@ -4,9 +4,9 @@
     "model": "ibm-granite/granite-guardian-3.0-2b",
     "sie_fn": "generate",
     "warmup_s": 0.0,
-    "latency_s": 0.7394436859758571,
+    "latency_s": 0.5427735809935257,
     "sent": "57 tok",
-    "got": "No_of_turn>",
+    "got": "No",
     "throughput": ""
   },
   {
@@ -14,67 +14,67 @@
     "model": "Qwen/Qwen3.5-4B",
     "sie_fn": "generate",
     "warmup_s": 0.0,
-    "latency_s": 1.4150379410129972,
+    "latency_s": 0.9684641230269335,
     "sent": "384 tok",
     "got": "47 tok",
-    "throughput": "33 tok/s"
+    "throughput": "49 tok/s"
   },
   {
     "step": "OCR signature page \u2192 markdown",
     "model": "lightonai/LightOnOCR-2-1B",
     "sie_fn": "extract",
     "warmup_s": 0.0,
-    "latency_s": 3.8122286979923956,
+    "latency_s": 3.787580762000289,
     "sent": "161 KB img",
     "got": "2,415 chars md",
-    "throughput": "633 chars/s"
+    "throughput": "638 chars/s"
   },
   {
     "step": "Extract entities (zero-shot NER)",
     "model": "fastino/gliner2-large-v1",
     "sie_fn": "extract",
     "warmup_s": 0.0,
-    "latency_s": 0.26116155000636354,
+    "latency_s": 0.24432582402369007,
     "sent": "6,000 chars",
     "got": "4 entities",
-    "throughput": "15.3 ent/s"
+    "throughput": "16.4 ent/s"
   },
   {
     "step": "Read signature page (vision)",
     "model": "Qwen/Qwen3.5-4B",
     "sie_fn": "generate + image",
     "warmup_s": 0.0,
-    "latency_s": 1.3771928870119154,
+    "latency_s": 1.1702396850450896,
     "sent": "161 KB img + 1,021 tok",
     "got": "41 tok",
-    "throughput": "30 tok/s"
+    "throughput": "35 tok/s"
   },
   {
     "step": "Embed clauses (index)",
     "model": "BAAI/bge-m3",
     "sie_fn": "encode",
     "warmup_s": 0.0,
-    "latency_s": 0.7661638939753175,
+    "latency_s": 0.7540487250080332,
     "sent": "68 clauses",
     "got": "1024-dim",
-    "throughput": "88.8 items/s"
+    "throughput": "90.2 items/s"
   },
   {
     "step": "Rerank candidate clauses",
     "model": "Qwen/Qwen3-Reranker-4B",
     "sie_fn": "score",
     "warmup_s": 0.0,
-    "latency_s": 0.7665897599654272,
+    "latency_s": 0.8003064640215598,
     "sent": "12 docs",
     "got": "top 4",
-    "throughput": "15.7 docs/s"
+    "throughput": "15.0 docs/s"
   },
   {
     "step": "Rerank candidate clauses",
     "model": "Qwen/Qwen3-Reranker-4B",
     "sie_fn": "score",
     "warmup_s": 0.0,
-    "latency_s": 0.7185030360124074,
+    "latency_s": 0.7167516380432062,
     "sent": "12 docs",
     "got": "top 4",
     "throughput": "16.7 docs/s"
@@ -84,7 +84,7 @@
     "model": "Qwen/Qwen3-Reranker-4B",
     "sie_fn": "score",
     "warmup_s": 0.0,
-    "latency_s": 0.7136495049926452,
+    "latency_s": 0.7129429680062458,
     "sent": "12 docs",
     "got": "top 4",
     "throughput": "16.8 docs/s"
@@ -94,17 +94,17 @@
     "model": "Qwen/Qwen3-Reranker-4B",
     "sie_fn": "score",
     "warmup_s": 0.0,
-    "latency_s": 0.6312575910123996,
+    "latency_s": 0.6970291309989989,
     "sent": "12 docs",
     "got": "top 4",
-    "throughput": "19.0 docs/s"
+    "throughput": "17.2 docs/s"
   },
   {
     "step": "Clause-risk analysis (specialist sub-agent)",
     "model": "Qwen/Qwen3.5-4B",
     "sie_fn": "generate",
     "warmup_s": 0.0,
-    "latency_s": 17.70683519600425,
+    "latency_s": 17.09528854902601,
     "sent": "2,912 tok",
     "got": "260 tok",
     "throughput": "15 tok/s"
@@ -114,9 +114,9 @@
     "model": "Qwen/Qwen3.5-4B",
     "sie_fn": "generate",
     "warmup_s": 0.0,
-    "latency_s": 3.6032055559917353,
+    "latency_s": 2.7728454989846796,
     "sent": "255 tok",
     "got": "256 tok",
-    "throughput": "71 tok/s"
+    "throughput": "92 tok/s"
   }
 ]

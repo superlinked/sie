@@ -69,6 +69,32 @@ def generated(text: str, request_id: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_safety_guardrail_uses_the_native_guard_verdict() -> None:
+    client = FakeSIE([generated("No", "request-guard")])
+    app = AppContext(
+        sie=client,  # type: ignore[arg-type]
+        cfg={
+            "cluster": {},
+            "models": {"guard": "ibm-granite/granite-guardian-3.0-2b"},
+        },
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+    )
+
+    result = await safety_guardrail.guardrail_function(
+        SimpleNamespace(context=app),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        "Review this contract.",
+    )
+
+    assert result.tripwire_triggered is False
+    assert client.calls[0]["kwargs"]["max_new_tokens"] == 3
+    assert "grammar" not in client.calls[0]["kwargs"]
+
+
+@pytest.mark.asyncio
 async def test_agents_runner_executes_native_tool_turn_then_finishes() -> None:
     client = FakeSIE(
         [

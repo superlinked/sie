@@ -7,10 +7,10 @@
     "removal_estimate": 49500.0
   },
   "decision": {
-    "covered_scope": "Removal of 12 to 15 cubic yards of flood-borne stones from underneath the insured building to the perimeter of the building in the yard",
-    "evidence_needed": "Additional evidence that the estimated dollar amount from the contractor is limited to the covered scope of work; other debris removal estimates from one or more different contractors",
-    "excluded_scope": "Transportation by barge, handling, disposal, and any increased cost to remove non-owned debris in the yard or cart debris from the perimeter into a barge",
-    "prior_claim_check": "Verify documentation for previous claims with debris removal to ensure no payment overlap; verify debris removal for the same area was performed before the July 2019 flood event"
+    "covered_scope": "Removal of non-owned flood-borne debris (stones) from underneath the insured building to the perimeter of the building in the yard",
+    "evidence_needed": "Additional evidence that the estimated dollar amount from the contractor is limited to the covered scope of work; other debris removal estimates from one or more different contractors to validate the $3,564 per cubic yard price with sales tax",
+    "excluded_scope": "Transportation, handling, disposal, and yard-work components outside the perimeter footprint; barge transportation costs",
+    "prior_claim_check": "Review documentation for previous claims filed on May 20, 2019, May 29, 2019, and June 11, 2019 to verify if debris removal for the same area underneath the building was performed before the July 2019 flood event"
   },
   "findings": [
     {
@@ -24,7 +24,7 @@
     },
     {
       "category": "excluded_transport",
-      "evidence": "SFIP does not cover expense to dispose non-owned debris because it is not insured property; excludes barge transportation, handling, and disposal",
+      "evidence": "SFIP does not cover expense to dispose non-owned debris, nor increased cost to remove debris in the yard or cart debris into a barge",
       "severity": "high",
       "sources": [
         "appeal_decision"
@@ -33,16 +33,16 @@
     },
     {
       "category": "price_support",
-      "evidence": "Contractor quoted $3,564 per cubic yard with sales tax; FEMA recommends providing other debris removal estimates from different contractors to validate reasonableness",
+      "evidence": "Contractor quote of $3,564 per cubic yard requires validation through additional estimates from different contractors",
       "severity": "medium",
       "sources": [
         "appeal_decision"
       ],
-      "title": "Price Support Requirements"
+      "title": "Price Support Requirement"
     },
     {
       "category": "prior_claim_overlap",
-      "evidence": "Policyholder filed three prior flood claims in May and June 2019; must provide proof of repairs and price from previous losses related to removing stones and debris from underneath the building",
+      "evidence": "Policyholder must provide proof of repairs and price from three previous flood claims to ensure against payment overlap",
       "severity": "medium",
       "sources": [
         "appeal_decision"
@@ -50,14 +50,13 @@
       "title": "Prior Claim Overlap Verification"
     }
   ],
-  "headline": "FEMA Flood Insurance Appeal Decision B8: Partial Coverage for Debris Removal Under Insured Building",
+  "headline": "FEMA Affirms Partial Coverage for Flood-Borne Debris Removal Under Insured Building",
   "next_actions": [
     "Insurer to review policyholder's amended proof of loss totaling $182,552.00",
-    "Insurer to verify coverage for direct physical loss by or from flood to covered property",
-    "Insurer to confirm excluded costs (transport, handling, disposal) are not covered under SFIP",
-    "Insurer to request additional evidence regarding contractor pricing and prior claim history",
-    "Insurer to issue payment only for covered scope of work (removal underneath building)",
-    "Insurer to deny transport, handling, and disposal components of the claim"
+    "Insurer to verify prior claim payments for debris removal from underneath the building",
+    "Insurer to request additional contractor estimates to validate removal pricing",
+    "Insurer to deny excluded transport, handling, and disposal components",
+    "Insurer to direct payment only for covered under-building removal labor and equipment usage"
   ],
   "route": "scope_review_required"
 }

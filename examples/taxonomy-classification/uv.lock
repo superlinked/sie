@@ -1192,7 +1192,7 @@ wheels = [
 
 [[package]]
 name = "sie-sdk"
-version = "0.6.24"
+version = "0.7.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1204,9 +1204,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/06/d0aeec2c8b8d4437d9ad26a6d613876f777bc94ad8e66ddeec2b9a145378/sie_sdk-0.6.24.tar.gz", hash = "sha256:83feaab4ecf9779eb51c63b5881946ea1cad3d57b349f3d0c6c98151a6d67c34", size = 198889, upload-time = "2026-07-26T03:17:48.064Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/c1/f7652a9c970ae53b94c005e959e02883203be3d9dc580110ef8fb85d5b17/sie_sdk-0.7.1.tar.gz", hash = "sha256:7af9416f1de592e5e9ce4d64a7eba9479cf8f1efaa0c0d3cd64e53e3d83e706c", size = 221925, upload-time = "2026-08-09T06:00:32.851Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e0/58/aa2d5a52ae04188e8c5106c76594ed5d846b79c14a0e953e8f65cb730856/sie_sdk-0.6.24-py3-none-any.whl", hash = "sha256:4c1765479d1739403de5d75f6291700416335a915319f188d09cff49d84089fc", size = 131161, upload-time = "2026-07-26T03:17:46.419Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/4c/c24d0a2f4a10be40625034d798d3eda44b0351851f08c5d38910b0a1d8c5/sie_sdk-0.7.1-py3-none-any.whl", hash = "sha256:a0a386167a33a3128ed1eb5447ec69e1caa5462ee55bf10d92a250277e9b59b7", size = 144187, upload-time = "2026-08-09T06:00:31.091Z" },
 ]
 
 [[package]]
@@ -1256,7 +1256,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.2.0" },
     { name = "polars", specifier = ">=1.40.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
-    { name = "sie-sdk", specifier = "==0.6.24" },
+    { name = "sie-sdk", specifier = "==0.7.1" },
     { name = "tqdm", specifier = ">=4.67.3" },
 ]
 

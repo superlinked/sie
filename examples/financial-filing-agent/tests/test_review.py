@@ -2,6 +2,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from financial_filing.evaluate import evaluate_review
 from financial_filing.review import (
     _chunks,
@@ -209,8 +211,11 @@ def test_verified_manifest_hashes() -> None:
 
     raw_dir = manifest_path.parent / "raw"
     retrieve = json.loads((raw_dir / "retrieve.json").read_text(encoding="utf-8"))
+    rerank_request = json.loads((raw_dir / "rerank-request.json").read_text(encoding="utf-8"))
     rerank = json.loads((raw_dir / "rerank.json").read_text(encoding="utf-8"))
-    assert rerank["query_id"] == retrieve["query"]["id"]
+    assert rerank_request["query"]["id"] == retrieve["query"]["id"]
+    assert [item["id"] for item in rerank_request["items"]] == [row["chunk_id"] for row in retrieve["ranking"]]
+    assert {row["item_id"] for row in rerank["scores"]} == {item["id"] for item in rerank_request["items"]}
 
     provenance = manifest["rate_book_provenance"]
     assert provenance == _rate_book_provenance(raw_dir)
@@ -219,3 +224,27 @@ def test_verified_manifest_hashes() -> None:
         request_id: provenance["version"] for request_id in provenance["request_ids"]
     }
     assert "raw/retrieve.json" in provenance["source_artifacts"]
+
+
+def test_rate_book_provenance_rejects_a_charged_request_without_its_own_version(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "complete.json").write_text(
+        json.dumps(
+            {
+                "request": {
+                    "id": "request-1",
+                    "credits_debited": 1,
+                    "rate_book_version": "rate-v1",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "missing.json").write_text(
+        json.dumps({"request": {"id": "request-2", "credits_debited": 1}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="without a rate-book version"):
+        _rate_book_provenance(tmp_path)

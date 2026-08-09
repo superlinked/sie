@@ -9,7 +9,7 @@ dependencies = [
     "pillow>=12.2.0",
     "polars>=1.40.0",
     "python-dotenv>=1.2.2",
-    "sie-sdk==0.6.24",
+    "sie-sdk==0.7.1",
     "tqdm>=4.67.3",
 ]
 

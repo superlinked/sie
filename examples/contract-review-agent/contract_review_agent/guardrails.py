@@ -55,11 +55,6 @@ async def safety_guardrail(
             stage="safety_guardrail",
             max_tokens=3,
             timeout_s=25,
-            grammar={
-                "regex": "(?:yes|no)",
-                "label": "guard_verdict",
-                "strict": True,
-            },
         )
     except Exception as exc:  # noqa: BLE001 - configured fail-open boundary.
         # Guard model unavailable: fail OPEN (allow the run) but make it visible.

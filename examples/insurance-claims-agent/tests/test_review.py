@@ -246,3 +246,27 @@ def test_verified_manifest_pins_every_recorded_artifact() -> None:
     assert provenance["request_versions"] == {
         request_id: provenance["version"] for request_id in provenance["request_ids"]
     }
+
+
+def test_rate_book_provenance_rejects_a_charged_request_without_its_own_version(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "complete.json").write_text(
+        json.dumps(
+            {
+                "request": {
+                    "id": "request-1",
+                    "credits_debited": 1,
+                    "rate_book_version": "rate-v1",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "missing.json").write_text(
+        json.dumps({"request": {"id": "request-2", "credits_debited": 1}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="without a rate-book version"):
+        _rate_book_provenance(tmp_path)

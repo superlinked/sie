@@ -159,6 +159,7 @@ def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
     versions: set[str] = set()
     source_artifacts: list[str] = []
     request_ids: list[str] = []
+    request_versions: dict[str, str] = {}
     for path in sorted(raw_dir.glob("*.json")):
         result = json.loads(path.read_text(encoding="utf-8"))
         charged_rows = _charged_request_rows(result)
@@ -170,10 +171,12 @@ def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
                 raise RuntimeError(f"{path.name} has a charged request without an ID")
             request_ids.append(request_id)
             version = request.get("rate_book_version")
-            if not isinstance(version, str):
+            if not isinstance(version, str) or not version:
                 version = usage.get("rate_book_version")
-            if isinstance(version, str) and version:
-                versions.add(version)
+            if not isinstance(version, str) or not version:
+                raise RuntimeError(f"{path.name} has a charged request without a rate-book version")
+            versions.add(version)
+            request_versions[request_id] = version
     if len(request_ids) != len(set(request_ids)):
         raise RuntimeError("Run contains duplicate charged request IDs")
     if len(versions) != 1 or not request_ids:
@@ -183,7 +186,7 @@ def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
         "version": version,
         "source_artifacts": source_artifacts,
         "request_ids": request_ids,
-        "request_versions": {request_id: version for request_id in request_ids},
+        "request_versions": request_versions,
     }
 
 

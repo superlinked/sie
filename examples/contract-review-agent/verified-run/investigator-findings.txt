@@ -1,7 +1,7 @@
 ## Contract Investigation Report
 
 ### 1. Document Classification
-- **Type:** MSA (Master Services Agreement) / Distributor Agreement
+- **Type:** MSA (Master Services Agreement) / Distributor Agreement.
 - **Reason:** The document is a Distributor Agreement between a company and a distributor, outlining the terms for selling products, which is a standard type of Master Services Agreement (MSA) or distribution contract.
 
 ### 2. Parties & Key Terms
@@ -9,22 +9,39 @@
   - **Company:** Electric City Corp. (Delaware corporation)
   - **Distributor:** Electric City of Illinois LLC
 - **Execution Date:** September 7, 1999
-- **Term:** Initial term of ten (10) years, renewable annually for up to another ten (10) years on the same terms and conditions.
-- **Market:** Exclusive distributorship within the State of Illinois.
-- **Products:** "Energy Saver" energy efficiency devices.
+- **Term:** 10 years, commencing upon delivery of the last Sample by the Company to the Distributor.
+- **Renewal:** Automatically renewable on an annual basis for one-year terms for up to another 10 years under the same terms and conditions.
+- **Territory:** Exclusive distributorship within the State of Illinois (the "Market").
+- **Financials:**
+  - **Letter of Credit (LC):** $500,000 irrevocable LC required at commencement, with a two-month term, renewed bimonthly.
+  - **Minimum Purchase Order:** $250,000 per month for a 12-month period.
+  - **Initial Volume:** 375 units in the first Product Year (1999).
 
 ### 3. Execution Status
-- **Status:** **NOT EXECUTED**
-- **Finding:** The signatures and dates for both parties are not present in the visible portion of the document. The document ends at Section 1.1, which does not include any signature blocks or dates.
+- **Status:** **NOT EXECUTED.**
+- **Finding:** The vision model confirmed that signatures and dates for both parties are not present in the visible portion of the document. The document ends at Section 1.1 without signature blocks or dates.
 
-### 4. Risk Analysis (Customer = Distributor)
-- **Risk: Automatic Renewal & Term Extension**
-  - **Severity:** High
+### 4. Risk Analysis (Customer/Distributor Perspective)
+- **High Severity: Automatic Renewal & Long-Term Commitment**
+  - **Clause:** Section 1.3 (Term and Renewal)
   - **Issue:** The agreement allows for automatic annual renewals for up to ten additional years without explicit customer consent or right to terminate early, creating a long-term commitment with no clear exit strategy.
   - **Redline:** Add a clause allowing the Distributor to terminate the Agreement upon 90 days' written notice at any time during the Term.
 
+- **Medium Severity: Indemnification Scope**
+  - **Clause:** Section 5.3 (Indemnification)
+  - **Issue:** Mutual indemnification covers breach of material representations, negligence, fault, and IP violations. While mutual, the scope is broad and could expose the Distributor to significant liability for third-party claims related to sales practices or unauthorized product alterations.
+  - **Redline:** Limit indemnification obligations to direct damages only and exclude consequential or indirect damages where possible.
+
+- **Low Severity: Termination for Cause**
+  - **Cause:** Either party may terminate upon 30 days' prior written notice for material default, insolvency, or bankruptcy.
+  - **Risk:** Standard termination rights, but ensure cure periods are clearly defined and commercially reasonable.
+
 ### 5. Upcoming Obligations & Deadlines
-- **Obligation:** Send renewal / non-renewal notice before term end
-- **Counterparty:** LIMEENERGYCO
-- **Due Date:** 2026-09-15
-- **Amount:** Not specified in the obligations database.
+- **Obligation:** Send renewal/non-renewal notice before term end.
+- **Counterparty:** LIMEENERGYCO (Electric City Corp.)
+- **Due Date:** September 15, 2026
+- **Amount:** N/A (Notice obligation)
+
+---
+
+**Summary:** This is a 10-year exclusive distributorship agreement for Illinois, automatically renewable for up to 10 more years. It requires a $500k LC and $250k monthly minimum purchases. The document is currently unsigned. The primary risk is the long-term automatic renewal structure, which locks the Distributor into a decade-long commitment with limited exit options.

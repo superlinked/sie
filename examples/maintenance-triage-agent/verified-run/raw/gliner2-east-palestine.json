@@ -79,11 +79,14 @@
   "id": "ranked-ntsb-east_palestine-evidence",
   "model": "fastino/gliner2-large-v1",
   "request": {
-    "id": "019fe6f1-0c05-7511-930e-b590285d7d1f",
-    "usage": {
-      "input_tokens": 72
-    },
+    "id": "019fe887-3762-7772-ab99-2715d077db0e",
     "credits_debited": 2,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "input_tokens": 72,
+      "credits_charged": 2,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

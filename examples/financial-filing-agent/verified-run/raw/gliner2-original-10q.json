@@ -87,11 +87,14 @@
   "id": "ranked-original-10q-table-evidence",
   "model": "fastino/gliner2-large-v1",
   "request": {
-    "id": "019fe6f0-feb2-7972-9ad3-146887136cc5",
-    "usage": {
-      "input_tokens": 197
-    },
+    "id": "019fe896-8c6d-7362-bcef-c8312102725e",
     "credits_debited": 4,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "input_tokens": 197,
+      "credits_charged": 4,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }
