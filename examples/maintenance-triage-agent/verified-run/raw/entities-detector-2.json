@@ -63,7 +63,7 @@
   "id": "ntsb-detector-2",
   "model": "urchade/gliner_multi-v2.1",
   "request": {
-    "id": "019fe887-3397-7ba0-b675-6a96aa9f73df",
+    "id": "019fe8cb-23b5-7ee0-8c6f-753974bc8091",
     "credits_debited": 1,
     "rate_book_version": "2026-07-26-production-bootstrap-v2",
     "usage": {

@@ -150,7 +150,11 @@ async def read_signature_page(ctx: RunContextWrapper[AppContext], question: str)
         [
             {
                 "role": "system",
-                "content": "You are a meticulous contracts paralegal. Answer only from what is visible in the image.",
+                "content": (
+                    "You are a meticulous contracts paralegal. Answer only from what "
+                    "is visible in the image. Describe only the visible page or image; "
+                    "never infer where the full contract ends."
+                ),
             },
             {
                 "role": "user",

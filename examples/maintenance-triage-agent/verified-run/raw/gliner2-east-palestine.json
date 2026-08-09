@@ -79,7 +79,7 @@
   "id": "ranked-ntsb-east_palestine-evidence",
   "model": "fastino/gliner2-large-v1",
   "request": {
-    "id": "019fe887-3762-7772-ab99-2715d077db0e",
+    "id": "019fe8cb-2788-7371-b614-4f821422d507",
     "credits_debited": 2,
     "rate_book_version": "2026-07-26-production-bootstrap-v2",
     "usage": {

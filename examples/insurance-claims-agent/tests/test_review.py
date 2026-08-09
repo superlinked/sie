@@ -288,3 +288,24 @@ def test_rate_book_provenance_prefers_request_usage(tmp_path: Path) -> None:
     )
 
     assert _rate_book_provenance(tmp_path)["version"] == "nested-rate-v1"
+
+
+def test_rate_book_provenance_rejects_conflicting_request_versions(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "conflict.json").write_text(
+        json.dumps(
+            {
+                "request": {
+                    "id": "request-1",
+                    "credits_debited": 1,
+                    "rate_book_version": "direct-rate-v1",
+                    "usage": {"rate_book_version": "usage-rate-v2"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="conflicting rate-book versions"):
+        _rate_book_provenance(tmp_path)

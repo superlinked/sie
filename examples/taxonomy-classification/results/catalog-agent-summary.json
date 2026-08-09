@@ -1,6 +1,6 @@
 {
   "record_type": "sie_catalog_agent_evaluation_summary",
-  "run_at": "2026-08-09T15:02:55.852094Z",
+  "run_at": "2026-08-09T23:15:52.551215Z",
   "endpoint": "https://api.superlinked.com",
   "run_command": "eval-catalog-agent --offset 0 --limit 100 --cache-dir .cache/catalog-agent --output verified-run/evaluation.json --summary-output results/catalog-agent-summary.json",
   "timing_note": "Per-call timings are diagnostic, not benchmark results.",
@@ -29,7 +29,9 @@
     "properties": {
       "selected_index": {
         "type": "integer",
-        "minimum": 0
+        "minimum": 0,
+        "maximum": 3,
+        "description": "The request schema tightens this bound to the number of candidate-union entries minus one."
       },
       "needs_review": {
         "type": "boolean"
@@ -61,6 +63,6 @@
   },
   "evaluation": {
     "path": "verified-run/evaluation.json",
-    "sha256": "21f68de8740102326c4981080049726b83cf86e7f5e6098b875ee5976c8bcf44"
+    "sha256": "8a8247fc5897b31aea13131950bb9abeef609446ac7f1b4fb5e80f24e7152329"
   }
 }

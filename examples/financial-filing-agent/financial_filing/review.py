@@ -80,7 +80,9 @@ def _charged_request_rows(value: Any) -> list[tuple[dict[str, Any], dict[str, An
     if isinstance(value, dict):
         request = value.get("request")
         if isinstance(request, dict) and request.get("credits_debited"):
-            usage = value.get("usage")
+            usage = request.get("usage")
+            if not isinstance(usage, dict):
+                usage = value.get("usage")
             rows.append((request, usage if isinstance(usage, dict) else {}))
         for child in value.values():
             rows.extend(_charged_request_rows(child))
@@ -88,6 +90,23 @@ def _charged_request_rows(value: Any) -> list[tuple[dict[str, Any], dict[str, An
         for child in value:
             rows.extend(_charged_request_rows(child))
     return rows
+
+
+def _request_rate_book_version(request: dict[str, Any], usage: dict[str, Any], source: str) -> str:
+    direct_present = "rate_book_version" in request
+    usage_present = "rate_book_version" in usage
+    direct = request.get("rate_book_version")
+    nested = usage.get("rate_book_version")
+    if direct_present and (not isinstance(direct, str) or not direct):
+        raise RuntimeError(f"{source} has a charged request without a rate-book version")
+    if usage_present and (not isinstance(nested, str) or not nested):
+        raise RuntimeError(f"{source} has a charged request without a rate-book version")
+    if direct_present and usage_present and direct != nested:
+        raise RuntimeError(f"{source} has conflicting rate-book versions for one request")
+    version = direct if direct_present else nested
+    if not isinstance(version, str) or not version:
+        raise RuntimeError(f"{source} has a charged request without a rate-book version")
+    return version
 
 
 def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
@@ -105,11 +124,7 @@ def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
             if not isinstance(request_id, str) or not request_id:
                 raise RuntimeError(f"{path.name} has a charged request without an ID")
             request_ids.append(request_id)
-            version = request.get("rate_book_version")
-            if not isinstance(version, str) or not version:
-                version = usage.get("rate_book_version")
-            if not isinstance(version, str) or not version:
-                raise RuntimeError(f"{path.name} has a charged request without a rate-book version")
+            version = _request_rate_book_version(request, usage, path.name)
             versions.add(version)
             request_versions[request_id] = version
     if len(request_ids) != len(set(request_ids)):

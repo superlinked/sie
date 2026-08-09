@@ -1,0 +1,33 @@
+{
+  "contract_text_sha256": "95ea6fae5227f2424896bb354e9de452c7f05a85dc0acb72fa6bd72ebe37a236",
+  "risk_clauses": [
+    {
+      "clause": "Section 1.3",
+      "citation": "Section 1.3",
+      "section": "1.3",
+      "excerpt": "1.3 Term. The term of this Agreement shall be ten (10) years (the \"Term\") which shall commence on the date upon which the Company delivers to Distributor the last Sample, as defined hereinafter. If Distributor complies with all of the terms of this Agreement, the Agreement shall be renewable on an annual basis for one (1) year terms for up to another ten (10) years on the same terms and conditions as set forth herein. All renewals of this Agreement shall be on the same terms and conditions as are set forth herein.",
+      "excerpt_sha256": "5e1d401e09f79ec03b74df88cc0959b0de0763f222212c04afc39362c1ef5ab8"
+    },
+    {
+      "clause": "Section 5.3",
+      "citation": "Section 5.3",
+      "section": "5.3",
+      "excerpt": "5.3 Indemnification. Company and Distributor agree to indemnify, defend and hold each other harmless from any and all suits, claims, obligations, liabilities, damages, losses and the like (including attorneys' fees and costs) relating to or arising out of: (A) any breach of any material representations, warranties, covenants, obligations, agreements or duties in connection with this Agreement; (b) any negligence or fault; (c) any violation by either of them of the patent, copyright, trademark or other Page -10- intellectual property rights of third parties. In addition, Company agrees to indemnify, defend and hold harmless Distributor from and against all suits, claims, obligations, liabilities, damages, losses and the like (including attorneys' fees and costs) arising out of or related to Company's manufacture or design of the Products, provided that Distributor is not at fault in connection with the same, and Distributor agrees to indemnify, defend and hold harmless Company from and against all suits, claims, obligations, liabilities, damages, losses and the like (including a attorneys' fees and costs) arising out of or related to Distributor's sales, marketing practices or unauthorized Product alteration (provided that Company is not at fault in connection with same).",
+      "excerpt_sha256": "23feff8b9e37a89b0991fea9e6597e4f7ca1de4d227aa1a6f556313bf8042df0"
+    },
+    {
+      "clause": "Section 4.2",
+      "citation": "Section 4.2",
+      "section": "4.2",
+      "excerpt": "4.2 Termination for Cause. Either party may terminate this Agreement upon 30 days Page -8- prior written notice to the other upon the occurrence of any of the following events: (A) the Distributor's failure to make full and prompt payment to the Company of all sums due and owing to it; (b) either party's default in the performance of any of the material, terms, conditions, obligations, undertakings, covenants or liabilities set forth herein and such default is not cured within a commercially reasonable time after the defaulting party has been notified of the default by the other party and (c) as otherwise expressly provided herein. In the event either party (a) becomes adjudicated insolvent, (b) discontinues its business, (c) has voluntary of involuntary bankruptcy proceedings instituted against it, or (d) makes an assignment for the benefit of creditors, the other party shall be entitled to terminate this Agreement effective immediately upon written notice.",
+      "excerpt_sha256": "340cb55f75016bc8058a33f3227321c329407f37263fe3c8532671e4de5b2393"
+    },
+    {
+      "clause": "Section 4.4",
+      "citation": "Section 4.4",
+      "section": "4.4",
+      "excerpt": "4.4 Repurchase of Products. Upon the expiration or termination of this Agreement, pursuant to Section 4.1 or 4.2 hereof, the Company may, at its option to be exercised within 30 days of the date of the termination of this Agreement, and in its sole discretion, repurchase any Products in the possession of the Distributor at the net invoice price paid by the Distributor to the Company less any applicable special allowances, discounts, shipping or allowances for cooperative advertising. If Company terminates the Agreement without cause and for reasons other than Distributor's failure to meet its minimum expectations; it shall repurchase from Distributor any unopened Product, and shall bear all shipping, handling and related costs notwithstanding any other remedies to which Distributor may be entitled. On demand and tender of the repurchase price, the Distributor shall be obligated to deliver such Products to the Company. The Company reserves the right to reject any Products that are not factory sealed and in new and unused condition. Repurchased Products shall be shipped at the Company's expense, and the Company may offset any indebtedness of the Distributor to the Company against the repurchase price of such Products. Following expiration or termination of this Agreement, the Distributor may continue to sell any Products in the Market which are in its inventory Page -9- and which the Company has not repurchased. 5. REPRESENTATIONS AND WARRANTIES AND OTHER MATTERS",
+      "excerpt_sha256": "907f0f090507a91a23445da6344b338ca175fb5599b5a8f13a7b743868b41df0"
+    }
+  ]
+}

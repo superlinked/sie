@@ -5,6 +5,7 @@ from pathlib import Path
 from maintenance_triage.evaluate import evaluate_review
 from maintenance_triage.review import (
     _map_exact_source_fields,
+    _rate_book_provenance,
     _require_entity_evidence,
     _require_gliner2_evidence,
     _require_ranked_evidence,
@@ -277,3 +278,48 @@ def test_verified_manifest_hashes() -> None:
     for entry in manifest["artifacts"]:
         artifact = manifest_path.parent / entry["path"]
         assert hashlib.sha256(artifact.read_bytes()).hexdigest() == entry["sha256"]
+
+    provenance = manifest["rate_book_provenance"]
+    assert provenance == _rate_book_provenance(manifest_path.parent / "raw")
+    assert provenance["request_ids"]
+    assert provenance["request_versions"] == {
+        request_id: provenance["version"] for request_id in provenance["request_ids"]
+    }
+
+
+def test_rate_book_provenance_prefers_request_usage_and_rejects_conflicts(
+    tmp_path: Path,
+) -> None:
+    payload = {
+        "request": {
+            "id": "request-1",
+            "credits_debited": 1,
+            "usage": {"rate_book_version": "nested-rate-v1"},
+        },
+        "usage": {"rate_book_version": "outer-rate-v1"},
+    }
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert _rate_book_provenance(tmp_path)["version"] == "nested-rate-v1"
+
+    payload["request"]["rate_book_version"] = "direct-rate-v2"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        _rate_book_provenance(tmp_path)
+    except RuntimeError as exc:
+        assert "conflicting rate-book versions" in str(exc)
+    else:
+        raise AssertionError("Accepted conflicting request rate-book versions")
+
+
+def test_rate_book_provenance_rejects_missing_request_version(tmp_path: Path) -> None:
+    (tmp_path / "request.json").write_text(
+        json.dumps({"request": {"id": "request-1", "credits_debited": 1}}),
+        encoding="utf-8",
+    )
+    try:
+        _rate_book_provenance(tmp_path)
+    except RuntimeError as exc:
+        assert "without a rate-book version" in str(exc)
+    else:
+        raise AssertionError("Accepted a charged request without a rate-book version")

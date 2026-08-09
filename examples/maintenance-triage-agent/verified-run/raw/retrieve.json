@@ -1029,7 +1029,7 @@
     ],
     "model": "BAAI/bge-m3",
     "request": {
-      "id": "019fe887-2097-7513-8bc5-b5b33a6c6ada",
+      "id": "019fe8cb-105f-72f1-9161-bd50ae7ef07a",
       "credits_debited": 1,
       "rate_book_version": "2026-07-26-production-bootstrap-v2",
       "usage": {
@@ -2071,7 +2071,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-215d-78d2-ac51-84fd3a387c59",
+        "id": "019fe8cb-113f-72a2-8b59-3f7c0b867127",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -3112,7 +3112,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-2218-71a1-afa4-5201c105f89c",
+        "id": "019fe8cb-11f6-74a0-a630-e80d622b906c",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -4153,7 +4153,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-22e3-7050-b414-437c50de6050",
+        "id": "019fe8cb-12be-79b3-82b1-a62846d2ffe2",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -5194,7 +5194,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-239f-7f12-ac1c-6e27a43fdc6d",
+        "id": "019fe8cb-1384-7f23-b28c-b6a4efd68378",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -6235,7 +6235,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-2476-7821-b811-e194598fe94c",
+        "id": "019fe8cb-1439-7760-be34-15306d2791ea",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -7276,7 +7276,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-252c-7de1-af4b-58751df37162",
+        "id": "019fe8cb-150e-7413-83a0-654490daa30a",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -8317,7 +8317,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-25ea-7c90-a263-f6d9db784b85",
+        "id": "019fe8cb-15c1-79a1-874f-d053d84a7a2f",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -9358,7 +9358,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-26af-7281-b9c3-d15c3c6c542d",
+        "id": "019fe8cb-1689-7431-b05b-aeb9d86bdf0b",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -10399,7 +10399,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-276a-76b1-8a00-cf93fd41b6bc",
+        "id": "019fe8cb-1742-7232-9879-45fe87889f97",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -11440,7 +11440,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-2832-7d31-b4d1-1cbcac621c95",
+        "id": "019fe8cb-1804-7c21-aab6-8be892573645",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -12481,7 +12481,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-28e5-7e03-a7cd-c3f020485497",
+        "id": "019fe8cb-18b9-7880-a0ed-ba357f4dc5e4",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -13522,7 +13522,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-29ad-72c0-ad70-88d3084f6ad5",
+        "id": "019fe8cb-1981-7ad3-8859-acd54d2757b1",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -14563,7 +14563,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-2a69-7922-8d9a-660e4ea3730f",
+        "id": "019fe8cb-1a30-71a3-b77e-c8d03931f7a6",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -15604,7 +15604,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-2b2e-72a1-8bf7-085c04398163",
+        "id": "019fe8cb-1afe-7301-9608-8fa6b9a44c0d",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -16645,7 +16645,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-2be0-78a1-82f3-91d2c5a25527",
+        "id": "019fe8cb-1bb5-7fc0-993a-27fd382a7b97",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -17686,7 +17686,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-2ca3-7002-b168-26a434da0d35",
+        "id": "019fe8cb-1c75-70d1-a03b-03909d26de2a",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -18727,7 +18727,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-2d58-7a93-b548-01122b979559",
+        "id": "019fe8cb-1d2d-78e0-8e61-5b028d68e0c9",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {
@@ -19768,7 +19768,7 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe887-2e12-7672-8824-b29fe806f0c3",
+        "id": "019fe8cb-1dee-77a3-b59f-6c494cb5f93e",
         "credits_debited": 1,
         "rate_book_version": "2026-07-26-production-bootstrap-v2",
         "usage": {

@@ -569,7 +569,15 @@ def _evaluation_output(
         "response_schema": {
             "type": "object",
             "properties": {
-                "selected_index": {"type": "integer", "minimum": 0},
+                "selected_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": TOP_K_PER_RANKING * 2 - 1,
+                    "description": (
+                        "The request schema tightens this bound to the number of "
+                        "candidate-union entries minus one."
+                    ),
+                },
                 "needs_review": {"type": "boolean"},
             },
             "required": ["selected_index", "needs_review"],

@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from agents import Agent, ModelSettings, Runner, RunResult
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .guardrails import safety_guardrail
 from .runtime import AppContext, model_for, provision_timeout_from
@@ -15,7 +15,12 @@ from .tools import ALL_TOOLS
 
 
 class RiskFlag(BaseModel):
-    clause: str
+    clause: str = Field(
+        description=(
+            "Exact source contract reference beginning with Section or Sections, "
+            "for example Section 1.3"
+        )
+    )
     issue: str
     severity: str  # low | medium | high
     suggested_redline: str
@@ -30,7 +35,12 @@ class ContractReview(BaseModel):
     renewal_terms: str
     governing_law: str  # "unknown" if not stated
     executed: bool  # is the signature page signed and dated?
-    key_obligations: list[str]
+    key_obligations: list[str] = Field(
+        description=(
+            "Existing obligations established by the findings only; never proposed "
+            "redlines or recommended new terms"
+        )
+    )
     risk_flags: list[RiskFlag]
     recommendation: str
 
@@ -46,7 +56,7 @@ one of these tools, one after another, before you write anything.
 - classify_document() — the document type
 - ocr_signature_page() — read the executed signature page (signatories, titles, date)
 - extract_entities() — parties, dates, amounts, governing law
-- read_signature_page("Are both parties' signatures present and dated?") — visual execution check
+- read_signature_page("In this signature-page image, are both parties' signatures present and dated?") — visual execution check
 - search_clauses("automatic renewal"), then search_clauses("limitation of liability"),
   then search_clauses("indemnification"), then search_clauses("termination")
 - analyze_clause_risks() — risk analysis over the clauses returned by those searches
@@ -54,19 +64,32 @@ one of these tools, one after another, before you write anything.
 
 Do NOT write your report until you have called them all. Then write a thorough,
 factual findings report that cites ONLY what the tools returned. Never invent a party,
-date, number, or clause — if a tool failed, say so."""
+date, number, or clause — if a tool failed, say so. Every reported risk must
+include the exact Section X.Y returned by the tools. Preserve distinct source-backed
+automatic-renewal and indemnification findings when the retrieved clauses establish
+them. Preserve every established date, monetary obligation, unit commitment,
+territory or exclusivity term, and term or renewal fact returned by the tools."""
 
 _SYNTHESIZER_INSTRUCTIONS = """\
 You turn a contract investigator's findings into a structured ContractReview. Use
 ONLY the findings provided — never add facts. If the findings don't establish a
 field, use "unknown" (or false for `executed`). Make key_obligations and risk_flags
-specific and grounded in the findings, and give a clear recommendation."""
+specific and grounded in the findings, and give a clear recommendation. Every
+risk flag must include the exact Section X.Y cited in the findings. Retain distinct
+source-backed automatic-renewal and indemnification risks when established.
+Key obligations must be existing duties established in the findings; never present
+a proposed redline or notice period as a current obligation. Preserve every
+established date, monetary obligation, unit commitment, territory or exclusivity
+term, and term or renewal fact from the findings."""
 
 _INVESTIGATOR_TOOL_SEQUENCE = (
     ("classify_document", None),
     ("ocr_signature_page", None),
     ("extract_entities", None),
-    ("read_signature_page", "Are both parties' signatures present and dated?"),
+    (
+        "read_signature_page",
+        "In this signature-page image, are both parties' signatures present and dated?",
+    ),
     ("search_clauses", "automatic renewal"),
     ("search_clauses", "limitation of liability"),
     ("search_clauses", "indemnification"),
@@ -84,7 +107,10 @@ def build_reasoning_agent(
         instructions=(
             "You are a senior contracts attorney. Given contract clauses, identify "
             "risks to the Customer. For each, state the clause, the issue, a severity "
-            "(low/medium/high), and a concrete one-line redline. Be specific and brief."
+            "(low/medium/high), and a concrete one-line redline. Cite the exact Section "
+            "X.Y for every risk, cover every supplied risk topic, and preserve distinct "
+            "source-backed automatic-renewal and indemnification risks. Be specific "
+            "and brief."
         ),
         model=model_for(
             cfg["models"]["reasoning"],

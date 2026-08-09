@@ -240,7 +240,7 @@ def evaluation_checks(
     except (KeyError, TypeError, ValueError):
         pair_ok = False
     try:
-        ocr_ok = len(ocr_fragments(upper_text, lower_text)) >= 7
+        ocr_ok = len(ocr_fragments(upper_text, lower_text)) == 7
     except (TypeError, ValueError):
         ocr_ok = False
     return {

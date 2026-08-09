@@ -24,7 +24,11 @@ from .app import (
 from .config import load_config
 from .data import make_sample
 from .data.paths import CUAD_DIR, GENERATED_DIR, MANIFEST_PATH
-from .evidence import validate_run_id, write_run_record
+from .evidence import (
+    ensure_run_destination_available,
+    validate_run_id,
+    write_run_record,
+)
 from .runtime import AppContext, Ledger, instruct_once, provision_timeout_from
 
 console = Console()
@@ -207,7 +211,7 @@ async def _warm(app: AppContext) -> None:
 async def _run(args) -> None:
     set_tracing_disabled(True)
     if args.run_id is not None:
-        validate_run_id(args.run_id)
+        ensure_run_destination_available(args.run_id)
     cfg = load_config()
     text, scan_path, db_path, label = _resolve_corpus(args)
 

@@ -79,7 +79,7 @@
   "id": "ranked-ntsb-salem-evidence",
   "model": "fastino/gliner2-large-v1",
   "request": {
-    "id": "019fe887-3662-7562-9b00-0780c69a53f8",
+    "id": "019fe8cb-26a1-7230-9784-c2fb39c32698",
     "credits_debited": 2,
     "rate_book_version": "2026-07-26-production-bootstrap-v2",
     "usage": {

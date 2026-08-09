@@ -6,6 +6,9 @@
     "parties_identified": true,
     "risk_flags_identified": true,
     "api_calls_have_request_provenance": true,
+    "api_call_request_ids_unique": true,
+    "risk_clauses_supported_by_source": true,
+    "signature_image_scope_not_overclaimed": true,
     "all_configured_models_called": true,
     "native_primitives_called": true,
     "required_api_call_sequence": true

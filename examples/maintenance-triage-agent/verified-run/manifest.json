@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-08-09T21:56:44.385392+00:00",
+  "created_at": "2026-08-09T23:10:56.803717+00:00",
   "endpoint": "https://api.superlinked.com",
   "models": {
     "parse": "docling",
@@ -7,6 +7,90 @@
     "rerank": "Qwen/Qwen3-Reranker-4B",
     "entities": "urchade/gliner_multi-v2.1",
     "extract": "fastino/gliner2-large-v1"
+  },
+  "rate_book_provenance": {
+    "version": "2026-07-26-production-bootstrap-v2",
+    "source_artifacts": [
+      "raw/entities-detector-0.json",
+      "raw/entities-detector-1.json",
+      "raw/entities-detector-2.json",
+      "raw/entities-outcome.json",
+      "raw/gliner2-cause.json",
+      "raw/gliner2-derailment.json",
+      "raw/gliner2-east-palestine.json",
+      "raw/gliner2-engineer.json",
+      "raw/gliner2-salem.json",
+      "raw/gliner2-sebring.json",
+      "raw/parse.json",
+      "raw/rerank.json",
+      "raw/retrieve.json"
+    ],
+    "request_ids": [
+      "019fe8cb-21a7-7d13-a5e3-cda7794d4a5a",
+      "019fe8cb-22d9-7be1-ac83-db39bb8b13aa",
+      "019fe8cb-23b5-7ee0-8c6f-753974bc8091",
+      "019fe8cb-24c7-75c0-b673-d1c54e731907",
+      "019fe8cb-287d-79b0-8e82-4f93ca4a46b3",
+      "019fe8cb-2a72-79e1-a22f-2d052731d525",
+      "019fe8cb-2788-7371-b614-4f821422d507",
+      "019fe8cb-2973-7e53-af72-7f27f7122168",
+      "019fe8cb-26a1-7230-9784-c2fb39c32698",
+      "019fe8cb-25ba-7e13-a3e8-08519e91e741",
+      "019fe8cb-0ae4-7980-af48-c3effb95a7c9",
+      "019fe8cb-1eb6-7f63-9ca9-3fc53b951d43",
+      "019fe8cb-105f-72f1-9161-bd50ae7ef07a",
+      "019fe8cb-113f-72a2-8b59-3f7c0b867127",
+      "019fe8cb-11f6-74a0-a630-e80d622b906c",
+      "019fe8cb-12be-79b3-82b1-a62846d2ffe2",
+      "019fe8cb-1384-7f23-b28c-b6a4efd68378",
+      "019fe8cb-1439-7760-be34-15306d2791ea",
+      "019fe8cb-150e-7413-83a0-654490daa30a",
+      "019fe8cb-15c1-79a1-874f-d053d84a7a2f",
+      "019fe8cb-1689-7431-b05b-aeb9d86bdf0b",
+      "019fe8cb-1742-7232-9879-45fe87889f97",
+      "019fe8cb-1804-7c21-aab6-8be892573645",
+      "019fe8cb-18b9-7880-a0ed-ba357f4dc5e4",
+      "019fe8cb-1981-7ad3-8859-acd54d2757b1",
+      "019fe8cb-1a30-71a3-b77e-c8d03931f7a6",
+      "019fe8cb-1afe-7301-9608-8fa6b9a44c0d",
+      "019fe8cb-1bb5-7fc0-993a-27fd382a7b97",
+      "019fe8cb-1c75-70d1-a03b-03909d26de2a",
+      "019fe8cb-1d2d-78e0-8e61-5b028d68e0c9",
+      "019fe8cb-1dee-77a3-b59f-6c494cb5f93e"
+    ],
+    "request_versions": {
+      "019fe8cb-21a7-7d13-a5e3-cda7794d4a5a": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-22d9-7be1-ac83-db39bb8b13aa": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-23b5-7ee0-8c6f-753974bc8091": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-24c7-75c0-b673-d1c54e731907": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-287d-79b0-8e82-4f93ca4a46b3": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-2a72-79e1-a22f-2d052731d525": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-2788-7371-b614-4f821422d507": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-2973-7e53-af72-7f27f7122168": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-26a1-7230-9784-c2fb39c32698": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-25ba-7e13-a3e8-08519e91e741": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-0ae4-7980-af48-c3effb95a7c9": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1eb6-7f63-9ca9-3fc53b951d43": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-105f-72f1-9161-bd50ae7ef07a": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-113f-72a2-8b59-3f7c0b867127": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-11f6-74a0-a630-e80d622b906c": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-12be-79b3-82b1-a62846d2ffe2": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1384-7f23-b28c-b6a4efd68378": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1439-7760-be34-15306d2791ea": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-150e-7413-83a0-654490daa30a": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-15c1-79a1-874f-d053d84a7a2f": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1689-7431-b05b-aeb9d86bdf0b": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1742-7232-9879-45fe87889f97": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1804-7c21-aab6-8be892573645": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-18b9-7880-a0ed-ba357f4dc5e4": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1981-7ad3-8859-acd54d2757b1": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1a30-71a3-b77e-c8d03931f7a6": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1afe-7301-9608-8fa6b9a44c0d": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1bb5-7fc0-993a-27fd382a7b97": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1c75-70d1-a03b-03909d26de2a": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1d2d-78e0-8e61-5b028d68e0c9": "2026-07-26-production-bootstrap-v2",
+      "019fe8cb-1dee-77a3-b59f-6c494cb5f93e": "2026-07-26-production-bootstrap-v2"
+    }
   },
   "fixture": {
     "path": "fixtures/east-palestine-bearing-spread.pdf",
@@ -33,19 +117,19 @@
     },
     {
       "path": "raw/entities-detector-0.json",
-      "sha256": "f5c754d57bb03866b04b94556a71d7cd35ef66cc5aea1edf3344b7111fc13d42"
+      "sha256": "a35723205a63e48c20561c9b6b53a69655c4491c8d3c857b3d03ac3308a46877"
     },
     {
       "path": "raw/entities-detector-1.json",
-      "sha256": "54d730a0346986eaaa8447173fbeb86f772257e8d8c23263673373e33d938c6a"
+      "sha256": "7461266e6d28866827af9b3d0a223e60fa1f16ff4930a94b81f6f7ab562cf4be"
     },
     {
       "path": "raw/entities-detector-2.json",
-      "sha256": "4a1b9f2f27101e4eaa9e870ff262a8988bcc483d5c173aa61feefb922f2f50db"
+      "sha256": "ce93e0a2e20fd8917ea6574be7a210b93c5df89a6ce8d714f8a2ddca51de1f03"
     },
     {
       "path": "raw/entities-outcome.json",
-      "sha256": "eaf44344b5cc8bd6597ef87ea1eb38bfaa17031eab8a9ded05fab91c6b2d19a0"
+      "sha256": "c1c07a9d59df46c16144fe71409c528ef1515e51271f8850ecd3c7a1bd89c814"
     },
     {
       "path": "raw/entities.json",
@@ -53,27 +137,27 @@
     },
     {
       "path": "raw/gliner2-cause.json",
-      "sha256": "6e139fe2a418b6d7db3a671d9711e5d9e384ac33452b461522ce4d31c1a9cdda"
+      "sha256": "d3500c90ae1ac525f23d2622b51340bc23ea4d9e7c7e85b20abe7dbe71e91e85"
     },
     {
       "path": "raw/gliner2-derailment.json",
-      "sha256": "f7a4771cc4a1cade6931a69dc331a3daa444d6a6731cc577c7c44cfdedb9ec3d"
+      "sha256": "c1b9d25963f09b85e96d0b2175f75401b8b54a876efb572c1b435a192c52f999"
     },
     {
       "path": "raw/gliner2-east-palestine.json",
-      "sha256": "f3c52c6428a68ba9fffb5d4c9036c3f07b0abb8d7444083b2acd5cfe56edca1f"
+      "sha256": "910aad735ae9e3735332aadb74d18ef487b0b0c38645d1f80a02304d8af52623"
     },
     {
       "path": "raw/gliner2-engineer.json",
-      "sha256": "969b5c63453a1a51c999fbe76c3a9b81118cb0ee106842f700870928b1ca655c"
+      "sha256": "1858b8b7e0393410fc1fdd061ba3032b5b84589c4dade78422a19a57e39400a3"
     },
     {
       "path": "raw/gliner2-salem.json",
-      "sha256": "0974c6716ca4c4e0fa0e5cfb62e3e8fd6a73d61e4e8252a019a61badb125d67d"
+      "sha256": "b888267a475ab176ad11503d11c2b48d93f48747285df8e0bd48232aa23c2475"
     },
     {
       "path": "raw/gliner2-sebring.json",
-      "sha256": "81e3aab65236f0d2aa34d87ce5ec80c765a323303af710f1f83864ab73cc8d2e"
+      "sha256": "d61491d97d9e5e874e90c205502dce77e3a283a07b5832d6b5149bdd15324405"
     },
     {
       "path": "raw/mapped.json",
@@ -81,15 +165,15 @@
     },
     {
       "path": "raw/parse.json",
-      "sha256": "cf5b8089f1e4bea11fd875692df3d649e2677ab99424967d0a303cdb05e2c216"
+      "sha256": "d5b2ce7229bd38884fe60b004ce3e7812f9e790e09ded7536a4e9c3d93cc0491"
     },
     {
       "path": "raw/rerank.json",
-      "sha256": "e59340a429e5bd168d9b9bd776eae6d28120f4de0ef5e132d48efabd158694c1"
+      "sha256": "bddf3ee5d53723e3fe99466446d41c2945330fc3ade8b7751137d854e69ab766"
     },
     {
       "path": "raw/retrieve.json",
-      "sha256": "95055c8e519af7a4b322bcca8278f6644d24bbed6f3b7c3f9a07a75790a89e47"
+      "sha256": "402d0c4fad3ac8f6b2b3299de1d1c92d33d31033f587b6f67ce65debf1fa6b09"
     },
     {
       "path": "evaluation.json",
@@ -106,42 +190,42 @@
       "stage": "parse",
       "model": "docling",
       "configured_model": "docling",
-      "latency_ms": 1837.2
+      "latency_ms": 1806.4
     },
     {
       "stage": "retrieve",
       "model": "BAAI/bge-m3",
-      "latency_ms": 3661.6
+      "latency_ms": 3655.4
     },
     {
       "stage": "rerank",
       "model": "Qwen/Qwen3-Reranker-4B",
-      "latency_ms": 735.3
+      "latency_ms": 757.3
     },
     {
       "stage": "entities_detector_0",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 248.8
+      "latency_ms": 308.8
     },
     {
       "stage": "entities_detector_1",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 221.3
+      "latency_ms": 217.8
     },
     {
       "stage": "entities_detector_2",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 224.8
+      "latency_ms": 272.8
     },
     {
       "stage": "entities_outcome",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 224.8
+      "latency_ms": 238.4
     },
     {
       "stage": "gliner2_sebring",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 246.0,
+      "latency_ms": 239.9,
       "source_chunk_ids": [
         "chunk-11"
       ],
@@ -150,7 +234,7 @@
     {
       "stage": "gliner2_salem",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 264.0,
+      "latency_ms": 226.6,
       "source_chunk_ids": [
         "chunk-12"
       ],
@@ -159,7 +243,7 @@
     {
       "stage": "gliner2_east_palestine",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 238.9,
+      "latency_ms": 244.1,
       "source_chunk_ids": [
         "chunk-13"
       ],
@@ -168,7 +252,7 @@
     {
       "stage": "gliner2_cause",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 250.9,
+      "latency_ms": 239.3,
       "source_chunk_ids": [
         "chunk-1"
       ],
@@ -177,7 +261,7 @@
     {
       "stage": "gliner2_engineer",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 236.8,
+      "latency_ms": 253.0,
       "source_chunk_ids": [
         "chunk-14"
       ],
@@ -186,7 +270,7 @@
     {
       "stage": "gliner2_derailment",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 245.4,
+      "latency_ms": 256.2,
       "source_chunk_ids": [
         "chunk-15"
       ],

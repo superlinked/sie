@@ -1,47 +1,39 @@
-## Contract Investigation Report
+## Contract Investigation Report: Distributor Agreement
 
-### 1. Document Classification
-- **Type:** MSA (Master Services Agreement) / Distributor Agreement.
-- **Reason:** The document is a Distributor Agreement between a company and a distributor, outlining the terms for selling products, which is a standard type of Master Services Agreement (MSA) or distribution contract.
+### 1. Document Classification & Execution Status
+- **Document Type**: Master Services Agreement (MSA) / Distributor Agreement.
+- **Execution Status**: **NOT EXECUTED**. The vision model analysis of the signature page image confirms that neither party's signatures nor dates are present on the visible page. The document appears to be a draft or unsigned copy.
 
-### 2. Parties & Key Terms
-- **Parties:**
-  - **Company:** Electric City Corp. (Delaware corporation)
-  - **Distributor:** Electric City of Illinois LLC
-- **Execution Date:** September 7, 1999
-- **Term:** 10 years, commencing upon delivery of the last Sample by the Company to the Distributor.
-- **Renewal:** Automatically renewable on an annual basis for one-year terms for up to another 10 years under the same terms and conditions.
-- **Territory:** Exclusive distributorship within the State of Illinois (the "Market").
-- **Financials:**
-  - **Letter of Credit (LC):** $500,000 irrevocable LC required at commencement, with a two-month term, renewed bimonthly.
-  - **Minimum Purchase Order:** $250,000 per month for a 12-month period.
-  - **Initial Volume:** 375 units in the first Product Year (1999).
+### 2. Parties Identified
+- **Company**: Electric City Corp., a Delaware corporation.
+- **Distributor**: Electric City of Illinois LLC.
 
-### 3. Execution Status
-- **Status:** **NOT EXECUTED.**
-- **Finding:** The vision model confirmed that signatures and dates for both parties are not present in the visible portion of the document. The document ends at Section 1.1 without signature blocks or dates.
+### 3. Key Terms & Obligations
+- **Term**: Initial term of ten (10) years, commencing upon delivery of the last Sample by Company to Distributor.
+- **Renewal**: Renewable annually for up to an additional ten (10) years on the same terms and conditions (Section 1.3).
+- **Exclusivity**: Company appoints Distributor as its **exclusive** distributor within the Market (State of Illinois) (Section 1.1).
+- **Territory**: State of Illinois, including public/private entities, institutions, schools, etc. (Recital C).
+- **Financial Commitments**:
+  - **Letter of Credit (LC)**: Distributor must issue an irrevocable LC in the amount of $500,000 at the commencement of the Term (Section 2.4(a)).
+  - **Minimum Purchase Order**: A minimum of $250,000.00 purchase order must be received by Company by the first of each month for a total 12-month period.
+  - **Unit Commitment**: 375 units in the first Product Year (1999).
+  - **Price Adjustment**: Prices subject to annual adjustment based on CPI starting calendar year 2000.
 
 ### 4. Risk Analysis (Customer/Distributor Perspective)
-- **High Severity: Automatic Renewal & Long-Term Commitment**
-  - **Clause:** Section 1.3 (Term and Renewal)
-  - **Issue:** The agreement allows for automatic annual renewals for up to ten additional years without explicit customer consent or right to terminate early, creating a long-term commitment with no clear exit strategy.
-  - **Redline:** Add a clause allowing the Distributor to terminate the Agreement upon 90 days' written notice at any time during the Term.
 
-- **Medium Severity: Indemnification Scope**
-  - **Clause:** Section 5.3 (Indemnification)
-  - **Issue:** Mutual indemnification covers breach of material representations, negligence, fault, and IP violations. While mutual, the scope is broad and could expose the Distributor to significant liability for third-party claims related to sales practices or unauthorized product alterations.
-  - **Redline:** Limit indemnification obligations to direct damages only and exclude consequential or indirect damages where possible.
+#### High Severity Risks
+- **Automatic Renewal Trap (Section 1.3)**: The agreement is renewable for up to ten additional years on the same terms. There is no specified right of first refusal or termination notice period for renewal.
+  - *Redline*: Add a requirement that Distributor must provide written notice at least 90 days prior to each annual renewal date to exercise the option to renew.
+- **Indemnification Scope (Section 5.3)**: Mutual indemnification covers breach of material representations, negligence, fault, and IP violations. However, the clause also requires Distributor to indemnify Company for "unauthorized Product alteration" even if Company is not at fault, which could expose Distributor to significant liability for product modifications made without explicit approval.
+- **Termination for Cause (Section 4.2)**: Either party may terminate upon 30 days' notice for default. This short cure period may be insufficient for complex breaches.
 
-- **Low Severity: Termination for Cause**
-  - **Cause:** Either party may terminate upon 30 days' prior written notice for material default, insolvency, or bankruptcy.
-  - **Risk:** Standard termination rights, but ensure cure periods are clearly defined and commercially reasonable.
+#### Medium Severity Risks
+- **Repurchase Obligation (Section 4.4)**: Upon expiration or termination, Company has the sole discretion to repurchase Products from Distributor at net invoice price less allowances. This lack of guaranteed buyback could leave Distributor with unsold inventory risk.
+- **Limitation of Liability (Force Majeure)**: While there is protection for events beyond reasonable control (Acts of God, etc.), the clause does not explicitly cap overall liability, potentially exposing both parties to unlimited damages for non-force majeure breaches.
 
 ### 5. Upcoming Obligations & Deadlines
-- **Obligation:** Send renewal/non-renewal notice before term end.
-- **Counterparty:** LIMEENERGYCO (Electric City Corp.)
-- **Due Date:** September 15, 2026
-- **Amount:** N/A (Notice obligation)
+- **Renewal/Non-Renewal Notice**: Due **2026-09-15**. Both parties must send renewal/non-renewal notice before the term end.
+- **Quarterly Reports**: Distributor must submit written reports to Company each quarter during the first year of the Term, commencing 90 days after execution (Section 4.1).
 
----
-
-**Summary:** This is a 10-year exclusive distributorship agreement for Illinois, automatically renewable for up to 10 more years. It requires a $500k LC and $250k monthly minimum purchases. The document is currently unsigned. The primary risk is the long-term automatic renewal structure, which locks the Distributor into a decade-long commitment with limited exit options.
+### 6. Governing Law
+- Not explicitly stated in the extracted entities or clauses provided.

@@ -104,6 +104,71 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, default=_json_default) + "\n", encoding="utf-8")
 
 
+def _charged_request_rows(value: Any) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    if isinstance(value, dict):
+        request = value.get("request")
+        if isinstance(request, dict) and request.get("credits_debited"):
+            usage = request.get("usage")
+            if not isinstance(usage, dict):
+                usage = value.get("usage")
+            rows.append((request, usage if isinstance(usage, dict) else {}))
+        for child in value.values():
+            rows.extend(_charged_request_rows(child))
+    elif isinstance(value, list):
+        for child in value:
+            rows.extend(_charged_request_rows(child))
+    return rows
+
+
+def _request_rate_book_version(request: dict[str, Any], usage: dict[str, Any], source: str) -> str:
+    direct_present = "rate_book_version" in request
+    usage_present = "rate_book_version" in usage
+    direct = request.get("rate_book_version")
+    nested = usage.get("rate_book_version")
+    if direct_present and (not isinstance(direct, str) or not direct):
+        raise RuntimeError(f"{source} has a charged request without a rate-book version")
+    if usage_present and (not isinstance(nested, str) or not nested):
+        raise RuntimeError(f"{source} has a charged request without a rate-book version")
+    if direct_present and usage_present and direct != nested:
+        raise RuntimeError(f"{source} has conflicting rate-book versions for one request")
+    version = direct if direct_present else nested
+    if not isinstance(version, str) or not version:
+        raise RuntimeError(f"{source} has a charged request without a rate-book version")
+    return version
+
+
+def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
+    versions: set[str] = set()
+    source_artifacts: list[str] = []
+    request_ids: list[str] = []
+    request_versions: dict[str, str] = {}
+    for path in sorted(raw_dir.glob("*.json")):
+        result = json.loads(path.read_text(encoding="utf-8"))
+        charged_rows = _charged_request_rows(result)
+        if charged_rows:
+            source_artifacts.append(f"raw/{path.name}")
+        for request, usage in charged_rows:
+            request_id = request.get("id")
+            if not isinstance(request_id, str) or not request_id:
+                raise RuntimeError(f"{path.name} has a charged request without an ID")
+            request_ids.append(request_id)
+            version = _request_rate_book_version(request, usage, path.name)
+            versions.add(version)
+            request_versions[request_id] = version
+    if len(request_ids) != len(set(request_ids)):
+        raise RuntimeError("Run contains duplicate charged request IDs")
+    if len(versions) != 1 or not request_ids:
+        raise RuntimeError("Run does not establish one settled rate book for charged requests")
+    version = versions.pop()
+    return {
+        "version": version,
+        "source_artifacts": source_artifacts,
+        "request_ids": request_ids,
+        "request_versions": request_versions,
+    }
+
+
 def _dense(result: dict[str, Any]) -> list[float]:
     values: Any = result.get("dense")
     if isinstance(values, dict):
@@ -718,6 +783,7 @@ def run(run_id: str) -> Path:
         "created_at": datetime.now(UTC).isoformat(),
         "endpoint": config["cluster"]["url"],
         "models": config["models"],
+        "rate_book_provenance": _rate_book_provenance(raw_dir),
         "fixture": {"path": str(DOCUMENT_PATH.relative_to(ROOT)), "sha256": sha256(DOCUMENT_PATH)},
         "diagnostic_fixtures": [
             {"path": str(path.relative_to(ROOT)), "sha256": sha256(path)} for path in SCHEMA_PROBE_PATHS

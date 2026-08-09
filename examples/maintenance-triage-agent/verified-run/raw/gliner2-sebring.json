@@ -55,7 +55,7 @@
   "id": "ranked-ntsb-sebring-evidence",
   "model": "fastino/gliner2-large-v1",
   "request": {
-    "id": "019fe887-3565-7922-be5b-e65cbbf36748",
+    "id": "019fe8cb-25ba-7e13-a3e8-08519e91e741",
     "credits_debited": 2,
     "rate_book_version": "2026-07-26-production-bootstrap-v2",
     "usage": {

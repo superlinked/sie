@@ -53,7 +53,7 @@ def _review() -> ContractReview:
         key_obligations=["Give notice"],
         risk_flags=[
             RiskFlag(
-                clause="Renewal",
+                clause="Section 1.1 (Renewal)",
                 issue="No early exit",
                 severity="high",
                 suggested_redline="Add a termination right.",
@@ -91,7 +91,7 @@ def _write_record(
         endpoint="https://api.superlinked.com",
         cfg=CFG,
         label="example",
-        contract_text="contract",
+        contract_text="1.1 Renewal. Annual renewal terms.",
         scan_path=str(scan),
         db_path=str(database),
         findings="findings",
@@ -112,6 +112,18 @@ def test_write_run_record_rejects_unsafe_run_id(
         _write_record(tmp_path, monkeypatch, run_id=run_id, api_calls=[])
 
     assert not (tmp_path / "runs").exists()
+
+
+def test_run_destination_preflight_rejects_existing_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(evidence_module, "PROJECT_ROOT", tmp_path)
+    destination = tmp_path / "runs" / "existing"
+    destination.mkdir(parents=True)
+
+    with pytest.raises(FileExistsError, match="Run evidence already exists"):
+        evidence_module.ensure_run_destination_available("existing")
 
 
 def test_write_run_record_rejects_missing_request_provenance(
@@ -136,6 +148,47 @@ def test_write_run_record_rejects_missing_request_provenance(
     )
     assert run_dir == runs_dir / "safe-run"
     assert (run_dir / "manifest.json").is_file()
+
+
+def test_write_run_record_rejects_duplicate_request_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_calls = _api_calls()
+    api_calls[-1]["request_id"] = api_calls[-2]["request_id"]
+
+    with pytest.raises(RuntimeError, match="Production evidence checks failed"):
+        _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)
+
+
+def test_write_run_record_rejects_an_unsupported_risk_clause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_calls = _api_calls()
+    monkeypatch.setattr(evidence_module, "PROJECT_ROOT", tmp_path)
+    scan = tmp_path / "scan.png"
+    database = tmp_path / "obligations.db"
+    scan.write_bytes(b"scan")
+    database.write_bytes(b"database")
+    review = _review()
+    review.risk_flags[0].clause = "Section 2.1 (Missing)"
+
+    with pytest.raises(RuntimeError, match="matched 0 source sections"):
+        write_run_record(
+            run_id="safe-run",
+            endpoint="https://api.superlinked.com",
+            cfg=CFG,
+            label="example",
+            contract_text="1.1 Renewal. Annual renewal terms.",
+            scan_path=str(scan),
+            db_path=str(database),
+            findings="findings",
+            review=review,
+            ledger=_ledger(),
+            api_calls=api_calls,
+            wall_s=1,
+        )
 
 
 @pytest.mark.parametrize("credits_debited", [None, False, "1", -1])
@@ -184,7 +237,7 @@ def test_write_run_record_rejects_a_malformed_guardrail_verdict(
             endpoint="https://api.superlinked.com",
             cfg=CFG,
             label="example",
-            contract_text="contract",
+            contract_text="1.1 Renewal. Annual renewal terms.",
             scan_path=str(scan),
             db_path=str(database),
             findings="findings",
@@ -199,12 +252,18 @@ def test_write_run_record_rejects_a_malformed_guardrail_verdict(
     assert list(runs_dir.iterdir()) == []
 
 
+def test_model_text_normalization_is_formatting_only() -> None:
+    assert evidence_module._normalize_model_text("first  \r\nsecond\t\r\n") == (
+        "first\nsecond\n"
+    )
+
+
 def test_verified_run_manifest_pins_complete_passing_evidence() -> None:
     run_dir = ROOT / "verified-run"
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     entries = manifest["artifacts"]
     paths = [entry["path"] for entry in entries]
-    assert len(paths) == len(set(paths)) == 5
+    assert len(paths) == len(set(paths)) == 6
     artifacts = {entry["path"]: entry["sha256"] for entry in entries}
 
     assert set(artifacts) == {
@@ -213,6 +272,7 @@ def test_verified_run_manifest_pins_complete_passing_evidence() -> None:
         "investigator-findings.txt",
         "ledger.json",
         "review.json",
+        "source-evidence.json",
     }
     for relative_path, expected_hash in artifacts.items():
         assert evidence_module._sha256(run_dir / relative_path) == expected_hash
@@ -220,5 +280,17 @@ def test_verified_run_manifest_pins_complete_passing_evidence() -> None:
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     assert evaluation["passed"] is True
     assert evaluation["checks"]["api_calls_have_request_provenance"] is True
+    assert evaluation["checks"]["api_call_request_ids_unique"] is True
+    assert evaluation["checks"]["risk_clauses_supported_by_source"] is True
+    assert evaluation["checks"]["signature_image_scope_not_overclaimed"] is True
+    source_evidence = json.loads(
+        (run_dir / "source-evidence.json").read_text(encoding="utf-8")
+    )
+    assert (
+        source_evidence["contract_text_sha256"]
+        == manifest["source_inputs"][0]["sha256"]
+    )
+    sections = {row["section"] for row in source_evidence["risk_clauses"]}
+    assert {"1.3", "5.3"} <= sections
     assert evaluation["checks"]["required_api_call_sequence"] is True
     assert evaluation["observed_call_sequence"] == evaluation["expected_call_sequence"]

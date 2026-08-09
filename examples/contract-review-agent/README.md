@@ -99,9 +99,9 @@ prompt to watch `granite-guardian` trip the tripwire.
 the endpoint, run date, input hashes, models, artifact hashes, and diagnostic
 wall time. `api-calls.json` preserves requested and runtime model IDs, request
 IDs, rate-book versions, execution identities, debited credits, and stable
-workflow stages. The evaluation requires the exact 18-stage tool and agent
+workflow stages. `source-evidence.json` records the exact full-contract section excerpt behind each published risk flag, plus its hash. The evaluation requires the exact 18-stage tool and agent
 sequence, including each stage's configured model and native primitive.
-Captured model output remains verbatim. Current runs require an exact safe
+Captured model content remains semantically verbatim; the publisher normalizes line endings and trailing whitespace only. Current runs require an exact safe
 guardrail verdict and atomically discard any rejected bundle. Historical ledger
 entries therefore remain evidence of what the endpoint returned rather than
 being rewritten to satisfy newer validation.

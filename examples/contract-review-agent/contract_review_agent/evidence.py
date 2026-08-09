@@ -58,6 +58,10 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def _normalize_model_text(value: str) -> str:
+    return "\n".join(line.rstrip() for line in value.rstrip().splitlines()) + "\n"
+
+
 def validate_run_id(run_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id) or run_id in {
         ".",
@@ -68,6 +72,67 @@ def validate_run_id(run_id: str) -> str:
             "digits, '.', '_', or '-'"
         )
     return run_id
+
+
+def ensure_run_destination_available(run_id: str) -> Path:
+    validate_run_id(run_id)
+    destination = PROJECT_ROOT / "runs" / run_id
+    if destination.exists():
+        raise FileExistsError(f"Run evidence already exists at {destination}")
+    return destination
+
+
+def _risk_clause_source_evidence(
+    contract_text: str, review: ContractReview
+) -> dict[str, Any]:
+    section_line = re.compile(r"^\s*(\d+(?:\.\d+)+)\s+")
+    lines = contract_text.splitlines()
+    rows: list[dict[str, str]] = []
+    for risk in review.risk_flags:
+        citation_record = f"{risk.clause} {risk.issue}"
+        sections = list(
+            dict.fromkeys(re.findall(r"\b\d+(?:\.\d+)+\b", citation_record))
+        )
+        if not sections:
+            raise RuntimeError(
+                f"Risk clause has no source section reference: {risk.clause}"
+            )
+        for section in sections:
+            starts = [
+                index
+                for index, line in enumerate(lines)
+                if (match := section_line.match(line)) and match.group(1) == section
+            ]
+            if len(starts) != 1:
+                raise RuntimeError(
+                    f"Risk clause {risk.clause!r} section {section} matched "
+                    f"{len(starts)} source sections"
+                )
+            start = starts[0]
+            end = next(
+                (
+                    index
+                    for index in range(start + 1, len(lines))
+                    if section_line.match(lines[index])
+                ),
+                len(lines),
+            )
+            excerpt = " ".join(" ".join(lines[start:end]).split())
+            if not excerpt:
+                raise RuntimeError(f"Risk clause has no source excerpt: {risk.clause}")
+            rows.append(
+                {
+                    "clause": risk.clause,
+                    "citation": f"Section {section}",
+                    "section": section,
+                    "excerpt": excerpt,
+                    "excerpt_sha256": _sha256_bytes(excerpt.encode()),
+                }
+            )
+    return {
+        "contract_text_sha256": _sha256_bytes(contract_text.encode()),
+        "risk_clauses": rows,
+    }
 
 
 def _guardrail_was_accepted(ledger: Ledger) -> bool:
@@ -94,11 +159,8 @@ def write_run_record(
     api_calls: list[dict[str, Any]],
     wall_s: float,
 ) -> Path:
-    validate_run_id(run_id)
+    final_run_dir = ensure_run_destination_available(run_id)
     runs_dir = PROJECT_ROOT / "runs"
-    final_run_dir = runs_dir / run_id
-    if final_run_dir.exists():
-        raise FileExistsError(f"Run evidence already exists at {final_run_dir}")
     runs_dir.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=runs_dir))
     try:
@@ -146,10 +208,13 @@ def _write_run_record(
     ledger_path = run_dir / "ledger.json"
     calls_path = run_dir / "api-calls.json"
     evaluation_path = run_dir / "evaluation.json"
+    source_evidence_path = run_dir / "source-evidence.json"
     _write_json(review_path, review.model_dump(mode="json"))
-    findings_path.write_text(findings.rstrip() + "\n", encoding="utf-8")
+    findings_path.write_text(_normalize_model_text(findings), encoding="utf-8")
     _write_json(ledger_path, [asdict(entry) for entry in ledger.entries])
     _write_json(calls_path, api_calls)
+    source_evidence = _risk_clause_source_evidence(contract_text, review)
+    _write_json(source_evidence_path, source_evidence)
 
     requested_models = sorted({call["requested_model"] for call in api_calls})
     expected_models = sorted(set(cfg["models"].values()))
@@ -160,6 +225,7 @@ def _write_run_record(
         for call in api_calls
         if call.get("stage") != "warmup"
     ]
+    request_ids = [call.get("request_id") for call in api_calls]
     checks = {
         "structured_review": True,
         "guardrail_was_accepted": _guardrail_was_accepted(ledger),
@@ -181,6 +247,10 @@ def _write_run_record(
             )
             for call in api_calls
         ),
+        "api_call_request_ids_unique": len(request_ids) == len(set(request_ids)),
+        "risk_clauses_supported_by_source": bool(source_evidence["risk_clauses"]),
+        "signature_image_scope_not_overclaimed": "document ends at"
+        not in findings.casefold(),
         "all_configured_models_called": requested_models == expected_models,
         "native_primitives_called": set(observed_functions)
         >= {"encode", "extract", "generate", "score"},
@@ -207,6 +277,7 @@ def _write_run_record(
         findings_path,
         ledger_path,
         review_path,
+        source_evidence_path,
     ]
     scan = Path(scan_path)
     database = Path(db_path)

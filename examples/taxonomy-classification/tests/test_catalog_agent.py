@@ -345,6 +345,7 @@ def test_eval_resumes_completed_rows_from_its_checkpoint(
         listings, {7: first_decision}, offset=7
     )
     catalog_agent._write_evaluation_output(output_path, checkpoint)
+    assert checkpoint["response_schema"]["properties"]["selected_index"]["maximum"] == 3
     classified_rows: list[int] = []
 
     def fake_classify(_client: object, source: CatalogListing) -> CatalogDecision:

@@ -1,32 +1,47 @@
 {
-  "document_type": "Distributor Agreement / MSA",
+  "document_type": "Master Services Agreement (MSA) / Distributor Agreement",
   "parties": [
-    "Electric City Corp. (Delaware corporation)",
+    "Electric City Corp., a Delaware corporation",
     "Electric City of Illinois LLC"
   ],
-  "effective_date": "1999-09-07",
-  "renewal_terms": "Automatically renewable on an annual basis for one-year terms for up to another 10 years under the same terms and conditions",
+  "effective_date": "unknown",
+  "renewal_terms": "Renewable annually for up to an additional ten (10) years on the same terms and conditions (Section 1.3)",
   "governing_law": "unknown",
   "executed": false,
   "key_obligations": [
-    "$500,000 irrevocable Letter of Credit required at commencement, renewed bimonthly",
-    "$250,000 minimum monthly purchase order for a 12-month period",
-    "375 units initial volume in the first Product Year (1999)",
-    "Exclusive distributorship within the State of Illinois"
+    "Distributor must issue an irrevocable Letter of Credit in the amount of $500,000 at the commencement of the Term (Section 2.4(a))",
+    "Distributor must receive a minimum purchase order of $250,000 by the first of each month for a 12-month period",
+    "Distributor must commit to 375 units in the first Product Year (1999)",
+    "Company appoints Distributor as exclusive distributor within the State of Illinois (Section 1.1)",
+    "Initial term is ten (10) years commencing upon delivery of the last Sample by Company to Distributor",
+    "Renewal is annual for up to an additional ten (10) years on the same terms and conditions (Section 1.3)",
+    "Distributor must submit written reports to Company each quarter during the first year of the Term, commencing 90 days after execution (Section 4.1)"
   ],
   "risk_flags": [
     {
-      "clause": "Section 1.3 (Term and Renewal)",
-      "issue": "Automatic annual renewals for up to ten additional years without explicit customer consent or right to terminate early",
+      "clause": "Section 1.3",
+      "issue": "Automatic renewal trap: Agreement renews for up to ten additional years without a specified right of first refusal or termination notice period",
       "severity": "high",
-      "suggested_redline": "Add a clause allowing the Distributor to terminate the Agreement upon 90 days' written notice at any time during the Term"
+      "suggested_redline": "Add a requirement that Distributor must provide written notice at least 90 days prior to each annual renewal date to exercise the option to renew"
     },
     {
-      "clause": "Section 5.3 (Indemnification)",
-      "issue": "Broad mutual indemnification scope could expose the Distributor to significant liability for third-party claims",
+      "clause": "Section 5.3",
+      "issue": "Broad indemnification scope: Requires Distributor to indemnify Company for unauthorized Product alteration even if Company is not at fault",
+      "severity": "high",
+      "suggested_redline": "Limit indemnification to cases where Distributor is at fault or negligent"
+    },
+    {
+      "clause": "Section 4.2",
+      "issue": "Short cure period: Either party may terminate upon 30 days' notice for default, which may be insufficient for complex breaches",
+      "severity": "high",
+      "suggested_redline": "Extend the cure period to allow sufficient time to remedy complex breaches"
+    },
+    {
+      "clause": "Section 4.4",
+      "issue": "Repurchase Obligation: Company has sole discretion to repurchase Products from Distributor at net invoice price less allowances, leaving Distributor with unsold inventory risk",
       "severity": "medium",
-      "suggested_redline": "Limit indemnification obligations to direct damages only and exclude consequential or indirect damages where possible"
+      "suggested_redline": "Negotiate a guaranteed buyback provision or clearer repurchase terms"
     }
   ],
-  "recommendation": "The document is unsigned and contains high-severity risks related to automatic renewals locking the Distributor into a long-term commitment with limited exit options. Recommend adding a termination clause allowing the Distributor to terminate upon 90 days' written notice at any time during the Term. Also, limit indemnification obligations to direct damages only and exclude consequential or indirect damages where possible."
+  "recommendation": "The agreement contains significant risks including an automatic renewal trap with no specified termination notice period, broad indemnification obligations that may expose the Distributor to liability for unauthorized product alterations even without fault, and a short 30-day cure period for termination. The Distributor should negotiate explicit renewal notice requirements, limit indemnification scope to fault-based claims, and extend the cure period. Additionally, the lack of a guaranteed repurchase obligation leaves the Distributor with inventory risk upon termination."
 }
