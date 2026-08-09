@@ -419,6 +419,35 @@ def test_checkpoint_rejects_changed_listing_source(
         catalog_agent._load_checkpoint(output_path, [changed], offset=7)
 
 
+def test_checkpoint_rejects_changed_sie_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = listing(reference="A > One")
+    decision = CatalogDecision(
+        row_idx=7,
+        selected_path="A > One",
+        needs_review=False,
+        candidate_union=["A > One"],
+        text_scores=[1.0, 0.0, 0.0, 0.0],
+        image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
+        verifier_response_id="candidate_verification-7",
+        api_calls=api_calls(7),
+    )
+    output_path = tmp_path / "evaluation.json"
+    catalog_agent._write_evaluation_output(
+        output_path,
+        catalog_agent._evaluation_output([source], {7: decision}, offset=7),
+    )
+    monkeypatch.setattr(
+        catalog_agent,
+        "read_sie_settings",
+        lambda: ("https://different.example/", "unused"),
+    )
+
+    with pytest.raises(ValueError, match="SIE endpoint changed"):
+        catalog_agent._load_checkpoint(output_path, [source], offset=7)
+
+
 def test_checkpoint_rejects_incomplete_api_call_provenance(tmp_path: Path) -> None:
     source = listing(reference="A > One")
     decision = CatalogDecision(

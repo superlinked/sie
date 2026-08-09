@@ -77,7 +77,13 @@ async def _clause_index(
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
-    record_api_call(app, "encode", embed_model, results)
+    record_api_call(
+        app,
+        "encode",
+        embed_model,
+        results,
+        stage="search_clauses:index",
+    )
     dt = time.monotonic() - t0
     matrix = np.vstack([np.asarray(r["dense"], dtype=np.float32) for r in results])
     app.ledger.record(
@@ -114,6 +120,7 @@ async def classify_document(ctx: RunContextWrapper[AppContext]) -> str:
             },
             {"role": "user", "content": app.contract_text[:1500]},
         ],
+        stage="classify_document",
         max_tokens=60,
     )
     app.ledger.record(
@@ -156,6 +163,7 @@ async def read_signature_page(ctx: RunContextWrapper[AppContext], question: str)
                 ],
             },
         ],
+        stage="read_signature_page",
         max_tokens=220,
     )
     app.ledger.record(
@@ -230,7 +238,7 @@ async def ocr_signature_page(ctx: RunContextWrapper[AppContext]) -> str:
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
-    record_api_call(app, "extract", model, res)
+    record_api_call(app, "extract", model, res, stage="ocr_signature_page")
     dt = time.monotonic() - t0
     entities = res.get("entities") or []
     markdown = entities[0]["text"] if entities else "(no text recognized)"
@@ -270,7 +278,7 @@ async def extract_entities(ctx: RunContextWrapper[AppContext]) -> str:
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
-    record_api_call(app, "extract", model, res)
+    record_api_call(app, "extract", model, res, stage="extract_entities")
     dt = time.monotonic() - t0
     entities = res.get("entities") or []
     app.ledger.record(
@@ -308,7 +316,13 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
-    record_api_call(app, "encode", embed_model, q)
+    record_api_call(
+        app,
+        "encode",
+        embed_model,
+        q,
+        stage=f"search_clauses:{query}:encode",
+    )
     qv = np.asarray(q["dense"], dtype=np.float32)
     denom = np.linalg.norm(matrix, axis=1) * (np.linalg.norm(qv) + 1e-9) + 1e-9
     sims = (matrix @ qv) / denom
@@ -323,7 +337,13 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
-    record_api_call(app, "score", rerank_model, scored)
+    record_api_call(
+        app,
+        "score",
+        rerank_model,
+        scored,
+        stage=f"search_clauses:{query}:score",
+    )
     dt = time.monotonic() - t0
     app.ledger.record(
         "Rerank candidate clauses",
@@ -419,6 +439,7 @@ async def query_obligations_db(
             app,
             model,
             prompt,
+            stage="query_obligations_db",
             max_tokens=256,
             stop=[";", "```", "\n\n\n"],
         )
@@ -439,6 +460,7 @@ async def query_obligations_db(
                     ),
                 },
             ],
+            stage="query_obligations_db",
             max_tokens=256,
         )
     else:

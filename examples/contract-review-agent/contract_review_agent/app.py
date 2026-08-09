@@ -89,6 +89,7 @@ def build_reasoning_agent(
         model=model_for(
             cfg["models"]["reasoning"],
             client,
+            stage="analyze_clause_risks",
             provision_timeout_s=provision_timeout_from(cfg),
             api_calls=api_calls,
         ),
@@ -106,6 +107,7 @@ def build_investigator(
         model=model_for(
             cfg["models"]["orchestrator"],
             client,
+            stage="investigator_report",
             provision_timeout_s=provision_timeout_from(cfg),
             required_tool_sequence=_INVESTIGATOR_TOOL_SEQUENCE,
             api_calls=api_calls,
@@ -126,6 +128,7 @@ def build_synthesizer(
         model=model_for(
             cfg["models"]["orchestrator"],
             client,
+            stage="synthesize_review",
             provision_timeout_s=provision_timeout_from(cfg),
             api_calls=api_calls,
         ),

@@ -13,6 +13,42 @@ from .config import PROJECT_ROOT
 from .runtime import Ledger
 
 
+def _expected_call_sequence(cfg: dict[str, Any]) -> list[dict[str, str]]:
+    models = cfg["models"]
+    sequence = [
+        ("safety_guardrail", "generate", "guard"),
+        ("classify_document", "generate", "triage"),
+        ("ocr_signature_page", "extract", "ocr"),
+        ("extract_entities", "extract", "entities"),
+        ("read_signature_page", "generate", "vision"),
+        ("search_clauses:index", "encode", "embed"),
+    ]
+    for query in (
+        "automatic renewal",
+        "limitation of liability",
+        "indemnification",
+        "termination",
+    ):
+        sequence.extend(
+            [
+                (f"search_clauses:{query}:encode", "encode", "embed"),
+                (f"search_clauses:{query}:score", "score", "rerank"),
+            ]
+        )
+    sequence.extend(
+        [
+            ("analyze_clause_risks", "generate", "reasoning"),
+            ("query_obligations_db", "generate", "sql"),
+            ("investigator_report", "generate", "orchestrator"),
+            ("synthesize_review", "generate", "orchestrator"),
+        ]
+    )
+    return [
+        {"stage": stage, "function": function, "requested_model": models[role]}
+        for stage, function, role in sequence
+    ]
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -64,6 +100,12 @@ def write_run_record(
     requested_models = sorted({call["requested_model"] for call in api_calls})
     expected_models = sorted(set(cfg["models"].values()))
     observed_functions = sorted({call["function"] for call in api_calls})
+    expected_call_sequence = _expected_call_sequence(cfg)
+    observed_call_sequence = [
+        {field: call.get(field) for field in ("stage", "function", "requested_model")}
+        for call in api_calls
+        if call.get("stage") != "warmup"
+    ]
     checks = {
         "structured_review": True,
         "parties_identified": bool(review.parties),
@@ -73,6 +115,7 @@ def write_run_record(
             all(
                 isinstance(call.get(field), str) and bool(call[field])
                 for field in (
+                    "stage",
                     "request_id",
                     "rate_book_version",
                     "execution_identity_sha256",
@@ -83,6 +126,7 @@ def write_run_record(
         "all_configured_models_called": requested_models == expected_models,
         "native_primitives_called": set(observed_functions)
         >= {"encode", "extract", "generate", "score"},
+        "required_api_call_sequence": observed_call_sequence == expected_call_sequence,
     }
     _write_json(
         evaluation_path,
@@ -92,6 +136,8 @@ def write_run_record(
             "expected_models": expected_models,
             "requested_models": requested_models,
             "observed_functions": observed_functions,
+            "expected_call_sequence": expected_call_sequence,
+            "observed_call_sequence": observed_call_sequence,
         },
     )
     if not all(checks.values()):

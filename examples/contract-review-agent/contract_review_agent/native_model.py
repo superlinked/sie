@@ -366,11 +366,13 @@ class SIENativeModel(Model):
         model: str,
         client: SIEAsyncClient,
         *,
+        stage: str,
         provision_timeout_s: float,
         required_tool_sequence: tuple[RequiredToolStep, ...] = (),
         api_calls: list[dict[str, Any]] | None = None,
     ) -> None:
         self.model = model
+        self._stage = stage
         self._client = client
         self._provision_timeout_s = provision_timeout_s
         self._required_tool_sequence = required_tool_sequence
@@ -480,6 +482,7 @@ class SIENativeModel(Model):
             request_row = request if isinstance(request, dict) else {}
             self._api_calls.append(
                 {
+                    "stage": self._stage,
                     "function": "generate",
                     "requested_model": self.model,
                     "runtime_model": (

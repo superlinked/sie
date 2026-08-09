@@ -79,6 +79,7 @@ async def test_agents_runner_executes_native_tool_turn_then_finishes() -> None:
         model=SIENativeModel(
             "Qwen/Qwen3.5-4B",
             client,  # type: ignore[arg-type]
+            stage="test_agent",
             provision_timeout_s=30,
             required_tool_sequence=(("echo", "clause"),),
         ),
@@ -162,6 +163,7 @@ async def test_agents_runner_validates_native_structured_output() -> None:
         model=SIENativeModel(
             "Qwen/Qwen3.6-27B",
             client,  # type: ignore[arg-type]
+            stage="test_agent",
             provision_timeout_s=30,
         ),
         output_type=Review,
@@ -210,6 +212,7 @@ async def test_instruction_helper_uses_native_multimodal_generate() -> None:
                 ],
             },
         ],
+        stage="read_signature_page",
         max_tokens=64,
     )
 
@@ -254,6 +257,7 @@ async def test_required_query_is_emitted_without_generation() -> None:
     model = SIENativeModel(
         "Qwen/Qwen3.6-27B",
         client,  # type: ignore[arg-type]
+        stage="test_agent",
         provision_timeout_s=30,
         required_tool_sequence=(("search_clauses", "termination"),),
     )
@@ -276,6 +280,7 @@ async def test_required_question_is_emitted_without_generation() -> None:
     model = SIENativeModel(
         "Qwen/Qwen3.6-27B",
         client,  # type: ignore[arg-type]
+        stage="test_agent",
         provision_timeout_s=30,
         required_tool_sequence=(("query_obligations_db", "upcoming obligations"),),
     )
@@ -294,6 +299,7 @@ async def test_native_model_rejects_handoffs_and_stored_prompts() -> None:
     model = SIENativeModel(
         "Qwen/Qwen3.5-4B",
         FakeSIE([]),  # type: ignore[arg-type]
+        stage="test_agent",
         provision_timeout_s=30,
     )
 
@@ -318,6 +324,7 @@ async def test_native_model_rejects_invalid_response_text(
     model = SIENativeModel(
         "Qwen/Qwen3.5-4B",
         FakeSIE([response]),  # type: ignore[arg-type]
+        stage="test_agent",
         provision_timeout_s=30,
     )
 
@@ -351,6 +358,7 @@ async def test_native_model_rejects_invalid_tool_calls(
     model = SIENativeModel(
         "Qwen/Qwen3.5-4B",
         FakeSIE([generated(json.dumps(turn), "request-invalid-tool")]),  # type: ignore[arg-type]
+        stage="test_agent",
         provision_timeout_s=30,
     )
 
@@ -379,6 +387,7 @@ async def test_instruction_timeout_bounds_the_full_model_call() -> None:
             app,
             "Qwen/Qwen3.5-4B",
             [{"role": "user", "content": "Bound this call."}],
+            stage="test_timeout",
             timeout_s=0.01,
         )
 

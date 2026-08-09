@@ -1,5 +1,6 @@
 [
   {
+    "stage": "safety_guardrail",
     "function": "generate",
     "requested_model": "ibm-granite/granite-guardian-3.0-2b",
     "runtime_model": "ibm-granite/granite-guardian-3.0-2b",
@@ -9,6 +10,7 @@
     "execution_identity_sha256": "59f05e80f242f431a06524f1000e2d76c00e00afcc990f81bb2d9a243755c1a7"
   },
   {
+    "stage": "classify_document",
     "function": "generate",
     "requested_model": "Qwen/Qwen3.5-4B",
     "runtime_model": "Qwen/Qwen3.5-4B",
@@ -18,6 +20,7 @@
     "execution_identity_sha256": "b6cd56b8aedd86472973abad44b1b26f896e65a4cd3e23d8243440cd35aecdef"
   },
   {
+    "stage": "ocr_signature_page",
     "function": "extract",
     "requested_model": "lightonai/LightOnOCR-2-1B",
     "runtime_model": null,
@@ -27,6 +30,7 @@
     "execution_identity_sha256": "ab0a02321f5880f6735446dc9d9ae7066b16d0e030f526566693d019c02f4f38"
   },
   {
+    "stage": "extract_entities",
     "function": "extract",
     "requested_model": "fastino/gliner2-large-v1",
     "runtime_model": null,
@@ -36,6 +40,7 @@
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   },
   {
+    "stage": "read_signature_page",
     "function": "generate",
     "requested_model": "Qwen/Qwen3.5-4B",
     "runtime_model": "Qwen/Qwen3.5-4B",
@@ -45,6 +50,7 @@
     "execution_identity_sha256": "b6cd56b8aedd86472973abad44b1b26f896e65a4cd3e23d8243440cd35aecdef"
   },
   {
+    "stage": "search_clauses:index",
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
@@ -54,6 +60,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
+    "stage": "search_clauses:automatic renewal:encode",
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
@@ -63,6 +70,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
+    "stage": "search_clauses:automatic renewal:score",
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
@@ -72,6 +80,7 @@
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   },
   {
+    "stage": "search_clauses:limitation of liability:encode",
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
@@ -81,6 +90,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
+    "stage": "search_clauses:limitation of liability:score",
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
@@ -90,6 +100,7 @@
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   },
   {
+    "stage": "search_clauses:indemnification:encode",
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
@@ -99,6 +110,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
+    "stage": "search_clauses:indemnification:score",
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
@@ -108,6 +120,7 @@
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   },
   {
+    "stage": "search_clauses:termination:encode",
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
@@ -117,6 +130,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
+    "stage": "search_clauses:termination:score",
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
@@ -126,6 +140,7 @@
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   },
   {
+    "stage": "analyze_clause_risks",
     "function": "generate",
     "requested_model": "Qwen/Qwen3.5-4B",
     "runtime_model": "Qwen/Qwen3.5-4B",
@@ -135,6 +150,7 @@
     "execution_identity_sha256": "2ffd0e49b20f5dd3bb0a02a541129ce6e86ce9ccc84a7b9657066760e417af97"
   },
   {
+    "stage": "query_obligations_db",
     "function": "generate",
     "requested_model": "Qwen/Qwen3.5-4B",
     "runtime_model": "Qwen/Qwen3.5-4B",
@@ -144,6 +160,7 @@
     "execution_identity_sha256": "b6cd56b8aedd86472973abad44b1b26f896e65a4cd3e23d8243440cd35aecdef"
   },
   {
+    "stage": "investigator_report",
     "function": "generate",
     "requested_model": "Qwen/Qwen3.6-27B",
     "runtime_model": "Qwen/Qwen3.6-27B",
@@ -153,6 +170,7 @@
     "execution_identity_sha256": "a51c1fb98f03033f834011229067f248afd0da11218fdbb1c6d7bd2f719fa543"
   },
   {
+    "stage": "synthesize_review",
     "function": "generate",
     "requested_model": "Qwen/Qwen3.6-27B",
     "runtime_model": "Qwen/Qwen3.6-27B",

@@ -144,6 +144,8 @@ def verify_cloud_run() -> None:
         raise ValueError("Verified run is not from the prod-US endpoint")
     if manifest.get("models") != {"detection": DINO_MODEL, "ocr": OCR_MODEL}:
         raise ValueError("Verified run model roster differs from the example config")
+    if manifest["source_input"].get("path") != SOURCE_IMAGE.relative_to(ROOT).as_posix():
+        raise ValueError("Verified run source image path differs")
     if manifest["source_input"]["sha256"] != sha256(SOURCE_IMAGE):
         raise ValueError("Verified run source image checksum differs")
     expected_outputs = {
@@ -170,6 +172,7 @@ def verify_cloud_run() -> None:
     detector = _load(VERIFIED_DIR / "raw" / "grounding-dino.json")
     upper_ocr = _load(VERIFIED_DIR / "raw" / "lighton-ocr-candidate-1.json")
     lower_ocr = _load(VERIFIED_DIR / "raw" / "lighton-ocr-candidate-2.json")
+    request_ids: list[str] = []
     for result, model in (
         (detector, DINO_MODEL),
         (upper_ocr, OCR_MODEL),
@@ -178,8 +181,12 @@ def verify_cloud_run() -> None:
         if result.get("model") != model:
             raise ValueError(f"Verified runtime model differs for {model}")
         request = result.get("request")
-        if not isinstance(request, dict) or not request.get("id"):
+        request_id = request.get("id") if isinstance(request, dict) else None
+        if not isinstance(request_id, str) or not request_id:
             raise ValueError(f"Verified response has no request ID for {model}")
+        request_ids.append(request_id)
+    if len(request_ids) != len(set(request_ids)):
+        raise ValueError("Verified responses reuse a request ID")
 
     gap = select_gap(detector["objects"], (4032, 3024))
     _upper, lower = select_vertical_pair(nearby_price_candidates(detector["objects"], gap))

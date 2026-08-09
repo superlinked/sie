@@ -6,7 +6,8 @@
     "risk_flags_identified": true,
     "api_calls_have_request_provenance": true,
     "all_configured_models_called": true,
-    "native_primitives_called": true
+    "native_primitives_called": true,
+    "required_api_call_sequence": true
   },
   "expected_models": [
     "BAAI/bge-m3",
@@ -31,5 +32,189 @@
     "extract",
     "generate",
     "score"
+  ],
+  "expected_call_sequence": [
+    {
+      "stage": "safety_guardrail",
+      "function": "generate",
+      "requested_model": "ibm-granite/granite-guardian-3.0-2b"
+    },
+    {
+      "stage": "classify_document",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.5-4B"
+    },
+    {
+      "stage": "ocr_signature_page",
+      "function": "extract",
+      "requested_model": "lightonai/LightOnOCR-2-1B"
+    },
+    {
+      "stage": "extract_entities",
+      "function": "extract",
+      "requested_model": "fastino/gliner2-large-v1"
+    },
+    {
+      "stage": "read_signature_page",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.5-4B"
+    },
+    {
+      "stage": "search_clauses:index",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:automatic renewal:encode",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:automatic renewal:score",
+      "function": "score",
+      "requested_model": "Qwen/Qwen3-Reranker-4B"
+    },
+    {
+      "stage": "search_clauses:limitation of liability:encode",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:limitation of liability:score",
+      "function": "score",
+      "requested_model": "Qwen/Qwen3-Reranker-4B"
+    },
+    {
+      "stage": "search_clauses:indemnification:encode",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:indemnification:score",
+      "function": "score",
+      "requested_model": "Qwen/Qwen3-Reranker-4B"
+    },
+    {
+      "stage": "search_clauses:termination:encode",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:termination:score",
+      "function": "score",
+      "requested_model": "Qwen/Qwen3-Reranker-4B"
+    },
+    {
+      "stage": "analyze_clause_risks",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.5-4B"
+    },
+    {
+      "stage": "query_obligations_db",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.5-4B"
+    },
+    {
+      "stage": "investigator_report",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.6-27B"
+    },
+    {
+      "stage": "synthesize_review",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.6-27B"
+    }
+  ],
+  "observed_call_sequence": [
+    {
+      "stage": "safety_guardrail",
+      "function": "generate",
+      "requested_model": "ibm-granite/granite-guardian-3.0-2b"
+    },
+    {
+      "stage": "classify_document",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.5-4B"
+    },
+    {
+      "stage": "ocr_signature_page",
+      "function": "extract",
+      "requested_model": "lightonai/LightOnOCR-2-1B"
+    },
+    {
+      "stage": "extract_entities",
+      "function": "extract",
+      "requested_model": "fastino/gliner2-large-v1"
+    },
+    {
+      "stage": "read_signature_page",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.5-4B"
+    },
+    {
+      "stage": "search_clauses:index",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:automatic renewal:encode",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:automatic renewal:score",
+      "function": "score",
+      "requested_model": "Qwen/Qwen3-Reranker-4B"
+    },
+    {
+      "stage": "search_clauses:limitation of liability:encode",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:limitation of liability:score",
+      "function": "score",
+      "requested_model": "Qwen/Qwen3-Reranker-4B"
+    },
+    {
+      "stage": "search_clauses:indemnification:encode",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:indemnification:score",
+      "function": "score",
+      "requested_model": "Qwen/Qwen3-Reranker-4B"
+    },
+    {
+      "stage": "search_clauses:termination:encode",
+      "function": "encode",
+      "requested_model": "BAAI/bge-m3"
+    },
+    {
+      "stage": "search_clauses:termination:score",
+      "function": "score",
+      "requested_model": "Qwen/Qwen3-Reranker-4B"
+    },
+    {
+      "stage": "analyze_clause_risks",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.5-4B"
+    },
+    {
+      "stage": "query_obligations_db",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.5-4B"
+    },
+    {
+      "stage": "investigator_report",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.6-27B"
+    },
+    {
+      "stage": "synthesize_review",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.6-27B"
+    }
   ]
 }

@@ -96,7 +96,9 @@ prompt to watch `granite-guardian` trip the tripwire.
 `verified-run/` contains the August 9, 2026, prod-US record. Its manifest pins
 the endpoint, run date, input hashes, models, artifact hashes, and diagnostic
 wall time. `api-calls.json` preserves requested and runtime model IDs, request
-IDs, rate-book versions, execution identities, and debited credits.
+IDs, rate-book versions, execution identities, debited credits, and stable
+workflow stages. The evaluation requires the exact 18-stage tool and agent
+sequence, including each stage's configured model and native primitive.
 
 ## Swapping models (the point of the catalog)
 

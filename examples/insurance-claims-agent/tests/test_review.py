@@ -27,6 +27,7 @@ VERIFIED_RUN = ROOT / "verified-run"
 class FakeExtractClient:
     def __init__(self) -> None:
         self.labels: list[str] | None = None
+        self.item: object | None = None
 
     def extract(
         self,
@@ -34,6 +35,7 @@ class FakeExtractClient:
         _item: object,
         **kwargs: object,
     ) -> dict[str, object]:
+        self.item = _item
         self.labels = kwargs.get("labels")  # type: ignore[assignment]
         return {"data": {"entities": []}}
 
@@ -72,6 +74,20 @@ def test_claim_fact_extraction_passes_domain_labels() -> None:
         "barge transportation estimate",
         "debris volume",
     ]
+
+
+def test_claim_fact_extraction_starts_at_appeal_when_issue_heading_is_absent() -> None:
+    client = FakeExtractClient()
+
+    _extract_claim_facts(
+        client,
+        "fastino/gliner2-large-v1",
+        "irrelevant policy preface\n\nThe insurer reviewed the amended claim.",
+        60,
+    )
+
+    assert isinstance(client.item, dict)
+    assert client.item["text"] == "The insurer reviewed the amended claim."
 
 
 def test_review_json_accepts_fenced_model_output() -> None:

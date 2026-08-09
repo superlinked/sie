@@ -22,6 +22,7 @@ def model_for(
     model_id: str,
     client: SIEAsyncClient,
     *,
+    stage: str,
     provision_timeout_s: float,
     required_tool_sequence: tuple[RequiredToolStep, ...] = (),
     api_calls: list[dict[str, Any]] | None = None,
@@ -30,6 +31,7 @@ def model_for(
     return SIENativeModel(
         model_id,
         client,
+        stage=stage,
         provision_timeout_s=provision_timeout_s,
         required_tool_sequence=required_tool_sequence,
         api_calls=api_calls,
@@ -126,6 +128,8 @@ def record_api_call(
     sie_fn: str,
     requested_model: str,
     result: Any,
+    *,
+    stage: str,
 ) -> None:
     """Record only non-payload response metadata for checked run evidence."""
     rows = result if isinstance(result, list) else [result]
@@ -134,6 +138,7 @@ def record_api_call(
     request_row = request if isinstance(request, dict) else {}
     app.api_calls.append(
         {
+            "stage": stage,
             "function": sie_fn,
             "requested_model": requested_model,
             "runtime_model": (
@@ -226,6 +231,7 @@ async def instruct_once(
     model: str,
     messages: list[dict[str, Any]],
     *,
+    stage: str,
     max_tokens: int = 512,
     temperature: float = 0.0,
     timeout_s: float | None = None,
@@ -251,7 +257,7 @@ async def instruct_once(
         if timeout_s is not None
         else await call
     )
-    record_api_call(app, "generate", model, result)
+    record_api_call(app, "generate", model, result, stage=stage)
     return _generation_result(result, time.monotonic() - started)
 
 
@@ -260,6 +266,7 @@ async def prompt_once(
     model: str,
     prompt: str,
     *,
+    stage: str,
     max_tokens: int = 256,
     temperature: float = 0.0,
     stop: list[str] | None = None,
@@ -275,5 +282,5 @@ async def prompt_once(
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
-    record_api_call(app, "generate", model, result)
+    record_api_call(app, "generate", model, result, stage=stage)
     return _generation_result(result, time.monotonic() - started)

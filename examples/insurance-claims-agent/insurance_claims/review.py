@@ -254,9 +254,11 @@ def _extract_claim_facts(
     ]
     event_start = markdown.find("The insurer reviewed")
     issue_start = markdown.find("## ISSUE", event_start)
-    claim_excerpt = (
-        markdown[event_start:issue_start] if event_start >= 0 and issue_start > event_start else markdown[:4000]
-    )
+    if event_start >= 0:
+        excerpt_end = issue_start if issue_start > event_start else event_start + 4000
+        claim_excerpt = markdown[event_start:excerpt_end]
+    else:
+        claim_excerpt = markdown[:4000]
     started = time.perf_counter()
     result = client.extract(
         model,

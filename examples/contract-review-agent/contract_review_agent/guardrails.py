@@ -47,6 +47,7 @@ async def safety_guardrail(
             app,
             model,
             [{"role": "user", "content": _input_text(data)[:6000]}],
+            stage="safety_guardrail",
             max_tokens=8,
             timeout_s=25,
         )

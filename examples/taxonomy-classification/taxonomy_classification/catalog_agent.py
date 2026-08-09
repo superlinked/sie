@@ -640,6 +640,9 @@ def _load_checkpoint(
     }
     if payload.get("record_type") != "sie_catalog_agent_evaluation":
         raise ValueError(f"Cannot resume from {path}: unexpected record type")
+    endpoint, _api_key = read_sie_settings()
+    if payload.get("endpoint") != endpoint.rstrip("/"):
+        raise ValueError(f"Cannot resume from {path}: SIE endpoint changed")
     if (
         payload.get("dataset") != expected_dataset
         or payload.get("models") != expected_models

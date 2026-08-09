@@ -193,6 +193,7 @@ async def _warm(app: AppContext) -> None:
                     app,
                     model,
                     [{"role": "user", "content": "ok"}],
+                    stage="warmup",
                     max_tokens=1,
                 )
             except Exception as exc:  # noqa: BLE001 - warm-up is best effort.

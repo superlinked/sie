@@ -11,6 +11,35 @@ from contract_review_agent.evidence import write_run_record
 from contract_review_agent.runtime import Ledger
 
 ROOT = Path(__file__).resolve().parents[1]
+MODELS = {
+    "triage": "model-triage",
+    "orchestrator": "model-orchestrator",
+    "vision": "model-vision",
+    "reasoning": "model-reasoning",
+    "sql": "model-sql",
+    "guard": "model-guard",
+    "ocr": "model-ocr",
+    "embed": "model-embed",
+    "rerank": "model-rerank",
+    "entities": "model-entities",
+}
+CFG = {"models": MODELS}
+
+
+def _api_calls() -> list[dict[str, object]]:
+    return [
+        {
+            **expected,
+            "runtime_model": expected["requested_model"],
+            "request_id": f"request-{index}",
+            "rate_book_version": "rate-book-1",
+            "credits_debited": 1,
+            "execution_identity_sha256": "a" * 64,
+        }
+        for index, expected in enumerate(
+            evidence_module._expected_call_sequence(CFG), start=1
+        )
+    ]
 
 
 def _review() -> ContractReview:
@@ -49,7 +78,7 @@ def _write_record(
     return write_run_record(
         run_id=run_id,
         endpoint="https://api.superlinked.com",
-        cfg={"models": {"review": "model-a"}},
+        cfg=CFG,
         label="example",
         contract_text="contract",
         scan_path=str(scan),
@@ -78,16 +107,8 @@ def test_write_run_record_rejects_missing_request_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api_calls = [
-        {
-            "function": function,
-            "requested_model": "model-a",
-            "request_id": "request-1",
-            "rate_book_version": "rate-book-1",
-            "execution_identity_sha256": None if function == "score" else "a" * 64,
-        }
-        for function in ("encode", "extract", "generate", "score")
-    ]
+    api_calls = _api_calls()
+    api_calls[-1]["execution_identity_sha256"] = None
 
     with pytest.raises(RuntimeError, match="Production evidence checks failed"):
         _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)
@@ -96,6 +117,23 @@ def test_write_run_record_rejects_missing_request_provenance(
         (tmp_path / "runs" / "safe-run" / "evaluation.json").read_text()
     )
     assert evaluation["checks"]["api_calls_have_request_provenance"] is False
+    assert evaluation["passed"] is False
+
+
+def test_write_run_record_rejects_a_missing_required_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_calls = _api_calls()
+    del api_calls[6]
+
+    with pytest.raises(RuntimeError, match="Production evidence checks failed"):
+        _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)
+
+    evaluation = json.loads(
+        (tmp_path / "runs" / "safe-run" / "evaluation.json").read_text()
+    )
+    assert evaluation["checks"]["required_api_call_sequence"] is False
     assert evaluation["passed"] is False
 
 
@@ -120,3 +158,5 @@ def test_verified_run_manifest_pins_complete_passing_evidence() -> None:
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     assert evaluation["passed"] is True
     assert evaluation["checks"]["api_calls_have_request_provenance"] is True
+    assert evaluation["checks"]["required_api_call_sequence"] is True
+    assert evaluation["observed_call_sequence"] == evaluation["expected_call_sequence"]

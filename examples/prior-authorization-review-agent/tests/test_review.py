@@ -423,4 +423,5 @@ def test_verified_manifest_hashes() -> None:
     raw_dir = manifest_path.parent / "raw"
     retrieve = json.loads((raw_dir / "retrieve.json").read_text(encoding="utf-8"))
     rerank = json.loads((raw_dir / "rerank.json").read_text(encoding="utf-8"))
+    assert retrieve["query"]["id"] == "cms-l1851-query"
     assert rerank["query_id"] == retrieve["query"]["id"]
