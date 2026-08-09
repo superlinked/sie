@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +22,7 @@ from retail_shelf_audit.config import (
     ROOT,
     RUNS_DIR,
     SOURCE_IMAGE,
+    RuntimeConfig,
     load_config,
 )
 
@@ -222,6 +225,7 @@ def build_evidence(
 
 
 def evaluation_checks(
+    objects: list[dict[str, Any]],
     gap: dict[str, Any],
     upper: dict[str, Any],
     lower: dict[str, Any],
@@ -230,11 +234,11 @@ def evaluation_checks(
     image_size: tuple[int, int],
 ) -> dict[str, bool]:
     try:
-        gap_ok = select_gap([gap], image_size) == gap
+        gap_ok = select_gap(objects, image_size) == gap
     except (KeyError, TypeError, ValueError):
         gap_ok = False
     try:
-        candidates = nearby_price_candidates([upper, lower], gap)
+        candidates = nearby_price_candidates(objects, gap)
         selected_upper, selected_lower = select_vertical_pair(candidates)
         pair_ok = selected_upper == upper and selected_lower == lower
     except (KeyError, TypeError, ValueError):
@@ -258,7 +262,21 @@ def _timed(call: Any) -> tuple[Any, float]:
 
 def run_audit(run_id: str) -> Path:
     config = load_config()
-    run_dir = RUNS_DIR / run_id
+    final_run_dir = RUNS_DIR / run_id
+    if final_run_dir.exists():
+        raise FileExistsError(f"Run evidence already exists at {final_run_dir}")
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=RUNS_DIR))
+    try:
+        _write_audit(staging_dir, run_id, config)
+        staging_dir.rename(final_run_dir)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    return final_run_dir
+
+
+def _write_audit(run_dir: Path, run_id: str, config: RuntimeConfig) -> None:
     raw_dir = run_dir / "raw"
     crops_dir = run_dir / "crops"
     raw_dir.mkdir(parents=True, exist_ok=False)
@@ -304,6 +322,7 @@ def run_audit(run_id: str) -> Path:
 
         upper_record, lower_record = crop_records
         checks = evaluation_checks(
+            objects,
             gap,
             upper_detection,
             lower_detection,
@@ -385,7 +404,6 @@ def run_audit(run_id: str) -> Path:
             "timing_note": "Diagnostic run timing, not a benchmark.",
         },
     )
-    return run_dir
 
 
 def main() -> None:

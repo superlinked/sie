@@ -150,6 +150,19 @@ def test_write_run_record_rejects_missing_request_provenance(
     assert (run_dir / "manifest.json").is_file()
 
 
+def test_write_run_record_rejects_missing_runtime_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_calls = _api_calls()
+    api_calls[-1]["runtime_model"] = None
+
+    with pytest.raises(RuntimeError, match="Production evidence checks failed"):
+        _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)
+
+    assert list((tmp_path / "runs").iterdir()) == []
+
+
 def test_write_run_record_rejects_duplicate_request_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -187,6 +200,36 @@ def test_write_run_record_rejects_an_unsupported_risk_clause(
             review=review,
             ledger=_ledger(),
             api_calls=api_calls,
+            wall_s=1,
+        )
+
+
+def test_write_run_record_rejects_section_reference_only_in_risk_issue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    review = _review()
+    review.risk_flags[0].clause = "Renewal clause"
+    review.risk_flags[0].issue = "Section 1.1 has no early exit"
+    monkeypatch.setattr(evidence_module, "PROJECT_ROOT", tmp_path)
+    scan = tmp_path / "scan.png"
+    database = tmp_path / "obligations.db"
+    scan.write_bytes(b"scan")
+    database.write_bytes(b"database")
+
+    with pytest.raises(RuntimeError, match="no source section reference"):
+        write_run_record(
+            run_id="safe-run",
+            endpoint="https://api.superlinked.com",
+            cfg=CFG,
+            label="example",
+            contract_text="1.1 Renewal. Annual renewal terms.",
+            scan_path=str(scan),
+            db_path=str(database),
+            findings="findings",
+            review=review,
+            ledger=_ledger(),
+            api_calls=_api_calls(),
             wall_s=1,
         )
 

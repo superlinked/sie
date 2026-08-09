@@ -89,10 +89,11 @@ def _risk_clause_source_evidence(
     lines = contract_text.splitlines()
     rows: list[dict[str, str]] = []
     for risk in review.risk_flags:
-        citation_record = f"{risk.clause} {risk.issue}"
-        sections = list(
-            dict.fromkeys(re.findall(r"\b\d+(?:\.\d+)+\b", citation_record))
-        )
+        if not re.match(r"^Sections?\b", risk.clause):
+            raise RuntimeError(
+                f"Risk clause has no source section reference: {risk.clause}"
+            )
+        sections = list(dict.fromkeys(re.findall(r"\b\d+(?:\.\d+)+\b", risk.clause)))
         if not sections:
             raise RuntimeError(
                 f"Risk clause has no source section reference: {risk.clause}"
@@ -241,6 +242,7 @@ def _write_run_record(
                 for field in (
                     "stage",
                     "request_id",
+                    "runtime_model",
                     "rate_book_version",
                     "execution_identity_sha256",
                 )

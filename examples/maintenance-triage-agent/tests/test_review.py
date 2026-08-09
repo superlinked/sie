@@ -2,6 +2,9 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
+import maintenance_triage.review as review_module
 from maintenance_triage.evaluate import evaluate_review
 from maintenance_triage.review import (
     _map_exact_source_fields,
@@ -323,3 +326,30 @@ def test_rate_book_provenance_rejects_missing_request_version(tmp_path: Path) ->
         assert "without a rate-book version" in str(exc)
     else:
         raise AssertionError("Accepted a charged request without a rate-book version")
+
+
+def test_run_cleans_failed_staging_and_allows_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(review_module, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(review_module, "load_config", dict)
+
+    def fail(run_dir: Path, _config: dict[str, object]) -> None:
+        (run_dir / "partial.json").write_text("partial", encoding="utf-8")
+        raise RuntimeError("provenance failed")
+
+    monkeypatch.setattr(review_module, "_write_run", fail)
+    with pytest.raises(RuntimeError, match="provenance failed"):
+        review_module.run("retryable")
+
+    assert list(tmp_path.iterdir()) == []
+
+    def succeed(run_dir: Path, _config: dict[str, object]) -> None:
+        (run_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(review_module, "_write_run", succeed)
+    final_run_dir = review_module.run("retryable")
+
+    assert final_run_dir == tmp_path / "retryable"
+    assert (final_run_dir / "manifest.json").is_file()

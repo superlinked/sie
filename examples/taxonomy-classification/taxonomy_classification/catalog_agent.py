@@ -105,13 +105,20 @@ def _api_call_record(
         execution_identity_sha256
     ):
         raise ValueError(f"SIE {stage} response has an invalid execution identity")
+    credits_debited = request_row.get("credits_debited")
+    if (
+        not isinstance(credits_debited, int | float)
+        or isinstance(credits_debited, bool)
+        or credits_debited < 0
+    ):
+        raise ValueError(f"SIE {stage} response has invalid credits debited")
     return {
         "stage": stage,
         "requested_model": requested_model,
         "runtime_model": runtime_model,
         "request_id": request_id,
         "timing_ms": round(timing_ms, 1),
-        "credits_debited": request_row.get("credits_debited"),
+        "credits_debited": credits_debited,
         "rate_book_version": rate_book_version,
         "execution_identity_sha256": execution_identity_sha256,
     }
@@ -144,6 +151,13 @@ def _validate_api_calls(
             or call.get("runtime_model") != expected_model
         ):
             raise ValueError(f"Row {row_idx} has the wrong model for {stage}")
+        credits_debited = call.get("credits_debited")
+        if (
+            not isinstance(credits_debited, int | float)
+            or isinstance(credits_debited, bool)
+            or credits_debited < 0
+        ):
+            raise ValueError(f"Row {row_idx} {stage} has invalid credits debited")
         for field_name in REQUIRED_PROVENANCE_FIELDS:
             value = call.get(field_name)
             valid = isinstance(value, str) and bool(value)
@@ -699,13 +713,37 @@ def _load_checkpoint(
                 raise ValueError(
                     f"Cannot resume from {path}: {score_field} changed for row {row_idx}"
                 )
+        text_scores = result["text_scores"]
+        image_plus_copy_scores = result["image_plus_copy_scores"]
+        expected_candidate_union = candidate_union(
+            listing.candidate_paths,
+            text_scores,
+            image_plus_copy_scores,
+        )
+        if result.get("candidate_union") != expected_candidate_union:
+            raise ValueError(
+                f"Cannot resume from {path}: candidate union changed for row {row_idx}"
+            )
+        selected_path = result.get("selected_path")
+        if (
+            not isinstance(selected_path, str)
+            or selected_path not in expected_candidate_union
+        ):
+            raise ValueError(
+                f"Cannot resume from {path}: selected path changed for row {row_idx}"
+            )
+        needs_review = result.get("needs_review")
+        if not isinstance(needs_review, bool):
+            raise ValueError(
+                f"Cannot resume from {path}: needs review changed for row {row_idx}"
+            )
         decision = CatalogDecision(
             row_idx=row_idx,
-            selected_path=result["selected_path"],
-            needs_review=result["needs_review"],
-            candidate_union=result["candidate_union"],
-            text_scores=result["text_scores"],
-            image_plus_copy_scores=result["image_plus_copy_scores"],
+            selected_path=selected_path,
+            needs_review=needs_review,
+            candidate_union=expected_candidate_union,
+            text_scores=text_scores,
+            image_plus_copy_scores=image_plus_copy_scores,
             verifier_response_id=result["verifier_response_id"],
             api_calls=result["api_calls"],
         )
