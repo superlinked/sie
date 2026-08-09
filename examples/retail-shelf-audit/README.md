@@ -17,6 +17,14 @@ The command verifies every checked-in checksum. It rebuilds both the pinned
 Modal-direct fixture and the August 9, 2026, prod-US evidence from raw detector
 and OCR responses, and verifies the production runtime model and request IDs.
 
+The published prod-US record has one documented post-generation privacy edit.
+Before checksumming, a non-claim-bearing person name in the first OCR response
+and `selection.json` was replaced with `[name redacted]`, and the affected paths
+were recorded in the manifest's `redactions` block. No detector result, geometry,
+product text, price, evaluation, or customer-facing claim was changed. A fresh
+run under `runs/` retains its API output and must receive the same publication
+review before it is promoted as a public record.
+
 ## Rerun through an SIE API
 
 Set an SIE endpoint and process the full shelf image:

@@ -1029,11 +1029,14 @@
     ],
     "model": "BAAI/bge-m3",
     "request": {
-      "id": "019fe6f0-d97c-7300-be28-4fc1e5304213",
-      "usage": {
-        "input_tokens": 35
-      },
+      "id": "019fe8ae-c07a-78a2-9976-7ada45b03c93",
       "credits_debited": 1,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2",
+      "usage": {
+        "input_tokens": 35,
+        "credits_charged": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2"
+      },
       "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
     }
   },
@@ -2068,11 +2071,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-da3b-7dd3-b71a-e2e2df96437d",
-        "usage": {
-          "input_tokens": 63
-        },
+        "id": "019fe8ae-c13f-7010-bf31-73dad483411c",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 63,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -3106,11 +3112,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-db07-72f2-bfdd-81a7030b5550",
-        "usage": {
-          "input_tokens": 12
-        },
+        "id": "019fe8ae-c1ee-7af3-a69d-86ec0f5b6750",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 12,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -4144,11 +4153,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-dbbb-7cc3-b65b-a2054b60b096",
-        "usage": {
-          "input_tokens": 56
-        },
+        "id": "019fe8ae-c2a9-7c12-990b-24f58845ff85",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 56,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -5182,11 +5194,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-dc84-7e11-ab1e-5fa0372767fb",
-        "usage": {
-          "input_tokens": 26
-        },
+        "id": "019fe8ae-c356-7a70-9386-c43b2ca4d064",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 26,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -6220,11 +6235,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-dd3d-7300-8a85-71c1ee3ca097",
-        "usage": {
-          "input_tokens": 97
-        },
+        "id": "019fe8ae-c411-7270-bc0b-087bb80d62f6",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 97,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -7258,11 +7276,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-de01-78a0-874a-eb9719a10152",
-        "usage": {
-          "input_tokens": 13
-        },
+        "id": "019fe8ae-c4ba-74d3-866a-3c98b780c7ec",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 13,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -8296,11 +8317,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-deba-7161-a18f-e646fdc08c64",
-        "usage": {
-          "input_tokens": 21
-        },
+        "id": "019fe8ae-c572-7171-a5cd-586d4ca32bc9",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 21,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -9334,11 +9358,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-df76-7a22-8d69-511caa17d4b0",
-        "usage": {
-          "input_tokens": 17
-        },
+        "id": "019fe8ae-c623-73a0-9cb3-29d240dcaa34",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 17,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -10372,11 +10399,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-e03b-7a93-9c4b-ebbb4c89e8c3",
-        "usage": {
-          "input_tokens": 11
-        },
+        "id": "019fe8ae-c6e2-7200-b207-79879ea49243",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 11,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -11410,11 +11440,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-e0f1-7cb0-89ab-6e787c723d2b",
-        "usage": {
-          "input_tokens": 24
-        },
+        "id": "019fe8ae-c799-7af3-96ad-841eae76c210",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 24,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
@@ -12448,11 +12481,14 @@
       ],
       "model": "BAAI/bge-m3",
       "request": {
-        "id": "019fe6f0-e1b5-7e12-971e-8a2a8d6d6ccc",
-        "usage": {
-          "input_tokens": 24
-        },
+        "id": "019fe8ae-c849-7ad3-a775-a1684a5029db",
         "credits_debited": 1,
+        "rate_book_version": "2026-07-26-production-bootstrap-v2",
+        "usage": {
+          "input_tokens": 24,
+          "credits_charged": 1,
+          "rate_book_version": "2026-07-26-production-bootstrap-v2"
+        },
         "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     }

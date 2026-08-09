@@ -145,7 +145,9 @@ def _charged_request_rows(value: Any) -> list[tuple[dict[str, Any], dict[str, An
     if isinstance(value, dict):
         request = value.get("request")
         if isinstance(request, dict) and request.get("credits_debited"):
-            usage = value.get("usage")
+            usage = request.get("usage")
+            if not isinstance(usage, dict):
+                usage = value.get("usage")
             rows.append((request, usage if isinstance(usage, dict) else {}))
         for child in value.values():
             rows.extend(_charged_request_rows(child))

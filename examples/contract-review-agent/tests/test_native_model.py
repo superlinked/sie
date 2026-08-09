@@ -165,8 +165,17 @@ def test_required_search_steps_only_advance_on_the_expected_query() -> None:
         },
     ]
 
+    case_changed_query = [
+        {
+            "type": "function_call",
+            "name": "search_clauses",
+            "arguments": json.dumps({"query": "Automatic Renewal"}),
+        }
+    ]
+
     assert _next_required_tool(sequence, repeated_query) == "search_clauses"
     assert _next_required_tool(sequence, distinct_queries) == "analyze_clause_risks"
+    assert _next_required_tool(sequence, case_changed_query) == "search_clauses"
 
 
 class Risk(BaseModel):

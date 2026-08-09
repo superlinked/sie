@@ -136,3 +136,30 @@ def test_evaluation_checks_fail_on_incomplete_ocr() -> None:
         "nearby_vertical_price_pair_selected": True,
         "minimum_ocr_fragments_recovered": False,
     }
+
+
+def test_evaluation_checks_reject_a_full_width_strip_gap() -> None:
+    upper, lower = select_vertical_pair(nearby_price_candidates(_objects(), _gap()))
+    checks = evaluation_checks(
+        _objects()[0],
+        upper,
+        lower,
+        "I am temporarily\nout-of-stock\nfrom our supplier",
+        "Panadol Child\n5-12Yrs Elixir 100ml\n101760\n10⁹⁹",
+        (4032, 3024),
+    )
+
+    assert checks["non_strip_gap_selected"] is False
+
+
+def test_evaluation_checks_reject_a_non_nearby_price_pair() -> None:
+    checks = evaluation_checks(
+        _gap(),
+        _objects()[5],
+        _price(),
+        "I am temporarily\nout-of-stock\nfrom our supplier",
+        "Panadol Child\n5-12Yrs Elixir 100ml\n101760\n10⁹⁹",
+        (4032, 3024),
+    )
+
+    assert checks["nearby_vertical_price_pair_selected"] is False

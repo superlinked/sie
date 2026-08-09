@@ -423,9 +423,12 @@ def test_verified_manifest_hashes() -> None:
 
     raw_dir = manifest_path.parent / "raw"
     retrieve = json.loads((raw_dir / "retrieve.json").read_text(encoding="utf-8"))
+    rerank_request = json.loads((raw_dir / "rerank-request.json").read_text(encoding="utf-8"))
     rerank = json.loads((raw_dir / "rerank.json").read_text(encoding="utf-8"))
     assert retrieve["query"]["id"] == "cms-l1851-query"
-    assert rerank["query_id"] == retrieve["query"]["id"]
+    assert rerank_request["query"]["id"] == retrieve["query"]["id"]
+    assert [item["id"] for item in rerank_request["items"]] == [row["chunk_id"] for row in retrieve["ranking"]]
+    assert {row["item_id"] for row in rerank["scores"]} == {item["id"] for item in rerank_request["items"]}
 
     provenance = manifest["rate_book_provenance"]
     assert provenance == _rate_book_provenance(raw_dir)
@@ -470,14 +473,12 @@ def test_rate_book_provenance_rejects_duplicate_request_ids(tmp_path: Path) -> N
 
 @pytest.mark.parametrize(
     "versions",
-    [(), ("rate-v1", "rate-v2")],
+    [("rate-v1", "rate-v2")],
 )
 def test_rate_book_provenance_requires_one_settled_version(
     tmp_path: Path,
     versions: tuple[str, ...],
 ) -> None:
-    if not versions:
-        versions = ("",)
     for index, version in enumerate(versions):
         request: dict[str, object] = {
             "id": f"request-{index}",
@@ -488,4 +489,24 @@ def test_rate_book_provenance_requires_one_settled_version(
         _write_provenance_payload(tmp_path / f"request-{index}.json", request)
 
     with pytest.raises(RuntimeError, match="one settled rate book"):
+        _rate_book_provenance(tmp_path)
+
+
+def test_rate_book_provenance_rejects_a_charged_request_without_its_own_version(
+    tmp_path: Path,
+) -> None:
+    _write_provenance_payload(
+        tmp_path / "complete.json",
+        {
+            "id": "request-1",
+            "credits_debited": 1,
+            "rate_book_version": "rate-v1",
+        },
+    )
+    _write_provenance_payload(
+        tmp_path / "missing.json",
+        {"id": "request-2", "credits_debited": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="without a rate-book version"):
         _rate_book_provenance(tmp_path)

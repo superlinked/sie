@@ -15,11 +15,14 @@
   "id": "cms-l1851-entities_case_3",
   "model": "urchade/gliner_multi-v2.1",
   "request": {
-    "id": "019fe6f0-e7c0-74b1-ace2-c5310a927190",
-    "usage": {
-      "input_tokens": 30
-    },
+    "id": "019fe8ae-ce14-7c10-a1d0-7246e1e84bdb",
     "credits_debited": 1,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "input_tokens": 30,
+      "credits_charged": 1,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

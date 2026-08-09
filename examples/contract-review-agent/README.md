@@ -42,14 +42,15 @@ For each required investigation step, the adapter emits the configured tool
 call directly and binds its fixed query or question. This prevents a model from
 skipping a required source or copying large clause payloads into arguments.
 After the required sequence, SIE performs the final unstructured investigator
-turn through its native generation primitive. The Agents SDK then passes every
-tool result and the investigator report into a separate synthesizer turn; only
-that synthesizer uses the agent's declared Pydantic schema for structured final
-output. The example never calls an OpenAI-compatible endpoint or sends data to
-`api.openai.com`. The text-to-SQL tool may execute model-generated SQL only
-after enforcing one SELECT statement; it never executes generated Python or
-shell code. The SDK normalizes slash-form catalog IDs into wire-safe paths,
-but the example never substitutes one catalog model for another.
+turn through its native generation primitive. The example passes the
+investigator's final grounded findings, rather than its raw tool messages, into
+a separate synthesizer turn. Only that synthesizer uses the agent's declared
+Pydantic schema for structured final output. The example never calls an
+OpenAI-compatible endpoint or sends data to `api.openai.com`. The text-to-SQL
+tool may execute model-generated SQL only after enforcing one SELECT statement;
+it never executes generated Python or shell code. The SDK normalizes slash-form
+catalog IDs into wire-safe paths, but the example never substitutes one catalog
+model for another.
 
 The flow is **two agents**:
 

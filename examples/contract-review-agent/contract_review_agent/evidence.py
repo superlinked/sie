@@ -167,7 +167,9 @@ def _write_run_record(
         "risk_flags_identified": bool(review.risk_flags),
         "api_calls_have_request_provenance": bool(api_calls)
         and all(
-            call.get("credits_debited") is not None
+            isinstance(call.get("credits_debited"), int | float)
+            and not isinstance(call["credits_debited"], bool)
+            and call["credits_debited"] >= 0
             and all(
                 isinstance(call.get(field), str) and bool(call[field])
                 for field in (

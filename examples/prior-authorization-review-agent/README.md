@@ -72,6 +72,7 @@ a local server at `http://localhost:8080`.
 runs/<run-id>/manifest.json                    endpoint, model IDs, source hash, latency
 runs/<run-id>/raw/parse.json                   complete Docling response
 runs/<run-id>/raw/retrieve.json                embeddings and cosine ranking
+runs/<run-id>/raw/rerank-request.json          exact reranker query and candidate IDs
 runs/<run-id>/raw/rerank.json                  complete reranker response
 runs/<run-id>/raw/entities.json                combined GLiNER entity spans
 runs/<run-id>/raw/entities-requirement-<index>.json per-requirement GLiNER entity spans

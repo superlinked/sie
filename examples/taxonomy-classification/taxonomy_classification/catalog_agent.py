@@ -678,6 +678,19 @@ def _load_checkpoint(
             raise ValueError(
                 f"Cannot resume from {path}: reference changed for row {row_idx}"
             )
+        for score_field in ("text_scores", "image_plus_copy_scores"):
+            scores = result.get(score_field)
+            if (
+                not isinstance(scores, list)
+                or len(scores) != len(listing.candidate_paths)
+                or any(
+                    not isinstance(score, int | float) or isinstance(score, bool)
+                    for score in scores
+                )
+            ):
+                raise ValueError(
+                    f"Cannot resume from {path}: {score_field} changed for row {row_idx}"
+                )
         decision = CatalogDecision(
             row_idx=row_idx,
             selected_path=result["selected_path"],

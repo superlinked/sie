@@ -162,10 +162,7 @@ def _next_required_step(
             except json.JSONDecodeError:
                 continue
             query = _required_text_argument(arguments)
-            if (
-                not isinstance(query, str)
-                or query.strip().casefold() != required_query.casefold()
-            ):
+            if not isinstance(query, str) or query.strip() != required_query:
                 continue
         progress += 1
     return required_sequence[progress] if progress < len(required_sequence) else None

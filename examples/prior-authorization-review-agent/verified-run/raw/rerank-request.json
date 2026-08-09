@@ -1,0 +1,53 @@
+{
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "query": {
+    "id": "cms-l1851-query",
+    "text": "For CMS's published L1851 example, what was required, what was submitted, what timing gap caused insufficient documentation, and what payment action followed?"
+  },
+  "items": [
+    {
+      "id": "chunk-3",
+      "text": "## Example of Improper Payments Due to Insufficient Documentation for Lower Limb Orthoses"
+    },
+    {
+      "id": "chunk-8",
+      "text": "### What Documentation Was Missing?"
+    },
+    {
+      "id": "chunk-2",
+      "text": "We require prior authorization, a face-to-face encounter, and written order prior to delivery for HCPCS codes L1832 and L1851. Conduct the face-to-face encounter within the 6 months before prescribing the item."
+    },
+    {
+      "id": "chunk-10",
+      "text": "The review contractor completes the claim as an insufficient documentation error, and the MAC recoups payment."
+    },
+    {
+      "id": "chunk-4",
+      "text": "A supplier bills the claim for L1851 (Knee orthosis (KO), single upright, thigh and calf, with adjustable flexion and extension joint (unicentric or polycentric), medial-lateral and rotation control, with or without varus/valgus adjustment, prefabricated, off-the-shelf) and submits the following documentation per the review contractor's request:"
+    },
+    {
+      "id": "chunk-0",
+      "text": "https://www.cms.gov/training-education/medicare-learning-networkr-mln/compliance/medicare-provider-compliance-tips/lower-limb-orthoses Page Last Modified: 02/11/2026 04:18 PM"
+    },
+    {
+      "id": "chunk-9",
+      "text": "The doctor didn't document the face-to-face encounter within 6 months of proof of delivery."
+    },
+    {
+      "id": "chunk-7",
+      "text": "- Proof of delivery with face-to-face encounter 7 months ago"
+    },
+    {
+      "id": "chunk-1",
+      "text": "## Billing &amp; Coding Criteria"
+    },
+    {
+      "id": "chunk-5",
+      "text": "- Standard written order with correct HCPCS coding"
+    },
+    {
+      "id": "chunk-6",
+      "text": "- Treating practitioner's medical record that has adequate medical necessity information"
+    }
+  ]
+}

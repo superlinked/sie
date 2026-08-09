@@ -63,11 +63,14 @@
   "id": "cms-l1851-outcome",
   "model": "fastino/gliner2-large-v1",
   "request": {
-    "id": "019fe6f0-eb78-79e2-b2a2-4f3ceef7d6c0",
-    "usage": {
-      "input_tokens": 43
-    },
+    "id": "019fe8ae-d19f-7160-9d01-b0e62fa8dd18",
     "credits_debited": 1,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "input_tokens": 43,
+      "credits_charged": 1,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

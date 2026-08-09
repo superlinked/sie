@@ -171,6 +171,7 @@ def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
     versions: set[str] = set()
     source_artifacts: list[str] = []
     request_ids: list[str] = []
+    request_versions: dict[str, str] = {}
     for path in sorted(raw_dir.glob("*.json")):
         result = json.loads(path.read_text(encoding="utf-8"))
         charged_rows = _charged_request_rows(result)
@@ -182,10 +183,12 @@ def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
                 raise RuntimeError(f"{path.name} has a charged request without an ID")
             request_ids.append(request_id)
             version = request.get("rate_book_version")
-            if not isinstance(version, str):
+            if not isinstance(version, str) or not version:
                 version = usage.get("rate_book_version")
-            if isinstance(version, str) and version:
-                versions.add(version)
+            if not isinstance(version, str) or not version:
+                raise RuntimeError(f"{path.name} has a charged request without a rate-book version")
+            versions.add(version)
+            request_versions[request_id] = version
     if len(request_ids) != len(set(request_ids)):
         raise RuntimeError("Run contains duplicate charged request IDs")
     if len(versions) != 1 or not request_ids:
@@ -195,7 +198,7 @@ def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
         "version": version,
         "source_artifacts": source_artifacts,
         "request_ids": request_ids,
-        "request_versions": {request_id: version for request_id in request_ids},
+        "request_versions": request_versions,
     }
 
 
@@ -564,10 +567,20 @@ def run(run_id: str) -> Path:
         )
 
         started = time.perf_counter()
+        rerank_query = Item(id="cms-l1851-query", text=config["review"]["query"])
+        rerank_items = [Item(id=row["chunk_id"], text=row["text"]) for row in retrieval]
+        _write_json(
+            raw_dir / "rerank-request.json",
+            {
+                "model": config["models"]["rerank"],
+                "query": rerank_query,
+                "items": rerank_items,
+            },
+        )
         rerank_raw = client.score(
             config["models"]["rerank"],
-            Item(id="cms-l1851-query", text=config["review"]["query"]),
-            [Item(id=row["chunk_id"], text=row["text"]) for row in retrieval],
+            rerank_query,
+            rerank_items,
             wait_for_capacity=True,
             provision_timeout_s=timeout,
         )
