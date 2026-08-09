@@ -718,6 +718,10 @@ def eval_main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path)
     args = parser.parse_args()
+    if args.summary_output is not None and args.summary_output.resolve() == (
+        args.output.resolve()
+    ):
+        parser.error("--summary-output must differ from --output")
     run_command = _evaluation_run_command(args)
     listings = load_shopify_rows(
         offset=args.offset,

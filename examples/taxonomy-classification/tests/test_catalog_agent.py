@@ -362,6 +362,30 @@ def test_eval_resumes_completed_rows_from_its_checkpoint(
     )
 
 
+def test_eval_rejects_a_summary_that_overwrites_the_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output_path = tmp_path / "evaluation.json"
+    equivalent_path = tmp_path / "unused" / ".." / "evaluation.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval-catalog-agent",
+            "--output",
+            str(output_path),
+            "--summary-output",
+            str(equivalent_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        catalog_agent.eval_main()
+
+    assert "--summary-output must differ from --output" in capsys.readouterr().err
+    assert not output_path.exists()
+
+
 @pytest.mark.parametrize("changed_field", ["image_sha256", "candidate_paths"])
 def test_checkpoint_rejects_changed_listing_source(
     tmp_path: Path,
