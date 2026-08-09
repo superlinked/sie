@@ -186,14 +186,18 @@ async def analyze_clause_risks(ctx: RunContextWrapper[AppContext]) -> str:
     search_results = app.clause_cache.get("search_results")
     if not isinstance(search_results, dict) or not search_results:
         raise RuntimeError("Clause-risk analysis requires saved search results")
-    sections = [
-        f"Topic: {query}\n\n" + "\n\n---\n\n".join(clauses)
-        for query, clauses in search_results.items()
-        if isinstance(query, str)
-        and isinstance(clauses, list)
-        and clauses
-        and all(isinstance(clause, str) for clause in clauses)
-    ]
+    sections: list[str] = []
+    for query, clauses in search_results.items():
+        if (
+            not isinstance(query, str)
+            or not isinstance(clauses, list)
+            or any(not isinstance(clause, str) for clause in clauses)
+        ):
+            raise RuntimeError(
+                "Clause-risk search results must map string queries to lists of strings"
+            )
+        if clauses:
+            sections.append(f"Topic: {query}\n\n" + "\n\n---\n\n".join(clauses))
     if not sections:
         raise RuntimeError("Clause-risk analysis found no saved clauses")
     clauses = "\n\n===\n\n".join(sections)

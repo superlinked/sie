@@ -12,6 +12,30 @@
     "rerank": "Qwen/Qwen3-Reranker-4B",
     "review": "Qwen/Qwen3.5-4B"
   },
+  "rate_book_provenance": {
+    "version": "2026-07-26-production-bootstrap-v2",
+    "source_artifacts": [
+      "raw/appeal_decision-parse.json",
+      "raw/claim-facts.json",
+      "raw/policy-parse.json",
+      "raw/policy-rerank.json",
+      "raw/review-completion.json"
+    ],
+    "request_ids": [
+      "019fe736-78d0-7aa2-b611-a6cad3e537cd",
+      "019fe736-acef-7a63-b4e8-026b71979556",
+      "019fe736-91f9-7230-839c-909144280718",
+      "019fe736-ae0b-7fc2-ab77-4cef91922b5d",
+      "019fe736-ca17-7971-b371-a8e3ae08b88f"
+    ],
+    "request_versions": {
+      "019fe736-78d0-7aa2-b611-a6cad3e537cd": "2026-07-26-production-bootstrap-v2",
+      "019fe736-acef-7a63-b4e8-026b71979556": "2026-07-26-production-bootstrap-v2",
+      "019fe736-91f9-7230-839c-909144280718": "2026-07-26-production-bootstrap-v2",
+      "019fe736-ae0b-7fc2-ab77-4cef91922b5d": "2026-07-26-production-bootstrap-v2",
+      "019fe736-ca17-7971-b371-a8e3ae08b88f": "2026-07-26-production-bootstrap-v2"
+    }
+  },
   "timings_ms": {
     "parse_appeal_decision_ms": 6617.2,
     "parse_policy_ms": 7106.0,

@@ -63,5 +63,6 @@
       "candidate-1": 752.0,
       "candidate-2": 809.1
     }
-  }
+  },
+  "timing_note": "Diagnostic run timing, not a benchmark."
 }

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import re
 import shlex
 import tempfile
 import time
@@ -42,6 +43,7 @@ REQUIRED_PROVENANCE_FIELDS = (
     "rate_book_version",
     "execution_identity_sha256",
 )
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 RERANK_INSTRUCTION = (
     "Rank Shopify taxonomy paths by which path should categorize the product "
@@ -99,8 +101,10 @@ def _api_call_record(
     if not isinstance(rate_book_version, str) or not rate_book_version:
         raise ValueError(f"SIE {stage} response has no rate-book version")
     execution_identity_sha256 = request_row.get("execution_identity_sha256")
-    if not isinstance(execution_identity_sha256, str) or not execution_identity_sha256:
-        raise ValueError(f"SIE {stage} response has no execution identity")
+    if not isinstance(execution_identity_sha256, str) or not SHA256_RE.fullmatch(
+        execution_identity_sha256
+    ):
+        raise ValueError(f"SIE {stage} response has an invalid execution identity")
     return {
         "stage": stage,
         "requested_model": requested_model,
@@ -142,9 +146,12 @@ def _validate_api_calls(
             raise ValueError(f"Row {row_idx} has the wrong model for {stage}")
         for field_name in REQUIRED_PROVENANCE_FIELDS:
             value = call.get(field_name)
-            if not isinstance(value, str) or not value:
+            valid = isinstance(value, str) and bool(value)
+            if field_name == "execution_identity_sha256":
+                valid = isinstance(value, str) and bool(SHA256_RE.fullmatch(value))
+            if not valid:
                 raise ValueError(
-                    f"Row {row_idx} {stage} has no {field_name.replace('_', ' ')}"
+                    f"Row {row_idx} {stage} has invalid {field_name.replace('_', ' ')}"
                 )
     request_ids = [call["request_id"] for call in calls]
     if len(request_ids) != len(set(request_ids)):

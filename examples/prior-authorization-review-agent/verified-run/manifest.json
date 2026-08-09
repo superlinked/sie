@@ -2,7 +2,7 @@
   "created_at": "2026-08-09T14:32:56.617431+00:00",
   "endpoint": "https://api.superlinked.com",
   "models": {
-    "parse": "docling-project/docling",
+    "parse": "docling",
     "retrieve": "BAAI/bge-m3",
     "rerank": "Qwen/Qwen3-Reranker-4B",
     "entities": "urchade/gliner_multi-v2.1",
@@ -15,7 +15,17 @@
   "rate_book_provenance": {
     "version": "2026-07-26-production-bootstrap-v2",
     "source_artifacts": [
-      "raw/rerank.json"
+      "raw/entities-case-0.json",
+      "raw/entities-case-1.json",
+      "raw/entities-case-2.json",
+      "raw/entities-case-3.json",
+      "raw/entities-case-4.json",
+      "raw/entities-requirement-0.json",
+      "raw/gliner2-outcome.json",
+      "raw/gliner2-requirements.json",
+      "raw/gliner2-submission.json",
+      "raw/rerank.json",
+      "raw/retrieve.json"
     ],
     "request_ids": [
       "019fe6f0-e518-76b2-99c9-9ad325860a94",
@@ -27,8 +37,44 @@
       "019fe6f0-eb78-79e2-b2a2-4f3ceef7d6c0",
       "019fe6f0-e97e-77b1-aa65-5aec3d81b53d",
       "019fe6f0-ea78-7e81-9953-4792eb6795db",
-      "019fe6f0-e274-7f01-8d01-58bed0fb296b"
-    ]
+      "019fe6f0-e274-7f01-8d01-58bed0fb296b",
+      "019fe6f0-d97c-7300-be28-4fc1e5304213",
+      "019fe6f0-da3b-7dd3-b71a-e2e2df96437d",
+      "019fe6f0-db07-72f2-bfdd-81a7030b5550",
+      "019fe6f0-dbbb-7cc3-b65b-a2054b60b096",
+      "019fe6f0-dc84-7e11-ab1e-5fa0372767fb",
+      "019fe6f0-dd3d-7300-8a85-71c1ee3ca097",
+      "019fe6f0-de01-78a0-874a-eb9719a10152",
+      "019fe6f0-deba-7161-a18f-e646fdc08c64",
+      "019fe6f0-df76-7a22-8d69-511caa17d4b0",
+      "019fe6f0-e03b-7a93-9c4b-ebbb4c89e8c3",
+      "019fe6f0-e0f1-7cb0-89ab-6e787c723d2b",
+      "019fe6f0-e1b5-7e12-971e-8a2a8d6d6ccc"
+    ],
+    "request_versions": {
+      "019fe6f0-e518-76b2-99c9-9ad325860a94": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e605-7bd3-928f-9f06f8b4440b": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e6e5-7490-969c-87a9705a008d": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e7c0-74b1-ace2-c5310a927190": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e8a4-7850-a565-ed73b244f5f0": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e441-79c3-ab69-02e8ad1fa7f5": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-eb78-79e2-b2a2-4f3ceef7d6c0": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e97e-77b1-aa65-5aec3d81b53d": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-ea78-7e81-9953-4792eb6795db": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e274-7f01-8d01-58bed0fb296b": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-d97c-7300-be28-4fc1e5304213": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-da3b-7dd3-b71a-e2e2df96437d": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-db07-72f2-bfdd-81a7030b5550": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-dbbb-7cc3-b65b-a2054b60b096": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-dc84-7e11-ab1e-5fa0372767fb": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-dd3d-7300-8a85-71c1ee3ca097": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-de01-78a0-874a-eb9719a10152": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-deba-7161-a18f-e646fdc08c64": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-df76-7a22-8d69-511caa17d4b0": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e03b-7a93-9c4b-ebbb4c89e8c3": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e0f1-7cb0-89ab-6e787c723d2b": "2026-07-26-production-bootstrap-v2",
+      "019fe6f0-e1b5-7e12-971e-8a2a8d6d6ccc": "2026-07-26-production-bootstrap-v2"
+    }
   },
   "artifacts": [
     {

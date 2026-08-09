@@ -206,7 +206,7 @@ def test_verify_candidates_rejects_an_empty_union() -> None:
     ("missing_field", "match"),
     [
         ("rate_book_version", "no rate-book version"),
-        ("execution_identity_sha256", "no execution identity"),
+        ("execution_identity_sha256", "invalid execution identity"),
     ],
 )
 def test_api_call_record_requires_complete_request_provenance(
@@ -225,6 +225,29 @@ def test_api_call_record_requires_complete_request_provenance(
             stage="copy_rerank",
             requested_model=catalog_agent.RERANKER_MODEL,
             response={"model": catalog_agent.RERANKER_MODEL, "request": request},
+            timing_ms=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "execution_identity_sha256",
+    ["a" * 63, "a" * 65, "A" * 64, "g" * 64],
+)
+def test_api_call_record_rejects_a_malformed_execution_identity(
+    execution_identity_sha256: str,
+) -> None:
+    with pytest.raises(ValueError, match="invalid execution identity"):
+        catalog_agent._api_call_record(
+            stage="copy_rerank",
+            requested_model=catalog_agent.RERANKER_MODEL,
+            response={
+                "model": catalog_agent.RERANKER_MODEL,
+                "request": {
+                    "id": "request-1",
+                    "rate_book_version": "rate-book-v1",
+                    "execution_identity_sha256": execution_identity_sha256,
+                },
+            },
             timing_ms=1,
         )
 
@@ -465,7 +488,30 @@ def test_checkpoint_rejects_incomplete_api_call_provenance(tmp_path: Path) -> No
     checkpoint["results"][0]["api_calls"][0]["rate_book_version"] = None
     catalog_agent._write_evaluation_output(output_path, checkpoint)
 
-    with pytest.raises(ValueError, match="has no rate book version"):
+    with pytest.raises(ValueError, match="has invalid rate book version"):
+        catalog_agent._load_checkpoint(output_path, [source], offset=7)
+
+
+def test_checkpoint_rejects_a_malformed_execution_identity(tmp_path: Path) -> None:
+    source = listing(reference="A > One")
+    decision = CatalogDecision(
+        row_idx=7,
+        selected_path="A > One",
+        needs_review=False,
+        candidate_union=["A > One"],
+        text_scores=[1.0, 0.0, 0.0, 0.0],
+        image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
+        verifier_response_id="candidate_verification-7",
+        api_calls=api_calls(7),
+    )
+    output_path = tmp_path / "evaluation.json"
+    checkpoint = catalog_agent._evaluation_output([source], {7: decision}, offset=7)
+    checkpoint["results"][0]["api_calls"][0]["execution_identity_sha256"] = (
+        "not-a-sha256"
+    )
+    catalog_agent._write_evaluation_output(output_path, checkpoint)
+
+    with pytest.raises(ValueError, match="invalid execution identity sha256"):
         catalog_agent._load_checkpoint(output_path, [source], offset=7)
 
 

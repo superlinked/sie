@@ -382,6 +382,7 @@ def run_audit(run_id: str) -> Path:
                 "grounding_dino": detector_ms,
                 "lighton_ocr_candidates": ocr_timings,
             },
+            "timing_note": "Diagnostic run timing, not a benchmark.",
         },
     )
     return run_dir

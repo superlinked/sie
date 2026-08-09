@@ -41,10 +41,11 @@ Agent(
 For each required investigation step, the adapter emits the configured tool
 call directly and binds its fixed query or question. This prevents a model from
 skipping a required source or copying large clause payloads into arguments.
-After the required sequence, SIE performs schema-constrained generation through
-its native primitive; the Agents SDK passes every tool result into that final
-investigator turn and the structured synthesizer turn.
-Structured final output uses the agent's declared Pydantic schema. The example never calls an OpenAI-compatible endpoint or sends data to
+After the required sequence, SIE performs the final unstructured investigator
+turn through its native generation primitive. The Agents SDK then passes every
+tool result and the investigator report into a separate synthesizer turn; only
+that synthesizer uses the agent's declared Pydantic schema for structured final
+output. The example never calls an OpenAI-compatible endpoint or sends data to
 `api.openai.com`. The text-to-SQL tool may execute model-generated SQL only
 after enforcing one SELECT statement; it never executes generated Python or
 shell code. The SDK normalizes slash-form catalog IDs into wire-safe paths,
@@ -99,6 +100,10 @@ wall time. `api-calls.json` preserves requested and runtime model IDs, request
 IDs, rate-book versions, execution identities, debited credits, and stable
 workflow stages. The evaluation requires the exact 18-stage tool and agent
 sequence, including each stage's configured model and native primitive.
+Captured model output remains verbatim. Current runs require an exact safe
+guardrail verdict and atomically discard any rejected bundle. Historical ledger
+entries therefore remain evidence of what the endpoint returned rather than
+being rewritten to satisfy newer validation.
 
 ## Swapping models (the point of the catalog)
 

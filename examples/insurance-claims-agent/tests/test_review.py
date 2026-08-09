@@ -16,6 +16,7 @@ from insurance_claims.review import (
     _extract_claim_facts,
     _final_review,
     _json_object_from_text,
+    _rate_book_provenance,
     _require_sources,
     chunk_markdown,
     run_default_stage,
@@ -238,3 +239,10 @@ def test_verified_manifest_pins_every_recorded_artifact() -> None:
     assert set(artifacts) == expected_paths
     for path, expected_hash in artifacts.items():
         assert hashlib.sha256((VERIFIED_RUN / path).read_bytes()).hexdigest() == expected_hash
+
+    provenance = manifest["rate_book_provenance"]
+    assert provenance == _rate_book_provenance(VERIFIED_RUN / "raw")
+    assert len(provenance["request_ids"]) == 5
+    assert provenance["request_versions"] == {
+        request_id: provenance["version"] for request_id in provenance["request_ids"]
+    }

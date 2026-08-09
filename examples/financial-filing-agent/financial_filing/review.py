@@ -75,34 +75,50 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, default=_json_default) + "\n", encoding="utf-8")
 
 
+def _charged_request_rows(value: Any) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    if isinstance(value, dict):
+        request = value.get("request")
+        if isinstance(request, dict) and request.get("credits_debited"):
+            usage = value.get("usage")
+            rows.append((request, usage if isinstance(usage, dict) else {}))
+        for child in value.values():
+            rows.extend(_charged_request_rows(child))
+    elif isinstance(value, list):
+        for child in value:
+            rows.extend(_charged_request_rows(child))
+    return rows
+
+
 def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
     versions: set[str] = set()
     source_artifacts: list[str] = []
     request_ids: list[str] = []
     for path in sorted(raw_dir.glob("*.json")):
         result = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(result, dict):
-            continue
-        request = result.get("request")
-        if not isinstance(request, dict) or not request.get("credits_debited"):
-            continue
-        request_id = request.get("id")
-        if not isinstance(request_id, str) or not request_id:
-            raise RuntimeError(f"{path.name} has a charged request without an ID")
-        request_ids.append(request_id)
-        usage = result.get("usage")
-        version = request.get("rate_book_version")
-        if not isinstance(version, str) and isinstance(usage, dict):
-            version = usage.get("rate_book_version")
-        if isinstance(version, str) and version:
-            versions.add(version)
+        charged_rows = _charged_request_rows(result)
+        if charged_rows:
             source_artifacts.append(f"raw/{path.name}")
+        for request, usage in charged_rows:
+            request_id = request.get("id")
+            if not isinstance(request_id, str) or not request_id:
+                raise RuntimeError(f"{path.name} has a charged request without an ID")
+            request_ids.append(request_id)
+            version = request.get("rate_book_version")
+            if not isinstance(version, str):
+                version = usage.get("rate_book_version")
+            if isinstance(version, str) and version:
+                versions.add(version)
+    if len(request_ids) != len(set(request_ids)):
+        raise RuntimeError("Run contains duplicate charged request IDs")
     if len(versions) != 1 or not request_ids:
         raise RuntimeError("Run does not establish one settled rate book for charged requests")
+    version = versions.pop()
     return {
-        "version": versions.pop(),
+        "version": version,
         "source_artifacts": source_artifacts,
         "request_ids": request_ids,
+        "request_versions": {request_id: version for request_id in request_ids},
     }
 
 

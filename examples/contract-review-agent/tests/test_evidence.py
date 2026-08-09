@@ -63,6 +63,17 @@ def _review() -> ContractReview:
     )
 
 
+def _ledger(verdict: str = "no") -> Ledger:
+    ledger = Ledger()
+    ledger.record(
+        "Safety guardrail (granite-guardian)",
+        MODELS["guard"],
+        "generate",
+        got=verdict,
+    )
+    return ledger
+
+
 def _write_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -85,7 +96,7 @@ def _write_record(
         db_path=str(database),
         findings="findings",
         review=_review(),
-        ledger=Ledger(),
+        ledger=_ledger(),
         api_calls=api_calls,
         wall_s=1,
     )
@@ -113,11 +124,18 @@ def test_write_run_record_rejects_missing_request_provenance(
     with pytest.raises(RuntimeError, match="Production evidence checks failed"):
         _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)
 
-    evaluation = json.loads(
-        (tmp_path / "runs" / "safe-run" / "evaluation.json").read_text()
+    runs_dir = tmp_path / "runs"
+    assert not (runs_dir / "safe-run").exists()
+    assert list(runs_dir.iterdir()) == []
+
+    run_dir = _write_record(
+        tmp_path,
+        monkeypatch,
+        run_id="safe-run",
+        api_calls=_api_calls(),
     )
-    assert evaluation["checks"]["api_calls_have_request_provenance"] is False
-    assert evaluation["passed"] is False
+    assert run_dir == runs_dir / "safe-run"
+    assert (run_dir / "manifest.json").is_file()
 
 
 def test_write_run_record_rejects_a_missing_required_stage(
@@ -130,11 +148,40 @@ def test_write_run_record_rejects_a_missing_required_stage(
     with pytest.raises(RuntimeError, match="Production evidence checks failed"):
         _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)
 
-    evaluation = json.loads(
-        (tmp_path / "runs" / "safe-run" / "evaluation.json").read_text()
-    )
-    assert evaluation["checks"]["required_api_call_sequence"] is False
-    assert evaluation["passed"] is False
+    runs_dir = tmp_path / "runs"
+    assert not (runs_dir / "safe-run").exists()
+    assert list(runs_dir.iterdir()) == []
+
+
+def test_write_run_record_rejects_a_malformed_guardrail_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(evidence_module, "PROJECT_ROOT", tmp_path)
+    scan = tmp_path / "scan.png"
+    database = tmp_path / "obligations.db"
+    scan.write_bytes(b"scan")
+    database.write_bytes(b"database")
+
+    with pytest.raises(RuntimeError, match="Production evidence checks failed"):
+        write_run_record(
+            run_id="safe-run",
+            endpoint="https://api.superlinked.com",
+            cfg=CFG,
+            label="example",
+            contract_text="contract",
+            scan_path=str(scan),
+            db_path=str(database),
+            findings="findings",
+            review=_review(),
+            ledger=_ledger("No_of_turn>"),
+            api_calls=_api_calls(),
+            wall_s=1,
+        )
+
+    runs_dir = tmp_path / "runs"
+    assert not (runs_dir / "safe-run").exists()
+    assert list(runs_dir.iterdir()) == []
 
 
 def test_verified_run_manifest_pins_complete_passing_evidence() -> None:

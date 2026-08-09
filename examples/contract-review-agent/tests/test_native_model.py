@@ -557,7 +557,7 @@ async def test_clause_risk_tool_reads_saved_searches_without_copy_arguments(
         reasoning_agent=object(),
         clause_cache={
             "search_results": {
-                "automatic renewal": ["renewal clause"],
+                "automatic renewal": [],
                 "termination": ["termination clause"],
             }
         },
@@ -574,6 +574,41 @@ async def test_clause_risk_tool_reads_saved_searches_without_copy_arguments(
     )
 
     assert contract_tools.analyze_clause_risks.params_json_schema["properties"] == {}
-    assert prompts and "Topic: automatic renewal\n\nrenewal clause" in prompts[0]
+    assert prompts and "Topic: automatic renewal" not in prompts[0]
     assert "Topic: termination\n\ntermination clause" in prompts[0]
     assert result == "grounded risk analysis"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "search_results",
+    [
+        {"termination": "termination clause"},
+        {1: ["termination clause"]},
+        {"termination": [1]},
+    ],
+)
+async def test_clause_risk_tool_rejects_malformed_saved_searches(
+    search_results: dict[object, object],
+) -> None:
+    app = AppContext(
+        sie=FakeSIE([]),  # type: ignore[arg-type]
+        cfg={"cluster": {}, "models": {"reasoning": "reasoning-model"}},
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+        reasoning_agent=object(),
+        clause_cache={"search_results": search_results},
+    )
+
+    with pytest.raises(RuntimeError, match="map string queries to lists of strings"):
+        await contract_tools.analyze_clause_risks.on_invoke_tool(
+            ToolContext(
+                app,
+                tool_name="analyze_clause_risks",
+                tool_call_id="call-risk",
+                tool_arguments="{}",
+            ),
+            "{}",
+        )

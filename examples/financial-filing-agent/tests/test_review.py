@@ -6,6 +6,7 @@ from financial_filing.evaluate import evaluate_review
 from financial_filing.review import (
     _chunks,
     _original_table_source_value,
+    _rate_book_provenance,
     _require_entity_evidence,
     _require_matching_source_values,
     _table_row_context,
@@ -211,14 +212,10 @@ def test_verified_manifest_hashes() -> None:
     rerank = json.loads((raw_dir / "rerank.json").read_text(encoding="utf-8"))
     assert rerank["query_id"] == retrieve["query"]["id"]
 
-    charged_request_ids = {
-        result["request"]["id"]
-        for path in raw_dir.glob("*.json")
-        if isinstance((result := json.loads(path.read_text(encoding="utf-8"))), dict)
-        and isinstance(result.get("request"), dict)
-        and result["request"].get("credits_debited")
-    }
     provenance = manifest["rate_book_provenance"]
-    assert provenance["version"]
-    assert set(provenance["request_ids"]) == charged_request_ids
-    assert provenance["source_artifacts"] == ["raw/rerank.json"]
+    assert provenance == _rate_book_provenance(raw_dir)
+    assert len(provenance["request_ids"]) == 13
+    assert provenance["request_versions"] == {
+        request_id: provenance["version"] for request_id in provenance["request_ids"]
+    }
+    assert "raw/retrieve.json" in provenance["source_artifacts"]

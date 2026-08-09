@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import tempfile
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,6 +70,15 @@ def validate_run_id(run_id: str) -> str:
     return run_id
 
 
+def _guardrail_was_accepted(ledger: Ledger) -> bool:
+    entries = [
+        entry
+        for entry in ledger.entries
+        if entry.step == "Safety guardrail (granite-guardian)"
+    ]
+    return len(entries) == 1 and entries[0].got.strip().casefold() == "no"
+
+
 def write_run_record(
     *,
     run_id: str,
@@ -84,8 +95,51 @@ def write_run_record(
     wall_s: float,
 ) -> Path:
     validate_run_id(run_id)
-    run_dir = PROJECT_ROOT / "runs" / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
+    runs_dir = PROJECT_ROOT / "runs"
+    final_run_dir = runs_dir / run_id
+    if final_run_dir.exists():
+        raise FileExistsError(f"Run evidence already exists at {final_run_dir}")
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=runs_dir))
+    try:
+        _write_run_record(
+            run_dir=staging_dir,
+            run_id=run_id,
+            endpoint=endpoint,
+            cfg=cfg,
+            label=label,
+            contract_text=contract_text,
+            scan_path=scan_path,
+            db_path=db_path,
+            findings=findings,
+            review=review,
+            ledger=ledger,
+            api_calls=api_calls,
+            wall_s=wall_s,
+        )
+        staging_dir.rename(final_run_dir)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    return final_run_dir
+
+
+def _write_run_record(
+    *,
+    run_dir: Path,
+    run_id: str,
+    endpoint: str,
+    cfg: dict[str, Any],
+    label: str,
+    contract_text: str,
+    scan_path: str,
+    db_path: str,
+    findings: str,
+    review: ContractReview,
+    ledger: Ledger,
+    api_calls: list[dict[str, Any]],
+    wall_s: float,
+) -> None:
 
     review_path = run_dir / "review.json"
     findings_path = run_dir / "investigator-findings.txt"
@@ -108,6 +162,7 @@ def write_run_record(
     ]
     checks = {
         "structured_review": True,
+        "guardrail_was_accepted": _guardrail_was_accepted(ledger),
         "parties_identified": bool(review.parties),
         "risk_flags_identified": bool(review.risk_flags),
         "api_calls_have_request_provenance": bool(api_calls)
@@ -184,4 +239,3 @@ def write_run_record(
             ],
         },
     )
-    return run_dir
