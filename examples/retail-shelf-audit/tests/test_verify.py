@@ -41,7 +41,8 @@ def test_verified_cloud_run_rejects_reused_request_ids(
     def changed_load(path):
         value = load(path)
         if path.name == "lighton-ocr-candidate-2.json":
-            value["request"]["id"] = "019fe6f0-2381-7ec0-bcf9-87324524058a"
+            sibling = load(path.with_name("lighton-ocr-candidate-1.json"))
+            value["request"]["id"] = sibling["request"]["id"]
         return value
 
     monkeypatch.setattr(verify_module, "_load", changed_load)

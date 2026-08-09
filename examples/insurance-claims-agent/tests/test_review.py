@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sie_sdk import Item
 
 import insurance_claims.review as review_module
 from insurance_claims.evaluate import ARTIFACT_EXCLUDED_PATHS, evaluate_review, evaluate_run
@@ -27,12 +28,12 @@ VERIFIED_RUN = ROOT / "verified-run"
 class FakeExtractClient:
     def __init__(self) -> None:
         self.labels: list[str] | None = None
-        self.item: object | None = None
+        self.item: Item | None = None
 
     def extract(
         self,
         _model: str,
-        _item: object,
+        _item: Item,
         **kwargs: object,
     ) -> dict[str, object]:
         self.item = _item
@@ -86,7 +87,7 @@ def test_claim_fact_extraction_starts_at_appeal_when_issue_heading_is_absent() -
         60,
     )
 
-    assert isinstance(client.item, dict)
+    assert client.item is not None
     assert client.item["text"] == "The insurer reviewed the amended claim."
 
 
