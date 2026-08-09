@@ -1,7 +1,7 @@
 {
   "entities": [
     {
-      "text": "I am temporarily  \nout-of-stock  \nfrom our supplier  \n\nPlease ask our friendly staff  \nfor a substitute.  \n\nPamela O'Neil",
+      "text": "I am temporarily  \nout-of-stock  \nfrom our supplier  \n\nPlease ask our friendly staff  \nfor a substitute.  \n\n[name redacted]",
       "label": "markdown",
       "score": 1.0,
       "start": null,

@@ -399,7 +399,7 @@ def test_checkpoint_rejects_changed_listing_source(
         candidate_union=["A > One"],
         text_scores=[1.0, 0.0, 0.0, 0.0],
         image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
-        verifier_response_id="generate-7",
+        verifier_response_id="candidate_verification-7",
         api_calls=api_calls(7),
     )
     output_path = tmp_path / "evaluation.json"

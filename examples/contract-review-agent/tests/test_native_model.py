@@ -19,10 +19,15 @@ from agents.tool_context import ToolContext
 from pydantic import BaseModel
 
 from contract_review_agent import tools as contract_tools
+from contract_review_agent.guardrails import safety_guardrail
 from contract_review_agent.native_model import SIENativeModel, _next_required_tool
 from contract_review_agent.runtime import AppContext, GenResult, Ledger, instruct_once
 
 set_tracing_disabled(True)
+
+
+def test_safety_guardrail_blocks_investigator_start() -> None:
+    assert safety_guardrail.run_in_parallel is False
 
 
 class FakeSIE:

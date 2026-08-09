@@ -35,7 +35,7 @@ def _input_text(data: Any) -> str:
     return "\n".join(parts)
 
 
-@input_guardrail
+@input_guardrail(run_in_parallel=False)
 async def safety_guardrail(
     ctx: RunContextWrapper[AppContext], agent: Agent, data: Any
 ) -> GuardrailFunctionOutput:

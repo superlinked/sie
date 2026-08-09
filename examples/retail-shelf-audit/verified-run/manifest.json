@@ -8,6 +8,17 @@
     "ocr": "lightonai/LightOnOCR-2-1B"
   },
   "checksum_scope": "source input plus every generated evidence file except this manifest",
+  "redactions": [
+    {
+      "paths": [
+        "raw/lighton-ocr-candidate-1.json",
+        "selection.json"
+      ],
+      "field": "OCR text",
+      "replacement": "[name redacted]",
+      "reason": "privacy"
+    }
+  ],
   "source_input": {
     "path": "assets/042-pharmacy-oos-sign.jpg",
     "sha256": "a8654b3a7c2be143fb788f91aeef0c09b23feaee0984151eefed95f6c7a96f63"
@@ -35,7 +46,7 @@
     },
     {
       "path": "raw/lighton-ocr-candidate-1.json",
-      "sha256": "ddae558b16b9af3a8cc5c8d65355f5fd7aacfe107dbc0fa8c40fcaaf5dfa73e8"
+      "sha256": "4f8e737087a51f5aa105d66c5d4b090c78fbfef20f923bc97ffc84ca68786969"
     },
     {
       "path": "raw/lighton-ocr-candidate-2.json",
@@ -43,7 +54,7 @@
     },
     {
       "path": "selection.json",
-      "sha256": "f92620fee047212041145710bfc388eb289ed9cd9cd4209b4045e609c1a2d01a"
+      "sha256": "2f8d7619a8d22071a9a2a000adbc3b84ad4da42f91f754c3f4ab462789ae1b61"
     }
   ],
   "timing_ms": {
