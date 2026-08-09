@@ -1,11 +1,17 @@
 {
   "record_type": "sie_catalog_agent_evaluation_summary",
-  "run_at": "2026-07-28T05:39:23.578423Z",
+  "run_at": "2026-08-09T15:02:55.852094Z",
+  "endpoint": "https://api.superlinked.com",
+  "run_command": "eval-catalog-agent --offset 0 --limit 100 --cache-dir .cache/catalog-agent --output verified-run/evaluation.json --summary-output results/catalog-agent-summary.json",
+  "timing_note": "Per-call timings are diagnostic, not benchmark results.",
   "dataset": {
     "id": "Shopify/product-catalogue",
     "revision": "d5c517c509f5aca99053897ef1de797d6d7e5aa5",
     "split": "train",
-    "row_window": [0, 99]
+    "row_window": [
+      0,
+      99
+    ]
   },
   "models": {
     "reranker": {
@@ -20,19 +26,41 @@
   "candidate_rule": "Union of the two highest-scoring paths from copy-only and image-plus-copy reranker calls.",
   "response_schema": {
     "type": "object",
-    "required": ["selected_index", "needs_review"],
+    "properties": {
+      "selected_index": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "needs_review": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "selected_index",
+      "needs_review"
+    ],
     "additionalProperties": false
   },
   "metrics": {
-    "copy_only_exact_path_correct": 42,
-    "image_plus_copy_exact_path_correct": 45,
-    "agent_exact_path_correct": 54,
+    "sample_size": 100,
+    "exact_path_correct": 62,
+    "exact_path_accuracy": 0.62,
+    "top_level_correct": 87,
+    "top_level_accuracy": 0.87,
+    "macro_hierarchical_f1": 0.7776861471861471,
+    "needs_review": 5,
+    "copy_only_exact_path_correct": 41,
     "copy_only_top_level_correct": 81,
-    "image_plus_copy_top_level_correct": 82,
-    "agent_top_level_correct": 86,
-    "copy_only_macro_hierarchical_f1": 0.6709681429681428,
-    "image_plus_copy_macro_hierarchical_f1": 0.6881536796536796,
-    "agent_macro_hierarchical_f1": 0.7446406926406923,
-    "needs_review": 6
+    "copy_only_macro_hierarchical_f1": 0.6655252525252524,
+    "image_plus_copy_exact_path_correct": 50,
+    "image_plus_copy_top_level_correct": 85,
+    "image_plus_copy_macro_hierarchical_f1": 0.7284378399378397,
+    "agent_exact_path_correct": 62,
+    "agent_top_level_correct": 87,
+    "agent_macro_hierarchical_f1": 0.7776861471861471
+  },
+  "evaluation": {
+    "path": "verified-run/evaluation.json",
+    "sha256": "21f68de8740102326c4981080049726b83cf86e7f5e6098b875ee5976c8bcf44"
   }
 }

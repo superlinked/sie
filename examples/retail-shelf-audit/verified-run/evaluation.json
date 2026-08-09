@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "checks": {
+    "non_strip_gap_selected": true,
+    "nearby_vertical_price_pair_selected": true,
+    "minimum_ocr_fragments_recovered": true
+  }
+}

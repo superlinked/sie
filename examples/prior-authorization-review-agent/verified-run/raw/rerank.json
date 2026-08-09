@@ -1,5 +1,6 @@
 {
   "model": "Qwen/Qwen3-Reranker-4B",
+  "query_id": "cms-l1851-query",
   "scores": [
     {
       "item_id": "chunk-10",
@@ -57,8 +58,18 @@
       "rank": 10
     }
   ],
-  "query_id": "cms-l1851-query",
   "usage": {
-    "input_tokens": 1434
+    "input_tokens": 1434,
+    "credits_charged": 69,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2"
+  },
+  "request": {
+    "id": "019fe6f0-e274-7f01-8d01-58bed0fb296b",
+    "usage": {
+      "input_tokens": 1434,
+      "pairs": 11
+    },
+    "credits_debited": 69,
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

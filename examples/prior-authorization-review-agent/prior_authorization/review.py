@@ -650,8 +650,6 @@ def run(run_id: str) -> Path:
     manifest = {
         "created_at": datetime.now(UTC).isoformat(),
         "endpoint": config["cluster"]["url"],
-        "sie_server_commit": os.getenv("SIE_SERVER_COMMIT"),
-        "run_command": os.getenv("SIE_RUN_COMMAND"),
         "models": config["models"],
         "fixture": {"path": str(DOCUMENT_PATH.relative_to(ROOT)), "sha256": sha256(DOCUMENT_PATH)},
         "artifacts": [{"path": str(path.relative_to(run_dir)), "sha256": sha256(path)} for path in artifact_paths],

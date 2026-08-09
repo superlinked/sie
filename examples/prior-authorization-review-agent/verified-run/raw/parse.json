@@ -401,5 +401,13 @@
       "pages": {}
     }
   },
-  "model": "docling"
+  "model": "docling",
+  "request": {
+    "id": "019fe6f0-d8a3-7ba1-9e91-431587b55dc7",
+    "usage": {
+      "pages": 0
+    },
+    "credits_debited": 0,
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+  }
 }

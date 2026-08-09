@@ -419,3 +419,8 @@ def test_verified_manifest_hashes() -> None:
     for entry in manifest["artifacts"]:
         artifact = manifest_path.parent / entry["path"]
         assert hashlib.sha256(artifact.read_bytes()).hexdigest() == entry["sha256"]
+
+    raw_dir = manifest_path.parent / "raw"
+    retrieve = json.loads((raw_dir / "retrieve.json").read_text(encoding="utf-8"))
+    rerank = json.loads((raw_dir / "rerank.json").read_text(encoding="utf-8"))
+    assert rerank["query_id"] == retrieve["query"]["id"]

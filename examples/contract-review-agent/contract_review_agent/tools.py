@@ -19,7 +19,7 @@ from agents import RunContextWrapper, Runner, function_tool
 from sie_sdk import Item
 
 from .data.make_sample import SCHEMA_DDL, TODAY
-from .runtime import AppContext, GenResult, instruct_once, prompt_once
+from .runtime import AppContext, GenResult, instruct_once, prompt_once, record_api_call
 
 
 def _tok(n: int | None) -> str:
@@ -77,6 +77,7 @@ async def _clause_index(
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
+    record_api_call(app, "encode", embed_model, results)
     dt = time.monotonic() - t0
     matrix = np.vstack([np.asarray(r["dense"], dtype=np.float32) for r in results])
     app.ledger.record(
@@ -171,11 +172,23 @@ async def read_signature_page(ctx: RunContextWrapper[AppContext], question: str)
 
 
 @function_tool(failure_error_function=None)
-async def analyze_clause_risks(ctx: RunContextWrapper[AppContext], clauses: str) -> str:
-    """Delegate deep legal risk analysis of specific clauses to a specialist
-    reasoning agent (the largest model). Pass the clause text to analyze; get
-    back per-clause issues with severity and suggested redlines."""
+async def analyze_clause_risks(ctx: RunContextWrapper[AppContext]) -> str:
+    """Analyze the clauses returned by the required retrieval steps."""
     app = ctx.context
+    search_results = app.clause_cache.get("search_results")
+    if not isinstance(search_results, dict) or not search_results:
+        raise RuntimeError("Clause-risk analysis requires saved search results")
+    sections = [
+        f"Topic: {query}\n\n" + "\n\n---\n\n".join(clauses)
+        for query, clauses in search_results.items()
+        if isinstance(query, str)
+        and isinstance(clauses, list)
+        and clauses
+        and all(isinstance(clause, str) for clause in clauses)
+    ]
+    if not sections:
+        raise RuntimeError("Clause-risk analysis found no saved clauses")
+    clauses = "\n\n===\n\n".join(sections)
     model = app.cfg["models"]["reasoning"]
     t0 = time.monotonic()
     result = await Runner.run(
@@ -217,6 +230,7 @@ async def ocr_signature_page(ctx: RunContextWrapper[AppContext]) -> str:
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
+    record_api_call(app, "extract", model, res)
     dt = time.monotonic() - t0
     entities = res.get("entities") or []
     markdown = entities[0]["text"] if entities else "(no text recognized)"
@@ -256,6 +270,7 @@ async def extract_entities(ctx: RunContextWrapper[AppContext]) -> str:
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
+    record_api_call(app, "extract", model, res)
     dt = time.monotonic() - t0
     entities = res.get("entities") or []
     app.ledger.record(
@@ -293,6 +308,7 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
+    record_api_call(app, "encode", embed_model, q)
     qv = np.asarray(q["dense"], dtype=np.float32)
     denom = np.linalg.norm(matrix, axis=1) * (np.linalg.norm(qv) + 1e-9) + 1e-9
     sims = (matrix @ qv) / denom
@@ -307,6 +323,7 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
+    record_api_call(app, "score", rerank_model, scored)
     dt = time.monotonic() - t0
     app.ledger.record(
         "Rerank candidate clauses",
@@ -319,6 +336,10 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
     )
     ranked = sorted(scored["scores"], key=lambda s: s["rank"])[:k_res]
     top = [candidates[int(s["item_id"])] for s in ranked]
+    search_results = app.clause_cache.setdefault("search_results", {})
+    if not isinstance(search_results, dict):
+        raise TypeError("Clause search cache has an invalid shape")
+    search_results[query] = top
     return "\n\n---\n\n".join(top) if top else "(no relevant clauses found)"
 
 

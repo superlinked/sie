@@ -1,0 +1,28 @@
+{
+  "entities": [
+    {
+      "text": "Please ask our friendly staff\n\nPanadol Child  \n5-12Yrs Elixir 100ml  \n101760  \n10\u2079\u2079  \n1 MONTHS  \n10-2 YEARS  \nr care.",
+      "label": "markdown",
+      "score": 1.0,
+      "start": null,
+      "end": null,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "candidate-2",
+  "model": "lightonai/LightOnOCR-2-1B",
+  "request": {
+    "id": "019fe6f0-2601-71c1-a5f4-70df61af9ec7",
+    "credits_debited": 1133,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "pages": 1,
+      "credits_charged": 1133,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
+    "execution_identity_sha256": "ab0a02321f5880f6735446dc9d9ae7066b16d0e030f526566693d019c02f4f38"
+  }
+}

@@ -39,26 +39,25 @@ uv run eval-catalog-agent \
   --output eval/catalog-agent.json
 ```
 
-The recorded run moves exact-path matches from `42/100` for copy alone to
-`54/100` for the catalog agent. Macro hierarchical F1 moves from `0.6710` to
-`0.7446`; six listings are flagged for review. Shopify recommends hierarchical
-F1 for this benchmark because a nearby taxonomy branch and a different
-top-level category should not count as the same error.
+The recorded prod-US run moves exact-path matches from `41/100` for copy alone
+and `50/100` for image plus copy to `62/100` for the catalog agent. Macro
+hierarchical F1 moves from `0.665525` and `0.728438`, respectively, to
+`0.777686`; five listings are flagged for review. Shopify recommends
+hierarchical F1 for this benchmark because a nearby taxonomy branch and a
+different top-level category should not count as the same error.
 
 The run summary is in
 [`results/catalog-agent-summary.json`](results/catalog-agent-summary.json).
 
-### What the first 55 misses showed
+### What the remaining 38 misses showed
 
-Image plus copy fixed 10 copy-only mistakes and introduced 7 regressions. Of
-the 55 image-plus-copy misses, 27 selected a nearby branch, 18 selected the
-wrong top-level branch, 6 selected an ancestor or descendant, and 4 stayed
-under the right top-level branch but missed elsewhere.
-
-The reference path was present in every supplied candidate list. It appeared
-in the union of the copy-only and image-plus-copy top two for 75 listings, while
-the best static blend of both reranker scores reached only 48 exact matches.
-That gap led to the verifier step.
+Of the catalog agent's 38 misses, 13 selected the wrong top-level branch, 4
+selected an ancestor or descendant, and 21 stayed under the right top-level
+branch but selected a different path. The reference path appeared in the union
+of the copy-only and image-plus-copy top two for 74 listings, which leaves 26
+rows where the verifier could not select it. The checked evaluation preserves
+the full candidate list, union, scores, source hashes, and request provenance
+for every row so this boundary is reproducible.
 
 Several reference labels also conflict with the listing itself. Examples
 include a hydraulic pump labeled as a cone crusher and a decorative banner

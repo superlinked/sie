@@ -77,5 +77,13 @@
   "classifications": [],
   "objects": [],
   "id": "ranked-ntsb-salem-evidence",
-  "model": "fastino/gliner2-large-v1"
+  "model": "fastino/gliner2-large-v1",
+  "request": {
+    "id": "019fe6f1-0adb-73a3-9794-48e0c4eb2d64",
+    "usage": {
+      "input_tokens": 91
+    },
+    "credits_debited": 2,
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+  }
 }

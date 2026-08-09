@@ -1,0 +1,56 @@
+{
+  "run_id": "prod-us-20260809-final",
+  "completed_at": "2026-08-09T14:32:06.544480+00:00",
+  "endpoint": "https://api.superlinked.com",
+  "execution": "SIE API",
+  "models": {
+    "detection": "IDEA-Research/grounding-dino-base",
+    "ocr": "lightonai/LightOnOCR-2-1B"
+  },
+  "checksum_scope": "source input plus every generated evidence file except this manifest",
+  "source_input": {
+    "path": "assets/042-pharmacy-oos-sign.jpg",
+    "sha256": "a8654b3a7c2be143fb788f91aeef0c09b23feaee0984151eefed95f6c7a96f63"
+  },
+  "outputs": [
+    {
+      "path": "crops/candidate-1.jpg",
+      "sha256": "3320b8db154525f4ffb20842d60935eb432063a14411f5088f500d089bff9047"
+    },
+    {
+      "path": "crops/candidate-2.jpg",
+      "sha256": "8c46a297dbe38c474ec227dde16d8d4a3e9c38abbbfe454f46749d5160cc8e92"
+    },
+    {
+      "path": "evaluation.json",
+      "sha256": "8fc0edcd9b3208e4c342d302f69fffb2ba212d12486ed2e602adbe4447d9218f"
+    },
+    {
+      "path": "evidence.json",
+      "sha256": "b96272e94557252fe69a2ae7e5ea8358607a80344a6fb8127a1fa2b9ea723e00"
+    },
+    {
+      "path": "raw/grounding-dino.json",
+      "sha256": "30ae2be41a931c518f3c7d79138219e09de2a0e75288e5241e3c52878e04de4b"
+    },
+    {
+      "path": "raw/lighton-ocr-candidate-1.json",
+      "sha256": "ddae558b16b9af3a8cc5c8d65355f5fd7aacfe107dbc0fa8c40fcaaf5dfa73e8"
+    },
+    {
+      "path": "raw/lighton-ocr-candidate-2.json",
+      "sha256": "8fd35b167d912e74aef2d7fdbb27131267f3ccb6b145adc9a6dfa3fd3653825f"
+    },
+    {
+      "path": "selection.json",
+      "sha256": "f92620fee047212041145710bfc388eb289ed9cd9cd4209b4045e609c1a2d01a"
+    }
+  ],
+  "timing_ms": {
+    "grounding_dino": 3172.0,
+    "lighton_ocr_candidates": {
+      "candidate-1": 752.0,
+      "candidate-2": 809.1
+    }
+  }
+}

@@ -1,0 +1,300 @@
+{
+  "entities": [],
+  "relations": [],
+  "classifications": [],
+  "objects": [
+    {
+      "label": "price tag",
+      "score": 0.38358360528945923,
+      "bbox": [
+        1259,
+        1094,
+        431,
+        517
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.38885006308555603,
+      "bbox": [
+        2298,
+        1104,
+        438,
+        520
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.3944924771785736,
+      "bbox": [
+        1725,
+        1100,
+        434,
+        515
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.3141557276248932,
+      "bbox": [
+        2193,
+        1,
+        451,
+        341
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.31048527359962463,
+      "bbox": [
+        1708,
+        0,
+        447,
+        331
+      ]
+    },
+    {
+      "label": "out of stock sign price tag",
+      "score": 0.3453260362148285,
+      "bbox": [
+        3193,
+        1105,
+        445,
+        519
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.274545818567276,
+      "bbox": [
+        1497,
+        2558,
+        335,
+        180
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.25109636783599854,
+      "bbox": [
+        2235,
+        2559,
+        398,
+        186
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.2366926223039627,
+      "bbox": [
+        2237,
+        2561,
+        335,
+        181
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.2755194306373596,
+      "bbox": [
+        784,
+        2559,
+        349,
+        174
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.2496301382780075,
+      "bbox": [
+        2,
+        2556,
+        312,
+        178
+      ]
+    },
+    {
+      "label": "empty shelf space",
+      "score": 0.26435837149620056,
+      "bbox": [
+        2043,
+        2137,
+        623,
+        403
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.23005375266075134,
+      "bbox": [
+        2300,
+        2318,
+        335,
+        244
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.2465333193540573,
+      "bbox": [
+        2864,
+        2572,
+        338,
+        177
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.2568320035934448,
+      "bbox": [
+        3329,
+        0,
+        446,
+        336
+      ]
+    },
+    {
+      "label": "price",
+      "score": 0.2030746340751648,
+      "bbox": [
+        3723,
+        1107,
+        306,
+        194
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.21502088010311127,
+      "bbox": [
+        924,
+        378,
+        395,
+        708
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.2267836332321167,
+      "bbox": [
+        1723,
+        1753,
+        321,
+        773
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.21617697179317474,
+      "bbox": [
+        1099,
+        2772,
+        404,
+        245
+      ]
+    },
+    {
+      "label": "price",
+      "score": 0.21354113519191742,
+      "bbox": [
+        1,
+        1090,
+        654,
+        183
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.22988080978393555,
+      "bbox": [
+        3488,
+        2578,
+        340,
+        183
+      ]
+    },
+    {
+      "label": "empty shelf space",
+      "score": 0.2067338526248932,
+      "bbox": [
+        4,
+        1087,
+        1267,
+        204
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.2223622351884842,
+      "bbox": [
+        1403,
+        1745,
+        325,
+        776
+      ]
+    },
+    {
+      "label": "empty shelf space",
+      "score": 0.2420264333486557,
+      "bbox": [
+        7,
+        2554,
+        4019,
+        207
+      ]
+    },
+    {
+      "label": "price",
+      "score": 0.21060390770435333,
+      "bbox": [
+        1328,
+        433,
+        359,
+        653
+      ]
+    },
+    {
+      "label": "price tag",
+      "score": 0.2233770787715912,
+      "bbox": [
+        3768,
+        0,
+        261,
+        332
+      ]
+    },
+    {
+      "label": "empty shelf space",
+      "score": 0.21700547635555267,
+      "bbox": [
+        4,
+        1269,
+        1265,
+        314
+      ]
+    },
+    {
+      "label": "empty shelf space",
+      "score": 0.2639787197113037,
+      "bbox": [
+        0,
+        1090,
+        4031,
+        213
+      ]
+    }
+  ],
+  "id": "hitl-042",
+  "model": "IDEA-Research/grounding-dino-base",
+  "request": {
+    "id": "019fe6f0-18bd-70c0-a90d-f312371e212d",
+    "credits_debited": 31,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "usage": {
+      "images": 1,
+      "credits_charged": 31,
+      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    },
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+  }
+}

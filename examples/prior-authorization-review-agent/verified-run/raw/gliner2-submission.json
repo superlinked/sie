@@ -53,5 +53,13 @@
   "classifications": [],
   "objects": [],
   "id": "cms-l1851-submission",
-  "model": "fastino/gliner2-large-v1"
+  "model": "fastino/gliner2-large-v1",
+  "request": {
+    "id": "019fe6f0-ea78-7e81-9953-4792eb6795db",
+    "usage": {
+      "input_tokens": 112
+    },
+    "credits_debited": 3,
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+  }
 }

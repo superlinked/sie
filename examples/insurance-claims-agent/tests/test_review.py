@@ -67,13 +67,10 @@ def test_claim_fact_extraction_passes_domain_labels() -> None:
     )
 
     assert client.labels == [
-        "proof of loss amount",
+        "amended proof of loss total",
         "debris removal estimate",
         "barge transportation estimate",
         "debris volume",
-        "date of loss",
-        "covered debris removal scope",
-        "excluded debris cost",
     ]
 
 

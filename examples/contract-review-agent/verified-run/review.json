@@ -1,0 +1,23 @@
+{
+  "document_type": "Distributor Agreement / MSA",
+  "parties": [
+    "Electric City Corp. (Delaware corporation)",
+    "Electric City of Illinois LLC"
+  ],
+  "effective_date": "1999-09-07",
+  "renewal_terms": "Initial term of 10 years, renewable annually for up to another 10 years on the same terms and conditions",
+  "governing_law": "unknown",
+  "executed": false,
+  "key_obligations": [
+    "Send renewal or non-renewal notice to LIMEENERGYCO before the term end"
+  ],
+  "risk_flags": [
+    {
+      "clause": "Automatic Renewal & Term Extension",
+      "issue": "Agreement allows automatic annual renewals for up to ten additional years without explicit customer consent or right to terminate early, creating a long-term commitment with no clear exit strategy.",
+      "severity": "High",
+      "suggested_redline": "Add a clause allowing the Distributor to terminate the Agreement upon 90 days' written notice at any time during the Term."
+    }
+  ],
+  "recommendation": "Do not execute in current form due to high risk from automatic renewals for up to ten additional years without a clear exit strategy. Add a termination clause allowing the Distributor to terminate with 90 days' written notice at any time during the Term."
+}

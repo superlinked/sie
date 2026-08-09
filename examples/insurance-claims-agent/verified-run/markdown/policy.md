@@ -479,7 +479,7 @@ policy term, and follow the procedure in VII.D.3.a above.
 
 We are not liable for loss that occurs while there is a hazard that is increased by any means within your control or knowledge.
 
-- G. Requirements in Case of Loss
+G. Requirements in Case of Loss
 
 In  case  of  a  flood  loss  to  insured property, you must:
 

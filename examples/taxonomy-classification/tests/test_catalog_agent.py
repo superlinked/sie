@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import hashlib
 import io
+import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +21,8 @@ from taxonomy_classification.catalog_agent import (
     verify_candidates,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def listing(*, reference: str) -> CatalogListing:
     return CatalogListing(
@@ -32,6 +35,22 @@ def listing(*, reference: str) -> CatalogListing:
         candidate_paths=["A > One", "A > Two", "B > Three", "A > Four"],
         ground_truth_path=reference,
     )
+
+
+def api_calls(row_idx: int) -> list[dict[str, object]]:
+    return [
+        {
+            "stage": stage,
+            "requested_model": model,
+            "runtime_model": model,
+            "request_id": f"{stage}-{row_idx}",
+            "timing_ms": 1.0,
+            "credits_debited": 1,
+            "rate_book_version": "rate-book-v1",
+            "execution_identity_sha256": "a" * 64,
+        }
+        for stage, model in catalog_agent.EXPECTED_API_CALL_MODELS.items()
+    ]
 
 
 def test_candidate_union_preserves_image_ranking_then_adds_text_candidates() -> None:
@@ -111,10 +130,16 @@ def test_classify_listing_runs_two_rankings_then_verifies_the_union() -> None:
                 else [0.3, 0.95, 0.4, 0.1]
             )
             return {
+                "model": catalog_agent.RERANKER_MODEL,
+                "request": {
+                    "id": f"score-{len(self.score_calls)}",
+                    "rate_book_version": "rate-book-v1",
+                    "execution_identity_sha256": "a" * 64,
+                },
                 "scores": [
                     {"item_id": str(index), "score": score}
                     for index, score in enumerate(scores)
-                ]
+                ],
             }
 
         def generate(
@@ -127,8 +152,13 @@ def test_classify_listing_runs_two_rankings_then_verifies_the_union() -> None:
                 {"model": model, "prompt": prompt, "kwargs": kwargs}
             )
             return {
+                "model": catalog_agent.VERIFIER_MODEL,
                 "text": '{"selected_index": 0, "needs_review": false}',
-                "request": {"id": "generate-54"},
+                "request": {
+                    "id": "generate-54",
+                    "rate_book_version": "rate-book-v1",
+                    "execution_identity_sha256": "b" * 64,
+                },
             }
 
     client = FakeClient()
@@ -158,6 +188,11 @@ def test_classify_listing_runs_two_rankings_then_verifies_the_union() -> None:
     )
     assert decision.needs_review is False
     assert decision.verifier_response_id == "generate-54"
+    assert [call["request_id"] for call in decision.api_calls] == [
+        "score-1",
+        "score-2",
+        "generate-54",
+    ]
 
 
 def test_verify_candidates_rejects_an_empty_union() -> None:
@@ -165,6 +200,33 @@ def test_verify_candidates_rejects_an_empty_union() -> None:
 
     with pytest.raises(ValueError, match="No candidate paths supplied for row 7"):
         verify_candidates(object(), source, [])  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "match"),
+    [
+        ("rate_book_version", "no rate-book version"),
+        ("execution_identity_sha256", "no execution identity"),
+    ],
+)
+def test_api_call_record_requires_complete_request_provenance(
+    missing_field: str,
+    match: str,
+) -> None:
+    request = {
+        "id": "request-1",
+        "rate_book_version": "rate-book-v1",
+        "execution_identity_sha256": "a" * 64,
+    }
+    del request[missing_field]
+
+    with pytest.raises(ValueError, match=match):
+        catalog_agent._api_call_record(
+            stage="copy_rerank",
+            requested_model=catalog_agent.RERANKER_MODEL,
+            response={"model": catalog_agent.RERANKER_MODEL, "request": request},
+            timing_ms=1,
+        )
 
 
 @pytest.mark.parametrize(
@@ -242,9 +304,10 @@ def test_eval_resumes_completed_rows_from_its_checkpoint(
         selected_path="A > One",
         needs_review=False,
         candidate_union=["A > One"],
-        text_scores=[1.0],
-        image_plus_copy_scores=[1.0],
-        verifier_response_id="generate-7",
+        text_scores=[1.0, 0.0, 0.0, 0.0],
+        image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
+        verifier_response_id="candidate_verification-7",
+        api_calls=api_calls(7),
     )
     output_path = tmp_path / "evaluation.json"
     checkpoint = catalog_agent._evaluation_output(
@@ -260,9 +323,10 @@ def test_eval_resumes_completed_rows_from_its_checkpoint(
             selected_path="A > Two",
             needs_review=False,
             candidate_union=["A > Two"],
-            text_scores=[1.0],
-            image_plus_copy_scores=[1.0],
-            verifier_response_id="generate-8",
+            text_scores=[0.0, 1.0, 0.0, 0.0],
+            image_plus_copy_scores=[0.0, 1.0, 0.0, 0.0],
+            verifier_response_id="candidate_verification-8",
+            api_calls=api_calls(8),
         )
 
     @contextmanager
@@ -292,6 +356,110 @@ def test_eval_resumes_completed_rows_from_its_checkpoint(
     assert classified_rows == [8]
     saved = json.loads(output_path.read_text())
     assert [result["row_idx"] for result in saved["results"]] == [7, 8]
+    assert saved["run_command"] == (
+        "eval-catalog-agent --offset 7 --limit 2 "
+        f"--cache-dir .cache/catalog-agent --output {output_path}"
+    )
+
+
+@pytest.mark.parametrize("changed_field", ["image_sha256", "candidate_paths"])
+def test_checkpoint_rejects_changed_listing_source(
+    tmp_path: Path,
+    changed_field: str,
+) -> None:
+    source = listing(reference="A > One")
+    decision = CatalogDecision(
+        row_idx=7,
+        selected_path="A > One",
+        needs_review=False,
+        candidate_union=["A > One"],
+        text_scores=[1.0, 0.0, 0.0, 0.0],
+        image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
+        verifier_response_id="generate-7",
+        api_calls=api_calls(7),
+    )
+    output_path = tmp_path / "evaluation.json"
+    catalog_agent._write_evaluation_output(
+        output_path,
+        catalog_agent._evaluation_output([source], {7: decision}, offset=7),
+    )
+    replacement = "changed" if changed_field == "image_sha256" else ["B > Changed"]
+    changed = CatalogListing(
+        **{
+            **source.__dict__,
+            changed_field: replacement,
+        }
+    )
+
+    with pytest.raises(ValueError, match="source changed for row 7"):
+        catalog_agent._load_checkpoint(output_path, [changed], offset=7)
+
+
+def test_checkpoint_rejects_incomplete_api_call_provenance(tmp_path: Path) -> None:
+    source = listing(reference="A > One")
+    decision = CatalogDecision(
+        row_idx=7,
+        selected_path="A > One",
+        needs_review=False,
+        candidate_union=["A > One"],
+        text_scores=[1.0, 0.0, 0.0, 0.0],
+        image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
+        verifier_response_id="candidate_verification-7",
+        api_calls=api_calls(7),
+    )
+    output_path = tmp_path / "evaluation.json"
+    checkpoint = catalog_agent._evaluation_output([source], {7: decision}, offset=7)
+    checkpoint["results"][0]["api_calls"][0]["rate_book_version"] = None
+    catalog_agent._write_evaluation_output(output_path, checkpoint)
+
+    with pytest.raises(ValueError, match="has no rate book version"):
+        catalog_agent._load_checkpoint(output_path, [source], offset=7)
+
+
+def test_evaluation_rejects_duplicate_request_ids() -> None:
+    sources = [
+        listing(reference="A > One"),
+        CatalogListing(
+            **{
+                **listing(reference="A > Two").__dict__,
+                "row_idx": 8,
+            }
+        ),
+    ]
+    first_calls = api_calls(7)
+    second_calls = api_calls(8)
+    second_calls[0]["request_id"] = first_calls[0]["request_id"]
+    decisions = {
+        source.row_idx: CatalogDecision(
+            row_idx=source.row_idx,
+            selected_path=source.ground_truth_path or "A > One",
+            needs_review=False,
+            candidate_union=[source.ground_truth_path or "A > One"],
+            text_scores=[1.0, 0.0, 0.0, 0.0],
+            image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
+            verifier_response_id=f"candidate_verification-{source.row_idx}",
+            api_calls=calls,
+        )
+        for source, calls in zip(sources, (first_calls, second_calls), strict=True)
+    }
+
+    with pytest.raises(ValueError, match="duplicate SIE request IDs"):
+        catalog_agent._evaluation_output(sources, decisions, offset=7)
+
+
+def test_verified_summary_pins_the_exact_evaluation_invocation() -> None:
+    evaluation_path = ROOT / "verified-run" / "evaluation.json"
+    summary = json.loads(
+        (ROOT / "results" / "catalog-agent-summary.json").read_text(encoding="utf-8")
+    )
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+
+    assert summary["run_command"] == evaluation["run_command"]
+    assert summary["evaluation"] == {
+        "path": "verified-run/evaluation.json",
+        "sha256": hashlib.sha256(evaluation_path.read_bytes()).hexdigest(),
+    }
+    assert all(result["source"].get("row_sha256") for result in evaluation["results"])
 
 
 def test_predict_honors_the_requested_limit(monkeypatch: pytest.MonkeyPatch) -> None:

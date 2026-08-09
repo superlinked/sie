@@ -25,7 +25,7 @@ models:
   ocr: "lightonai/LightOnOCR-2-1B"                   # scanned PDF / image -> markdown (latest OCR model)
   embed: "BAAI/bge-m3"                               # dense embeddings for clause search
   rerank: "Qwen/Qwen3-Reranker-4B"                   # cross-encoder rerank of retrieved clauses
-  entities: "urchade/gliner_multi-v2.1"              # zero-shot entity extraction (parties, dates, amounts)
+  entities: "fastino/gliner2-large-v1"               # zero-shot entity extraction (parties, dates, amounts)
 
 # Tunables for the SIE-backed tools.
 search:

@@ -85,9 +85,7 @@ runs/<run-id>/review.json                      validated reproduction of the CMS
 runs/<run-id>/evaluation.json                  source, arithmetic, and boundary checks
 ```
 
-The manifest records `SIE_SERVER_COMMIT` and `SIE_RUN_COMMAND` when they are
-present in the environment. Recorded latency includes model provisioning and is
-not a performance claim.
+Recorded latency includes model provisioning and is not a performance claim.
 The verified manifest preserves the upstream-style Docling name configured
 during acquisition and the canonical `docling` ID that SIE actually served.
 New runs use the canonical ID directly.

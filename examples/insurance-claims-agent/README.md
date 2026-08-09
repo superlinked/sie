@@ -34,8 +34,8 @@ The evaluator checks facts stated in FEMA's published decision:
 
 The model summarizes a completed public appeal. It does not decide a live claim.
 
-The [`verified-run`](verified-run/) directory records a July 26, 2026, run in
-which all ten factual checks passed.
+The [`verified-run`](verified-run/) directory records an August 9, 2026, prod-US
+run in which all ten factual checks passed.
 
 ## Run it
 
@@ -84,7 +84,7 @@ runs/<run-id>/manifest.json           endpoints, models, and per-call latency
 runs/<run-id>/source-manifest.json    source URLs, rights, sizes, and checksums
 runs/<run-id>/default-stage.json      default-bundle endpoint, models, and timings
 runs/<run-id>/markdown/*.md           parsed appeal decision and policy
-runs/<run-id>/claim-facts.json        extracted amounts, dates, and scope phrases
+runs/<run-id>/claim-facts.json        extracted claim amounts and debris volume
 runs/<run-id>/policy-evidence.json    reranked policy passages
 runs/<run-id>/review.json             structured appeal review
 runs/<run-id>/evaluation.json         deterministic factual checks

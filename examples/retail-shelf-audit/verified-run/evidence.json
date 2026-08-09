@@ -1,0 +1,31 @@
+{
+  "gap_detection": {
+    "label": "empty shelf space",
+    "score": 0.264358,
+    "bbox_xywh": [
+      2043.0,
+      2137.0,
+      623.0,
+      403.0
+    ]
+  },
+  "price_detection": {
+    "label": "price tag",
+    "score": 0.251096,
+    "bbox_xywh": [
+      2235.0,
+      2559.0,
+      398.0,
+      186.0
+    ]
+  },
+  "ocr_fragments": [
+    "Panadol Child",
+    "5-12Yrs Elixir 100ml",
+    "101760",
+    "10\u2079\u2079",
+    "I am temporarily",
+    "out-of-stock",
+    "from our supplier"
+  ]
+}

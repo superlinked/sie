@@ -1,8 +1,6 @@
 {
-  "created_at": "2026-07-25T02:35:39.667778+00:00",
-  "endpoint": "http://127.0.0.1:8080",
-  "sie_server_commit": "4b5ea9ccd5d5fc07c56edfea790080b05e17f0d2",
-  "run_command": "Modal exact-source reference examples against public SIE main at 4b5ea9c",
+  "created_at": "2026-08-09T14:32:56.617431+00:00",
+  "endpoint": "https://api.superlinked.com",
   "models": {
     "parse": "docling-project/docling",
     "retrieve": "BAAI/bge-m3",
@@ -25,27 +23,27 @@
     },
     {
       "path": "raw/entities-case-0.json",
-      "sha256": "7cc13bed69de37886d91ab709db0eb09213450bb1d177014e0a503024cfd01ff"
+      "sha256": "e801cc4c8ea5c5a5b7d284d4e58ae9997fca65eb9fc9158e3c6ae38c0a415dcc"
     },
     {
       "path": "raw/entities-case-1.json",
-      "sha256": "842d45572b3a3e2bd84e9f60eb75c5c7227725d8d58de993ab03db37b82f8d9a"
+      "sha256": "90d114c08aef2e6f1894f94f77ab543146f0680f20746aa3d8c35a00b50510a7"
     },
     {
       "path": "raw/entities-case-2.json",
-      "sha256": "9df72fcaacc8c68f9eed13f58982eb42a044073122cdd8dcb30400500cb9982e"
+      "sha256": "521258555e54e7e4ea30a9cfb91562c43ce590a670a61a2006fc34f353fa11bd"
     },
     {
       "path": "raw/entities-case-3.json",
-      "sha256": "f06147d7c35393adf4dff19b2600488334768120f98d72ed4d16b6f2e25cd9a9"
+      "sha256": "b440df43373fa4c88b2a6b8575abf0cf8f31c925523e9a638e4a47c10ec5f5af"
     },
     {
       "path": "raw/entities-case-4.json",
-      "sha256": "d97c6eac7c79d1fa503b09d6bce5204308de232d31176bd206c928711565dc44"
+      "sha256": "209eca9801d8dd8de2ba4ff746feabde8447b6095c68006382b4182571896dc6"
     },
     {
       "path": "raw/entities-requirement-0.json",
-      "sha256": "0c4ba08af8b389a288b44621514d81c0eb858070ee65a7a8c23a71a884f7a1b2"
+      "sha256": "675762bbed0256f4f51e23b5d8c04ef003b6c92f41e4c68331e73b3cccc94700"
     },
     {
       "path": "raw/entities.json",
@@ -53,15 +51,15 @@
     },
     {
       "path": "raw/gliner2-outcome.json",
-      "sha256": "c9ec5d4ff68870786a01c63c06146881433e2f3c62a952e4d013d27655e5003f"
+      "sha256": "9044ce49f6a4027f20645e145ae2dbc8f10b426344669d90acfc2a1aff5919e2"
     },
     {
       "path": "raw/gliner2-requirements.json",
-      "sha256": "809de1f98b358d9b6a6d094ef6e9754b32bfa28d94a8d7c2ae3312368754d3f2"
+      "sha256": "566961a632fa15d3a874c8c4e233cb922c620300b9c68d926ed6d80431f8f979"
     },
     {
       "path": "raw/gliner2-submission.json",
-      "sha256": "16ffc2a78032eaa3df46f105d8eb9156f471865b85a5133df9e89e5a97ed5008"
+      "sha256": "2fb04049e605327dd8017ffada66ab6957658aeec77be385d8c03d555cf09a73"
     },
     {
       "path": "raw/mapped.json",
@@ -69,15 +67,15 @@
     },
     {
       "path": "raw/parse.json",
-      "sha256": "9fc49a18e11c8ad7bfbff26dbafbdeee4dfa09901d8986c0655121c6e8fb315f"
+      "sha256": "0809705093090498631c538826b2f60af2d1741178bd10511bca9e8d958effe2"
     },
     {
       "path": "raw/rerank.json",
-      "sha256": "515be530e03bd31a476cfcbcf48bd2bc8625931d301997d501d3e4347236849c"
+      "sha256": "b7971143fdb5a3f59986e6a58b9af3f4c06ff5797eaed699de30062e9c225d2f"
     },
     {
       "path": "raw/retrieve.json",
-      "sha256": "50ee8a23ae7e74cf9ad49c81729191b4264652b89f254f00db4524e1f18a9cbd"
+      "sha256": "ea547cdd41cdbfd0d2bc8b3b5c43c9e71c9813c95ec77fc31f5f2ee4b8b5cfd7"
     },
     {
       "path": "review.json",
@@ -94,53 +92,53 @@
     {
       "stage": "parse",
       "model": "docling",
-      "configured_model": "docling-project/docling",
-      "latency_ms": 35066.1
+      "configured_model": "docling",
+      "latency_ms": 3057.1
     },
     {
       "stage": "retrieve",
       "model": "BAAI/bge-m3",
-      "latency_ms": 6515.2
+      "latency_ms": 2296.7
     },
     {
       "stage": "rerank",
       "model": "Qwen/Qwen3-Reranker-4B",
-      "latency_ms": 10605.6
+      "latency_ms": 454.9
     },
     {
       "stage": "entities_requirement_0",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 11180.6
+      "latency_ms": 223.6
     },
     {
       "stage": "entities_case_0",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 168.2
+      "latency_ms": 223.6
     },
     {
       "stage": "entities_case_1",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 109.9
+      "latency_ms": 227.5
     },
     {
       "stage": "entities_case_2",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 376.7
+      "latency_ms": 220.0
     },
     {
       "stage": "entities_case_3",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 27.3
+      "latency_ms": 230.3
     },
     {
       "stage": "entities_case_4",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 29.5
+      "latency_ms": 213.9
     },
     {
       "stage": "gliner2_requirements",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 10098.2,
+      "latency_ms": 256.5,
       "source_chunk_ids": [
         "chunk-2"
       ],
@@ -155,7 +153,7 @@
     {
       "stage": "gliner2_submission",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 56.4,
+      "latency_ms": 238.2,
       "source_chunk_ids": [
         "chunk-4",
         "chunk-5",
@@ -174,7 +172,7 @@
     {
       "stage": "gliner2_outcome",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 49.6,
+      "latency_ms": 264.4,
       "source_chunk_ids": [
         "chunk-9",
         "chunk-10"
@@ -191,7 +189,7 @@
     "parse",
     "retrieve",
     "rerank",
-    "entities_requirements",
+    "entities_requirement",
     "entities_case",
     "gliner2_requirements",
     "gliner2_submission",

@@ -1,0 +1,14 @@
+{
+  "endpoint": "https://api.superlinked.com",
+  "models": {
+    "parse": "docling",
+    "extract": "fastino/gliner2-large-v1",
+    "rerank": "Qwen/Qwen3-Reranker-4B"
+  },
+  "timings_ms": {
+    "parse_appeal_decision_ms": 6617.2,
+    "parse_policy_ms": 7106.0,
+    "extract_claim_facts_ms": 259.4,
+    "rerank_policy_ms": 7052.0
+  }
+}

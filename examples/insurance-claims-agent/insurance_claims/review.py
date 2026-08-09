@@ -247,18 +247,20 @@ def _extract_claim_facts(
     provision_timeout_s: float,
 ) -> tuple[dict[str, Any], float]:
     labels = [
-        "proof of loss amount",
+        "amended proof of loss total",
         "debris removal estimate",
         "barge transportation estimate",
         "debris volume",
-        "date of loss",
-        "covered debris removal scope",
-        "excluded debris cost",
     ]
+    event_start = markdown.find("The insurer reviewed")
+    issue_start = markdown.find("## ISSUE", event_start)
+    claim_excerpt = (
+        markdown[event_start:issue_start] if event_start >= 0 and issue_start > event_start else markdown[:4000]
+    )
     started = time.perf_counter()
     result = client.extract(
         model,
-        Item(id="appeal-facts", text=markdown[:12000]),
+        Item(id="appeal-facts", text=claim_excerpt),
         labels=labels,
         wait_for_capacity=True,
         provision_timeout_s=provision_timeout_s,
@@ -299,6 +301,10 @@ physical work FEMA directed the insurer to cover from transport, handling,
 disposal, yard work, and other costs outside that scope. Preserve the three
 published dollar amounts and the debris-volume range exactly. Record the
 additional price evidence and prior-claim checks FEMA requested.
+
+Actions must preserve the published partial-coverage result: direct payment for
+covered under-building removal and deny only excluded transport, disposal, and
+yard-work components. Never recommend denial of the entire debris-removal claim.
 
 This is a summary of a completed public appeal. Do not make a new coverage or
 payment decision. Cite only the source identifiers allowed by the schema.

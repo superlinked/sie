@@ -1,0 +1,61 @@
+{
+  "strategy": "non-strip gap, nearby price-tag candidates, vertically aligned upper/lower pair",
+  "gap_detection": {
+    "label": "empty shelf space",
+    "score": 0.264358,
+    "bbox_xywh": [
+      2043.0,
+      2137.0,
+      623.0,
+      403.0
+    ]
+  },
+  "upper_candidate_role": "notice",
+  "upper_candidate_id": "candidate-1",
+  "lower_candidate_role": "shelf_label",
+  "lower_candidate_id": "candidate-2",
+  "candidates": [
+    {
+      "candidate_id": "candidate-1",
+      "source_detection": {
+        "label": "price tag",
+        "score": 0.230054,
+        "bbox_xywh": [
+          2300.0,
+          2318.0,
+          335.0,
+          244.0
+        ]
+      },
+      "source_crop_xyxy": [
+        2233,
+        2257,
+        2702,
+        2623
+      ],
+      "display_scale": 3,
+      "ocr_text": "I am temporarily  \nout-of-stock  \nfrom our supplier  \n\nPlease ask our friendly staff  \nfor a substitute.  \n\nPamela O'Neil"
+    },
+    {
+      "candidate_id": "candidate-2",
+      "source_detection": {
+        "label": "price tag",
+        "score": 0.251096,
+        "bbox_xywh": [
+          2235.0,
+          2559.0,
+          398.0,
+          186.0
+        ]
+      },
+      "source_crop_xyxy": [
+        2155,
+        2512,
+        2713,
+        2792
+      ],
+      "display_scale": 3,
+      "ocr_text": "Please ask our friendly staff\n\nPanadol Child  \n5-12Yrs Elixir 100ml  \n101760  \n10\u2079\u2079  \n1 MONTHS  \n10-2 YEARS  \nr care."
+    }
+  ]
+}

@@ -114,10 +114,20 @@ def _called_tools(input_items: str | list[TResponseInputItem]) -> list[dict[str,
     ]
 
 
-def _next_required_tool(
+def _required_text_argument(arguments: Any) -> str | None:
+    if not isinstance(arguments, dict):
+        return None
+    for name in ("query", "question"):
+        value = arguments.get(name)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _next_required_step(
     required_sequence: tuple[RequiredToolStep, ...],
     input_items: str | list[TResponseInputItem],
-) -> str | None:
+) -> RequiredToolStep | None:
     progress = 0
     for call in _called_tools(input_items):
         if progress >= len(required_sequence):
@@ -135,14 +145,22 @@ def _next_required_tool(
                 )
             except json.JSONDecodeError:
                 continue
-            query = arguments.get("query") if isinstance(arguments, dict) else None
+            query = _required_text_argument(arguments)
             if (
                 not isinstance(query, str)
                 or query.strip().casefold() != required_query.casefold()
             ):
                 continue
         progress += 1
-    return required_sequence[progress][0] if progress < len(required_sequence) else None
+    return required_sequence[progress] if progress < len(required_sequence) else None
+
+
+def _next_required_tool(
+    required_sequence: tuple[RequiredToolStep, ...],
+    input_items: str | list[TResponseInputItem],
+) -> str | None:
+    step = _next_required_step(required_sequence, input_items)
+    return step[0] if step is not None else None
 
 
 def _function_tools(tools: list[Tool]) -> list[FunctionTool]:
@@ -350,11 +368,13 @@ class SIENativeModel(Model):
         *,
         provision_timeout_s: float,
         required_tool_sequence: tuple[RequiredToolStep, ...] = (),
+        api_calls: list[dict[str, Any]] | None = None,
     ) -> None:
         self.model = model
         self._client = client
         self._provision_timeout_s = provision_timeout_s
         self._required_tool_sequence = required_tool_sequence
+        self._api_calls = api_calls
 
     async def get_response(
         self,
@@ -384,7 +404,8 @@ class SIENativeModel(Model):
             _function_tools(tools),
             model_settings,
         )
-        required_tool = _next_required_tool(self._required_tool_sequence, input)
+        required_step = _next_required_step(self._required_tool_sequence, input)
+        required_tool = required_step[0] if required_step is not None else None
         if required_tool is not None:
             selected_tools = [
                 tool for tool in selected_tools if tool.name == required_tool
@@ -393,7 +414,45 @@ class SIENativeModel(Model):
                 raise ModelBehaviorError(
                     f"Required tool is unavailable: {required_tool}"
                 )
-            allow_final = False
+            tool = selected_tools[0]
+            arguments: dict[str, Any] = {}
+            required_text = required_step[1]
+            if required_text is not None:
+                properties = tool.params_json_schema.get("properties")
+                if not isinstance(properties, dict):
+                    raise ModelBehaviorError(
+                        f"Required tool has no arguments: {required_tool}"
+                    )
+                argument_name = next(
+                    (
+                        name
+                        for name in ("query", "question")
+                        if isinstance(properties.get(name), dict)
+                    ),
+                    None,
+                )
+                if argument_name is None:
+                    raise ModelBehaviorError(
+                        f"Required tool cannot bind text argument: {required_tool}"
+                    )
+                arguments[argument_name] = required_text
+            call_id = f"sie-call-{uuid4().hex}"
+            return ModelResponse(
+                output=[
+                    ResponseFunctionToolCall(
+                        id=call_id,
+                        call_id=call_id,
+                        arguments=json.dumps(
+                            arguments, ensure_ascii=False, separators=(",", ":")
+                        ),
+                        name=required_tool,
+                        type="function_call",
+                    )
+                ],
+                usage=Usage(requests=0),
+                response_id=None,
+                request_id=None,
+            )
         schema = _turn_schema(selected_tools, output_schema, allow_final=allow_final)
         result = await self._client.generate(
             self.model,
@@ -416,6 +475,30 @@ class SIENativeModel(Model):
             wait_for_capacity=True,
             provision_timeout_s=self._provision_timeout_s,
         )
+        if self._api_calls is not None:
+            request = result.get("request")
+            request_row = request if isinstance(request, dict) else {}
+            self._api_calls.append(
+                {
+                    "function": "generate",
+                    "requested_model": self.model,
+                    "runtime_model": (
+                        result.get("model")
+                        if isinstance(result.get("model"), str)
+                        else None
+                    ),
+                    "request_id": (
+                        request_row.get("id")
+                        if isinstance(request_row.get("id"), str)
+                        else None
+                    ),
+                    "rate_book_version": request_row.get("rate_book_version"),
+                    "credits_debited": request_row.get("credits_debited"),
+                    "execution_identity_sha256": request_row.get(
+                        "execution_identity_sha256"
+                    ),
+                }
+            )
         text = result.get("text")
         if not isinstance(text, str):
             raise ModelBehaviorError("SIE native generate returned no text")

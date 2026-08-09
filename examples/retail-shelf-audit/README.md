@@ -13,7 +13,9 @@ uv sync --frozen
 uv run verify-retail-records
 ```
 
-The command verifies every checked-in checksum. It also rebuilds the selected evidence from the raw detector and OCR records, then compares the result with the reviewed case-042 fixture.
+The command verifies every checked-in checksum. It rebuilds both the pinned
+Modal-direct fixture and the August 9, 2026, prod-US evidence from raw detector
+and OCR responses, and verifies the production runtime model and request IDs.
 
 ## Rerun through an SIE API
 
@@ -31,7 +33,8 @@ The command writes these files to `runs/cloud-042/`:
 - `crops/`, containing the upper notice and lower shelf-label regions created from DINO boxes
 - `selection.json`, with every geometry decision and source coordinate
 - `evidence.json`, with the selected gap, shelf-label box, and OCR lines
-- `manifest.json`, with endpoint and request timing
+- `evaluation.json`, with the fail-closed geometry and OCR checks
+- `manifest.json`, with endpoint, model IDs, source hash, output hashes, and diagnostic timing
 
 It fails if DINO returns no usable gap, if two aligned text candidates cannot be found, or if OCR does not return three upper lines and four distinct lower lines.
 

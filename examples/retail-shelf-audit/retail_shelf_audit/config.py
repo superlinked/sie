@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = ROOT / "assets"
 RECORDED_DIR = ROOT / "recorded" / "modal-direct"
 RUNS_DIR = ROOT / "runs"
+VERIFIED_DIR = ROOT / "verified-run"
 
 SOURCE_IMAGE = ASSETS_DIR / "042-pharmacy-oos-sign.jpg"
 

@@ -53,5 +53,13 @@
   "classifications": [],
   "objects": [],
   "id": "ranked-ntsb-sebring-evidence",
-  "model": "fastino/gliner2-large-v1"
+  "model": "fastino/gliner2-large-v1",
+  "request": {
+    "id": "019fe6f1-09d2-7de1-84c6-b65ff133d918",
+    "usage": {
+      "input_tokens": 58
+    },
+    "credits_debited": 2,
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+  }
 }

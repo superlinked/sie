@@ -78,11 +78,9 @@ runs/<run-id>/review.json         source-versioned result and calculated delta
 runs/<run-id>/evaluation.json     deterministic checks
 ```
 
-`verified-run/` contains the saved evidence used to design the example. It is
-not a latency benchmark. The first request included model provisioning.
-Its manifest preserves the upstream-style Docling name configured during
-acquisition and the canonical `docling` ID that SIE actually served. New runs
-use the canonical ID directly.
+`verified-run/` contains the August 9, 2026, prod-US evidence. It is not a
+latency benchmark. Its manifest pins the endpoint, run date, model IDs, source
+hashes, diagnostic timings, and every artifact checksum.
 
 See [fixtures/SOURCES.md](fixtures/SOURCES.md) for accession numbers, URLs, and
 source checksums.

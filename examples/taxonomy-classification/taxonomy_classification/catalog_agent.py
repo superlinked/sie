@@ -4,8 +4,10 @@ import argparse
 import hashlib
 import io
 import json
+import shlex
 import tempfile
-from dataclasses import asdict, dataclass
+import time
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,7 @@ from urllib.request import Request, urlopen
 from PIL import Image
 from sie_sdk import SIEClient
 
-from taxonomy_classification.sie_client import create_sie_client
+from taxonomy_classification.sie_client import create_sie_client, read_sie_settings
 
 DATASET = "Shopify/product-catalogue"
 DATASET_REVISION = "d5c517c509f5aca99053897ef1de797d6d7e5aa5"
@@ -24,10 +26,22 @@ DATASET_SPLIT = "train"
 DATASET_ROWS_URL = "https://datasets-server.huggingface.co/rows"
 
 RERANKER_MODEL = "Qwen/Qwen3-VL-Reranker-2B"
+RERANKER_REVISION = "4bd860ac4f15ad1897a214615cccc700f8f71818"
 VERIFIER_MODEL = "Qwen/Qwen3.6-27B"
+VERIFIER_REVISION = "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
 PROVISION_TIMEOUT_S = 900.0
 DESCRIPTION_CHARS = 512
 TOP_K_PER_RANKING = 2
+EXPECTED_API_CALL_MODELS = {
+    "copy_rerank": RERANKER_MODEL,
+    "image_plus_copy_rerank": RERANKER_MODEL,
+    "candidate_verification": VERIFIER_MODEL,
+}
+REQUIRED_PROVENANCE_FIELDS = (
+    "request_id",
+    "rate_book_version",
+    "execution_identity_sha256",
+)
 
 RERANK_INSTRUCTION = (
     "Rank Shopify taxonomy paths by which path should categorize the product "
@@ -60,6 +74,82 @@ class CatalogDecision:
     text_scores: list[float]
     image_plus_copy_scores: list[float]
     verifier_response_id: str | None
+    api_calls: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _api_call_record(
+    *,
+    stage: str,
+    requested_model: str,
+    response: dict[str, Any],
+    timing_ms: float,
+) -> dict[str, Any]:
+    runtime_model = response.get("model")
+    if runtime_model != requested_model:
+        raise ValueError(
+            f"SIE {stage} runtime model {runtime_model!r} differs from "
+            f"requested model {requested_model!r}"
+        )
+    request = response.get("request")
+    request_row = request if isinstance(request, dict) else {}
+    request_id = request_row.get("id")
+    if not isinstance(request_id, str) or not request_id:
+        raise ValueError(f"SIE {stage} response has no request ID")
+    rate_book_version = request_row.get("rate_book_version")
+    if not isinstance(rate_book_version, str) or not rate_book_version:
+        raise ValueError(f"SIE {stage} response has no rate-book version")
+    execution_identity_sha256 = request_row.get("execution_identity_sha256")
+    if not isinstance(execution_identity_sha256, str) or not execution_identity_sha256:
+        raise ValueError(f"SIE {stage} response has no execution identity")
+    return {
+        "stage": stage,
+        "requested_model": requested_model,
+        "runtime_model": runtime_model,
+        "request_id": request_id,
+        "timing_ms": round(timing_ms, 1),
+        "credits_debited": request_row.get("credits_debited"),
+        "rate_book_version": rate_book_version,
+        "execution_identity_sha256": execution_identity_sha256,
+    }
+
+
+def _validate_api_calls(
+    api_calls: object,
+    *,
+    row_idx: int,
+) -> list[str]:
+    if not isinstance(api_calls, list) or len(api_calls) != len(
+        EXPECTED_API_CALL_MODELS
+    ):
+        raise ValueError(f"Row {row_idx} must record exactly three SIE API calls")
+    calls = [call for call in api_calls if isinstance(call, dict)]
+    if len(calls) != len(api_calls):
+        raise TypeError(f"Row {row_idx} has a non-object SIE API call")
+    stages = [call.get("stage") for call in calls]
+    if (
+        any(not isinstance(stage, str) for stage in stages)
+        or len(stages) != len(set(stages))
+        or set(stages) != set(EXPECTED_API_CALL_MODELS)
+    ):
+        raise ValueError(f"Row {row_idx} has incomplete or duplicate SIE API stages")
+    for call in calls:
+        stage = call["stage"]
+        expected_model = EXPECTED_API_CALL_MODELS[stage]
+        if (
+            call.get("requested_model") != expected_model
+            or call.get("runtime_model") != expected_model
+        ):
+            raise ValueError(f"Row {row_idx} has the wrong model for {stage}")
+        for field_name in REQUIRED_PROVENANCE_FIELDS:
+            value = call.get(field_name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"Row {row_idx} {stage} has no {field_name.replace('_', ' ')}"
+                )
+    request_ids = [call["request_id"] for call in calls]
+    if len(request_ids) != len(set(request_ids)):
+        raise ValueError(f"Row {row_idx} has duplicate SIE request IDs")
+    return request_ids
 
 
 def _download(url: str) -> bytes:
@@ -87,6 +177,21 @@ def listing_query(listing: CatalogListing) -> str:
     if description:
         query += f"\nProduct description: {description}"
     return query
+
+
+def listing_sha256(listing: CatalogListing) -> str:
+    payload = {
+        "row_idx": listing.row_idx,
+        "title": listing.title,
+        "description": listing.description,
+        "image_sha256": listing.image_sha256,
+        "image_format": listing.image_format,
+        "candidate_paths": listing.candidate_paths,
+        "ground_truth_path": listing.ground_truth_path,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
 
 
 def load_shopify_rows(
@@ -178,12 +283,13 @@ def candidate_union(
 def rerank_listing(
     client: SIEClient,
     listing: CatalogListing,
-) -> tuple[list[float], list[float]]:
+) -> tuple[list[float], list[float], list[dict[str, Any]]]:
     query = listing_query(listing)
     candidates = [
         {"id": str(index), "text": path}
         for index, path in enumerate(listing.candidate_paths)
     ]
+    started = time.perf_counter()
     text_result = client.score(
         RERANKER_MODEL,
         {"text": query},
@@ -192,6 +298,13 @@ def rerank_listing(
         wait_for_capacity=True,
         provision_timeout_s=PROVISION_TIMEOUT_S,
     )
+    text_call = _api_call_record(
+        stage="copy_rerank",
+        requested_model=RERANKER_MODEL,
+        response=text_result,
+        timing_ms=(time.perf_counter() - started) * 1000,
+    )
+    started = time.perf_counter()
     image_result = client.score(
         RERANKER_MODEL,
         {
@@ -208,9 +321,16 @@ def rerank_listing(
         wait_for_capacity=True,
         provision_timeout_s=PROVISION_TIMEOUT_S,
     )
+    image_call = _api_call_record(
+        stage="image_plus_copy_rerank",
+        requested_model=RERANKER_MODEL,
+        response=image_result,
+        timing_ms=(time.perf_counter() - started) * 1000,
+    )
     return (
         _scores_in_request_order(text_result, len(candidates)),
         _scores_in_request_order(image_result, len(candidates)),
+        [text_call, image_call],
     )
 
 
@@ -218,7 +338,7 @@ def verify_candidates(
     client: SIEClient,
     listing: CatalogListing,
     candidates: list[str],
-) -> tuple[int, bool, str | None]:
+) -> tuple[int, bool, dict[str, Any]]:
     if not candidates:
         raise ValueError(f"No candidate paths supplied for row {listing.row_idx}")
     candidate_lines = "\n".join(
@@ -242,6 +362,7 @@ def verify_candidates(
         "required": ["selected_index", "needs_review"],
         "additionalProperties": False,
     }
+    started = time.perf_counter()
     response = client.generate(
         VERIFIER_MODEL,
         f"{VERIFIER_SYSTEM_PROMPT}\n\n{user_text}",
@@ -270,22 +391,26 @@ def verify_candidates(
         0 <= selected_index < len(candidates)
     ):
         raise ValueError(f"Invalid selected_index: {selected_index!r}")
-    request = response.get("request")
-    response_id = request.get("id") if isinstance(request, dict) else None
-    return selected_index, bool(selection["needs_review"]), response_id
+    call = _api_call_record(
+        stage="candidate_verification",
+        requested_model=VERIFIER_MODEL,
+        response=response,
+        timing_ms=(time.perf_counter() - started) * 1000,
+    )
+    return selected_index, bool(selection["needs_review"]), call
 
 
 def classify_listing(
     client: SIEClient,
     listing: CatalogListing,
 ) -> CatalogDecision:
-    text_scores, image_plus_copy_scores = rerank_listing(client, listing)
+    text_scores, image_plus_copy_scores, rerank_calls = rerank_listing(client, listing)
     candidates = candidate_union(
         listing.candidate_paths,
         text_scores,
         image_plus_copy_scores,
     )
-    selected_index, needs_review, response_id = verify_candidates(
+    selected_index, needs_review, verifier_call = verify_candidates(
         client,
         listing,
         candidates,
@@ -297,7 +422,8 @@ def classify_listing(
         candidate_union=candidates,
         text_scores=text_scores,
         image_plus_copy_scores=image_plus_copy_scores,
-        verifier_response_id=response_id,
+        verifier_response_id=verifier_call["request_id"],
+        api_calls=[*rerank_calls, verifier_call],
     )
 
 
@@ -351,6 +477,28 @@ def evaluation_metrics(
     }
 
 
+def _ranking_metrics(
+    listings: list[CatalogListing],
+    decisions: list[CatalogDecision],
+    score_field: str,
+) -> dict[str, Any]:
+    ranked_decisions = [
+        CatalogDecision(
+            **{
+                **asdict(decision),
+                "selected_path": listing.candidate_paths[
+                    max(
+                        range(len(listing.candidate_paths)),
+                        key=lambda index: getattr(decision, score_field)[index],
+                    )
+                ],
+            }
+        )
+        for listing, decision in zip(listings, decisions, strict=True)
+    ]
+    return evaluation_metrics(listings, ranked_decisions)
+
+
 def _common_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--offset", type=int, default=0)
@@ -368,14 +516,34 @@ def _evaluation_output(
     decisions_by_row: dict[int, CatalogDecision],
     *,
     offset: int,
+    run_command: str | None = None,
 ) -> dict[str, Any]:
     completed_listings = [
         listing for listing in listings if listing.row_idx in decisions_by_row
     ]
     decisions = [decisions_by_row[listing.row_idx] for listing in completed_listings]
+    request_ids = [
+        request_id
+        for decision in decisions
+        for request_id in _validate_api_calls(
+            decision.api_calls,
+            row_idx=decision.row_idx,
+        )
+    ]
+    if len(request_ids) != len(set(request_ids)):
+        raise ValueError("Catalog evaluation has duplicate SIE request IDs")
+    agent_metrics = evaluation_metrics(completed_listings, decisions)
+    copy_metrics = _ranking_metrics(completed_listings, decisions, "text_scores")
+    image_metrics = _ranking_metrics(
+        completed_listings, decisions, "image_plus_copy_scores"
+    )
+    endpoint, _api_key = read_sie_settings()
     return {
         "record_type": "sie_catalog_agent_evaluation",
         "run_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "endpoint": endpoint.rstrip("/"),
+        "run_command": run_command,
+        "timing_note": "Per-call timings are diagnostic, not benchmark results.",
         "dataset": {
             "id": DATASET,
             "revision": DATASET_REVISION,
@@ -391,13 +559,38 @@ def _evaluation_output(
             "image-plus-copy reranker calls."
         ),
         "response_schema": {
+            "type": "object",
+            "properties": {
+                "selected_index": {"type": "integer", "minimum": 0},
+                "needs_review": {"type": "boolean"},
+            },
             "required": ["selected_index", "needs_review"],
+            "additionalProperties": False,
         },
-        "metrics": evaluation_metrics(completed_listings, decisions),
+        "metrics": {
+            **agent_metrics,
+            "copy_only_exact_path_correct": copy_metrics["exact_path_correct"],
+            "copy_only_top_level_correct": copy_metrics["top_level_correct"],
+            "copy_only_macro_hierarchical_f1": copy_metrics["macro_hierarchical_f1"],
+            "image_plus_copy_exact_path_correct": image_metrics["exact_path_correct"],
+            "image_plus_copy_top_level_correct": image_metrics["top_level_correct"],
+            "image_plus_copy_macro_hierarchical_f1": image_metrics[
+                "macro_hierarchical_f1"
+            ],
+            "agent_exact_path_correct": agent_metrics["exact_path_correct"],
+            "agent_top_level_correct": agent_metrics["top_level_correct"],
+            "agent_macro_hierarchical_f1": agent_metrics["macro_hierarchical_f1"],
+        },
         "results": [
             {
                 **asdict(decision),
                 "ground_truth_path": listing.ground_truth_path,
+                "source": {
+                    "viewer_url": listing.viewer_url,
+                    "image_sha256": listing.image_sha256,
+                    "row_sha256": listing_sha256(listing),
+                },
+                "candidate_paths": listing.candidate_paths,
             }
             for listing, decision in zip(completed_listings, decisions, strict=True)
         ],
@@ -455,6 +648,7 @@ def _load_checkpoint(
 
     listings_by_row = {listing.row_idx: listing for listing in listings}
     decisions: dict[int, CatalogDecision] = {}
+    request_ids: list[str] = []
     for result in payload.get("results", []):
         row_idx = int(result["row_idx"])
         listing = listings_by_row.get(row_idx)
@@ -462,11 +656,18 @@ def _load_checkpoint(
             raise ValueError(f"Cannot resume from {path}: unexpected row {row_idx}")
         if row_idx in decisions:
             raise ValueError(f"Cannot resume from {path}: duplicate row {row_idx}")
+        source = result.get("source")
+        if not isinstance(source, dict) or source.get("row_sha256") != listing_sha256(
+            listing
+        ):
+            raise ValueError(
+                f"Cannot resume from {path}: source changed for row {row_idx}"
+            )
         if result.get("ground_truth_path") != listing.ground_truth_path:
             raise ValueError(
                 f"Cannot resume from {path}: reference changed for row {row_idx}"
             )
-        decisions[row_idx] = CatalogDecision(
+        decision = CatalogDecision(
             row_idx=row_idx,
             selected_path=result["selected_path"],
             needs_review=result["needs_review"],
@@ -474,8 +675,40 @@ def _load_checkpoint(
             text_scores=result["text_scores"],
             image_plus_copy_scores=result["image_plus_copy_scores"],
             verifier_response_id=result["verifier_response_id"],
+            api_calls=result["api_calls"],
         )
+        row_request_ids = _validate_api_calls(decision.api_calls, row_idx=row_idx)
+        verifier_call = next(
+            call
+            for call in decision.api_calls
+            if call["stage"] == "candidate_verification"
+        )
+        if decision.verifier_response_id != verifier_call["request_id"]:
+            raise ValueError(
+                f"Cannot resume from {path}: verifier request changed for row {row_idx}"
+            )
+        request_ids.extend(row_request_ids)
+        decisions[row_idx] = decision
+    if len(request_ids) != len(set(request_ids)):
+        raise ValueError(f"Cannot resume from {path}: duplicate SIE request IDs")
     return decisions
+
+
+def _evaluation_run_command(args: argparse.Namespace) -> str:
+    parts = [
+        "eval-catalog-agent",
+        "--offset",
+        str(args.offset),
+        "--limit",
+        str(args.limit),
+        "--cache-dir",
+        args.cache_dir.as_posix(),
+        "--output",
+        args.output.as_posix(),
+    ]
+    if args.summary_output is not None:
+        parts.extend(["--summary-output", args.summary_output.as_posix()])
+    return shlex.join(parts)
 
 
 def eval_main() -> None:
@@ -483,7 +716,9 @@ def eval_main() -> None:
         "Evaluate the focused multimodal catalog agent on Shopify listings."
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--summary-output", type=Path)
     args = parser.parse_args()
+    run_command = _evaluation_run_command(args)
     listings = load_shopify_rows(
         offset=args.offset,
         limit=args.limit,
@@ -503,7 +738,10 @@ def eval_main() -> None:
                 decision = classify_listing(client, listing)
                 decisions_by_row[listing.row_idx] = decision
                 output = _evaluation_output(
-                    listings, decisions_by_row, offset=args.offset
+                    listings,
+                    decisions_by_row,
+                    offset=args.offset,
+                    run_command=run_command,
                 )
                 _write_evaluation_output(args.output, output)
                 print(
@@ -512,8 +750,42 @@ def eval_main() -> None:
                     f"{decision.selected_path}"
                 )
 
-    output = _evaluation_output(listings, decisions_by_row, offset=args.offset)
+    output = _evaluation_output(
+        listings,
+        decisions_by_row,
+        offset=args.offset,
+        run_command=run_command,
+    )
     _write_evaluation_output(args.output, output)
+    if args.summary_output is not None:
+        _write_evaluation_output(
+            args.summary_output,
+            {
+                "record_type": "sie_catalog_agent_evaluation_summary",
+                "run_at": output["run_at"],
+                "endpoint": output["endpoint"],
+                "run_command": output["run_command"],
+                "timing_note": output["timing_note"],
+                "dataset": output["dataset"],
+                "models": {
+                    "reranker": {
+                        "id": output["models"]["reranker"],
+                        "revision": RERANKER_REVISION,
+                    },
+                    "verifier": {
+                        "id": output["models"]["verifier"],
+                        "revision": VERIFIER_REVISION,
+                    },
+                },
+                "candidate_rule": output["candidate_rule"],
+                "response_schema": output["response_schema"],
+                "metrics": output["metrics"],
+                "evaluation": {
+                    "path": args.output.as_posix(),
+                    "sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
+                },
+            },
+        )
     print(json.dumps(output["metrics"], indent=2))
 
 

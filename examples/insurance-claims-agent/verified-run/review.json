@@ -1,61 +1,63 @@
 {
-  "route": "scope_review_required",
-  "headline": "FEMA Appeal Decision B8: Debris Removal Scope and Price Verification for July 2019 Flood Loss",
   "appeal_summary": {
-    "proof_of_loss_amount": 182552.0,
-    "removal_estimate": 49500.0,
     "barge_estimate": 181832.94,
+    "debris_cubic_yards_max": 15,
     "debris_cubic_yards_min": 12,
-    "debris_cubic_yards_max": 15
+    "proof_of_loss_amount": 182552.0,
+    "removal_estimate": 49500.0
   },
   "decision": {
-    "covered_scope": "Labor and equipment usage to remove 12 to 15 cubic yards of flood-borne stones from underneath the insured building to the area around the perimeter of the building.",
-    "excluded_scope": "Disposal costs, yard work, carting debris from the perimeter into a barge, barge transportation, handling, and disposal of non-owned debris.",
-    "evidence_needed": "Additional evidence that the contractor's estimated dollar amount is limited strictly to the covered scope of work (labor and equipment under the building). The $3,564 per cubic yard quote requires validation against other estimates.",
-    "prior_claim_check": "Verify documentation in the file for previous claims filed on May 20, 2019, May 29, 2019, and June 11, 2019, to ensure no payment overlap occurred for debris removal from the same area before the July 2019 event."
+    "covered_scope": "Removal of 12 to 15 cubic yards of flood-borne stones from underneath the insured building to the perimeter of the building in the yard",
+    "evidence_needed": "Additional evidence that the estimated dollar amount from the contractor is limited to the covered scope of work; other debris removal estimates from one or more different contractors",
+    "excluded_scope": "Transportation by barge, handling, disposal, and any increased cost to remove non-owned debris in the yard or cart debris from the perimeter into a barge",
+    "prior_claim_check": "Verify documentation for previous claims with debris removal to ensure no payment overlap; verify debris removal for the same area was performed before the July 2019 flood event"
   },
   "findings": [
     {
       "category": "covered_removal",
+      "evidence": "FEMA agrees SFIP covers cost to remove flood-borne debris such as stones deposited underneath the insured building's perimeter footprint",
       "severity": "high",
-      "title": "Coverage Confirmed for Under-Building Debris Removal",
-      "evidence": "FEMA affirms SFIP covers the expense to remove non-owned flood debris on or in insured property, specifically labor and equipment usage to remove 12 to 15 cubic yards of stones from underneath the building to the perimeter.",
       "sources": [
         "appeal_decision"
-      ]
+      ],
+      "title": "Coverage for Debris Removal Underneath Building"
     },
     {
       "category": "excluded_transport",
+      "evidence": "SFIP does not cover expense to dispose non-owned debris because it is not insured property; excludes barge transportation, handling, and disposal",
       "severity": "high",
-      "title": "Exclusion of Yard Work and Transportation Costs",
-      "evidence": "The SFIP does not cover the expense to dispose non-owned debris, nor does it cover increased costs to remove debris in the yard or transport it by barge for further handling and disposal.",
       "sources": [
         "appeal_decision"
-      ]
+      ],
+      "title": "Exclusion of Transport and Disposal Costs"
     },
     {
       "category": "price_support",
+      "evidence": "Contractor quoted $3,564 per cubic yard with sales tax; FEMA recommends providing other debris removal estimates from different contractors to validate reasonableness",
       "severity": "medium",
-      "title": "Requirement for Reasonable and Customary Pricing Evidence",
-      "evidence": "The policyholder must provide proof of repairs and price from previous flood losses related to removing stones and debris from underneath the building to validate the quoted price of $3,564 per cubic yard.",
       "sources": [
         "appeal_decision"
-      ]
+      ],
+      "title": "Price Support Requirements"
     },
     {
       "category": "prior_claim_overlap",
-      "severity": "high",
-      "title": "Verification of Prior Debris Removal Payments",
-      "evidence": "Policyholder has received payments for similar losses in May and June 2019; insurer must verify if debris removal for the same area was performed and paid for prior to the July 2019 flood event to prevent double payment.",
+      "evidence": "Policyholder filed three prior flood claims in May and June 2019; must provide proof of repairs and price from previous losses related to removing stones and debris from underneath the building",
+      "severity": "medium",
       "sources": [
         "appeal_decision"
-      ]
+      ],
+      "title": "Prior Claim Overlap Verification"
     }
   ],
+  "headline": "FEMA Flood Insurance Appeal Decision B8: Partial Coverage for Debris Removal Under Insured Building",
   "next_actions": [
-    "Direct insurer to review proof of loss documentation packet for completeness regarding covered scope only.",
-    "Require policyholder to submit additional debris removal estimates from different contractors to support the unit price.",
-    "Instruct insurer to check claim files for May 20, May 29, and June 11, 2019 events to confirm no prior coverage for this specific debris removal task.",
-    "Exclude all costs associated with barge transportation ($181,832.94) and yard disposal from any potential payment recommendation."
-  ]
+    "Insurer to review policyholder's amended proof of loss totaling $182,552.00",
+    "Insurer to verify coverage for direct physical loss by or from flood to covered property",
+    "Insurer to confirm excluded costs (transport, handling, disposal) are not covered under SFIP",
+    "Insurer to request additional evidence regarding contractor pricing and prior claim history",
+    "Insurer to issue payment only for covered scope of work (removal underneath building)",
+    "Insurer to deny transport, handling, and disposal components of the claim"
+  ],
+  "route": "scope_review_required"
 }
