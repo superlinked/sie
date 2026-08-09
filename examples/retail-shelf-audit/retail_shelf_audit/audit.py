@@ -303,13 +303,6 @@ def run_audit(run_id: str) -> Path:
             ocr_timings[record["candidate_id"]] = duration_ms
 
         upper_record, lower_record = crop_records
-        evidence = build_evidence(
-            gap,
-            lower_record["source_detection"],
-            upper_record["text"],
-            lower_record["text"],
-        )
-        write_json(run_dir / "evidence.json", evidence)
         checks = evaluation_checks(
             gap,
             upper_detection,
@@ -328,6 +321,13 @@ def run_audit(run_id: str) -> Path:
         )
         if not passed:
             raise RuntimeError("Retail evidence checks failed; manifest not published")
+        evidence = build_evidence(
+            gap,
+            lower_record["source_detection"],
+            upper_record["text"],
+            lower_record["text"],
+        )
+        write_json(run_dir / "evidence.json", evidence)
         write_json(
             run_dir / "selection.json",
             {

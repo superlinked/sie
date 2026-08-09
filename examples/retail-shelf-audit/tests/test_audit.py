@@ -121,10 +121,18 @@ def test_evaluation_checks_are_derived_from_selected_evidence() -> None:
         "Panadol Child\n5-12Yrs Elixir 100ml\n101760\n10⁹⁹",
         (4032, 3024),
     )
-    assert all(checks.values())
+    assert checks == {
+        "non_strip_gap_selected": True,
+        "nearby_vertical_price_pair_selected": True,
+        "minimum_ocr_fragments_recovered": True,
+    }
 
 
 def test_evaluation_checks_fail_on_incomplete_ocr() -> None:
     upper, lower = select_vertical_pair(nearby_price_candidates(_objects(), _gap()))
     checks = evaluation_checks(_gap(), upper, lower, "one\ntwo", "three\nfour", (4032, 3024))
-    assert checks["minimum_ocr_fragments_recovered"] is False
+    assert checks == {
+        "non_strip_gap_selected": True,
+        "nearby_vertical_price_pair_selected": True,
+        "minimum_ocr_fragments_recovered": False,
+    }

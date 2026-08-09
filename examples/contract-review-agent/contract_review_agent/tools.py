@@ -190,8 +190,11 @@ async def analyze_clause_risks(ctx: RunContextWrapper[AppContext]) -> str:
     for query, clauses in search_results.items():
         if (
             not isinstance(query, str)
+            or not query.strip()
             or not isinstance(clauses, list)
-            or any(not isinstance(clause, str) for clause in clauses)
+            or any(
+                not isinstance(clause, str) or not clause.strip() for clause in clauses
+            )
         ):
             raise RuntimeError(
                 "Clause-risk search results must map string queries to lists of strings"

@@ -394,17 +394,18 @@ def verify_candidates(
         raise ValueError("SIE verifier returned non-text content")
     selection = json.loads(content)
     selected_index = selection["selected_index"]
-    if not isinstance(selected_index, int) or not (
-        0 <= selected_index < len(candidates)
-    ):
+    if type(selected_index) is not int or not (0 <= selected_index < len(candidates)):
         raise ValueError(f"Invalid selected_index: {selected_index!r}")
+    needs_review = selection["needs_review"]
+    if type(needs_review) is not bool:
+        raise ValueError(f"Invalid needs_review: {needs_review!r}")
     call = _api_call_record(
         stage="candidate_verification",
         requested_model=VERIFIER_MODEL,
         response=response,
         timing_ms=(time.perf_counter() - started) * 1000,
     )
-    return selected_index, bool(selection["needs_review"]), call
+    return selected_index, needs_review, call
 
 
 def classify_listing(

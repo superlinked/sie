@@ -260,6 +260,14 @@ def test_api_call_record_rejects_a_malformed_execution_identity(
             {"text": '{"selected_index": 2, "needs_review": false}'},
             "Invalid selected_index: 2",
         ),
+        (
+            {"text": '{"selected_index": true, "needs_review": false}'},
+            "Invalid selected_index: True",
+        ),
+        (
+            {"text": '{"selected_index": 0, "needs_review": "false"}'},
+            "Invalid needs_review: 'false'",
+        ),
     ],
 )
 def test_verify_candidates_rejects_invalid_native_output(

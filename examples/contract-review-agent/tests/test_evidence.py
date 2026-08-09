@@ -138,6 +138,19 @@ def test_write_run_record_rejects_missing_request_provenance(
     assert (run_dir / "manifest.json").is_file()
 
 
+def test_write_run_record_rejects_missing_credit_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_calls = _api_calls()
+    api_calls[-1]["credits_debited"] = None
+
+    with pytest.raises(RuntimeError, match="Production evidence checks failed"):
+        _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)
+
+    assert list((tmp_path / "runs").iterdir()) == []
+
+
 def test_write_run_record_rejects_a_missing_required_stage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

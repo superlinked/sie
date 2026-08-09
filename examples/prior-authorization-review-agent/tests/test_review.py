@@ -434,3 +434,58 @@ def test_verified_manifest_hashes() -> None:
         request_id: provenance["version"] for request_id in provenance["request_ids"]
     }
     assert "raw/retrieve.json" in provenance["source_artifacts"]
+
+
+def _write_provenance_payload(path: Path, request: dict[str, object]) -> None:
+    path.write_text(
+        json.dumps({"request": request}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_rate_book_provenance_rejects_a_charged_request_without_an_id(
+    tmp_path: Path,
+) -> None:
+    _write_provenance_payload(
+        tmp_path / "missing-id.json",
+        {"credits_debited": 1, "rate_book_version": "rate-v1"},
+    )
+
+    with pytest.raises(RuntimeError, match="charged request without an ID"):
+        _rate_book_provenance(tmp_path)
+
+
+def test_rate_book_provenance_rejects_duplicate_request_ids(tmp_path: Path) -> None:
+    request = {
+        "id": "request-1",
+        "credits_debited": 1,
+        "rate_book_version": "rate-v1",
+    }
+    _write_provenance_payload(tmp_path / "first.json", request)
+    _write_provenance_payload(tmp_path / "second.json", request)
+
+    with pytest.raises(RuntimeError, match="duplicate charged request IDs"):
+        _rate_book_provenance(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "versions",
+    [(), ("rate-v1", "rate-v2")],
+)
+def test_rate_book_provenance_requires_one_settled_version(
+    tmp_path: Path,
+    versions: tuple[str, ...],
+) -> None:
+    if not versions:
+        versions = ("",)
+    for index, version in enumerate(versions):
+        request: dict[str, object] = {
+            "id": f"request-{index}",
+            "credits_debited": 1,
+        }
+        if version:
+            request["rate_book_version"] = version
+        _write_provenance_payload(tmp_path / f"request-{index}.json", request)
+
+    with pytest.raises(RuntimeError, match="one settled rate book"):
+        _rate_book_provenance(tmp_path)

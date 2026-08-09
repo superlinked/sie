@@ -586,6 +586,10 @@ async def test_clause_risk_tool_reads_saved_searches_without_copy_arguments(
         {"termination": "termination clause"},
         {1: ["termination clause"]},
         {"termination": [1]},
+        {"": []},
+        {"   ": []},
+        {"termination": [""]},
+        {"termination": ["   "]},
     ],
 )
 async def test_clause_risk_tool_rejects_malformed_saved_searches(
