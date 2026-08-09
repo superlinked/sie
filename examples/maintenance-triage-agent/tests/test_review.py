@@ -175,6 +175,13 @@ def test_review_boundary_passes_evaluation() -> None:
     assert all(check.passed for check in evaluate_review(build_review(structured_data(), ranked_evidence())))
 
 
+def test_verified_rerank_correlates_to_retrieval_query() -> None:
+    raw_dir = ROOT / "verified-run" / "raw"
+    retrieve = json.loads((raw_dir / "retrieve.json").read_text(encoding="utf-8"))
+    rerank = json.loads((raw_dir / "rerank.json").read_text(encoding="utf-8"))
+    assert rerank["query_id"] == retrieve["query"]["id"]
+
+
 def test_review_fails_closed_on_changed_temperature() -> None:
     data = structured_data()
     data["salem_temperature"] = "130°F above ambient"

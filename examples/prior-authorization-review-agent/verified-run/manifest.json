@@ -12,6 +12,24 @@
     "path": "fixtures/cms-l1851-insufficient-documentation.html",
     "sha256": "aec2408ff0e00b9960bf9e7879a7213942d32e8980da801a2c71acef4755cf91"
   },
+  "rate_book_provenance": {
+    "version": "2026-07-26-production-bootstrap-v2",
+    "source_artifacts": [
+      "raw/rerank.json"
+    ],
+    "request_ids": [
+      "019fe6f0-e518-76b2-99c9-9ad325860a94",
+      "019fe6f0-e605-7bd3-928f-9f06f8b4440b",
+      "019fe6f0-e6e5-7490-969c-87a9705a008d",
+      "019fe6f0-e7c0-74b1-ace2-c5310a927190",
+      "019fe6f0-e8a4-7850-a565-ed73b244f5f0",
+      "019fe6f0-e441-79c3-ab69-02e8ad1fa7f5",
+      "019fe6f0-eb78-79e2-b2a2-4f3ceef7d6c0",
+      "019fe6f0-e97e-77b1-aa65-5aec3d81b53d",
+      "019fe6f0-ea78-7e81-9953-4792eb6795db",
+      "019fe6f0-e274-7f01-8d01-58bed0fb296b"
+    ]
+  },
   "artifacts": [
     {
       "path": "evaluation.json",

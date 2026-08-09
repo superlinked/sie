@@ -5,6 +5,7 @@ import pytest
 from retail_shelf_audit.audit import (
     build_evidence,
     candidate_crop_box,
+    evaluation_checks,
     nearby_price_candidates,
     ocr_fragments,
     select_gap,
@@ -108,3 +109,22 @@ def test_build_evidence_preserves_model_outputs() -> None:
         },
         "ocr_fragments": EXPECTED_OCR_FRAGMENTS,
     }
+
+
+def test_evaluation_checks_are_derived_from_selected_evidence() -> None:
+    upper, lower = select_vertical_pair(nearby_price_candidates(_objects(), _gap()))
+    checks = evaluation_checks(
+        _gap(),
+        upper,
+        lower,
+        "I am temporarily\nout-of-stock\nfrom our supplier",
+        "Panadol Child\n5-12Yrs Elixir 100ml\n101760\n10⁹⁹",
+        (4032, 3024),
+    )
+    assert all(checks.values())
+
+
+def test_evaluation_checks_fail_on_incomplete_ocr() -> None:
+    upper, lower = select_vertical_pair(nearby_price_candidates(_objects(), _gap()))
+    checks = evaluation_checks(_gap(), upper, lower, "one\ntwo", "three\nfour", (4032, 3024))
+    assert checks["minimum_ocr_fragments_recovered"] is False

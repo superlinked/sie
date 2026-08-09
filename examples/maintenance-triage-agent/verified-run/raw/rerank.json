@@ -1,4 +1,5 @@
 {
+  "query_id": "bearing-trend-query",
   "model": "Qwen/Qwen3-Reranker-4B",
   "scores": [
     {

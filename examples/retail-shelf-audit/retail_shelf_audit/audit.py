@@ -221,6 +221,35 @@ def build_evidence(
     }
 
 
+def evaluation_checks(
+    gap: dict[str, Any],
+    upper: dict[str, Any],
+    lower: dict[str, Any],
+    upper_text: str,
+    lower_text: str,
+    image_size: tuple[int, int],
+) -> dict[str, bool]:
+    try:
+        gap_ok = select_gap([gap], image_size) == gap
+    except (KeyError, TypeError, ValueError):
+        gap_ok = False
+    try:
+        candidates = nearby_price_candidates([upper, lower], gap)
+        selected_upper, selected_lower = select_vertical_pair(candidates)
+        pair_ok = selected_upper == upper and selected_lower == lower
+    except (KeyError, TypeError, ValueError):
+        pair_ok = False
+    try:
+        ocr_ok = len(ocr_fragments(upper_text, lower_text)) >= 7
+    except (TypeError, ValueError):
+        ocr_ok = False
+    return {
+        "non_strip_gap_selected": gap_ok,
+        "nearby_vertical_price_pair_selected": pair_ok,
+        "minimum_ocr_fragments_recovered": ocr_ok,
+    }
+
+
 def _timed(call: Any) -> tuple[Any, float]:
     started = time.perf_counter()
     result = call()
@@ -281,17 +310,24 @@ def run_audit(run_id: str) -> Path:
             lower_record["text"],
         )
         write_json(run_dir / "evidence.json", evidence)
+        checks = evaluation_checks(
+            gap,
+            upper_detection,
+            lower_detection,
+            upper_record["text"],
+            lower_record["text"],
+            image_size,
+        )
+        passed = all(checks.values())
         write_json(
             run_dir / "evaluation.json",
             {
-                "passed": True,
-                "checks": {
-                    "non_strip_gap_selected": True,
-                    "nearby_vertical_price_pair_selected": True,
-                    "minimum_ocr_fragments_recovered": True,
-                },
+                "passed": passed,
+                "checks": checks,
             },
         )
+        if not passed:
+            raise RuntimeError("Retail evidence checks failed; manifest not published")
         write_json(
             run_dir / "selection.json",
             {

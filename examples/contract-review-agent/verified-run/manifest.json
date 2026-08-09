@@ -39,11 +39,11 @@
   "artifacts": [
     {
       "path": "api-calls.json",
-      "sha256": "cbb0155b83529117e4624ab05b4934abf07994ed3adb6dcbd0532fabaf198c67"
+      "sha256": "3462a0d5dd9d88fec25b559684346934ddcfe5186ae2a41899b0753a558e477d"
     },
     {
       "path": "evaluation.json",
-      "sha256": "f5764e1f0ff0a208802ca96743319a2209a486376c73370792563d5960549907"
+      "sha256": "c25ce6fd0eb95448a469af483688c3cb5832498c83c363efe38978007ca003c2"
     },
     {
       "path": "investigator-findings.txt",

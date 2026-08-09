@@ -35,6 +35,11 @@ def _input_text(data: Any) -> str:
     return "\n".join(parts)
 
 
+def _unsafe_verdict(verdict: str) -> bool:
+    normalized = verdict.strip().casefold()
+    return normalized != "no"
+
+
 @input_guardrail(run_in_parallel=False)
 async def safety_guardrail(
     ctx: RunContextWrapper[AppContext], agent: Agent, data: Any
@@ -48,8 +53,13 @@ async def safety_guardrail(
             model,
             [{"role": "user", "content": _input_text(data)[:6000]}],
             stage="safety_guardrail",
-            max_tokens=8,
+            max_tokens=3,
             timeout_s=25,
+            grammar={
+                "regex": "(?:yes|no)",
+                "label": "guard_verdict",
+                "strict": True,
+            },
         )
     except Exception as exc:  # noqa: BLE001 - configured fail-open boundary.
         # Guard model unavailable: fail OPEN (allow the run) but make it visible.
@@ -74,7 +84,7 @@ async def safety_guardrail(
         sent=f"{res.prompt_tokens:,} tok" if res.prompt_tokens else "—",
         got=verdict or "—",
     )
-    unsafe = verdict.lower().startswith("yes")
+    unsafe = _unsafe_verdict(verdict)
     return GuardrailFunctionOutput(
         output_info={"verdict": verdict, "model": model},
         tripwire_triggered=unsafe,

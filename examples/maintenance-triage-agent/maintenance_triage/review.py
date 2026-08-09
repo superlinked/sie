@@ -569,6 +569,7 @@ def run(run_id: str) -> Path:
             wait_for_capacity=True,
             provision_timeout_s=timeout,
         )
+        rerank_raw["query_id"] = "bearing-trend-query"
         by_id = {row["chunk_id"]: row["text"] for row in retrieval}
         ranked = [
             {

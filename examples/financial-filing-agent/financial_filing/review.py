@@ -75,6 +75,37 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, default=_json_default) + "\n", encoding="utf-8")
 
 
+def _rate_book_provenance(raw_dir: Path) -> dict[str, Any]:
+    versions: set[str] = set()
+    source_artifacts: list[str] = []
+    request_ids: list[str] = []
+    for path in sorted(raw_dir.glob("*.json")):
+        result = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(result, dict):
+            continue
+        request = result.get("request")
+        if not isinstance(request, dict) or not request.get("credits_debited"):
+            continue
+        request_id = request.get("id")
+        if not isinstance(request_id, str) or not request_id:
+            raise RuntimeError(f"{path.name} has a charged request without an ID")
+        request_ids.append(request_id)
+        usage = result.get("usage")
+        version = request.get("rate_book_version")
+        if not isinstance(version, str) and isinstance(usage, dict):
+            version = usage.get("rate_book_version")
+        if isinstance(version, str) and version:
+            versions.add(version)
+            source_artifacts.append(f"raw/{path.name}")
+    if len(versions) != 1 or not request_ids:
+        raise RuntimeError("Run does not establish one settled rate book for charged requests")
+    return {
+        "version": versions.pop(),
+        "source_artifacts": source_artifacts,
+        "request_ids": request_ids,
+    }
+
+
 def _dense(result: dict[str, Any]) -> list[float]:
     values: Any = result.get("dense")
     if isinstance(values, dict):
@@ -578,6 +609,7 @@ def run(run_id: str) -> Path:
         "endpoint": config["cluster"]["url"],
         "models": config["models"],
         "fixture": {"path": str(DOCUMENT_PATH.relative_to(ROOT)), "sha256": sha256(DOCUMENT_PATH)},
+        "rate_book_provenance": _rate_book_provenance(raw_dir),
         "artifacts": [{"path": str(path.relative_to(run_dir)), "sha256": sha256(path)} for path in artifact_paths],
         "calls": calls,
         "pipeline": [

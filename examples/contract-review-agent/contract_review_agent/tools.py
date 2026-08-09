@@ -321,7 +321,7 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
         "encode",
         embed_model,
         q,
-        stage=f"search_clauses:{query}:encode",
+        stage="search_clauses:encode",
     )
     qv = np.asarray(q["dense"], dtype=np.float32)
     denom = np.linalg.norm(matrix, axis=1) * (np.linalg.norm(qv) + 1e-9) + 1e-9
@@ -342,7 +342,7 @@ async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
         "score",
         rerank_model,
         scored,
-        stage=f"search_clauses:{query}:score",
+        stage="search_clauses:score",
     )
     dt = time.monotonic() - t0
     app.ledger.record(

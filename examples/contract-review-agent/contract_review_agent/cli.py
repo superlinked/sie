@@ -24,7 +24,7 @@ from .app import (
 from .config import load_config
 from .data import make_sample
 from .data.paths import CUAD_DIR, GENERATED_DIR, MANIFEST_PATH
-from .evidence import write_run_record
+from .evidence import validate_run_id, write_run_record
 from .runtime import AppContext, Ledger, instruct_once, provision_timeout_from
 
 console = Console()
@@ -206,6 +206,8 @@ async def _warm(app: AppContext) -> None:
 
 async def _run(args) -> None:
     set_tracing_disabled(True)
+    if args.run_id is not None:
+        validate_run_id(args.run_id)
     cfg = load_config()
     text, scan_path, db_path, label = _resolve_corpus(args)
 
@@ -276,7 +278,7 @@ async def _run(args) -> None:
         _print_ledger(ledger)
         usage = getattr(getattr(gather, "context_wrapper", None), "usage", None)
         _print_summary(cfg, usage, wall)
-        if args.run_id:
+        if args.run_id is not None:
             if not isinstance(review, ContractReview):
                 raise RuntimeError("Cannot record an unstructured contract review")
             run_dir = write_run_record(
@@ -326,6 +328,7 @@ def main() -> None:
     parser.add_argument(
         "--run-id",
         default=None,
+        type=validate_run_id,
         help="write reproducible evidence under runs/<run-id> after a passing run",
     )
     args = parser.parse_args()

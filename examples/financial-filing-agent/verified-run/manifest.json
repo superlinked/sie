@@ -12,6 +12,22 @@
     "path": "fixtures/pathward-filing-packet.html",
     "sha256": "6232258157eb1881e8c1bbd479958ae13ea63281a21569e20414683e7c23c3ea"
   },
+  "rate_book_provenance": {
+    "version": "2026-07-26-production-bootstrap-v2",
+    "source_artifacts": [
+      "raw/rerank.json"
+    ],
+    "request_ids": [
+      "019fe6f0-faca-7dd3-a71c-a68288b06d8a",
+      "019fe6f0-fcbf-7830-a610-dc33dc655ef4",
+      "019fe6f0-fbc8-78b2-8478-80b58e262133",
+      "019fe6f0-fda1-7d90-b4a2-3692143ff31c",
+      "019fe6f0-feb2-7972-9ad3-146887136cc5",
+      "019fe6f0-ffad-75a3-af23-520f4e9e75d3",
+      "019fe6f1-00b2-7943-acca-b5fc467321f6",
+      "019fe6f0-f8c7-7351-ac54-c4f0f9fa9008"
+    ]
+  },
   "artifacts": [
     {
       "path": "parsed.md",

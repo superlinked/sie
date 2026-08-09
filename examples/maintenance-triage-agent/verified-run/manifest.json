@@ -85,7 +85,7 @@
     },
     {
       "path": "raw/rerank.json",
-      "sha256": "a3e60f2d42f55127da2255ab86a7263735f3f9b568ddf00ddc5102c18866885c"
+      "sha256": "e294ef86f9921f1d74310a86c6dbff1f2d07e202071355d18da32e303363d347"
     },
     {
       "path": "raw/retrieve.json",

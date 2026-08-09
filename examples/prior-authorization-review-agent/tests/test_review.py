@@ -425,3 +425,15 @@ def test_verified_manifest_hashes() -> None:
     rerank = json.loads((raw_dir / "rerank.json").read_text(encoding="utf-8"))
     assert retrieve["query"]["id"] == "cms-l1851-query"
     assert rerank["query_id"] == retrieve["query"]["id"]
+
+    charged_request_ids = {
+        result["request"]["id"]
+        for path in raw_dir.glob("*.json")
+        if isinstance((result := json.loads(path.read_text(encoding="utf-8"))), dict)
+        and isinstance(result.get("request"), dict)
+        and result["request"].get("credits_debited")
+    }
+    provenance = manifest["rate_book_provenance"]
+    assert provenance["version"]
+    assert set(provenance["request_ids"]) == charged_request_ids
+    assert provenance["source_artifacts"] == ["raw/rerank.json"]

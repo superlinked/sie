@@ -60,7 +60,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
-    "stage": "search_clauses:automatic renewal:encode",
+    "stage": "search_clauses:encode",
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
@@ -70,7 +70,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
-    "stage": "search_clauses:automatic renewal:score",
+    "stage": "search_clauses:score",
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
@@ -80,7 +80,7 @@
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   },
   {
-    "stage": "search_clauses:limitation of liability:encode",
+    "stage": "search_clauses:encode",
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
@@ -90,7 +90,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
-    "stage": "search_clauses:limitation of liability:score",
+    "stage": "search_clauses:score",
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
@@ -100,7 +100,7 @@
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   },
   {
-    "stage": "search_clauses:indemnification:encode",
+    "stage": "search_clauses:encode",
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
@@ -110,7 +110,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
-    "stage": "search_clauses:indemnification:score",
+    "stage": "search_clauses:score",
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
@@ -120,7 +120,7 @@
     "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   },
   {
-    "stage": "search_clauses:termination:encode",
+    "stage": "search_clauses:encode",
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
@@ -130,7 +130,7 @@
     "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
   },
   {
-    "stage": "search_clauses:termination:score",
+    "stage": "search_clauses:score",
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",

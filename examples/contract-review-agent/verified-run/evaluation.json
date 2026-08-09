@@ -65,42 +65,42 @@
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:automatic renewal:encode",
+      "stage": "search_clauses:encode",
       "function": "encode",
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:automatic renewal:score",
+      "stage": "search_clauses:score",
       "function": "score",
       "requested_model": "Qwen/Qwen3-Reranker-4B"
     },
     {
-      "stage": "search_clauses:limitation of liability:encode",
+      "stage": "search_clauses:encode",
       "function": "encode",
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:limitation of liability:score",
+      "stage": "search_clauses:score",
       "function": "score",
       "requested_model": "Qwen/Qwen3-Reranker-4B"
     },
     {
-      "stage": "search_clauses:indemnification:encode",
+      "stage": "search_clauses:encode",
       "function": "encode",
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:indemnification:score",
+      "stage": "search_clauses:score",
       "function": "score",
       "requested_model": "Qwen/Qwen3-Reranker-4B"
     },
     {
-      "stage": "search_clauses:termination:encode",
+      "stage": "search_clauses:encode",
       "function": "encode",
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:termination:score",
+      "stage": "search_clauses:score",
       "function": "score",
       "requested_model": "Qwen/Qwen3-Reranker-4B"
     },
@@ -157,42 +157,42 @@
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:automatic renewal:encode",
+      "stage": "search_clauses:encode",
       "function": "encode",
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:automatic renewal:score",
+      "stage": "search_clauses:score",
       "function": "score",
       "requested_model": "Qwen/Qwen3-Reranker-4B"
     },
     {
-      "stage": "search_clauses:limitation of liability:encode",
+      "stage": "search_clauses:encode",
       "function": "encode",
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:limitation of liability:score",
+      "stage": "search_clauses:score",
       "function": "score",
       "requested_model": "Qwen/Qwen3-Reranker-4B"
     },
     {
-      "stage": "search_clauses:indemnification:encode",
+      "stage": "search_clauses:encode",
       "function": "encode",
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:indemnification:score",
+      "stage": "search_clauses:score",
       "function": "score",
       "requested_model": "Qwen/Qwen3-Reranker-4B"
     },
     {
-      "stage": "search_clauses:termination:encode",
+      "stage": "search_clauses:encode",
       "function": "encode",
       "requested_model": "BAAI/bge-m3"
     },
     {
-      "stage": "search_clauses:termination:score",
+      "stage": "search_clauses:score",
       "function": "score",
       "requested_model": "Qwen/Qwen3-Reranker-4B"
     },

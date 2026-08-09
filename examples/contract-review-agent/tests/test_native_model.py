@@ -19,7 +19,7 @@ from agents.tool_context import ToolContext
 from pydantic import BaseModel
 
 from contract_review_agent import tools as contract_tools
-from contract_review_agent.guardrails import safety_guardrail
+from contract_review_agent.guardrails import _unsafe_verdict, safety_guardrail
 from contract_review_agent.native_model import SIENativeModel, _next_required_tool
 from contract_review_agent.runtime import AppContext, GenResult, Ledger, instruct_once
 
@@ -28,6 +28,17 @@ set_tracing_disabled(True)
 
 def test_safety_guardrail_blocks_investigator_start() -> None:
     assert safety_guardrail.run_in_parallel is False
+
+
+@pytest.mark.parametrize("verdict", ["yes", "YES", "unexpected", "No_of_turn>", ""])
+def test_safety_guardrail_fails_closed_unless_verdict_is_exact_no(
+    verdict: str,
+) -> None:
+    assert _unsafe_verdict(verdict) is True
+
+
+def test_safety_guardrail_accepts_unambiguous_no() -> None:
+    assert _unsafe_verdict(" no \n") is False
 
 
 class FakeSIE:
@@ -297,6 +308,45 @@ async def test_required_question_is_emitted_without_generation() -> None:
     assert json.loads(response.output[0].arguments) == {
         "question": "upcoming obligations"
     }
+
+
+@pytest.mark.asyncio
+async def test_required_text_rejects_non_string_tool_argument() -> None:
+    @function_tool
+    async def search_clauses(query: int) -> str:
+        """Reject a required text query bound to an integer field."""
+        return str(query)
+
+    model = SIENativeModel(
+        "Qwen/Qwen3.6-27B",
+        FakeSIE([]),  # type: ignore[arg-type]
+        stage="test_agent",
+        provision_timeout_s=30,
+        required_tool_sequence=(("search_clauses", "termination"),),
+    )
+
+    with pytest.raises(ModelBehaviorError, match="cannot bind text argument"):
+        await _get_response(model, tools=[search_clauses])
+
+
+@pytest.mark.asyncio
+async def test_required_text_accepts_union_string_tool_argument() -> None:
+    @function_tool
+    async def search_clauses(query: str | None) -> str:
+        """Accept a required text query through a string union field."""
+        return query or ""
+
+    model = SIENativeModel(
+        "Qwen/Qwen3.6-27B",
+        FakeSIE([]),  # type: ignore[arg-type]
+        stage="test_agent",
+        provision_timeout_s=30,
+        required_tool_sequence=(("search_clauses", "termination"),),
+    )
+
+    response = await _get_response(model, tools=[search_clauses])
+
+    assert json.loads(response.output[0].arguments) == {"query": "termination"}
 
 
 @pytest.mark.asyncio

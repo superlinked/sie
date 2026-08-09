@@ -23,16 +23,11 @@ def _expected_call_sequence(cfg: dict[str, Any]) -> list[dict[str, str]]:
         ("read_signature_page", "generate", "vision"),
         ("search_clauses:index", "encode", "embed"),
     ]
-    for query in (
-        "automatic renewal",
-        "limitation of liability",
-        "indemnification",
-        "termination",
-    ):
+    for _ in range(4):
         sequence.extend(
             [
-                (f"search_clauses:{query}:encode", "encode", "embed"),
-                (f"search_clauses:{query}:score", "score", "rerank"),
+                ("search_clauses:encode", "encode", "embed"),
+                ("search_clauses:score", "score", "rerank"),
             ]
         )
     sequence.extend(
@@ -61,6 +56,18 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def validate_run_id(run_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id) or run_id in {
+        ".",
+        "..",
+    }:
+        raise ValueError(
+            "run_id must be one safe directory name containing only letters, "
+            "digits, '.', '_', or '-'"
+        )
+    return run_id
+
+
 def write_run_record(
     *,
     run_id: str,
@@ -76,14 +83,7 @@ def write_run_record(
     api_calls: list[dict[str, Any]],
     wall_s: float,
 ) -> Path:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id) or run_id in {
-        ".",
-        "..",
-    }:
-        raise ValueError(
-            "run_id must be one safe directory name containing only letters, "
-            "digits, '.', '_', or '-'"
-        )
+    validate_run_id(run_id)
     run_dir = PROJECT_ROOT / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
 

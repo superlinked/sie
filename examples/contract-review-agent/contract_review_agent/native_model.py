@@ -124,6 +124,22 @@ def _required_text_argument(arguments: Any) -> str | None:
     return None
 
 
+def _schema_accepts_string(schema: Any) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    value_type = schema.get("type")
+    if value_type == "string" or (
+        isinstance(value_type, list) and "string" in value_type
+    ):
+        return True
+    return any(
+        _schema_accepts_string(branch)
+        for keyword in ("anyOf", "oneOf")
+        for branch in schema.get(keyword, [])
+        if isinstance(schema.get(keyword), list)
+    )
+
+
 def _next_required_step(
     required_sequence: tuple[RequiredToolStep, ...],
     input_items: str | list[TResponseInputItem],
@@ -429,7 +445,7 @@ class SIENativeModel(Model):
                     (
                         name
                         for name in ("query", "question")
-                        if isinstance(properties.get(name), dict)
+                        if _schema_accepts_string(properties.get(name))
                     ),
                     None,
                 )
