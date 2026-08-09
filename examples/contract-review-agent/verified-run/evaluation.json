@@ -1,0 +1,34 @@
+{
+  "passed": true,
+  "checks": {
+    "structured_review": true,
+    "parties_identified": true,
+    "risk_flags_identified": true,
+    "all_configured_models_called": true,
+    "native_primitives_called": true
+  },
+  "expected_models": [
+    "BAAI/bge-m3",
+    "Qwen/Qwen3-Reranker-4B",
+    "Qwen/Qwen3.5-4B",
+    "Qwen/Qwen3.6-27B",
+    "fastino/gliner2-large-v1",
+    "ibm-granite/granite-guardian-3.0-2b",
+    "lightonai/LightOnOCR-2-1B"
+  ],
+  "requested_models": [
+    "BAAI/bge-m3",
+    "Qwen/Qwen3-Reranker-4B",
+    "Qwen/Qwen3.5-4B",
+    "Qwen/Qwen3.6-27B",
+    "fastino/gliner2-large-v1",
+    "ibm-granite/granite-guardian-3.0-2b",
+    "lightonai/LightOnOCR-2-1B"
+  ],
+  "observed_functions": [
+    "encode",
+    "extract",
+    "generate",
+    "score"
+  ]
+}

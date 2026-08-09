@@ -53,5 +53,13 @@
   "classifications": [],
   "objects": [],
   "id": "ntsb-detector-0",
-  "model": "urchade/gliner_multi-v2.1"
+  "model": "urchade/gliner_multi-v2.1",
+  "request": {
+    "id": "019fe6f1-05b3-7490-814c-eb2b7171450e",
+    "usage": {
+      "input_tokens": 74
+    },
+    "credits_debited": 1,
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+  }
 }

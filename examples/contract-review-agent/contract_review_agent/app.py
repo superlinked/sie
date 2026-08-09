@@ -49,7 +49,7 @@ one of these tools, one after another, before you write anything.
 - read_signature_page("Are both parties' signatures present and dated?") — visual execution check
 - search_clauses("automatic renewal"), then search_clauses("limitation of liability"),
   then search_clauses("indemnification"), then search_clauses("termination")
-- analyze_clause_risks(<the clause text you found>) — risk analysis with severities
+- analyze_clause_risks() — risk analysis over the clauses returned by those searches
 - query_obligations_db("upcoming obligations with due dates and amounts") — deadlines
 
 Do NOT write your report until you have called them all. Then write a thorough,
@@ -66,17 +66,19 @@ _INVESTIGATOR_TOOL_SEQUENCE = (
     ("classify_document", None),
     ("ocr_signature_page", None),
     ("extract_entities", None),
-    ("read_signature_page", None),
+    ("read_signature_page", "Are both parties' signatures present and dated?"),
     ("search_clauses", "automatic renewal"),
     ("search_clauses", "limitation of liability"),
     ("search_clauses", "indemnification"),
     ("search_clauses", "termination"),
     ("analyze_clause_risks", None),
-    ("query_obligations_db", None),
+    ("query_obligations_db", "upcoming obligations with due dates and amounts"),
 )
 
 
-def build_reasoning_agent(cfg: dict[str, Any], client: Any) -> Agent:
+def build_reasoning_agent(
+    cfg: dict[str, Any], client: Any, api_calls: list[dict[str, Any]] | None = None
+) -> Agent:
     return Agent(
         name="Risk Analyst",
         instructions=(
@@ -88,12 +90,15 @@ def build_reasoning_agent(cfg: dict[str, Any], client: Any) -> Agent:
             cfg["models"]["reasoning"],
             client,
             provision_timeout_s=provision_timeout_from(cfg),
+            api_calls=api_calls,
         ),
         model_settings=ModelSettings(temperature=0, max_tokens=1200),
     )
 
 
-def build_investigator(cfg: dict[str, Any], client: Any) -> Agent:
+def build_investigator(
+    cfg: dict[str, Any], client: Any, api_calls: list[dict[str, Any]] | None = None
+) -> Agent:
     """Autonomous tool-using agent (no output_type) that gathers grounded findings."""
     return Agent(
         name="Contract Investigator",
@@ -103,6 +108,7 @@ def build_investigator(cfg: dict[str, Any], client: Any) -> Agent:
             client,
             provision_timeout_s=provision_timeout_from(cfg),
             required_tool_sequence=_INVESTIGATOR_TOOL_SEQUENCE,
+            api_calls=api_calls,
         ),
         model_settings=ModelSettings(temperature=0, max_tokens=2048),
         tools=ALL_TOOLS,
@@ -110,7 +116,9 @@ def build_investigator(cfg: dict[str, Any], client: Any) -> Agent:
     )
 
 
-def build_synthesizer(cfg: dict[str, Any], client: Any) -> Agent:
+def build_synthesizer(
+    cfg: dict[str, Any], client: Any, api_calls: list[dict[str, Any]] | None = None
+) -> Agent:
     """Structured-output agent (no tools) that formats the findings into a review."""
     return Agent(
         name="Contract Reviewer",
@@ -119,6 +127,7 @@ def build_synthesizer(cfg: dict[str, Any], client: Any) -> Agent:
             cfg["models"]["orchestrator"],
             client,
             provision_timeout_s=provision_timeout_from(cfg),
+            api_calls=api_calls,
         ),
         model_settings=ModelSettings(temperature=0, max_tokens=2400),
         output_type=ContractReview,

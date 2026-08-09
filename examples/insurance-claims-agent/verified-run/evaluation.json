@@ -29,22 +29,22 @@
     {
       "name": "covered-scope",
       "passed": true,
-      "detail": "Labor and equipment usage to remove 12 to 15 cubic yards of flood-borne stones from underneath the insured building to the area around the perimeter of the building."
+      "detail": "Removal of non-owned flood-borne debris (stones) from underneath the insured building to the perimeter of the building in the yard"
     },
     {
       "name": "excluded-scope",
       "passed": true,
-      "detail": "Disposal costs, yard work, carting debris from the perimeter into a barge, barge transportation, handling, and disposal of non-owned debris."
+      "detail": "Cost to remove non-owned flood-borne debris from the yard; expense to ship non-owned flood-borne debris by barge for further handling and disposal; increased cost to remove non-owned debris in the yard or cart debris from the perimeter into a barge"
     },
     {
       "name": "price-support",
       "passed": true,
-      "detail": "Additional evidence that the contractor's estimated dollar amount is limited strictly to the covered scope of work (labor and equipment under the building). The $3,564 per cubic yard quote requires validation against other estimates."
+      "detail": "Additional evidence that the estimated dollar amount from the contractor is limited to the covered scope of work; other debris removal estimates from one or more different contractors; proof of repairs and price from previous flood claims related to removing stones and debris from underneath the building; cost paid to remove debris from the yard even though not covered under SFIP"
     },
     {
       "name": "prior-claim-overlap",
       "passed": true,
-      "detail": "Verify documentation in the file for previous claims filed on May 20, 2019, May 29, 2019, and June 11, 2019, to ensure no payment overlap occurred for debris removal from the same area before the July 2019 event."
+      "detail": "Review documentation in file for policyholder's previous claims with debris removal; verify that debris removal for the same area underneath the building was performed before the July 2019 flood event"
     },
     {
       "name": "finding-categories",

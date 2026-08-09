@@ -154,6 +154,54 @@
       "bbox": null
     },
     {
+      "text": "Restated Form 10-K/A Accession 0000907471-25-000083",
+      "label": "filing",
+      "score": 0.6875,
+      "start": 3,
+      "end": 54,
+      "bbox": null
+    },
+    {
+      "text": "Three Months",
+      "label": "reporting period",
+      "score": 0.64208984375,
+      "start": 79,
+      "end": 91,
+      "bbox": null
+    },
+    {
+      "text": "$1.68",
+      "label": "money amount",
+      "score": 0.8857421875,
+      "start": 164,
+      "end": 169,
+      "bbox": null
+    },
+    {
+      "text": "$1.34",
+      "label": "money amount",
+      "score": 0.84033203125,
+      "start": 257,
+      "end": 262,
+      "bbox": null
+    },
+    {
+      "text": "$4.62",
+      "label": "money amount",
+      "score": 0.9208984375,
+      "start": 273,
+      "end": 278,
+      "bbox": null
+    },
+    {
+      "text": "$4.27",
+      "label": "money amount",
+      "score": 0.8642578125,
+      "start": 366,
+      "end": 371,
+      "bbox": null
+    },
+    {
       "text": "Pathward Financial",
       "label": "company",
       "score": 0.8701171875,

@@ -1028,12 +1028,13 @@
       0.0556640625
     ],
     "model": "BAAI/bge-m3",
-    "timing": {
-      "total_ms": 18.97879499999533,
-      "queue_ms": 2.163505999988047,
-      "tokenization_ms": 0.017859999999814136,
-      "inference_ms": 16.66648600000542,
-      "postprocessing_ms": null
+    "request": {
+      "id": "019fe6f0-f33c-7933-8016-22978b33eb09",
+      "usage": {
+        "input_tokens": 36
+      },
+      "credits_debited": 1,
+      "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
     }
   },
   "chunks": [
@@ -2066,12 +2067,13 @@
         0.0294189453125
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 15.358657999996694,
-        "queue_ms": 0.10244199999931425,
-        "tokenization_ms": 0.016650000006279697,
-        "inference_ms": 15.091482000002543,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-f3ff-7111-829e-91ce645bcc9d",
+        "usage": {
+          "input_tokens": 8
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -3103,12 +3105,13 @@
         0.0654296875
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 15.509692000009068,
-        "queue_ms": 1.5471530000041867,
-        "tokenization_ms": 0.017560000003413734,
-        "inference_ms": 13.784053999998491,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-f4c9-70a3-9a36-1b35ff26b69c",
+        "usage": {
+          "input_tokens": 84
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -4140,12 +4143,13 @@
         0.00555419921875
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 16.76146799999856,
-        "queue_ms": 1.4572910000083539,
-        "tokenization_ms": 0.018409999995583348,
-        "inference_ms": 15.164564000002656,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-f581-73e2-9db9-dd5f70647488",
+        "usage": {
+          "input_tokens": 122
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -5177,12 +5181,13 @@
         0.0004329681396484375
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 18.04185500000699,
-        "queue_ms": 1.7034959999904231,
-        "tokenization_ms": 0.01857999998833293,
-        "inference_ms": 16.131075000004103,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-f634-7ca1-afad-abd2868de664",
+        "usage": {
+          "input_tokens": 104
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -6214,12 +6219,13 @@
         0.025146484375
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 17.337781000009045,
-        "queue_ms": 2.2332079999927146,
-        "tokenization_ms": 0.01820999999324613,
-        "inference_ms": 14.968249999995464,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-f6ec-7082-9223-db39f464ead9",
+        "usage": {
+          "input_tokens": 65
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -7251,12 +7257,13 @@
         -0.001953125
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 15.201044999997748,
-        "queue_ms": 1.2174160000029133,
-        "tokenization_ms": 0.020331000001760913,
-        "inference_ms": 13.793675000002281,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-f7b7-7df2-acb5-941eba872f9b",
+        "usage": {
+          "input_tokens": 39
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -8288,12 +8295,13 @@
         1.9550323486328125e-05
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 17.58623499999601,
-        "queue_ms": 2.079604999991602,
-        "tokenization_ms": 0.03321100000164279,
-        "inference_ms": 15.039851000011595,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-f8b5-7ae3-a508-a02a39f38689",
+        "usage": {
+          "input_tokens": 70
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -9325,12 +9333,13 @@
         0.07080078125
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 16.822959999998943,
-        "queue_ms": 1.8113290000059123,
-        "tokenization_ms": 0.019399999999336615,
-        "inference_ms": 14.856786999999372,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-f97f-7333-9c56-011b049d07a7",
+        "usage": {
+          "input_tokens": 13
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -10362,12 +10371,13 @@
         0.01019287109375
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 16.007012000002874,
-        "queue_ms": 1.3025869999978568,
-        "tokenization_ms": 0.019829999999387837,
-        "inference_ms": 14.548071000007212,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-fa7d-7443-8cc5-38437e51c90e",
+        "usage": {
+          "input_tokens": 99
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -11399,12 +11409,13 @@
         0.0272216796875
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 16.752568000001133,
-        "queue_ms": 1.2562969999976303,
-        "tokenization_ms": 0.018960999994988015,
-        "inference_ms": 15.356018000005633,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-fb42-75f2-9752-d061b80c61f9",
+        "usage": {
+          "input_tokens": 58
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -12436,12 +12447,13 @@
         0.01708984375
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 15.712034999992852,
-        "queue_ms": 2.1118049999984123,
-        "tokenization_ms": 0.01670000000331129,
-        "inference_ms": 13.468168000002834,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-fc1c-7942-beb0-f17c54e948e5",
+        "usage": {
+          "input_tokens": 11
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -13473,12 +13485,13 @@
         0.061279296875
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 16.568403999997372,
-        "queue_ms": 1.7165460000114763,
-        "tokenization_ms": 0.015039999993859965,
-        "inference_ms": 14.707634999993502,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-fce9-7f11-a933-61c4dfc92168",
+        "usage": {
+          "input_tokens": 65
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -14510,12 +14523,13 @@
         0.06640625
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 13.331344999997441,
-        "queue_ms": 0.0751510000043254,
-        "tokenization_ms": 0.014700000008360803,
-        "inference_ms": 13.140731000007122,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-fdc3-70f2-b91d-2d9064a485b7",
+        "usage": {
+          "input_tokens": 109
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -15547,12 +15561,13 @@
         0.0791015625
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 16.56818399999338,
-        "queue_ms": 2.246248000005835,
-        "tokenization_ms": 0.019860999998400075,
-        "inference_ms": 14.177333999995767,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-fe93-7cf3-ae28-1dc87914aa4a",
+        "usage": {
+          "input_tokens": 82
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -16584,12 +16599,13 @@
         0.02490234375
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 14.217074000001162,
-        "queue_ms": 0.11038200000257348,
-        "tokenization_ms": 0.019610999999031264,
-        "inference_ms": 13.970078999989255,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f0-ff64-74f1-a85e-f3c6d01f70c6",
+        "usage": {
+          "input_tokens": 50
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -17621,12 +17637,13 @@
         0.052734375
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 14.765936000003421,
-        "queue_ms": 1.2184260000083214,
-        "tokenization_ms": 0.02100100000745897,
-        "inference_ms": 13.391925999997056,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f1-001c-74a1-aa45-851c80a847d0",
+        "usage": {
+          "input_tokens": 30
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -18658,12 +18675,13 @@
         0.027587890625
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 16.744657000003826,
-        "queue_ms": 0.11244200000248838,
-        "tokenization_ms": 0.017149999990806464,
-        "inference_ms": 16.198735999992664,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f1-0122-72c1-a26f-98f08dfe2f65",
+        "usage": {
+          "input_tokens": 169
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     },
     {
@@ -19695,12 +19713,13 @@
         0.0478515625
       ],
       "model": "BAAI/bge-m3",
-      "timing": {
-        "total_ms": 16.376660000005927,
-        "queue_ms": 1.5239920000027496,
-        "tokenization_ms": 0.01594000001148288,
-        "inference_ms": 14.71642499998893,
-        "postprocessing_ms": null
+      "request": {
+        "id": "019fe6f1-0206-7281-adb9-1d50707605b7",
+        "usage": {
+          "input_tokens": 68
+        },
+        "credits_debited": 1,
+        "execution_identity_sha256": "dd8dbec2aaa952f8c5cbc8531b843026ee901d94719d5208c23ea875ac233eb5"
       }
     }
   ],

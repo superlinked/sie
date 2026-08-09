@@ -24,6 +24,7 @@ def model_for(
     *,
     provision_timeout_s: float,
     required_tool_sequence: tuple[RequiredToolStep, ...] = (),
+    api_calls: list[dict[str, Any]] | None = None,
 ) -> SIENativeModel:
     """Bind one SIE catalog model to the Agents SDK native model interface."""
     return SIENativeModel(
@@ -31,6 +32,7 @@ def model_for(
         client,
         provision_timeout_s=provision_timeout_s,
         required_tool_sequence=required_tool_sequence,
+        api_calls=api_calls,
     )
 
 
@@ -110,12 +112,45 @@ class AppContext:
     contract_text: str
     scan_path: str
     db_path: str
+    api_calls: list[dict[str, Any]] = field(default_factory=list)
     reasoning_agent: Any = None
     clause_cache: dict[str, Any] = field(default_factory=dict)
 
     @property
     def provision_timeout_s(self) -> float:
         return provision_timeout_from(self.cfg)
+
+
+def record_api_call(
+    app: AppContext,
+    sie_fn: str,
+    requested_model: str,
+    result: Any,
+) -> None:
+    """Record only non-payload response metadata for checked run evidence."""
+    rows = result if isinstance(result, list) else [result]
+    response = next((row for row in rows if isinstance(row, dict)), {})
+    request = response.get("request")
+    request_row = request if isinstance(request, dict) else {}
+    app.api_calls.append(
+        {
+            "function": sie_fn,
+            "requested_model": requested_model,
+            "runtime_model": (
+                response.get("model")
+                if isinstance(response.get("model"), str)
+                else None
+            ),
+            "request_id": (
+                request_row.get("id")
+                if isinstance(request_row.get("id"), str)
+                else None
+            ),
+            "rate_book_version": request_row.get("rate_book_version"),
+            "credits_debited": request_row.get("credits_debited"),
+            "execution_identity_sha256": request_row.get("execution_identity_sha256"),
+        }
+    )
 
 
 def _data_uri_image(value: str) -> tuple[bytes, str]:
@@ -216,6 +251,7 @@ async def instruct_once(
         if timeout_s is not None
         else await call
     )
+    record_api_call(app, "generate", model, result)
     return _generation_result(result, time.monotonic() - started)
 
 
@@ -239,4 +275,5 @@ async def prompt_once(
         wait_for_capacity=True,
         provision_timeout_s=app.provision_timeout_s,
     )
+    record_api_call(app, "generate", model, result)
     return _generation_result(result, time.monotonic() - started)

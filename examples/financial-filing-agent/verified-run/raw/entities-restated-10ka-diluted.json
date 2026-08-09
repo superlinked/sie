@@ -1,0 +1,65 @@
+{
+  "entities": [
+    {
+      "text": "Restated Form 10-K/A Accession 0000907471-25-000083",
+      "label": "filing",
+      "score": 0.6875,
+      "start": 3,
+      "end": 54,
+      "bbox": null
+    },
+    {
+      "text": "Three Months",
+      "label": "reporting period",
+      "score": 0.64208984375,
+      "start": 79,
+      "end": 91,
+      "bbox": null
+    },
+    {
+      "text": "$1.68",
+      "label": "money amount",
+      "score": 0.8857421875,
+      "start": 164,
+      "end": 169,
+      "bbox": null
+    },
+    {
+      "text": "$1.34",
+      "label": "money amount",
+      "score": 0.84033203125,
+      "start": 257,
+      "end": 262,
+      "bbox": null
+    },
+    {
+      "text": "$4.62",
+      "label": "money amount",
+      "score": 0.9208984375,
+      "start": 273,
+      "end": 278,
+      "bbox": null
+    },
+    {
+      "text": "$4.27",
+      "label": "money amount",
+      "score": 0.8642578125,
+      "start": 366,
+      "end": 371,
+      "bbox": null
+    }
+  ],
+  "relations": [],
+  "classifications": [],
+  "objects": [],
+  "id": "entities_restated_10ka_diluted",
+  "model": "urchade/gliner_multi-v2.1",
+  "request": {
+    "id": "019fe6f0-fcbf-7830-a610-dc33dc655ef4",
+    "usage": {
+      "input_tokens": 74
+    },
+    "credits_debited": 1,
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+  }
+}

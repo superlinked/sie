@@ -1,86 +1,99 @@
 {
-  "model": "BAAI/bge-reranker-v2-m3",
+  "model": "Qwen/Qwen3-Reranker-4B",
   "scores": [
     {
       "item_id": "13",
-      "score": 0.9503188729286194,
+      "score": 0.98046875,
       "rank": 0
     },
     {
-      "item_id": "23",
-      "score": 0.7388575673103333,
+      "item_id": "6",
+      "score": 0.953125,
       "rank": 1
     },
     {
-      "item_id": "6",
-      "score": 0.48630863428115845,
+      "item_id": "23",
+      "score": 0.53125,
       "rank": 2
     },
     {
-      "item_id": "18",
-      "score": 0.29108163714408875,
+      "item_id": "3",
+      "score": 0.255859375,
       "rank": 3
     },
     {
       "item_id": "4",
-      "score": 0.28587010502815247,
+      "score": 0.2333984375,
       "rank": 4
     },
     {
-      "item_id": "14",
-      "score": 0.2581389248371124,
+      "item_id": "10",
+      "score": 0.1640625,
       "rank": 5
     },
     {
-      "item_id": "3",
-      "score": 0.23528403043746948,
+      "item_id": "18",
+      "score": 0.1123046875,
       "rank": 6
     },
     {
-      "item_id": "2",
-      "score": 0.17781086266040802,
+      "item_id": "11",
+      "score": 0.10693359375,
       "rank": 7
     },
     {
       "item_id": "1",
-      "score": 0.1475551724433899,
+      "score": 0.06787109375,
       "rank": 8
     },
     {
-      "item_id": "11",
-      "score": 0.1200256198644638,
+      "item_id": "14",
+      "score": 0.050537109375,
       "rank": 9
     },
     {
-      "item_id": "7",
-      "score": 0.0616496242582798,
+      "item_id": "2",
+      "score": 0.047607421875,
       "rank": 10
     },
     {
-      "item_id": "9",
-      "score": 0.0497734509408474,
+      "item_id": "7",
+      "score": 0.035400390625,
       "rank": 11
     },
     {
-      "item_id": "50",
-      "score": 0.018194368109107018,
+      "item_id": "9",
+      "score": 0.01043701171875,
       "rank": 12
     },
     {
       "item_id": "8",
-      "score": 0.01578456163406372,
+      "score": 0.00136566162109375,
       "rank": 13
     },
     {
-      "item_id": "33",
-      "score": 0.007725534029304981,
+      "item_id": "50",
+      "score": 0.0003681182861328125,
       "rank": 14
     },
     {
-      "item_id": "10",
-      "score": 0.0061929901130497456,
+      "item_id": "33",
+      "score": 0.0001087188720703125,
       "rank": 15
     }
   ],
-  "query_id": "debris-removal-scope"
+  "usage": {
+    "input_tokens": 8509,
+    "credits_charged": 100,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2"
+  },
+  "request": {
+    "id": "019fe6f2-883f-7e51-a493-8b4942e30dc7",
+    "usage": {
+      "input_tokens": 8509,
+      "pairs": 16
+    },
+    "credits_debited": 100,
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+  }
 }

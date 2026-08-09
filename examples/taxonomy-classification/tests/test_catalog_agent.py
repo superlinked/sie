@@ -111,10 +111,12 @@ def test_classify_listing_runs_two_rankings_then_verifies_the_union() -> None:
                 else [0.3, 0.95, 0.4, 0.1]
             )
             return {
+                "model": catalog_agent.RERANKER_MODEL,
+                "request": {"id": f"score-{len(self.score_calls)}"},
                 "scores": [
                     {"item_id": str(index), "score": score}
                     for index, score in enumerate(scores)
-                ]
+                ],
             }
 
         def generate(
@@ -127,6 +129,7 @@ def test_classify_listing_runs_two_rankings_then_verifies_the_union() -> None:
                 {"model": model, "prompt": prompt, "kwargs": kwargs}
             )
             return {
+                "model": catalog_agent.VERIFIER_MODEL,
                 "text": '{"selected_index": 0, "needs_review": false}',
                 "request": {"id": "generate-54"},
             }
@@ -158,6 +161,11 @@ def test_classify_listing_runs_two_rankings_then_verifies_the_union() -> None:
     )
     assert decision.needs_review is False
     assert decision.verifier_response_id == "generate-54"
+    assert [call["request_id"] for call in decision.api_calls] == [
+        "score-1",
+        "score-2",
+        "generate-54",
+    ]
 
 
 def test_verify_candidates_rejects_an_empty_union() -> None:
@@ -242,8 +250,8 @@ def test_eval_resumes_completed_rows_from_its_checkpoint(
         selected_path="A > One",
         needs_review=False,
         candidate_union=["A > One"],
-        text_scores=[1.0],
-        image_plus_copy_scores=[1.0],
+        text_scores=[1.0, 0.0, 0.0, 0.0],
+        image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
         verifier_response_id="generate-7",
     )
     output_path = tmp_path / "evaluation.json"
@@ -260,8 +268,8 @@ def test_eval_resumes_completed_rows_from_its_checkpoint(
             selected_path="A > Two",
             needs_review=False,
             candidate_union=["A > Two"],
-            text_scores=[1.0],
-            image_plus_copy_scores=[1.0],
+            text_scores=[0.0, 1.0, 0.0, 0.0],
+            image_plus_copy_scores=[0.0, 1.0, 0.0, 0.0],
             verifier_response_id="generate-8",
         )
 

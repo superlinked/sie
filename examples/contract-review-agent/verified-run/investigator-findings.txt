@@ -1,0 +1,30 @@
+## Contract Investigation Report
+
+### 1. Document Classification
+- **Type:** MSA (Master Services Agreement) / Distributor Agreement
+- **Reason:** The document is a Distributor Agreement between a company and a distributor, outlining the terms for selling products, which is a standard type of Master Services Agreement (MSA) or distribution contract.
+
+### 2. Parties & Key Terms
+- **Parties:**
+  - **Company:** Electric City Corp. (Delaware corporation)
+  - **Distributor:** Electric City of Illinois LLC
+- **Execution Date:** September 7, 1999
+- **Term:** Initial term of ten (10) years, renewable annually for up to another ten (10) years on the same terms and conditions.
+- **Market:** Exclusive distributorship within the State of Illinois.
+- **Products:** "Energy Saver" energy efficiency devices.
+
+### 3. Execution Status
+- **Status:** **NOT EXECUTED**
+- **Finding:** The signatures and dates for both parties are not present in the visible portion of the document. The document ends at Section 1.1, which does not include any signature blocks or dates.
+
+### 4. Risk Analysis (Customer = Distributor)
+- **Risk: Automatic Renewal & Term Extension**
+  - **Severity:** High
+  - **Issue:** The agreement allows for automatic annual renewals for up to ten additional years without explicit customer consent or right to terminate early, creating a long-term commitment with no clear exit strategy.
+  - **Redline:** Add a clause allowing the Distributor to terminate the Agreement upon 90 days' written notice at any time during the Term.
+
+### 5. Upcoming Obligations & Deadlines
+- **Obligation:** Send renewal / non-renewal notice before term end
+- **Counterparty:** LIMEENERGYCO
+- **Due Date:** 2026-09-15
+- **Amount:** Not specified in the obligations database.

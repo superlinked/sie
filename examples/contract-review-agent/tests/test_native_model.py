@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -58,16 +59,6 @@ async def test_agents_runner_executes_native_tool_turn_then_finishes() -> None:
             generated(
                 json.dumps(
                     {
-                        "kind": "tool_call",
-                        "name": "echo",
-                        "arguments": {"value": "clause"},
-                    }
-                ),
-                "request-tool",
-            ),
-            generated(
-                json.dumps(
-                    {
                         "kind": "final",
                         "output": "Grounded result: CLAUSE",
                     }
@@ -78,9 +69,9 @@ async def test_agents_runner_executes_native_tool_turn_then_finishes() -> None:
     )
 
     @function_tool
-    async def echo(value: str) -> str:
+    async def echo(query: str) -> str:
         """Uppercase one value."""
-        return value.upper()
+        return query.upper()
 
     agent = Agent(
         name="native-test",
@@ -89,7 +80,7 @@ async def test_agents_runner_executes_native_tool_turn_then_finishes() -> None:
             "Qwen/Qwen3.5-4B",
             client,  # type: ignore[arg-type]
             provision_timeout_s=30,
-            required_tool_sequence=(("echo", None),),
+            required_tool_sequence=(("echo", "clause"),),
         ),
         tools=[echo],
     )
@@ -97,13 +88,11 @@ async def test_agents_runner_executes_native_tool_turn_then_finishes() -> None:
     result = await Runner.run(agent, "Process clause")
 
     assert result.final_output == "Grounded result: CLAUSE"
-    assert len(client.calls) == 2
-    first_schema = client.calls[0]["kwargs"]["grammar"]["json_schema"]
-    assert first_schema["properties"]["name"]["const"] == "echo"
-    second_schema = client.calls[1]["kwargs"]["grammar"]["json_schema"]
-    assert len(second_schema["oneOf"]) == 2
-    assert "[tool echo]\nCLAUSE" in client.calls[1]["prompt"]
-    assert client.calls[1]["kwargs"]["wait_for_capacity"] is True
+    assert len(client.calls) == 1
+    schema = client.calls[0]["kwargs"]["grammar"]["json_schema"]
+    assert len(schema["oneOf"]) == 2
+    assert "[tool echo]\nCLAUSE" in client.calls[0]["prompt"]
+    assert client.calls[0]["kwargs"]["wait_for_capacity"] is True
 
 
 def test_required_search_steps_only_advance_on_the_expected_query() -> None:
@@ -252,6 +241,52 @@ async def _get_response(
         conversation_id=None,
         prompt=prompt,
     )
+
+
+@pytest.mark.asyncio
+async def test_required_query_is_emitted_without_generation() -> None:
+    @function_tool
+    async def search_clauses(query: str) -> str:
+        """Find clauses for one exact query."""
+        return query
+
+    client = FakeSIE([])
+    model = SIENativeModel(
+        "Qwen/Qwen3.6-27B",
+        client,  # type: ignore[arg-type]
+        provision_timeout_s=30,
+        required_tool_sequence=(("search_clauses", "termination"),),
+    )
+
+    response = await _get_response(model, tools=[search_clauses])
+
+    assert client.calls == []
+    assert response.output[0].name == "search_clauses"
+    assert json.loads(response.output[0].arguments) == {"query": "termination"}
+
+
+@pytest.mark.asyncio
+async def test_required_question_is_emitted_without_generation() -> None:
+    @function_tool
+    async def query_obligations_db(question: str) -> str:
+        """Query obligations with one exact question."""
+        return question
+
+    client = FakeSIE([])
+    model = SIENativeModel(
+        "Qwen/Qwen3.6-27B",
+        client,  # type: ignore[arg-type]
+        provision_timeout_s=30,
+        required_tool_sequence=(("query_obligations_db", "upcoming obligations"),),
+    )
+
+    response = await _get_response(model, tools=[query_obligations_db])
+
+    assert client.calls == []
+    assert response.output[0].name == "query_obligations_db"
+    assert json.loads(response.output[0].arguments) == {
+        "question": "upcoming obligations"
+    }
 
 
 @pytest.mark.asyncio
@@ -427,3 +462,54 @@ async def test_query_obligations_db_rejects_unknown_generation_mode() -> None:
             ),
             json.dumps({"question": "Show one value"}),
         )
+
+
+@pytest.mark.asyncio
+async def test_clause_risk_tool_reads_saved_searches_without_copy_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    async def fake_run(_agent: object, prompt: str, **_kwargs: Any) -> object:
+        prompts.append(prompt)
+        return SimpleNamespace(
+            final_output="grounded risk analysis",
+            context_wrapper=SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=20, output_tokens=5)
+            ),
+        )
+
+    monkeypatch.setattr(contract_tools.Runner, "run", fake_run)
+    app = AppContext(
+        sie=FakeSIE([]),  # type: ignore[arg-type]
+        cfg={
+            "cluster": {"provision_timeout_s": 30},
+            "models": {"reasoning": "reasoning-model"},
+        },
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+        reasoning_agent=object(),
+        clause_cache={
+            "search_results": {
+                "automatic renewal": ["renewal clause"],
+                "termination": ["termination clause"],
+            }
+        },
+    )
+
+    result = await contract_tools.analyze_clause_risks.on_invoke_tool(
+        ToolContext(
+            app,
+            tool_name="analyze_clause_risks",
+            tool_call_id="call-risk",
+            tool_arguments="{}",
+        ),
+        "{}",
+    )
+
+    assert contract_tools.analyze_clause_risks.params_json_schema["properties"] == {}
+    assert prompts and "Topic: automatic renewal\n\nrenewal clause" in prompts[0]
+    assert "Topic: termination\n\ntermination clause" in prompts[0]
+    assert result == "grounded risk analysis"

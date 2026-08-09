@@ -1,0 +1,63 @@
+{
+  "run_id": "prod-us-20260809",
+  "completed_at": "2026-08-09T14:30:00.903717+00:00",
+  "endpoint": "https://api.superlinked.com",
+  "execution": "SIE API",
+  "sie_server_commit": "892ef31f0e08a6111c249f9351ba3a1db40e8b86",
+  "run_command": "review --no-warm --run-id prod-us-20260809",
+  "models": {
+    "triage": "Qwen/Qwen3.5-4B",
+    "orchestrator": "Qwen/Qwen3.6-27B",
+    "vision": "Qwen/Qwen3.5-4B",
+    "reasoning": "Qwen/Qwen3.5-4B",
+    "sql": "Qwen/Qwen3.5-4B",
+    "guard": "ibm-granite/granite-guardian-3.0-2b",
+    "ocr": "lightonai/LightOnOCR-2-1B",
+    "embed": "BAAI/bge-m3",
+    "rerank": "Qwen/Qwen3-Reranker-4B",
+    "entities": "fastino/gliner2-large-v1"
+  },
+  "source_inputs": [
+    {
+      "label": "CUAD \u00b7 limeenergyco-09-09-1999-ex-10-distributor-agreement",
+      "kind": "contract_text",
+      "sha256": "95ea6fae5227f2424896bb354e9de452c7f05a85dc0acb72fa6bd72ebe37a236"
+    },
+    {
+      "path": "limeenergyco-09-09-1999-ex-10-distributor-agreement-page.png",
+      "kind": "signature_scan",
+      "sha256": "961b16d5dfbecc90a41875d99cae5bd619927665f85da41515b1e16dbad18842"
+    },
+    {
+      "path": "obligations.db",
+      "kind": "obligations_db",
+      "sha256": "07f80b875aac06ec3612a3426dc81f38825969d20e27d7165d2f19d5c5872888"
+    }
+  ],
+  "timing_ms": {
+    "end_to_end": 72127.1
+  },
+  "timing_note": "Diagnostic run timing, not a benchmark.",
+  "artifacts": [
+    {
+      "path": "api-calls.json",
+      "sha256": "a0eaa71b49d7294d61687f2d8b9b4877219a891c352fc0b5fb3cb062ee27ab5d"
+    },
+    {
+      "path": "evaluation.json",
+      "sha256": "306a42c4f46d68aac489fff838aa46ce1138e572d566f03497abe08132e0360e"
+    },
+    {
+      "path": "investigator-findings.txt",
+      "sha256": "bdeec99720fb56cd6133848400c9d05cb0eb77027bba0c15a36fe64fc125642f"
+    },
+    {
+      "path": "ledger.json",
+      "sha256": "6215dcf2c8d4f7a2a2179fbd425fee7c4217402e679566a7457632878a0cfef3"
+    },
+    {
+      "path": "review.json",
+      "sha256": "9cc37a6015c40a20fdd5a76c3b6a98881d45c614e7f8af1f0e1ce027a3f3f169"
+    }
+  ]
+}

@@ -92,8 +92,18 @@
       "rank": 17
     }
   ],
-  "query_id": "bearing-trend-query",
   "usage": {
-    "input_tokens": 2938
+    "input_tokens": 2938,
+    "credits_charged": 112,
+    "rate_book_version": "2026-07-26-production-bootstrap-v2"
+  },
+  "request": {
+    "id": "019fe6f1-02d9-7fc2-8fe9-324f1a811946",
+    "usage": {
+      "input_tokens": 2938,
+      "pairs": 18
+    },
+    "credits_debited": 112,
+    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
   }
 }

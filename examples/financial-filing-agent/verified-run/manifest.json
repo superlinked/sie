@@ -1,10 +1,10 @@
 {
-  "created_at": "2026-07-25T02:28:01.848776+00:00",
-  "endpoint": "http://127.0.0.1:8080",
-  "sie_server_commit": "4b5ea9ccd5d5fc07c56edfea790080b05e17f0d2",
-  "run_command": "Modal exact-source reference examples against public SIE main at 4b5ea9c",
+  "created_at": "2026-08-09T14:33:02.068850+00:00",
+  "endpoint": "https://api.superlinked.com",
+  "sie_server_commit": "892ef31f0e08a6111c249f9351ba3a1db40e8b86",
+  "run_command": "review-filing --run-id prod-us-20260809",
   "models": {
-    "parse": "docling-project/docling",
+    "parse": "docling",
     "retrieve": "BAAI/bge-m3",
     "rerank": "Qwen/Qwen3-Reranker-4B",
     "entities": "urchade/gliner_multi-v2.1",
@@ -25,31 +25,35 @@
     },
     {
       "path": "raw/entities-original-10q.json",
-      "sha256": "d7db84b21d2f86a0b1d3f80c30091de9f0557910d147d27e85689a6c79be353c"
+      "sha256": "f78ef0123d20d6669de6256fcc0125d99277c3dd1175ba43e003043c8a59cc7d"
+    },
+    {
+      "path": "raw/entities-restated-10ka-diluted.json",
+      "sha256": "d04860c24b8c70226f1c55eb21ac6f940dc2dedf7ac2a03aaf8794fcddaba2a2"
     },
     {
       "path": "raw/entities-restated-10ka.json",
-      "sha256": "815e9b289837a1eefcc72bd08c23c11ce6e6533398a533ba5540d57743aedb68"
+      "sha256": "b73cfb6965a756578c203435f665fa69c46787e8fdf9b56b2cc0f2b9bb6d2a6d"
     },
     {
       "path": "raw/entities-status.json",
-      "sha256": "4dc6569dcc77d12e373e7b89a21676bced7849bf1abefee92399e0835599e115"
+      "sha256": "bdb70ab6e1a13c0702700a9e84fcccec02e1afbd98d1b1b60bbb2a4baa5c9eaa"
     },
     {
       "path": "raw/entities.json",
-      "sha256": "0c07ce92df4e183c7a4cf4f567b06474d0f1245b37326b09b894a159f4ff54c3"
+      "sha256": "574b5fd48ea6e9020a141a4546fbf80585a34a794e2a45fbba0e94c30ea8d5da"
     },
     {
       "path": "raw/gliner2-original-10q.json",
-      "sha256": "02535822a2e1f0a061e43253b993a296a76444d1198b2ee25379df91e7f4e512"
+      "sha256": "0a465786a7dccf975946cf03e2682058048527e0a1fb8ec96344aea84bedf6c5"
     },
     {
       "path": "raw/gliner2-restated-10ka.json",
-      "sha256": "23c3e88506769d17e34cdb1ad654d99212623f8f7fd6f49f11086fac5a68a820"
+      "sha256": "1bc127ea48abc06540a1d7e044c93f6f9f5eac3745e65cb8afded09f7d6f09b4"
     },
     {
       "path": "raw/gliner2-status.json",
-      "sha256": "8a25edf9c397dc00b7dd11a454ceaebfc70c3f94d6d44fd7f6d85b05be78bac5"
+      "sha256": "0d47acf6191ef3eef8e57ea6e3fce56fedaf20409ae859ab3f955771ffae1d6b"
     },
     {
       "path": "raw/mapped.json",
@@ -57,15 +61,15 @@
     },
     {
       "path": "raw/parse.json",
-      "sha256": "9f0e6109b074439f331ff97bf2aceaae4b4566db9553c8f7779673acb53414e2"
+      "sha256": "a8d98ba0fa87746cde5c6ab4ae215c67720dae17c9c51b596ffd7d594b2a685a"
     },
     {
       "path": "raw/rerank.json",
-      "sha256": "1d8bb7655c90ee6a6342ce05ccd4d15e9e497ac70e58ed761faba7f6431c1e78"
+      "sha256": "47f1c499adf0c582277aef4dff4b6ee98e752b363c0424e0ab0a9d0ac723bdae"
     },
     {
       "path": "raw/retrieve.json",
-      "sha256": "e98ce5792654f8b68bd3b93789ae75cb4b24482bc1162ba9b9dba6147198482b"
+      "sha256": "636e621caa8eb21208ee79cfaea82bfc8022836b4fecde15cde0df1000d76fb4"
     },
     {
       "path": "evaluation.json",
@@ -76,48 +80,53 @@
     {
       "stage": "parse",
       "model": "docling",
-      "configured_model": "docling-project/docling",
-      "latency_ms": 35300.6
+      "configured_model": "docling",
+      "latency_ms": 15696.5
     },
     {
       "stage": "retrieve",
       "model": "BAAI/bge-m3",
-      "latency_ms": 11543.0
+      "latency_ms": 967.8
     },
     {
       "stage": "rerank",
       "model": "Qwen/Qwen3-Reranker-4B",
-      "latency_ms": 16574.0
+      "latency_ms": 513.1
     },
     {
       "stage": "entities_original_10q",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 11186.1
+      "latency_ms": 253.4
     },
     {
       "stage": "entities_restated_10ka",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 183.8
+      "latency_ms": 248.4
+    },
+    {
+      "stage": "entities_restated_10ka_diluted",
+      "model": "urchade/gliner_multi-v2.1",
+      "latency_ms": 223.3
     },
     {
       "stage": "entities_status",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 130.7
+      "latency_ms": 273.3
     },
     {
       "stage": "gliner2_original_10q",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 10638.7
+      "latency_ms": 251.9
     },
     {
       "stage": "gliner2_restated_10ka",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 62.0
+      "latency_ms": 261.9
     },
     {
       "stage": "gliner2_status",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 50.3
+      "latency_ms": 256.3
     }
   ],
   "pipeline": [
@@ -126,6 +135,7 @@
     "rerank",
     "entities_original_10q",
     "entities_restated_10ka",
+    "entities_restated_10ka_diluted",
     "entities_status",
     "gliner2_original_10q",
     "gliner2_restated_10ka",

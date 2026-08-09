@@ -24,6 +24,7 @@ from .app import (
 from .config import load_config
 from .data import make_sample
 from .data.paths import CUAD_DIR, GENERATED_DIR, MANIFEST_PATH
+from .evidence import write_run_record
 from .runtime import AppContext, Ledger, instruct_once, provision_timeout_from
 
 console = Console()
@@ -218,6 +219,7 @@ async def _run(args) -> None:
         timeout_s=provision_timeout_from(cfg),
     ) as sie:
         ledger = Ledger()
+        api_calls: list[dict] = []
         app = AppContext(
             sie=sie,
             cfg=cfg,
@@ -225,10 +227,11 @@ async def _run(args) -> None:
             contract_text=text,
             scan_path=scan_path,
             db_path=db_path,
-            reasoning_agent=build_reasoning_agent(cfg, sie),
+            api_calls=api_calls,
+            reasoning_agent=build_reasoning_agent(cfg, sie, api_calls),
         )
-        investigator = build_investigator(cfg, sie)
-        synthesizer = build_synthesizer(cfg, sie)
+        investigator = build_investigator(cfg, sie, api_calls)
+        synthesizer = build_synthesizer(cfg, sie, api_calls)
         if not args.no_warm:
             await _warm(app)
         t0 = time.monotonic()
@@ -272,6 +275,24 @@ async def _run(args) -> None:
         _print_ledger(ledger)
         usage = getattr(getattr(gather, "context_wrapper", None), "usage", None)
         _print_summary(cfg, usage, wall)
+        if args.run_id:
+            if not isinstance(review, ContractReview):
+                raise RuntimeError("Cannot record an unstructured contract review")
+            run_dir = write_run_record(
+                run_id=args.run_id,
+                endpoint=cfg["cluster"]["url"],
+                cfg=cfg,
+                label=label,
+                contract_text=text,
+                scan_path=scan_path,
+                db_path=db_path,
+                findings=str(gather.final_output),
+                review=review,
+                ledger=ledger,
+                api_calls=api_calls,
+                wall_s=wall,
+            )
+            console.print(f"Checked run evidence: [bold]{run_dir}[/]")
 
 
 def main() -> None:
@@ -300,6 +321,11 @@ def main() -> None:
         "--no-warm",
         action="store_true",
         help="skip pre-warming models (faster when the cluster is already warm)",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="write reproducible evidence under runs/<run-id> after a passing run",
     )
     args = parser.parse_args()
 

@@ -1,6 +1,6 @@
 # Contract review with the OpenAI Agents SDK, on one SIE cluster
 
-A multi-agent contract reviewer built with the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) where **every model call is served by SIE**. No `api.openai.com`; managed calls are metered by SIE's native primitives. An **investigator** agent autonomously calls tools to gather grounded facts, then a **synthesizer** agent turns them into a structured review. Each step runs on the **right model from the SIE catalog**: a fast triage model, a vision model that reads the scanned signature page, a reasoning sub-agent for clause risk, a text-to-SQL specialist, an OCR model, embedding and reranker models for clause search, a zero-shot entity extractor, and a safety guardrail. Ten specialized jobs, one cluster.
+A multi-agent contract reviewer built with the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) where **every model call is served by SIE**. No `api.openai.com`; managed calls are metered by SIE's native primitives. An **investigator** agent follows a required tool sequence to gather grounded facts, then a **synthesizer** agent turns them into a structured review. Each step runs on the **right model from the SIE catalog**: a fast triage model, a vision model that reads the scanned signature page, a reasoning sub-agent for clause risk, a text-to-SQL specialist, an OCR model, embedding and reranker models for clause search, a zero-shot entity extractor, and a safety guardrail. Ten specialized jobs, one cluster.
 
 This is the "one cluster powers every model your agent calls" idea from the [SIE landing page](https://superlinked.com), made real and runnable.
 
@@ -19,7 +19,7 @@ Every value below is a real model in the [SIE catalog](https://superlinked.com/m
 | OCR: scanned page to markdown | `lightonai/LightOnOCR-2-1B` | extract |
 | Clause search: dense embeddings | `BAAI/bge-m3` | encode |
 | Clause rerank: cross-encoder | `Qwen/Qwen3-Reranker-4B` | score |
-| Entity extraction: parties, dates, amounts | `urchade/gliner_multi-v2.1` | extract |
+| Entity extraction: parties, dates, amounts | `fastino/gliner2-large-v1` | extract |
 
 ## How it works
 
@@ -38,10 +38,12 @@ Agent(
 )
 ```
 
-For each agent turn, the adapter builds a strict JSON Schema whose valid result
-is either one declared function call or a final answer. SIE performs the
-schema-constrained generation through its native primitive; the Agents SDK
-executes declared Python tools and passes their results into the next turn.
+For each required investigation step, the adapter emits the configured tool
+call directly and binds its fixed query or question. This prevents a model from
+skipping a required source or copying large clause payloads into arguments.
+After the required sequence, SIE performs schema-constrained generation through
+its native primitive; the Agents SDK passes every tool result into that final
+investigator turn and the structured synthesizer turn.
 Structured final output uses the agent's declared Pydantic schema. The example never calls an OpenAI-compatible endpoint or sends data to
 `api.openai.com`. The text-to-SQL tool may execute model-generated SQL only
 after enforcing one SELECT statement; it never executes generated Python or
@@ -77,6 +79,7 @@ uv run fetch-contracts                 # or: uv run make-sample  (offline synthe
 # 3. Review the first contract and watch the model fan-out.
 uv run review                          # uv run review --list   to see available contracts
 uv run review --contract <slug>        # review a specific one
+uv run review --run-id local           # also write a reproducible evidence bundle
 ```
 
 > **GPU sizing.** The brain (`orchestrator`, which also does the structured synthesis) runs on `Qwen/Qwen3.6-27B` (64K, non-thinking), so it needs an H100 or RTX PRO 6000. The shorter-context roles (`triage`, `vision`, `reasoning`, `sql`) run on `Qwen/Qwen3.5-4B`. A cold cluster pays a one-time load per model on first use; the agent retries the "still provisioning" responses under `cluster.provision_timeout_s`. Keep bundles warm (`minReplicas: 1`) to skip the wait. A required model or tool failure is printed with the partial ledger and exits nonzero.
@@ -89,6 +92,11 @@ the step's model, native SIE primitive, total latency, data sent, and available
 throughput. Every primitive uses the SDK's governed capacity wait. Try
 `--instruction "..."` to change the ask, or feed the guardrail a malicious
 prompt to watch `granite-guardian` trip the tripwire.
+
+`verified-run/` contains the August 9, 2026, prod-US record. Its manifest pins
+the production source commit, endpoint, input hashes, models, artifact hashes,
+and diagnostic wall time. `api-calls.json` preserves requested and runtime model
+IDs, request IDs, rate-book versions, execution identities, and debited credits.
 
 ## Swapping models (the point of the catalog)
 
