@@ -132,7 +132,10 @@ def _validate_api_calls(
     if not isinstance(api_calls, list) or len(api_calls) != len(
         EXPECTED_API_CALL_MODELS
     ):
-        raise ValueError(f"Row {row_idx} must record exactly three SIE API calls")
+        raise ValueError(
+            f"Row {row_idx} must record exactly "
+            f"{len(EXPECTED_API_CALL_MODELS)} SIE API calls"
+        )
     calls = [call for call in api_calls if isinstance(call, dict)]
     if len(calls) != len(api_calls):
         raise TypeError(f"Row {row_idx} has a non-object SIE API call")

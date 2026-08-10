@@ -34,6 +34,31 @@ _MAX_PLAIN_TEXT_LENGTH = 3500
 type RequiredToolStep = tuple[str, str | None]
 
 
+def api_call_row(
+    *,
+    stage: str,
+    function: str,
+    requested_model: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    request = response.get("request")
+    request_row = request if isinstance(request, dict) else {}
+    return {
+        "stage": stage,
+        "function": function,
+        "requested_model": requested_model,
+        "runtime_model": (
+            response.get("model") if isinstance(response.get("model"), str) else None
+        ),
+        "request_id": (
+            request_row.get("id") if isinstance(request_row.get("id"), str) else None
+        ),
+        "rate_book_version": request_row.get("rate_book_version"),
+        "credits_debited": request_row.get("credits_debited"),
+        "execution_identity_sha256": request_row.get("execution_identity_sha256"),
+    }
+
+
 def _as_dict(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return item
@@ -497,29 +522,13 @@ class SIENativeModel(Model):
             provision_timeout_s=self._provision_timeout_s,
         )
         if self._api_calls is not None:
-            request = result.get("request")
-            request_row = request if isinstance(request, dict) else {}
             self._api_calls.append(
-                {
-                    "stage": self._stage,
-                    "function": "generate",
-                    "requested_model": self.model,
-                    "runtime_model": (
-                        result.get("model")
-                        if isinstance(result.get("model"), str)
-                        else None
-                    ),
-                    "request_id": (
-                        request_row.get("id")
-                        if isinstance(request_row.get("id"), str)
-                        else None
-                    ),
-                    "rate_book_version": request_row.get("rate_book_version"),
-                    "credits_debited": request_row.get("credits_debited"),
-                    "execution_identity_sha256": request_row.get(
-                        "execution_identity_sha256"
-                    ),
-                }
+                api_call_row(
+                    stage=self._stage,
+                    function="generate",
+                    requested_model=self.model,
+                    response=result,
+                )
             )
         text = result.get("text")
         if not isinstance(text, str):

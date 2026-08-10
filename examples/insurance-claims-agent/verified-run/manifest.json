@@ -1,6 +1,6 @@
 {
-  "run_id": "prod-us-20260809-sdk071",
-  "run_at": "2026-08-09T21:56:15.771230+00:00",
+  "run_id": "prod-us-20260810-sdk071-temporal",
+  "run_at": "2026-08-10T08:38:33.843127+00:00",
   "public_record": true,
   "endpoints": {
     "cluster": "https://api.superlinked.com",
@@ -10,10 +10,10 @@
     "parse": "docling",
     "extract": "fastino/gliner2-large-v1",
     "rerank": "Qwen/Qwen3-Reranker-4B",
-    "review": "Qwen/Qwen3.5-4B"
+    "review": "Qwen/Qwen3.6-27B"
   },
   "rate_book_provenance": {
-    "version": "2026-07-26-production-bootstrap-v2",
+    "version": "2026-08-09-production-bootstrap-v3",
     "source_artifacts": [
       "raw/appeal_decision-parse.json",
       "raw/claim-facts.json",
@@ -22,41 +22,41 @@
       "raw/review-completion.json"
     ],
     "request_ids": [
-      "019fe886-1eed-7862-8255-a72615d7bef5",
-      "019fe886-3dd5-7293-95ef-ab1ce2143601",
-      "019fe886-24c0-7bd0-8e77-b3ad4b134a0c",
-      "019fe886-3eeb-78a0-a41b-c45e293b502a",
-      "019fe886-478c-7991-88ac-6ef00e7dd8d4"
+      "019feac8-1300-7a00-958a-8a609dc77699",
+      "019feac8-349f-7aa0-851f-5e68c355c49c",
+      "019feac8-1962-7b52-8f99-48997edcbcca",
+      "019feac8-35dd-7301-9912-d1e3a113b025",
+      "019fead2-5194-7bf2-97bc-569a0eb18318"
     ],
     "request_versions": {
-      "019fe886-1eed-7862-8255-a72615d7bef5": "2026-07-26-production-bootstrap-v2",
-      "019fe886-3dd5-7293-95ef-ab1ce2143601": "2026-07-26-production-bootstrap-v2",
-      "019fe886-24c0-7bd0-8e77-b3ad4b134a0c": "2026-07-26-production-bootstrap-v2",
-      "019fe886-3eeb-78a0-a41b-c45e293b502a": "2026-07-26-production-bootstrap-v2",
-      "019fe886-478c-7991-88ac-6ef00e7dd8d4": "2026-07-26-production-bootstrap-v2"
+      "019feac8-1300-7a00-958a-8a609dc77699": "2026-08-09-production-bootstrap-v3",
+      "019feac8-349f-7aa0-851f-5e68c355c49c": "2026-08-09-production-bootstrap-v3",
+      "019feac8-1962-7b52-8f99-48997edcbcca": "2026-08-09-production-bootstrap-v3",
+      "019feac8-35dd-7301-9912-d1e3a113b025": "2026-08-09-production-bootstrap-v3",
+      "019fead2-5194-7bf2-97bc-569a0eb18318": "2026-08-09-production-bootstrap-v3"
     }
   },
   "timings_ms": {
-    "parse_appeal_decision_ms": 1552.8,
-    "parse_policy_ms": 6655.6,
-    "extract_claim_facts_ms": 240.6,
-    "rerank_policy_ms": 2057.0,
-    "synthesize_review_ms": 33917.8
+    "parse_appeal_decision_ms": 1822.6,
+    "parse_policy_ms": 7178.9,
+    "extract_claim_facts_ms": 289.1,
+    "rerank_policy_ms": 2022.2,
+    "synthesize_review_ms": 34368.1
   },
   "source_manifest": "source-manifest.json",
   "review": "review.json",
   "artifacts": [
     {
       "path": "claim-facts.json",
-      "sha256": "8c138347308ce838530bd57cdde36cff8abf50c4fae4fd416124049c0e6957fd"
+      "sha256": "0750196083b01a5bcf0982de5f3519d5cb7a0173d575ff1a9b6f1ebad232d1e4"
     },
     {
       "path": "default-stage.json",
-      "sha256": "ab1fced4dbec79e9880815394479cf85318a6ceb30a5c7423cab69cc42cda0b0"
+      "sha256": "009d43bc63d799969fa875fdf522da7f07df5efbf3fa561bdb498a1c51d8e756"
     },
     {
       "path": "evaluation.json",
-      "sha256": "5292a9cebdf50b142f888818257d05daf30f7def19669a64c0f261574f067d8c"
+      "sha256": "dc034a20c5027eb6fd63859beb3d16f93dd732bc8a2b415326a676eb22e51a08"
     },
     {
       "path": "markdown/appeal_decision.md",
@@ -72,27 +72,27 @@
     },
     {
       "path": "raw/appeal_decision-parse.json",
-      "sha256": "95bee3732b916589ce0e865434a3713f0d3b52437de112814d68f2be5a78bcd9"
+      "sha256": "4f66c89dbb708a8d3cf95bbf5cf3c5f7742f698b803b36cb519e096a65940be6"
     },
     {
       "path": "raw/claim-facts.json",
-      "sha256": "8c138347308ce838530bd57cdde36cff8abf50c4fae4fd416124049c0e6957fd"
+      "sha256": "0750196083b01a5bcf0982de5f3519d5cb7a0173d575ff1a9b6f1ebad232d1e4"
     },
     {
       "path": "raw/policy-parse.json",
-      "sha256": "b775d5f1422c6e7c8cd0ac24b94bd33e52bf317e0a5e0ff9ae31886d127f32a7"
+      "sha256": "071df5e83e8f85c1949d6524a80244b98024ce17b9a97eaf35bb32e51ba98f20"
     },
     {
       "path": "raw/policy-rerank.json",
-      "sha256": "7b5063b8e782bf410dc4c372f164ea4fb695ec84ef8f31585c344872a36c4b12"
+      "sha256": "bfddba5dad6174f669bbbb9bb6d5fe39eb9eed8ac73f87e4ded23321c8bf55a2"
     },
     {
       "path": "raw/review-completion.json",
-      "sha256": "a92f3244776b970c1f3d339f2684f237a2c4027b8cb92c263aabe80d5161874d"
+      "sha256": "6fd5ccae514ab9245fa2b43da8c17101b01bd6fdba9d13150f73fee9033268b0"
     },
     {
       "path": "review.json",
-      "sha256": "7863fa12b4552cfe311348c16fac208702280d63f8f1dc979de3cbc87b773af2"
+      "sha256": "4bf2976227d331ae5ede5cae82be7f9c04ce725e34049a720ad2f6c890cb5300"
     },
     {
       "path": "source-manifest.json",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -561,7 +562,17 @@ def build_review(data: dict[str, Any], ranked: list[dict[str, Any]]) -> dict[str
     }
 
 
+def _validate_run_id(run_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id) or run_id in {
+        ".",
+        "..",
+    }:
+        raise ValueError("run_id must be one safe directory name containing only letters, digits, '.', '_', or '-'")
+    return run_id
+
+
 def run(run_id: str) -> Path:
+    run_id = _validate_run_id(run_id)
     config = load_config()
     final_run_dir = RUNS_DIR / run_id
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -581,7 +592,8 @@ def run(run_id: str) -> Path:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
     finally:
-        reservation_dir.rmdir()
+        with contextlib.suppress(OSError):
+            reservation_dir.rmdir()
     console.print(f"[green]Wrote[/] {final_run_dir}")
     return final_run_dir
 

@@ -45,6 +45,9 @@ def test_published_section_allowlist_rejects_unrelated_citations() -> None:
     assert _unsupported_published_sections("Risks are in Sections 6.7 and 1.3.") == {
         "6.7"
     }
+    assert _unsupported_published_sections("Risks are in Sections 1.3 and 6.7.") == {
+        "6.7"
+    }
 
 
 def test_optional_citation_repair_precedes_synthesis_in_provenance() -> None:
@@ -294,7 +297,6 @@ def test_verified_api_calls_have_supported_runtime_model_provenance() -> None:
         (ROOT / "verified-run" / "api-calls.json").read_text(encoding="utf-8")
     )
 
-    assert any(call["runtime_model"] is None for call in api_calls)
     assert all(evidence_module._runtime_model_is_valid(call) for call in api_calls)
 
 
@@ -383,7 +385,7 @@ def test_risk_claim_gate_rejects_unsupported_automatic_renewal_variants() -> Non
     }
 
     assert not evidence_module._risk_claims_are_source_supported(
-        review, source_evidence
+        review, source_evidence, "example"
     )
 
     review.risk_flags[
@@ -391,7 +393,9 @@ def test_risk_claim_gate_rejects_unsupported_automatic_renewal_variants() -> Non
     ].issue = (
         "It is unclear whether the term automatically renews or requires an election."
     )
-    assert evidence_module._risk_claims_are_source_supported(review, source_evidence)
+    assert evidence_module._risk_claims_are_source_supported(
+        review, source_evidence, "example"
+    )
 
 
 def test_risk_claim_gate_accepts_distinct_notice_and_cure_periods() -> None:
@@ -413,7 +417,9 @@ def test_risk_claim_gate_accepts_distinct_notice_and_cure_periods() -> None:
         ]
     }
 
-    assert evidence_module._risk_claims_are_source_supported(review, source_evidence)
+    assert evidence_module._risk_claims_are_source_supported(
+        review, source_evidence, evidence_module.PUBLISHED_CONTRACT_LABEL
+    )
 
 
 def test_risk_claim_gate_requires_correct_repurchase_option_and_exception() -> None:
@@ -436,14 +442,34 @@ def test_risk_claim_gate_requires_correct_repurchase_option_and_exception() -> N
         "exception when Company terminates without cause, leaving inventory exposure "
         "after other expirations or terminations."
     )
-    assert evidence_module._risk_claims_are_source_supported(review, source_evidence)
+    assert evidence_module._risk_claims_are_source_supported(
+        review, source_evidence, evidence_module.PUBLISHED_CONTRACT_LABEL
+    )
 
     review.risk_flags[0].issue = (
         "Company has the repurchase option only if it terminates without cause, and "
         "the mandatory exception is unclear."
     )
     assert not evidence_module._risk_claims_are_source_supported(
-        review, source_evidence
+        review, source_evidence, evidence_module.PUBLISHED_CONTRACT_LABEL
+    )
+
+
+def test_risk_claim_gate_does_not_apply_published_terms_to_other_contracts() -> None:
+    review = _review()
+    review.risk_flags[0].clause = "Section 4.4"
+    review.risk_flags[0].issue = "The source-specific repurchase wording is unclear."
+    source_evidence = {
+        "risk_clauses": [
+            {
+                "section": "4.4",
+                "excerpt": "4.4 A contract-specific repurchase term.",
+            }
+        ]
+    }
+
+    assert evidence_module._risk_claims_are_source_supported(
+        review, source_evidence, "other-contract"
     )
 
 

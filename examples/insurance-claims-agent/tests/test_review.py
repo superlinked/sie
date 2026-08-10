@@ -27,6 +27,14 @@ ROOT = Path(__file__).resolve().parents[1]
 VERIFIED_RUN = ROOT / "verified-run"
 
 
+@pytest.mark.parametrize("run_id", ["", ".", "..", "../escape", "nested/run", "nested\\run"])
+def test_run_stages_reject_unsafe_run_id(run_id: str) -> None:
+    with pytest.raises(ValueError, match="safe directory name"):
+        review_module.run_default_stage(run_id)
+    with pytest.raises(ValueError, match="safe directory name"):
+        review_module.run_generation_stage(run_id)
+
+
 class FakeExtractClient:
     def __init__(self) -> None:
         self.labels: list[str] | None = None
@@ -104,7 +112,7 @@ def test_final_review_uses_native_strict_json_schema() -> None:
 
     _, parsed, _ = _final_review(
         client,
-        "Qwen/Qwen3.5-4B",
+        "Qwen/Qwen3.6-27B",
         appeal_markdown="appeal",
         claim_facts={},
         policy_chunks=[],
@@ -120,6 +128,10 @@ def test_final_review_uses_native_strict_json_schema() -> None:
 
 
 def test_evaluation_accepts_published_appeal_result() -> None:
+    prior_claim_check = (
+        "Review prior claims to verify debris removal underneath the building in the "
+        "same area occurred before the July 2019 flood; retain repair and pricing records."
+    )
     review = {
         "route": "scope_review_required",
         "appeal_summary": {
@@ -133,22 +145,27 @@ def test_evaluation_accepts_published_appeal_result() -> None:
             "covered_scope": ("Remove flood-borne stones from underneath the insured building to its perimeter."),
             "excluded_scope": ("Barge transport, handling, disposal, and yard removal."),
             "evidence_needed": "Other contractor estimates.",
-            "prior_claim_check": "Proof of repairs from previous claims.",
+            "prior_claim_check": prior_claim_check,
         },
         "findings": [
             {"category": "covered_removal"},
             {"category": "excluded_transport"},
             {"category": "price_support"},
-            {"category": "prior_claim_overlap"},
+            {"category": "prior_claim_overlap", "evidence": prior_claim_check},
             # Synthetic schema-valid category used only to test evaluator tolerance.
             {"category": "other"},
         ],
+        "next_actions": [f"Insurer to {prior_claim_check[0].lower()}{prior_claim_check[1:]}"],
     }
 
     assert all(check.passed for check in evaluate_review(review))
 
 
 def test_evaluation_rejects_the_wrong_proof_of_loss_amount() -> None:
+    prior_claim_check = (
+        "Review prior claims to verify debris removal underneath the building in the "
+        "same area occurred before the July 2019 flood; retain repair and pricing records."
+    )
     review = {
         "route": "scope_review_required",
         "appeal_summary": {
@@ -162,18 +179,75 @@ def test_evaluation_rejects_the_wrong_proof_of_loss_amount() -> None:
             "covered_scope": "Remove flood-borne stones from underneath the insured building to its perimeter.",
             "excluded_scope": "Barge transport, handling, disposal, and yard removal.",
             "evidence_needed": "Other contractor estimates.",
-            "prior_claim_check": "Proof of repairs from previous claims.",
+            "prior_claim_check": prior_claim_check,
         },
         "findings": [
             {"category": "covered_removal"},
             {"category": "excluded_transport"},
             {"category": "price_support"},
-            {"category": "prior_claim_overlap"},
+            {"category": "prior_claim_overlap", "evidence": prior_claim_check},
         ],
+        "next_actions": [f"Insurer to {prior_claim_check[0].lower()}{prior_claim_check[1:]}"],
     }
 
     checks = {check.name: check for check in evaluate_review(review)}
     assert {name for name, check in checks.items() if not check.passed} == {"proof-of-loss-amount"}
+
+
+def test_prior_claim_alignment_preserves_timing_in_finding_and_action() -> None:
+    review = {
+        "decision": {
+            "prior_claim_check": (
+                "Review prior claims to verify debris removal for the same area "
+                "underneath the building was performed before the July 2019 flood event"
+            )
+        },
+        "findings": [
+            {
+                "category": "prior_claim_overlap",
+                "evidence": "Verify prior payments.",
+            }
+        ],
+        "next_actions": [
+            "Insurer to verify prior claim payments.",
+            "Provide repair records from previous claims.",
+            "Keep the unrelated coverage action.",
+        ],
+    }
+
+    source_check = (
+        "Before issuing any additional payment for the subject July 2019 flood event, "
+        "the insurer should verify that debris removal for the same area underneath "
+        "the building was performed before the July 2019 flood event; retain proof "
+        "of repairs and pricing from previous losses to prevent payment overlap"
+    )
+    aligned = review_module._align_prior_claim_evidence(review, source_check)
+    values = (
+        aligned["decision"]["prior_claim_check"],
+        aligned["findings"][0]["evidence"],
+        aligned["next_actions"][0],
+    )
+    assert all("before the July 2019 flood" in value for value in values)
+    assert all("proof of repairs and pricing" in value for value in values)
+    assert aligned["next_actions"] == [
+        values[2],
+        "Keep the unrelated coverage action.",
+    ]
+
+
+def test_prior_claim_alignment_is_derived_from_the_fema_source() -> None:
+    source = (
+        "The policyholder should provide proof of repairs and price from the previous "
+        "losses. Before issuing any additional payment for the subject July 2019 flood "
+        "event, the insurer should verify that debris removal for the same area "
+        "underneath the building was performed before the July 2019 flood event."
+    )
+
+    result = review_module._source_prior_claim_check(source)
+
+    assert "same area underneath the building" in result
+    assert "before the July 2019 flood event" in result
+    assert "proof of repairs and pricing" in result
 
 
 def test_existing_run_id_has_an_actionable_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

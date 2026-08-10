@@ -17,6 +17,18 @@ from retail_shelf_audit.audit import (
 from retail_shelf_audit.verify import EXPECTED_OCR_FRAGMENTS
 
 
+@pytest.mark.parametrize("run_id", ["", ".", "..", "../escape", "nested/run", "nested\\run"])
+def test_run_audit_rejects_unsafe_run_id_before_setup(run_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        audit_module,
+        "load_config",
+        lambda: pytest.fail("load_config must not run for an unsafe run ID"),
+    )
+
+    with pytest.raises(ValueError, match="safe directory name"):
+        audit_module.run_audit(run_id)
+
+
 def _objects() -> list[dict]:
     return [
         {"label": "empty shelf space", "score": 0.252384, "bbox": [8.0, 2552.5, 4019.2, 210.1]},

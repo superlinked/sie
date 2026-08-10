@@ -1,27 +1,27 @@
 {
-  "model": "Qwen/Qwen3.5-4B",
-  "text": "{ \"appeal_summary\": { \"barge_estimate\": 181832.94, \"debris_cubic_yards_max\": 15, \"debris_cubic_yards_min\": 12, \"proof_of_loss_amount\": 182552.0, \"removal_estimate\": 49500.0 }, \"decision\": { \"covered_scope\": \"Removal of non-owned flood-borne debris (stones) from underneath the insured building to the perimeter of the building in the yard\", \"evidence_needed\": \"Additional evidence that the estimated dollar amount from the contractor is limited to the covered scope of work; other debris removal estimates from one or more different contractors to validate the $3,564 per cubic yard price with sales tax\", \"excluded_scope\": \"Transportation, handling, disposal, and yard-work components outside the perimeter footprint; barge transportation costs\", \"prior_claim_check\": \"Review documentation for previous claims filed on May 20, 2019, May 29, 2019, and June 11, 2019 to verify if debris removal for the same area underneath the building was performed before the July 2019 flood event\" }, \"findings\": [ { \"category\": \"covered_removal\", \"evidence\": \"FEMA agrees SFIP covers cost to remove flood-borne debris such as stones deposited underneath the insured building's perimeter footprint\", \"severity\": \"high\", \"sources\": [\"appeal_decision\"] , \"title\": \"Coverage for Debris Removal Underneath Building\" }, { \"category\": \"excluded_transport\", \"evidence\": \"SFIP does not cover expense to dispose non-owned debris, nor increased cost to remove debris in the yard or cart debris into a barge\", \"severity\": \"high\", \"sources\": [\"appeal_decision\"] , \"title\": \"Exclusion of Transport and Disposal Costs\" }, { \"category\": \"price_support\", \"evidence\": \"Contractor quote of $3,564 per cubic yard requires validation through additional estimates from different contractors\", \"severity\": \"medium\", \"sources\": [\"appeal_decision\"] , \"title\": \"Price Support Requirement\" }, { \"category\": \"prior_claim_overlap\", \"evidence\": \"Policyholder must provide proof of repairs and price from three previous flood claims to ensure against payment overlap\", \"severity\": \"medium\", \"sources\": [\"appeal_decision\"] , \"title\": \"Prior Claim Overlap Verification\" } ], \"headline\": \"FEMA Affirms Partial Coverage for Flood-Borne Debris Removal Under Insured Building\", \"next_actions\": [ \"Insurer to review policyholder's amended proof of loss totaling $182,552.00\", \"Insurer to verify prior claim payments for debris removal from underneath the building\", \"Insurer to request additional contractor estimates to validate removal pricing\", \"Insurer to deny excluded transport, handling, and disposal components\", \"Insurer to direct payment only for covered under-building removal labor and equipment usage\"] ,\"route\": \"scope_review_required\"}",
+  "model": "Qwen/Qwen3.6-27B",
+  "text": "{\n  \"appeal_summary\": {\n    \"barge_estimate\": 181832.94,\n    \"debris_cubic_yards_max\": 15,\n    \"debris_cubic_yards_min\": 12,\n    \"proof_of_loss_amount\": 182552.0,\n    \"removal_estimate\": 49500.0\n  },\n  \"decision\": {\n    \"covered_scope\": \"Removal of non-owned flood-borne debris (stones) from underneath the insured building to the perimeter of the building.\",\n    \"evidence_needed\": \"Additional evidence that the contractor's estimated dollar amount is limited to the covered scope of work; other debris removal estimates from one or more different contractors to verify pricing is reasonable and customary for the location and site conditions.\",\n    \"excluded_scope\": \"Transportation by barge, handling, disposal, and yard work components outside the building's perimeter footprint.\",\n    \"prior_claim_check\": \"Verify that debris removal for the same area underneath the building occurred before the July 2019 flood event to prevent payment overlap with prior claims.\"\n  },\n  \"findings\": [\n    {\n      \"category\": \"covered_removal\",\n      \"evidence\": \"SFIP covers expense to remove non-owned debris on or in insured property; engineer confirmed 12 to 15 cubic yards of stones under the building.\",\n      \"severity\": \"decision\",\n      \"sources\": [\n        \"appeal_decision\",\n        \"policy\"\n      ],\n      \"title\": \"Coverage for Under-Building Debris Removal\"\n    },\n    {\n      \"category\": \"excluded_transport\",\n      \"evidence\": \"SFIP excludes costs for barge transportation, handling, and disposal as these are not part of removing debris from insured property.\",\n      \"severity\": \"decision\",\n      \"sources\": [\n        \"appeal_decision\",\n        \"policy\"\n      ],\n      \"title\": \"Exclusion of Transport and Disposal Costs\"\n    },\n    {\n      \"category\": \"price_support\",\n      \"evidence\": \"Contractor quote of $3,564 per cubic yard requires validation against other estimates to ensure reasonableness.\",\n      \"severity\": \"high\",\n      \"sources\": [\n        \"appeal_decision\"\n      ],\n      \"title\": \"Validation of Removal Pricing\"\n    },\n    {\n      \"category\": \"prior_claim_overlap\",\n      \"evidence\": \"Insurer must verify no prior payment was made for debris removal in the same under-building area before the July 2019 event.\",\n      \"severity\": \"high\",\n      \"sources\": [\n        \"appeal_decision\"\n      ],\n      \"title\": \"Verification of Prior Claim Activity\"\n    }\n  ],\n  \"headline\": \"FEMA Affirms Partial Coverage for Under-Building Debris Removal, Denies Transport and Yard Work\",\n  \"next_actions\": [\n    \"Request additional contractor estimates to validate the $3,564 per cubic yard rate.\",\n    \"Verify prior claim history to ensure no duplicate payment for under-building debris removal.\",\n    \"Process payment only for the covered scope of under-building debris removal upon receipt of valid proof of loss.\"\n  ],\n  \"route\": \"scope_review_required\"\n}",
   "finish_reason": "stop",
   "usage": {
-    "prompt_tokens": 5800,
-    "completion_tokens": 656,
-    "total_tokens": 6456,
-    "credits_charged": 277,
-    "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    "prompt_tokens": 5837,
+    "completion_tokens": 734,
+    "total_tokens": 6571,
+    "credits_charged": 474,
+    "rate_book_version": "2026-08-09-production-bootstrap-v3"
   },
-  "attempt_id": "0103dbf791d84fcf9b00051036366572",
-  "ttft_ms": 439.3595100045786,
-  "tpot_ms": 50.43620380487805,
+  "attempt_id": "04ebf80405ef484c9d8433b25f6831c0",
+  "ttft_ms": 242.08229499981823,
+  "tpot_ms": 45.440558348773834,
   "request": {
-    "id": "019fe886-478c-7991-88ac-6ef00e7dd8d4",
-    "credits_debited": 277,
-    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "id": "019fead2-5194-7bf2-97bc-569a0eb18318",
+    "credits_debited": 474,
+    "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "usage": {
-      "input_tokens": 5800,
-      "output_tokens": 656,
-      "credits_charged": 277,
-      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+      "input_tokens": 5837,
+      "output_tokens": 734,
+      "credits_charged": 474,
+      "rate_book_version": "2026-08-09-production-bootstrap-v3"
     },
-    "execution_identity_sha256": "2ffd0e49b20f5dd3bb0a02a541129ce6e86ce9ccc84a7b9657066760e417af97"
+    "execution_identity_sha256": "5f4a7840183ae006b5381892169c8bfdeea694284ed57d2b80cc1cca518c4347"
   }
 }

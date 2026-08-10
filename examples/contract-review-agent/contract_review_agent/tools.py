@@ -602,7 +602,7 @@ async def query_obligations_db(
         sql_params = {"counterparty": app.obligation_counterparty}
     try:
         cols, rows = _run_select(app.db_path, sql, sql_params)
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, sqlite3.Warning) as exc:
         return f"SQL error: {exc}\nQuery was:\n{sql}"
     if app.obligation_counterparty:
         required_scope_columns = set(_SCOPED_OBLIGATION_COLUMNS)
@@ -619,11 +619,17 @@ async def query_obligations_db(
         expected_scope_rows = _open_obligation_rows(
             app.db_path, app.obligation_counterparty
         )
-        if Counter(returned_scope_rows) != Counter(expected_scope_rows):
+        returned_scope = Counter(returned_scope_rows)
+        expected_scope = Counter(expected_scope_rows)
+        if returned_scope != expected_scope:
+            scope_difference = (returned_scope - expected_scope) + (
+                expected_scope - returned_scope
+            )
             return (
                 "Generated query returned incomplete contract scope: expected "
                 f"{len(expected_scope_rows)} open rows, got "
-                f"{len(returned_scope_rows)}.\nSQL: {sql}"
+                f"{len(returned_scope_rows)}; differing rows: "
+                f"{dict(scope_difference)}.\nSQL: {sql}"
             )
     if not rows:
         return f"Query ran but returned no rows.\nSQL: {sql}"

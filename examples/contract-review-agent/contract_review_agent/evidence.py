@@ -10,7 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .app import ContractReview
+from .app import (
+    _INVESTIGATOR_TOOL_SEQUENCE,
+    ContractReview,
+    _published_review_missing_labels,
+    _source_section_excerpt,
+)
 from .config import PROJECT_ROOT
 from .runtime import Ledger
 
@@ -51,7 +56,10 @@ def _expected_call_sequence(
         ("read_signature_page", "generate", "vision"),
         ("search_clauses:index", "encode", "embed"),
     ]
-    for _ in range(4):
+    search_rounds = sum(
+        1 for name, _ in _INVESTIGATOR_TOOL_SEQUENCE if name == "search_clauses"
+    )
+    for _ in range(search_rounds):
         sequence.extend(
             [
                 ("search_clauses:encode", "encode", "embed"),
@@ -117,8 +125,6 @@ def ensure_run_destination_available(run_id: str) -> Path:
 def _risk_clause_source_evidence(
     contract_text: str, review: ContractReview, label: str
 ) -> dict[str, Any]:
-    section_line = re.compile(r"^\s*(\d+(?:\.\d+)+)\s+")
-    lines = contract_text.splitlines()
     rows: list[dict[str, str]] = []
     for risk in review.risk_flags:
         if not re.match(r"^Sections?\s+\d+(?:\.\d+)+\b", risk.clause):
@@ -131,26 +137,11 @@ def _risk_clause_source_evidence(
                 f"Risk clause has no source section reference: {risk.clause}"
             )
         for section in sections:
-            starts = [
-                index
-                for index, line in enumerate(lines)
-                if (match := section_line.match(line)) and match.group(1) == section
-            ]
-            if len(starts) != 1:
-                raise RuntimeError(
-                    f"Risk clause {risk.clause!r} section {section} matched "
-                    f"{len(starts)} source sections"
-                )
-            start = starts[0]
-            end = next(
-                (
-                    index
-                    for index in range(start + 1, len(lines))
-                    if section_line.match(lines[index])
-                ),
-                len(lines),
+            excerpt = _source_section_excerpt(
+                contract_text,
+                section,
+                error_prefix=f"Risk clause {risk.clause!r}",
             )
-            excerpt = " ".join(" ".join(lines[start:end]).split())
             if not excerpt:
                 raise RuntimeError(f"Risk clause has no source excerpt: {risk.clause}")
             rows.append(
@@ -165,25 +156,12 @@ def _risk_clause_source_evidence(
     commercial_fact_clauses: list[dict[str, str]] = []
     if label == PUBLISHED_CONTRACT_LABEL:
         for section in PUBLISHED_FACT_SECTIONS:
-            starts = [
-                index
-                for index, line in enumerate(lines)
-                if (match := section_line.match(line)) and match.group(1) == section
-            ]
-            if len(starts) != 1:
-                raise RuntimeError(
-                    f"Published fact section {section} matched {len(starts)} source sections"
-                )
-            start = starts[0]
-            end = next(
-                (
-                    index
-                    for index in range(start + 1, len(lines))
-                    if section_line.match(lines[index])
-                ),
-                len(lines),
+            excerpt = _source_section_excerpt(
+                contract_text,
+                section,
+                error_prefix="Published fact",
             )
-            excerpt = " ".join(" ".join(lines[start:end]).split())
+            assert excerpt is not None
             commercial_fact_clauses.append(
                 {
                     "citation": f"Section {section}",
@@ -200,7 +178,7 @@ def _risk_clause_source_evidence(
 
 
 def _risk_claims_are_source_supported(
-    review: ContractReview, source_evidence: dict[str, Any]
+    review: ContractReview, source_evidence: dict[str, Any], label: str
 ) -> bool:
     excerpts = {
         str(row["section"]): str(row["excerpt"]).casefold()
@@ -241,26 +219,40 @@ def _risk_claims_are_source_supported(
             and "commercially reasonable" not in claim
         ):
             return False
-        if sections == ["4.2"] and (
-            "commercially reasonable" not in claim
-            or "without a cure" in claim
-            or "no cure" in claim
+        if (
+            label == PUBLISHED_CONTRACT_LABEL
+            and sections == ["4.2"]
+            and (
+                "commercially reasonable" not in claim
+                or "without a cure" in claim
+                or "no cure" in claim
+            )
         ):
             return False
-        if sections == ["4.4"] and (
-            "without cause" not in claim
-            or ("mandatory" not in claim and "shall" not in claim)
-            or "option" not in claim
-            or "inventory" not in claim
-            or re.search(r"\boption\b.{0,60}\bonly\b.{0,60}\bwithout cause\b", claim)
-            or re.search(r"\bmandatory exception\b.{0,80}\boptional\b", claim)
-            or "drafted as optional" in claim
+        if (
+            label == PUBLISHED_CONTRACT_LABEL
+            and sections == ["4.4"]
+            and (
+                "without cause" not in claim
+                or ("mandatory" not in claim and "shall" not in claim)
+                or "option" not in claim
+                or "inventory" not in claim
+                or re.search(
+                    r"\boption\b.{0,60}\bonly\b.{0,60}\bwithout cause\b", claim
+                )
+                or re.search(r"\bmandatory exception\b.{0,80}\boptional\b", claim)
+                or "drafted as optional" in claim
+            )
         ):
             return False
-        if sections == ["5.3"] and (
-            "not at fault" not in claim
-            or "indemnif" in claim
-            and "for company's negligence" in claim
+        if (
+            label == PUBLISHED_CONTRACT_LABEL
+            and sections == ["5.3"]
+            and (
+                "not at fault" not in claim
+                or "indemnif" in claim
+                and "for company's negligence" in claim
+            )
         ):
             return False
     return True
@@ -367,49 +359,7 @@ def _published_risk_coverage_is_preserved(label: str, review: ContractReview) ->
 def _published_fact_coverage_is_preserved(label: str, review: ContractReview) -> bool:
     if label != PUBLISHED_CONTRACT_LABEL:
         return True
-
-    obligations = [
-        " ".join(value.casefold().split()) for value in review.key_obligations
-    ]
-
-    def has_obligation(*fragments: str) -> bool:
-        return any(
-            all(fragment in value for fragment in fragments) for value in obligations
-        )
-
-    def has_letter_of_credit() -> bool:
-        amount_forms = ("500,000", "500000", "500k", "five hundred thousand")
-        return any(
-            "distributor" in value
-            and any(amount in value for amount in amount_forms)
-            and ("letter of credit" in value or re.search(r"\blc\b", value) is not None)
-            for value in obligations
-        )
-
-    renewal = " ".join(review.renewal_terms.casefold().split())
-    governing_law = " ".join(review.governing_law.casefold().split())
-    parties = "\n".join(review.parties).casefold()
-    return (
-        review.document_type.strip().casefold() == "distributor agreement"
-        and has_letter_of_credit()
-        and has_obligation("250,000", "purchase order")
-        and has_obligation("375")
-        and has_obligation("exclusive", "illinois")
-        and has_obligation("ten", "last sample")
-        and has_obligation("quarter", "first year")
-        and "compli" in renewal
-        and ("ten" in renewal or re.search(r"\b10\b", renewal) is not None)
-        and (
-            "annual" in renewal
-            or "one-year" in renewal
-            or "yearly" in renewal
-            or re.search(r"\bone\s*(?:\(1\))?\s+year\b", renewal) is not None
-            or re.search(r"\b1\s*[- ]?year\b", renewal) is not None
-        )
-        and "illinois" in governing_law
-        and "electric city corp" in parties
-        and "electric city of illinois" in parties
-    )
+    return not _published_review_missing_labels(review)
 
 
 def _published_fact_source_coverage_is_preserved(
@@ -570,7 +520,7 @@ def _write_run_record(
         "api_call_request_ids_unique": len(request_ids) == len(set(request_ids)),
         "risk_clauses_supported_by_source": bool(source_evidence["risk_clauses"]),
         "risk_claims_supported_by_source": _risk_claims_are_source_supported(
-            review, source_evidence
+            review, source_evidence, label
         ),
         "published_risk_coverage_non_regression": (
             _published_risk_coverage_is_preserved(label, review)

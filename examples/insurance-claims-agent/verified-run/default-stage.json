@@ -6,9 +6,9 @@
     "rerank": "Qwen/Qwen3-Reranker-4B"
   },
   "timings_ms": {
-    "parse_appeal_decision_ms": 1552.8,
-    "parse_policy_ms": 6655.6,
-    "extract_claim_facts_ms": 240.6,
-    "rerank_policy_ms": 2057.0
+    "parse_appeal_decision_ms": 1822.6,
+    "parse_policy_ms": 7178.9,
+    "extract_claim_facts_ms": 289.1,
+    "rerank_policy_ms": 2022.2
   }
 }

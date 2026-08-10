@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,15 @@ from insurance_claims.config import (
 )
 
 console = Console()
+
+
+def _validate_run_id(run_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id) or run_id in {
+        ".",
+        "..",
+    }:
+        raise ValueError("run_id must be one safe directory name containing only letters, digits, '.', '_', or '-'")
+    return run_id
 
 
 def _artifact_entries(run_dir: Path) -> list[dict[str, str]]:
@@ -380,7 +390,9 @@ Read the decision's background, rules, analysis, and conclusion. Separate the
 physical work FEMA directed the insurer to cover from transport, handling,
 disposal, yard work, and other costs outside that scope. Preserve the three
 published dollar amounts and the debris-volume range exactly. Record the
-additional price evidence and prior-claim checks FEMA requested.
+additional price evidence and prior-claim checks FEMA requested. Preserve that,
+before paying the July 2019 flood claim, the insurer must verify that debris
+removal for the same area underneath the building occurred before that flood.
 
 Actions must preserve the published partial-coverage result: direct payment for
 covered under-building removal and deny only excluded transport, disposal, and
@@ -430,6 +442,57 @@ schema.<|im_end|>
     return result, _json_object_from_text(content), duration_ms
 
 
+def _source_prior_claim_check(appeal_markdown: str) -> str:
+    normalized_source = " ".join(appeal_markdown.split())
+    temporal_match = re.search(
+        r"Before issuing any additional payment for the subject July 2019 flood event, "
+        r"the insurer should verify that debris removal for the same area underneath "
+        r"the building was performed before the July 2019 flood event\.",
+        normalized_source,
+        re.IGNORECASE,
+    )
+    if temporal_match is None or "proof of repairs and price" not in normalized_source.casefold():
+        raise RuntimeError("FEMA source omitted the required prior-claim evidence")
+    temporal_check = temporal_match.group().rstrip(".")
+    return f"{temporal_check}; retain proof of repairs and pricing from previous losses to prevent payment overlap"
+
+
+def _align_prior_claim_evidence(review: dict[str, Any], source_prior_claim_check: str) -> dict[str, Any]:
+    decision = review.get("decision")
+    findings = review.get("findings")
+    next_actions = review.get("next_actions")
+    if not isinstance(decision, dict) or not isinstance(findings, list) or not isinstance(next_actions, list):
+        raise TypeError("Review omitted prior-claim decision surfaces")
+    if not str(decision.get("prior_claim_check", "")).strip():
+        raise RuntimeError("Review omitted the prior-claim decision")
+    aligned_check = source_prior_claim_check
+    overlap_findings = [
+        finding
+        for finding in findings
+        if isinstance(finding, dict) and finding.get("category") == "prior_claim_overlap"
+    ]
+    action_indexes = [
+        index
+        for index, action in enumerate(next_actions)
+        if "prior claim" in str(action).casefold()
+        or "previous claim" in str(action).casefold()
+        or "payment overlap" in str(action).casefold()
+    ]
+    if len(overlap_findings) != 1 or not action_indexes:
+        raise RuntimeError("Review must contain a prior-claim finding and action")
+    decision["prior_claim_check"] = aligned_check
+    overlap_findings[0]["evidence"] = aligned_check
+    aligned_action = aligned_check
+    first_action_index = action_indexes[0]
+    duplicate_action_indexes = set(action_indexes[1:])
+    next_actions[:] = [
+        aligned_action if index == first_action_index else action
+        for index, action in enumerate(next_actions)
+        if index not in duplicate_action_indexes
+    ]
+    return review
+
+
 def _require_sources() -> None:
     config = load_config()
     required_paths = [
@@ -443,6 +506,7 @@ def _require_sources() -> None:
 
 
 def run_default_stage(run_id: str) -> Path:
+    run_id = _validate_run_id(run_id)
     run_dir = RUNS_DIR / run_id
     if run_dir.exists():
         raise FileExistsError(
@@ -529,6 +593,7 @@ def run_default_stage(run_id: str) -> Path:
 
 
 def run_generation_stage(run_id: str) -> Path:
+    run_id = _validate_run_id(run_id)
     config = load_config()
     _require_sources()
     run_dir = RUNS_DIR / run_id
@@ -558,6 +623,7 @@ def run_generation_stage(run_id: str) -> Path:
             provision_timeout_s=config.cluster.provision_timeout_s,
         )
         _write_json(raw_dir / "review-completion.json", review_raw)
+        review = _align_prior_claim_evidence(review, _source_prior_claim_check(appeal_markdown))
         _write_json(run_dir / "review.json", review)
     finally:
         client.close()

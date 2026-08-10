@@ -36,7 +36,7 @@ def _input_text(data: Any) -> str:
 
 
 def _unsafe_verdict(verdict: str) -> bool:
-    normalized = verdict.strip().casefold()
+    normalized = verdict.strip().casefold().rstrip(".,!;:")
     return normalized != "no"
 
 

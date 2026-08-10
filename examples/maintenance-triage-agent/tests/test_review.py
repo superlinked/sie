@@ -20,6 +20,18 @@ from maintenance_triage.review import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("run_id", ["", ".", "..", "../escape", "nested/run", "nested\\run"])
+def test_run_rejects_unsafe_run_id_before_setup(run_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        review_module,
+        "load_config",
+        lambda: pytest.fail("load_config must not run for an unsafe run ID"),
+    )
+
+    with pytest.raises(ValueError, match="safe directory name"):
+        review_module.run(run_id)
+
+
 def test_fixture_is_the_exact_ntsb_page_spread() -> None:
     source = ROOT / "fixtures" / "east-palestine-bearing-spread.pdf"
     assert hashlib.sha256(source.read_bytes()).hexdigest() == (

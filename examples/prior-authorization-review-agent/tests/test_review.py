@@ -30,6 +30,36 @@ from prior_authorization.review import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("run_id", ["", ".", "..", "../escape", "nested/run", "nested\\run"])
+def test_run_rejects_unsafe_run_id(run_id: str) -> None:
+    with pytest.raises(ValueError, match="safe directory name"):
+        review_module.run(run_id)
+
+
+def test_run_publishes_atomically_and_allows_retry_after_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(review_module, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(review_module, "load_config", dict)
+
+    def fail(run_dir: Path, _config: dict[str, object]) -> None:
+        (run_dir / "partial.json").write_text("{}\n", encoding="utf-8")
+        raise RuntimeError("provenance failed")
+
+    monkeypatch.setattr(review_module, "_write_run", fail)
+    with pytest.raises(RuntimeError, match="provenance failed"):
+        review_module.run("retryable-run")
+    assert list(tmp_path.iterdir()) == []
+
+    def succeed(run_dir: Path, _config: dict[str, object]) -> None:
+        (run_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(review_module, "_write_run", succeed)
+    result = review_module.run("retryable-run")
+    assert result == tmp_path / "retryable-run"
+    assert (result / "manifest.json").is_file()
+
+
 def test_docling_line_wraps_stay_in_complete_cms_statements() -> None:
     markdown = """## Billing and Coding Criteria for Lower Limb Orthoses
 
@@ -355,7 +385,7 @@ def test_evaluate_main_exits_one_when_checks_fail(monkeypatch: pytest.MonkeyPatc
 def test_run_reports_an_existing_run_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(review_module, "RUNS_DIR", tmp_path)
     (tmp_path / "local").mkdir()
-    with pytest.raises(SystemExit, match="Choose a new --run-id"):
+    with pytest.raises(FileExistsError, match="Run evidence already exists"):
         review_module.run("local")
 
 

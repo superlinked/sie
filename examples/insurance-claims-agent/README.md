@@ -17,7 +17,7 @@ and debris removal from the yard remain outside that covered scope.
 | Parse the appeal and policy | `docling` | Markdown with the record, amounts, rules, analysis, and conclusion |
 | Extract claim facts | `fastino/gliner2-large-v1` | Amounts, debris volume, loss date, and coverage terms |
 | Retrieve controlling policy language | `Qwen/Qwen3-Reranker-4B` | Ranked passages about non-owned debris removal |
-| Produce the cited review | `Qwen/Qwen3.5-4B` | JSON separating covered work, excluded costs, and evidence still needed |
+| Produce the cited review | `Qwen/Qwen3.6-27B` | JSON separating covered work, excluded costs, and evidence still needed |
 
 Every model call goes through SIE.
 
@@ -30,11 +30,12 @@ The evaluator checks facts stated in FEMA's published decision:
 - barge estimate: `$181,832.94`;
 - covered physical scope: `12` to `15` cubic yards beneath the building;
 - excluded scope: barge transport, handling, disposal, and yard removal;
-- follow-up evidence: comparison estimates and proof of work from prior claims.
+- follow-up evidence: comparison estimates, repair and pricing records, and
+  verification that same-area debris removal happened before the July 2019 flood.
 
 The model summarizes a completed public appeal. It does not decide a live claim.
 
-The [`verified-run`](verified-run/) directory records an August 9, 2026, prod-US
+The [`verified-run`](verified-run/) directory records an August 10, 2026, prod-US
 run in which all ten factual checks passed.
 
 ## Run it
@@ -64,7 +65,7 @@ separate ports:
 sie-server serve --port 8080
 
 # Terminal 2: Qwen generation
-sie-server serve --models Qwen/Qwen3.5-4B:no-spec --port 8081
+sie-server serve --models Qwen/Qwen3.6-27B --port 8081
 
 SIE_GENERATION_URL=http://localhost:8081 uv run review-claim --run-id local
 ```

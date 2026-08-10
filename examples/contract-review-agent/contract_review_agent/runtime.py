@@ -10,7 +10,7 @@ from typing import Any
 
 from sie_sdk import SIEAsyncClient
 
-from .native_model import RequiredToolStep, SIENativeModel
+from .native_model import RequiredToolStep, SIENativeModel, api_call_row
 
 
 def provision_timeout_from(cfg: dict[str, Any]) -> float:
@@ -135,27 +135,13 @@ def record_api_call(
     """Record only non-payload response metadata for checked run evidence."""
     rows = result if isinstance(result, list) else [result]
     response = next((row for row in rows if isinstance(row, dict)), {})
-    request = response.get("request")
-    request_row = request if isinstance(request, dict) else {}
     app.api_calls.append(
-        {
-            "stage": stage,
-            "function": sie_fn,
-            "requested_model": requested_model,
-            "runtime_model": (
-                response.get("model")
-                if isinstance(response.get("model"), str)
-                else None
-            ),
-            "request_id": (
-                request_row.get("id")
-                if isinstance(request_row.get("id"), str)
-                else None
-            ),
-            "rate_book_version": request_row.get("rate_book_version"),
-            "credits_debited": request_row.get("credits_debited"),
-            "execution_identity_sha256": request_row.get("execution_identity_sha256"),
-        }
+        api_call_row(
+            stage=stage,
+            function=sie_fn,
+            requested_model=requested_model,
+            response=response,
+        )
     )
 
 

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import financial_filing.review as review_module
 from financial_filing.evaluate import evaluate_review
 from financial_filing.review import (
     _chunks,
@@ -18,6 +19,36 @@ from financial_filing.review import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("run_id", ["", ".", "..", "../escape", "nested/run", "nested\\run"])
+def test_run_rejects_unsafe_run_id(run_id: str) -> None:
+    with pytest.raises(ValueError, match="safe directory name"):
+        review_module.run(run_id)
+
+
+def test_run_publishes_atomically_and_allows_retry_after_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(review_module, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(review_module, "load_config", dict)
+
+    def fail(run_dir: Path, _config: dict[str, object]) -> None:
+        (run_dir / "partial.json").write_text("{}\n", encoding="utf-8")
+        raise RuntimeError("provenance failed")
+
+    monkeypatch.setattr(review_module, "_write_run", fail)
+    with pytest.raises(RuntimeError, match="provenance failed"):
+        review_module.run("retryable-run")
+    assert list(tmp_path.iterdir()) == []
+
+    def succeed(run_dir: Path, _config: dict[str, object]) -> None:
+        (run_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(review_module, "_write_run", succeed)
+    result = review_module.run("retryable-run")
+    assert result == tmp_path / "retryable-run"
+    assert (result / "manifest.json").is_file()
 
 
 def test_fixture_preserves_the_sec_table_rows_and_item_402_sentences() -> None:

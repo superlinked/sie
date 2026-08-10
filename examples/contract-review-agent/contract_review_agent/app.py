@@ -296,7 +296,17 @@ _PUBLISHED_ALLOWED_SECTIONS = frozenset(
 
 
 def _unsupported_published_sections(findings: str) -> set[str]:
-    cited = set(re.findall(r"\bSections?\s+(\d+(?:\.\d+)+)\b", findings, re.IGNORECASE))
+    citation_lists = re.findall(
+        r"\bSections?\s+(\d+(?:\.\d+)+(?:\s*(?:,\s*(?:and\s+)?|and\s+)"
+        r"(?:Sections?\s+)?\d+(?:\.\d+)+)*)",
+        findings,
+        re.IGNORECASE,
+    )
+    cited = {
+        section
+        for citation_list in citation_lists
+        for section in re.findall(r"\d+(?:\.\d+)+", citation_list)
+    }
     return cited - _PUBLISHED_ALLOWED_SECTIONS
 
 
@@ -419,40 +429,55 @@ def build_synthesizer(
     )
 
 
-def _exact_source_sections(contract_text: str, sections: tuple[str, ...]) -> list[str]:
+def _source_section_excerpt(
+    contract_text: str,
+    section: str,
+    *,
+    error_prefix: str | None = None,
+) -> str | None:
     section_line = re.compile(r"^\s*(\d+(?:\.\d+)+)\s+")
     lines = contract_text.splitlines()
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if (match := section_line.match(line)) and match.group(1) == section
+    ]
+    if len(starts) != 1:
+        if error_prefix is not None:
+            raise RuntimeError(
+                f"{error_prefix} section {section} matched {len(starts)} source sections"
+            )
+        return None
+    start = starts[0]
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if section_line.match(lines[index])
+        ),
+        len(lines),
+    )
+    return " ".join(" ".join(lines[start:end]).split())
+
+
+def _exact_source_sections(contract_text: str, sections: tuple[str, ...]) -> list[str]:
     excerpts: list[str] = []
     for section in sections:
-        starts = [
-            index
-            for index, line in enumerate(lines)
-            if (match := section_line.match(line)) and match.group(1) == section
-        ]
-        if len(starts) != 1:
-            continue
-        start = starts[0]
-        end = next(
-            (
-                index
-                for index in range(start + 1, len(lines))
-                if section_line.match(lines[index])
-            ),
-            len(lines),
-        )
-        excerpts.append(" ".join(" ".join(lines[start:end]).split()))
+        excerpt = _source_section_excerpt(contract_text, section)
+        if excerpt is not None:
+            excerpts.append(excerpt)
     return excerpts
 
 
-def _published_review_missing_facts(
-    contract_text: str, review: ContractReview
-) -> list[str]:
+def _is_published_contract(contract_text: str) -> bool:
     normalized_source = " ".join(contract_text.casefold().split())
-    if not all(
+    return all(
         marker in normalized_source
         for marker in ("electric city corp", "375 units in the first product year")
-    ):
-        return []
+    )
+
+
+def _published_review_missing_labels(review: ContractReview) -> list[str]:
     obligations = [
         " ".join(value.casefold().split()) for value in review.key_obligations
     ]
@@ -478,6 +503,9 @@ def _published_review_missing_facts(
     renewal = " ".join(review.renewal_terms.casefold().split())
     parties = "\n".join(review.parties).casefold()
     checks = {
+        "Distributor Agreement document type": (
+            review.document_type.strip().casefold() == "distributor agreement"
+        ),
         "both full party names": (
             "electric city corp" in parties and "electric city of illinois" in parties
         ),
@@ -505,6 +533,14 @@ def _published_review_missing_facts(
     return [label for label, present in checks.items() if not present]
 
 
+def _published_review_missing_facts(
+    contract_text: str, review: ContractReview
+) -> list[str]:
+    if not _is_published_contract(contract_text):
+        return []
+    return _published_review_missing_labels(review)
+
+
 async def run_review(
     app: AppContext, investigator: Agent, synthesizer: Agent, instruction: str
 ) -> tuple[RunResult, RunResult]:
@@ -515,11 +551,7 @@ async def run_review(
         context=app,
         max_turns=20,
     )
-    normalized_source = " ".join(app.contract_text.casefold().split())
-    is_published_contract = all(
-        marker in normalized_source
-        for marker in ("electric city corp", "375 units in the first product year")
-    )
+    is_published_contract = _is_published_contract(app.contract_text)
     unsupported_sections = _unsupported_published_sections(str(gather.final_output))
     normalized_findings = " ".join(str(gather.final_output).casefold().split())
     incorrect_document_type = (

@@ -85,18 +85,18 @@
   "usage": {
     "input_tokens": 8509,
     "credits_charged": 100,
-    "rate_book_version": "2026-07-26-production-bootstrap-v2"
+    "rate_book_version": "2026-08-09-production-bootstrap-v3"
   },
   "request": {
-    "id": "019fe886-3eeb-78a0-a41b-c45e293b502a",
+    "id": "019feac8-35dd-7301-9912-d1e3a113b025",
     "credits_debited": 100,
-    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "usage": {
       "input_tokens": 8509,
       "pairs": 16,
       "credits_charged": 100,
-      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+      "rate_book_version": "2026-08-09-production-bootstrap-v3"
     },
-    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+    "execution_identity_sha256": "d365dc27037c3c16cfc7e6ee3ef02f1a9cfaca84c1967d22ab4c2bf4b31e6e4d"
   }
 }

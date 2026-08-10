@@ -6,6 +6,8 @@ import json
 import math
 import os
 import re
+import shutil
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -510,14 +512,17 @@ def _extract_gliner2_group(
     return response, call
 
 
-def run(run_id: str) -> Path:
-    config = load_config()
+def _validate_run_id(run_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id) or run_id in {
+        ".",
+        "..",
+    }:
+        raise ValueError("run_id must be one safe directory name containing only letters, digits, '.', '_', or '-'")
+    return run_id
+
+
+def _write_run(run_dir: Path, config: dict[str, Any]) -> None:
     parse_model = str(config["models"]["parse"])
-    run_dir = RUNS_DIR / run_id
-    if run_dir.exists():
-        raise SystemExit(
-            f"Run directory already exists: {run_dir}. Choose a new --run-id or remove the existing run directory."
-        )
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=False)
     calls: list[dict[str, Any]] = []
@@ -747,8 +752,24 @@ def run(run_id: str) -> Path:
         ),
     }
     _write_json(run_dir / "manifest.json", manifest)
-    console.print(f"[green]Wrote[/] {run_dir}")
-    return run_dir
+
+
+def run(run_id: str) -> Path:
+    run_id = _validate_run_id(run_id)
+    config = load_config()
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    final_run_dir = RUNS_DIR / run_id
+    if final_run_dir.exists():
+        raise FileExistsError(f"Run evidence already exists at {final_run_dir}")
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=RUNS_DIR))
+    try:
+        _write_run(staging_dir, config)
+        staging_dir.rename(final_run_dir)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    console.print(f"[green]Wrote[/] {final_run_dir}")
+    return final_run_dir
 
 
 def main() -> None:

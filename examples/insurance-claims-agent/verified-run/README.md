@@ -3,13 +3,13 @@
 This directory records a successful run against FEMA Flood Insurance Appeal
 Decision B8 and the Standard Flood Insurance Policy Dwelling Form.
 
-- Run ID: `prod-us-20260809-sdk071`
-- Run date: August 9, 2026
+- Run ID: `prod-us-20260810-sdk071-temporal`
+- Run date: August 10, 2026
 - Runtime: SIE Cloud prod-US at `https://api.superlinked.com`
 - Evaluation: all ten factual checks passed
 
 The run used `docling`, `fastino/gliner2-large-v1`,
-`Qwen/Qwen3-Reranker-4B`, and `Qwen/Qwen3.5-4B`.
+`Qwen/Qwen3-Reranker-4B`, and `Qwen/Qwen3.6-27B`.
 
 `manifest.json` records the models, timings, and SHA-256 hash of every recorded
 artifact. `source-manifest.json` pins the publisher URLs and source hashes.

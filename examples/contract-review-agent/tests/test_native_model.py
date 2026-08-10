@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,7 +27,13 @@ from contract_review_agent.native_model import (
     _next_required_tool,
     _schema_accepts_string,
 )
-from contract_review_agent.runtime import AppContext, GenResult, Ledger, instruct_once
+from contract_review_agent.runtime import (
+    AppContext,
+    GenResult,
+    Ledger,
+    instruct_once,
+    record_api_call,
+)
 
 set_tracing_disabled(True)
 
@@ -36,14 +43,15 @@ def test_safety_guardrail_blocks_investigator_start() -> None:
 
 
 @pytest.mark.parametrize("verdict", ["yes", "YES", "unexpected", "No_of_turn>", ""])
-def test_safety_guardrail_fails_closed_unless_verdict_is_exact_no(
+def test_safety_guardrail_fails_closed_unless_verdict_is_unambiguous_no(
     verdict: str,
 ) -> None:
     assert _unsafe_verdict(verdict) is True
 
 
-def test_safety_guardrail_accepts_unambiguous_no() -> None:
-    assert _unsafe_verdict(" no \n") is False
+@pytest.mark.parametrize("verdict", [" no \n", "No.", "NO,"])
+def test_safety_guardrail_accepts_unambiguous_no(verdict: str) -> None:
+    assert _unsafe_verdict(verdict) is False
 
 
 def test_guardrail_unavailability_is_distinct_from_an_unsafe_verdict() -> None:
@@ -373,6 +381,61 @@ async def _get_response(
         conversation_id=None,
         prompt=prompt,
     )
+
+
+@pytest.mark.asyncio
+async def test_api_call_producers_emit_the_publication_schema() -> None:
+    provenance = {
+        "id": "request-provenance",
+        "rate_book_version": "rate-v1",
+        "credits_debited": 2,
+        "execution_identity_sha256": "a" * 64,
+    }
+    native_result = generated(
+        json.dumps({"kind": "final", "output": "Grounded output. " * 30}),
+        "request-provenance",
+    )
+    native_result["request"] = provenance
+    api_calls: list[dict[str, Any]] = []
+    model = SIENativeModel(
+        "Qwen/Qwen3.6-27B",
+        FakeSIE([native_result]),  # type: ignore[arg-type]
+        stage="synthesize_review",
+        provision_timeout_s=30,
+        api_calls=api_calls,
+    )
+
+    await _get_response(model)
+    app = AppContext(
+        sie=FakeSIE([]),  # type: ignore[arg-type]
+        cfg={"cluster": {}},
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+    )
+    record_api_call(
+        app,
+        "extract",
+        "extract-model",
+        {"request": provenance},
+        stage="extract_entities",
+    )
+
+    expected_keys = {
+        "stage",
+        "function",
+        "requested_model",
+        "runtime_model",
+        "request_id",
+        "rate_book_version",
+        "credits_debited",
+        "execution_identity_sha256",
+    }
+    assert set(api_calls[0]) == expected_keys
+    assert set(app.api_calls[0]) == expected_keys
+    assert api_calls[0]["runtime_model"] is None
+    assert app.api_calls[0]["runtime_model"] is None
 
 
 @pytest.mark.asyncio
@@ -750,6 +813,47 @@ async def test_query_obligations_db_rejects_incomplete_or_duplicated_contract_sc
     )
 
     assert f"expected {expected_count} open rows, got {actual_count}" in result
+    assert "differing rows:" in result
+
+
+@pytest.mark.asyncio
+async def test_query_obligations_db_reports_sqlite_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_instruct(
+        _app: object, _model: str, _messages: list[dict[str, str]], **_kwargs: Any
+    ) -> GenResult:
+        return GenResult("SELECT 1", 0.0, 0.1)
+
+    def warn(*_args: object) -> tuple[list[str], list[tuple[object, ...]]]:
+        raise sqlite3.Warning("driver warning")
+
+    monkeypatch.setattr(contract_tools, "instruct_once", fake_instruct)
+    monkeypatch.setattr(contract_tools, "_run_select", warn)
+    app = AppContext(
+        sie=FakeSIE([]),  # type: ignore[arg-type]
+        cfg={
+            "cluster": {"provision_timeout_s": 30},
+            "models": {"sql": "sql-model"},
+            "sql": {"mode": "instruct"},
+        },
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+    )
+
+    result = await contract_tools.query_obligations_db.on_invoke_tool(
+        ToolContext(
+            app,
+            tool_name="query_obligations_db",
+            tool_call_id="call-warning-query",
+            tool_arguments=json.dumps({"question": "Show obligations"}),
+        ),
+        json.dumps({"question": "Show obligations"}),
+    )
+
+    assert result.startswith("SQL error: driver warning")
 
 
 @pytest.mark.asyncio
