@@ -9,13 +9,6 @@
       "excerpt_sha256": "5e1d401e09f79ec03b74df88cc0959b0de0763f222212c04afc39362c1ef5ab8"
     },
     {
-      "clause": "Section 5.3",
-      "citation": "Section 5.3",
-      "section": "5.3",
-      "excerpt": "5.3 Indemnification. Company and Distributor agree to indemnify, defend and hold each other harmless from any and all suits, claims, obligations, liabilities, damages, losses and the like (including attorneys' fees and costs) relating to or arising out of: (A) any breach of any material representations, warranties, covenants, obligations, agreements or duties in connection with this Agreement; (b) any negligence or fault; (c) any violation by either of them of the patent, copyright, trademark or other Page -10- intellectual property rights of third parties. In addition, Company agrees to indemnify, defend and hold harmless Distributor from and against all suits, claims, obligations, liabilities, damages, losses and the like (including attorneys' fees and costs) arising out of or related to Company's manufacture or design of the Products, provided that Distributor is not at fault in connection with the same, and Distributor agrees to indemnify, defend and hold harmless Company from and against all suits, claims, obligations, liabilities, damages, losses and the like (including a attorneys' fees and costs) arising out of or related to Distributor's sales, marketing practices or unauthorized Product alteration (provided that Company is not at fault in connection with same).",
-      "excerpt_sha256": "23feff8b9e37a89b0991fea9e6597e4f7ca1de4d227aa1a6f556313bf8042df0"
-    },
-    {
       "clause": "Section 4.2",
       "citation": "Section 4.2",
       "section": "4.2",
@@ -28,6 +21,45 @@
       "section": "4.4",
       "excerpt": "4.4 Repurchase of Products. Upon the expiration or termination of this Agreement, pursuant to Section 4.1 or 4.2 hereof, the Company may, at its option to be exercised within 30 days of the date of the termination of this Agreement, and in its sole discretion, repurchase any Products in the possession of the Distributor at the net invoice price paid by the Distributor to the Company less any applicable special allowances, discounts, shipping or allowances for cooperative advertising. If Company terminates the Agreement without cause and for reasons other than Distributor's failure to meet its minimum expectations; it shall repurchase from Distributor any unopened Product, and shall bear all shipping, handling and related costs notwithstanding any other remedies to which Distributor may be entitled. On demand and tender of the repurchase price, the Distributor shall be obligated to deliver such Products to the Company. The Company reserves the right to reject any Products that are not factory sealed and in new and unused condition. Repurchased Products shall be shipped at the Company's expense, and the Company may offset any indebtedness of the Distributor to the Company against the repurchase price of such Products. Following expiration or termination of this Agreement, the Distributor may continue to sell any Products in the Market which are in its inventory Page -9- and which the Company has not repurchased. 5. REPRESENTATIONS AND WARRANTIES AND OTHER MATTERS",
       "excerpt_sha256": "907f0f090507a91a23445da6344b338ca175fb5599b5a8f13a7b743868b41df0"
+    },
+    {
+      "clause": "Section 5.3",
+      "citation": "Section 5.3",
+      "section": "5.3",
+      "excerpt": "5.3 Indemnification. Company and Distributor agree to indemnify, defend and hold each other harmless from any and all suits, claims, obligations, liabilities, damages, losses and the like (including attorneys' fees and costs) relating to or arising out of: (A) any breach of any material representations, warranties, covenants, obligations, agreements or duties in connection with this Agreement; (b) any negligence or fault; (c) any violation by either of them of the patent, copyright, trademark or other Page -10- intellectual property rights of third parties. In addition, Company agrees to indemnify, defend and hold harmless Distributor from and against all suits, claims, obligations, liabilities, damages, losses and the like (including attorneys' fees and costs) arising out of or related to Company's manufacture or design of the Products, provided that Distributor is not at fault in connection with the same, and Distributor agrees to indemnify, defend and hold harmless Company from and against all suits, claims, obligations, liabilities, damages, losses and the like (including a attorneys' fees and costs) arising out of or related to Distributor's sales, marketing practices or unauthorized Product alteration (provided that Company is not at fault in connection with same).",
+      "excerpt_sha256": "23feff8b9e37a89b0991fea9e6597e4f7ca1de4d227aa1a6f556313bf8042df0"
+    }
+  ],
+  "commercial_fact_clauses": [
+    {
+      "citation": "Section 1.1",
+      "section": "1.1",
+      "excerpt": "1.1 Grant and Acceptance. Company hereby appoints Distributor as Company's exclusive distributor within the Market and grants to Distributor the exclusive right to sell and distribute Products within the Market, and Distributor hereby accepts such appointment and such grant, in accordance with the terms and conditions of this Agreement. Distributor acknowledges that customers of other distributors of the Products may have sites, locations or operations in the Market, which will use the Products. Distributor will sell any and all Products required by such customers in the Market to those customers. Distributor also acknowledges that if its customers have sites, locations or operations outside the Market, in the market of another exclusive distributor of the Products, those customers will be required to purchase products from the applicable exclusive distributor in that market; otherwise, Distributor shall be free to sell to its customers in any market which does not have another exclusive distributor.",
+      "excerpt_sha256": "dfb612f6a2d81c214a85436492a4fa267abf80e7373473a4244396d06a0039d7"
+    },
+    {
+      "citation": "Section 1.3",
+      "section": "1.3",
+      "excerpt": "1.3 Term. The term of this Agreement shall be ten (10) years (the \"Term\") which shall commence on the date upon which the Company delivers to Distributor the last Sample, as defined hereinafter. If Distributor complies with all of the terms of this Agreement, the Agreement shall be renewable on an annual basis for one (1) year terms for up to another ten (10) years on the same terms and conditions as set forth herein. All renewals of this Agreement shall be on the same terms and conditions as are set forth herein.",
+      "excerpt_sha256": "5e1d401e09f79ec03b74df88cc0959b0de0763f222212c04afc39362c1ef5ab8"
+    },
+    {
+      "citation": "Section 1.6",
+      "section": "1.6",
+      "excerpt": "1.6 Distributor's Terms and Minimum Expectations. In order to maintain the exclusive rights to sell, lease, distribute and service Products in the Market, the Distributor must use all commercially reasonably efforts to purchase for sale to subdistributors the following minimum quantities of the Products from the Company: On the commencement of the Term Distributor will issue to the Company an irrevocable letter of credit (\"LC\") in the amount of Five Hundred Thousand Dollars ($500,000), the form of which is attached hereto as Exhibit A and incorporated herein by reference. The LC shall have a two (2) month term, and shall be renewed for five (5) consecutive bimonthly periods. A minimum of a $250,000.00 purchase order must be received by Company by the first of each month for a total (12) month period. The Company may draw funds from the LC to pay for Distributor's purchases, which are not paid according to the terms in Section 2.7. Prices for the EnergySaver units are Page -2- provided by the Company as Exhibit C. The Company will be entitled to draw against the LC pursuant to the terms of the LC. (A) 375 units in the first Product Year (1999) (B) 750 units in the next succeeding Product Year; (2000) (C) 937 units in the next succeeding Product Year; (2001) (D) 1,171 units in the next succeeding Product Year; (2002) (E) 1,463 units in the next succeeding Product Year; (2003) (F) 1,828 units in the next succeeding Product Year; (2004) (G) 2,285 units in the next succeeding Product Year; (2005) (H) 2,856 unit each in the lat three years of the initial Term of this Agreement and any renewals thereof. For purposes of this Agreement, a Product Year shall be the twelve (12) month period following the commencement of the initial Term of this Agreement and each twelve (12) months thereafter. Distributor's expected sales shall include the purchase of the Samples as defined hereinafter. Sales in excess of the expected sales which are actually made in a Product Year may be applied to meet the expectations for the next Product Year. Any such carry-over from one year to the next Product Year may not be considered in determining whether there is a carry-over from that next Product Year. Thus, by way of example and not limitation, if there was an expectation of 50 in year one and 200 for year two and 60 units are sold in year one and 195 units are sold in year two, the expectation for year two will have been met, but there will be no carry-over to year three. If the Distributor shall fail to purchase the minimum number of units in any year, the Distributor's exclusive rights to sell and distribute the Product in the Market, may at Company's sole option, be reevaluated. Company agrees that Distributor shall not be liable or subject to reevaluation for failure to meet expectations due to any occurrence beyond Distributor's reasonable control, including, but not limited to, Acts of God, fires, floods, wars, sabotage, accidents in shipping, labor disturbances, weather conditions, governmental regulation, lack of Company performance, delay by Company, failure of Company to honor warranties or otherwise materially support the Products. The aggregate units to be sold on an annual basis described above are for the Illinois distributorship on an aggregate basis.",
+      "excerpt_sha256": "62dfcb3fd7e8820352027a4c194e79df2beb28c62a7b2887fed6727b6e75319f"
+    },
+    {
+      "citation": "Section 4.1",
+      "section": "4.1",
+      "excerpt": "4.1 Duration. Unless earlier terminated otherwise provided therein, this Agreement, subject to the commencement date established in Section 1.3, shall be effective immediately. Distributor shall submit written reports to the Company each quarter during the first year of the Term, commencing ninety (90) days after execution of this Agreement, describing its efforts, the potential customers it has approached and the status of its efforts.",
+      "excerpt_sha256": "99df6b74f2bea2666078b32010d7c7fffa7a939d9aca73d8ed1e06b457b78229"
+    },
+    {
+      "citation": "Section 6.9",
+      "section": "6.9",
+      "excerpt": "6.9 Governing Law. This Agreement is to be construed according to the laws of the State of Illinois. 7. NEW PRODUCTS",
+      "excerpt_sha256": "b009e8d2fd9fc74663a72719bbb8e4448ffcf0ceb3ba32179912917b0d6b6c3e"
     }
   ]
 }

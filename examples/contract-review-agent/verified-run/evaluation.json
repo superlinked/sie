@@ -8,10 +8,17 @@
     "api_calls_have_request_provenance": true,
     "api_call_request_ids_unique": true,
     "risk_clauses_supported_by_source": true,
+    "risk_claims_supported_by_source": true,
+    "published_risk_coverage_non_regression": true,
+    "published_fact_coverage_non_regression": true,
+    "published_fact_source_coverage_non_regression": true,
     "signature_image_scope_not_overclaimed": true,
+    "published_investigator_findings_complete": true,
     "all_configured_models_called": true,
     "native_primitives_called": true,
-    "required_api_call_sequence": true
+    "required_api_call_sequence": true,
+    "bounded_citation_repair": true,
+    "bounded_synthesis_repair": true
   },
   "expected_models": [
     "BAAI/bge-m3",
@@ -111,7 +118,7 @@
     {
       "stage": "analyze_clause_risks",
       "function": "generate",
-      "requested_model": "Qwen/Qwen3.5-4B"
+      "requested_model": "Qwen/Qwen3.6-27B"
     },
     {
       "stage": "query_obligations_db",
@@ -125,6 +132,11 @@
     },
     {
       "stage": "synthesize_review",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.6-27B"
+    },
+    {
+      "stage": "synthesize_review:repair",
       "function": "generate",
       "requested_model": "Qwen/Qwen3.6-27B"
     }
@@ -203,7 +215,7 @@
     {
       "stage": "analyze_clause_risks",
       "function": "generate",
-      "requested_model": "Qwen/Qwen3.5-4B"
+      "requested_model": "Qwen/Qwen3.6-27B"
     },
     {
       "stage": "query_obligations_db",
@@ -217,6 +229,11 @@
     },
     {
       "stage": "synthesize_review",
+      "function": "generate",
+      "requested_model": "Qwen/Qwen3.6-27B"
+    },
+    {
+      "stage": "synthesize_review:repair",
       "function": "generate",
       "requested_model": "Qwen/Qwen3.6-27B"
     }

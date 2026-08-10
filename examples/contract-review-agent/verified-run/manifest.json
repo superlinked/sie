@@ -1,13 +1,13 @@
 {
-  "run_id": "prod-us-20260809-sdk071-review8-normalized",
-  "completed_at": "2026-08-09T23:31:32.984980+00:00",
+  "run_id": "prod-us-20260810-sdk071-review55-grounded",
+  "completed_at": "2026-08-10T07:24:50.739098+00:00",
   "endpoint": "https://api.superlinked.com",
   "execution": "SIE API",
   "models": {
     "triage": "Qwen/Qwen3.5-4B",
     "orchestrator": "Qwen/Qwen3.6-27B",
     "vision": "Qwen/Qwen3.5-4B",
-    "reasoning": "Qwen/Qwen3.5-4B",
+    "reasoning": "Qwen/Qwen3.6-27B",
     "sql": "Qwen/Qwen3.5-4B",
     "guard": "ibm-granite/granite-guardian-3.0-2b",
     "ocr": "lightonai/LightOnOCR-2-1B",
@@ -24,7 +24,7 @@
     {
       "path": "limeenergyco-09-09-1999-ex-10-distributor-agreement-page.png",
       "kind": "signature_scan",
-      "sha256": "961b16d5dfbecc90a41875d99cae5bd619927665f85da41515b1e16dbad18842"
+      "sha256": "64971970656dec10bc5651cd39549f17dcbae0dc128aa4bf164c4b266cdb9b9b"
     },
     {
       "path": "obligations.db",
@@ -33,33 +33,33 @@
     }
   ],
   "timing_ms": {
-    "end_to_end": 97871.8
+    "end_to_end": 125487.6
   },
   "timing_note": "Diagnostic run timing, not a benchmark.",
   "artifacts": [
     {
       "path": "api-calls.json",
-      "sha256": "b8904f4647fcdaa4ab7c64ab104a4ea5a822ee0deab3c81ef46269dd0c168a29"
+      "sha256": "01bb86f952d9478de4324e1322ff9f525efbb1b4f12387a06d5efca4e2b8abb9"
     },
     {
       "path": "evaluation.json",
-      "sha256": "4eb5ccde8b80fe986ca38e98c8fc6d14ddac2da0e335b4709ce252a92a4c41de"
+      "sha256": "8dabbb9f797a288564964e40843e6a9b50473f0bf06c4a064d22b6772cc8f698"
     },
     {
       "path": "investigator-findings.txt",
-      "sha256": "1487c5862a16f57672b6cc8235cb5d7d3a2b13711067aaa5927cd876df53b8ec"
+      "sha256": "ba3035bf413050f541f62d32df3e385fb53a304ca9e94493e50a521929833c30"
     },
     {
       "path": "ledger.json",
-      "sha256": "ab6f685603fd0349e67c644dc881eb367758ab1335f91a78d6d2b2c25a1b38a4"
+      "sha256": "3098120138edc973081ba7f5a95ba4888f3e8670cba27b738f48a9d640db70f4"
     },
     {
       "path": "review.json",
-      "sha256": "a2ad657969246711f3993922c0ef24fbb0cd743954f1941ae1974359a1add2c2"
+      "sha256": "7996241089b0efdf33b8a25f3a0976859c9719741f095926f778b8972f75ab64"
     },
     {
       "path": "source-evidence.json",
-      "sha256": "a49db95c534ea5580fe6555e57da6222567abdb3963e8a446f6af0e87367ad05"
+      "sha256": "a2a5ab9b575496e2ebafa427ae6a61a7285b4b5bd70717ed03e282b0e37861a1"
     }
   ]
 }

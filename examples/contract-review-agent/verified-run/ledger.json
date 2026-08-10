@@ -4,8 +4,8 @@
     "model": "ibm-granite/granite-guardian-3.0-2b",
     "sie_fn": "generate",
     "warmup_s": 0.0,
-    "latency_s": 0.6589052029885352,
-    "sent": "57 tok",
+    "latency_s": 0.5249240099219605,
+    "sent": "68 tok",
     "got": "No",
     "throughput": ""
   },
@@ -14,109 +14,109 @@
     "model": "Qwen/Qwen3.5-4B",
     "sie_fn": "generate",
     "warmup_s": 0.0,
-    "latency_s": 0.9983626329922117,
-    "sent": "384 tok",
+    "latency_s": 0.9750730530358851,
+    "sent": "405 tok",
     "got": "47 tok",
-    "throughput": "47 tok/s"
+    "throughput": "48 tok/s"
   },
   {
     "step": "OCR signature page \u2192 markdown",
     "model": "lightonai/LightOnOCR-2-1B",
     "sie_fn": "extract",
     "warmup_s": 0.0,
-    "latency_s": 3.808183012995869,
-    "sent": "161 KB img",
-    "got": "2,415 chars md",
-    "throughput": "634 chars/s"
+    "latency_s": 0.8917914299527183,
+    "sent": "27 KB img",
+    "got": "380 chars md",
+    "throughput": "426 chars/s"
   },
   {
     "step": "Extract entities (zero-shot NER)",
     "model": "fastino/gliner2-large-v1",
     "sie_fn": "extract",
     "warmup_s": 0.0,
-    "latency_s": 0.24344166700029746,
+    "latency_s": 0.22630236204713583,
     "sent": "6,000 chars",
     "got": "4 entities",
-    "throughput": "16.4 ent/s"
+    "throughput": "17.7 ent/s"
   },
   {
     "step": "Read signature page (vision)",
     "model": "Qwen/Qwen3.5-4B",
     "sie_fn": "generate + image",
     "warmup_s": 0.0,
-    "latency_s": 1.672706643003039,
-    "sent": "161 KB img + 1,043 tok",
-    "got": "81 tok",
-    "throughput": "48 tok/s"
+    "latency_s": 3.140354771981947,
+    "sent": "27 KB img + 545 tok",
+    "got": "133 tok",
+    "throughput": "42 tok/s"
   },
   {
     "step": "Embed clauses (index)",
     "model": "BAAI/bge-m3",
     "sie_fn": "encode",
     "warmup_s": 0.0,
-    "latency_s": 1.0098826679750346,
+    "latency_s": 0.8116070020478219,
     "sent": "68 clauses",
     "got": "1024-dim",
-    "throughput": "67.3 items/s"
+    "throughput": "83.8 items/s"
   },
   {
     "step": "Rerank candidate clauses",
     "model": "Qwen/Qwen3-Reranker-4B",
     "sie_fn": "score",
     "warmup_s": 0.0,
-    "latency_s": 0.7838336050044745,
+    "latency_s": 0.6972688829991966,
     "sent": "12 docs",
     "got": "top 4",
-    "throughput": "15.3 docs/s"
+    "throughput": "17.2 docs/s"
   },
   {
     "step": "Rerank candidate clauses",
     "model": "Qwen/Qwen3-Reranker-4B",
     "sie_fn": "score",
     "warmup_s": 0.0,
-    "latency_s": 0.7116207950166427,
+    "latency_s": 0.7069687739713117,
     "sent": "12 docs",
     "got": "top 4",
-    "throughput": "16.9 docs/s"
+    "throughput": "17.0 docs/s"
   },
   {
     "step": "Rerank candidate clauses",
     "model": "Qwen/Qwen3-Reranker-4B",
     "sie_fn": "score",
     "warmup_s": 0.0,
-    "latency_s": 0.7180550810298882,
+    "latency_s": 0.6874280810588971,
     "sent": "12 docs",
     "got": "top 4",
-    "throughput": "16.7 docs/s"
+    "throughput": "17.5 docs/s"
   },
   {
     "step": "Rerank candidate clauses",
     "model": "Qwen/Qwen3-Reranker-4B",
     "sie_fn": "score",
     "warmup_s": 0.0,
-    "latency_s": 0.6659399199998006,
+    "latency_s": 0.6342033339897171,
     "sent": "12 docs",
     "got": "top 4",
-    "throughput": "18.0 docs/s"
+    "throughput": "18.9 docs/s"
   },
   {
     "step": "Clause-risk analysis (specialist sub-agent)",
-    "model": "Qwen/Qwen3.5-4B",
+    "model": "Qwen/Qwen3.6-27B",
     "sie_fn": "generate",
     "warmup_s": 0.0,
-    "latency_s": 8.170850347029045,
-    "sent": "2,943 tok",
-    "got": "126 tok",
-    "throughput": "15 tok/s"
+    "latency_s": 23.71464120701421,
+    "sent": "2,787 tok",
+    "got": "459 tok",
+    "throughput": "19 tok/s"
   },
   {
     "step": "Text-to-SQL",
     "model": "Qwen/Qwen3.5-4B",
     "sie_fn": "generate",
     "warmup_s": 0.0,
-    "latency_s": 2.8043296789983287,
-    "sent": "255 tok",
+    "latency_s": 3.6775467849802226,
+    "sent": "330 tok",
     "got": "256 tok",
-    "throughput": "91 tok/s"
+    "throughput": "70 tok/s"
   }
 ]

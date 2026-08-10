@@ -1,47 +1,47 @@
 {
-  "document_type": "Master Services Agreement (MSA) / Distributor Agreement",
+  "document_type": "Distributor Agreement",
   "parties": [
-    "Electric City Corp., a Delaware corporation",
-    "Electric City of Illinois LLC"
+    "Electric City Corp. (Company)",
+    "Electric City of Illinois L.L.C. (Distributor)"
   ],
   "effective_date": "unknown",
-  "renewal_terms": "Renewable annually for up to an additional ten (10) years on the same terms and conditions (Section 1.3)",
-  "governing_law": "unknown",
+  "renewal_terms": "Conditional annual renewal for 1-year terms up to 10 additional years if Distributor complies with all terms of the Agreement (Section 1.3)",
+  "governing_law": "Illinois (Section 6.9)",
   "executed": false,
   "key_obligations": [
-    "Distributor must issue an irrevocable Letter of Credit in the amount of $500,000 at the commencement of the Term (Section 2.4(a))",
-    "Distributor must receive a minimum purchase order of $250,000 by the first of each month for a 12-month period",
-    "Distributor must commit to 375 units in the first Product Year (1999)",
-    "Company appoints Distributor as exclusive distributor within the State of Illinois (Section 1.1)",
-    "Initial term is ten (10) years commencing upon delivery of the last Sample by Company to Distributor",
-    "Renewal is annual for up to an additional ten (10) years on the same terms and conditions (Section 1.3)",
-    "Distributor must submit written reports to Company each quarter during the first year of the Term, commencing 90 days after execution (Section 4.1)"
+    "Exclusive distributorship within the Illinois Market (Section 1.1)",
+    "Ten-year initial term beginning on delivery of the last Sample (Section 1.3)",
+    "Conditional annual renewal for 1-year terms up to 10 additional years if Distributor complies with all terms of the Agreement (Section 1.3)",
+    "Distributor must issue an irrevocable $500,000 letter of credit to Company (Section 1.6)",
+    "Company must receive a $250,000 purchase order from Distributor by the first day of each month (Section 1.6)",
+    "Distributor must purchase at least 375 units during the first Product Year (Section 1.6)",
+    "Distributor must submit written reports each quarter during the first year of the Term (Section 4.1)"
   ],
   "risk_flags": [
     {
       "clause": "Section 1.3",
-      "issue": "Automatic renewal trap: Agreement renews for up to ten additional years without a specified right of first refusal or termination notice period",
+      "issue": "Missing explicit renewal election or notice mechanics.",
       "severity": "high",
-      "suggested_redline": "Add a requirement that Distributor must provide written notice at least 90 days prior to each annual renewal date to exercise the option to renew"
-    },
-    {
-      "clause": "Section 5.3",
-      "issue": "Broad indemnification scope: Requires Distributor to indemnify Company for unauthorized Product alteration even if Company is not at fault",
-      "severity": "high",
-      "suggested_redline": "Limit indemnification to cases where Distributor is at fault or negligent"
+      "suggested_redline": "Add explicit language requiring Distributor to provide written notice of its election to renew at least 90 days prior to the expiration of the then-current Term."
     },
     {
       "clause": "Section 4.2",
-      "issue": "Short cure period: Either party may terminate upon 30 days' notice for default, which may be insufficient for complex breaches",
+      "issue": "30 days is the termination-notice period; the separate cure period is an undefined commercially reasonable time. Curable defaults do have that cure period.",
       "severity": "high",
-      "suggested_redline": "Extend the cure period to allow sufficient time to remedy complex breaches"
+      "suggested_redline": "Replace 'commercially reasonable time' with a specific, fixed number of days (e.g., 30 days) for curing any material default after receipt of written notice."
     },
     {
       "clause": "Section 4.4",
-      "issue": "Repurchase Obligation: Company has sole discretion to repurchase Products from Distributor at net invoice price less allowances, leaving Distributor with unsold inventory risk",
+      "issue": "Company generally may, at its option, repurchase; but Company shall repurchase unopened Product when it terminates without cause for reasons other than Distributor's minimum failure. The clear mandatory exception protects that scenario; the risk is inventory exposure after other expirations or terminations, where repurchase remains optional.",
       "severity": "medium",
-      "suggested_redline": "Negotiate a guaranteed buyback provision or clearer repurchase terms"
+      "suggested_redline": "Change 'may, at its option... repurchase' to 'shall repurchase' for all Products in Distributor's possession upon any expiration or termination, regardless of cause."
+    },
+    {
+      "clause": "Section 5.3",
+      "issue": "Each party covers its own breach, negligence, and IP violations; the Distributor-specific indemnity applies only when Company is not at fault.",
+      "severity": "high",
+      "suggested_redline": "Remove the 'provided that Company is not at fault' condition from the Distributor\u2019s indemnification obligation to ensure full coverage for claims arising from Distributor\u2019s sales and marketing practices."
     }
   ],
-  "recommendation": "The agreement contains significant risks including an automatic renewal trap with no specified termination notice period, broad indemnification obligations that may expose the Distributor to liability for unauthorized product alterations even without fault, and a short 30-day cure period for termination. The Distributor should negotiate explicit renewal notice requirements, limit indemnification scope to fault-based claims, and extend the cure period. Additionally, the lack of a guaranteed repurchase obligation leaves the Distributor with inventory risk upon termination."
+  "recommendation": "The agreement contains high-severity risks regarding missing renewal mechanics, undefined cure periods, optional repurchase obligations, and conditional indemnification. Execution is not established as signatures and dates are incomplete. Immediate redlining is recommended to fix these structural gaps before signing."
 }
