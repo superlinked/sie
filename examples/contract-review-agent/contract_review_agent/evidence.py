@@ -610,6 +610,7 @@ def _write_run_record(
                 {
                     "label": label,
                     "kind": "contract_text",
+                    "parties": review.parties,
                     "sha256": _sha256_bytes(contract_text.encode()),
                 },
                 {"path": scan.name, "kind": "signature_scan", "sha256": _sha256(scan)},

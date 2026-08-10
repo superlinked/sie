@@ -833,6 +833,8 @@ def test_verified_run_manifest_pins_complete_passing_evidence() -> None:
         source_evidence["contract_text_sha256"]
         == manifest["source_inputs"][0]["sha256"]
     )
+    recorded_review = json.loads((run_dir / "review.json").read_text(encoding="utf-8"))
+    assert manifest["source_inputs"][0]["parties"] == recorded_review["parties"]
     sections = {row["section"] for row in source_evidence["risk_clauses"]}
     assert {"1.3", "5.3"} <= sections
     assert evaluation["checks"]["required_api_call_sequence"] is True

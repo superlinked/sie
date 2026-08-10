@@ -1,6 +1,6 @@
 {
-  "run_id": "prod-us-20260810-sdk071-deadline-status",
-  "completed_at": "2026-08-10T10:32:40.529186+00:00",
+  "run_id": "prod-us-20260810-sdk071-party-mapping",
+  "completed_at": "2026-08-10T10:50:19.607592+00:00",
   "endpoint": "https://api.superlinked.com",
   "execution": "SIE API",
   "models": {
@@ -19,6 +19,10 @@
     {
       "label": "CUAD \u00b7 limeenergyco-09-09-1999-ex-10-distributor-agreement",
       "kind": "contract_text",
+      "parties": [
+        "Electric City Corp. (Company)",
+        "Electric City of Illinois L.L.C. (Distributor)"
+      ],
       "sha256": "95ea6fae5227f2424896bb354e9de452c7f05a85dc0acb72fa6bd72ebe37a236"
     },
     {
@@ -33,13 +37,13 @@
     }
   ],
   "timing_ms": {
-    "end_to_end": 140689.1
+    "end_to_end": 108385.4
   },
   "timing_note": "Diagnostic run timing, not a benchmark.",
   "artifacts": [
     {
       "path": "api-calls.json",
-      "sha256": "dcaf392c86f92519bd57fb515043c510bf310900dc90a14837223d6e1d7d0249"
+      "sha256": "e5dc91d889dd31dbc525decf52f80297426c61de6f8987e53d19350af80c5838"
     },
     {
       "path": "evaluation.json",
@@ -51,11 +55,11 @@
     },
     {
       "path": "ledger.json",
-      "sha256": "621cd4120810aee069e58343d6b4a68471d168b3ac8a1326c0b7836c041da08b"
+      "sha256": "4e33d005940dcb4a55e38b42896160bf2a4be3638e2b36cbb26e09a8519bbc1d"
     },
     {
       "path": "review.json",
-      "sha256": "8733b059b6f0b9694c590a3f15ceab4c1dc1e2e343b6ef3780fec3a7ee423741"
+      "sha256": "7bfdec1b4ac3b3bcd641041ef06df5748cd1970f2b4dedcd821d348709969182"
     },
     {
       "path": "source-evidence.json",
