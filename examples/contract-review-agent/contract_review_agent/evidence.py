@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -13,6 +14,7 @@ from typing import Any
 from .app import (
     _INVESTIGATOR_TOOL_SEQUENCE,
     ContractReview,
+    _published_findings_narrative_is_bounded,
     _published_review_missing_labels,
     _source_section_excerpt,
 )
@@ -161,7 +163,10 @@ def _risk_clause_source_evidence(
                 section,
                 error_prefix="Published fact",
             )
-            assert excerpt is not None
+            if not excerpt:
+                raise RuntimeError(
+                    f"Published fact section {section} has no source excerpt"
+                )
             commercial_fact_clauses.append(
                 {
                     "citation": f"Section {section}",
@@ -267,6 +272,7 @@ def _signature_scope_is_supported(findings: str, review: ContractReview) -> bool
         "not established from the visible signature page" in normalized
         and "not executed" not in normalized
         and "not executed" not in review_text
+        and "not fully executed" not in review_text
         and "unexecuted" not in review_text
         and "draft or unsigned copy" not in normalized
         and "document ends at" not in normalized
@@ -344,6 +350,15 @@ def _published_investigator_findings_are_complete(label: str, findings: str) -> 
     return not _published_investigator_findings_missing(label, findings)
 
 
+def _published_investigator_narrative_is_bounded(label: str, findings: str) -> bool:
+    if label != PUBLISHED_CONTRACT_LABEL:
+        return True
+    narrative = findings.split(
+        "\n\nUpcoming obligations and deadlines (validated exact-contract rows):", 1
+    )[0]
+    return _published_findings_narrative_is_bounded(narrative)
+
+
 def _published_risk_coverage_is_preserved(label: str, review: ContractReview) -> bool:
     if label != PUBLISHED_CONTRACT_LABEL:
         return True
@@ -404,6 +419,10 @@ def write_run_record(
             "Published investigator findings are incomplete: "
             + ", ".join(missing_findings)
         )
+    if not _published_investigator_narrative_is_bounded(label, findings):
+        raise RuntimeError(
+            "Published investigator findings narrative is incomplete or out of range"
+        )
     final_run_dir = ensure_run_destination_available(run_id)
     runs_dir = PROJECT_ROOT / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -437,7 +456,8 @@ def write_run_record(
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
     finally:
-        reservation_dir.rmdir()
+        with contextlib.suppress(OSError):
+            reservation_dir.rmdir()
     return final_run_dir
 
 
@@ -536,6 +556,9 @@ def _write_run_record(
         ),
         "published_investigator_findings_complete": (
             _published_investigator_findings_are_complete(label, findings)
+        ),
+        "published_investigator_narrative_bounded": (
+            _published_investigator_narrative_is_bounded(label, findings)
         ),
         "all_configured_models_called": requested_models == expected_models,
         "native_primitives_called": set(observed_functions)

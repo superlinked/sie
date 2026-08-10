@@ -5,17 +5,16 @@
     "Electric City of Illinois L.L.C. (Distributor)"
   ],
   "effective_date": "unknown",
-  "renewal_terms": "Conditional annual renewal for 1-year terms up to 10 additional years if Distributor complies with all terms of the Agreement (Section 1.3)",
-  "governing_law": "Illinois (Section 6.9)",
+  "renewal_terms": "Conditional annual one-year renewals for up to ten additional years if Distributor complies with the Agreement (Section 1.3). Missing explicit renewal election or notice mechanics.",
+  "governing_law": "Illinois",
   "executed": false,
   "key_obligations": [
-    "Exclusive distributorship within the Illinois Market (Section 1.1)",
-    "Ten-year initial term beginning on delivery of the last Sample (Section 1.3)",
-    "Conditional annual renewal for 1-year terms up to 10 additional years if Distributor complies with all terms of the Agreement (Section 1.3)",
-    "Distributor must issue an irrevocable $500,000 letter of credit to Company (Section 1.6)",
-    "Company must receive a $250,000 purchase order from Distributor by the first day of each month (Section 1.6)",
-    "Distributor must purchase at least 375 units during the first Product Year (Section 1.6)",
-    "Distributor must submit written reports each quarter during the first year of the Term (Section 4.1)"
+    "Company appoints Distributor as exclusive distributor in the Illinois Market (Section 1.1)",
+    "Ten-year initial term beginning on delivery of last Sample, renewable annually for up to ten additional years if Distributor complies with the Agreement (Section 1.3)",
+    "Distributor must issue an irrevocable $500,000 letter of credit (Section 1.6)",
+    "Distributor must place a $250,000 purchase order by the first day of each month (Section 1.6)",
+    "Distributor must purchase at least 375 units in the first Product Year (Section 1.6)",
+    "Distributor must submit quarterly written reports during the first year (Section 4.1)"
   ],
   "risk_flags": [
     {
@@ -43,5 +42,5 @@
       "suggested_redline": "Remove the 'provided that Company is not at fault' condition from the Distributor\u2019s indemnification obligation to ensure full coverage for claims arising from Distributor\u2019s sales and marketing practices."
     }
   ],
-  "recommendation": "The agreement contains high-severity risks regarding missing renewal mechanics, undefined cure periods, optional repurchase obligations, and conditional indemnification. Execution is not established as signatures and dates are incomplete. Immediate redlining is recommended to fix these structural gaps before signing."
+  "recommendation": "Execution is not established from the visible signature page: one explicit /s/Joseph Marino mark and Jim Stump's typed signatory block are visible, but no execution dates are visible. The repurchase obligation risk is medium severity but should be addressed to eliminate inventory exposure upon termination."
 }

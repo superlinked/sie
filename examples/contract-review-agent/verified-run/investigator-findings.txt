@@ -1,4 +1,29 @@
-## Contract Investigation Findings: Distributor Agreement (LIMEENERGYCO_09_09_1999-EX-10)  ### Document Classification & Execution Status  **Document Type:** Distributor Agreement. The contract defines the roles of a “Company” and a “Distributor” regarding product distribution.  **Execution Status:** Execution is not established from the visible signature page. The OCR and vision analysis confirm that while signatories are present, full execution evidence is incomplete.  - **Electric City Corp.:** Signed by Joseph Marino, President. Signature mark: `/s/Joseph Marino`. Date: Not visible on this page.  - **Electric City of Illinois L.L.C.:** Signed by Jim Stump. Signature mark: Typed name only (no explicit `/s/` or handwritten mark). Title: Not specified. Date: Not visible on this page.  Both parties’ signatures and dates are not fully visible; one signature is typed without a clear mark, and no execution dates appear on the page.  ### Key Commercial Terms & Obligations  **Parties:** Electric City Corp. (Company) and Electric City of Illinois L.L.C. (Distributor).  **Governing Law:** Section 6.9 establishes that the Agreement is to be construed according to the laws of the State of Illinois.  **Term & Renewal (Section 1.3):** The initial Term is ten (10) years, commencing upon the Company’s delivery of the last Sample to the Distributor. If the Distributor complies with all terms, the Agreement is renewable annually for up to ten (10) additional years on the same terms and conditions. However, Section 1.3 lacks explicit renewal election or notice mechanics.  **Exclusivity (Section 1.6):** The Distributor holds exclusive rights to sell, lease, distribute, and service Products in the Market, contingent upon meeting minimum expectations.  **Financial Commitments (Section 1.6):**  - **Letter of Credit:** Upon commencement, the Distributor must issue an irrevocable letter of credit (“LC”) for $500,000 ($500,000.00). The LC has a two-month term and renews for five consecutive bimonthly periods.  - **Purchase Minimums:** A minimum purchase order of $250,000.00 must be received by the Company by the first of each month. In the first Product Year (1999), the unit minimum is 375 units.  **Reporting Obligations (Section 4.1):** The Distributor must submit written reports to the Company each quarter during the first year of the Term, commencing 90 days after execution, detailing efforts and potential customer status.  ### Material Risks & Redlines  **Section 1.3 | Severity: High**  - **Risk:** Missing explicit renewal election or notice mechanics.  - **Redline:** Add language requiring the Distributor to provide written notice of its election to renew at least 90 days prior to the expiration of the then-current Term.  **Section 4.2 | Severity: High**  - **Risk:** The termination-notice period is 30 days, but the cure period for curable defaults is undefined as a “commercially reasonable time.”  - **Redline:** Replace “commercially reasonable time” with a specific, fixed number of days (e.g., 30 days) for curing any material default after receipt of written notice.  **Section 4.4 | Severity: Medium**  - **Risk:** The Company generally “may” repurchase products at its option upon expiration or termination. While it “shall” repurchase if terminating without cause (excluding Distributor’s failure to meet minimums), inventory exposure remains high in other scenarios where repurchase is optional.  - **Redline:** Change “may, at its option... repurchase” to
+## Contract investigation findings
+
+Document type: Distributor Agreement. Parties: Electric City Corp. (Company) and Electric City of Illinois L.L.C. (Distributor).
+
+Execution: The visible signature page shows Joseph Marino's `/s/Joseph Marino` mark and President title for Electric City Corp. It also shows Jim Stump's typed signatory block for Electric City of Illinois L.L.C., without an explicit signature mark. No execution dates are visible, so execution is not established from the visible signature page.
+
+Commercial terms: Section 1.1 appoints Distributor as the exclusive distributor in the Illinois Market. Section 1.3 sets a ten-year initial term beginning when Company delivers the last Sample and permits conditional annual one-year renewals for up to ten additional years if Distributor complies with the Agreement. Section 1.6 requires an irrevocable $500,000 letter of credit, a $250,000 purchase order by the first day of each month, and at least 375 units in the first Product Year. Section 4.1 requires quarterly written reports during the first year. Section 6.9 applies Illinois law.
+
+Material risks and redlines:
+Section 1.3 | severity: high
+Issue: Missing explicit renewal election or notice mechanics.
+Suggested redline: Add explicit language requiring Distributor to provide written notice of its election to renew at least 90 days prior to the expiration of the then-current Term.
+
+Section 4.2 | severity: high
+Issue: 30 days is the termination-notice period; the separate cure period is an undefined commercially reasonable time. Curable defaults do have that cure period.
+Suggested redline: Replace 'commercially reasonable time' with a specific, fixed number of days (e.g., 30 days) for curing any material default after receipt of written notice.
+
+Section 4.4 | severity: medium
+Issue: Company generally may, at its option, repurchase; but Company shall repurchase unopened Product when it terminates without cause for reasons other than Distributor's minimum failure. The clear mandatory exception protects that scenario; the risk is inventory exposure after other expirations or terminations, where repurchase remains optional.
+Suggested redline: Change 'may, at its option... repurchase' to 'shall repurchase' for all Products in Distributor's possession upon any expiration or termination, regardless of cause.
+
+Section 5.3 | severity: high
+Issue: Each party covers its own breach, negligence, and IP violations; the Distributor-specific indemnity applies only when Company is not at fault.
+Suggested redline: Remove the 'provided that Company is not at fault' condition from the Distributor’s indemnification obligation to ensure full coverage for claims arising from Distributor’s sales and marketing practices.
+
+Upcoming obligations and deadlines: validated exact-contract rows identify a quarterly compliance attestation due June 30, 2026; an annual subscription or license fee due July 1, 2026; and a renewal or non-renewal notice due September 15, 2026.
 
 Upcoming obligations and deadlines (validated exact-contract rows):
 SQL: SELECT
@@ -16,20 +41,3 @@ counterparty | status | obligation | due_date | amount_usd
 LIMEENERGYCO 09 09 1999 EX 10 DISTRIBUTOR AGREEM | open | Quarterly compliance attestation | 2026-06-30 |
 LIMEENERGYCO 09 09 1999 EX 10 DISTRIBUTOR AGREEM | open | Annual subscription / license fee | 2026-07-01 | 120000.0
 LIMEENERGYCO 09 09 1999 EX 10 DISTRIBUTOR AGREEM | open | Send renewal / non-renewal notice before term end | 2026-09-15 |
-
-Grounded clause-risk analysis:
-Section 1.3 | severity: high
-Issue: Missing explicit renewal election or notice mechanics.
-Suggested redline: Add explicit language requiring Distributor to provide written notice of its election to renew at least 90 days prior to the expiration of the then-current Term.
-
-Section 4.2 | severity: high
-Issue: 30 days is the termination-notice period; the separate cure period is an undefined commercially reasonable time. Curable defaults do have that cure period.
-Suggested redline: Replace 'commercially reasonable time' with a specific, fixed number of days (e.g., 30 days) for curing any material default after receipt of written notice.
-
-Section 4.4 | severity: medium
-Issue: Company generally may, at its option, repurchase; but Company shall repurchase unopened Product when it terminates without cause for reasons other than Distributor's minimum failure. The clear mandatory exception protects that scenario; the risk is inventory exposure after other expirations or terminations, where repurchase remains optional.
-Suggested redline: Change 'may, at its option... repurchase' to 'shall repurchase' for all Products in Distributor's possession upon any expiration or termination, regardless of cause.
-
-Section 5.3 | severity: high
-Issue: Each party covers its own breach, negligence, and IP violations; the Distributor-specific indemnity applies only when Company is not at fault.
-Suggested redline: Remove the 'provided that Company is not at fault' condition from the Distributor’s indemnification obligation to ensure full coverage for claims arising from Distributor’s sales and marketing practices.

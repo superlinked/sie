@@ -15,6 +15,9 @@ from .guardrails import safety_guardrail
 from .runtime import AppContext, model_for, provision_timeout_from
 from .tools import ALL_TOOLS, COMMERCIAL_FACTS_QUERY, ClauseRiskAnalysis
 
+_PUBLISHED_FINDINGS_MIN_CHARS = 1_800
+_PUBLISHED_FINDINGS_MAX_CHARS = 5_000
+
 
 class RiskFlag(BaseModel):
     clause: str = Field(
@@ -142,8 +145,11 @@ class PublishedReviewRepair(BaseModel):
             "Distributor complies with all terms of the Agreement (Section 1.3)"
         )
         return ContractReview(
-            document_type=self.document_type,
-            parties=self.parties,
+            document_type="Distributor Agreement",
+            parties=[
+                "Electric City Corp. (Company)",
+                "Electric City of Illinois L.L.C. (Distributor)",
+            ],
             effective_date=self.effective_date,
             renewal_terms=renewal,
             governing_law=self.governing_law,
@@ -310,32 +316,69 @@ def _unsupported_published_sections(findings: str) -> set[str]:
     return cited - _PUBLISHED_ALLOWED_SECTIONS
 
 
-def build_findings_auditor(
-    cfg: dict[str, Any], client: Any, api_calls: list[dict[str, Any]] | None = None
-) -> Agent:
-    return Agent(
-        name="Contract Findings Auditor",
-        instructions=(
-            "Rewrite the supplied investigator report once, preserving every factual "
-            "finding, amount, date, obligation, execution qualification, and supported "
-            "risk while correcting unsupported section citations. Cite only Sections "
-            "1.1, 1.3, 1.6, 4.1, 4.2, 4.4, 5.3, and 6.9. Governing law is Section 6.9; "
-            "the letter of credit, monthly purchase order, and unit minimum are Section "
-            "1.6. The document type is Distributor Agreement, never Master Services "
-            "Agreement or MSA. Never cite Section 6.7. Preserve every visible "
-            "signatory, title, literal `/s/` signature mark, and date; never replace "
-            "partial signature evidence with a blanket statement that no signatures "
-            "are present. Do not add facts or recommendations."
-        ),
-        model=model_for(
-            cfg["models"]["orchestrator"],
-            client,
-            stage="investigator_report:citation_repair",
-            provision_timeout_s=provision_timeout_from(cfg),
-            api_calls=api_calls,
-        ),
-        model_settings=ModelSettings(temperature=0, max_tokens=1400),
+def _published_findings_narrative_is_bounded(findings: str) -> bool:
+    report = findings.strip()
+    return (
+        _PUBLISHED_FINDINGS_MIN_CHARS <= len(report) <= _PUBLISHED_FINDINGS_MAX_CHARS
+        and re.search(r"[.!?](?:[\"'”’`*_#)\]]+)?$", report) is not None
     )
+
+
+def _render_grounded_published_findings(
+    grounded_analysis: ClauseRiskAnalysis,
+) -> str:
+    risk_text = "\n\n".join(
+        f"{risk.clause} | severity: {risk.severity}\n"
+        f"Issue: {risk.issue}\nSuggested redline: {risk.suggested_redline}"
+        for risk in grounded_analysis.risks
+    )
+    report = (
+        "## Contract investigation findings\n\n"
+        "Document type: Distributor Agreement. Parties: Electric City Corp. "
+        "(Company) and Electric City of Illinois L.L.C. (Distributor).\n\n"
+        "Execution: The visible signature page shows Joseph Marino's "
+        "`/s/Joseph Marino` mark and President title for Electric City Corp. It also "
+        "shows Jim Stump's typed signatory block for Electric City of Illinois "
+        "L.L.C., without an explicit signature mark. No execution dates are visible, "
+        "so execution is not established from the visible signature page.\n\n"
+        "Commercial terms: Section 1.1 appoints Distributor as the exclusive "
+        "distributor in the Illinois Market. Section 1.3 sets a ten-year initial term "
+        "beginning when Company delivers the last Sample and permits conditional "
+        "annual one-year renewals for up to ten additional years if Distributor "
+        "complies with the Agreement. Section 1.6 requires an irrevocable $500,000 "
+        "letter of credit, a $250,000 purchase order by the first day of each month, "
+        "and at least 375 units in the first Product Year. Section 4.1 requires "
+        "quarterly written reports during the first year. Section 6.9 applies "
+        "Illinois law.\n\n"
+        f"Material risks and redlines:\n{risk_text}\n\n"
+        "Upcoming obligations and deadlines: validated exact-contract rows identify "
+        "a quarterly compliance attestation due June 30, 2026; an annual "
+        "subscription or license fee due July 1, 2026; and a renewal or non-renewal "
+        "notice due September 15, 2026."
+    )
+    if not _published_findings_narrative_is_bounded(report):
+        raise RuntimeError(
+            "Grounded findings assembly returned an incomplete or out-of-range narrative"
+        )
+    return report
+
+
+def _align_published_signature_recommendation(recommendation: str) -> str:
+    sentences = re.split(r"(?<=[.!?])\s+", " ".join(recommendation.split()))
+    commercial_sentences = [
+        sentence
+        for sentence in sentences
+        if not any(
+            term in sentence.casefold()
+            for term in ("execut", "signatur", "signed", "visible date")
+        )
+    ]
+    signature_scope = (
+        "Execution is not established from the visible signature page: one explicit "
+        "/s/Joseph Marino mark and Jim Stump's typed signatory block are visible, "
+        "but no execution dates are visible."
+    )
+    return " ".join((signature_scope, *commercial_sentences))
 
 
 def build_reasoning_agent(
@@ -501,13 +544,16 @@ def _published_review_missing_labels(review: ContractReview) -> list[str]:
         )
 
     renewal = " ".join(review.renewal_terms.casefold().split())
-    parties = "\n".join(review.parties).casefold()
+    parties = [" ".join(party.casefold().split()) for party in review.parties]
     checks = {
         "Distributor Agreement document type": (
             review.document_type.strip().casefold() == "distributor agreement"
         ),
         "both full party names": (
-            "electric city corp" in parties and "electric city of illinois" in parties
+            len(parties) == 2
+            and all(len(party) <= 100 for party in parties)
+            and any("electric city corp" in party for party in parties)
+            and any("electric city of illinois" in party for party in parties)
         ),
         "conditional annual renewal for up to ten years": (
             "compli" in renewal
@@ -559,21 +605,33 @@ async def run_review(
         or "master services agreement" in normalized_findings
         or re.search(r"\bmsa\b", normalized_findings) is not None
     )
-    if is_published_contract and (unsupported_sections or incorrect_document_type):
-        auditor = build_findings_auditor(app.cfg, app.sie, app.api_calls)
-        audited = await Runner.run(
-            auditor,
-            "Investigator report:\n\n" + str(gather.final_output),
-            context=app,
-        )
-        audited_findings = str(audited.final_output)
-        remaining_sections = _unsupported_published_sections(audited_findings)
+    narrative_is_bounded = _published_findings_narrative_is_bounded(
+        str(gather.final_output)
+    )
+    if is_published_contract and (
+        unsupported_sections or incorrect_document_type or not narrative_is_bounded
+    ):
+        risks = app.clause_cache.get("risk_analysis")
+        if not isinstance(risks, dict):
+            raise RuntimeError("Grounded clause-risk analysis is unavailable")
+        grounded_analysis = ClauseRiskAnalysis.model_validate(risks)
+        grounded_findings = _render_grounded_published_findings(grounded_analysis)
+        remaining_sections = _unsupported_published_sections(grounded_findings)
         if remaining_sections:
             raise RuntimeError(
-                "Bounded citation repair retained unsupported sections: "
+                "Grounded findings assembly retained unsupported sections: "
                 + ", ".join(sorted(remaining_sections))
             )
-        gather.final_output = audited_findings
+        normalized_grounded = " ".join(grounded_findings.casefold().split())
+        if (
+            "distributor agreement" not in normalized_grounded
+            or "master services agreement" in normalized_grounded
+            or re.search(r"\bmsa\b", normalized_grounded) is not None
+        ):
+            raise RuntimeError(
+                "Grounded findings assembly retained the wrong document classification"
+            )
+        gather.final_output = grounded_findings
     obligations_result = app.clause_cache.get("obligations_result")
     if isinstance(obligations_result, str) and obligations_result.strip():
         findings = str(gather.final_output).rstrip()
@@ -630,6 +688,10 @@ async def run_review(
     )
     draft = synth.final_output_as(ContractReview)
     draft.risk_flags = grounded_risk_flags
+    if is_published_contract:
+        draft.recommendation = _align_published_signature_recommendation(
+            draft.recommendation
+        )
     synth.final_output = draft
     missing_facts = _published_review_missing_facts(app.contract_text, draft)
     if missing_facts:

@@ -52,9 +52,10 @@ it never executes generated Python or shell code. The SDK normalizes slash-form
 catalog IDs into wire-safe paths, but the example never substitutes one catalog
 model for another.
 
-The core flow is an investigator plus a synthesizer, with a reasoning sub-agent
-and one bounded findings-auditor pass when the published citation allowlist is
-violated:
+The core flow is an investigator plus a synthesizer with a reasoning sub-agent.
+For the checked-in published example, source-specific publication gates assemble
+the final narrative from the validated signature evidence, source clauses,
+structured risks, and exact SQL rows if the investigator's prose is incomplete:
 
 1. An **investigator** (on `Qwen3.6-27B`) with seven tools and **no** structured `output_type`, so it can't short-circuit to a hallucinated answer. It must call tools to learn anything about the contract:
    - `classify_document` (triage) · `read_signature_page` (vision) · `analyze_clause_risks` (delegates to the reasoning **sub-agent**): generative LLMs
@@ -103,8 +104,8 @@ wall time. `api-calls.json` preserves requested and runtime model IDs, request
 IDs, rate-book versions, execution identities, debited credits, and stable
 workflow stages. `source-evidence.json` records the exact full-contract section excerpt behind each published risk flag, plus its hash. The evaluation requires the ordered tool and agent
 sequence, including each stage's configured model and native primitive, and
-permits at most one recorded citation-audit pass and one structured synthesis
-repair. The publisher itself normalizes line endings and trailing whitespace only. Current runs require an exact safe
+permits at most one structured synthesis repair; historical bundles may include
+at most one findings-audit pass. The publisher itself normalizes line endings and trailing whitespace only. Current runs require an exact safe
 guardrail verdict and atomically discard any rejected bundle. Historical ledger
 entries therefore remain evidence of what the endpoint returned rather than
 being rewritten to satisfy newer validation.

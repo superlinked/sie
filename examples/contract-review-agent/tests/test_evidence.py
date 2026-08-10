@@ -10,11 +10,15 @@ from contract_review_agent.app import (
     ContractReview,
     PublishedReviewRepair,
     RiskFlag,
+    _align_published_signature_recommendation,
+    _published_findings_narrative_is_bounded,
+    _render_grounded_published_findings,
     _unsupported_published_sections,
 )
 from contract_review_agent.data.fetch_contracts import _signature_page_text
 from contract_review_agent.evidence import write_run_record
 from contract_review_agent.runtime import Ledger
+from contract_review_agent.tools import ClauseRiskAnalysis
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = {
@@ -50,18 +54,51 @@ def test_published_section_allowlist_rejects_unrelated_citations() -> None:
     }
 
 
-def test_optional_citation_repair_precedes_synthesis_in_provenance() -> None:
+def test_optional_findings_repairs_precede_synthesis_in_provenance() -> None:
     stages = [
         call["stage"]
         for call in evidence_module._expected_call_sequence(
-            CFG, include_citation_repair=True
+            CFG, include_citation_repair=True, include_synthesis_repair=True
         )
     ]
-    assert stages[-3:] == [
+    assert stages[-4:] == [
         "investigator_report",
         "investigator_report:citation_repair",
         "synthesize_review",
+        "synthesize_review:repair",
     ]
+
+
+def test_published_findings_narrative_must_be_complete_and_bounded() -> None:
+    complete = "A" * 1_799 + "."
+    assert _published_findings_narrative_is_bounded(complete)
+    assert _published_findings_narrative_is_bounded("A" * 1_797 + ".**")
+    assert not _published_findings_narrative_is_bounded("A" * 1_799)
+    assert not _published_findings_narrative_is_bounded("A" * 5_000 + ".")
+
+
+def test_grounded_published_findings_are_complete_and_bounded() -> None:
+    risks = json.loads(
+        (ROOT / "verified-run" / "review.json").read_text(encoding="utf-8")
+    )["risk_flags"]
+    findings = _render_grounded_published_findings(
+        ClauseRiskAnalysis.model_validate({"risks": risks})
+    )
+
+    assert _published_findings_narrative_is_bounded(findings)
+    assert evidence_module._published_investigator_findings_are_complete(
+        evidence_module.PUBLISHED_CONTRACT_LABEL, findings
+    )
+
+
+def test_published_signature_recommendation_replaces_execution_overclaim() -> None:
+    recommendation = _align_published_signature_recommendation(
+        "The agreement is not fully executed. Negotiate the renewal notice window."
+    )
+
+    assert "not fully executed" not in recommendation
+    assert "not established from the visible signature page" in recommendation
+    assert "Negotiate the renewal notice window." in recommendation
 
 
 def test_cuad_scan_renders_signature_block_or_document_tail() -> None:
@@ -73,6 +110,8 @@ def test_cuad_scan_renders_signature_block_or_document_tail() -> None:
     )
     assert len(tail.splitlines()) == 46
     assert tail.endswith("By: /s/ Tail")
+    unicode_prefix = "Straße before the marker\nSIGNATURE PAGE\nBy: /s/ Example"
+    assert _signature_page_text(unicode_prefix) == ("SIGNATURE PAGE\nBy: /s/ Example")
 
 
 def _api_calls() -> list[dict[str, object]]:
@@ -144,6 +183,11 @@ def test_published_repair_assembles_every_named_obligation() -> None:
         risk_flags=risk_flags,
         recommendation="review",
     )
+    assert review.document_type == "Distributor Agreement"
+    assert review.parties == [
+        "Electric City Corp. (Company)",
+        "Electric City of Illinois L.L.C. (Distributor)",
+    ]
     assert review.renewal_terms == (
         "Conditional annual renewal for 1-year terms up to 10 additional years if "
         "Distributor complies with all terms of the Agreement (Section 1.3)"
@@ -504,6 +548,24 @@ def test_published_investigator_findings_require_complete_marketing_evidence() -
     assert not evidence_module._published_investigator_findings_are_complete(
         evidence_module.PUBLISHED_CONTRACT_LABEL,
         findings.replace("By: /s/ Joseph Marino", "No actual signatures are present"),
+    )
+
+
+def test_published_investigator_primary_narrative_must_be_bounded() -> None:
+    narrative = "A" * 1_799 + "."
+    findings = (
+        narrative
+        + "\n\nUpcoming obligations and deadlines (validated exact-contract rows):\n"
+        + "2026-06-30 | quarterly compliance"
+    )
+
+    assert evidence_module._published_investigator_narrative_is_bounded(
+        evidence_module.PUBLISHED_CONTRACT_LABEL, findings
+    )
+    assert not evidence_module._published_investigator_narrative_is_bounded(
+        evidence_module.PUBLISHED_CONTRACT_LABEL,
+        "Too short.\n\nUpcoming obligations and deadlines "
+        "(validated exact-contract rows):\n2026-06-30",
     )
 
 

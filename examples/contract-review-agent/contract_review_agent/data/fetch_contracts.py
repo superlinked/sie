@@ -139,14 +139,13 @@ _OBLIGATION_PLANS = [
 
 
 def _signature_page_text(contract_text: str) -> str:
-    normalized = contract_text.casefold()
     starts = [
-        normalized.rfind(marker)
+        match.start()
         for marker in ("in witness whereof", "signature page", "signatures")
+        for match in re.finditer(re.escape(marker), contract_text, re.IGNORECASE)
     ]
-    start = max(starts)
-    if start >= 0:
-        return contract_text[start:]
+    if starts:
+        return contract_text[max(starts) :]
     wrapped_lines: list[str] = []
     for raw_line in contract_text.splitlines():
         wrapped_lines.extend(textwrap.wrap(raw_line, width=92) or [""])

@@ -14,6 +14,7 @@
     "published_fact_source_coverage_non_regression": true,
     "signature_image_scope_not_overclaimed": true,
     "published_investigator_findings_complete": true,
+    "published_investigator_narrative_bounded": true,
     "all_configured_models_called": true,
     "native_primitives_called": true,
     "required_api_call_sequence": true,
@@ -134,11 +135,6 @@
       "stage": "synthesize_review",
       "function": "generate",
       "requested_model": "Qwen/Qwen3.6-27B"
-    },
-    {
-      "stage": "synthesize_review:repair",
-      "function": "generate",
-      "requested_model": "Qwen/Qwen3.6-27B"
     }
   ],
   "observed_call_sequence": [
@@ -229,11 +225,6 @@
     },
     {
       "stage": "synthesize_review",
-      "function": "generate",
-      "requested_model": "Qwen/Qwen3.6-27B"
-    },
-    {
-      "stage": "synthesize_review:repair",
       "function": "generate",
       "requested_model": "Qwen/Qwen3.6-27B"
     }

@@ -4,7 +4,7 @@
     "function": "generate",
     "requested_model": "ibm-granite/granite-guardian-3.0-2b",
     "runtime_model": "ibm-granite/granite-guardian-3.0-2b",
-    "request_id": "019fea8d-6f34-70f0-9b55-7975a57aa67a",
+    "request_id": "019feb05-d2aa-7893-8a26-a20758ebedd0",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 2,
     "execution_identity_sha256": "7a49627d19b3b0349ee752c148c3e87fb034b0f88300f68f8eb553c3ae47ca96"
@@ -14,7 +14,7 @@
     "function": "generate",
     "requested_model": "Qwen/Qwen3.5-4B",
     "runtime_model": "Qwen/Qwen3.5-4B",
-    "request_id": "019fea8d-70c2-75b3-9eb9-44a5631553f7",
+    "request_id": "019feb05-d484-7490-baff-f87e5040dda2",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 20,
     "execution_identity_sha256": "40ab9e95a3707617eb64edd8f78d2bab09c5522516c0b6a19d0063392d71bd97"
@@ -24,7 +24,7 @@
     "function": "extract",
     "requested_model": "lightonai/LightOnOCR-2-1B",
     "runtime_model": null,
-    "request_id": "019fea8d-74ed-7b40-aca3-6cf17811fc93",
+    "request_id": "019feb05-d8b5-7c90-bf2d-d40939a405fe",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 200,
     "execution_identity_sha256": "7e05790915cbdb9673e2419ff7ebe37057be993b0b9a3f18d97319ebeaf47fb2"
@@ -34,7 +34,7 @@
     "function": "extract",
     "requested_model": "fastino/gliner2-large-v1",
     "runtime_model": null,
-    "request_id": "019fea8d-7815-78d1-b933-1fb1bbfdf536",
+    "request_id": "019feb05-dbe5-7f32-b14b-6df07d2fec41",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 10,
     "execution_identity_sha256": "d365dc27037c3c16cfc7e6ee3ef02f1a9cfaca84c1967d22ab4c2bf4b31e6e4d"
@@ -44,7 +44,7 @@
     "function": "generate",
     "requested_model": "Qwen/Qwen3.5-4B",
     "runtime_model": "Qwen/Qwen3.5-4B",
-    "request_id": "019fea8d-790a-7ef2-b5d2-c238e04d5403",
+    "request_id": "019feb05-dcf4-70d3-977c-9594ef98c79d",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 37,
     "execution_identity_sha256": "40ab9e95a3707617eb64edd8f78d2bab09c5522516c0b6a19d0063392d71bd97"
@@ -54,7 +54,7 @@
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
-    "request_id": "019fea8d-858a-7c91-8089-5e33b33c7f3e",
+    "request_id": "019feb05-e83f-77a0-ab87-9daaa177d3a7",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 33,
     "execution_identity_sha256": "391eac08033efcd20970b6f49a3e2254c39c4218bfb4292c058b891df582ad06"
@@ -64,7 +64,7 @@
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
-    "request_id": "019fea8d-8867-7ab0-8eb2-331826e0287b",
+    "request_id": "019feb05-eb43-7ca0-ae3d-b2d08142ac75",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 1,
     "execution_identity_sha256": "391eac08033efcd20970b6f49a3e2254c39c4218bfb4292c058b891df582ad06"
@@ -74,7 +74,7 @@
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
-    "request_id": "019fea8d-8948-7ae1-b5fa-2b606d49ad91",
+    "request_id": "019feb05-ec22-7db1-b7e9-edd92d82455d",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 75,
     "execution_identity_sha256": "d365dc27037c3c16cfc7e6ee3ef02f1a9cfaca84c1967d22ab4c2bf4b31e6e4d"
@@ -84,7 +84,7 @@
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
-    "request_id": "019fea8d-8bfc-7113-aa4f-7d1ffb5d6d7e",
+    "request_id": "019feb05-eef7-7523-8772-4610da4ea100",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 1,
     "execution_identity_sha256": "391eac08033efcd20970b6f49a3e2254c39c4218bfb4292c058b891df582ad06"
@@ -94,7 +94,7 @@
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
-    "request_id": "019fea8d-8cd1-79e1-92ce-7fc8e4d66d5b",
+    "request_id": "019feb05-efc5-7980-834e-c4b44a6c46fe",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 75,
     "execution_identity_sha256": "d365dc27037c3c16cfc7e6ee3ef02f1a9cfaca84c1967d22ab4c2bf4b31e6e4d"
@@ -104,7 +104,7 @@
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
-    "request_id": "019fea8d-8f96-72a1-a6ab-338921a0afee",
+    "request_id": "019feb05-f294-77c0-9579-9a32005ad2ab",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 1,
     "execution_identity_sha256": "391eac08033efcd20970b6f49a3e2254c39c4218bfb4292c058b891df582ad06"
@@ -114,7 +114,7 @@
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
-    "request_id": "019fea8d-9064-7a40-8b37-ff7b1d50e872",
+    "request_id": "019feb05-f36b-7d82-85b6-c6534a2e99a9",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 75,
     "execution_identity_sha256": "d365dc27037c3c16cfc7e6ee3ef02f1a9cfaca84c1967d22ab4c2bf4b31e6e4d"
@@ -124,7 +124,7 @@
     "function": "encode",
     "requested_model": "BAAI/bge-m3",
     "runtime_model": null,
-    "request_id": "019fea8d-9319-7600-83c8-53e74ae920c0",
+    "request_id": "019feb05-f625-7463-b7b9-b1f0510a386f",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 1,
     "execution_identity_sha256": "391eac08033efcd20970b6f49a3e2254c39c4218bfb4292c058b891df582ad06"
@@ -134,7 +134,7 @@
     "function": "score",
     "requested_model": "Qwen/Qwen3-Reranker-4B",
     "runtime_model": "Qwen/Qwen3-Reranker-4B",
-    "request_id": "019fea8d-93e3-7220-a420-329b25b8fbbf",
+    "request_id": "019feb05-f6fc-7ad0-aa5d-d932e30664e6",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 75,
     "execution_identity_sha256": "d365dc27037c3c16cfc7e6ee3ef02f1a9cfaca84c1967d22ab4c2bf4b31e6e4d"
@@ -144,7 +144,7 @@
     "function": "generate",
     "requested_model": "Qwen/Qwen3.6-27B",
     "runtime_model": "Qwen/Qwen3.6-27B",
-    "request_id": "019fea8d-969c-7670-9b7c-8bedee384cdb",
+    "request_id": "019feb05-f9bc-7891-a1be-b964197876d2",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 234,
     "execution_identity_sha256": "5f4a7840183ae006b5381892169c8bfdeea694284ed57d2b80cc1cca518c4347"
@@ -154,7 +154,7 @@
     "function": "generate",
     "requested_model": "Qwen/Qwen3.5-4B",
     "runtime_model": "Qwen/Qwen3.5-4B",
-    "request_id": "019fea8d-f308-7370-88f6-6c15814aed7d",
+    "request_id": "019feb06-5708-7623-8560-8133cfd7b7a8",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "credits_debited": 50,
     "execution_identity_sha256": "40ab9e95a3707617eb64edd8f78d2bab09c5522516c0b6a19d0063392d71bd97"
@@ -164,9 +164,9 @@
     "function": "generate",
     "requested_model": "Qwen/Qwen3.6-27B",
     "runtime_model": "Qwen/Qwen3.6-27B",
-    "request_id": "019fea8e-019d-74e0-a92c-0713058f9006",
+    "request_id": "019feb06-652b-77f2-b797-f2bceed36833",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
-    "credits_debited": 459,
+    "credits_debited": 458,
     "execution_identity_sha256": "5f4a7840183ae006b5381892169c8bfdeea694284ed57d2b80cc1cca518c4347"
   },
   {
@@ -174,19 +174,9 @@
     "function": "generate",
     "requested_model": "Qwen/Qwen3.6-27B",
     "runtime_model": "Qwen/Qwen3.6-27B",
-    "request_id": "019fea8e-9c7a-79f2-9b13-72742f61ca1a",
+    "request_id": "019feb06-ff5b-7433-a2f7-66fedda2fdb9",
     "rate_book_version": "2026-08-09-production-bootstrap-v3",
-    "credits_debited": 326,
-    "execution_identity_sha256": "5f4a7840183ae006b5381892169c8bfdeea694284ed57d2b80cc1cca518c4347"
-  },
-  {
-    "stage": "synthesize_review:repair",
-    "function": "generate",
-    "requested_model": "Qwen/Qwen3.6-27B",
-    "runtime_model": "Qwen/Qwen3.6-27B",
-    "request_id": "019fea8f-2550-7aa2-b0a6-62b08152ddbf",
-    "rate_book_version": "2026-08-09-production-bootstrap-v3",
-    "credits_debited": 359,
+    "credits_debited": 285,
     "execution_identity_sha256": "5f4a7840183ae006b5381892169c8bfdeea694284ed57d2b80cc1cca518c4347"
   }
 ]
