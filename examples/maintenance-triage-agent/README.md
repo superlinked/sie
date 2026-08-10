@@ -53,6 +53,10 @@ uv run triage-fault --run-id local
 uv run eval-triage runs/local
 ```
 
+If the process crashes, it can leave `runs/.<run-id>.lock` and a
+`runs/.<run-id>-*` staging directory. Remove those exact abandoned paths before
+retrying the same run ID.
+
 Set `SIE_CLUSTER_URL` and `SIE_API_KEY` to use SIE Cloud. The default points to
 a local server at `http://localhost:8080`.
 

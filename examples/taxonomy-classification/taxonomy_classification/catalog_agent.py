@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import re
 import shlex
 import tempfile
@@ -106,11 +107,7 @@ def _api_call_record(
     ):
         raise ValueError(f"SIE {stage} response has an invalid execution identity")
     credits_debited = request_row.get("credits_debited")
-    if (
-        not isinstance(credits_debited, int | float)
-        or isinstance(credits_debited, bool)
-        or credits_debited < 0
-    ):
+    if not _valid_credits_debited(credits_debited):
         raise ValueError(f"SIE {stage} response has invalid credits debited")
     return {
         "stage": stage,
@@ -122,6 +119,15 @@ def _api_call_record(
         "rate_book_version": rate_book_version,
         "execution_identity_sha256": execution_identity_sha256,
     }
+
+
+def _valid_credits_debited(value: object) -> bool:
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and value >= 0
+        and (not isinstance(value, float) or math.isfinite(value))
+    )
 
 
 def _validate_api_calls(
@@ -155,11 +161,7 @@ def _validate_api_calls(
         ):
             raise ValueError(f"Row {row_idx} has the wrong model for {stage}")
         credits_debited = call.get("credits_debited")
-        if (
-            not isinstance(credits_debited, int | float)
-            or isinstance(credits_debited, bool)
-            or credits_debited < 0
-        ):
+        if not _valid_credits_debited(credits_debited):
             raise ValueError(f"Row {row_idx} {stage} has invalid credits debited")
         for field_name in REQUIRED_PROVENANCE_FIELDS:
             value = call.get(field_name)

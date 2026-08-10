@@ -233,7 +233,10 @@ def test_api_call_record_requires_complete_request_provenance(
         )
 
 
-@pytest.mark.parametrize("credits_debited", [None, False, -1, "1"])
+@pytest.mark.parametrize(
+    "credits_debited",
+    [None, False, -1, "1", float("nan"), float("inf"), float("-inf")],
+)
 def test_api_call_record_rejects_invalid_credits_debited(
     credits_debited: object,
 ) -> None:
@@ -555,7 +558,10 @@ def test_checkpoint_rejects_incomplete_api_call_provenance(tmp_path: Path) -> No
         catalog_agent._load_checkpoint(output_path, [source], offset=7)
 
 
-@pytest.mark.parametrize("credits_debited", [None, False, -1, "1"])
+@pytest.mark.parametrize(
+    "credits_debited",
+    [None, False, -1, "1", float("nan"), float("inf"), float("-inf")],
+)
 def test_checkpoint_rejects_invalid_credits_debited(
     tmp_path: Path,
     credits_debited: object,

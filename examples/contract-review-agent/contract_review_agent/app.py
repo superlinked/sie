@@ -139,6 +139,10 @@ class PublishedReviewRepair(BaseModel):
             raise ValueError("Section 1.6 first-year unit minimum was not preserved")
         if not self.quarterly_reports_during_first_year:
             raise ValueError("Section 4.1 quarterly reporting duty was not preserved")
+        if self.renewal_period_years != 1:
+            raise ValueError("Section 1.3 renewal period was not preserved")
+        if self.renewal_max_additional_years != 10:
+            raise ValueError("Section 1.3 maximum renewal duration was not preserved")
         renewal = (
             f"Conditional annual renewal for {self.renewal_period_years}-year terms "
             f"up to {self.renewal_max_additional_years} additional years if "
@@ -652,6 +656,10 @@ async def run_review(
         or retrieved_source_facts
     )
     risk_analysis = app.clause_cache.get("risk_analysis")
+    if not isinstance(risk_analysis, dict):
+        raise RuntimeError(  # noqa: TRY004
+            "Grounded clause-risk analysis is unavailable"
+        )
     grounded_analysis = ClauseRiskAnalysis.model_validate(risk_analysis)
     grounded_risk_flags = [
         RiskFlag(

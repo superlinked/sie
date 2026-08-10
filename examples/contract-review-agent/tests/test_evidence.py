@@ -74,6 +74,7 @@ def test_published_findings_narrative_must_be_complete_and_bounded() -> None:
     assert _published_findings_narrative_is_bounded(complete)
     assert _published_findings_narrative_is_bounded("A" * 1_797 + ".**")
     assert not _published_findings_narrative_is_bounded("A" * 1_799)
+    assert _published_findings_narrative_is_bounded("A" * 2_999 + ".")
     assert not _published_findings_narrative_is_bounded("A" * 3_000 + ".")
 
 
@@ -151,8 +152,8 @@ def _review() -> ContractReview:
     )
 
 
-def test_published_repair_assembles_every_named_obligation() -> None:
-    repair = PublishedReviewRepair(
+def _published_repair() -> PublishedReviewRepair:
+    return PublishedReviewRepair(
         document_type="agreement",
         parties=["Buyer", "Seller"],
         effective_date="unknown",
@@ -170,6 +171,10 @@ def test_published_repair_assembles_every_named_obligation() -> None:
         first_product_year_unit_minimum=375,
         quarterly_reports_during_first_year=True,
     )
+
+
+def test_published_repair_assembles_every_named_obligation() -> None:
+    repair = _published_repair()
     risk_flags = [
         RiskFlag(
             clause="Section 1.3",
@@ -215,6 +220,24 @@ def test_published_repair_assembles_every_named_obligation() -> None:
     ]
     assert review.risk_flags == risk_flags
     assert "risk_flags" not in PublishedReviewRepair.model_json_schema()["properties"]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "match"),
+    [
+        ("renewal_period_years", 2, "renewal period"),
+        ("renewal_max_additional_years", 9, "maximum renewal duration"),
+    ],
+)
+def test_published_repair_rejects_changed_renewal_durations(
+    field_name: str,
+    value: int,
+    match: str,
+) -> None:
+    repair = _published_repair().model_copy(update={field_name: value})
+
+    with pytest.raises(ValueError, match=match):
+        repair.to_contract_review(risk_flags=[], recommendation="review")
 
 
 def _ledger(verdict: str = "no") -> Ledger:
@@ -754,6 +777,12 @@ def test_verified_run_manifest_pins_complete_passing_evidence() -> None:
     paths = [entry["path"] for entry in entries]
     assert len(paths) == len(set(paths)) == 6
     artifacts = {entry["path"]: entry["sha256"] for entry in entries}
+    recorded_files = {
+        path.relative_to(run_dir).as_posix()
+        for path in run_dir.rglob("*")
+        if path.is_file() and path != run_dir / "manifest.json"
+    }
+    assert set(artifacts) == recorded_files
 
     assert set(artifacts) == {
         "api-calls.json",
