@@ -98,6 +98,10 @@ throughput. Every primitive uses the SDK's governed capacity wait. Try
 `--instruction "..."` to change the ask, or feed the guardrail a malicious
 prompt to watch `granite-guardian` trip the tripwire.
 
+The printed table and `ledger.json` are the user-facing, tool-level
+observability record. `api-calls.json` is the complete native call ledger,
+including repeated search encoding and investigator and synthesizer turns.
+
 `verified-run/` contains the August 10, 2026, prod-US record. Its manifest pins
 the endpoint, run date, input hashes, models, artifact hashes, and diagnostic
 wall time. `api-calls.json` preserves requested and runtime model IDs, request

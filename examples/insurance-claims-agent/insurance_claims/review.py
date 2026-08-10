@@ -20,6 +20,7 @@ from insurance_claims.config import (
     load_config,
     source_by_slug,
 )
+from insurance_claims.evaluate import ARTIFACT_EXCLUDED_PATHS
 
 console = Console()
 
@@ -40,7 +41,7 @@ def _artifact_entries(run_dir: Path) -> list[dict[str, str]]:
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
         for path in sorted(run_dir.rglob("*"))
-        if path.is_file() and path != run_dir / "manifest.json"
+        if path.is_file() and path.relative_to(run_dir) not in ARTIFACT_EXCLUDED_PATHS
     ]
 
 

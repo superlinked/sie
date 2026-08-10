@@ -295,6 +295,7 @@ def test_generation_manifest_entries_cover_every_pre_manifest_artifact(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "review.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("run documentation\n", encoding="utf-8")
     raw = tmp_path / "raw"
     raw.mkdir()
     (raw / "response.json").write_text("{}\n", encoding="utf-8")

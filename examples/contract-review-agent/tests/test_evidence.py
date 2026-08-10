@@ -234,6 +234,8 @@ def _write_record(
     *,
     run_id: str,
     api_calls: list[dict[str, object]],
+    label: str = "example",
+    findings: str = "Execution is not established from the visible signature page.",
 ) -> Path:
     monkeypatch.setattr(evidence_module, "PROJECT_ROOT", tmp_path)
     scan = tmp_path / "scan.png"
@@ -244,11 +246,11 @@ def _write_record(
         run_id=run_id,
         endpoint="https://api.superlinked.com",
         cfg=CFG,
-        label="example",
+        label=label,
         contract_text="1.1 Renewal. Annual renewal terms.",
         scan_path=str(scan),
         db_path=str(database),
-        findings="Execution is not established from the visible signature page.",
+        findings=findings,
         review=_review(),
         ledger=_ledger(),
         api_calls=api_calls,
@@ -302,6 +304,25 @@ def test_write_run_record_rejects_missing_request_provenance(
     )
     assert run_dir == runs_dir / "safe-run"
     assert (run_dir / "manifest.json").is_file()
+
+
+def test_write_run_record_rejects_incomplete_published_findings_before_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(
+        RuntimeError, match="Published investigator findings are incomplete"
+    ):
+        _write_record(
+            tmp_path,
+            monkeypatch,
+            run_id="safe-run",
+            api_calls=_api_calls(),
+            label=evidence_module.PUBLISHED_CONTRACT_LABEL,
+            findings="Incomplete findings.",
+        )
+
+    assert not (tmp_path / "runs").exists()
 
 
 def test_write_run_record_rejects_missing_runtime_model(

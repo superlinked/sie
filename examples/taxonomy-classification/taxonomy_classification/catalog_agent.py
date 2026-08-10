@@ -686,7 +686,12 @@ def _load_checkpoint(
     decisions: dict[int, CatalogDecision] = {}
     request_ids: list[str] = []
     for result in payload.get("results", []):
-        row_idx = int(result["row_idx"])
+        raw_row_idx = result.get("row_idx") if isinstance(result, dict) else None
+        if not isinstance(raw_row_idx, int) or isinstance(raw_row_idx, bool):
+            raise ValueError(
+                f"Cannot resume from {path}: invalid row_idx {raw_row_idx!r}"
+            )
+        row_idx = raw_row_idx
         listing = listings_by_row.get(row_idx)
         if listing is None:
             raise ValueError(f"Cannot resume from {path}: unexpected row {row_idx}")

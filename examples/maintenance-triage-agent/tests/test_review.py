@@ -198,6 +198,7 @@ def test_verified_rerank_correlates_to_retrieval_query() -> None:
     rerank = json.loads((raw_dir / "rerank.json").read_text(encoding="utf-8"))
     assert rerank_request["query"]["id"] == retrieve["query"]["id"]
     assert [item["id"] for item in rerank_request["items"]] == [row["chunk_id"] for row in retrieve["ranking"]]
+    assert len(rerank["scores"]) == len(rerank_request["items"])
     assert {row["item_id"] for row in rerank["scores"]} == {item["id"] for item in rerank_request["items"]}
 
 

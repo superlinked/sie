@@ -420,6 +420,34 @@ def test_eval_resumes_completed_rows_from_its_checkpoint(
     )
 
 
+@pytest.mark.parametrize("row_idx", [None, "7", True])
+def test_checkpoint_rejects_invalid_row_idx(
+    tmp_path: Path,
+    row_idx: object,
+) -> None:
+    source = listing(reference="A > One")
+    decision = CatalogDecision(
+        row_idx=7,
+        selected_path="A > One",
+        needs_review=False,
+        candidate_union=["A > One", "A > Two"],
+        text_scores=[1.0, 0.0, 0.0, 0.0],
+        image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
+        verifier_response_id="candidate_verification-7",
+        api_calls=api_calls(7),
+    )
+    output_path = tmp_path / "evaluation.json"
+    checkpoint = catalog_agent._evaluation_output([source], {7: decision}, offset=7)
+    if row_idx is None:
+        checkpoint["results"][0].pop("row_idx")
+    else:
+        checkpoint["results"][0]["row_idx"] = row_idx
+    catalog_agent._write_evaluation_output(output_path, checkpoint)
+
+    with pytest.raises(ValueError, match="invalid row_idx"):
+        catalog_agent._load_checkpoint(output_path, [source], offset=7)
+
+
 def test_eval_rejects_a_summary_that_overwrites_the_evaluation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
