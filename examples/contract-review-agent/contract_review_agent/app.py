@@ -16,7 +16,7 @@ from .runtime import AppContext, model_for, provision_timeout_from
 from .tools import ALL_TOOLS, COMMERCIAL_FACTS_QUERY, ClauseRiskAnalysis
 
 _PUBLISHED_FINDINGS_MIN_CHARS = 1_800
-_PUBLISHED_FINDINGS_MAX_CHARS = 5_000
+_PUBLISHED_FINDINGS_MAX_CHARS = 3_000
 
 
 class RiskFlag(BaseModel):

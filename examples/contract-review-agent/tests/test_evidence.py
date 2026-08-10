@@ -74,7 +74,7 @@ def test_published_findings_narrative_must_be_complete_and_bounded() -> None:
     assert _published_findings_narrative_is_bounded(complete)
     assert _published_findings_narrative_is_bounded("A" * 1_797 + ".**")
     assert not _published_findings_narrative_is_bounded("A" * 1_799)
-    assert not _published_findings_narrative_is_bounded("A" * 5_000 + ".")
+    assert not _published_findings_narrative_is_bounded("A" * 3_000 + ".")
 
 
 def test_grounded_published_findings_are_complete_and_bounded() -> None:
