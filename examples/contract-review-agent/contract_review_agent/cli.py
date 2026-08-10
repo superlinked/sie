@@ -141,6 +141,14 @@ def _print_review(review: ContractReview) -> None:
         console.print(risks)
 
 
+def _guardrail_unavailable(ledger: Ledger) -> bool:
+    return bool(
+        ledger.entries
+        and ledger.entries[-1].step.startswith("Safety guardrail")
+        and ledger.entries[-1].got.startswith("unavailable:")
+    )
+
+
 def _resolve_corpus(args) -> tuple[str, str, str, str, str | None]:
     """Return text, scan, obligations DB, display label, and DB counterparty."""
     # Explicit file path wins.
@@ -266,14 +274,21 @@ async def _run(args) -> None:
                 app, investigator, synthesizer, args.instruction
             )
         except InputGuardrailTripwireTriggered:
+            unavailable = _guardrail_unavailable(ledger)
             console.print(
                 Panel(
-                    "Request blocked by the granite-guardian safety guardrail.",
+                    (
+                        "Safety guardrail unavailable; the contract review did not run."
+                        if unavailable
+                        else "Request blocked by the granite-guardian safety guardrail."
+                    ),
                     border_style="red",
-                    title="Guardrail tripped",
+                    title="Run failed" if unavailable else "Guardrail tripped",
                 )
             )
             _print_ledger(ledger)
+            if unavailable:
+                raise
             return
         except Exception as exc:
             console.print(

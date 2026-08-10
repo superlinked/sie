@@ -216,12 +216,19 @@ def _risk_claims_are_source_supported(
     automatic_renewal = re.compile(
         r"\bautomatic(?:ally)?(?:\s+\w+){0,2}\s+renew(?:al|als|s|ed|ing)\b"
     )
-    if automatic_renewal.search(all_claims) and not automatic_renewal.search(all_source):
+    if automatic_renewal.search(all_claims) and not automatic_renewal.search(
+        all_source
+    ):
         for match in automatic_renewal.finditer(all_claims):
             qualifier = all_claims[max(0, match.start() - 80) : match.start()]
-            if not re.search(r"\b(?:ambiguity|uncertain|uncertainty|unclear|whether)\b", qualifier):
+            if not re.search(
+                r"\b(?:ambiguity|uncertain|uncertainty|unclear|whether)\b", qualifier
+            ):
                 return False
-    if "right of first refusal" in all_claims and "right of first refusal" not in all_source:
+    if (
+        "right of first refusal" in all_claims
+        and "right of first refusal" not in all_source
+    ):
         return False
     for risk in review.risk_flags:
         sections = re.findall(r"\b\d+(?:\.\d+)+\b", risk.clause)
@@ -361,9 +368,7 @@ def _published_fact_coverage_is_preserved(label: str, review: ContractReview) ->
         return any(
             "distributor" in value
             and any(amount in value for amount in amount_forms)
-            and (
-                "letter of credit" in value or re.search(r"\blc\b", value) is not None
-            )
+            and ("letter of credit" in value or re.search(r"\blc\b", value) is not None)
             for value in obligations
         )
 

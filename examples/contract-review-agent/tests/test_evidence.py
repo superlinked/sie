@@ -33,12 +33,15 @@ CFG = {"models": MODELS}
 
 
 def test_published_section_allowlist_rejects_unrelated_citations() -> None:
-    assert _unsupported_published_sections(
-        "Financial terms (Section 1.6); governing law (Section 6.9)."
-    ) == set()
-    assert _unsupported_published_sections(
-        "Financial terms are in Section 6.7."
-    ) == {"6.7"}
+    assert (
+        _unsupported_published_sections(
+            "Financial terms (Section 1.6); governing law (Section 6.9)."
+        )
+        == set()
+    )
+    assert _unsupported_published_sections("Financial terms are in Section 6.7.") == {
+        "6.7"
+    }
 
 
 def test_optional_citation_repair_precedes_synthesis_in_provenance() -> None:
@@ -375,7 +378,9 @@ def test_risk_claim_gate_rejects_unsupported_automatic_renewal_variants() -> Non
         review, source_evidence
     )
 
-    review.risk_flags[0].issue = (
+    review.risk_flags[
+        0
+    ].issue = (
         "It is unclear whether the term automatically renews or requires an election."
     )
     assert evidence_module._risk_claims_are_source_supported(review, source_evidence)

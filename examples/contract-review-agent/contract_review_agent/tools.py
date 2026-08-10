@@ -608,9 +608,7 @@ async def query_obligations_db(
             if row[counterparty_index] == app.obligation_counterparty
             and row[status_index] == "open"
         ]
-        expected_rows = _open_obligation_count(
-            app.db_path, app.obligation_counterparty
-        )
+        expected_rows = _open_obligation_count(app.db_path, app.obligation_counterparty)
         if len(rows) != expected_rows:
             return (
                 "Generated query returned incomplete contract scope: expected "

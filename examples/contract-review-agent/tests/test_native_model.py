@@ -19,6 +19,7 @@ from agents.tool_context import ToolContext
 from pydantic import BaseModel
 
 from contract_review_agent import tools as contract_tools
+from contract_review_agent.cli import _guardrail_unavailable
 from contract_review_agent.guardrails import _unsafe_verdict, safety_guardrail
 from contract_review_agent.native_model import (
     SIENativeModel,
@@ -43,6 +44,20 @@ def test_safety_guardrail_fails_closed_unless_verdict_is_exact_no(
 
 def test_safety_guardrail_accepts_unambiguous_no() -> None:
     assert _unsafe_verdict(" no \n") is False
+
+
+def test_guardrail_unavailability_is_distinct_from_an_unsafe_verdict() -> None:
+    ledger = Ledger()
+    ledger.record(
+        "Safety guardrail (granite-guardian)",
+        "ibm-granite/granite-guardian-3.0-2b",
+        "generate",
+        got="unavailable: ServerError",
+    )
+    assert _guardrail_unavailable(ledger) is True
+
+    ledger.entries[-1].got = "yes"
+    assert _guardrail_unavailable(ledger) is False
 
 
 @pytest.mark.parametrize("keyword", ["anyOf", "oneOf"])

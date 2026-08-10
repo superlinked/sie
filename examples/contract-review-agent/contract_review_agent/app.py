@@ -39,7 +39,7 @@ class ContractReview(BaseModel):
     )
     governing_law: str = Field(
         description=(
-            'Governing jurisdiction with source section when available, for example '
+            "Governing jurisdiction with source section when available, for example "
             '"Illinois (Section 6.9)", or "unknown"'
         )
     )
@@ -108,11 +108,14 @@ class PublishedReviewRepair(BaseModel):
             "each quarter during the first year of the Term"
         )
     )
+
     def to_contract_review(
         self, *, risk_flags: list[RiskFlag], recommendation: str
     ) -> ContractReview:
         if not self.renewal_requires_distributor_compliance:
-            raise ValueError("Section 1.3 renewal compliance condition was not preserved")
+            raise ValueError(
+                "Section 1.3 renewal compliance condition was not preserved"
+            )
         if not self.illinois_exclusive_distributorship:
             raise ValueError("Section 1.1 Illinois exclusivity was not preserved")
         if self.initial_term_years != 10:
@@ -122,9 +125,13 @@ class PublishedReviewRepair(BaseModel):
         if self.letter_of_credit_amount_usd != 500_000:
             raise ValueError("Section 1.6 letter-of-credit amount was not preserved")
         if not self.letter_of_credit_is_irrevocable:
-            raise ValueError("Section 1.6 irrevocable letter-of-credit term was not preserved")
+            raise ValueError(
+                "Section 1.6 irrevocable letter-of-credit term was not preserved"
+            )
         if self.monthly_purchase_order_amount_usd != 250_000:
-            raise ValueError("Section 1.6 monthly purchase-order amount was not preserved")
+            raise ValueError(
+                "Section 1.6 monthly purchase-order amount was not preserved"
+            )
         if self.first_product_year_unit_minimum != 375:
             raise ValueError("Section 1.6 first-year unit minimum was not preserved")
         if not self.quarterly_reports_during_first_year:
@@ -282,11 +289,7 @@ _PUBLISHED_ALLOWED_SECTIONS = frozenset(
 
 
 def _unsupported_published_sections(findings: str) -> set[str]:
-    cited = set(
-        re.findall(
-            r"\bSection\s+(\d+(?:\.\d+)+)\b", findings, re.IGNORECASE
-        )
-    )
+    cited = set(re.findall(r"\bSection\s+(\d+(?:\.\d+)+)\b", findings, re.IGNORECASE))
     return cited - _PUBLISHED_ALLOWED_SECTIONS
 
 
@@ -440,7 +443,9 @@ def _published_review_missing_facts(
         for marker in ("electric city corp", "375 units in the first product year")
     ):
         return []
-    obligations = [" ".join(value.casefold().split()) for value in review.key_obligations]
+    obligations = [
+        " ".join(value.casefold().split()) for value in review.key_obligations
+    ]
 
     def has_obligation(*fragments: str) -> bool:
         return any(
@@ -464,8 +469,7 @@ def _published_review_missing_facts(
     parties = "\n".join(review.parties).casefold()
     checks = {
         "both full party names": (
-            "electric city corp" in parties
-            and "electric city of illinois" in parties
+            "electric city corp" in parties and "electric city of illinois" in parties
         ),
         "conditional annual renewal for up to ten years": (
             "compli" in renewal
@@ -480,9 +484,7 @@ def _published_review_missing_facts(
         ),
         "Illinois governing law": "illinois" in review.governing_law.casefold(),
         "$500,000 letter of credit": has_letter_of_credit(),
-        "$250,000 monthly purchase order": has_obligation(
-            "250,000", "purchase order"
-        ),
+        "$250,000 monthly purchase order": has_obligation("250,000", "purchase order"),
         "375-unit first-year minimum": has_obligation("375"),
         "Illinois exclusivity": has_obligation("exclusive", "illinois"),
         "ten-year term beginning with the last Sample": has_obligation(
