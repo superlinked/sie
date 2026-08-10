@@ -353,7 +353,7 @@ def main() -> None:
         default="Review this contract. Identify the parties and key terms, flag every "
         "source-backed material risk to the Customer with severity and redlines, "
         "assess whether signatures and dates are visible on the supplied signature "
-        "page, and surface upcoming obligations and deadlines.",
+        "page, and surface outstanding obligations with their deadline status.",
         help="what to ask the agent to do",
     )
     parser.add_argument(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -83,10 +84,14 @@ def test_grounded_published_findings_are_complete_and_bounded() -> None:
         (ROOT / "verified-run" / "review.json").read_text(encoding="utf-8")
     )["risk_flags"]
     findings = _render_grounded_published_findings(
-        ClauseRiskAnalysis.model_validate({"risks": risks})
+        ClauseRiskAnalysis.model_validate({"risks": risks}),
+        as_of_date=date(2026, 8, 10),
     )
 
     assert _published_findings_narrative_is_bounded(findings)
+    assert "June 30, 2026 quarterly compliance attestation is overdue" in findings
+    assert "July 1, 2026 annual subscription or license fee is overdue" in findings
+    assert "September 15, 2026 renewal or non-renewal notice is upcoming" in findings
     assert evidence_module._published_investigator_findings_are_complete(
         evidence_module.PUBLISHED_CONTRACT_LABEL, findings
     )
@@ -361,6 +366,19 @@ def test_write_run_record_rejects_missing_runtime_model(
     assert list((tmp_path / "runs").iterdir()) == []
 
 
+def test_write_run_record_rejects_substituted_runtime_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_calls = _api_calls()
+    api_calls[-1]["runtime_model"] = "model-other"
+
+    with pytest.raises(RuntimeError, match="Production evidence checks failed"):
+        _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)
+
+    assert list((tmp_path / "runs").iterdir()) == []
+
+
 def test_write_run_record_allows_unreported_encode_and_extract_runtime_models(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -577,7 +595,10 @@ def test_published_investigator_findings_require_complete_marketing_evidence() -
         "Section 6.9; not at fault; 2026-06-30; 2026-07-01; 2026-09-15; "
         "$500,000 letter of credit; $250,000 monthly purchase order; 375 units; "
         "quarterly compliance attestation; annual subscription fee; renewal notice; "
-        "Upcoming obligations and deadlines; the visible signature page shows "
+        "Deadline status as of August 10, 2026: June 30, 2026 quarterly compliance "
+        "attestation is overdue; July 1, 2026 annual subscription or license fee is "
+        "overdue; September 15, 2026 renewal or non-renewal notice is upcoming. "
+        "The visible signature page shows "
         "By: /s/ Joseph Marino and a Jim Stump signatory block, but no execution "
         "dates. Execution is not established from the visible signature page."
     )
@@ -593,13 +614,17 @@ def test_published_investigator_findings_require_complete_marketing_evidence() -
         evidence_module.PUBLISHED_CONTRACT_LABEL,
         findings.replace("By: /s/ Joseph Marino", "No actual signatures are present"),
     )
+    assert not evidence_module._published_investigator_findings_are_complete(
+        evidence_module.PUBLISHED_CONTRACT_LABEL,
+        findings.replace("attestation is overdue", "attestation is upcoming"),
+    )
 
 
 def test_published_investigator_primary_narrative_must_be_bounded() -> None:
     narrative = "A" * 1_799 + "."
     findings = (
         narrative
-        + "\n\nUpcoming obligations and deadlines (validated exact-contract rows):\n"
+        + "\n\nObligations and deadlines (validated exact-contract rows):\n"
         + "2026-06-30 | quarterly compliance"
     )
 
@@ -608,7 +633,7 @@ def test_published_investigator_primary_narrative_must_be_bounded() -> None:
     )
     assert not evidence_module._published_investigator_narrative_is_bounded(
         evidence_module.PUBLISHED_CONTRACT_LABEL,
-        "Too short.\n\nUpcoming obligations and deadlines "
+        "Too short.\n\nObligations and deadlines "
         "(validated exact-contract rows):\n2026-06-30",
     )
 

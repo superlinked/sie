@@ -14,6 +14,7 @@ from typing import Any
 from .app import (
     _INVESTIGATOR_TOOL_SEQUENCE,
     ContractReview,
+    _published_deadline_status_is_grounded,
     _published_findings_narrative_is_bounded,
     _published_review_missing_labels,
     _source_section_excerpt,
@@ -307,7 +308,9 @@ def _published_investigator_findings_missing(label: str, findings: str) -> list[
         "renewal notice obligation": (
             "renewal" in normalized and "notice" in normalized
         ),
-        "upcoming obligations section": "upcoming obligation" in normalized,
+        "grounded deadline status section": _published_deadline_status_is_grounded(
+            findings
+        ),
         "indemnity fault condition": "not at fault" in normalized,
         "June 30, 2026 deadline": any(
             value in normalized
@@ -353,8 +356,11 @@ def _published_investigator_findings_are_complete(label: str, findings: str) -> 
 def _published_investigator_narrative_is_bounded(label: str, findings: str) -> bool:
     if label != PUBLISHED_CONTRACT_LABEL:
         return True
-    narrative = findings.split(
-        "\n\nUpcoming obligations and deadlines (validated exact-contract rows):", 1
+    narrative = re.split(
+        r"\n\n(?:Upcoming )?[Oo]bligations and deadlines "
+        r"\(validated exact-contract rows\):",
+        findings,
+        maxsplit=1,
     )[0]
     return _published_findings_narrative_is_bounded(narrative)
 

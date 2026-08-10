@@ -161,6 +161,27 @@ def test_evaluation_accepts_published_appeal_result() -> None:
     assert all(check.passed for check in evaluate_review(review))
 
 
+def test_evaluation_rejects_a_later_ungrounded_prior_claim_value() -> None:
+    grounded = (
+        "Review prior claims to verify debris removal underneath the building in the "
+        "same area occurred before the July 2019 flood; retain repair and pricing records."
+    )
+    review = {
+        "decision": {"prior_claim_check": grounded},
+        "findings": [
+            {"category": "prior_claim_overlap", "evidence": grounded},
+            {
+                "category": "prior_claim_overlap",
+                "evidence": "Check prior claim payment overlap without source details.",
+            },
+        ],
+        "next_actions": [grounded, "Review a prior claim without source details."],
+    }
+
+    checks = {check.name: check for check in evaluate_review(review)}
+    assert checks["prior-claim-overlap"].passed is False
+
+
 def test_evaluation_rejects_the_wrong_proof_of_loss_amount() -> None:
     prior_claim_check = (
         "Review prior claims to verify debris removal underneath the building in the "

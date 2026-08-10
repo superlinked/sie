@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 from agents import Agent, ModelSettings, Runner, RunResult
@@ -203,7 +204,7 @@ one of these tools, one after another, before you write anything.
   search_clauses("governing law, exclusivity, term, letter of credit, purchase minimum, and reporting obligations"),
   then search_clauses("indemnification"), then search_clauses("termination")
 - analyze_clause_risks() — risk analysis over the clauses returned by those searches
-- query_obligations_db("upcoming obligations with due dates and amounts") — deadlines
+- query_obligations_db("outstanding obligations with due dates and amounts") — deadlines
 
 Do NOT write your report until you have called them all. Then write a thorough,
 factual findings report that cites ONLY what the tools returned. Never invent a party,
@@ -297,7 +298,7 @@ _INVESTIGATOR_TOOL_SEQUENCE = (
     ("search_clauses", "indemnification"),
     ("search_clauses", "termination"),
     ("analyze_clause_risks", None),
-    ("query_obligations_db", "upcoming obligations with due dates and amounts"),
+    ("query_obligations_db", "outstanding obligations with due dates and amounts"),
 )
 
 _PUBLISHED_ALLOWED_SECTIONS = frozenset(
@@ -328,8 +329,51 @@ def _published_findings_narrative_is_bounded(findings: str) -> bool:
     )
 
 
+_PUBLISHED_DEADLINES = (
+    (date(2026, 6, 30), "quarterly compliance attestation"),
+    (date(2026, 7, 1), "annual subscription or license fee"),
+    (date(2026, 9, 15), "renewal or non-renewal notice"),
+)
+
+
+def _published_deadline_status_is_grounded(findings: str) -> bool:
+    match = re.search(
+        r"deadline status as of ([A-Za-z]+ \d{1,2}, \d{4}):",
+        findings,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return False
+    try:
+        as_of = (
+            datetime.strptime(match.group(1), "%B %d, %Y").replace(tzinfo=UTC).date()
+        )
+    except ValueError:
+        return False
+    normalized = " ".join(findings.casefold().split())
+    return all(
+        f"{due_date:%B} {due_date.day}, {due_date.year} {obligation} is "
+        f"{'overdue' if due_date < as_of else 'upcoming'}".casefold()
+        in normalized
+        for due_date, obligation in _PUBLISHED_DEADLINES
+    )
+
+
+def _published_deadline_summary(as_of_date: date | None = None) -> str:
+    as_of = as_of_date or datetime.now(UTC).date()
+    as_of_text = f"{as_of:%B} {as_of.day}, {as_of.year}"
+    rendered = []
+    for due_date, obligation in _PUBLISHED_DEADLINES:
+        status = "overdue" if due_date < as_of else "upcoming"
+        due_text = f"{due_date:%B} {due_date.day}, {due_date.year}"
+        rendered.append(f"{due_text} {obligation} is {status}")
+    return f"Deadline status as of {as_of_text}: " + "; ".join(rendered) + "."
+
+
 def _render_grounded_published_findings(
     grounded_analysis: ClauseRiskAnalysis,
+    *,
+    as_of_date: date | None = None,
 ) -> str:
     risk_text = "\n\n".join(
         f"{risk.clause} | severity: {risk.severity}\n"
@@ -355,10 +399,7 @@ def _render_grounded_published_findings(
         "quarterly written reports during the first year. Section 6.9 applies "
         "Illinois law.\n\n"
         f"Material risks and redlines:\n{risk_text}\n\n"
-        "Upcoming obligations and deadlines: validated exact-contract rows identify "
-        "a quarterly compliance attestation due June 30, 2026; an annual "
-        "subscription or license fee due July 1, 2026; and a renewal or non-renewal "
-        "notice due September 15, 2026."
+        f"{_published_deadline_summary(as_of_date)}"
     )
     if not _published_findings_narrative_is_bounded(report):
         raise RuntimeError(
@@ -612,8 +653,14 @@ async def run_review(
     narrative_is_bounded = _published_findings_narrative_is_bounded(
         str(gather.final_output)
     )
+    deadline_status_is_grounded = _published_deadline_status_is_grounded(
+        str(gather.final_output)
+    )
     if is_published_contract and (
-        unsupported_sections or incorrect_document_type or not narrative_is_bounded
+        unsupported_sections
+        or incorrect_document_type
+        or not narrative_is_bounded
+        or not deadline_status_is_grounded
     ):
         risks = app.clause_cache.get("risk_analysis")
         if not isinstance(risks, dict):
@@ -641,7 +688,7 @@ async def run_review(
         findings = str(gather.final_output).rstrip()
         if obligations_result not in findings:
             gather.final_output = (
-                f"{findings}\n\nUpcoming obligations and deadlines "
+                f"{findings}\n\nObligations and deadlines "
                 "(validated exact-contract rows):\n"
                 f"{obligations_result}"
             )

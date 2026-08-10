@@ -23,9 +23,9 @@ Section 5.3 | severity: high
 Issue: Each party covers its own breach, negligence, and IP violations; the Distributor-specific indemnity applies only when Company is not at fault.
 Suggested redline: Remove the 'provided that Company is not at fault' condition from the Distributor’s indemnification obligation to ensure full coverage for claims arising from Distributor’s sales and marketing practices.
 
-Upcoming obligations and deadlines: validated exact-contract rows identify a quarterly compliance attestation due June 30, 2026; an annual subscription or license fee due July 1, 2026; and a renewal or non-renewal notice due September 15, 2026.
+Deadline status as of August 10, 2026: June 30, 2026 quarterly compliance attestation is overdue; July 1, 2026 annual subscription or license fee is overdue; September 15, 2026 renewal or non-renewal notice is upcoming.
 
-Upcoming obligations and deadlines (validated exact-contract rows):
+Obligations and deadlines (validated exact-contract rows):
 SQL: SELECT
     counterparty,
     status,

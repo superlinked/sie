@@ -474,7 +474,7 @@ async def test_required_question_is_emitted_without_generation() -> None:
         client,  # type: ignore[arg-type]
         stage="test_agent",
         provision_timeout_s=30,
-        required_tool_sequence=(("query_obligations_db", "upcoming obligations"),),
+        required_tool_sequence=(("query_obligations_db", "outstanding obligations"),),
     )
 
     response = await _get_response(model, tools=[query_obligations_db])
@@ -482,7 +482,7 @@ async def test_required_question_is_emitted_without_generation() -> None:
     assert client.calls == []
     assert response.output[0].name == "query_obligations_db"
     assert json.loads(response.output[0].arguments) == {
-        "question": "upcoming obligations"
+        "question": "outstanding obligations"
     }
 
 
