@@ -29,6 +29,8 @@ from openai.types.responses import (
 from sie_sdk import SIEAsyncClient
 
 _DEFAULT_MAX_NEW_TOKENS = 1200
+_MIN_PLAIN_TEXT_LENGTH = 256
+_MAX_PLAIN_TEXT_LENGTH = 3500
 type RequiredToolStep = tuple[str, str | None]
 
 
@@ -162,7 +164,7 @@ def _next_required_step(
             except json.JSONDecodeError:
                 continue
             query = _required_text_argument(arguments)
-            if not isinstance(query, str) or query.strip() != required_query:
+            if not isinstance(query, str) or query != required_query:
                 continue
         progress += 1
     return required_sequence[progress] if progress < len(required_sequence) else None
@@ -268,7 +270,11 @@ def _turn_schema(
     if allow_final:
         final_schema: dict[str, Any]
         if output_schema is None or output_schema.is_plain_text():
-            final_schema = {"type": "string"}
+            final_schema = {
+                "type": "string",
+                "minLength": _MIN_PLAIN_TEXT_LENGTH,
+                "maxLength": _MAX_PLAIN_TEXT_LENGTH,
+            }
         else:
             final_schema, definitions = _namespace_schema_defs(
                 output_schema.json_schema(),
@@ -557,6 +563,16 @@ class SIENativeModel(Model):
             if output_schema is None or output_schema.is_plain_text():
                 if not isinstance(final, str):
                     raise ModelBehaviorError("SIE native final text must be a string")
+                if len(final.strip()) < _MIN_PLAIN_TEXT_LENGTH:
+                    raise ModelBehaviorError(
+                        "SIE native final text was shorter than the required "
+                        f"{_MIN_PLAIN_TEXT_LENGTH} characters"
+                    )
+                if len(final) > _MAX_PLAIN_TEXT_LENGTH:
+                    raise ModelBehaviorError(
+                        "SIE native final text exceeded the maximum "
+                        f"{_MAX_PLAIN_TEXT_LENGTH} characters"
+                    )
                 final_text = final
             else:
                 final_text = json.dumps(

@@ -56,9 +56,8 @@ async def safety_guardrail(
             max_tokens=3,
             timeout_s=25,
         )
-    except Exception as exc:  # noqa: BLE001 - configured fail-open boundary.
-        # Guard model unavailable: fail OPEN (allow the run) but make it visible.
-        # A stricter deployment might fail closed — that's a policy choice.
+    except Exception as exc:  # noqa: BLE001 - guard failures must fail closed.
+        # Guard model unavailable: block the run and make the failure visible.
         app.ledger.record(
             "Safety guardrail (granite-guardian)",
             model,
@@ -67,7 +66,7 @@ async def safety_guardrail(
             got=f"unavailable: {type(exc).__name__}",
         )
         return GuardrailFunctionOutput(
-            output_info={"error": str(exc), "model": model}, tripwire_triggered=False
+            output_info={"error": str(exc), "model": model}, tripwire_triggered=True
         )
     verdict = res.text.strip()
     app.ledger.record(

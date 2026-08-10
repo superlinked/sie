@@ -263,16 +263,24 @@ def _timed(call: Any) -> tuple[Any, float]:
 def run_audit(run_id: str) -> Path:
     config = load_config()
     final_run_dir = RUNS_DIR / run_id
-    if final_run_dir.exists():
-        raise FileExistsError(f"Run evidence already exists at {final_run_dir}")
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=RUNS_DIR))
+    reservation_dir = RUNS_DIR / f".{run_id}.lock"
     try:
-        _write_audit(staging_dir, run_id, config)
-        staging_dir.rename(final_run_dir)
-    except BaseException:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
+        reservation_dir.mkdir()
+    except FileExistsError as exc:
+        raise FileExistsError(f"Run ID is already reserved: {run_id}") from exc
+    try:
+        if final_run_dir.exists():
+            raise FileExistsError(f"Run evidence already exists at {final_run_dir}")
+        staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=RUNS_DIR))
+        try:
+            _write_audit(staging_dir, run_id, config)
+            staging_dir.rename(final_run_dir)
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+    finally:
+        reservation_dir.rmdir()
     return final_run_dir
 
 
@@ -339,7 +347,8 @@ def _write_audit(run_dir: Path, run_id: str, config: RuntimeConfig) -> None:
             },
         )
         if not passed:
-            raise RuntimeError("Retail evidence checks failed; manifest not published")
+            failed = sorted(name for name, ok in checks.items() if not ok)
+            raise RuntimeError(f"Retail evidence checks failed ({', '.join(failed)}); manifest not published")
         evidence = build_evidence(
             gap,
             lower_record["source_detection"],

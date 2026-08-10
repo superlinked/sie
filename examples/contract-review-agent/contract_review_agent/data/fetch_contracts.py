@@ -137,6 +137,18 @@ _OBLIGATION_PLANS = [
 ]
 
 
+def _signature_page_text(contract_text: str) -> str:
+    normalized = contract_text.casefold()
+    starts = [
+        normalized.rfind(marker)
+        for marker in ("in witness whereof", "signature page", "signatures")
+    ]
+    start = max(starts)
+    if start >= 0:
+        return contract_text[start:]
+    return contract_text[-6_000:]
+
+
 def build_obligations(contracts: list[dict]) -> int:
     DB_PATH.unlink(missing_ok=True)
     rows = []
@@ -175,7 +187,11 @@ def main() -> None:
 
     primary = contracts[0]
     scan_path = CUAD_DIR / f"{primary['slug']}-page.png"
-    render_text_page(primary["text"], scan_path, title=primary["title"])
+    render_text_page(
+        _signature_page_text(primary["text"]),
+        scan_path,
+        title=f"{primary['title']} — signature page",
+    )
 
     n_obligations = build_obligations(contracts)
 

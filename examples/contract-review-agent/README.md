@@ -11,9 +11,9 @@ Every value below is a real model in the [SIE catalog](https://superlinked.com/m
 | Role in the agent | SIE model | SIE function |
 |---|---|---|
 | Triage: classify the document type | `Qwen/Qwen3.5-4B` | generate |
-| **Orchestrator**: plan, call tools, assemble the review | `Qwen/Qwen3.6-27B` (64K, non-thinking) | generate + tools + JSON schema |
+| **Orchestrator**: plan, call tools, assemble the review | `Qwen/Qwen3.6-27B` (non-thinking) | generate + tools + JSON schema |
 | Vision: read the scanned signature page | `Qwen/Qwen3.5-4B` | generate + image |
-| Reasoning sub-agent: clause-risk analysis | `Qwen/Qwen3.5-4B` | generate |
+| Reasoning sub-agent: bounded grounded clause-risk analysis | `Qwen/Qwen3.6-27B` | generate |
 | Text-to-SQL: query the obligations DB | `Qwen/Qwen3.5-4B` (raw-prompt specialists use `sql.mode: prompt`) | generate |
 | Guardrail: safety / prompt-injection | `ibm-granite/granite-guardian-3.0-2b` (alias `guard`) | generate |
 | OCR: scanned page to markdown | `lightonai/LightOnOCR-2-1B` | extract |
@@ -52,13 +52,15 @@ it never executes generated Python or shell code. The SDK normalizes slash-form
 catalog IDs into wire-safe paths, but the example never substitutes one catalog
 model for another.
 
-The flow is **two agents**:
+The core flow is an investigator plus a synthesizer, with a reasoning sub-agent
+and one bounded findings-auditor pass when the published citation allowlist is
+violated:
 
 1. An **investigator** (on `Qwen3.6-27B`) with seven tools and **no** structured `output_type`, so it can't short-circuit to a hallucinated answer. It must call tools to learn anything about the contract:
    - `classify_document` (triage) · `read_signature_page` (vision) · `analyze_clause_risks` (delegates to the reasoning **sub-agent**): generative LLMs
    - `ocr_signature_page` · `extract_entities` (`extract`), `search_clauses` (`encode` + `score`), `query_obligations_db` (`generate`): retrieval and extraction
-   - a `granite-guardian` **input guardrail** screens the request first (and fails open, logged, if the guard model is unavailable).
-2. A **synthesizer** (structured `output_type=ContractReview`, no tools) turns the investigator's grounded findings into the final review (parties, dates, governing law, executed?, key obligations, risk flags with severity plus redlines, recommendation) via SIE's JSON-schema-constrained generation.
+   - a `granite-guardian` **input guardrail** screens the request first and fails closed if the guard model is unavailable.
+2. A **synthesizer** (structured `output_type=ContractReview`, no tools) turns the investigator's grounded findings into the final review (parties, dates, governing law, executed?, key obligations, risk flags with severity plus redlines, recommendation) via SIE's JSON-schema-constrained generation. Complete validated SQL rows and structured clause risks are retained as evidence appendices, so narrative assembly cannot silently drop either specialist's result.
 
 > Two agents instead of one: a single structured-output agent tends to emit the schema immediately and skip the tools, sometimes hallucinating the fields. Splitting "gather with tools" from "format the result" keeps the fan-out real and the output grounded.
 
@@ -84,7 +86,7 @@ uv run review --contract <slug>        # review a specific one
 uv run review --run-id local           # also write a reproducible evidence bundle
 ```
 
-> **GPU sizing.** The brain (`orchestrator`, which also does the structured synthesis) runs on `Qwen/Qwen3.6-27B` (64K, non-thinking), so it needs an H100 or RTX PRO 6000. The shorter-context roles (`triage`, `vision`, `reasoning`, `sql`) run on `Qwen/Qwen3.5-4B`. A cold cluster pays a one-time load per model on first use; the agent retries the "still provisioning" responses under `cluster.provision_timeout_s`. Keep bundles warm (`minReplicas: 1`) to skip the wait. A required model or tool failure is printed with the partial ledger and exits nonzero.
+> **GPU sizing.** The orchestrator, structured synthesizer, and bounded clause analyst run on `Qwen/Qwen3.6-27B` (non-thinking), so they need an H100 or RTX PRO 6000. The latency-sensitive roles (`triage`, `vision`, `sql`) run on `Qwen/Qwen3.5-4B`. A cold cluster pays a one-time load per model on first use; the agent retries the "still provisioning" responses under `cluster.provision_timeout_s`. Keep bundles warm (`minReplicas: 1`) to skip the wait. A required model or tool failure is printed with the partial ledger and exits nonzero.
 
 ## What you'll see
 
@@ -95,13 +97,14 @@ throughput. Every primitive uses the SDK's governed capacity wait. Try
 `--instruction "..."` to change the ask, or feed the guardrail a malicious
 prompt to watch `granite-guardian` trip the tripwire.
 
-`verified-run/` contains the August 9, 2026, prod-US record. Its manifest pins
+`verified-run/` contains the August 10, 2026, prod-US record. Its manifest pins
 the endpoint, run date, input hashes, models, artifact hashes, and diagnostic
 wall time. `api-calls.json` preserves requested and runtime model IDs, request
 IDs, rate-book versions, execution identities, debited credits, and stable
-workflow stages. `source-evidence.json` records the exact full-contract section excerpt behind each published risk flag, plus its hash. The evaluation requires the exact 18-stage tool and agent
-sequence, including each stage's configured model and native primitive.
-Captured model content remains semantically verbatim; the publisher normalizes line endings and trailing whitespace only. Current runs require an exact safe
+workflow stages. `source-evidence.json` records the exact full-contract section excerpt behind each published risk flag, plus its hash. The evaluation requires the ordered tool and agent
+sequence, including each stage's configured model and native primitive, and
+permits at most one recorded citation-audit pass and one structured synthesis
+repair. The publisher itself normalizes line endings and trailing whitespace only. Current runs require an exact safe
 guardrail verdict and atomically discard any rejected bundle. Historical ledger
 entries therefore remain evidence of what the endpoint returned rather than
 being rewritten to satisfy newer validation.
@@ -120,7 +123,7 @@ Alternatively, resolve roles **server-side** with SIE's gateway aliases. Set `SI
 
 ## Data
 
-The default corpus is **[CUAD](https://www.atticusprojectai.org/cuad/)** (Contract Understanding Atticus Dataset): 510 real commercial contracts filed with the SEC, released by The Atticus Project under **CC BY 4.0**. `fetch-contracts` downloads CUAD's ~18 MB archive once (from the [Atticus Project repo](https://github.com/TheAtticusProject/cuad)), parses the SQuAD-format contract text, writes a curated handful as the corpus, renders one page to an image for the OCR/vision step, and seeds a small SQLite obligations database that references the contracts pulled.
+The default corpus is **[CUAD](https://www.atticusprojectai.org/cuad/)** (Contract Understanding Atticus Dataset): 510 real commercial contracts filed with the SEC, released by The Atticus Project under **CC BY 4.0**. `fetch-contracts` downloads CUAD's ~18 MB archive once (from the [Atticus Project repo](https://github.com/TheAtticusProject/cuad)), parses the SQuAD-format contract text, writes a curated handful as the corpus, renders the contract's signature block to an image for the OCR/vision step (falling back to the document tail when no signature marker exists), and seeds a small SQLite obligations database that references the contracts pulled.
 
 > CUAD: An Expert-Annotated NLP Dataset for Legal Contract Review. Dan Hendrycks, Collin Burns, Anya Chen, Spencer Ball. arXiv:2103.06268. Licensed CC BY 4.0.
 

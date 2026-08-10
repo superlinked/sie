@@ -207,6 +207,7 @@ def test_verify_candidates_rejects_an_empty_union() -> None:
 @pytest.mark.parametrize(
     ("missing_field", "match"),
     [
+        ("id", "no request ID"),
         ("rate_book_version", "no rate-book version"),
         ("execution_identity_sha256", "invalid execution identity"),
     ],

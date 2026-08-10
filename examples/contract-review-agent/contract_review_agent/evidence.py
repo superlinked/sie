@@ -15,6 +15,14 @@ from .config import PROJECT_ROOT
 from .runtime import Ledger
 
 RUNTIME_MODEL_OPTIONAL_FUNCTIONS = frozenset({"encode", "extract"})
+PUBLISHED_CONTRACT_LABEL = "CUAD · limeenergyco-09-09-1999-ex-10-distributor-agreement"
+PUBLISHED_RISK_TARGETS = {
+    "1.3": "high",
+    "4.2": "high",
+    "4.4": "medium",
+    "5.3": "high",
+}
+PUBLISHED_FACT_SECTIONS = ("1.1", "1.3", "1.6", "4.1", "6.9")
 
 
 def _runtime_model_is_valid(call: dict[str, Any]) -> bool:
@@ -28,7 +36,12 @@ def _runtime_model_is_valid(call: dict[str, Any]) -> bool:
     )
 
 
-def _expected_call_sequence(cfg: dict[str, Any]) -> list[dict[str, str]]:
+def _expected_call_sequence(
+    cfg: dict[str, Any],
+    *,
+    include_citation_repair: bool = False,
+    include_synthesis_repair: bool = False,
+) -> list[dict[str, str]]:
     models = cfg["models"]
     sequence = [
         ("safety_guardrail", "generate", "guard"),
@@ -50,9 +63,15 @@ def _expected_call_sequence(cfg: dict[str, Any]) -> list[dict[str, str]]:
             ("analyze_clause_risks", "generate", "reasoning"),
             ("query_obligations_db", "generate", "sql"),
             ("investigator_report", "generate", "orchestrator"),
-            ("synthesize_review", "generate", "orchestrator"),
         ]
     )
+    if include_citation_repair:
+        sequence.append(
+            ("investigator_report:citation_repair", "generate", "orchestrator")
+        )
+    sequence.append(("synthesize_review", "generate", "orchestrator"))
+    if include_synthesis_repair:
+        sequence.append(("synthesize_review:repair", "generate", "orchestrator"))
     return [
         {"stage": stage, "function": function, "requested_model": models[role]}
         for stage, function, role in sequence
@@ -96,13 +115,13 @@ def ensure_run_destination_available(run_id: str) -> Path:
 
 
 def _risk_clause_source_evidence(
-    contract_text: str, review: ContractReview
+    contract_text: str, review: ContractReview, label: str
 ) -> dict[str, Any]:
     section_line = re.compile(r"^\s*(\d+(?:\.\d+)+)\s+")
     lines = contract_text.splitlines()
     rows: list[dict[str, str]] = []
     for risk in review.risk_flags:
-        if not re.match(r"^Sections?\b", risk.clause):
+        if not re.match(r"^Sections?\s+\d+(?:\.\d+)+\b", risk.clause):
             raise RuntimeError(
                 f"Risk clause has no source section reference: {risk.clause}"
             )
@@ -143,10 +162,247 @@ def _risk_clause_source_evidence(
                     "excerpt_sha256": _sha256_bytes(excerpt.encode()),
                 }
             )
+    commercial_fact_clauses: list[dict[str, str]] = []
+    if label == PUBLISHED_CONTRACT_LABEL:
+        for section in PUBLISHED_FACT_SECTIONS:
+            starts = [
+                index
+                for index, line in enumerate(lines)
+                if (match := section_line.match(line)) and match.group(1) == section
+            ]
+            if len(starts) != 1:
+                raise RuntimeError(
+                    f"Published fact section {section} matched {len(starts)} source sections"
+                )
+            start = starts[0]
+            end = next(
+                (
+                    index
+                    for index in range(start + 1, len(lines))
+                    if section_line.match(lines[index])
+                ),
+                len(lines),
+            )
+            excerpt = " ".join(" ".join(lines[start:end]).split())
+            commercial_fact_clauses.append(
+                {
+                    "citation": f"Section {section}",
+                    "section": section,
+                    "excerpt": excerpt,
+                    "excerpt_sha256": _sha256_bytes(excerpt.encode()),
+                }
+            )
     return {
         "contract_text_sha256": _sha256_bytes(contract_text.encode()),
         "risk_clauses": rows,
+        "commercial_fact_clauses": commercial_fact_clauses,
     }
+
+
+def _risk_claims_are_source_supported(
+    review: ContractReview, source_evidence: dict[str, Any]
+) -> bool:
+    excerpts = {
+        str(row["section"]): str(row["excerpt"]).casefold()
+        for row in source_evidence["risk_clauses"]
+    }
+    all_source = "\n".join(excerpts.values())
+    all_claims = "\n".join(
+        [
+            review.recommendation,
+            *(risk.issue for risk in review.risk_flags),
+        ]
+    ).casefold()
+    automatic_renewal = re.compile(
+        r"\bautomatic(?:ally)?(?:\s+\w+){0,2}\s+renew(?:al|als|s|ed|ing)\b"
+    )
+    if automatic_renewal.search(all_claims) and not automatic_renewal.search(all_source):
+        for match in automatic_renewal.finditer(all_claims):
+            qualifier = all_claims[max(0, match.start() - 80) : match.start()]
+            if not re.search(r"\b(?:ambiguity|uncertain|uncertainty|unclear|whether)\b", qualifier):
+                return False
+    if "right of first refusal" in all_claims and "right of first refusal" not in all_source:
+        return False
+    for risk in review.risk_flags:
+        sections = re.findall(r"\b\d+(?:\.\d+)+\b", risk.clause)
+        source = "\n".join(excerpts.get(section, "") for section in sections)
+        claim = risk.issue.casefold()
+        if (
+            "cure" in claim
+            and "30 day" in claim
+            and "commercially reasonable" in source
+            and "commercially reasonable" not in claim
+        ):
+            return False
+        if sections == ["4.2"] and (
+            "commercially reasonable" not in claim
+            or "without a cure" in claim
+            or "no cure" in claim
+        ):
+            return False
+        if sections == ["4.4"] and (
+            "without cause" not in claim
+            or ("mandatory" not in claim and "shall" not in claim)
+            or "option" not in claim
+            or "inventory" not in claim
+            or re.search(r"\boption\b.{0,60}\bonly\b.{0,60}\bwithout cause\b", claim)
+            or re.search(r"\bmandatory exception\b.{0,80}\boptional\b", claim)
+            or "drafted as optional" in claim
+        ):
+            return False
+        if sections == ["5.3"] and (
+            "not at fault" not in claim
+            or "indemnif" in claim
+            and "for company's negligence" in claim
+        ):
+            return False
+    return True
+
+
+def _signature_scope_is_supported(findings: str, review: ContractReview) -> bool:
+    normalized = " ".join(findings.casefold().split())
+    review_text = " ".join(review.recommendation.casefold().split())
+    if review.executed:
+        return "not executed" not in normalized and "not executed" not in review_text
+    return (
+        "not established from the visible signature page" in normalized
+        and "not executed" not in normalized
+        and "not executed" not in review_text
+        and "unexecuted" not in review_text
+        and "draft or unsigned copy" not in normalized
+        and "document ends at" not in normalized
+    )
+
+
+def _published_investigator_findings_missing(label: str, findings: str) -> list[str]:
+    if label != PUBLISHED_CONTRACT_LABEL:
+        return []
+    normalized = " ".join(findings.casefold().split())
+    requirements = {
+        "all cited risk and fact sections": all(
+            section in normalized
+            for section in (
+                "section 1.3",
+                "section 1.6",
+                "section 4.2",
+                "section 4.4",
+                "section 5.3",
+                "section 6.9",
+            )
+        ),
+        "commercial amounts and unit minimum": all(
+            fact in normalized for fact in ("$500,000", "$250,000", "375")
+        ),
+        "quarterly compliance obligation": (
+            "quarter" in normalized and "compliance" in normalized
+        ),
+        "annual subscription obligation": (
+            "annual" in normalized and "subscription" in normalized
+        ),
+        "renewal notice obligation": (
+            "renewal" in normalized and "notice" in normalized
+        ),
+        "upcoming obligations section": "upcoming obligation" in normalized,
+        "indemnity fault condition": "not at fault" in normalized,
+        "June 30, 2026 deadline": any(
+            value in normalized
+            for value in ("2026-06-30", "june 30, 2026", "june 30 2026")
+        ),
+        "July 1, 2026 deadline": any(
+            value in normalized
+            for value in ("2026-07-01", "july 1, 2026", "july 1 2026")
+        ),
+        "September 15, 2026 deadline": any(
+            value in normalized
+            for value in ("2026-09-15", "september 15, 2026", "september 15 2026")
+        ),
+        "no unsupported Section 6.7 citation": "section 6.7" not in normalized,
+        "no unrelated contract rows": "centrack" not in normalized,
+        "exact document classification": (
+            "distributor agreement" in normalized
+            and "master services agreement" not in normalized
+            and re.search(r"\bmsa\b", normalized) is None
+        ),
+    }
+    return [name for name, present in requirements.items() if not present]
+
+
+def _published_investigator_findings_are_complete(label: str, findings: str) -> bool:
+    return not _published_investigator_findings_missing(label, findings)
+
+
+def _published_risk_coverage_is_preserved(label: str, review: ContractReview) -> bool:
+    if label != PUBLISHED_CONTRACT_LABEL:
+        return True
+    actual: dict[str, str] = {}
+    for risk in review.risk_flags:
+        sections = re.findall(r"\b\d+(?:\.\d+)+\b", risk.clause)
+        if len(sections) != 1 or sections[0] in actual:
+            return False
+        actual[sections[0]] = risk.severity.casefold()
+    return actual == PUBLISHED_RISK_TARGETS
+
+
+def _published_fact_coverage_is_preserved(label: str, review: ContractReview) -> bool:
+    if label != PUBLISHED_CONTRACT_LABEL:
+        return True
+
+    obligations = [
+        " ".join(value.casefold().split()) for value in review.key_obligations
+    ]
+
+    def has_obligation(*fragments: str) -> bool:
+        return any(
+            all(fragment in value for fragment in fragments) for value in obligations
+        )
+
+    def has_letter_of_credit() -> bool:
+        amount_forms = ("500,000", "500000", "500k", "five hundred thousand")
+        return any(
+            "distributor" in value
+            and any(amount in value for amount in amount_forms)
+            and (
+                "letter of credit" in value or re.search(r"\blc\b", value) is not None
+            )
+            for value in obligations
+        )
+
+    renewal = " ".join(review.renewal_terms.casefold().split())
+    governing_law = " ".join(review.governing_law.casefold().split())
+    parties = "\n".join(review.parties).casefold()
+    return (
+        review.document_type.strip().casefold() == "distributor agreement"
+        and has_letter_of_credit()
+        and has_obligation("250,000", "purchase order")
+        and has_obligation("375")
+        and has_obligation("exclusive", "illinois")
+        and has_obligation("ten", "last sample")
+        and has_obligation("quarter", "first year")
+        and "compli" in renewal
+        and ("ten" in renewal or re.search(r"\b10\b", renewal) is not None)
+        and (
+            "annual" in renewal
+            or "one-year" in renewal
+            or "yearly" in renewal
+            or re.search(r"\bone\s*(?:\(1\))?\s+year\b", renewal) is not None
+            or re.search(r"\b1\s*[- ]?year\b", renewal) is not None
+        )
+        and "illinois" in governing_law
+        and "electric city corp" in parties
+        and "electric city of illinois" in parties
+    )
+
+
+def _published_fact_source_coverage_is_preserved(
+    label: str, source_evidence: dict[str, Any]
+) -> bool:
+    if label != PUBLISHED_CONTRACT_LABEL:
+        return True
+    sections = [
+        str(row.get("section"))
+        for row in source_evidence.get("commercial_fact_clauses", [])
+    ]
+    return sections == list(PUBLISHED_FACT_SECTIONS)
 
 
 def _guardrail_was_accepted(ledger: Ledger) -> bool:
@@ -173,30 +429,46 @@ def write_run_record(
     api_calls: list[dict[str, Any]],
     wall_s: float,
 ) -> Path:
+    missing_findings = _published_investigator_findings_missing(label, findings)
+    if missing_findings:
+        raise RuntimeError(
+            "Published investigator findings are incomplete: "
+            + ", ".join(missing_findings)
+        )
     final_run_dir = ensure_run_destination_available(run_id)
     runs_dir = PROJECT_ROOT / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=runs_dir))
+    reservation_dir = runs_dir / f".{run_id}.lock"
     try:
-        _write_run_record(
-            run_dir=staging_dir,
-            run_id=run_id,
-            endpoint=endpoint,
-            cfg=cfg,
-            label=label,
-            contract_text=contract_text,
-            scan_path=scan_path,
-            db_path=db_path,
-            findings=findings,
-            review=review,
-            ledger=ledger,
-            api_calls=api_calls,
-            wall_s=wall_s,
-        )
-        staging_dir.rename(final_run_dir)
-    except BaseException:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
+        reservation_dir.mkdir()
+    except FileExistsError as exc:
+        raise FileExistsError(f"Run ID is already reserved: {run_id}") from exc
+    try:
+        if final_run_dir.exists():
+            raise FileExistsError(f"Run evidence already exists at {final_run_dir}")
+        staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}-", dir=runs_dir))
+        try:
+            _write_run_record(
+                run_dir=staging_dir,
+                run_id=run_id,
+                endpoint=endpoint,
+                cfg=cfg,
+                label=label,
+                contract_text=contract_text,
+                scan_path=scan_path,
+                db_path=db_path,
+                findings=findings,
+                review=review,
+                ledger=ledger,
+                api_calls=api_calls,
+                wall_s=wall_s,
+            )
+            staging_dir.rename(final_run_dir)
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+    finally:
+        reservation_dir.rmdir()
     return final_run_dir
 
 
@@ -227,18 +499,32 @@ def _write_run_record(
     findings_path.write_text(_normalize_model_text(findings), encoding="utf-8")
     _write_json(ledger_path, [asdict(entry) for entry in ledger.entries])
     _write_json(calls_path, api_calls)
-    source_evidence = _risk_clause_source_evidence(contract_text, review)
+    source_evidence = _risk_clause_source_evidence(contract_text, review, label)
     _write_json(source_evidence_path, source_evidence)
 
     requested_models = sorted({call["requested_model"] for call in api_calls})
     expected_models = sorted(set(cfg["models"].values()))
     observed_functions = sorted({call["function"] for call in api_calls})
-    expected_call_sequence = _expected_call_sequence(cfg)
     observed_call_sequence = [
         {field: call.get(field) for field in ("stage", "function", "requested_model")}
         for call in api_calls
         if call.get("stage") != "warmup"
     ]
+    repair_calls = [
+        call
+        for call in observed_call_sequence
+        if call.get("stage") == "synthesize_review:repair"
+    ]
+    citation_repair_calls = [
+        call
+        for call in observed_call_sequence
+        if call.get("stage") == "investigator_report:citation_repair"
+    ]
+    expected_call_sequence = _expected_call_sequence(
+        cfg,
+        include_citation_repair=len(citation_repair_calls) == 1,
+        include_synthesis_repair=len(repair_calls) == 1,
+    )
     request_ids = [call.get("request_id") for call in api_calls]
     checks = {
         "structured_review": True,
@@ -264,12 +550,30 @@ def _write_run_record(
         ),
         "api_call_request_ids_unique": len(request_ids) == len(set(request_ids)),
         "risk_clauses_supported_by_source": bool(source_evidence["risk_clauses"]),
-        "signature_image_scope_not_overclaimed": "document ends at"
-        not in findings.casefold(),
+        "risk_claims_supported_by_source": _risk_claims_are_source_supported(
+            review, source_evidence
+        ),
+        "published_risk_coverage_non_regression": (
+            _published_risk_coverage_is_preserved(label, review)
+        ),
+        "published_fact_coverage_non_regression": (
+            _published_fact_coverage_is_preserved(label, review)
+        ),
+        "published_fact_source_coverage_non_regression": (
+            _published_fact_source_coverage_is_preserved(label, source_evidence)
+        ),
+        "signature_image_scope_not_overclaimed": _signature_scope_is_supported(
+            findings, review
+        ),
+        "published_investigator_findings_complete": (
+            _published_investigator_findings_are_complete(label, findings)
+        ),
         "all_configured_models_called": requested_models == expected_models,
         "native_primitives_called": set(observed_functions)
         >= {"encode", "extract", "generate", "score"},
         "required_api_call_sequence": observed_call_sequence == expected_call_sequence,
+        "bounded_citation_repair": len(citation_repair_calls) <= 1,
+        "bounded_synthesis_repair": len(repair_calls) <= 1,
     }
     _write_json(
         evaluation_path,

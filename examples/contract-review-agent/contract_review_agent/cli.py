@@ -141,20 +141,27 @@ def _print_review(review: ContractReview) -> None:
         console.print(risks)
 
 
-def _resolve_corpus(args) -> tuple[str, str, str, str]:
-    """Return (contract_text, scan_path, db_path, label)."""
+def _resolve_corpus(args) -> tuple[str, str, str, str, str | None]:
+    """Return text, scan, obligations DB, display label, and DB counterparty."""
     # Explicit file path wins.
     if args.contract and Path(args.contract).is_file():
         p = Path(args.contract)
         scan = args.scan or str(GENERATED_DIR / "acme-msa-signature.png")
-        return p.read_text(), scan, str(GENERATED_DIR / "obligations.db"), p.name
+        return p.read_text(), scan, str(GENERATED_DIR / "obligations.db"), p.name, None
 
     if MANIFEST_PATH.exists():  # real CUAD corpus
         manifest = json.loads(MANIFEST_PATH.read_text())
         slug = args.contract or manifest["primary"]
+        contract = next(row for row in manifest["contracts"] if row["slug"] == slug)
         text = (CUAD_DIR / f"{slug}.txt").read_text()
         scan = args.scan or str(GENERATED_DIR / manifest["scan_path"])
-        return text, scan, str(GENERATED_DIR / manifest["db_path"]), f"CUAD · {slug}"
+        return (
+            text,
+            scan,
+            str(GENERATED_DIR / manifest["db_path"]),
+            f"CUAD · {slug}",
+            contract["counterparty"],
+        )
 
     # Offline fallback: synthetic corpus (generate it if missing).
     if not (GENERATED_DIR / "acme-msa.md").exists():
@@ -166,7 +173,18 @@ def _resolve_corpus(args) -> tuple[str, str, str, str]:
     name = args.contract or "acme-msa"
     text = (GENERATED_DIR / f"{name}.md").read_text()
     scan = args.scan or str(GENERATED_DIR / "acme-msa-signature.png")
-    return text, scan, str(GENERATED_DIR / "obligations.db"), f"synthetic · {name}"
+    counterparty = {
+        "acme-msa": "Acme Cloud Services, LLC",
+        "acme-sow": "Acme Cloud Services, LLC",
+        "mutual-nda": "Globex Corporation",
+    }.get(name)
+    return (
+        text,
+        scan,
+        str(GENERATED_DIR / "obligations.db"),
+        f"synthetic · {name}",
+        counterparty,
+    )
 
 
 def _list_contracts() -> None:
@@ -213,7 +231,7 @@ async def _run(args) -> None:
     if args.run_id is not None:
         ensure_run_destination_available(args.run_id)
     cfg = load_config()
-    text, scan_path, db_path, label = _resolve_corpus(args)
+    text, scan_path, db_path, label, obligation_counterparty = _resolve_corpus(args)
 
     _print_catalog(cfg)
     console.print(
@@ -234,6 +252,7 @@ async def _run(args) -> None:
             contract_text=text,
             scan_path=scan_path,
             db_path=db_path,
+            obligation_counterparty=obligation_counterparty,
             api_calls=api_calls,
             reasoning_agent=build_reasoning_agent(cfg, sie, api_calls),
         )
@@ -316,9 +335,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--instruction",
-        default="Review this contract. Identify the parties and key terms, flag the "
-        "biggest risks to the Customer with severity and redlines, confirm it is "
-        "executed, and surface upcoming obligations and deadlines.",
+        default="Review this contract. Identify the parties and key terms, flag every "
+        "source-backed material risk to the Customer with severity and redlines, "
+        "assess whether signatures and dates are visible on the supplied signature "
+        "page, and surface upcoming obligations and deadlines.",
         help="what to ask the agent to do",
     )
     parser.add_argument(

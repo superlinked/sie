@@ -66,6 +66,13 @@ class FakeSIE:
         return self.responses.pop(0)
 
 
+class UnavailableSIE:
+    async def generate(
+        self, _model: str, _prompt: str, **_kwargs: Any
+    ) -> dict[str, Any]:
+        raise TimeoutError("guard unavailable")
+
+
 def generated(text: str, request_id: str) -> dict[str, Any]:
     return {
         "text": text,
@@ -105,14 +112,45 @@ async def test_safety_guardrail_uses_the_native_guard_verdict() -> None:
 
 
 @pytest.mark.asyncio
+async def test_safety_guardrail_fails_closed_when_the_guard_is_unavailable() -> None:
+    app = AppContext(
+        sie=UnavailableSIE(),  # type: ignore[arg-type]
+        cfg={
+            "cluster": {},
+            "models": {"guard": "ibm-granite/granite-guardian-3.0-2b"},
+        },
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+    )
+
+    result = await safety_guardrail.guardrail_function(
+        SimpleNamespace(context=app),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        "Review this contract.",
+    )
+
+    assert result.tripwire_triggered is True
+    assert app.ledger.entries[-1].got == "unavailable: TimeoutError"
+
+
+@pytest.mark.asyncio
 async def test_agents_runner_executes_native_tool_turn_then_finishes() -> None:
+    grounded_result = (
+        "Grounded result: CLAUSE. "
+        "The retrieved clause establishes the relevant obligation and the report "
+        "keeps the named actor, timing, conditions, and exceptions attached to that "
+        "source. No fact outside the tool result is introduced. The conclusion stays "
+        "within the supplied evidence and identifies the precise contractual effect."
+    )
     client = FakeSIE(
         [
             generated(
                 json.dumps(
                     {
                         "kind": "final",
-                        "output": "Grounded result: CLAUSE",
+                        "output": grounded_result,
                     }
                 ),
                 "request-final",
@@ -140,10 +178,17 @@ async def test_agents_runner_executes_native_tool_turn_then_finishes() -> None:
 
     result = await Runner.run(agent, "Process clause")
 
-    assert result.final_output == "Grounded result: CLAUSE"
+    assert result.final_output == grounded_result
     assert len(client.calls) == 1
     schema = client.calls[0]["kwargs"]["grammar"]["json_schema"]
     assert len(schema["oneOf"]) == 2
+    final_branch = next(
+        branch
+        for branch in schema["oneOf"]
+        if branch["properties"]["kind"].get("const") == "final"
+    )
+    assert final_branch["properties"]["output"]["minLength"] == 256
+    assert final_branch["properties"]["output"]["maxLength"] == 3500
     assert "[tool echo]\nCLAUSE" in client.calls[0]["prompt"]
     assert client.calls[0]["kwargs"]["wait_for_capacity"] is True
 
@@ -182,10 +227,18 @@ def test_required_search_steps_only_advance_on_the_expected_query() -> None:
             "arguments": json.dumps({"query": "Automatic Renewal"}),
         }
     ]
+    whitespace_changed_query = [
+        {
+            "type": "function_call",
+            "name": "search_clauses",
+            "arguments": json.dumps({"query": "automatic renewal "}),
+        }
+    ]
 
     assert _next_required_tool(sequence, repeated_query) == "search_clauses"
     assert _next_required_tool(sequence, distinct_queries) == "analyze_clause_risks"
     assert _next_required_tool(sequence, case_changed_query) == "search_clauses"
+    assert _next_required_tool(sequence, whitespace_changed_query) == "search_clauses"
 
 
 class Risk(BaseModel):
@@ -517,7 +570,7 @@ async def test_query_obligations_db_selects_configured_generation_helper(
     monkeypatch.setattr(
         contract_tools,
         "_run_select",
-        lambda _db_path, _sql: (["value"], [(7,)]),
+        lambda _db_path, _sql, _params: (["value"], [(7,)]),
     )
     app = AppContext(
         sie=FakeSIE([]),  # type: ignore[arg-type]
@@ -544,6 +597,113 @@ async def test_query_obligations_db_selects_configured_generation_helper(
 
     assert calls == [expected_helper]
     assert result.splitlines() == ["SQL: SELECT 7 AS value", "", "value", "7"]
+
+
+@pytest.mark.asyncio
+async def test_query_obligations_db_filters_rows_to_current_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    async def fake_instruct(
+        _app: object, _model: str, messages: list[dict[str, str]], **_kwargs: Any
+    ) -> GenResult:
+        prompts.append(messages[-1]["content"])
+        return GenResult(
+            "SELECT * FROM obligations WHERE counterparty = :counterparty", 0.0, 0.1
+        )
+
+    monkeypatch.setattr(contract_tools, "instruct_once", fake_instruct)
+    monkeypatch.setattr(
+        contract_tools,
+        "_run_select",
+        lambda _db_path, _sql, _params: (
+            ["counterparty", "status", "obligation"],
+            [
+                ("Current Contract", "open", "Current row"),
+                ("Other Contract", "open", "Other row"),
+            ],
+        ),
+    )
+    monkeypatch.setattr(contract_tools, "_open_obligation_count", lambda *_args: 1)
+    app = AppContext(
+        sie=FakeSIE([]),  # type: ignore[arg-type]
+        cfg={
+            "cluster": {"provision_timeout_s": 30},
+            "models": {"sql": "sql-model"},
+            "sql": {"mode": "instruct"},
+        },
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+        obligation_counterparty="Current Contract",
+    )
+
+    result = await contract_tools.query_obligations_db.on_invoke_tool(
+        ToolContext(
+            app,
+            tool_name="query_obligations_db",
+            tool_call_id="call-scoped-query",
+            tool_arguments=json.dumps({"question": "Show upcoming obligations"}),
+        ),
+        json.dumps({"question": "Show upcoming obligations"}),
+    )
+
+    assert "Current Contract" not in prompts[0]
+    assert ":counterparty" in prompts[0]
+    assert "Return every row" in prompts[0]
+    assert "Current row" in result
+    assert "Other row" not in result
+    assert app.clause_cache["obligations_result"] == result
+
+
+@pytest.mark.asyncio
+async def test_query_obligations_db_rejects_incomplete_contract_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_instruct(
+        _app: object, _model: str, _messages: list[dict[str, str]], **_kwargs: Any
+    ) -> GenResult:
+        return GenResult(
+            "SELECT * FROM obligations WHERE counterparty = :counterparty", 0.0, 0.1
+        )
+
+    monkeypatch.setattr(contract_tools, "instruct_once", fake_instruct)
+    monkeypatch.setattr(
+        contract_tools,
+        "_run_select",
+        lambda _db_path, _sql, _params: (
+            ["counterparty", "status", "obligation"],
+            [("Current Contract", "open", "Only one row")],
+        ),
+    )
+    monkeypatch.setattr(contract_tools, "_open_obligation_count", lambda *_args: 2)
+    app = AppContext(
+        sie=FakeSIE([]),  # type: ignore[arg-type]
+        cfg={
+            "cluster": {"provision_timeout_s": 30},
+            "models": {"sql": "sql-model"},
+            "sql": {"mode": "instruct"},
+        },
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+        obligation_counterparty="Current Contract",
+    )
+
+    result = await contract_tools.query_obligations_db.on_invoke_tool(
+        ToolContext(
+            app,
+            tool_name="query_obligations_db",
+            tool_call_id="call-incomplete-query",
+            tool_arguments=json.dumps({"question": "Show upcoming obligations"}),
+        ),
+        json.dumps({"question": "Show upcoming obligations"}),
+    )
+
+    assert "expected 2 open rows, got 1" in result
 
 
 @pytest.mark.asyncio
@@ -578,11 +738,30 @@ async def test_clause_risk_tool_reads_saved_searches_without_copy_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompts: list[str] = []
+    analysis = contract_tools.ClauseRiskAnalysis(
+        risks=[
+            contract_tools.ClauseRiskFinding(
+                clause="Section 4.2",
+                severity="high",
+                issue=(
+                    "The termination clause permits termination after notice while "
+                    "allowing a commercially reasonable time to cure a material "
+                    "default, leaving the cure duration uncertain."
+                ),
+                suggested_redline=(
+                    "Define a concrete cure period while preserving immediate "
+                    "termination for the listed insolvency events and separate the "
+                    "notice requirement from the cure mechanics."
+                ),
+            )
+        ]
+    )
 
     async def fake_run(_agent: object, prompt: str, **_kwargs: Any) -> object:
         prompts.append(prompt)
         return SimpleNamespace(
-            final_output="grounded risk analysis",
+            final_output=analysis,
+            final_output_as=lambda _output_type: analysis,
             context_wrapper=SimpleNamespace(
                 usage=SimpleNamespace(input_tokens=20, output_tokens=5)
             ),
@@ -602,8 +781,8 @@ async def test_clause_risk_tool_reads_saved_searches_without_copy_arguments(
         reasoning_agent=object(),
         clause_cache={
             "search_results": {
-                "automatic renewal": [],
-                "termination": ["termination clause"],
+                "automatic renewal": ["Section 4.2 termination clause"],
+                "termination": ["Section 4.2 termination clause"],
             }
         },
     )
@@ -619,9 +798,62 @@ async def test_clause_risk_tool_reads_saved_searches_without_copy_arguments(
     )
 
     assert contract_tools.analyze_clause_risks.params_json_schema["properties"] == {}
-    assert prompts and "Topic: automatic renewal" not in prompts[0]
-    assert "Topic: termination\n\ntermination clause" in prompts[0]
-    assert result == "grounded risk analysis"
+    assert prompts
+    assert (
+        "Topics: automatic renewal, termination\n\nSection 4.2 termination clause"
+        in prompts[0]
+    )
+    assert prompts[0].count("Section 4.2 termination clause") == 1
+    assert result.startswith("Section 4.2 | severity: high")
+    assert app.clause_cache["risk_analysis"] == analysis.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_clause_risk_tool_rejects_an_incomplete_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = contract_tools.ClauseRiskAnalysis(
+        risks=[
+            contract_tools.ClauseRiskFinding(
+                clause="Section 4.2",
+                issue="Ambiguous cure.",
+                severity="high",
+                suggested_redline="Clarify it.",
+            )
+        ]
+    )
+
+    async def fake_run(_agent: object, _prompt: str, **_kwargs: Any) -> object:
+        return SimpleNamespace(
+            final_output=analysis,
+            final_output_as=lambda _output_type: analysis,
+            context_wrapper=SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=20, output_tokens=5)
+            ),
+        )
+
+    monkeypatch.setattr(contract_tools.Runner, "run", fake_run)
+    app = AppContext(
+        sie=FakeSIE([]),  # type: ignore[arg-type]
+        cfg={"cluster": {}, "models": {"reasoning": "reasoning-model"}},
+        ledger=Ledger(),
+        contract_text="contract",
+        scan_path="scan.png",
+        db_path="obligations.db",
+        reasoning_agent=object(),
+        clause_cache={"search_results": {"termination": ["Section 4.2 text"]}},
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete response"):
+        await contract_tools.analyze_clause_risks.on_invoke_tool(
+            ToolContext(
+                app,
+                tool_name="analyze_clause_risks",
+                tool_call_id="call-risk",
+                tool_arguments="{}",
+            ),
+            "{}",
+        )
 
 
 @pytest.mark.asyncio

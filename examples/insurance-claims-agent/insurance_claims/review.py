@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from datetime import UTC, datetime
@@ -20,6 +21,18 @@ from insurance_claims.config import (
 )
 
 console = Console()
+
+
+def _artifact_entries(run_dir: Path) -> list[dict[str, str]]:
+    return [
+        {
+            "path": path.relative_to(run_dir).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in sorted(run_dir.rglob("*"))
+        if path.is_file() and path != run_dir / "manifest.json"
+    ]
+
 
 POLICY_QUERY = (
     "What does the Standard Flood Insurance Policy cover for removal of non-owned flood debris "
@@ -549,6 +562,10 @@ def run_generation_stage(run_id: str) -> Path:
     finally:
         client.close()
 
+    _write_json(
+        run_dir / "source-manifest.json",
+        json.loads((DATA_DIR / "source-manifest.json").read_text(encoding="utf-8")),
+    )
     manifest = {
         "run_id": run_id,
         "run_at": datetime.now(UTC).isoformat(),
@@ -565,12 +582,9 @@ def run_generation_stage(run_id: str) -> Path:
         "timings_ms": timings,
         "source_manifest": "source-manifest.json",
         "review": "review.json",
+        "artifacts": _artifact_entries(run_dir),
     }
     _write_json(run_dir / "manifest.json", manifest)
-    _write_json(
-        run_dir / "source-manifest.json",
-        json.loads((DATA_DIR / "source-manifest.json").read_text(encoding="utf-8")),
-    )
 
     table = Table("Model call", "Latency")
     for name, duration_ms in timings.items():

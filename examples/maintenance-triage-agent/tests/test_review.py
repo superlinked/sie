@@ -282,6 +282,14 @@ def test_verified_manifest_hashes() -> None:
         artifact = manifest_path.parent / entry["path"]
         assert hashlib.sha256(artifact.read_bytes()).hexdigest() == entry["sha256"]
 
+    listed_paths = {entry["path"] for entry in manifest["artifacts"]}
+    actual_paths = {
+        path.relative_to(manifest_path.parent).as_posix()
+        for path in manifest_path.parent.rglob("*")
+        if path.is_file() and path != manifest_path
+    }
+    assert listed_paths == actual_paths
+
     provenance = manifest["rate_book_provenance"]
     assert provenance == _rate_book_provenance(manifest_path.parent / "raw")
     assert provenance["request_ids"]
@@ -353,3 +361,23 @@ def test_run_cleans_failed_staging_and_allows_retry(
 
     assert final_run_dir == tmp_path / "retryable"
     assert (final_run_dir / "manifest.json").is_file()
+
+
+def test_run_reserves_the_id_before_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(review_module, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(review_module, "load_config", dict)
+
+    def write(run_dir: Path, _config: dict[str, object]) -> None:
+        with pytest.raises(FileExistsError, match="already reserved"):
+            review_module.run("reserved")
+        (run_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(review_module, "_write_run", write)
+
+    final_run_dir = review_module.run("reserved")
+
+    assert final_run_dir == tmp_path / "reserved"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["reserved"]

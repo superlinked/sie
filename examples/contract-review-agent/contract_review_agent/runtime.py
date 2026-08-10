@@ -114,6 +114,7 @@ class AppContext:
     contract_text: str
     scan_path: str
     db_path: str
+    obligation_counterparty: str | None = None
     api_calls: list[dict[str, Any]] = field(default_factory=list)
     reasoning_agent: Any = None
     clause_cache: dict[str, Any] = field(default_factory=dict)

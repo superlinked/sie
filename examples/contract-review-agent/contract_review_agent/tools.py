@@ -13,13 +13,42 @@ import re
 import sqlite3
 import time
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from agents import RunContextWrapper, Runner, function_tool
+from pydantic import BaseModel, Field
 from sie_sdk import Item
 
 from .data.make_sample import SCHEMA_DDL, TODAY
 from .runtime import AppContext, GenResult, instruct_once, prompt_once, record_api_call
+
+COMMERCIAL_FACTS_QUERY = (
+    "governing law, exclusivity, term, letter of credit, purchase minimum, "
+    "and reporting obligations"
+)
+
+
+class ClauseRiskFinding(BaseModel):
+    clause: str = Field(pattern=r"^Section \d+(?:\.\d+)+$")
+    issue: str = Field(
+        min_length=1,
+        max_length=400,
+        description=(
+            "Current source-grounded clause mechanics and resulting risk; do not "
+            "describe a proposed redline as existing contract language"
+        ),
+    )
+    severity: Literal["low", "medium", "high"]
+    suggested_redline: str = Field(
+        min_length=1,
+        max_length=400,
+        description="A proposed change, kept distinct from current clause mechanics",
+    )
+
+
+class ClauseRiskAnalysis(BaseModel):
+    risks: list[ClauseRiskFinding] = Field(min_length=1, max_length=8)
 
 
 def _tok(n: int | None) -> str:
@@ -28,6 +57,29 @@ def _tok(n: int | None) -> str:
 
 def _tps(res: GenResult) -> str:
     return f"{res.tokens_per_s:.0f} tok/s" if res.tokens_per_s else "—"
+
+
+def _validated_clause_risk_output(value: object, source: str) -> str:
+    output = str(value).strip()
+    if len(output) < 256:
+        raise RuntimeError("Clause-risk analysis returned an incomplete response")
+    cited_sections = set(re.findall(r"\bSection\s+(\d+(?:\.\d+)+)\b", output))
+    source_sections = set(re.findall(r"\b(\d+(?:\.\d+)+)\b", source))
+    if not cited_sections or not cited_sections <= source_sections:
+        unexpected = sorted(cited_sections - source_sections)
+        raise RuntimeError(
+            "Clause-risk analysis must cite only exact sections from retrieved "
+            f"clauses; unexpected sections: {unexpected}"
+        )
+    return output
+
+
+def _format_clause_risk_analysis(analysis: ClauseRiskAnalysis) -> str:
+    return "\n\n".join(
+        f"{risk.clause} | severity: {risk.severity}\n"
+        f"Issue: {risk.issue}\nSuggested redline: {risk.suggested_redline}"
+        for risk in analysis.risks
+    )
 
 
 def _split_clauses(text: str, target: int = 900) -> list[str]:
@@ -105,8 +157,9 @@ async def _clause_index(
 # ──────────────────────────────────────────────────────────────────────────
 @function_tool(failure_error_function=None)
 async def classify_document(ctx: RunContextWrapper[AppContext]) -> str:
-    """Classify the contract under review as MSA, NDA, SOW, or Other, with a
-    one-line reason. A fast first-pass triage over the loaded contract."""
+    """Classify the contract under review as MSA, NDA, SOW, Distributor
+    Agreement, or Other, with a one-line reason. A fast first-pass triage over
+    the loaded contract."""
     app = ctx.context
     model = app.cfg["models"]["triage"]
     res = await instruct_once(
@@ -115,8 +168,12 @@ async def classify_document(ctx: RunContextWrapper[AppContext]) -> str:
         [
             {
                 "role": "system",
-                "content": "You label legal documents. Reply with the type only "
-                "(MSA, NDA, SOW, or Other) followed by a short reason.",
+                "content": (
+                    "You label legal documents. Reply with exactly one type "
+                    "(MSA, NDA, SOW, Distributor Agreement, or Other) followed by "
+                    "a short reason. A document titled Distributor Agreement is a "
+                    "Distributor Agreement, not an MSA."
+                ),
             },
             {"role": "user", "content": app.contract_text[:1500]},
         ],
@@ -133,7 +190,9 @@ async def classify_document(ctx: RunContextWrapper[AppContext]) -> str:
         got=_tok(res.completion_tokens),
         throughput=_tps(res),
     )
-    return res.text.strip()
+    result = res.text.strip()
+    app.clause_cache["classification_result"] = result
+    return result
 
 
 @function_tool(failure_error_function=None)
@@ -190,7 +249,7 @@ async def analyze_clause_risks(ctx: RunContextWrapper[AppContext]) -> str:
     search_results = app.clause_cache.get("search_results")
     if not isinstance(search_results, dict) or not search_results:
         raise RuntimeError("Clause-risk analysis requires saved search results")
-    sections: list[str] = []
+    clause_topics: dict[str, list[str]] = {}
     for query, clauses in search_results.items():
         if (
             not isinstance(query, str)
@@ -203,11 +262,14 @@ async def analyze_clause_risks(ctx: RunContextWrapper[AppContext]) -> str:
             raise RuntimeError(
                 "Clause-risk search results must map string queries to lists of strings"
             )
-        if clauses:
-            sections.append(f"Topic: {query}\n\n" + "\n\n---\n\n".join(clauses))
-    if not sections:
+        for clause in clauses:
+            clause_topics.setdefault(clause, []).append(query)
+    if not clause_topics:
         raise RuntimeError("Clause-risk analysis found no saved clauses")
-    clauses = "\n\n===\n\n".join(sections)
+    clauses = "\n\n===\n\n".join(
+        f"Topics: {', '.join(topics)}\n\n{clause}"
+        for clause, topics in clause_topics.items()
+    )
     model = app.cfg["models"]["reasoning"]
     t0 = time.monotonic()
     result = await Runner.run(
@@ -229,7 +291,11 @@ async def analyze_clause_risks(ctx: RunContextWrapper[AppContext]) -> str:
         got=_tok(out_tok),
         throughput=f"{out_tok / dt:.0f} tok/s" if out_tok and dt > 0 else "—",
     )
-    return str(result.final_output)
+    analysis = result.final_output_as(ClauseRiskAnalysis)
+    app.clause_cache["risk_analysis"] = analysis.model_dump(mode="json")
+    return _validated_clause_risk_output(
+        _format_clause_risk_analysis(analysis), clauses
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -309,7 +375,7 @@ async def extract_entities(ctx: RunContextWrapper[AppContext]) -> str:
 
 @function_tool(failure_error_function=None)
 async def search_clauses(ctx: RunContextWrapper[AppContext], query: str) -> str:
-    """Find the clauses most relevant to a topic (e.g. 'automatic renewal',
+    """Find the clauses most relevant to a topic (e.g. 'renewal mechanics',
     'limitation of liability', 'indemnification'). Dense-embedding retrieval
     followed by a cross-encoder rerank; returns the top clauses verbatim."""
     app = ctx.context
@@ -419,12 +485,27 @@ def _clean_sql(raw: str) -> str:
     return sql.strip().rstrip(";").strip()
 
 
-def _run_select(db_path: str, sql: str) -> tuple[list[str], list[tuple]]:
+def _run_select(
+    db_path: str, sql: str, params: dict[str, str] | None = None
+) -> tuple[list[str], list[tuple]]:
     conn = sqlite3.connect(db_path)
     try:
-        cur = conn.execute(sql)
+        cur = conn.execute(sql, params or {})
         cols = [d[0] for d in cur.description] if cur.description else []
         return cols, cur.fetchmany(50)
+    finally:
+        conn.close()
+
+
+def _open_obligation_count(db_path: str, counterparty: str) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM obligations "
+            "WHERE counterparty = ? AND status = 'open'",
+            (counterparty,),
+        ).fetchone()
+        return int(row[0])
     finally:
         conn.close()
 
@@ -440,9 +521,18 @@ async def query_obligations_db(
     app = ctx.context
     model = app.cfg["models"]["sql"]
     mode = (app.cfg.get("sql") or {}).get("mode", "instruct")
+    scoped_question = question
+    if app.obligation_counterparty:
+        scoped_question += (
+            "\nReturn every row whose counterparty equals the named SQLite parameter "
+            ":counterparty and whose status exactly equals 'open'. Use :counterparty "
+            "in the WHERE clause; do not copy or invent a literal counterparty value. "
+            "Include counterparty, status, obligation, due_date, and amount_usd in "
+            "SELECT. Order by due_date. Do not use LIMIT or a date window."
+        )
     if mode == "prompt":
         prompt = _SQLCODER_PROMPT.format(
-            question=question,
+            question=scoped_question,
             schema=SCHEMA_DDL,
             today=TODAY,
         )
@@ -467,7 +557,7 @@ async def query_obligations_db(
                     "role": "user",
                     "content": _SQL_CHAT_USER.format(
                         schema=SCHEMA_DDL,
-                        question=question,
+                        question=scoped_question,
                     ),
                 },
             ],
@@ -490,17 +580,51 @@ async def query_obligations_db(
     sql = _clean_sql(res.text)
     if not sql.lower().startswith("select"):
         return f"Generated query was not a SELECT, so it was not run:\n{sql}"
+    sql_params: dict[str, str] | None = None
+    if app.obligation_counterparty:
+        if ":counterparty" not in sql:
+            return (
+                "Generated query omitted the required bound :counterparty parameter."
+                f"\nSQL: {sql}"
+            )
+        sql_params = {"counterparty": app.obligation_counterparty}
     try:
-        cols, rows = _run_select(app.db_path, sql)
+        cols, rows = _run_select(app.db_path, sql, sql_params)
     except sqlite3.Error as exc:
         return f"SQL error: {exc}\nQuery was:\n{sql}"
+    if app.obligation_counterparty:
+        required_scope_columns = {"counterparty", "status"}
+        missing_scope_columns = required_scope_columns - set(cols)
+        if missing_scope_columns:
+            return (
+                "Generated query omitted columns required for exact contract "
+                f"scoping: {', '.join(sorted(missing_scope_columns))}.\nSQL: {sql}"
+            )
+        counterparty_index = cols.index("counterparty")
+        status_index = cols.index("status")
+        rows = [
+            row
+            for row in rows
+            if row[counterparty_index] == app.obligation_counterparty
+            and row[status_index] == "open"
+        ]
+        expected_rows = _open_obligation_count(
+            app.db_path, app.obligation_counterparty
+        )
+        if len(rows) != expected_rows:
+            return (
+                "Generated query returned incomplete contract scope: expected "
+                f"{expected_rows} open rows, got {len(rows)}.\nSQL: {sql}"
+            )
     if not rows:
         return f"Query ran but returned no rows.\nSQL: {sql}"
     header = " | ".join(cols)
     body = "\n".join(
         " | ".join("" if v is None else str(v) for v in row) for row in rows
     )
-    return f"SQL: {sql}\n\n{header}\n{body}"
+    result = f"SQL: {sql}\n\n{header}\n{body}"
+    app.clause_cache["obligations_result"] = result
+    return result
 
 
 ALL_TOOLS = [

@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 import contract_review_agent.evidence as evidence_module
-from contract_review_agent.app import ContractReview, RiskFlag
+from contract_review_agent.app import (
+    ContractReview,
+    PublishedReviewRepair,
+    RiskFlag,
+    _unsupported_published_sections,
+)
+from contract_review_agent.data.fetch_contracts import _signature_page_text
 from contract_review_agent.evidence import write_run_record
 from contract_review_agent.runtime import Ledger
 
@@ -24,6 +30,35 @@ MODELS = {
     "entities": "model-entities",
 }
 CFG = {"models": MODELS}
+
+
+def test_published_section_allowlist_rejects_unrelated_citations() -> None:
+    assert _unsupported_published_sections(
+        "Financial terms (Section 1.6); governing law (Section 6.9)."
+    ) == set()
+    assert _unsupported_published_sections(
+        "Financial terms are in Section 6.7."
+    ) == {"6.7"}
+
+
+def test_optional_citation_repair_precedes_synthesis_in_provenance() -> None:
+    stages = [
+        call["stage"]
+        for call in evidence_module._expected_call_sequence(
+            CFG, include_citation_repair=True
+        )
+    ]
+    assert stages[-3:] == [
+        "investigator_report",
+        "investigator_report:citation_repair",
+        "synthesize_review",
+    ]
+
+
+def test_cuad_scan_renders_signature_block_or_document_tail() -> None:
+    text = "title\nbody\nIn witness whereof\nBy: /s/ Example"
+    assert _signature_page_text(text) == "In witness whereof\nBy: /s/ Example"
+    assert _signature_page_text("0123456789") == "0123456789"
 
 
 def _api_calls() -> list[dict[str, object]]:
@@ -63,6 +98,67 @@ def _review() -> ContractReview:
     )
 
 
+def test_published_repair_assembles_every_named_obligation() -> None:
+    repair = PublishedReviewRepair(
+        document_type="agreement",
+        parties=["Buyer", "Seller"],
+        effective_date="unknown",
+        governing_law="Illinois",
+        executed=False,
+        illinois_exclusive_distributorship=True,
+        initial_term_years=10,
+        initial_term_starts_on_last_sample_delivery=True,
+        renewal_period_years=1,
+        renewal_max_additional_years=10,
+        renewal_requires_distributor_compliance=True,
+        letter_of_credit_amount_usd=500_000,
+        letter_of_credit_is_irrevocable=True,
+        monthly_purchase_order_amount_usd=250_000,
+        first_product_year_unit_minimum=375,
+        quarterly_reports_during_first_year=True,
+    )
+    risk_flags = [
+        RiskFlag(
+            clause="Section 1.3",
+            issue="Missing notice mechanics",
+            severity="high",
+            suggested_redline="Add explicit notice mechanics.",
+        )
+    ]
+
+    review = repair.to_contract_review(
+        risk_flags=risk_flags,
+        recommendation="review",
+    )
+    assert review.renewal_terms == (
+        "Conditional annual renewal for 1-year terms up to 10 additional years if "
+        "Distributor complies with all terms of the Agreement (Section 1.3)"
+    )
+    assert review.key_obligations == [
+        "Exclusive distributorship within the Illinois Market (Section 1.1)",
+        "Ten-year initial term beginning on delivery of the last Sample (Section 1.3)",
+        review.renewal_terms,
+        (
+            "Distributor must issue an irrevocable $500,000 letter of credit to "
+            "Company (Section 1.6)"
+        ),
+        (
+            "Company must receive a $250,000 purchase order from Distributor by the "
+            "first day of each month (Section 1.6)"
+        ),
+        (
+            "Distributor must purchase at least 375 units during the first Product "
+            "Year (Section 1.6)"
+        ),
+        (
+            "Distributor must submit written reports each quarter during the first "
+            "year of the Term (Section 4.1)"
+        ),
+    ]
+    assert review.risk_flags == risk_flags
+    assert "risk_flags" not in PublishedReviewRepair.model_json_schema()["properties"]
+
+
 def _ledger(verdict: str = "no") -> Ledger:
     ledger = Ledger()
     ledger.record(
@@ -94,7 +190,7 @@ def _write_record(
         contract_text="1.1 Renewal. Annual renewal terms.",
         scan_path=str(scan),
         db_path=str(database),
-        findings="findings",
+        findings="Execution is not established from the visible signature page.",
         review=_review(),
         ledger=_ledger(),
         api_calls=api_calls,
@@ -202,6 +298,170 @@ def test_write_run_record_rejects_duplicate_request_ids(
         _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)
 
 
+def test_published_risk_target_requires_three_high_and_one_medium() -> None:
+    review = _review()
+    review.risk_flags = [
+        RiskFlag(
+            clause=f"Section {section}",
+            issue=f"Grounded risk in {section}",
+            severity=severity,
+            suggested_redline=f"Clarify Section {section}.",
+        )
+        for section, severity in evidence_module.PUBLISHED_RISK_TARGETS.items()
+    ]
+
+    assert evidence_module._published_risk_coverage_is_preserved(
+        evidence_module.PUBLISHED_CONTRACT_LABEL, review
+    )
+
+    review.risk_flags[0].severity = "medium"
+    assert not evidence_module._published_risk_coverage_is_preserved(
+        evidence_module.PUBLISHED_CONTRACT_LABEL, review
+    )
+
+
+def test_published_fact_target_preserves_source_grounded_commercial_details() -> None:
+    review = _review()
+    review.document_type = "Distributor Agreement"
+    review.parties = ["Electric City Corp.", "Electric City of Illinois LLC"]
+    review.renewal_terms = (
+        "If Distributor complies with the Agreement, annual renewal is available for "
+        "up to ten additional years (Section 1.3)."
+    )
+    review.governing_law = "Illinois"
+    review.key_obligations = [
+        "Distributor must issue a $500,000 letter of credit (Section 1.6).",
+        "Company must receive a $250,000 purchase order monthly (Section 1.6).",
+        "Distributor has a 375-unit first-year minimum (Section 1.6).",
+        "Distributor has exclusive rights in Illinois (Section 1.1).",
+        "The ten-year term starts upon delivery of the last Sample (Section 1.3).",
+        "Distributor reports quarterly during the first year (Section 4.1).",
+    ]
+
+    assert evidence_module._published_fact_coverage_is_preserved(
+        evidence_module.PUBLISHED_CONTRACT_LABEL, review
+    )
+
+    review.renewal_terms = review.renewal_terms.replace("annual", "one (1) year")
+    review.renewal_terms = review.renewal_terms.replace("ten", "10")
+    assert evidence_module._published_fact_coverage_is_preserved(
+        evidence_module.PUBLISHED_CONTRACT_LABEL, review
+    )
+
+    review.key_obligations[0] = "Distributor must issue a 500k LC (Section 1.6)."
+    assert evidence_module._published_fact_coverage_is_preserved(
+        evidence_module.PUBLISHED_CONTRACT_LABEL, review
+    )
+
+    review.key_obligations[0] = review.key_obligations[0].replace("500k", "50k")
+    assert not evidence_module._published_fact_coverage_is_preserved(
+        evidence_module.PUBLISHED_CONTRACT_LABEL, review
+    )
+
+
+def test_risk_claim_gate_rejects_unsupported_automatic_renewal_variants() -> None:
+    review = _review()
+    review.risk_flags[0].issue = "The clause implies automatic annual renewals."
+    source_evidence = {
+        "risk_clauses": [
+            {
+                "section": "1.1",
+                "excerpt": "1.1 Renewal is available if Distributor complies.",
+            }
+        ]
+    }
+
+    assert not evidence_module._risk_claims_are_source_supported(
+        review, source_evidence
+    )
+
+    review.risk_flags[0].issue = (
+        "It is unclear whether the term automatically renews or requires an election."
+    )
+    assert evidence_module._risk_claims_are_source_supported(review, source_evidence)
+
+
+def test_risk_claim_gate_accepts_distinct_notice_and_cure_periods() -> None:
+    review = _review()
+    review.risk_flags[0].clause = "Section 4.2"
+    review.risk_flags[0].issue = (
+        "The termination notice is 30 days, while curable defaults have a separate "
+        "commercially reasonable cure period."
+    )
+    source_evidence = {
+        "risk_clauses": [
+            {
+                "section": "4.2",
+                "excerpt": (
+                    "4.2 Termination requires 30 days' notice; material defaults may "
+                    "be cured within a commercially reasonable time."
+                ),
+            }
+        ]
+    }
+
+    assert evidence_module._risk_claims_are_source_supported(review, source_evidence)
+
+
+def test_risk_claim_gate_requires_correct_repurchase_option_and_exception() -> None:
+    review = _review()
+    review.risk_flags[0].clause = "Section 4.4"
+    source_evidence = {
+        "risk_clauses": [
+            {
+                "section": "4.4",
+                "excerpt": (
+                    "4.4 Company has the option to repurchase unopened Products; "
+                    "provided that if Company terminates without cause, Company shall "
+                    "repurchase them."
+                ),
+            }
+        ]
+    }
+    review.risk_flags[0].issue = (
+        "Company has a general repurchase option, with a mandatory repurchase "
+        "exception when Company terminates without cause, leaving inventory exposure "
+        "after other expirations or terminations."
+    )
+    assert evidence_module._risk_claims_are_source_supported(review, source_evidence)
+
+    review.risk_flags[0].issue = (
+        "Company has the repurchase option only if it terminates without cause, and "
+        "the mandatory exception is unclear."
+    )
+    assert not evidence_module._risk_claims_are_source_supported(
+        review, source_evidence
+    )
+
+
+def test_signature_scope_rejects_a_review_level_execution_overclaim() -> None:
+    review = _review()
+    review.recommendation = "The agreement is not executed."
+
+    assert not evidence_module._signature_scope_is_supported(
+        "Execution is not established from the visible signature page.", review
+    )
+
+
+def test_published_investigator_findings_require_complete_marketing_evidence() -> None:
+    findings = (
+        "Distributor Agreement; Section 1.3, Section 1.6, Section 4.2, "
+        "Section 4.4, Section 5.3, and "
+        "Section 6.9; not at fault; 2026-06-30; 2026-07-01; 2026-09-15; "
+        "$500,000 letter of credit; $250,000 monthly purchase order; 375 units; "
+        "quarterly compliance attestation; annual subscription fee; renewal notice; "
+        "Upcoming obligations and deadlines"
+    )
+    assert evidence_module._published_investigator_findings_are_complete(
+        evidence_module.PUBLISHED_CONTRACT_LABEL, findings
+    )
+
+    assert not evidence_module._published_investigator_findings_are_complete(
+        evidence_module.PUBLISHED_CONTRACT_LABEL,
+        findings.replace("Section 5.3", "Indemnification"),
+    )
+
+
 def test_write_run_record_rejects_an_unsupported_risk_clause(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -255,6 +515,35 @@ def test_write_run_record_rejects_section_reference_only_in_risk_issue(
             scan_path=str(scan),
             db_path=str(database),
             findings="findings",
+            review=review,
+            ledger=_ledger(),
+            api_calls=_api_calls(),
+            wall_s=1,
+        )
+
+
+def test_write_run_record_rejects_a_delayed_section_number(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    review = _review()
+    review.risk_flags[0].clause = "Section summary 1.1"
+    monkeypatch.setattr(evidence_module, "PROJECT_ROOT", tmp_path)
+    scan = tmp_path / "scan.png"
+    database = tmp_path / "obligations.db"
+    scan.write_bytes(b"scan")
+    database.write_bytes(b"database")
+
+    with pytest.raises(RuntimeError, match="no source section reference"):
+        write_run_record(
+            run_id="safe-run",
+            endpoint="https://api.superlinked.com",
+            cfg=CFG,
+            label="example",
+            contract_text="1.1 Renewal. Annual renewal terms.",
+            scan_path=str(scan),
+            db_path=str(database),
+            findings="Execution is not established from the visible signature page.",
             review=review,
             ledger=_ledger(),
             api_calls=_api_calls(),

@@ -421,6 +421,14 @@ def test_verified_manifest_hashes() -> None:
         artifact = manifest_path.parent / entry["path"]
         assert hashlib.sha256(artifact.read_bytes()).hexdigest() == entry["sha256"]
 
+    listed_paths = {entry["path"] for entry in manifest["artifacts"]}
+    actual_paths = {
+        path.relative_to(manifest_path.parent).as_posix()
+        for path in manifest_path.parent.rglob("*")
+        if path.is_file() and path != manifest_path
+    }
+    assert listed_paths == actual_paths
+
     raw_dir = manifest_path.parent / "raw"
     retrieve = json.loads((raw_dir / "retrieve.json").read_text(encoding="utf-8"))
     rerank_request = json.loads((raw_dir / "rerank-request.json").read_text(encoding="utf-8"))

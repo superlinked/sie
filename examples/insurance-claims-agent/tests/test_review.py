@@ -13,6 +13,7 @@ import insurance_claims.review as review_module
 from insurance_claims.evaluate import ARTIFACT_EXCLUDED_PATHS, evaluate_review, evaluate_run
 from insurance_claims.review import (
     REVIEW_SCHEMA,
+    _artifact_entries,
     _extract_claim_facts,
     _final_review,
     _json_object_from_text,
@@ -214,6 +215,24 @@ def test_artifact_exclusions_only_apply_at_the_run_root(tmp_path: Path) -> None:
     assert "README.md" not in artifact_paths
     assert "manifest.json" not in artifact_paths
     assert {"nested/README.md", "nested/manifest.json"} <= artifact_paths
+
+
+def test_generation_manifest_entries_cover_every_pre_manifest_artifact(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "review.json").write_text("{}\n", encoding="utf-8")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "response.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+    entries = _artifact_entries(tmp_path)
+
+    assert {entry["path"] for entry in entries} == {
+        "raw/response.json",
+        "review.json",
+    }
+    assert all(len(entry["sha256"]) == 64 for entry in entries)
 
 
 def test_verified_evaluation_recomputes_from_the_recorded_review() -> None:

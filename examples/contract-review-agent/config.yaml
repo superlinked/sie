@@ -13,12 +13,12 @@ cluster:
 # Swap any line to try a different model; no other code changes.
 models:
   # Generative LLMs, the agent "brains". Two Qwen models, both non-thinking:
-  # Qwen3.6-27B (64K ctx) is the brain: plans, reasons over long context, and
-  # synthesizes; Qwen3.5-4B (8K, vision LLM) handles shorter-context tasks.
+  # Qwen3.6-27B is the brain: plans, reasons across tool evidence, and
+  # synthesizes; Qwen3.5-4B handles latency-sensitive bounded tasks.
   triage: "Qwen/Qwen3.5-4B"                          # fast doc-type classifier
-  orchestrator: "Qwen/Qwen3.6-27B"                   # the brain: native generate + tools + JSON schema (64K ctx)
+  orchestrator: "Qwen/Qwen3.6-27B"                   # the brain: native generate + tools + JSON schema
   vision: "Qwen/Qwen3.5-4B"                          # reads scanned / signature pages (text + image); the vision LLM
-  reasoning: "Qwen/Qwen3.5-4B"                       # clause-risk analysis (short context)
+  reasoning: "Qwen/Qwen3.6-27B"                      # grounded clause analysis with bounded structured output
   sql: "Qwen/Qwen3.5-4B"                             # text-to-SQL via native generate; raw specialists use sql.mode=prompt
   guard: "ibm-granite/granite-guardian-3.0-2b"       # safety / prompt-injection guardrail (specialist; alias: guard)
   # Retrieval + extraction tools (encode / score / extract):
