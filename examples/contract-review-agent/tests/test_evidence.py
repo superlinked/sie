@@ -163,6 +163,34 @@ def test_write_run_record_rejects_missing_runtime_model(
     assert list((tmp_path / "runs").iterdir()) == []
 
 
+def test_write_run_record_allows_unreported_encode_and_extract_runtime_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_calls = _api_calls()
+    for call in api_calls:
+        if call["function"] in evidence_module.RUNTIME_MODEL_OPTIONAL_FUNCTIONS:
+            call["runtime_model"] = None
+
+    run_dir = _write_record(
+        tmp_path,
+        monkeypatch,
+        run_id="safe-run",
+        api_calls=api_calls,
+    )
+
+    assert (run_dir / "manifest.json").is_file()
+
+
+def test_verified_api_calls_have_supported_runtime_model_provenance() -> None:
+    api_calls = json.loads(
+        (ROOT / "verified-run" / "api-calls.json").read_text(encoding="utf-8")
+    )
+
+    assert any(call["runtime_model"] is None for call in api_calls)
+    assert all(evidence_module._runtime_model_is_valid(call) for call in api_calls)
+
+
 def test_write_run_record_rejects_duplicate_request_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -253,8 +281,9 @@ def test_write_run_record_rejects_a_missing_required_stage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api_calls = _api_calls()
-    del api_calls[6]
+    api_calls = [
+        call for call in _api_calls() if call["stage"] != "search_clauses:index"
+    ]
 
     with pytest.raises(RuntimeError, match="Production evidence checks failed"):
         _write_record(tmp_path, monkeypatch, run_id="safe-run", api_calls=api_calls)

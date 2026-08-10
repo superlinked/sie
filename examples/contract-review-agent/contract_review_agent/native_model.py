@@ -135,8 +135,8 @@ def _schema_accepts_string(schema: Any) -> bool:
     return any(
         _schema_accepts_string(branch)
         for keyword in ("anyOf", "oneOf")
-        for branch in schema.get(keyword, [])
         if isinstance(schema.get(keyword), list)
+        for branch in schema[keyword]
     )
 
 

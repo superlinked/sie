@@ -14,6 +14,19 @@ from .app import ContractReview
 from .config import PROJECT_ROOT
 from .runtime import Ledger
 
+RUNTIME_MODEL_OPTIONAL_FUNCTIONS = frozenset({"encode", "extract"})
+
+
+def _runtime_model_is_valid(call: dict[str, Any]) -> bool:
+    runtime_model = call.get("runtime_model")
+    if runtime_model is None:
+        return call.get("function") in RUNTIME_MODEL_OPTIONAL_FUNCTIONS
+    return (
+        isinstance(runtime_model, str)
+        and bool(runtime_model)
+        and runtime_model == call.get("requested_model")
+    )
+
 
 def _expected_call_sequence(cfg: dict[str, Any]) -> list[dict[str, str]]:
     models = cfg["models"]
@@ -237,12 +250,12 @@ def _write_run_record(
             isinstance(call.get("credits_debited"), int | float)
             and not isinstance(call["credits_debited"], bool)
             and call["credits_debited"] >= 0
+            and _runtime_model_is_valid(call)
             and all(
                 isinstance(call.get(field), str) and bool(call[field])
                 for field in (
                     "stage",
                     "request_id",
-                    "runtime_model",
                     "rate_book_version",
                     "execution_identity_sha256",
                 )

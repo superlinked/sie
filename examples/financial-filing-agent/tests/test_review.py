@@ -224,6 +224,13 @@ def test_verified_manifest_hashes() -> None:
         request_id: provenance["version"] for request_id in provenance["request_ids"]
     }
     assert "raw/retrieve.json" in provenance["source_artifacts"]
+    listed_paths = {entry["path"] for entry in manifest["artifacts"]}
+    actual_paths = {
+        path.relative_to(manifest_path.parent).as_posix()
+        for path in manifest_path.parent.rglob("*")
+        if path.is_file() and path != manifest_path
+    }
+    assert listed_paths == actual_paths
 
 
 def test_rate_book_provenance_rejects_a_charged_request_without_its_own_version(

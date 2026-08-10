@@ -20,7 +20,11 @@ from pydantic import BaseModel
 
 from contract_review_agent import tools as contract_tools
 from contract_review_agent.guardrails import _unsafe_verdict, safety_guardrail
-from contract_review_agent.native_model import SIENativeModel, _next_required_tool
+from contract_review_agent.native_model import (
+    SIENativeModel,
+    _next_required_tool,
+    _schema_accepts_string,
+)
 from contract_review_agent.runtime import AppContext, GenResult, Ledger, instruct_once
 
 set_tracing_disabled(True)
@@ -39,6 +43,12 @@ def test_safety_guardrail_fails_closed_unless_verdict_is_exact_no(
 
 def test_safety_guardrail_accepts_unambiguous_no() -> None:
     assert _unsafe_verdict(" no \n") is False
+
+
+@pytest.mark.parametrize("keyword", ["anyOf", "oneOf"])
+def test_string_schema_union_skips_non_list_branches(keyword: str) -> None:
+    assert _schema_accepts_string({keyword: 5}) is False
+    assert _schema_accepts_string({keyword: [{"type": "string"}]}) is True
 
 
 class FakeSIE:
