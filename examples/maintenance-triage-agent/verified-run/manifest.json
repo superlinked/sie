@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-08-09T23:10:56.803717+00:00",
+  "created_at": "2026-08-10T07:49:57.912879+00:00",
   "endpoint": "https://api.superlinked.com",
   "models": {
     "parse": "docling",
@@ -9,7 +9,7 @@
     "extract": "fastino/gliner2-large-v1"
   },
   "rate_book_provenance": {
-    "version": "2026-07-26-production-bootstrap-v2",
+    "version": "2026-08-09-production-bootstrap-v3",
     "source_artifacts": [
       "raw/entities-detector-0.json",
       "raw/entities-detector-1.json",
@@ -26,70 +26,70 @@
       "raw/retrieve.json"
     ],
     "request_ids": [
-      "019fe8cb-21a7-7d13-a5e3-cda7794d4a5a",
-      "019fe8cb-22d9-7be1-ac83-db39bb8b13aa",
-      "019fe8cb-23b5-7ee0-8c6f-753974bc8091",
-      "019fe8cb-24c7-75c0-b673-d1c54e731907",
-      "019fe8cb-287d-79b0-8e82-4f93ca4a46b3",
-      "019fe8cb-2a72-79e1-a22f-2d052731d525",
-      "019fe8cb-2788-7371-b614-4f821422d507",
-      "019fe8cb-2973-7e53-af72-7f27f7122168",
-      "019fe8cb-26a1-7230-9784-c2fb39c32698",
-      "019fe8cb-25ba-7e13-a3e8-08519e91e741",
-      "019fe8cb-0ae4-7980-af48-c3effb95a7c9",
-      "019fe8cb-1eb6-7f63-9ca9-3fc53b951d43",
-      "019fe8cb-105f-72f1-9161-bd50ae7ef07a",
-      "019fe8cb-113f-72a2-8b59-3f7c0b867127",
-      "019fe8cb-11f6-74a0-a630-e80d622b906c",
-      "019fe8cb-12be-79b3-82b1-a62846d2ffe2",
-      "019fe8cb-1384-7f23-b28c-b6a4efd68378",
-      "019fe8cb-1439-7760-be34-15306d2791ea",
-      "019fe8cb-150e-7413-83a0-654490daa30a",
-      "019fe8cb-15c1-79a1-874f-d053d84a7a2f",
-      "019fe8cb-1689-7431-b05b-aeb9d86bdf0b",
-      "019fe8cb-1742-7232-9879-45fe87889f97",
-      "019fe8cb-1804-7c21-aab6-8be892573645",
-      "019fe8cb-18b9-7880-a0ed-ba357f4dc5e4",
-      "019fe8cb-1981-7ad3-8859-acd54d2757b1",
-      "019fe8cb-1a30-71a3-b77e-c8d03931f7a6",
-      "019fe8cb-1afe-7301-9608-8fa6b9a44c0d",
-      "019fe8cb-1bb5-7fc0-993a-27fd382a7b97",
-      "019fe8cb-1c75-70d1-a03b-03909d26de2a",
-      "019fe8cb-1d2d-78e0-8e61-5b028d68e0c9",
-      "019fe8cb-1dee-77a3-b59f-6c494cb5f93e"
+      "019feaa5-d3fc-7891-8f96-297130dcdc9e",
+      "019feaa6-12b0-71e2-aa34-ea5121ba270d",
+      "019feaa6-144e-7f23-8e75-c927d83555a0",
+      "019feaa6-159f-7fa0-8673-62547fc3fa3c",
+      "019feaa6-55af-72c1-84ca-bdad9c2c7354",
+      "019feaa6-5775-7073-ab7c-11de1d34234b",
+      "019feaa6-54c5-7652-8f98-bd8fa6997d0e",
+      "019feaa6-5689-78c3-a28f-ecb002fd6e54",
+      "019feaa6-53de-7171-b845-4fa72bfea160",
+      "019feaa6-1832-7361-902a-f144e07186d3",
+      "019feaa5-3784-7820-82db-00751c51935b",
+      "019feaa5-9299-7252-8722-bf102afa04c7",
+      "019feaa5-787c-7300-abbe-7e536ba6a894",
+      "019feaa5-81bf-7a32-88ee-013ef66d9283",
+      "019feaa5-84d7-7100-ad9e-54de062cfb9a",
+      "019feaa5-85a8-7d80-a5d7-5a4e7bddce29",
+      "019feaa5-8671-79f2-aef3-f7007b3ae1bf",
+      "019feaa5-8743-74c1-bf78-0d2596a024c6",
+      "019feaa5-8805-7782-b54b-a218bc93d2ba",
+      "019feaa5-88d9-7d90-abd8-6397c738e4d5",
+      "019feaa5-89ae-7f40-93a0-a6c4765f0711",
+      "019feaa5-8a71-78c3-a0cf-55e8c3e8c78f",
+      "019feaa5-8b46-7bc0-8bf1-1622e5d6a3f7",
+      "019feaa5-8c12-70c2-901d-a8e32fabddda",
+      "019feaa5-8cdc-7360-bf7d-1be24c454842",
+      "019feaa5-8db1-7930-9a6d-89badec998f9",
+      "019feaa5-8e7d-7bb0-966d-ddbc714c1b79",
+      "019feaa5-8f51-7ef2-8156-3711a8f6270b",
+      "019feaa5-9018-7c03-bd1b-4c3fad8dfc1d",
+      "019feaa5-90e5-72d3-954a-5f70d825615f",
+      "019feaa5-91c4-72f3-95b8-2ce372016b10"
     ],
     "request_versions": {
-      "019fe8cb-21a7-7d13-a5e3-cda7794d4a5a": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-22d9-7be1-ac83-db39bb8b13aa": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-23b5-7ee0-8c6f-753974bc8091": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-24c7-75c0-b673-d1c54e731907": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-287d-79b0-8e82-4f93ca4a46b3": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-2a72-79e1-a22f-2d052731d525": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-2788-7371-b614-4f821422d507": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-2973-7e53-af72-7f27f7122168": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-26a1-7230-9784-c2fb39c32698": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-25ba-7e13-a3e8-08519e91e741": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-0ae4-7980-af48-c3effb95a7c9": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1eb6-7f63-9ca9-3fc53b951d43": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-105f-72f1-9161-bd50ae7ef07a": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-113f-72a2-8b59-3f7c0b867127": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-11f6-74a0-a630-e80d622b906c": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-12be-79b3-82b1-a62846d2ffe2": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1384-7f23-b28c-b6a4efd68378": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1439-7760-be34-15306d2791ea": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-150e-7413-83a0-654490daa30a": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-15c1-79a1-874f-d053d84a7a2f": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1689-7431-b05b-aeb9d86bdf0b": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1742-7232-9879-45fe87889f97": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1804-7c21-aab6-8be892573645": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-18b9-7880-a0ed-ba357f4dc5e4": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1981-7ad3-8859-acd54d2757b1": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1a30-71a3-b77e-c8d03931f7a6": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1afe-7301-9608-8fa6b9a44c0d": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1bb5-7fc0-993a-27fd382a7b97": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1c75-70d1-a03b-03909d26de2a": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1d2d-78e0-8e61-5b028d68e0c9": "2026-07-26-production-bootstrap-v2",
-      "019fe8cb-1dee-77a3-b59f-6c494cb5f93e": "2026-07-26-production-bootstrap-v2"
+      "019feaa5-d3fc-7891-8f96-297130dcdc9e": "2026-08-09-production-bootstrap-v3",
+      "019feaa6-12b0-71e2-aa34-ea5121ba270d": "2026-08-09-production-bootstrap-v3",
+      "019feaa6-144e-7f23-8e75-c927d83555a0": "2026-08-09-production-bootstrap-v3",
+      "019feaa6-159f-7fa0-8673-62547fc3fa3c": "2026-08-09-production-bootstrap-v3",
+      "019feaa6-55af-72c1-84ca-bdad9c2c7354": "2026-08-09-production-bootstrap-v3",
+      "019feaa6-5775-7073-ab7c-11de1d34234b": "2026-08-09-production-bootstrap-v3",
+      "019feaa6-54c5-7652-8f98-bd8fa6997d0e": "2026-08-09-production-bootstrap-v3",
+      "019feaa6-5689-78c3-a28f-ecb002fd6e54": "2026-08-09-production-bootstrap-v3",
+      "019feaa6-53de-7171-b845-4fa72bfea160": "2026-08-09-production-bootstrap-v3",
+      "019feaa6-1832-7361-902a-f144e07186d3": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-3784-7820-82db-00751c51935b": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-9299-7252-8722-bf102afa04c7": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-787c-7300-abbe-7e536ba6a894": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-81bf-7a32-88ee-013ef66d9283": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-84d7-7100-ad9e-54de062cfb9a": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-85a8-7d80-a5d7-5a4e7bddce29": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8671-79f2-aef3-f7007b3ae1bf": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8743-74c1-bf78-0d2596a024c6": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8805-7782-b54b-a218bc93d2ba": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-88d9-7d90-abd8-6397c738e4d5": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-89ae-7f40-93a0-a6c4765f0711": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8a71-78c3-a0cf-55e8c3e8c78f": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8b46-7bc0-8bf1-1622e5d6a3f7": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8c12-70c2-901d-a8e32fabddda": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8cdc-7360-bf7d-1be24c454842": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8db1-7930-9a6d-89badec998f9": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8e7d-7bb0-966d-ddbc714c1b79": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-8f51-7ef2-8156-3711a8f6270b": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-9018-7c03-bd1b-4c3fad8dfc1d": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-90e5-72d3-954a-5f70d825615f": "2026-08-09-production-bootstrap-v3",
+      "019feaa5-91c4-72f3-95b8-2ce372016b10": "2026-08-09-production-bootstrap-v3"
     }
   },
   "fixture": {
@@ -117,19 +117,19 @@
     },
     {
       "path": "raw/entities-detector-0.json",
-      "sha256": "a35723205a63e48c20561c9b6b53a69655c4491c8d3c857b3d03ac3308a46877"
+      "sha256": "84da7520ffc90560fe7bd171cee74875d323314a4df4d6eba775618a9581ec94"
     },
     {
       "path": "raw/entities-detector-1.json",
-      "sha256": "7461266e6d28866827af9b3d0a223e60fa1f16ff4930a94b81f6f7ab562cf4be"
+      "sha256": "7251ba39429b60014f55e4ba4ac206509f311f95149fa3194cb81bb61d0d0ea1"
     },
     {
       "path": "raw/entities-detector-2.json",
-      "sha256": "ce93e0a2e20fd8917ea6574be7a210b93c5df89a6ce8d714f8a2ddca51de1f03"
+      "sha256": "5c3741e8a72fb794d9d80909604bd72ed35734647d1946fcbbef23c56de1281c"
     },
     {
       "path": "raw/entities-outcome.json",
-      "sha256": "c1c07a9d59df46c16144fe71409c528ef1515e51271f8850ecd3c7a1bd89c814"
+      "sha256": "f7ab0f1935e955a6c3b66a7b0c132dac8c1fbbf64399d4ca5c231e031f6d0170"
     },
     {
       "path": "raw/entities.json",
@@ -137,27 +137,27 @@
     },
     {
       "path": "raw/gliner2-cause.json",
-      "sha256": "d3500c90ae1ac525f23d2622b51340bc23ea4d9e7c7e85b20abe7dbe71e91e85"
+      "sha256": "29b8ee94845a8514f5f8150d86ea2ebd2f35c0e8d04a4e76910d9e86d0dca04a"
     },
     {
       "path": "raw/gliner2-derailment.json",
-      "sha256": "c1b9d25963f09b85e96d0b2175f75401b8b54a876efb572c1b435a192c52f999"
+      "sha256": "e82c6d2f5663958389d2796fa992db80aa4cdc4c283bc0e3cc9e601b1e800658"
     },
     {
       "path": "raw/gliner2-east-palestine.json",
-      "sha256": "910aad735ae9e3735332aadb74d18ef487b0b0c38645d1f80a02304d8af52623"
+      "sha256": "27c72ca3ffca188cf3af7dd4a43d6a2108936c6ac378c91891aa2f7d7cc2ee14"
     },
     {
       "path": "raw/gliner2-engineer.json",
-      "sha256": "1858b8b7e0393410fc1fdd061ba3032b5b84589c4dade78422a19a57e39400a3"
+      "sha256": "a911820b5729871710d385eb54da52e26cccb872e107edfa8aee84753c7ef6a5"
     },
     {
       "path": "raw/gliner2-salem.json",
-      "sha256": "b888267a475ab176ad11503d11c2b48d93f48747285df8e0bd48232aa23c2475"
+      "sha256": "83382c151e80af09070f831104d3db7eab470df3b92985363225fc41299acfd9"
     },
     {
       "path": "raw/gliner2-sebring.json",
-      "sha256": "d61491d97d9e5e874e90c205502dce77e3a283a07b5832d6b5149bdd15324405"
+      "sha256": "766d60cf6d4c92ab2d010cb02653246918ee9d992b82c78837e3cbe9f2eca7b2"
     },
     {
       "path": "raw/mapped.json",
@@ -165,15 +165,19 @@
     },
     {
       "path": "raw/parse.json",
-      "sha256": "d5b2ce7229bd38884fe60b004ce3e7812f9e790e09ded7536a4e9c3d93cc0491"
+      "sha256": "017d997b1f7daba9e6b2d194f4dd03dc997a0263e5c224bf47ba40e0ea64de31"
+    },
+    {
+      "path": "raw/rerank-request.json",
+      "sha256": "a0fbb1f07e37cc7c48c5307bc5457450f5a071854c08cb8fb0da7412f6d59174"
     },
     {
       "path": "raw/rerank.json",
-      "sha256": "bddf3ee5d53723e3fe99466446d41c2945330fc3ade8b7751137d854e69ab766"
+      "sha256": "c312fc84da3d14247b6c496d06b95ce2c29532d1e39a4c12caac9820ae9ea4d1"
     },
     {
       "path": "raw/retrieve.json",
-      "sha256": "402d0c4fad3ac8f6b2b3299de1d1c92d33d31033f587b6f67ce65debf1fa6b09"
+      "sha256": "9b0740cc9d16a13616c74b3f13e48a9f1030b24e1db071cc0de6b881a4c74be9"
     },
     {
       "path": "evaluation.json",
@@ -190,42 +194,42 @@
       "stage": "parse",
       "model": "docling",
       "configured_model": "docling",
-      "latency_ms": 1806.4
+      "latency_ms": 17161.9
     },
     {
       "stage": "retrieve",
       "model": "BAAI/bge-m3",
-      "latency_ms": 3655.4
+      "latency_ms": 6678.3
     },
     {
       "stage": "rerank",
       "model": "Qwen/Qwen3-Reranker-4B",
-      "latency_ms": 757.3
+      "latency_ms": 16743.3
     },
     {
       "stage": "entities_detector_0",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 308.8
+      "latency_ms": 16044.7
     },
     {
       "stage": "entities_detector_1",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 217.8
+      "latency_ms": 389.6
     },
     {
       "stage": "entities_detector_2",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 272.8
+      "latency_ms": 361.9
     },
     {
       "stage": "entities_outcome",
       "model": "urchade/gliner_multi-v2.1",
-      "latency_ms": 238.4
+      "latency_ms": 658.2
     },
     {
       "stage": "gliner2_sebring",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 239.9,
+      "latency_ms": 15275.0,
       "source_chunk_ids": [
         "chunk-11"
       ],
@@ -234,7 +238,7 @@
     {
       "stage": "gliner2_salem",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 226.6,
+      "latency_ms": 216.7,
       "source_chunk_ids": [
         "chunk-12"
       ],
@@ -243,7 +247,7 @@
     {
       "stage": "gliner2_east_palestine",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 244.1,
+      "latency_ms": 244.8,
       "source_chunk_ids": [
         "chunk-13"
       ],
@@ -252,7 +256,7 @@
     {
       "stage": "gliner2_cause",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 239.3,
+      "latency_ms": 225.2,
       "source_chunk_ids": [
         "chunk-1"
       ],
@@ -261,7 +265,7 @@
     {
       "stage": "gliner2_engineer",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 253.0,
+      "latency_ms": 221.9,
       "source_chunk_ids": [
         "chunk-14"
       ],
@@ -270,7 +274,7 @@
     {
       "stage": "gliner2_derailment",
       "model": "fastino/gliner2-large-v1",
-      "latency_ms": 256.2,
+      "latency_ms": 242.5,
       "source_chunk_ids": [
         "chunk-15"
       ],

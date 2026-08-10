@@ -182,8 +182,11 @@ def test_review_boundary_passes_evaluation() -> None:
 def test_verified_rerank_correlates_to_retrieval_query() -> None:
     raw_dir = ROOT / "verified-run" / "raw"
     retrieve = json.loads((raw_dir / "retrieve.json").read_text(encoding="utf-8"))
+    rerank_request = json.loads((raw_dir / "rerank-request.json").read_text(encoding="utf-8"))
     rerank = json.loads((raw_dir / "rerank.json").read_text(encoding="utf-8"))
-    assert rerank["query_id"] == retrieve["query"]["id"]
+    assert rerank_request["query"]["id"] == retrieve["query"]["id"]
+    assert [item["id"] for item in rerank_request["items"]] == [row["chunk_id"] for row in retrieve["ranking"]]
+    assert {row["item_id"] for row in rerank["scores"]} == {item["id"] for item in rerank_request["items"]}
 
 
 def test_review_fails_closed_on_changed_temperature() -> None:

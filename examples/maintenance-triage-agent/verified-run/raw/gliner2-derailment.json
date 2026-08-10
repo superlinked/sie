@@ -23,14 +23,14 @@
   "id": "ranked-ntsb-derailment-evidence",
   "model": "fastino/gliner2-large-v1",
   "request": {
-    "id": "019fe8cb-2a72-79e1-a22f-2d052731d525",
+    "id": "019feaa6-5775-7073-ab7c-11de1d34234b",
     "credits_debited": 1,
-    "rate_book_version": "2026-07-26-production-bootstrap-v2",
+    "rate_book_version": "2026-08-09-production-bootstrap-v3",
     "usage": {
       "input_tokens": 25,
       "credits_charged": 1,
-      "rate_book_version": "2026-07-26-production-bootstrap-v2"
+      "rate_book_version": "2026-08-09-production-bootstrap-v3"
     },
-    "execution_identity_sha256": "a61058c96cb7d88459f63949845a8b35aa0b258042898d6159adf80eff846963"
+    "execution_identity_sha256": "d365dc27037c3c16cfc7e6ee3ef02f1a9cfaca84c1967d22ab4c2bf4b31e6e4d"
   }
 }

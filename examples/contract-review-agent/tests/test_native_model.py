@@ -615,7 +615,7 @@ async def test_query_obligations_db_selects_configured_generation_helper(
 
 
 @pytest.mark.asyncio
-async def test_query_obligations_db_filters_rows_to_current_contract(
+async def test_query_obligations_db_validates_rows_for_current_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompts: list[str] = []
@@ -633,14 +633,17 @@ async def test_query_obligations_db_filters_rows_to_current_contract(
         contract_tools,
         "_run_select",
         lambda _db_path, _sql, _params: (
-            ["counterparty", "status", "obligation"],
-            [
-                ("Current Contract", "open", "Current row"),
-                ("Other Contract", "open", "Other row"),
-            ],
+            ["counterparty", "status", "obligation", "due_date", "amount_usd"],
+            [("Current Contract", "open", "Current row", "2026-06-30", None)],
         ),
     )
-    monkeypatch.setattr(contract_tools, "_open_obligation_count", lambda *_args: 1)
+    monkeypatch.setattr(
+        contract_tools,
+        "_open_obligation_rows",
+        lambda *_args: [
+            ("Current Contract", "open", "Current row", "2026-06-30", None)
+        ],
+    )
     app = AppContext(
         sie=FakeSIE([]),  # type: ignore[arg-type]
         cfg={
@@ -669,13 +672,39 @@ async def test_query_obligations_db_filters_rows_to_current_contract(
     assert ":counterparty" in prompts[0]
     assert "Return every row" in prompts[0]
     assert "Current row" in result
-    assert "Other row" not in result
     assert app.clause_cache["obligations_result"] == result
 
 
+@pytest.mark.parametrize(
+    ("returned_rows", "expected_rows", "expected_count", "actual_count"),
+    [
+        (
+            [("Current Contract", "open", "Only one row", "2026-06-30", None)],
+            [
+                ("Current Contract", "open", "Only one row", "2026-06-30", None),
+                ("Current Contract", "open", "Missing row", "2026-07-01", 120000.0),
+            ],
+            2,
+            1,
+        ),
+        (
+            [
+                ("Current Contract", "open", "Duplicate row", "2026-06-30", None),
+                ("Current Contract", "open", "Duplicate row", "2026-06-30", None),
+            ],
+            [("Current Contract", "open", "Duplicate row", "2026-06-30", None)],
+            1,
+            2,
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_query_obligations_db_rejects_incomplete_contract_scope(
+async def test_query_obligations_db_rejects_incomplete_or_duplicated_contract_scope(
     monkeypatch: pytest.MonkeyPatch,
+    returned_rows: list[tuple],
+    expected_rows: list[tuple],
+    expected_count: int,
+    actual_count: int,
 ) -> None:
     async def fake_instruct(
         _app: object, _model: str, _messages: list[dict[str, str]], **_kwargs: Any
@@ -689,11 +718,13 @@ async def test_query_obligations_db_rejects_incomplete_contract_scope(
         contract_tools,
         "_run_select",
         lambda _db_path, _sql, _params: (
-            ["counterparty", "status", "obligation"],
-            [("Current Contract", "open", "Only one row")],
+            ["counterparty", "status", "obligation", "due_date", "amount_usd"],
+            returned_rows,
         ),
     )
-    monkeypatch.setattr(contract_tools, "_open_obligation_count", lambda *_args: 2)
+    monkeypatch.setattr(
+        contract_tools, "_open_obligation_rows", lambda *_args: expected_rows
+    )
     app = AppContext(
         sie=FakeSIE([]),  # type: ignore[arg-type]
         cfg={
@@ -718,7 +749,7 @@ async def test_query_obligations_db_rejects_incomplete_contract_scope(
         json.dumps({"question": "Show upcoming obligations"}),
     )
 
-    assert "expected 2 open rows, got 1" in result
+    assert f"expected {expected_count} open rows, got {actual_count}" in result
 
 
 @pytest.mark.asyncio

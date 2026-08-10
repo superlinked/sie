@@ -607,6 +607,30 @@ def test_checkpoint_rejects_a_malformed_execution_identity(tmp_path: Path) -> No
         catalog_agent._load_checkpoint(output_path, [source], offset=7)
 
 
+@pytest.mark.parametrize("field_name", ["verifier_response_id", "api_calls"])
+def test_checkpoint_rejects_missing_decision_provenance(
+    tmp_path: Path, field_name: str
+) -> None:
+    source = listing(reference="A > One")
+    decision = CatalogDecision(
+        row_idx=7,
+        selected_path="A > One",
+        needs_review=False,
+        candidate_union=["A > One", "A > Two"],
+        text_scores=[1.0, 0.0, 0.0, 0.0],
+        image_plus_copy_scores=[1.0, 0.0, 0.0, 0.0],
+        verifier_response_id="candidate_verification-7",
+        api_calls=api_calls(7),
+    )
+    output_path = tmp_path / "evaluation.json"
+    checkpoint = catalog_agent._evaluation_output([source], {7: decision}, offset=7)
+    checkpoint["results"][0].pop(field_name)
+    catalog_agent._write_evaluation_output(output_path, checkpoint)
+
+    with pytest.raises(ValueError, match=rf"{field_name} missing for row 7"):
+        catalog_agent._load_checkpoint(output_path, [source], offset=7)
+
+
 @pytest.mark.parametrize(
     ("field_name", "value", "match"),
     [

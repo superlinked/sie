@@ -12,6 +12,7 @@ import base64
 import re
 import sqlite3
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Literal
 
@@ -495,20 +496,28 @@ def _run_select(
     try:
         cur = conn.execute(sql, params or {})
         cols = [d[0] for d in cur.description] if cur.description else []
-        return cols, cur.fetchmany(50)
+        return cols, cur.fetchall()
     finally:
         conn.close()
 
 
-def _open_obligation_count(db_path: str, counterparty: str) -> int:
+_SCOPED_OBLIGATION_COLUMNS = (
+    "counterparty",
+    "status",
+    "obligation",
+    "due_date",
+    "amount_usd",
+)
+
+
+def _open_obligation_rows(db_path: str, counterparty: str) -> list[tuple]:
     conn = sqlite3.connect(db_path)
     try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM obligations "
-            "WHERE counterparty = ? AND status = 'open'",
+        return conn.execute(
+            "SELECT counterparty, status, obligation, due_date, amount_usd "
+            "FROM obligations WHERE counterparty = ? AND status = 'open'",
             (counterparty,),
-        ).fetchone()
-        return int(row[0])
+        ).fetchall()
     finally:
         conn.close()
 
@@ -596,26 +605,25 @@ async def query_obligations_db(
     except sqlite3.Error as exc:
         return f"SQL error: {exc}\nQuery was:\n{sql}"
     if app.obligation_counterparty:
-        required_scope_columns = {"counterparty", "status"}
+        required_scope_columns = set(_SCOPED_OBLIGATION_COLUMNS)
         missing_scope_columns = required_scope_columns - set(cols)
         if missing_scope_columns:
             return (
                 "Generated query omitted columns required for exact contract "
                 f"scoping: {', '.join(sorted(missing_scope_columns))}.\nSQL: {sql}"
             )
-        counterparty_index = cols.index("counterparty")
-        status_index = cols.index("status")
-        rows = [
-            row
-            for row in rows
-            if row[counterparty_index] == app.obligation_counterparty
-            and row[status_index] == "open"
+        scope_indexes = [cols.index(column) for column in _SCOPED_OBLIGATION_COLUMNS]
+        returned_scope_rows = [
+            tuple(row[index] for index in scope_indexes) for row in rows
         ]
-        expected_rows = _open_obligation_count(app.db_path, app.obligation_counterparty)
-        if len(rows) != expected_rows:
+        expected_scope_rows = _open_obligation_rows(
+            app.db_path, app.obligation_counterparty
+        )
+        if Counter(returned_scope_rows) != Counter(expected_scope_rows):
             return (
                 "Generated query returned incomplete contract scope: expected "
-                f"{expected_rows} open rows, got {len(rows)}.\nSQL: {sql}"
+                f"{len(expected_scope_rows)} open rows, got "
+                f"{len(returned_scope_rows)}.\nSQL: {sql}"
             )
     if not rows:
         return f"Query ran but returned no rows.\nSQL: {sql}"

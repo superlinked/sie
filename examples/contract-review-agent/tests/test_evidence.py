@@ -42,6 +42,9 @@ def test_published_section_allowlist_rejects_unrelated_citations() -> None:
     assert _unsupported_published_sections("Financial terms are in Section 6.7.") == {
         "6.7"
     }
+    assert _unsupported_published_sections("Risks are in Sections 6.7 and 1.3.") == {
+        "6.7"
+    }
 
 
 def test_optional_citation_repair_precedes_synthesis_in_provenance() -> None:
@@ -62,6 +65,11 @@ def test_cuad_scan_renders_signature_block_or_document_tail() -> None:
     text = "title\nbody\nIn witness whereof\nBy: /s/ Example"
     assert _signature_page_text(text) == "In witness whereof\nBy: /s/ Example"
     assert _signature_page_text("0123456789") == "0123456789"
+    tail = _signature_page_text(
+        "\n".join([*(f"contract line {index}" for index in range(60)), "By: /s/ Tail"])
+    )
+    assert len(tail.splitlines()) == 46
+    assert tail.endswith("By: /s/ Tail")
 
 
 def _api_calls() -> list[dict[str, object]]:

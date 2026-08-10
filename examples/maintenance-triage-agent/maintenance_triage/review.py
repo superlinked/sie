@@ -652,14 +652,23 @@ def _write_run(run_dir: Path, config: dict[str, Any]) -> None:
         )
 
         started = time.perf_counter()
+        rerank_query = Item(id="bearing-trend-query", text=config["review"]["query"])
+        rerank_items = [Item(id=row["chunk_id"], text=row["text"]) for row in retrieval]
+        _write_json(
+            raw_dir / "rerank-request.json",
+            {
+                "model": config["models"]["rerank"],
+                "query": rerank_query,
+                "items": rerank_items,
+            },
+        )
         rerank_raw = client.score(
             config["models"]["rerank"],
-            Item(id="bearing-trend-query", text=config["review"]["query"]),
-            [Item(id=row["chunk_id"], text=row["text"]) for row in retrieval],
+            rerank_query,
+            rerank_items,
             wait_for_capacity=True,
             provision_timeout_s=timeout,
         )
-        rerank_raw["query_id"] = "bearing-trend-query"
         by_id = {row["chunk_id"]: row["text"] for row in retrieval}
         ranked = [
             {

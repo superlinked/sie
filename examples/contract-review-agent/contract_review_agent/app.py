@@ -296,7 +296,7 @@ _PUBLISHED_ALLOWED_SECTIONS = frozenset(
 
 
 def _unsupported_published_sections(findings: str) -> set[str]:
-    cited = set(re.findall(r"\bSection\s+(\d+(?:\.\d+)+)\b", findings, re.IGNORECASE))
+    cited = set(re.findall(r"\bSections?\s+(\d+(?:\.\d+)+)\b", findings, re.IGNORECASE))
     return cited - _PUBLISHED_ALLOWED_SECTIONS
 
 

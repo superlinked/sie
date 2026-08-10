@@ -737,6 +737,17 @@ def _load_checkpoint(
             raise ValueError(
                 f"Cannot resume from {path}: needs review changed for row {row_idx}"
             )
+        verifier_response_id = result.get("verifier_response_id")
+        if not isinstance(verifier_response_id, str) or not verifier_response_id:
+            raise ValueError(
+                f"Cannot resume from {path}: verifier_response_id missing for row "
+                f"{row_idx}"
+            )
+        api_calls = result.get("api_calls")
+        if not isinstance(api_calls, list):
+            raise ValueError(
+                f"Cannot resume from {path}: api_calls missing for row {row_idx}"
+            )
         decision = CatalogDecision(
             row_idx=row_idx,
             selected_path=selected_path,
@@ -744,8 +755,8 @@ def _load_checkpoint(
             candidate_union=expected_candidate_union,
             text_scores=text_scores,
             image_plus_copy_scores=image_plus_copy_scores,
-            verifier_response_id=result["verifier_response_id"],
-            api_calls=result["api_calls"],
+            verifier_response_id=verifier_response_id,
+            api_calls=api_calls,
         )
         row_request_ids = _validate_api_calls(decision.api_calls, row_idx=row_idx)
         verifier_call = next(
