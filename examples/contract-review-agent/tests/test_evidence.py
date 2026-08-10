@@ -455,7 +455,9 @@ def test_published_investigator_findings_require_complete_marketing_evidence() -
         "Section 6.9; not at fault; 2026-06-30; 2026-07-01; 2026-09-15; "
         "$500,000 letter of credit; $250,000 monthly purchase order; 375 units; "
         "quarterly compliance attestation; annual subscription fee; renewal notice; "
-        "Upcoming obligations and deadlines"
+        "Upcoming obligations and deadlines; the visible signature page shows "
+        "By: /s/ Joseph Marino and a Jim Stump signatory block, but no execution "
+        "dates. Execution is not established from the visible signature page."
     )
     assert evidence_module._published_investigator_findings_are_complete(
         evidence_module.PUBLISHED_CONTRACT_LABEL, findings
@@ -464,6 +466,10 @@ def test_published_investigator_findings_require_complete_marketing_evidence() -
     assert not evidence_module._published_investigator_findings_are_complete(
         evidence_module.PUBLISHED_CONTRACT_LABEL,
         findings.replace("Section 5.3", "Indemnification"),
+    )
+    assert not evidence_module._published_investigator_findings_are_complete(
+        evidence_module.PUBLISHED_CONTRACT_LABEL,
+        findings.replace("By: /s/ Joseph Marino", "No actual signatures are present"),
     )
 
 

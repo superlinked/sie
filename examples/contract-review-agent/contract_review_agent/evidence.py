@@ -330,6 +330,20 @@ def _published_investigator_findings_missing(label: str, findings: str) -> list[
             and "master services agreement" not in normalized
             and re.search(r"\bmsa\b", normalized) is None
         ),
+        "partial visible signature evidence": (
+            "/s/" in normalized
+            and "joseph marino" in normalized
+            and "jim stump" in normalized
+            and "no actual signature" not in normalized
+            and "no signatures are present" not in normalized
+        ),
+        "visible-page execution qualification": (
+            "not established from the visible signature page" in normalized
+            and any(
+                wording in normalized
+                for wording in ("no execution dates", "no dates", "not dated")
+            )
+        ),
     }
     return [name for name, present in requirements.items() if not present]
 

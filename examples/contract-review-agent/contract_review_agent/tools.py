@@ -212,7 +212,10 @@ async def read_signature_page(ctx: RunContextWrapper[AppContext], question: str)
                 "content": (
                     "You are a meticulous contracts paralegal. Answer only from what "
                     "is visible in the image. Describe only the visible page or image; "
-                    "never infer where the full contract ends."
+                    "never infer where the full contract ends. Treat a literal `/s/ "
+                    "Name` as an explicit signature mark. List partial evidence "
+                    "precisely; never replace it with a blanket statement that no "
+                    "signatures are present."
                 ),
             },
             {
@@ -303,9 +306,9 @@ async def analyze_clause_risks(ctx: RunContextWrapper[AppContext]) -> str:
 # ──────────────────────────────────────────────────────────────────────────
 @function_tool(failure_error_function=None)
 async def ocr_signature_page(ctx: RunContextWrapper[AppContext]) -> str:
-    """OCR the executed signature page (a scanned image) into markdown text.
-    Use this to recover who signed, their titles, and the execution date —
-    details that exist only on the scan, not in the contract body."""
+    """OCR the supplied signature-page image into markdown text.
+    Use this to recover visible signatories, titles, signature marks, and dates —
+    details that may exist only on the scan, not in the contract body."""
     app = ctx.context
     model = app.cfg["models"]["ocr"]
     t0 = time.monotonic()

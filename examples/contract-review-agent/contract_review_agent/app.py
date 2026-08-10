@@ -186,9 +186,9 @@ ONLY way to learn anything is to CALL YOUR TOOLS. Investigate thoroughly: call E
 one of these tools, one after another, before you write anything.
 
 - classify_document() — the document type
-- ocr_signature_page() — read the executed signature page (signatories, titles, date)
+- ocr_signature_page() — read the supplied signature-page image (signatories, titles, marks, dates)
 - extract_entities() — parties, dates, amounts, governing law
-- read_signature_page("In this signature-page image, are both parties' signatures present and dated?") — visual execution check
+- read_signature_page("List each visible signatory, title, signature mark, and date; then say whether both parties' signatures and dates are visible.") — visual execution check
 - search_clauses("renewal mechanics"), then
   search_clauses("governing law, exclusivity, term, letter of credit, purchase minimum, and reporting obligations"),
   then search_clauses("indemnification"), then search_clauses("termination")
@@ -222,9 +222,12 @@ query_obligations_db. Cite the letter of credit, purchase order, and 375-unit
 minimum as Section 1.6.
 Keep the final findings report between 1,800 and 3,000 characters. Be concise;
 validated risk and obligation appendices preserve the complete specialist outputs.
-Describe execution only from the supplied image; when signatures are not visible,
-state "Execution is not established from the visible signature page" rather than
-declaring the full agreement unexecuted. Preserve every established date, monetary
+Describe execution only from the supplied image. Report each visible signatory,
+title, literal `/s/` signature mark, and date. Never replace partial signature
+evidence with a blanket statement that no signatures are present. Unless both
+parties' signatures and execution dates are visible, state "Execution is not
+established from the visible signature page" rather than declaring the full
+agreement unexecuted. Preserve every established date, monetary
 obligation, unit commitment, territory or exclusivity term, and term or renewal
 fact returned by the tools."""
 
@@ -259,9 +262,10 @@ first-year minimum (all Section 1.6); and Distributor's quarterly first-year rep
 (Section 4.1). Keep each actor, amount, timing, condition, and citation attached to
 its fact.
 Preserve the full party names Electric City Corp. and Electric City of Illinois LLC.
-When `executed` is false because signatures are not visible, say only that execution
-is not established from the visible signature page; never call the whole agreement
-unexecuted.
+When `executed` is false because both signatures and dates are not visible, preserve
+each visible signatory, title, literal `/s/` signature mark, and date, say only that
+execution is not established from the visible signature page, and never call the
+whole agreement unexecuted.
 Key obligations must be existing duties established in the findings; never present
 a proposed redline or notice period as a current obligation. Preserve every
 established date, monetary obligation, unit commitment, territory or exclusivity
@@ -273,7 +277,10 @@ _INVESTIGATOR_TOOL_SEQUENCE = (
     ("extract_entities", None),
     (
         "read_signature_page",
-        "In this signature-page image, are both parties' signatures present and dated?",
+        (
+            "List each visible signatory, title, signature mark, and date; then say "
+            "whether both parties' signatures and dates are visible."
+        ),
     ),
     ("search_clauses", "renewal mechanics"),
     ("search_clauses", COMMERCIAL_FACTS_QUERY),
@@ -305,7 +312,10 @@ def build_findings_auditor(
             "1.1, 1.3, 1.6, 4.1, 4.2, 4.4, 5.3, and 6.9. Governing law is Section 6.9; "
             "the letter of credit, monthly purchase order, and unit minimum are Section "
             "1.6. The document type is Distributor Agreement, never Master Services "
-            "Agreement or MSA. Never cite Section 6.7. Do not add facts or recommendations."
+            "Agreement or MSA. Never cite Section 6.7. Preserve every visible "
+            "signatory, title, literal `/s/` signature mark, and date; never replace "
+            "partial signature evidence with a blanket statement that no signatures "
+            "are present. Do not add facts or recommendations."
         ),
         model=model_for(
             cfg["models"]["orchestrator"],
