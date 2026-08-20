@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from threat_mapper.models import BehaviorEvidence, CandidateScore, Technique
-from threat_mapper.pipeline import _ground_quote, retrieve, verify_mapping
+from threat_mapper.pipeline import _ground_quote, retrieve, split_report, verify_mapping
 
 
 def technique(technique_id: str, name: str) -> Technique:
@@ -61,6 +61,40 @@ def test_behavior_extraction_keeps_the_quote_in_its_source_chunk() -> None:
 
     assert len(behaviors) == 1
     assert behaviors[0].source_start == report.rindex("used a proxy")
+
+
+def test_behavior_extraction_preserves_offsets_with_noncanonical_separators() -> None:
+    from threat_mapper.pipeline import extract_behaviors
+
+    client = FakeGenerateClient(
+        [
+            {"behaviors": []},
+            {"behaviors": [{"quote": "used a proxy", "summary": "AiTM"}]},
+        ]
+    )
+    report = "First paragraph used a proxy.\r\n\r\n\r\nSecond paragraph used a proxy."
+
+    behaviors, _ = extract_behaviors(
+        client,
+        "Qwen/Qwen3.5-4B",
+        report,
+        max_behaviors=4,
+        chunk_characters=31,
+        provision_timeout_s=60,
+    )
+
+    assert len(behaviors) == 1
+    assert behaviors[0].source_start == report.rindex("used a proxy")
+    assert report[behaviors[0].source_start : behaviors[0].source_end] == "used a proxy"
+
+
+def test_split_report_returns_exact_source_spans_when_paragraphs_merge() -> None:
+    report = "  First paragraph.\n\n\nSecond paragraph.  "
+
+    spans = split_report(report, max_characters=80)
+
+    assert spans == [(2, len(report) - 2)]
+    assert report[slice(*spans[0])] == "First paragraph.\n\n\nSecond paragraph."
 
 
 def test_retrieve_sorts_by_cosine_score() -> None:

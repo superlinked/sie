@@ -74,28 +74,56 @@ def _ground_quote(source: str, quote: str) -> tuple[str, int, int] | None:
     return match.group(), match.start(), match.end()
 
 
-def split_report(text: str, max_characters: int) -> list[str]:
-    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text) if paragraph.strip()]
-    chunks: list[str] = []
-    current = ""
-    for paragraph in paragraphs:
-        if len(paragraph) > max_characters:
-            if current:
-                chunks.append(current)
-                current = ""
+def split_report(text: str, max_characters: int) -> list[tuple[int, int]]:
+    if max_characters < 1:
+        raise ValueError("max_characters must be positive")
+
+    paragraph_spans: list[tuple[int, int]] = []
+    cursor = 0
+    for separator in re.finditer(r"(?:\r?\n[ \t]*){2,}", text):
+        start, end = cursor, separator.start()
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if start < end:
+            paragraph_spans.append((start, end))
+        cursor = separator.end()
+
+    start, end = cursor, len(text)
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    if start < end:
+        paragraph_spans.append((start, end))
+
+    if not paragraph_spans:
+        return [(0, min(len(text), max_characters))]
+
+    chunks: list[tuple[int, int]] = []
+    current_start: int | None = None
+    current_end = 0
+    for paragraph_start, paragraph_end in paragraph_spans:
+        if paragraph_end - paragraph_start > max_characters:
+            if current_start is not None:
+                chunks.append((current_start, current_end))
+                current_start = None
             chunks.extend(
-                paragraph[index : index + max_characters] for index in range(0, len(paragraph), max_characters)
+                (chunk_start, min(chunk_start + max_characters, paragraph_end))
+                for chunk_start in range(paragraph_start, paragraph_end, max_characters)
             )
             continue
-        candidate = paragraph if not current else f"{current}\n\n{paragraph}"
-        if len(candidate) > max_characters:
-            chunks.append(current)
-            current = paragraph
+        if current_start is None:
+            current_start, current_end = paragraph_start, paragraph_end
+        elif paragraph_end - current_start <= max_characters:
+            current_end = paragraph_end
         else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks or [text[:max_characters]]
+            chunks.append((current_start, current_end))
+            current_start, current_end = paragraph_start, paragraph_end
+    if current_start is not None:
+        chunks.append((current_start, current_end))
+    return chunks
 
 
 def extract_behaviors(
@@ -110,12 +138,8 @@ def extract_behaviors(
     behaviors: list[BehaviorEvidence] = []
     calls: list[dict[str, Any]] = []
     seen_quotes: set[str] = set()
-    source_cursor = 0
-    for chunk_index, chunk in enumerate(split_report(report_text, chunk_characters)):
-        chunk_start = report_text.find(chunk, source_cursor)
-        if chunk_start < 0:
-            raise RuntimeError("A report chunk could not be traced back to the source text")
-        source_cursor = chunk_start + len(chunk)
+    for chunk_index, (chunk_start, chunk_end) in enumerate(split_report(report_text, chunk_characters)):
+        chunk = report_text[chunk_start:chunk_end]
         prompt = (
             "You review a cyber threat report. Extract concrete adversary behaviors that can be mapped to MITRE "
             "ATT&CK Enterprise techniques. Copy each quote exactly from the report chunk. Skip product advice, "

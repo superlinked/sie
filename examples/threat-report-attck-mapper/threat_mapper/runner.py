@@ -23,7 +23,7 @@ from .pipeline import enrich_entities, evidence_sha256, extract_behaviors, reran
 from .sie import encode_texts, jsonable, request_record
 
 
-def _write_json(path: Path, value: Any) -> None:
+def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
@@ -62,6 +62,19 @@ def _artifact_rows(run_dir: Path) -> list[dict[str, str]]:
         for path in sorted(run_dir.rglob("*"))
         if path.is_file() and path.name != "manifest.json"
     ]
+
+
+def _publish_failed_run(final_dir: Path, staging: Path, error: BaseException) -> None:
+    failure_manifest = {
+        "created_at": datetime.now(UTC).isoformat(),
+        "status": "post_processing_failed",
+        "error": {"type": type(error).__name__, "message": str(error)},
+        "artifacts": _artifact_rows(staging),
+    }
+    with contextlib.suppress(OSError, TypeError, ValueError):
+        write_json(staging / "manifest.json", failure_manifest)
+    with contextlib.suppress(OSError):
+        staging.rename(final_dir)
 
 
 def _rate_book_provenance(calls: list[dict[str, Any]]) -> dict[str, Any]:
@@ -141,6 +154,7 @@ def map_report(config: dict[str, Any], *, report_path: Path, run_id: str) -> Pat
     lookup = catalog_by_id(techniques)
     final_dir, staging, reservation = _begin_run(run_id)
     calls: list[dict[str, Any]] = []
+    preserve_artifacts = False
     try:
         timeout = float(config["cluster"]["provision_timeout_s"])
         with SIEClient(
@@ -250,8 +264,9 @@ def map_report(config: dict[str, Any], *, report_path: Path, run_id: str) -> Pat
             "suggested_mapping_count": sum(row["selected_technique_id"] is not None for row in decisions),
             "mappings": decisions,
         }
-        _write_json(staging / "review.json", review)
-        _write_json(staging / "api-calls.json", calls)
+        write_json(staging / "review.json", review)
+        write_json(staging / "api-calls.json", calls)
+        preserve_artifacts = True
         manifest = {
             "created_at": datetime.now(UTC).isoformat(),
             "endpoint": config["cluster"]["url"],
@@ -273,10 +288,13 @@ def map_report(config: dict[str, Any], *, report_path: Path, run_id: str) -> Pat
             ),
             "artifacts": _artifact_rows(staging),
         }
-        _write_json(staging / "manifest.json", manifest)
+        write_json(staging / "manifest.json", manifest)
         staging.rename(final_dir)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+    except BaseException as exc:
+        if preserve_artifacts:
+            _publish_failed_run(final_dir, staging, exc)
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
         raise
     finally:
         with contextlib.suppress(OSError):
@@ -319,6 +337,7 @@ def benchmark(
 
     final_dir, staging, reservation = _begin_run(run_id)
     calls: list[dict[str, Any]] = []
+    preserve_artifacts = False
     try:
         timeout = float(config["cluster"]["provision_timeout_s"])
         with SIEClient(
@@ -418,8 +437,9 @@ def benchmark(
                 predictions.append(row)
 
         _write_jsonl(staging / "predictions.jsonl", predictions)
-        _write_json(staging / "evaluation.json", evaluate_predictions(predictions))
-        _write_json(staging / "api-calls.json", calls)
+        write_json(staging / "api-calls.json", calls)
+        preserve_artifacts = True
+        write_json(staging / "evaluation.json", evaluate_predictions(predictions))
         manifest = {
             "created_at": datetime.now(UTC).isoformat(),
             "endpoint": config["cluster"]["url"],
@@ -450,10 +470,13 @@ def benchmark(
             ),
             "artifacts": _artifact_rows(staging),
         }
-        _write_json(staging / "manifest.json", manifest)
+        write_json(staging / "manifest.json", manifest)
         staging.rename(final_dir)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+    except BaseException as exc:
+        if preserve_artifacts:
+            _publish_failed_run(final_dir, staging, exc)
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
         raise
     finally:
         with contextlib.suppress(OSError):

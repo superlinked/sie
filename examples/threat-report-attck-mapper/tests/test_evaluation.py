@@ -32,3 +32,31 @@ def test_evaluation_reports_retrieval_rerank_and_selective_verifier_metrics() ->
     assert metrics["rerank"]["hit_at_1"] == 0.5
     assert metrics["verification"]["coverage"] == 0.5
     assert metrics["verification"]["selective_precision"] == 1.0
+
+
+def test_evaluation_returns_zero_metrics_when_no_cases_have_active_gold() -> None:
+    metrics = evaluate_predictions(
+        [
+            {
+                "document": "historical-report",
+                "gold_ids": [],
+                "retrieval": [candidate("T1539")],
+                "rerank": [],
+                "verification": None,
+            }
+        ]
+    )
+
+    assert metrics["cases"] == {
+        "total": 1,
+        "eligible": 0,
+        "excluded_no_active_gold": 1,
+        "documents": 0,
+    }
+    assert metrics["retrieval"] == {
+        "hit_at_1": 0.0,
+        "hit_at_5": 0.0,
+        "recall_at_10": 0.0,
+        "mrr": 0.0,
+        "document_macro_hit_at_1": 0.0,
+    }

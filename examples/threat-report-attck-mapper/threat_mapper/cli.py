@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,7 +11,7 @@ from .catalog import load_annoctr_catalog, load_catalog
 from .config import load_config
 from .data import ensure_sources, find_annoctr_catalog, load_linking_cases
 from .evaluation import evaluate_predictions, read_predictions
-from .runner import benchmark, map_annoctr_demo, map_report
+from .runner import benchmark, map_annoctr_demo, map_report, write_json
 
 console = Console()
 
@@ -66,7 +65,7 @@ def _evaluate(args: argparse.Namespace) -> None:
         raise SystemExit(f"Predictions not found: {predictions_path}")
     evaluation = evaluate_predictions(read_predictions(predictions_path))
     output = args.run_dir / "evaluation.json"
-    output.write_text(json.dumps(evaluation, indent=2) + "\n", encoding="utf-8")
+    write_json(output, evaluation)
     console.print_json(data=evaluation)
 
 

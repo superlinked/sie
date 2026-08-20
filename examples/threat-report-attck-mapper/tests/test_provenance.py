@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from threat_mapper import runner
@@ -52,3 +54,20 @@ def test_begin_run_reserves_an_id_against_concurrent_writers(tmp_path, monkeypat
     assert reservation.is_dir()
     with pytest.raises(FileExistsError, match="reserved"):
         runner._begin_run("one")
+
+
+def test_publish_failed_run_keeps_persisted_artifacts(tmp_path) -> None:
+    staging = tmp_path / ".run-staging"
+    final_dir = tmp_path / "run"
+    staging.mkdir()
+    (staging / "predictions.jsonl").write_text('{"case_id":"one"}\n', encoding="utf-8")
+    (staging / "api-calls.json").write_text("[]\n", encoding="utf-8")
+
+    runner._publish_failed_run(final_dir, staging, RuntimeError("provenance failed"))
+
+    assert not staging.exists()
+    assert (final_dir / "predictions.jsonl").is_file()
+    manifest = json.loads((final_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "post_processing_failed"
+    assert manifest["error"] == {"type": "RuntimeError", "message": "provenance failed"}
+    assert [row["path"] for row in manifest["artifacts"]] == ["api-calls.json", "predictions.jsonl"]

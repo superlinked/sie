@@ -101,6 +101,8 @@ def encode_texts(
         if len(responses) != len(items):
             raise RuntimeError(f"Embedding batch returned {len(responses)} rows for {len(items)} inputs")
         vectors.extend(dense_vector(row) for row in responses)
+        # The SDK repeats metadata for the whole HTTP request on every result row.
+        # Record it once so the ledger does not duplicate the request ID and charge.
         calls.append(
             request_record(
                 f"{stage}_{offset // batch_size}",
