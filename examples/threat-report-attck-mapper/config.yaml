@@ -1,0 +1,44 @@
+cluster:
+  url: "http://localhost:8080"
+  api_key: ""
+  provision_timeout_s: 900
+
+models:
+  parse: "docling"
+  behavior_extract: "Qwen/Qwen3.5-4B"
+  entities: "fastino/gliner2-large-v1"
+  retrieve: "Qwen/Qwen3-Embedding-8B"
+  rerank: "Qwen/Qwen3-Reranker-4B"
+  verify: "Qwen/Qwen3.5-4B"
+  escalate: "Qwen/Qwen3.6-27B"
+
+model_revisions:
+  docling: "310479be56f3a99a0fea75d930e11eea38bf5ef7"
+  Qwen/Qwen3.5-4B: "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+  fastino/gliner2-large-v1: "b122b11eeaee4dabd32bed80412f3234c0d0e943"
+  Qwen/Qwen3-Embedding-8B: "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+  Qwen/Qwen3-Reranker-4B: "22e683669bc0f0bd69640a1354a6d0aebcfeede5"
+  Qwen/Qwen3.6-27B: "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
+
+retrieval:
+  instruction: "Given a behavior described in a cyber threat report, retrieve the MITRE ATT&CK Enterprise technique that directly explains the behavior."
+  candidate_count: 25
+  rerank_count: 8
+  verifier_count: 5
+  embedding_batch_size: 16
+
+report:
+  max_behaviors: 12
+  chunk_characters: 12000
+  use_escalation: true
+
+sources:
+  attack:
+    version: "19.2"
+    commit: "6cda5ad8462c79e14fbb872f4e09059b18e0cfc4"
+    url: "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/6cda5ad8462c79e14fbb872f4e09059b18e0cfc4/enterprise-attack/enterprise-attack-19.2.json"
+    sha256: "dc1639caa5501d720e280cf1cbd8fbe009884a0c9b3e6e9ed9d0c25166c3d8f4"
+  annoctr:
+    commit: "d510b6949e1938d47c93a43eedd562dc538439dc"
+    url: "https://github.com/boschresearch/anno-ctr-lrec-coling-2024/archive/d510b6949e1938d47c93a43eedd562dc538439dc.zip"
+    sha256: "2eb29db3bba2e95f908ad3d4195c202b3c44a666f98c43e4c02a809edffcd480"
