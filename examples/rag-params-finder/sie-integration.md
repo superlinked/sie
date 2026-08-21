@@ -29,11 +29,15 @@ docker compose up -d --force-recreate server
 # Host-run server instead: reload or restart uvicorn
 ```
 
-Source `.env` into the **current shell** before gateway curls (editing the file
-does not update existing variables):
+Load only SIE vars into the **current shell** before gateway curls (do not
+`source .env` wholesale — that overwrites the host CLI `MONGODB_URI` export
+from [Getting started](./getting-started.md) with the Atlas placeholder):
 
 ```bash
-set -a && source .env && set +a
+export SIE_ENABLED=true
+export SIE_ENDPOINT=https://your-sie-gateway.example.com
+export SIE_API_KEY=your_gateway_token
+# keep the earlier MONGODB_URI export for Atlas Local host CLI
 ```
 
 ### Readiness checks
@@ -41,18 +45,34 @@ set -a && source .env && set +a
 **1. Gateway process alive** (`/healthz` ≠ model ready):
 
 ```bash
-curl -H "Authorization: Bearer $SIE_API_KEY" "$SIE_ENDPOINT/healthz"
+curl --connect-timeout 5 --max-time 15 \
+  -H "Authorization: Bearer $SIE_API_KEY" "$SIE_ENDPOINT/healthz"
 # → ok
 ```
 
-**2. Model can encode** — wait for HTTP **200** (503 during warm-up is expected):
+**2. Model can encode** — accept only HTTP **200**; retry **503** (warm-up);
+stop on terminal failures (e.g. **502**, **401**):
 
 ```bash
-until curl -sf -o /dev/null -X POST "$SIE_ENDPOINT/v1/encode/BAAI/bge-m3" \
-  -H "Authorization: Bearer $SIE_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"items":[{"text":"readiness probe"}]}'; do
-  echo "SIE encode not ready yet — waiting 10s..."
+attempts=0
+max_attempts=60   # ~10 minutes at 10s interval
+while true; do
+  attempts=$((attempts + 1))
+  code=$(curl --connect-timeout 5 --max-time 30 -s -o /dev/null -w '%{http_code}' \
+    -X POST "$SIE_ENDPOINT/v1/encode/BAAI/bge-m3" \
+    -H "Authorization: Bearer $SIE_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"items":[{"text":"readiness probe"}]}' || true)
+  case "$code" in
+    200) echo "SIE encode ready"; break ;;
+    503) echo "SIE warm-up ($attempts/$max_attempts) — waiting 10s..." ;;
+    000) echo "SIE unreachable ($attempts/$max_attempts) — waiting 10s..." ;;
+    *) echo "SIE encode failed with HTTP $code — abort"; exit 1 ;;
+  esac
+  if [ "$attempts" -ge "$max_attempts" ]; then
+    echo "SIE encode not ready after $max_attempts attempts — abort"
+    exit 1
+  fi
   sleep 10
 done
 ```
