@@ -1,0 +1,67 @@
+{
+  "created_at": "2026-08-21T09:00:32.326656+00:00",
+  "endpoint": "http://localhost:8080",
+  "models": {
+    "parse": "docling",
+    "behavior_extract": "Qwen/Qwen3.6-27B:no-spec",
+    "entities": "fastino/gliner2-large-v1",
+    "retrieve": "Qwen/Qwen3-Embedding-8B",
+    "late_interaction": "jinaai/jina-colbert-v2",
+    "rerank": "Qwen/Qwen3-Reranker-4B",
+    "verify": "Qwen/Qwen3.6-27B:no-spec",
+    "escalate": "Qwen/Qwen3.6-27B:no-spec"
+  },
+  "model_revisions": {
+    "docling": "310479be56f3a99a0fea75d930e11eea38bf5ef7",
+    "fastino/gliner2-large-v1": "b122b11eeaee4dabd32bed80412f3234c0d0e943",
+    "Qwen/Qwen3-Embedding-8B": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+    "jinaai/jina-colbert-v2": "4552c4dc1ffd7d7a635b6a41a1077fe9c9cdd974",
+    "Qwen/Qwen3-Reranker-4B": "22e683669bc0f0bd69640a1354a6d0aebcfeede5",
+    "Qwen/Qwen3.6-27B:no-spec": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
+  },
+  "rate_book_provenance": {
+    "version": null,
+    "request_ids": [],
+    "execution_identity_sha256": []
+  },
+  "pipeline_stage": "full_report_review",
+  "source_report": {
+    "path": "proofpoint_2022-02-03_mfa-psa-oh-my.txt",
+    "sha256": "7703c78bfc6c9819f999a81ebe4fb8d88138a271e34905cc06b6ec9d5b8fd75b",
+    "characters": 9772
+  },
+  "taxonomy": {
+    "name": "MITRE ATT&CK Enterprise",
+    "version": "19.2",
+    "commit": "6cda5ad8462c79e14fbb872f4e09059b18e0cfc4",
+    "sha256": "dc1639caa5501d720e280cf1cbd8fbe009884a0c9b3e6e9ed9d0c25166c3d8f4",
+    "active_techniques": 697
+  },
+  "decision_boundary": "The agent proposes source-backed mappings for analyst review. It cannot accept a mapping, detect an intrusion, or change a security control.",
+  "artifacts": [
+    {
+      "path": "api-calls.json",
+      "sha256": "4f0ee6c52bec082e9ab6a4b6f19dd8e275646f59115ae4f335c3593c15c7a0d8"
+    },
+    {
+      "path": "embeddings.npz",
+      "sha256": "082e941b1a27b04f739ea4092c7014e2ebab457ec05cca0cb8d20bb0c6bd8ce0"
+    },
+    {
+      "path": "exemplar-embeddings.npz",
+      "sha256": "2aaf29fd8106b59343618527a2e781fe9f29de9d1e0a64d24d0d602464387ffe"
+    },
+    {
+      "path": "late-interaction.npz",
+      "sha256": "26c9d23748ddb0604d7407f7a9227fbe68b07580fa5fc7752550b39de159754c"
+    },
+    {
+      "path": "parsed-report.md",
+      "sha256": "7703c78bfc6c9819f999a81ebe4fb8d88138a271e34905cc06b6ec9d5b8fd75b"
+    },
+    {
+      "path": "review.json",
+      "sha256": "01dd3e739ced4d1f0b23d560d8aee2b89c33bb5a4392f1d74006ff9a35a38a83"
+    }
+  ]
+}

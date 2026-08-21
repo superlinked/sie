@@ -5,32 +5,55 @@ cluster:
 
 models:
   parse: "docling"
-  behavior_extract: "Qwen/Qwen3.5-4B"
+  behavior_extract: "Qwen/Qwen3.6-27B:no-spec"
   entities: "fastino/gliner2-large-v1"
   retrieve: "Qwen/Qwen3-Embedding-8B"
+  late_interaction: "jinaai/jina-colbert-v2"
   rerank: "Qwen/Qwen3-Reranker-4B"
-  verify: "Qwen/Qwen3.5-4B"
-  escalate: "Qwen/Qwen3.6-27B"
+  verify: "Qwen/Qwen3.6-27B:no-spec"
+  escalate: "Qwen/Qwen3.6-27B:no-spec"
 
 model_revisions:
   docling: "310479be56f3a99a0fea75d930e11eea38bf5ef7"
-  Qwen/Qwen3.5-4B: "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
   fastino/gliner2-large-v1: "b122b11eeaee4dabd32bed80412f3234c0d0e943"
   Qwen/Qwen3-Embedding-8B: "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+  jinaai/jina-colbert-v2: "4552c4dc1ffd7d7a635b6a41a1077fe9c9cdd974"
   Qwen/Qwen3-Reranker-4B: "22e683669bc0f0bd69640a1354a6d0aebcfeede5"
-  Qwen/Qwen3.6-27B: "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
+  Qwen/Qwen3.6-27B:no-spec: "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
 
 retrieval:
   instruction: "Given a behavior described in a cyber threat report, retrieve the MITRE ATT&CK Enterprise technique that directly explains the behavior."
-  candidate_count: 25
-  rerank_count: 8
-  verifier_count: 5
+  exemplar_instruction: "Represent this threat-report span for ATT&CK technique classification."
+  candidate_count: 75
+  dense_pool_count: 50
+  late_interaction_pool_count: 50
+  exemplar_pool_count: 20
+  exemplar_rrf_weight: 2.0
+  rerank_count: 75
+  verifier_count: 10
   embedding_batch_size: 16
+  multivector_batch_size: 16
 
 report:
-  max_behaviors: 12
-  chunk_characters: 12000
-  use_escalation: true
+  max_behaviors: 24
+  # Keeps the extraction prompt plus a 4096-token JSON response inside the
+  # 8192-token Qwen3.6 serving profile, including the 40 entity hints.
+  chunk_characters: 4500
+  entity_chunk_characters: 2000
+  chunk_overlap_characters: 400
+  use_escalation: false
+
+evaluation:
+  suggestion_annotated_span_precision_gate: 0.85
+  report_pair_behavior_recall_gate: 0.70
+  report_pair_family_conditional_finalist_recall_gate: 0.90
+  excluded_documents:
+    - "proofpoint_2022-02-03_mfa-psa-oh-my"
+
+concurrency:
+  documents: 8
+  rerank: 16
+  verify: 8
 
 sources:
   attack:

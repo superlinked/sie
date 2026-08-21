@@ -11,7 +11,7 @@ from .catalog import load_annoctr_catalog, load_catalog
 from .config import load_config
 from .data import ensure_sources, find_annoctr_catalog, load_linking_cases
 from .evaluation import evaluate_predictions, read_predictions
-from .runner import benchmark, map_annoctr_demo, map_report, write_json
+from .runner import benchmark, full_report_benchmark, map_annoctr_demo, map_report, write_json
 
 console = Console()
 
@@ -44,6 +44,13 @@ def _report(args: argparse.Namespace) -> None:
     config = load_config()
     run_id = args.run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     result = map_report(config, report_path=args.report, run_id=run_id)
+    console.print(f"[green]Wrote[/] {result}")
+
+
+def _full_benchmark(args: argparse.Namespace) -> None:
+    config = load_config()
+    run_id = args.run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    result = full_report_benchmark(config, split=args.split, limit=args.limit, run_id=run_id)
     console.print(f"[green]Wrote[/] {result}")
 
 
@@ -83,6 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_benchmark.add_argument("--stage", choices=("retrieve", "rerank", "verify"), default="retrieve")
     run_benchmark.add_argument("--run-id")
     run_benchmark.set_defaults(func=_benchmark)
+
+    full_benchmark = commands.add_parser(
+        "full-benchmark",
+        help="Run behavior detection and ATT&CK mapping from complete AnnoCTR reports",
+    )
+    full_benchmark.add_argument("--split", choices=("dev", "test"), default="dev")
+    full_benchmark.add_argument("--limit", type=int)
+    full_benchmark.add_argument("--run-id")
+    full_benchmark.set_defaults(func=_full_benchmark)
 
     report = commands.add_parser("report", help="Map behaviors in one text, Markdown, HTML, or PDF report")
     report.add_argument("report", type=Path)

@@ -44,6 +44,22 @@ def dense_vector(result: Any) -> np.ndarray:
     return vector / norm
 
 
+def multivector(result: Any) -> np.ndarray:
+    value = jsonable(result)
+    rows: Any = value.get("multivector") if isinstance(value, dict) else None
+    if isinstance(rows, dict):
+        rows = rows.get("values") or rows.get("vector")
+    if not isinstance(rows, list) or not rows:
+        raise TypeError("Embedding response has no multivector")
+    vector = np.asarray(rows, dtype=np.float32)
+    if vector.ndim != 2 or vector.shape[0] == 0 or vector.shape[1] == 0:
+        raise TypeError("Embedding response multivector must be a non-empty matrix")
+    norms = np.linalg.norm(vector, axis=1, keepdims=True)
+    if np.any(norms == 0):
+        raise ValueError("Embedding response has a zero-length token vector")
+    return vector / norms
+
+
 def request_record(
     stage: str,
     requested_model: str,
@@ -67,6 +83,30 @@ def request_record(
         "rate_book_version": request.get("rate_book_version") or usage.get("rate_book_version"),
         "execution_identity_sha256": request.get("execution_identity_sha256"),
         "latency_ms": round(latency_ms, 1),
+    }
+
+
+def traced_request_record(
+    stage: str,
+    requested_model: str,
+    response: Any,
+    latency_ms: float,
+    *,
+    function: str,
+    request_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the exact non-vector request and response beside its billing metadata."""
+
+    return {
+        **request_record(
+            stage,
+            requested_model,
+            response,
+            latency_ms,
+            function=function,
+        ),
+        "request_payload": jsonable(request_payload),
+        "raw_response": jsonable(response),
     }
 
 
@@ -115,6 +155,47 @@ def encode_texts(
     if not vectors:
         return np.empty((0, 0), dtype=np.float32), calls
     return np.stack(vectors), calls
+
+
+def encode_multivectors(
+    client: SIEClientProtocol,
+    model: str,
+    texts: list[str],
+    *,
+    is_query: bool,
+    batch_size: int,
+    provision_timeout_s: float,
+    stage: str,
+) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
+    vectors: list[np.ndarray] = []
+    calls: list[dict[str, Any]] = []
+    for offset in range(0, len(texts), batch_size):
+        batch = texts[offset : offset + batch_size]
+        items = [Item(id=f"{stage}-{offset + index}", text=text) for index, text in enumerate(batch)]
+        started = time.perf_counter()
+        response = client.encode(
+            model,
+            items,
+            output_types=["multivector"],
+            is_query=is_query,
+            wait_for_capacity=True,
+            provision_timeout_s=provision_timeout_s,
+        )
+        elapsed = (time.perf_counter() - started) * 1000
+        responses = response if isinstance(response, list) else [response]
+        if len(responses) != len(items):
+            raise RuntimeError(f"Embedding batch returned {len(responses)} rows for {len(items)} inputs")
+        vectors.extend(multivector(row) for row in responses)
+        calls.append(
+            request_record(
+                f"{stage}_{offset // batch_size}",
+                model,
+                responses[0],
+                elapsed,
+                function="encode",
+            )
+        )
+    return vectors, calls
 
 
 def parse_generated_json(response: Any) -> dict[str, Any]:

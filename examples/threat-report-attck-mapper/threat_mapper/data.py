@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from .config import CACHE_DIR
-from .models import LinkingCase
+from .models import GoldTechniqueMention, LabeledTechniqueExample, LinkingCase
 
 
 def sha256(path: Path) -> str:
@@ -145,6 +145,91 @@ def find_annoctr_report(annoctr_root: Path, split: str, document: str) -> Path:
     return matches[0]
 
 
+def list_annoctr_reports(annoctr_root: Path, split: str) -> list[Path]:
+    if split not in {"train", "dev", "test"}:
+        raise ValueError("split must be train, dev, or test")
+    roots = list(annoctr_root.glob(f"*/AnnoCTR/text/{split}"))
+    if len(roots) != 1:
+        raise FileNotFoundError(
+            f"Expected one AnnoCTR {split} report directory under {annoctr_root}, found {len(roots)}"
+        )
+    return sorted(roots[0].glob("*.txt"), key=lambda path: path.stem)
+
+
+def _normalized(value: str) -> str:
+    return " ".join(value.replace("\u00a0", " ").split()).casefold()
+
+
+def _context_score(report: str, start: int, end: int, row: dict[str, Any]) -> tuple[int, int, int]:
+    left = _normalized(str(row.get("_context_left", row.get("context_left", ""))))
+    right = _normalized(str(row.get("_context_right", row.get("context_right", ""))))
+    before = _normalized(report[max(0, start - max(600, len(left) * 2)) : start])
+    after = _normalized(report[end : min(len(report), end + max(600, len(right) * 2))])
+    left_words = left.split()
+    right_words = right.split()
+    left_match = 0
+    for count in range(1, len(left_words) + 1):
+        if before.endswith(" ".join(left_words[-count:])):
+            left_match = count
+    right_match = 0
+    for count in range(1, len(right_words) + 1):
+        if after.startswith(" ".join(right_words[:count])):
+            right_match = count
+    adjacent = int(bool(left_words) and left_match == len(left_words)) + int(
+        bool(right_words) and right_match == len(right_words)
+    )
+    return adjacent, left_match + right_match, -start
+
+
+def _align_mention(report: str, row: dict[str, Any]) -> tuple[int, int]:
+    mention = str(row.get("mention", ""))
+    if not mention:
+        raise ValueError("AnnoCTR technique annotation has an empty mention")
+    exact = [(match.start(), match.end()) for match in re.finditer(re.escape(mention), report)]
+    if not exact:
+        pattern = r"\s+".join(re.escape(token) for token in mention.split())
+        exact = [(match.start(), match.end()) for match in re.finditer(pattern, report, flags=re.IGNORECASE)]
+    if not exact:
+        document = row.get("document", "unknown")
+        raise ValueError(f"Could not align AnnoCTR mention {mention!r} in {document}")
+    return max(exact, key=lambda span: _context_score(report, span[0], span[1], row))
+
+
+def load_gold_mentions(annoctr_root: Path, split: str) -> list[GoldTechniqueMention]:
+    if split not in {"train", "dev", "test"}:
+        raise ValueError("split must be train, dev, or test")
+    report_cache: dict[str, str] = {}
+    mentions: dict[tuple[str, str, str, int, int], GoldTechniqueMention] = {}
+    with _find_split_file(annoctr_root, split).open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("entity_type") != "TECHNIQUE":
+                continue
+            technique_id = _technique_id(str(row.get("label_link", "")))
+            if technique_id is None:
+                continue
+            document = str(row.get("document", ""))
+            if document not in report_cache:
+                report_cache[document] = find_annoctr_report(annoctr_root, split, document).read_text(encoding="utf-8")
+            report = report_cache[document]
+            start, end = _align_mention(report, row)
+            annotation_class = str(row.get("entity_class", ""))
+            key = (document, technique_id, annotation_class, start, end)
+            identity = json.dumps(key, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            mentions[key] = GoldTechniqueMention(
+                mention_id=hashlib.sha256(identity).hexdigest()[:20],
+                document=document,
+                technique_id=technique_id,
+                annotation_class=annotation_class,
+                quote=report[start:end],
+                source_start=start,
+                source_end=end,
+            )
+    return sorted(mentions.values(), key=lambda row: (row.document, row.source_start, row.technique_id))
+
+
 def load_linking_cases(annoctr_root: Path, split: str) -> list[LinkingCase]:
     if split not in {"train", "dev", "test"}:
         raise ValueError("split must be train, dev, or test")
@@ -176,3 +261,38 @@ def load_linking_cases(annoctr_root: Path, split: str) -> list[LinkingCase]:
             )
         )
     return sorted(cases, key=lambda item: item.case_id)
+
+
+def load_training_examples(annoctr_root: Path) -> list[LabeledTechniqueExample]:
+    examples: dict[tuple[str, str, str], LabeledTechniqueExample] = {}
+    with _find_split_file(annoctr_root, "train").open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("entity_type") != "TECHNIQUE":
+                continue
+            technique_id = _technique_id(str(row.get("label_link", "")))
+            if technique_id is None:
+                continue
+            quote = " ".join(str(row.get("mention", "")).split())
+            left = str(row.get("_context_left", row.get("context_left", "")))
+            right = str(row.get("_context_right", row.get("context_right", "")))
+            context = " ".join(f"{left}{quote}{right}".split())
+            if not quote or not context:
+                continue
+            document = str(row.get("document", ""))
+            key = (technique_id, document, context.casefold())
+            examples[key] = LabeledTechniqueExample(
+                technique_id=technique_id,
+                quote=quote,
+                context=context,
+                document=document,
+                annotation_class=str(row.get("entity_class", "")),
+            )
+    if not examples:
+        raise ValueError(f"No labeled ATT&CK training examples found under {annoctr_root}")
+    return sorted(
+        examples.values(),
+        key=lambda item: (item.technique_id, item.document, item.context.casefold()),
+    )
