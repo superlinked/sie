@@ -5,10 +5,12 @@ Tripwire discovers AI skills and MCP servers, runs isolated safety scanners
 in one dashboard. **SIE is a post-scan tiered router**, not part of the core
 scan path.
 
-**Source of truth:**
+**Upstream deep-links:**
 [sie-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md) ·
 [model-studio-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md) ·
 [ADR-0016](https://github.com/neomatrix369/tripwire/blob/main/docs/adr/0016-tiered-router-sie-model-studio.md).
+Those setup pages may still label Model Studio as optional; for current CLI
+routing prerequisites use [SIE integration](./sie-integration.md).
 
 ## SIE primitives
 

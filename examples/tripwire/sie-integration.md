@@ -3,8 +3,14 @@
 Routing is **optional**. Without the keys below, auto-route warns and skips; the
 scan itself still succeeds.
 
-**Source of truth:**
-[docs/user-guide/sie-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md).
+**Upstream deep-links:**
+[sie-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md) ·
+[model-studio-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md).
+
+Those project pages still describe Model Studio as “optional escalation.” Prefer
+**this page** for routing prerequisites: current Tripwire
+`resolveRouteConfig()` requires **both** `SIE_*` and Model Studio keys before
+any route runs (SIE-only configs skip; no `routing_review` rows).
 
 Finish a Live scan path from [Getting started](./getting-started.md) before
 relying on routing in the product UI.
@@ -12,29 +18,28 @@ relying on routing in the product UI.
 ## Happy path — hosted Superlinked gateway
 
 1. Sign in at [console.superlinked.com](https://console.superlinked.com) → **Keys**.
-2. Put values in the **repo-root** `.env` (product CLI does **not** load
-   `prototypes/.env`):
+2. Put **all** of the following in the **repo-root** `.env` (product CLI does
+   **not** load `prototypes/.env`):
 
 ```bash
 SIE_ENDPOINT=https://api.superlinked.com
 # EU: https://eu.api.superlinked.com
 SIE_API_KEY=sk-sie-…
-# optional
+# optional model override
 SIE_MODEL=gen-4b
-```
 
-3. For `tripwire route` / auto-route, also set Model Studio credentials in the
-   **same** repo-root `.env`. Today `resolveRouteConfig()` validates
-   `ALIBABA_OPENAI_BASE_URL` and `DASHSCOPE_API_KEY` up front (escalation still
-   runs only when SIE signals conflict / unusual status / low confidence):
-
-```bash
+# required today for tripwire route / auto-route (validated up front)
 ALIBABA_OPENAI_BASE_URL=https://…/compatible-mode/v1
 DASHSCOPE_API_KEY=sk-…
 ```
 
+Escalation to Alibaba still runs only when SIE signals conflict, unusual status,
+or low confidence — but the MS keys must be present for config resolution.
+
 Key map:
-[env-vars — tiered router](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/env-vars.md#optional--tiered-router-sie--model-studio).
+[env-vars — tiered router](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/env-vars.md#optional--tiered-router-sie--model-studio)
+(section title still says “optional”; treat MS keys as **required for routing**
+until upstream docs catch up).
 
 ## Verify SIE alone
 
@@ -68,10 +73,11 @@ Look for pathway strips (Scan → SIE → …) and filters (**Escalated** / **SI
 
 ## Model Studio (required for route config; used on escalate)
 
-Configure Part B in
+Follow Part B in
 [model-studio-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md)
-before expecting pathway strips. Review billing/quotas first. Alibaba calls run
-only when SIE escalates; missing MS keys still cause auto-route to skip today.
+before expecting pathway strips (ignore any “optional” wording there for
+routing). Review billing/quotas first. Alibaba calls run only when SIE
+escalates; missing MS keys still cause auto-route to skip today.
 
 ## Next
 

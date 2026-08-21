@@ -1,6 +1,7 @@
 # Troubleshooting (SIE / router-focused)
 
-Short FAQ for gallery readers. Full guides:
+Short FAQ for gallery readers. Full guides (upstream may still call Model Studio
+“optional” — prefer [SIE integration](./sie-integration.md) for routing keys):
 [sie-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md),
 [model-studio-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md),
 [setup-commands — when it fails](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/setup-commands.md#when-it-fails),

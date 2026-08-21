@@ -1,7 +1,7 @@
 # Scan AI skills and MCP servers, then triage with SIE
 
 > Tripwire is a metal detector for AI tools — discover, scan in isolation, review
-> findings in one dashboard. Optional Superlinked SIE routes findings after Live scans.
+> findings in one dashboard. Superlinked SIE can route findings after Live scans.
 
 This is an **external project guide**. The runnable app lives in
 [neomatrix369/tripwire](https://github.com/neomatrix369/tripwire).
@@ -9,8 +9,11 @@ This folder is the SIE-facing onboarding surface: short pages here, full detail
 in that repo.
 
 **SIE primitives used:** `generate` (chat completions via OpenAI-compatible
-`/v1/chat/completions` for post-scan triage). SIE is **optional** — Mock demo and
-Live scans work without it; routing runs only when `SIE_*` keys are set.
+`/v1/chat/completions` for post-scan triage). Mock demo and Live scans work
+without routing. Auto-route / `tripwire route` need **both** `SIE_*` and Model
+Studio keys today (see [SIE integration](./sie-integration.md)); upstream
+[sie-setup](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md)
+may still call Model Studio “optional.”
 
 ## Who this is for
 
@@ -25,11 +28,11 @@ hosted SIE → `tripwire route` (or auto-route after scan).
 ## Start here
 
 1. [Getting started](./getting-started.md) — clone, Mock demo, then Live prerequisites
-2. [SIE integration](./sie-integration.md) — `SIE_*` keys, verify, route a batch
+2. [SIE integration](./sie-integration.md) — router keys (`SIE_*` + Model Studio), verify, route
 3. [What SIE does here](./what-sie-does.md) — tiered router, Model Studio escalation
 4. [Troubleshooting](./troubleshooting.md) — short FAQ + deep-links
 
-**Canonical docs in the project:**
+**Canonical docs in the project** (prefer gallery pages above for routing prereqs):
 [QUICKSTART](https://github.com/neomatrix369/tripwire/blob/main/QUICKSTART.md) ·
 [SIE setup](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md) ·
 [docs hub](https://github.com/neomatrix369/tripwire/blob/main/docs/README.md)
