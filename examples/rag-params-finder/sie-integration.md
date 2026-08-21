@@ -8,7 +8,8 @@ dashboard only — they never start SIE.
 
 ## Happy path — remote gateway (recommended)
 
-Finish [Getting started](./getting-started.md) first so `:8001` is up.
+Finish [Getting started](./getting-started.md) first so `:8001` is up and
+`MONGODB_URI` is exported for the host CLI.
 
 In the project `.env`:
 
@@ -18,20 +19,66 @@ SIE_ENDPOINT=https://your-sie-gateway.example.com
 SIE_API_KEY=your_gateway_token
 ```
 
-Restart or reload the rag-params-finder server after changing `.env`.
+Reload the server so it picks up the new env (a plain restart is not enough for
+Compose — env is baked in at container create time):
 
-Check the gateway, then the app health:
+```bash
+# Compose (typical after ./start-services.sh)
+docker compose up -d --force-recreate server
+
+# Host-run server instead: reload or restart uvicorn
+```
+
+Source `.env` into the **current shell** before gateway curls (editing the file
+does not update existing variables):
+
+```bash
+set -a && source .env && set +a
+```
+
+### Readiness checks
+
+**1. Gateway process alive** (`/healthz` ≠ model ready):
 
 ```bash
 curl -H "Authorization: Bearer $SIE_API_KEY" "$SIE_ENDPOINT/healthz"
+# → ok
+```
+
+**2. Model can encode** — wait for HTTP **200** (503 during warm-up is expected):
+
+```bash
+until curl -sf -o /dev/null -X POST "$SIE_ENDPOINT/v1/encode/BAAI/bge-m3" \
+  -H "Authorization: Bearer $SIE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"items":[{"text":"readiness probe"}]}'; do
+  echo "SIE encode not ready yet — waiting 10s..."
+  sleep 10
+done
+```
+
+**3. App sees SIE:**
+
+```bash
 curl -s http://localhost:8001/health
 # → "sie":"reachable"
 ```
 
-**First success:** `"sie":"reachable"`, then one sweep:
+### First success
+
+Provide an input PDF (`input_data/` is gitignored). Either copy a file to the
+path expected by the example config, or point `data_paths` at an existing PDF:
 
 ```bash
-# from the rag-params-finder repo root, with CLI installed (see project QUICKSTART)
+mkdir -p input_data/pdfs
+cp /path/to/your-document.pdf \
+  input_data/pdfs/The_Federal_Pell_Grant_Program.pdf
+# or edit data_paths in configs/mongodb/example-sie.yaml
+```
+
+Then run one sweep (CLI installed per project QUICKSTART):
+
+```bash
 rag-params-finder run --config configs/mongodb/example-sie.yaml
 ```
 
