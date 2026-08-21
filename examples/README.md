@@ -33,6 +33,7 @@ service keys.
 | [Reconstruct a bearing failure](./maintenance-triage-agent) | Turning the NTSB's three East Palestine detector readings into a cited temperature and alert sequence without adding a new causal claim | `extract`, `encode`, `score` | SIE endpoint; standalone `uv` project; exact NTSB illustrated report spread | Runnable agent example |
 | [Make a shelf gap auditable](./retail-shelf-audit) | Detecting one empty facing, deriving its notice and shelf-label crops by geometry, then preserving OCR evidence | `extract` | GPU SIE deployment; standalone `uv` project; CC0 supermarket shelf image and recorded direct-checkpoint evidence included | Runnable evaluation example |
 | [A behavioural gate that catches hijacked AI agents by their actions, not their credentials](./agent-action-monitor) | Judging a proposed AI agent action against that agent's own learned baseline in real time, before it reaches a downstream system | `encode`, `score`, `extract` | Docker Compose (gate + self-hosted SIE + n8n + mock downstream), no API key required | Runnable demo |
+| [Scan AI skills and MCP servers, then triage with SIE](./tripwire) | Discovering and scanning AI skills/MCP servers, then optionally routing findings with Superlinked SIE | `generate` | External repo; Mock demo local; Live needs Supabase + Modal; SIE keys optional | External project guide |
 
 For docs publishing, lead with the quickest runnable demos, then use the
 benchmark and evaluation examples for deeper technical users.
