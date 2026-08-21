@@ -225,6 +225,60 @@ def test_behavior_extraction_reduces_the_row_limit_when_text_cannot_split() -> N
     assert calls[0]["outcome"] == "invalid_json_retried_with_smaller_request"
 
 
+def test_behavior_extraction_caps_rows_across_the_complete_report() -> None:
+    from threat_mapper.pipeline import extract_behaviors
+
+    report = "First actor stole passwords.\n\nSecond actor used a proxy.\n\nThird actor downloaded a payload."
+    client = FakeGenerateClient(
+        [
+            {
+                "behaviors": [
+                    {
+                        "quote": "stole passwords",
+                        "summary": "Password theft",
+                        "action": "stole",
+                        "object": "passwords",
+                    }
+                ]
+            },
+            {
+                "behaviors": [
+                    {
+                        "quote": "used a proxy",
+                        "summary": "Proxy use",
+                        "action": "used",
+                        "object": "proxy",
+                    },
+                    {
+                        "quote": "used a proxy",
+                        "summary": "Extra row from an invalid response",
+                        "action": "accessed",
+                        "object": "account",
+                    },
+                ]
+            },
+        ]
+    )
+
+    behaviors, calls = extract_behaviors(
+        client,
+        "Qwen/Qwen3.6-27B",
+        report,
+        max_behaviors=2,
+        chunk_characters=35,
+        provision_timeout_s=60,
+    )
+
+    assert [(row.action, row.object) for row in behaviors] == [
+        ("stole", "passwords"),
+        ("used", "proxy"),
+    ]
+    assert len(calls) == 2
+    assert "Return at most 2 behaviors" in client.prompts[0]
+    assert "Return at most 1 behaviors" in client.prompts[1]
+    assert calls[1]["request_payload"]["grammar"]["json_schema"]["properties"]["behaviors"]["maxItems"] == 1
+
+
 def test_split_report_returns_exact_source_spans_when_paragraphs_merge() -> None:
     report = "  First paragraph.\n\n\nSecond paragraph.  "
 

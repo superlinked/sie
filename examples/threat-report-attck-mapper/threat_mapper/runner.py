@@ -911,8 +911,8 @@ def full_report_benchmark(
                         "predictions": document_predictions,
                     },
                 )
-                _write_jsonl(staging / "predictions.jsonl", predictions)
-                write_json(staging / "api-calls.json", calls)
+            _write_jsonl(staging / "predictions.jsonl", predictions)
+            write_json(staging / "api-calls.json", calls)
 
         evaluation = evaluate_full_report_predictions(
             predictions,

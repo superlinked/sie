@@ -265,6 +265,10 @@ def extract_behaviors(
     ]
     while pending_chunks:
         chunk_start, chunk_end, chunk_label, behavior_limit = pending_chunks.pop(0)
+        remaining_behaviors = max_behaviors - len(behaviors)
+        if remaining_behaviors <= 0:
+            break
+        behavior_limit = min(behavior_limit, remaining_behaviors)
         chunk = report_text[chunk_start:chunk_end]
         anchors = _entities_for_chunk(entities, chunk_start, chunk_end)
         anchor_text = (
@@ -347,6 +351,8 @@ def extract_behaviors(
         if not isinstance(rows, list):
             raise TypeError("Behavior extractor omitted behaviors")
         for row in rows:
+            if len(behaviors) >= max_behaviors:
+                break
             if not isinstance(row, dict):
                 continue
             grounded = _ground_quote(chunk, str(row.get("quote", "")))
