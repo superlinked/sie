@@ -55,7 +55,9 @@ stop on terminal failures (e.g. **502**, **401**):
 
 ```bash
 attempts=0
-max_attempts=60   # ~10 minutes at 10s interval
+# 60 attempts × (up to 30s request + 10s sleep) ≈ 40 minutes worst case —
+# first-run model download/load can exceed a short 10-minute budget.
+max_attempts=60
 while true; do
   attempts=$((attempts + 1))
   code=$(curl --connect-timeout 5 --max-time 30 -s -o /dev/null -w '%{http_code}' \
@@ -113,7 +115,8 @@ Compare results in the dashboard at **http://localhost:5374**.
 ## Alternate — self-hosted Docker
 
 Use when you have no remote gateway. Needs Docker, disk for model weights, and
-usually `HF_TOKEN` on the **SIE container** (not for app routing).
+**requires** `HF_TOKEN` on the **SIE container** for Hugging Face weight
+downloads during warm-up (not used for app routing).
 
 Typical host endpoint:
 
