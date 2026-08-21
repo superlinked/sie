@@ -18,8 +18,8 @@ optional `score` (SIE rerank). SIE is **opt-in** — the default stack runs with
 | New to rag-params-finder, want SIE embeddings | Same path — then [What SIE does here](./what-sie-does.md) |
 
 Both audiences share the same **local** starting path (MongoDB stack +
-dashboard). SIE is optional afterward: enable a remote gateway, then run one
-`example-sie.yaml` sweep.
+dashboard). SIE is optional afterward: configure a remote gateway or start
+self-hosted SIE, then run one `example-sie.yaml` sweep.
 
 ## Start here
 

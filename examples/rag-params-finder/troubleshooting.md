@@ -15,7 +15,7 @@ Short FAQ for gallery readers. Full tables and recovery steps:
 - Wrong `SIE_ENDPOINT` (typo, http vs https, missing port)
 - Gateway auth: set `SIE_API_KEY` and use `Authorization: Bearer …` on `/healthz`
 - Local Docker: SIE not running, still warming up, or server-in-Docker needs
-  `host.docker.internal:8720`
+  `http://host.docker.internal:8720`
 - Encode still returning **503** during model load — wait until encode returns **200**
 
 ## Sweep with `provider: sie` fails immediately
@@ -23,9 +23,11 @@ Short FAQ for gallery readers. Full tables and recovery steps:
 SIE guard runs preflight. Fix health/`SIE_ENABLED` first, then re-run. Index
 requirements come from the **selected config**, not from `provider: sie` alone.
 For [`configs/mongodb/example-sie.yaml`](https://github.com/neomatrix369/rag-params-finder/blob/main/configs/mongodb/example-sie.yaml)
-(dense BGE-M3 / Stella-v5), create `vector_index_1024` and `text_search_index`
-on Mongo — see project MongoDB setup. Sparse-only models can need different
-indexes; do not treat `vector_index_1024` as universal.
+(dense BGE-M3 / Stella-v5), create both indexes on the `chunks` collection:
+`vector_index_1024` for dense 1024-dim embeddings, and `text_search_index` for
+the separately swept sparse/hybrid retrievers — see project MongoDB setup.
+Sparse-only models can need different indexes; do not treat `vector_index_1024`
+as universal.
 
 ## `./start-services.sh` did not bring up SIE
 
