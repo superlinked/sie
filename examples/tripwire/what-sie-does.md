@@ -6,7 +6,8 @@ in one dashboard. **SIE is a post-scan tiered router**, not part of the core
 scan path.
 
 **Source of truth:**
-[tiered-router-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/tiered-router-setup.md) ·
+[sie-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md) ·
+[model-studio-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md) ·
 [ADR-0016](https://github.com/neomatrix369/tripwire/blob/main/docs/adr/0016-tiered-router-sie-model-studio.md).
 
 ## SIE primitives

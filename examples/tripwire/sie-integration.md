@@ -4,7 +4,7 @@ SIE is **optional**. Missing `SIE_*` keys causes auto-route to warn and skip; th
 scan itself still succeeds.
 
 **Source of truth:**
-[docs/user-guide/tiered-router-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/tiered-router-setup.md).
+[docs/user-guide/sie-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md).
 
 Finish a Live scan path from [Getting started](./getting-started.md) before
 relying on routing in the product UI.
@@ -55,7 +55,7 @@ Look for pathway strips (Scan → SIE → …) and filters (**Escalated** / **SI
 
 Alibaba Cloud Model Studio runs only when SIE signals conflict, unusual status,
 or low confidence. Configure after Part A in
-[tiered-router-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/tiered-router-setup.md)
+[model-studio-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md)
 (`DASHSCOPE_*` / `ALIBABA_OPENAI_BASE_URL`). Review billing/quotas first.
 
 ## Next

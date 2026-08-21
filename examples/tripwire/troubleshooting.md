@@ -1,7 +1,8 @@
 # Troubleshooting (SIE / router-focused)
 
 Short FAQ for gallery readers. Full guides:
-[tiered-router-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/tiered-router-setup.md),
+[sie-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md),
+[model-studio-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md),
 [setup-commands — when it fails](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/setup-commands.md#when-it-fails),
 [env-vars.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/env-vars.md).
 
@@ -30,7 +31,7 @@ MVP Live only needs Supabase + Modal.
 ## Model Studio never runs
 
 Expected unless SIE escalates. Configure Part B only after SIE works; check
-`DASHSCOPE_*` / region endpoint in tiered-router-setup.
+`DASHSCOPE_*` / region endpoint in [model-studio-setup](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md).
 
 ## Still stuck?
 

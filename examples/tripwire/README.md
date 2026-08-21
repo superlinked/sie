@@ -31,7 +31,7 @@ hosted SIE → `tripwire route` (or auto-route after scan).
 
 **Canonical docs in the project:**
 [QUICKSTART](https://github.com/neomatrix369/tripwire/blob/main/QUICKSTART.md) ·
-[Tiered router / SIE](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/tiered-router-setup.md) ·
+[SIE setup](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md) ·
 [docs hub](https://github.com/neomatrix369/tripwire/blob/main/docs/README.md)
 
 ## Ports cheat sheet
