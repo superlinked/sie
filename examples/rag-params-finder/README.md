@@ -17,14 +17,15 @@ optional `score` (SIE rerank). SIE is **opt-in** — the default stack runs with
 | New to SIE, found this in the gallery | [Getting started](./getting-started.md) → [SIE integration](./sie-integration.md) |
 | New to rag-params-finder, want SIE embeddings | Same path — then [What SIE does here](./what-sie-does.md) |
 
-Both audiences share one happy path: local MongoDB stack → enable a remote SIE
-gateway → one `example-sie.yaml` sweep → dashboard.
+Both audiences share the same **local** starting path (MongoDB stack +
+dashboard). SIE is optional afterward: enable a remote gateway, then run one
+`example-sie.yaml` sweep.
 
 ## Start here
 
 1. [Getting started](./getting-started.md) — clone, prereqs, local Mongo path, dashboard
 2. [SIE integration](./sie-integration.md) — env vars, health checks, first SIE sweep
-3. [What SIE does here](./what-sie-does.md) — models, encode/rerank, vs Voyage/local
+3. [What SIE does here](./what-sie-does.md) — models, encode/score, vs Voyage/local
 4. [Troubleshooting](./troubleshooting.md) — short FAQ + deep-links
 
 **Canonical docs in the project:**

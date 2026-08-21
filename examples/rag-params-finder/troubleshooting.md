@@ -20,9 +20,12 @@ Short FAQ for gallery readers. Full tables and recovery steps:
 
 ## Sweep with `provider: sie` fails immediately
 
-SIE guard runs preflight. Fix health/`SIE_ENABLED` first, then re-run. Confirm
-indexes for your storage backend (`vector_index_1024` + text index on Mongo for
-typical SIE configs — see project MongoDB setup).
+SIE guard runs preflight. Fix health/`SIE_ENABLED` first, then re-run. Index
+requirements come from the **selected config**, not from `provider: sie` alone.
+For [`configs/mongodb/example-sie.yaml`](https://github.com/neomatrix369/rag-params-finder/blob/main/configs/mongodb/example-sie.yaml)
+(dense BGE-M3 / Stella-v5), create `vector_index_1024` and `text_search_index`
+on Mongo — see project MongoDB setup. Sparse-only models can need different
+indexes; do not treat `vector_index_1024` as universal.
 
 ## `./start-services.sh` did not bring up SIE
 

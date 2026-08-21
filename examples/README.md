@@ -1,6 +1,10 @@
 # Examples
 
-A project gallery of full end-to-end applications built with SIE. Each project lives in its own subdirectory. Clone it, run it, learn from it.
+A project gallery of full end-to-end applications built with SIE. Most entries
+are self-contained under `examples/<name>/` — clone this repo, run them locally,
+and learn from them. Rows marked **External project guide** are docs-only
+landings that deep-link to a separately maintained repository (clone and run
+there).
 
 New to SIE? Start with the **[quickstart notebook](./quickstart.ipynb)** [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/superlinked/sie/blob/main/examples/quickstart.ipynb): encode, score, and extract in 5 minutes, then pick a project below.
 
@@ -43,13 +47,23 @@ benchmark and evaluation examples for deeper technical users.
 
 We welcome contributions. To add your project to the gallery:
 
+### Runnable examples (default)
+
 1. **Create a subdirectory** with a short, descriptive name (e.g. `wikipedia-search/`, `pdf-rag/`)
 2. **Include a README** that covers:
    - What the project does
    - How to run it (`docker compose up`, a script, etc.)
    - Which SIE features it uses (encode, score, extract, cluster, etc.)
-3. **Keep it self-contained** - include a `requirements.txt` or `package.json`, a docker-compose if needed, and sample data or instructions to fetch it
+3. **Keep it self-contained** — include a `requirements.txt` or `package.json`, a docker-compose if needed, and sample data or instructions to fetch it
 4. **Open a PR** against `main`
+
+### External project guides
+
+Use this path only when vendoring a runnable copy is impractical (large multi-service
+apps). Ship a thin `examples/<name>/` landing (README + short sibling pages) that
+deep-links to the external repo’s QUICKSTART/SIE setup, set Status to
+**External project guide**, and do **not** require in-tree `requirements.txt` /
+compose / sample data. See `examples/rag-params-finder/` for the shape.
 
 ### Review workflow
 

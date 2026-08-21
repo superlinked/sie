@@ -47,7 +47,7 @@ You can compare providers across sweeps; SIE does not replace the vector store
 Your corpus + questions
         │
         ▼
-rag-params-finder server  ──encode/rerank──►  SIE (remote or :8720)
+rag-params-finder server  ──encode/score──►  SIE (remote or :8720)
         │
         ▼
 MongoDB / Postgres (vectors + scores)
