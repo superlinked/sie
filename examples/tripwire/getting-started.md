@@ -11,6 +11,8 @@ accounts or SIE.
 - Node.js **22**
 - Python **3.12** (scanners / tooling)
 - Git and npm
+- For **Live** only: Modal CLI (`pip install modal`) before `./scripts/setup-modal.sh` —
+  see [modal-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/modal-setup.md)
 
 Details: [prerequisites.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/prerequisites.md).
 

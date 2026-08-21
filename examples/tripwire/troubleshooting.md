@@ -8,19 +8,21 @@ Short FAQ for gallery readers. Full guides:
 
 ## Route warns and skips
 
-`SIE_ENDPOINT` and/or `SIE_API_KEY` missing from **repo-root** `.env`. The CLI
-does not load `prototypes/.env`. Scan can still succeed.
+Missing `SIE_ENDPOINT` / `SIE_API_KEY` **or** `ALIBABA_OPENAI_BASE_URL` /
+`DASHSCOPE_API_KEY` from **repo-root** `.env`. The product CLI does not load
+`prototypes/.env`. Scan can still succeed; no `routing_review` rows are written.
 
 ## `sie_studio.py` fails but `.env` looks fine
 
-Confirm keys are in `prototypes/.env` for the sample CLI, or export the same
-variables in the shell. Product routing still needs root `.env`.
+Confirm keys are in `prototypes/.env` or `prototypes/sie-studio/.env` (or
+exported in the shell). The sample CLI does not load repo-root `.env`. Product
+routing still needs root `.env`.
 
 ## No pathway strips in the dashboard
 
 - You are on **Mock** — switch to **Live (Supabase)** after a real scan
 - Batch was never routed — run `tripwire route --batch-id …` or re-scan with
-  `SIE_*` set
+  router keys set (`SIE_*` and Model Studio)
 - Read filters: [reading-router-results.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/reading-router-results.md)
 
 ## Live scan “all clear” but a scanner was missing
@@ -28,9 +30,9 @@ variables in the shell. Product routing still needs root `.env`.
 Missing scanner keys **soft-skip** that engine — not a clean bill of health.
 MVP Live only needs Supabase + Modal.
 
-## Model Studio never runs
+## Model Studio never runs (no Alibaba calls)
 
-Expected unless SIE escalates. Configure Part B only after SIE works; check
+Expected unless SIE escalates. Keys must still be present for route config; check
 `DASHSCOPE_*` / region endpoint in [model-studio-setup](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md).
 
 ## Still stuck?

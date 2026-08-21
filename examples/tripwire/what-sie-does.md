@@ -42,8 +42,8 @@ rollups — triage is separate from scanner severity.
 |---|---|
 | Mock demo | No |
 | Live scan + dashboard | No |
-| Auto-route / `tripwire route` | Yes (`SIE_*`) |
-| Model Studio second hop | SIE + Model Studio keys |
+| Auto-route / `tripwire route` | Yes — `SIE_*` plus Model Studio keys (validated up front) |
+| Model Studio second hop | Same keys; Alibaba called only when SIE escalates |
 
 ## Sample prototypes
 
