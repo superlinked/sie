@@ -28,3 +28,7 @@ def test_candle_and_docker_release_source_closure() -> None:
     assert contract.candle_source_errors() == []
     assert contract.docker_copy_errors() == []
     assert contract.docker_release_errors() == []
+
+
+def test_helm_release_follows_verified_images() -> None:
+    assert contract.helm_release_errors() == []

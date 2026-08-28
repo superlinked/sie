@@ -59,7 +59,7 @@ def test_server_build_uses_full_source_revision_and_versioned_tag() -> None:
         push=True,
     )
     assert f"SIE_SRC_REV={FULL_SHA}" in command
-    assert "ghcr.io/superlinked/sie-server:0.7.2-cpu-default" in command
+    assert "ghcr.io/superlinked/sie-server:v0.7.2-cpu-default" in command
     assert "--push" in command
     with pytest.raises(ValueError, match="full 40-character"):
         docker_task.build_server_command(
@@ -90,4 +90,4 @@ def test_expected_release_set_has_no_duplicates() -> None:
     images = docker_task.expected_versioned_images("ghcr.io/superlinked", "0.7.2", targets)
     assert len(images) == 12
     assert len(images) == len(set(images))
-    assert "ghcr.io/superlinked/sie-server-rust:0.7.2-cuda12-sm89" in images
+    assert "ghcr.io/superlinked/sie-server-rust:v0.7.2-cuda12-sm89" in images

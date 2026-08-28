@@ -120,7 +120,7 @@ def load_release_matrix(path: Path = DEFAULT_MATRIX) -> tuple[ServerTarget, ...]
 
 
 def server_image(registry: str, version: str, target: ServerTarget) -> str:
-    return f"{normalize_registry(registry)}sie-server:{validate_version(version)}-{target.platform}-{target.bundle}"
+    return f"{normalize_registry(registry)}sie-server:v{validate_version(version)}-{target.platform}-{target.bundle}"
 
 
 def singleton_image(registry: str, version: str, service: str) -> str:
@@ -130,7 +130,7 @@ def singleton_image(registry: str, version: str, service: str) -> str:
     image_name = "sie-server-rust" if service == "sie-server-rust-cpu" else service
     if service == "sie-server-rust-cpu":
         suffix = "-cpu"
-    return f"{normalize_registry(registry)}{image_name}:{validate_version(version)}{suffix}"
+    return f"{normalize_registry(registry)}{image_name}:v{validate_version(version)}{suffix}"
 
 
 def expected_versioned_images(

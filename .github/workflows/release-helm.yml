@@ -1,0 +1,84 @@
+name: Release Helm
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      tag_name:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+      publish:
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - name: Validate, render, and package the exact chart
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["version"])' deploy/helm/sie-cluster/Chart.yaml)" = "$RELEASE_VERSION"
+          test "$(mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["appVersion"])' deploy/helm/sie-cluster/Chart.yaml)" = "$RELEASE_TAG"
+          mise run helm -- dependencies
+          mise run helm -- lint --set payloadStore.enabled=false
+          mise run helm -- template --set payloadStore.enabled=false >/dev/null
+          mkdir -p artifact
+          mise exec -- helm package deploy/helm/sie-cluster --destination artifact
+          test -f "artifact/sie-cluster-$RELEASE_VERSION.tgz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: helm-sie-cluster-${{ inputs.version }}
+          path: artifact/sie-cluster-${{ inputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: inputs.publish == true && vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: helm-sie-cluster-${{ inputs.version }}
+          path: artifact
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Push and verify the immutable chart version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          chart="artifact/sie-cluster-$RELEASE_VERSION.tgz"
+          test -f "$chart"
+          mise exec -- helm push "$chart" oci://ghcr.io/superlinked/charts
+          remote_version="$(mise exec -- helm show chart oci://ghcr.io/superlinked/charts/sie-cluster --version "$RELEASE_VERSION" | mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(sys.stdin)["version"])')"
+          test "$remote_version" = "$RELEASE_VERSION"

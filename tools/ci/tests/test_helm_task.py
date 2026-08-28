@@ -9,6 +9,17 @@ def test_dependency_command_uses_checked_in_chart() -> None:
     assert helm.dependency_command() == ["dependency", "build", "deploy/helm/sie-cluster"]
 
 
+def test_dependency_repositories_are_derived_and_idempotent() -> None:
+    commands = helm.dependency_repository_commands()
+    assert commands
+    assert all(command[:2] == ["repo", "add"] for command in commands)
+    assert all(command[-1] == "--force-update" for command in commands)
+    urls = [command[-2] for command in commands]
+    assert len(urls) == len(set(urls))
+    assert "https://kedacore.github.io/charts" in urls
+    assert all(not url.startswith("oci://") for url in urls)
+
+
 def test_validation_defaults_disable_payload_store(monkeypatch) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(helm, "run_helm", lambda args: calls.append(args) or 0)

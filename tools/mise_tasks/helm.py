@@ -125,6 +125,30 @@ def dependency_command() -> list[str]:
     return ["dependency", "build", str(CHART_DIR)]
 
 
+def dependency_repository_commands() -> list[list[str]]:
+    """Return idempotent Helm repo setup commands derived from Chart.yaml."""
+    root = resolve_project_root()
+    chart = root / CHART_DIR / "Chart.yaml"
+    repositories: list[str] = []
+    for line in chart.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("repository:"):
+            continue
+        repository = stripped.split(":", maxsplit=1)[1].strip().strip("\"'")
+        if repository.startswith(("https://", "http://")) and repository not in repositories:
+            repositories.append(repository)
+    return [
+        [
+            "repo",
+            "add",
+            f"sie-dependency-{hashlib.sha256(repository.encode()).hexdigest()[:12]}",
+            repository,
+            "--force-update",
+        ]
+        for repository in repositories
+    ]
+
+
 def validation_args(extra_args: list[str]) -> list[str]:
     """Provide deterministic, non-secret values for local chart validation."""
     return [*DEFAULT_VALIDATION_ARGS, *extra_args]
@@ -163,6 +187,9 @@ def cmd_dependencies(extra_args: list[str]) -> int:
         log_error("dependencies does not accept additional arguments")
         return 1
     log(f"[helm] Preparing locked dependencies for: {CHART_DIR}")
+    for command in dependency_repository_commands():
+        if run_helm(command) != 0:
+            return 1
     return run_helm(dependency_command())
 
 

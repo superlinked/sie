@@ -347,6 +347,40 @@ def docker_release_errors() -> list[str]:
     return errors
 
 
+def helm_release_errors() -> list[str]:
+    errors: list[str] = []
+    chart = (ROOT / "deploy/helm/sie-cluster/Chart.yaml").read_text()
+    version_match = re.search(r"^version:\s*([^\s#]+)", chart, re.MULTILINE)
+    app_match = re.search(r"^appVersion:\s*([^\s#]+)", chart, re.MULTILINE)
+    if not version_match or not app_match or app_match.group(1) != f"v{version_match.group(1)}":
+        errors.append("Helm Chart version and appVersion must share the vX.Y.Z release identity")
+
+    workflow = (ROOT / ".github/workflows/release-helm.yml").read_text()
+    required = (
+        "ref: ${{ inputs.sha }}",
+        "mise run helm -- dependencies",
+        "mise run helm -- lint --set payloadStore.enabled=false",
+        "mise run helm -- template --set payloadStore.enabled=false",
+        "helm package deploy/helm/sie-cluster",
+        "needs: build",
+        "inputs.publish == true",
+        "PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
+        "packages: write",
+        "helm push",
+        "helm show chart",
+    )
+    missing = [item for item in required if item not in workflow]
+    if missing:
+        errors.append(f"Helm release workflow is missing contract elements: {missing}")
+    if "latest" in workflow or "alias" in workflow:
+        errors.append("Helm release must not move a floating chart alias")
+
+    docker_task = (ROOT / "tools/mise_tasks/docker_task.py").read_text()
+    if ":v{validate_version(version)}" not in docker_task:
+        errors.append("Docker versioned tags must match the chart's v-prefixed appVersion")
+    return errors
+
+
 def tag_errors() -> list[str]:
     result = subprocess.run(
         ["git", "rev-parse", "v0.7.2^{commit}"],  # noqa: S607
@@ -370,6 +404,7 @@ def validate() -> list[str]:
         *release_config_errors(),
         *release_workflow_errors(),
         *docker_release_errors(),
+        *helm_release_errors(),
         *workflow_pin_errors(),
         *tag_errors(),
     ]
