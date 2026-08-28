@@ -1,0 +1,135 @@
+name: Release npm
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      tag_name:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+      publish:
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - name: Install, test, and build the root workspace
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          mise exec -- pnpm install --frozen-lockfile
+          mise run ts -- lint
+          mise run ts -- typecheck
+          mise run ts -- build
+          mise run ts -- test
+      - name: Pack and inspect all public npm packages
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          pack_one() {
+            package_name="$1"
+            artifact_name="$2"
+            destination="artifacts/$artifact_name"
+            mkdir -p "$destination"
+            mise exec -- pnpm --filter "$package_name" pack --pack-destination "$destination"
+            tarball="$(find "$destination" -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+            test -n "$tarball"
+            tar -tzf "$tarball" | sort | tee "$destination/files.txt"
+            actual_name="$(tar -xOzf "$tarball" package/package.json | jq -r .name)"
+            actual_version="$(tar -xOzf "$tarball" package/package.json | jq -r .version)"
+            test "$actual_name" = "$package_name"
+            test "$actual_version" = "$RELEASE_VERSION"
+          }
+          pack_one @superlinked/sie-sdk sie-sdk
+          pack_one @superlinked/sie-chroma sie-chroma
+          pack_one @superlinked/sie-langchain sie-langchain
+          pack_one @superlinked/sie-llamaindex sie-llamaindex
+          pack_one @superlinked/sie-lancedb sie-lancedb
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-sie-sdk-${{ inputs.version }}
+          path: artifacts/sie-sdk
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-sie-chroma-${{ inputs.version }}
+          path: artifacts/sie-chroma
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-sie-langchain-${{ inputs.version }}
+          path: artifacts/sie-langchain
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-sie-llamaindex-${{ inputs.version }}
+          path: artifacts/sie-llamaindex
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-sie-lancedb-${{ inputs.version }}
+          path: artifacts/sie-lancedb
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: inputs.publish == true && vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: '@superlinked/sie-sdk', artifact: sie-sdk }
+          - { package: '@superlinked/sie-chroma', artifact: sie-chroma }
+          - { package: '@superlinked/sie-langchain', artifact: sie-langchain }
+          - { package: '@superlinked/sie-llamaindex', artifact: sie-llamaindex }
+          - { package: '@superlinked/sie-lancedb', artifact: sie-lancedb }
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-${{ matrix.artifact }}-${{ inputs.version }}
+          path: artifact
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - name: Publish with npm trusted publishing
+        env:
+          EXPECTED_PACKAGE: ${{ matrix.package }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tarball="$(find artifact -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+          test -n "$tarball"
+          test "$(tar -xOzf "$tarball" package/package.json | jq -r .name)" = "$EXPECTED_PACKAGE"
+          test "$(tar -xOzf "$tarball" package/package.json | jq -r .version)" = "$EXPECTED_VERSION"
+          mise exec -- npm publish "$tarball" --access public --provenance

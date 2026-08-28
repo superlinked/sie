@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-release-main
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+      - id: release
+        uses: googleapis/release-please-action@0dfd8538845b8e92600d271a895a5372865d4062 # v5
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
+      - name: Refresh coupled locks on the release pull request
+        if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
+        env:
+          RELEASE_PRS: ${{ steps.release.outputs.prs }}
+        run: |
+          set -euo pipefail
+          branch="$(jq -r '.[0].headBranchName // empty' <<<"$RELEASE_PRS")"
+          test -n "$branch"
+          git fetch origin "$branch"
+          git checkout -B "$branch" FETCH_HEAD
+          mise exec -- uv lock --project .
+          mise exec -- pnpm install --lockfile-only
+          mise exec -- cargo check --workspace
+          if git diff --quiet -- uv.lock pnpm-lock.yaml Cargo.lock; then
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add uv.lock pnpm-lock.yaml Cargo.lock
+          git commit -m 'chore: refresh release locks'
+          git push origin "HEAD:refs/heads/$branch"
+      - name: Validate immutable release outputs
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$RELEASE_SHA" = "$EXPECTED_SHA"
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+  python:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/release-python.yml
+    with:
+      version: ${{ needs.release-please.outputs.version }}
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      sha: ${{ needs.release-please.outputs.sha }}
+      publish: true
+
+  npm:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/release-npm.yml
+    with:
+      version: ${{ needs.release-please.outputs.version }}
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      sha: ${{ needs.release-please.outputs.sha }}
+      publish: true
+
+  docker:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/release-docker.yml
+    with:
+      version: ${{ needs.release-please.outputs.version }}
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      sha: ${{ needs.release-please.outputs.sha }}
+      publish: true
+
+  helm:
+    needs: [release-please, docker]
+    if: needs.release-please.outputs.release_created == 'true' && needs.docker.result == 'success'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/release-helm.yml
+    with:
+      version: ${{ needs.release-please.outputs.version }}
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      sha: ${{ needs.release-please.outputs.sha }}
+      publish: true
