@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import runpy
 import shlex
 import subprocess
 import tomllib
@@ -66,6 +67,26 @@ EXTRA_VERSION_PATHS = {
     "deploy/helm/sie-cluster/Chart.yaml",
 }
 ACTION_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
+JOB_FIELD_INDENT = 4
+REQUIRED_OCI_LABEL_OCCURRENCES = 2
+TRUSTED_WRITE_CONDITION_TERMS = (
+    "inputs.publish == true",
+    "vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
+    "github.event_name == 'push'",
+    "github.ref == 'refs/heads/main'",
+    "github.ref_protected == true",
+    "github.repository == 'superlinked/sie'",
+    "github.sha == inputs.sha",
+)
+PUBLISHER_JOBS = (
+    (".github/workflows/release-python.yml", "publish", "pypi", {"contents": "read", "id-token": "write"}),
+    (".github/workflows/release-npm.yml", "publish", "npm", {"contents": "read", "id-token": "write"}),
+    (".github/workflows/release-audio.yml", "publish", "github-release", {"contents": "write"}),
+    (".github/workflows/release-docker.yml", "push-server", "ghcr", {"contents": "read", "packages": "write"}),
+    (".github/workflows/release-docker.yml", "push-service", "ghcr", {"contents": "read", "packages": "write"}),
+    (".github/workflows/release-docker.yml", "alias", "ghcr", {"contents": "read", "packages": "write"}),
+    (".github/workflows/release-helm.yml", "publish", "helm", {"contents": "read", "packages": "write"}),
+)
 
 CANDLE_PATHS = (
     "packages/sie_server_rust/Cargo.lock",
@@ -141,6 +162,115 @@ def load_json(path: str) -> Any:
     return json.loads((ROOT / path).read_text())
 
 
+def workflow_job_blocks(path: str) -> dict[str, str]:
+    """Extract top-level job blocks without requiring a YAML dependency."""
+    lines = (ROOT / path).read_text().splitlines()
+    try:
+        jobs_index = lines.index("jobs:")
+    except ValueError:
+        return {}
+    starts: list[tuple[str, int]] = []
+    for index, line in enumerate(lines[jobs_index + 1 :], start=jobs_index + 1):
+        match = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+        if match:
+            starts.append((match.group(1), index))
+    blocks: dict[str, str] = {}
+    for offset, (name, start) in enumerate(starts):
+        end = starts[offset + 1][1] if offset + 1 < len(starts) else len(lines)
+        blocks[name] = "\n".join(lines[start:end])
+    return blocks
+
+
+def job_scalar(block: str, key: str) -> str | None:
+    lines = block.splitlines()
+    prefix = f"    {key}:"
+    for index, line in enumerate(lines):
+        if not line.startswith(prefix):
+            continue
+        value = line.removeprefix(prefix).strip()
+        if value not in {">", ">-", "|", "|-"}:
+            return value
+        parts: list[str] = []
+        for continuation in lines[index + 1 :]:
+            if continuation and len(continuation) - len(continuation.lstrip()) <= JOB_FIELD_INDENT:
+                break
+            if continuation.strip():
+                parts.append(continuation.strip())
+        return " ".join(parts)
+    return None
+
+
+def job_permissions(block: str) -> dict[str, str]:
+    lines = block.splitlines()
+    for index, line in enumerate(lines):
+        if line != "    permissions:":
+            continue
+        permissions: dict[str, str] = {}
+        for continuation in lines[index + 1 :]:
+            match = re.fullmatch(r"      ([A-Za-z0-9_-]+):\s*([^\s]+)", continuation)
+            if not match:
+                break
+            permissions[match.group(1)] = match.group(2)
+        return permissions
+    return {}
+
+
+def trusted_publication_context(
+    *,
+    publish: bool,
+    latch: str,
+    event_name: str,
+    ref: str,
+    ref_protected: bool,
+    repository: str,
+    github_sha: str,
+    input_sha: str,
+    tag_name: str,
+    version: str,
+    tag_sha: str,
+) -> bool:
+    """Model the context every external writer must prove independently."""
+    return (
+        publish
+        and latch == "true"
+        and event_name == "push"
+        and ref == "refs/heads/main"
+        and ref_protected
+        and repository == "superlinked/sie"
+        and re.fullmatch(r"[0-9a-f]{40}", input_sha) is not None
+        and github_sha == input_sha == tag_sha
+        and tag_name == f"v{version}"
+    )
+
+
+def publisher_job_errors() -> list[str]:
+    errors: list[str] = []
+    for path, job_name, environment, expected_permissions in PUBLISHER_JOBS:
+        block = workflow_job_blocks(path).get(job_name)
+        label = f"{path}:{job_name}"
+        if block is None:
+            errors.append(f"publisher job is missing: {label}")
+            continue
+        condition = job_scalar(block, "if") or ""
+        missing_terms = [term for term in TRUSTED_WRITE_CONDITION_TERMS if term not in condition]
+        if missing_terms:
+            errors.append(f"{label} is not bound to trusted push/main/SHA context: {missing_terms}")
+        if job_scalar(block, "environment") != environment:
+            errors.append(f"{label} must use protected environment {environment}")
+        if job_permissions(block) != expected_permissions:
+            errors.append(f"{label} permissions differ from {expected_permissions}")
+        required_binding = (
+            "Validate trusted publication context and tag binding",
+            'test "$GITHUB_SHA" = "$RELEASE_SHA"',
+            'git fetch --no-tags origin "refs/tags/$RELEASE_TAG"',
+            "FETCH_HEAD^{commit}",
+        )
+        missing_binding = [item for item in required_binding if item not in block]
+        if missing_binding:
+            errors.append(f"{label} does not prove the immutable tag binding: {missing_binding}")
+    return errors
+
+
 def python_matrices() -> tuple[tuple[str, ...], tuple[str, ...]]:
     workflow = (ROOT / ".github/workflows/release-python.yml").read_text()
     build_section, publish_section = workflow.split("\n  publish:", maxsplit=1)
@@ -189,7 +319,13 @@ def release_config_errors() -> list[str]:
 def release_workflow_errors() -> list[str]:
     errors: list[str] = []
     top = (ROOT / ".github/workflows/release.yml").read_text()
-    for reusable in ("release-python.yml", "release-npm.yml", "release-docker.yml", "release-helm.yml"):
+    for reusable in (
+        "release-python.yml",
+        "release-npm.yml",
+        "release-audio.yml",
+        "release-docker.yml",
+        "release-helm.yml",
+    ):
         if f"uses: ./.github/workflows/{reusable}" not in top:
             errors.append(f"top-level release does not call {reusable} directly")
     if "needs: [release-please, docker]" not in top:
@@ -201,15 +337,6 @@ def release_workflow_errors() -> list[str]:
         for token_name in ("PYPI_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN"):
             if token_name in text:
                 errors.append(f"{path.name} references forbidden publication token {token_name}")
-    for path, environment in (
-        (".github/workflows/release-python.yml", "pypi"),
-        (".github/workflows/release-npm.yml", "npm"),
-    ):
-        text = (ROOT / path).read_text()
-        if "inputs.publish == true" not in text or "PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'" not in text:
-            errors.append(f"{path} is missing the dual publication latch")
-        if f"environment: {environment}" not in text or "id-token: write" not in text:
-            errors.append(f"{path} is missing its protected OIDC environment")
     python_workflow = (ROOT / ".github/workflows/release-python.yml").read_text()
     if "uv lock --check --project ." not in python_workflow or "uv build --package" not in python_workflow:
         errors.append("Python release must check the root lock before isolated package builds")
@@ -218,6 +345,91 @@ def release_workflow_errors() -> list[str]:
     npm_workflow = (ROOT / ".github/workflows/release-npm.yml").read_text()
     if 'pnpm --dir "$package_path" pack' not in npm_workflow or 'pnpm --filter "$package_name" pack' in npm_workflow:
         errors.append("npm release must pack from each workspace directory with pnpm 9")
+    return errors
+
+
+def release_app_errors() -> list[str]:
+    errors: list[str] = []
+    path = ".github/workflows/release.yml"
+    text = (ROOT / path).read_text()
+    block = workflow_job_blocks(path).get("release-please", "")
+    if job_scalar(block, "environment") != "release-automation":
+        errors.append("release-please must use the protected release-automation environment")
+    if job_permissions(block) != {"contents": "read"}:
+        errors.append("release-please GITHUB_TOKEN permissions must remain read-only")
+    release_condition = job_scalar(block, "if") or ""
+    for term in (
+        "github.event_name == 'push'",
+        "github.ref == 'refs/heads/main'",
+        "github.ref_protected == true",
+        "github.repository == 'superlinked/sie'",
+    ):
+        if term not in release_condition:
+            errors.append(f"release-please is missing trusted context condition: {term}")
+    required = (
+        "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
+        "vars.PUBLIC_RELEASE_APP_ID",
+        "secrets.PUBLIC_RELEASE_APP_PRIVATE_KEY",
+        "permission-contents: write",
+        "permission-pull-requests: write",
+        "token: ${{ steps.app-token.outputs.token }}",
+        "git push origin",
+        "Verify the release PR final head after the App-authored push",
+        'gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --jq .head.sha',
+        'test "$remote_sha" = "$expected_sha"',
+        "release_pr_head: ${{ steps.release-pr-head.outputs.sha }}",
+    )
+    missing = [item for item in required if item not in text]
+    if missing:
+        errors.append(f"public release GitHub App exact-head handoff is incomplete: {missing}")
+    forbidden = ("secrets.GITHUB_TOKEN", "${{ github.token }}", "GH_TOKEN: ${{ github.token }}")
+    leaked = [item for item in forbidden if item in text]
+    if leaked:
+        errors.append(f"release-please or lock pushes fall back to GITHUB_TOKEN: {leaked}")
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    if "  pull_request:" not in ci:
+        errors.append("App-authored release PR changes do not trigger public pull-request CI")
+    return errors
+
+
+def audio_release_contract() -> tuple[str, str, str]:
+    values = runpy.run_path(str(ROOT / "packages/sie_audio_prep/build_wheel.py"))
+    version = values["AUDIO_PREP_VERSION"]
+    filename = values["AUDIO_WHEEL_FILENAME"]
+    url = f"https://github.com/superlinked/sie/releases/download/v{version}/{filename}"
+    return version, filename, url
+
+
+def audio_release_errors() -> list[str]:
+    errors: list[str] = []
+    version, filename, url = audio_release_contract()
+    expected_filename = f"sie_audio_prep-{version}-cp312-abi3-manylinux_2_28_x86_64.whl"
+    if filename != expected_filename:
+        errors.append(f"native audio asset filename changed unexpectedly: {filename}")
+    mise_config = tomllib.loads((ROOT / "mise.toml").read_text())
+    if mise_config.get("tools", {}).get("zig") != "0.13.0":
+        errors.append("native audio release must pin Zig 0.13.0")
+    workflow = (ROOT / ".github/workflows/release-audio.yml").read_text()
+    required = (
+        "ref: ${{ inputs.sha }}",
+        "manylinux_2_28_x86_64@sha256:",
+        "tools/ci/build_audio_prep_release_asset.py --out dist",
+        expected_filename.replace(version, "$RELEASE_VERSION"),
+        "gh release upload",
+        "browser_download_url",
+        "environment: github-release",
+    )
+    missing = [item for item in required if item not in workflow]
+    if missing:
+        errors.append(f"native audio release workflow is incomplete: {missing}")
+    if not (ROOT / "tools/ci/build_audio_prep_release_asset.py").is_file():
+        errors.append("native audio release asset builder is missing")
+    top = (ROOT / ".github/workflows/release.yml").read_text()
+    if "uses: ./.github/workflows/release-audio.yml" not in top or "contents: write" not in workflow:
+        errors.append("top-level release does not fan out the native audio asset writer")
+    expected_url_fragment = "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$AUDIO_WHEEL_FILENAME"
+    if expected_url_fragment not in workflow:
+        errors.append(f"native audio workflow does not verify browser URL contract {url}")
     return errors
 
 
@@ -359,6 +571,13 @@ def docker_release_errors() -> list[str]:
         errors.append("Docker release is missing its dual publication latch")
     if "needs: [matrix, verify]" not in workflow:
         errors.append("Docker latest aliases are not ordered after full-set verification")
+    docker_task = (ROOT / "tools/mise_tasks/docker_task.py").read_text()
+    for label in (
+        "org.opencontainers.image.revision={revision}",
+        "org.opencontainers.image.source=https://github.com/superlinked/sie",
+    ):
+        if docker_task.count(label) < REQUIRED_OCI_LABEL_OCCURRENCES:
+            errors.append(f"server and singleton builds must both carry OCI label {label}")
     return errors
 
 
@@ -420,6 +639,9 @@ def validate() -> list[str]:
     errors = [
         *release_config_errors(),
         *release_workflow_errors(),
+        *release_app_errors(),
+        *publisher_job_errors(),
+        *audio_release_errors(),
         *docker_release_errors(),
         *helm_release_errors(),
         *workflow_pin_errors(),

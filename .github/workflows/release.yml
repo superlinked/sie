@@ -13,23 +13,50 @@ concurrency:
 
 jobs:
   release-please:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    environment: release-automation
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
       sha: ${{ steps.release.outputs.sha }}
+      release_pr_head: ${{ steps.release-pr-head.outputs.sha }}
     steps:
+      - name: Require activated public release GitHub App credentials
+        env:
+          APP_ID: ${{ vars.PUBLIC_RELEASE_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.PUBLIC_RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$APP_ID"
+          [[ "$APP_ID" =~ ^[0-9]+$ ]]
+          test -n "$APP_PRIVATE_KEY"
+          [[ "$APP_PRIVATE_KEY" == *"BEGIN"*"PRIVATE KEY"* ]]
+      - id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.PUBLIC_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PUBLIC_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
       - id: release
         uses: googleapis/release-please-action@0dfd8538845b8e92600d271a895a5372865d4062 # v5
         with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
@@ -37,6 +64,7 @@ jobs:
       - name: Refresh coupled locks on the release pull request
         if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_PRS: ${{ steps.release.outputs.prs }}
         run: |
           set -euo pipefail
@@ -55,6 +83,28 @@ jobs:
           git add uv.lock pnpm-lock.yaml Cargo.lock
           git commit -m 'chore: refresh release locks'
           git push origin "HEAD:refs/heads/$branch"
+      - id: release-pr-head
+        name: Verify the release PR final head after the App-authored push
+        if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PRS: ${{ steps.release.outputs.prs }}
+        run: |
+          set -euo pipefail
+          pr_number="$(jq -r '.[0].number // empty' <<<"$RELEASE_PRS")"
+          expected_sha="$(git rev-parse HEAD)"
+          test -n "$pr_number"
+          [[ "$expected_sha" =~ ^[0-9a-f]{40}$ ]]
+          remote_sha=""
+          for _ in 1 2 3 4 5 6; do
+            remote_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --jq .head.sha)"
+            if [ "$remote_sha" = "$expected_sha" ]; then
+              break
+            fi
+            sleep 2
+          done
+          test "$remote_sha" = "$expected_sha"
+          echo "sha=$expected_sha" >> "$GITHUB_OUTPUT"
       - name: Validate immutable release outputs
         if: steps.release.outputs.release_created == 'true'
         env:
@@ -88,6 +138,18 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/release-npm.yml
+    with:
+      version: ${{ needs.release-please.outputs.version }}
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      sha: ${{ needs.release-please.outputs.sha }}
+      publish: true
+
+  audio:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-audio.yml
     with:
       version: ${{ needs.release-please.outputs.version }}
       tag_name: ${{ needs.release-please.outputs.tag_name }}

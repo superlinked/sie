@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Build and stage the exact native audio wheel used as a release asset."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import shutil
+import sys
+from pathlib import Path
+from types import ModuleType
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+BUILD_WHEEL_PATH = REPOSITORY_ROOT / "packages/sie_audio_prep/build_wheel.py"
+
+
+def load_build_wheel() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("sie_audio_prep_build_wheel", BUILD_WHEEL_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {BUILD_WHEEL_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("sie_audio_prep_build_wheel", module)
+    spec.loader.exec_module(module)
+    return module
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args(argv)
+
+    build_wheel = load_build_wheel()
+    wheel = build_wheel.build_audio_prep_wheel(REPOSITORY_ROOT, required=True)
+    if wheel is None:
+        raise RuntimeError("required audio wheel build returned no artifact")
+    args.out.mkdir(parents=True, exist_ok=True)
+    destination = args.out / wheel.name
+    shutil.copyfile(wheel, destination)
+    build_wheel._validate_wheel(destination)
+    print(destination)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

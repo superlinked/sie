@@ -92,9 +92,17 @@ jobs:
 
   push-server:
     needs: [matrix, build-server, build-service]
-    if: inputs.publish == true && vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'
+    if: >-
+      inputs.publish == true &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == inputs.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    environment: ghcr
     permissions:
       contents: read
       packages: write
@@ -106,6 +114,21 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           persist-credentials: false
+      - name: Validate trusted publication context and tag binding
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = superlinked/sie
+          test "$GITHUB_SHA" = "$RELEASE_SHA"
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -124,9 +147,17 @@ jobs:
 
   push-service:
     needs: [matrix, build-server, build-service]
-    if: inputs.publish == true && vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'
+    if: >-
+      inputs.publish == true &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == inputs.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    environment: ghcr
     permissions:
       contents: read
       packages: write
@@ -139,6 +170,21 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           persist-credentials: false
+      - name: Validate trusted publication context and tag binding
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = superlinked/sie
+          test "$GITHUB_SHA" = "$RELEASE_SHA"
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -156,7 +202,14 @@ jobs:
 
   verify:
     needs: [matrix, push-server, push-service]
-    if: inputs.publish == true && vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'
+    if: >-
+      inputs.publish == true &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == inputs.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -178,9 +231,18 @@ jobs:
 
   alias:
     needs: [matrix, verify]
-    if: inputs.publish == true && vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' && needs.verify.result == 'success'
+    if: >-
+      inputs.publish == true &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == inputs.sha &&
+      needs.verify.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    environment: ghcr
     permissions:
       contents: read
       packages: write
@@ -189,6 +251,21 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           persist-credentials: false
+      - name: Validate trusted publication context and tag binding
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = superlinked/sie
+          test "$GITHUB_SHA" = "$RELEASE_SHA"
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3

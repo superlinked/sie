@@ -101,7 +101,14 @@ jobs:
 
   publish:
     needs: build
-    if: inputs.publish == true && vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'
+    if: >-
+      inputs.publish == true &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == inputs.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm
@@ -118,6 +125,26 @@ jobs:
           - { package: '@superlinked/sie-llamaindex', artifact: sie-llamaindex }
           - { package: '@superlinked/sie-lancedb', artifact: sie-lancedb }
     steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate trusted publication context and tag binding
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = superlinked/sie
+          test "$GITHUB_SHA" = "$RELEASE_SHA"
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: npm-${{ matrix.artifact }}-${{ inputs.version }}

@@ -59,6 +59,8 @@ def test_server_build_uses_full_source_revision_and_versioned_tag() -> None:
         push=True,
     )
     assert f"SIE_SRC_REV={FULL_SHA}" in command
+    assert f"org.opencontainers.image.revision={FULL_SHA}" in command
+    assert "org.opencontainers.image.source=https://github.com/superlinked/sie" in command
     assert "ghcr.io/superlinked/sie-server:v0.7.2-cpu-default" in command
     assert "--push" in command
     with pytest.raises(ValueError, match="full 40-character"):
@@ -83,6 +85,18 @@ def test_complete_set_is_verified_before_alias_commands(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="incomplete"):
         docker_task.move_aliases("ghcr.io/superlinked", "0.7.2", targets)
     assert commands == []
+
+
+def test_singleton_build_records_the_validated_source_revision() -> None:
+    command = docker_task.build_service_command(
+        registry="ghcr.io/superlinked",
+        version="0.7.2",
+        service="sie-config",
+        source_revision=FULL_SHA,
+        push=True,
+    )
+    assert f"org.opencontainers.image.revision={FULL_SHA}" in command
+    assert "org.opencontainers.image.source=https://github.com/superlinked/sie" in command
 
 
 def test_expected_release_set_has_no_duplicates() -> None:

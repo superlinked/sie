@@ -1,4 +1,4 @@
-name: Release Helm
+name: Release native audio asset
 
 on:
   workflow_call:
@@ -22,14 +22,25 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    container: quay.io/pypa/manylinux_2_28_x86_64@sha256:4dc41da7df20400310c80d162a2fe2d2c2f3d9734d8dec20f6b9843711618deb
+    timeout-minutes: 30
+    outputs:
+      filename: ${{ steps.contract.outputs.filename }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ inputs.sha }}
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
-      - name: Validate, render, and package the exact chart
+        with:
+          install: false
+          cache: false
+      - name: Install pinned native build tools
+        run: |
+          mise trust
+          mise install python uv zig
+      - id: contract
+        name: Validate exact release identity and asset filename
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_TAG: ${{ inputs.tag_name }}
@@ -38,18 +49,15 @@ jobs:
           set -euo pipefail
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-          test "$(mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["version"])' deploy/helm/sie-cluster/Chart.yaml)" = "$RELEASE_VERSION"
-          test "$(mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["appVersion"])' deploy/helm/sie-cluster/Chart.yaml)" = "$RELEASE_TAG"
-          mise run helm -- dependencies
-          mise run helm -- lint --set payloadStore.enabled=false
-          mise run helm -- template --set payloadStore.enabled=false >/dev/null
-          mkdir -p artifact
-          mise exec -- helm package deploy/helm/sie-cluster --destination artifact
-          test -f "artifact/sie-cluster-$RELEASE_VERSION.tgz"
+          filename="$(mise exec -- python -c 'import runpy; print(runpy.run_path("packages/sie_audio_prep/build_wheel.py")["AUDIO_WHEEL_FILENAME"])')"
+          test "$filename" = "sie_audio_prep-$RELEASE_VERSION-cp312-abi3-manylinux_2_28_x86_64.whl"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+      - name: Build and validate exact Linux wheel
+        run: mise exec -- python tools/ci/build_audio_prep_release_asset.py --out dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: helm-sie-cluster-${{ inputs.version }}
-          path: artifact/sie-cluster-${{ inputs.version }}.tgz
+          name: audio-prep-${{ inputs.version }}
+          path: dist/${{ steps.contract.outputs.filename }}
           if-no-files-found: error
           retention-days: 7
 
@@ -64,11 +72,10 @@ jobs:
       github.repository == 'superlinked/sie' &&
       github.sha == inputs.sha
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    environment: helm
+    timeout-minutes: 15
+    environment: github-release
     permissions:
-      contents: read
-      packages: write
+      contents: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -92,21 +99,19 @@ jobs:
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: helm-sie-cluster-${{ inputs.version }}
+          name: audio-prep-${{ inputs.version }}
           path: artifact
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-      - name: Push and verify the immutable chart version
+      - name: Attach and verify exact GitHub Release asset
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          AUDIO_WHEEL_FILENAME: ${{ needs.build.outputs.filename }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
         run: |
           set -euo pipefail
-          chart="artifact/sie-cluster-$RELEASE_VERSION.tgz"
-          test -f "$chart"
-          mise exec -- helm push "$chart" oci://ghcr.io/superlinked/charts
-          remote_version="$(mise exec -- helm show chart oci://ghcr.io/superlinked/charts/sie-cluster --version "$RELEASE_VERSION" | mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(sys.stdin)["version"])')"
-          test "$remote_version" = "$RELEASE_VERSION"
+          wheel="artifact/$AUDIO_WHEEL_FILENAME"
+          test -f "$wheel"
+          python3 -c 'import runpy,sys; runpy.run_path("packages/sie_audio_prep/build_wheel.py")["_validate_wheel"](__import__("pathlib").Path(sys.argv[1]))' "$wheel"
+          gh release upload "$RELEASE_TAG" "$wheel#$AUDIO_WHEEL_FILENAME" --clobber
+          expected_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$AUDIO_WHEEL_FILENAME"
+          actual_url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq ".assets[] | select(.name == \"$AUDIO_WHEEL_FILENAME\") | .browser_download_url")"
+          test "$actual_url" = "$expected_url"

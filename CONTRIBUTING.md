@@ -54,6 +54,10 @@ mise exec -- cargo clippy --manifest-path packages/sie_server_rust/Cargo.toml --
 mise exec -- cargo test --manifest-path packages/sie_server_rust/Cargo.toml --locked
 ```
 
+Native release-wheel builds additionally use the repository's pinned Zig
+toolchain and run on Linux x86_64. The public release workflow is the authority
+for the exact manylinux asset; it is not part of the PyPI package matrix.
+
 The public Docker task resolves the checked-in release matrix and requires the
 full source commit for every build. A CPU-only Candle image can be built on a
 normal Docker host without publication credentials:

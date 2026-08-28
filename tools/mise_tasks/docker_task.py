@@ -172,6 +172,7 @@ def build_server_command(
     push: bool,
 ) -> list[str]:
     validate_target(target)
+    revision = validate_source_revision(source_revision)
     dockerfile = ROOT / "packages/sie_server" / f"Dockerfile.{target.platform}"
     if not dockerfile.is_file():
         raise ValueError(f"server Dockerfile does not exist: {dockerfile.relative_to(ROOT)}")
@@ -186,7 +187,11 @@ def build_server_command(
         "--build-arg",
         f"BUNDLE={target.bundle}",
         "--build-arg",
-        f"SIE_SRC_REV={validate_source_revision(source_revision)}",
+        f"SIE_SRC_REV={revision}",
+        "--label",
+        f"org.opencontainers.image.revision={revision}",
+        "--label",
+        "org.opencontainers.image.source=https://github.com/superlinked/sie",
         "--tag",
         server_image(registry, version, target),
         "--push" if push else "--load",
@@ -203,7 +208,7 @@ def build_service_command(
     source_revision: str,
     push: bool,
 ) -> list[str]:
-    validate_source_revision(source_revision)
+    revision = validate_source_revision(source_revision)
     dockerfile = SINGLETON_DOCKERFILES.get(service)
     if dockerfile is None or not dockerfile.is_file():
         raise ValueError(f"Dockerfile is unavailable for {service}")
@@ -218,6 +223,14 @@ def build_service_command(
     ]
     if service == "sie-server-rust":
         command.extend(["--build-arg", "CUDA_COMPUTE_CAP=89"])
+    command.extend(
+        [
+            "--label",
+            f"org.opencontainers.image.revision={revision}",
+            "--label",
+            "org.opencontainers.image.source=https://github.com/superlinked/sie",
+        ]
+    )
     command.extend(
         [
             "--tag",
