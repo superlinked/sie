@@ -57,3 +57,12 @@ def test_ci_is_fork_safe_and_actions_are_immutable() -> None:
     action_lines = [line.strip() for line in workflow.splitlines() if "uses:" in line]
     assert action_lines
     assert all(re.search(r"@[0-9a-f]{40}(?:\s|$)", line) for line in action_lines)
+
+
+def test_ci_rust_job_owns_the_standalone_candle_workspace() -> None:
+    workflow = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text()
+    manifest = "--manifest-path packages/sie_server_rust/Cargo.toml"
+    assert f"cargo fmt {manifest} -- --check" in workflow
+    assert f"cargo check {manifest} --locked --all-targets" in workflow
+    assert f"cargo clippy {manifest} --locked --all-targets -- -D warnings" in workflow
+    assert f"cargo test {manifest} --locked" in workflow

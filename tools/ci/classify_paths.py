@@ -42,8 +42,6 @@ def classify(paths: list[str], *, event: str) -> dict[str, bool]:
     for path in paths:
         if not path or path in GLOBAL_NAMES or path.startswith((".github/", "tools/mise_tasks/")):
             return all_groups()
-        if is_documentation(path):
-            continue
 
         matched = False
         if path.endswith((".py", ".pyi")) or path.startswith(
@@ -78,6 +76,8 @@ def classify(paths: list[str], *, event: str) -> dict[str, bool]:
             matched = True
         if path.startswith("tools/ci/"):
             return all_groups()
+        if not matched and is_documentation(path):
+            continue
         if not matched:
             return all_groups()
     return selected

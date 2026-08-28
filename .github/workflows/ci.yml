@@ -80,7 +80,7 @@ jobs:
     needs: policy
     if: needs.policy.outputs.rust == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -90,6 +90,10 @@ jobs:
       - run: mise run rust-check
       - run: mise run rust-clippy
       - run: mise run rust-test
+      - run: mise exec -- cargo fmt --manifest-path packages/sie_server_rust/Cargo.toml -- --check
+      - run: mise exec -- cargo check --manifest-path packages/sie_server_rust/Cargo.toml --locked --all-targets
+      - run: mise exec -- cargo clippy --manifest-path packages/sie_server_rust/Cargo.toml --locked --all-targets -- -D warnings
+      - run: mise exec -- cargo test --manifest-path packages/sie_server_rust/Cargo.toml --locked
 
   contracts:
     name: CI / Contracts
