@@ -51,9 +51,10 @@ jobs:
           pack_one() {
             package_name="$1"
             artifact_name="$2"
+            package_path="$3"
             destination="artifacts/$artifact_name"
             mkdir -p "$destination"
-            mise exec -- pnpm --filter "$package_name" pack --pack-destination "$destination"
+            mise exec -- pnpm --dir "$package_path" pack --pack-destination "$destination"
             tarball="$(find "$destination" -maxdepth 1 -name '*.tgz' -type f -print -quit)"
             test -n "$tarball"
             tar -tzf "$tarball" | sort | tee "$destination/files.txt"
@@ -62,11 +63,11 @@ jobs:
             test "$actual_name" = "$package_name"
             test "$actual_version" = "$RELEASE_VERSION"
           }
-          pack_one @superlinked/sie-sdk sie-sdk
-          pack_one @superlinked/sie-chroma sie-chroma
-          pack_one @superlinked/sie-langchain sie-langchain
-          pack_one @superlinked/sie-llamaindex sie-llamaindex
-          pack_one @superlinked/sie-lancedb sie-lancedb
+          pack_one @superlinked/sie-sdk sie-sdk packages/sie_ts_sdk
+          pack_one @superlinked/sie-chroma sie-chroma integrations/sie_ts_chroma
+          pack_one @superlinked/sie-langchain sie-langchain integrations/sie_ts_langchain
+          pack_one @superlinked/sie-llamaindex sie-llamaindex integrations/sie_ts_llamaindex
+          pack_one @superlinked/sie-lancedb sie-lancedb integrations/sie_ts_lancedb
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: npm-sie-sdk-${{ inputs.version }}

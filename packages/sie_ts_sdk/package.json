@@ -39,6 +39,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:browser": "playwright test",
     "test:browser:serve": "npx serve -l 3456 -C .",
+    "prepare": "pnpm run build",
     "prepack": "pnpm run build"
   },
   "engines": {

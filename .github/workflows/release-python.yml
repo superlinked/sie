@@ -63,7 +63,8 @@ jobs:
           manifest_version="$(mise exec -- python -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$PACKAGE_PATH/pyproject.toml")"
           test "$manifest_version" = "$RELEASE_VERSION"
           mkdir -p artifact
-          mise exec -- uv build --frozen --package "$PACKAGE" --out-dir artifact
+          mise exec -- uv lock --check --project .
+          mise exec -- uv build --package "$PACKAGE" --out-dir artifact
       - name: Verify archive metadata and contents
         env:
           DISTRIBUTION: ${{ matrix.distribution }}
@@ -78,7 +79,10 @@ jobs:
 
           expected_name = os.environ["DISTRIBUTION"].replace("_", "-").lower()
           expected_version = os.environ["RELEASE_VERSION"]
-          archives = sorted(Path("artifact").iterdir())
+          archives = sorted(
+              path for path in Path("artifact").iterdir()
+              if path.name.endswith((".whl", ".tar.gz"))
+          )
           assert len(archives) == 2, archives
           for archive in archives:
               if archive.suffix == ".whl":

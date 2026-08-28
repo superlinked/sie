@@ -5,6 +5,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SIEEmbedding, SIESparseEmbeddingFunction } from "../src/index.js";
 
+function asConstructor<T extends object>(instance: T): () => T {
+  return function constructorMock() {
+    return instance;
+  };
+}
+
 // Mock the SIEClient
 vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@superlinked/sie-sdk")>();
@@ -15,7 +21,7 @@ vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
 
   return {
     ...actual,
-    SIEClient: vi.fn().mockImplementation(() => mockClient),
+    SIEClient: vi.fn().mockImplementation(asConstructor(mockClient)),
   };
 });
 
@@ -59,10 +65,12 @@ describe("SIEEmbedding", () => {
     const mockEncode = vi.fn().mockResolvedValue({
       dense: new Float32Array([0.5, 0.25, 0.75]),
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
-      encode: mockEncode,
-      close: vi.fn(),
-    }));
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        encode: mockEncode,
+        close: vi.fn(),
+      }),
+    );
 
     const embedding = new SIEEmbedding();
     const result = await embedding.getTextEmbedding("Document text");
@@ -93,10 +101,12 @@ describe("SIEEmbedding", () => {
         { dense: new Float32Array([0.5, 0.25]) },
         { dense: new Float32Array([0.75, 0.125]) },
       ]);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
-      encode: mockEncode,
-      close: vi.fn(),
-    }));
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        encode: mockEncode,
+        close: vi.fn(),
+      }),
+    );
 
     const embedding = new SIEEmbedding();
     const result = await embedding.getTextEmbeddings(["Hello", "World"]);
@@ -118,10 +128,12 @@ describe("SIEEmbedding", () => {
   it("throws if dense is missing", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockEncode = vi.fn().mockResolvedValue({});
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
-      encode: mockEncode,
-      close: vi.fn(),
-    }));
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        encode: mockEncode,
+        close: vi.fn(),
+      }),
+    );
 
     const embedding = new SIEEmbedding();
     await expect(embedding.getTextEmbedding("test")).rejects.toThrow("missing dense embedding");
@@ -132,10 +144,12 @@ describe("SIEEmbedding", () => {
     const mockEncode = vi.fn().mockResolvedValue({
       dense: new Float32Array([0.5, 0.25]),
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
-      encode: mockEncode,
-      close: vi.fn(),
-    }));
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        encode: mockEncode,
+        close: vi.fn(),
+      }),
+    );
 
     const embedding = new SIEEmbedding({
       instruction: "Represent this for retrieval:",
@@ -177,10 +191,12 @@ describe("SIESparseEmbeddingFunction", () => {
       .mockResolvedValue([
         { sparse: { indices: new Int32Array([1, 5]), values: new Float32Array([0.5, 0.25]) } },
       ]);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
-      encode: mockEncode,
-      close: vi.fn(),
-    }));
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        encode: mockEncode,
+        close: vi.fn(),
+      }),
+    );
 
     const fn = new SIESparseEmbeddingFunction({ modelName: "test-model" });
     const [indices, values] = await fn.encodeQueries(["test query"]);
@@ -205,10 +221,12 @@ describe("SIESparseEmbeddingFunction", () => {
       .mockResolvedValue([
         { sparse: { indices: new Int32Array([2, 4]), values: new Float32Array([0.5, 0.75]) } },
       ]);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
-      encode: mockEncode,
-      close: vi.fn(),
-    }));
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        encode: mockEncode,
+        close: vi.fn(),
+      }),
+    );
 
     const fn = new SIESparseEmbeddingFunction();
     const [indices, values] = await fn.encodeDocuments(["test doc"]);
@@ -229,10 +247,12 @@ describe("SIESparseEmbeddingFunction", () => {
   it("returns empty arrays when sparse is missing", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockEncode = vi.fn().mockResolvedValue([{}]);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
-      encode: mockEncode,
-      close: vi.fn(),
-    }));
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        encode: mockEncode,
+        close: vi.fn(),
+      }),
+    );
 
     const fn = new SIESparseEmbeddingFunction();
     const [indices, values] = await fn.encodeDocuments(["test"]);
@@ -249,10 +269,12 @@ describe("SIESparseEmbeddingFunction", () => {
         { sparse: { indices: new Int32Array([1]), values: new Float32Array([0.5]) } },
         { sparse: { indices: new Int32Array([2, 3]), values: new Float32Array([0.25, 0.75]) } },
       ]);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
-      encode: mockEncode,
-      close: vi.fn(),
-    }));
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      asConstructor({
+        encode: mockEncode,
+        close: vi.fn(),
+      }),
+    );
 
     const fn = new SIESparseEmbeddingFunction();
     const [indices, values] = await fn.encodeDocuments(["text1", "text2"]);

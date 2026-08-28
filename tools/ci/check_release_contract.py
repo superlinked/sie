@@ -210,6 +210,14 @@ def release_workflow_errors() -> list[str]:
             errors.append(f"{path} is missing the dual publication latch")
         if f"environment: {environment}" not in text or "id-token: write" not in text:
             errors.append(f"{path} is missing its protected OIDC environment")
+    python_workflow = (ROOT / ".github/workflows/release-python.yml").read_text()
+    if "uv lock --check --project ." not in python_workflow or "uv build --package" not in python_workflow:
+        errors.append("Python release must check the root lock before isolated package builds")
+    if "uv build --frozen" in python_workflow:
+        errors.append("Python release passes an unsupported option to uv build")
+    npm_workflow = (ROOT / ".github/workflows/release-npm.yml").read_text()
+    if 'pnpm --dir "$package_path" pack' not in npm_workflow or 'pnpm --filter "$package_name" pack' in npm_workflow:
+        errors.append("npm release must pack from each workspace directory with pnpm 9")
     return errors
 
 

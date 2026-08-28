@@ -30,6 +30,7 @@ def test_bootstrap_uses_root_locks_even_in_ci() -> None:
     assert "packages/sie_ts_sdk" not in full_sync
     assert "CI:-" not in full_sync
     assert '"packageManager": "pnpm@9.15.9"' in package
+    assert '"prepare": "pnpm run build"' in (REPOSITORY_ROOT / "packages/sie_ts_sdk/package.json").read_text()
     assert "MISE_" not in mise_config
     assert "XDG_CONFIG_HOME" not in mise_config
     assert "XDG_STATE_HOME" not in mise_config
