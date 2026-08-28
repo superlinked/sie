@@ -18,9 +18,7 @@ vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
 
   return {
     ...actual,
-    SIEClient: vi.fn().mockImplementation(function () {
-      return mockClient;
-    }),
+    SIEClient: vi.fn().mockImplementation(() => mockClient),
   };
 });
 
@@ -57,12 +55,10 @@ describe("createSIEExtractorTool", () => {
       classifications: [],
       objects: [],
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       extract: mockExtract,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const tool = createSIEExtractorTool({ modelName: "test-ner" });
     const result = await tool.call({ text: "John Smith works at Acme Corp" });
@@ -90,12 +86,10 @@ describe("createSIEExtractorTool", () => {
   it("passes custom labels to extract", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockExtract = vi.fn().mockResolvedValue(emptyExtractResult);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       extract: mockExtract,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const tool = createSIEExtractorTool({
       labels: ["product", "date"],
@@ -110,12 +104,10 @@ describe("createSIEExtractorTool", () => {
   it("returns empty result for no extractions", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockExtract = vi.fn().mockResolvedValue(emptyExtractResult);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       extract: mockExtract,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const tool = createSIEExtractorTool();
     const result = await tool.call({ text: "no entities here" });

@@ -18,9 +18,7 @@ vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
 
   return {
     ...actual,
-    SIEClient: vi.fn().mockImplementation(function () {
-      return mockClient;
-    }),
+    SIEClient: vi.fn().mockImplementation(() => mockClient),
   };
 });
 
@@ -60,12 +58,10 @@ describe("SIEExtractor", () => {
       classifications: [],
       objects: [],
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       extract: mockExtract,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const extractor = new SIEExtractor({ model: "test-ner" });
     const result = await extractor._call("John Smith works at Acme Corp");
@@ -93,12 +89,10 @@ describe("SIEExtractor", () => {
   it("passes custom labels to extract", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockExtract = vi.fn().mockResolvedValue(emptyExtractResult);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       extract: mockExtract,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const extractor = new SIEExtractor({
       labels: ["product", "date"],
@@ -113,12 +107,10 @@ describe("SIEExtractor", () => {
   it("passes threshold when specified", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockExtract = vi.fn().mockResolvedValue(emptyExtractResult);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       extract: mockExtract,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const extractor = new SIEExtractor({
       threshold: 0.5,
@@ -134,12 +126,10 @@ describe("SIEExtractor", () => {
   it("returns empty result for no extractions", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockExtract = vi.fn().mockResolvedValue(emptyExtractResult);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       extract: mockExtract,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const extractor = new SIEExtractor();
     const result = await extractor._call("no entities here");
@@ -159,12 +149,10 @@ describe("SIEExtractor", () => {
       classifications: [],
       objects: [],
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       extract: mockExtract,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const extractor = new SIEExtractor();
     const result = await extractor._call("test");

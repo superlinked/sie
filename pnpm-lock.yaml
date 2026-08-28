@@ -8,8 +8,11 @@ overrides:
   esbuild: '>=0.25.0'
   form-data: '>=4.0.4'
   langsmith: '>=0.6.0'
+  picomatch: '>=4.0.4'
+  postcss: '>=8.5.10'
   protobufjs: '>=7.5.8'
   qs: '>=6.15.2'
+  rollup: '>=4.59.0'
   tar: '>=7.5.11'
   uuid: '>=11.1.1'
   vite: ^6.4.2
@@ -875,6 +878,7 @@ packages:
   '@lancedb/lancedb@0.17.0':
     resolution: {integrity: sha512-AgQ4dqHBjoEpVdND5tmzhy0OJxwP4gJnEjOz3jVh7ip+8EYhR44wO6XbEhpxvvGfXyyepDrulo3bpL1323eNSg==}
     engines: {node: '>= 18'}
+    cpu: [x64, arm64]
     os: [darwin, linux, win32]
     peerDependencies:
       apache-arrow: '>=15.0.0 <=18.1.0'
@@ -1412,6 +1416,7 @@ packages:
   '@xmldom/xmldom@0.8.13':
     resolution: {integrity: sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==}
     engines: {node: '>=10.0.0'}
+    deprecated: this version has critical issues, please update to the latest version
 
   '@xterm/xterm@5.5.0':
     resolution: {integrity: sha512-hqJHYaQb5OptNunnyAnkHyM8aCjZ1MEIDTQu1iIbbTD/xops91NB5yq1ZK/dC2JDbVWtF23zUtl9JE2NqwT87A==}
@@ -1419,6 +1424,7 @@ packages:
   '@zenfs/core@1.11.4':
     resolution: {integrity: sha512-jFihhedKitw1X9rlImtaca4KTs1Xk9awo4GxUemqt2ucE1jLi10lyRfFFbiYXZsFDkuCWGHwEQwv7BeDIEXMbQ==}
     engines: {node: '>= 18'}
+    deprecated: v1 is no longer supported. Please update ZenFS (or whatever ZenFS dependent you depend on).
     hasBin: true
 
   '@zilliz/milvus2-sdk-node@2.6.15':
@@ -1991,7 +1997,7 @@ packages:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
     engines: {node: '>=12.0.0'}
     peerDependencies:
-      picomatch: ^3 || ^4
+      picomatch: '>=4.0.4'
     peerDependenciesMeta:
       picomatch:
         optional: true
@@ -2832,7 +2838,7 @@ packages:
     engines: {node: '>= 18'}
     peerDependencies:
       jiti: '>=1.21.0'
-      postcss: '>=8.0.9'
+      postcss: '>=8.5.10'
       tsx: ^4.8.1
       yaml: ^2.4.2
     peerDependenciesMeta:
@@ -3237,7 +3243,7 @@ packages:
     peerDependencies:
       '@microsoft/api-extractor': ^7.36.0
       '@swc/core': ^1
-      postcss: ^8.4.12
+      postcss: '>=8.5.10'
       typescript: '>=4.5.0'
     peerDependenciesMeta:
       '@microsoft/api-extractor':

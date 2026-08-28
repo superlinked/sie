@@ -29,10 +29,9 @@ import {
   type DType,
   type EncodeOptions,
   type EncodeResult,
-  type ModelInfo,
-  type ScoreResult,
   SIEClient,
   type SIEClientOptions,
+  type ScoreResult,
   toNumberArray,
 } from "@superlinked/sie-sdk";
 
@@ -311,7 +310,7 @@ export class SIEReranker {
         columnArrays[field.name] = vals;
       }
     }
-    columnArrays["_relevance_score"] = Array.from(scores);
+    columnArrays._relevance_score = Array.from(scores);
 
     const newTable = arrow.tableFromArrays(columnArrays);
     const batch = newTable.batches[0];
@@ -384,7 +383,11 @@ export class SIEReranker {
     }
 
     const table = arrow.tableFromArrays(columnArrays);
-    return table.batches[0]!;
+    const batch = table.batches[0];
+    if (!batch) {
+      throw new Error("Failed to merge result batches");
+    }
+    return batch;
   }
 
   async close(): Promise<void> {

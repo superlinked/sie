@@ -15,9 +15,7 @@ vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
 
   return {
     ...actual,
-    SIEClient: vi.fn().mockImplementation(function () {
-      return mockClient;
-    }),
+    SIEClient: vi.fn().mockImplementation(() => mockClient),
   };
 });
 
@@ -58,12 +56,10 @@ describe("SIEEmbeddings", () => {
         { dense: new Float32Array([0.5, 0.25, 0.75]) },
         { dense: new Float32Array([1.0, 2.0, 3.0]) },
       ]);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       encode: mockEncode,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const embeddings = new SIEEmbeddings({ model: "test-model" });
     const result = await embeddings.embedDocuments(["Hello", "World"]);
@@ -87,12 +83,10 @@ describe("SIEEmbeddings", () => {
     const mockEncode = vi.fn().mockResolvedValue({
       dense: new Float32Array([0.5, 0.25, 0.125]),
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       encode: mockEncode,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const embeddings = new SIEEmbeddings({ model: "test-model" });
     const result = await embeddings.embedQuery("What is this?");
@@ -112,12 +106,10 @@ describe("SIEEmbeddings", () => {
   it("embedQuery throws if dense is missing", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockEncode = vi.fn().mockResolvedValue({});
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       encode: mockEncode,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const embeddings = new SIEEmbeddings();
     await expect(embeddings.embedQuery("test")).rejects.toThrow("missing dense embedding");
@@ -128,12 +120,10 @@ describe("SIEEmbeddings", () => {
     const mockEncode = vi.fn().mockResolvedValue({
       dense: new Float32Array([0.5, 0.25]),
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       encode: mockEncode,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const embeddings = new SIEEmbeddings({
       instruction: "Represent this for retrieval:",
@@ -178,12 +168,10 @@ describe("SIESparseEncoder", () => {
         },
       },
     ]);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       encode: mockEncode,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const encoder = new SIESparseEncoder({ model: "test-model" });
     const result = await encoder.encodeQueries(["test query"]);
@@ -209,12 +197,10 @@ describe("SIESparseEncoder", () => {
       .mockResolvedValue([
         { sparse: { indices: new Int32Array([2, 4]), values: new Float32Array([0.5, 0.75]) } },
       ]);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       encode: mockEncode,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const encoder = new SIESparseEncoder();
     const result = await encoder.encodeDocuments(["test doc"]);
@@ -237,12 +223,10 @@ describe("SIESparseEncoder", () => {
   it("returns empty arrays when sparse is missing", async () => {
     const { SIEClient } = await import("@superlinked/sie-sdk");
     const mockEncode = vi.fn().mockResolvedValue([{}]);
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       encode: mockEncode,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const encoder = new SIESparseEncoder();
     const result = await encoder.encodeDocuments(["test"]);

@@ -16,9 +16,7 @@ vi.mock("@superlinked/sie-sdk", async (importOriginal) => {
 
   return {
     ...actual,
-    SIEClient: vi.fn().mockImplementation(function () {
-      return mockClient;
-    }),
+    SIEClient: vi.fn().mockImplementation(() => mockClient),
   };
 });
 
@@ -80,12 +78,10 @@ describe("SIENodePostprocessor", () => {
         { itemId: "2", score: 0.31, rank: 2 },
       ],
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       score: mockScore,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const nodes = [
       mockNodeWithScore("First doc", 0.5),
@@ -99,11 +95,11 @@ describe("SIENodePostprocessor", () => {
       "search query",
     );
 
-    expect(mockScore).toHaveBeenCalledWith(
-      "test-reranker",
-      { text: "search query" },
-      [{ text: "First doc" }, { text: "Second doc" }, { text: "Third doc" }],
-    );
+    expect(mockScore).toHaveBeenCalledWith("test-reranker", { text: "search query" }, [
+      { text: "First doc" },
+      { text: "Second doc" },
+      { text: "Third doc" },
+    ]);
 
     expect(result).toHaveLength(3);
     // Sorted by score descending (server returns sorted)
@@ -125,12 +121,10 @@ describe("SIENodePostprocessor", () => {
         { itemId: "0", score: 0.72, rank: 1 },
       ],
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       score: mockScore,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const nodes = [mockNodeWithScore("doc1"), mockNodeWithScore("doc2")];
 
@@ -150,12 +144,10 @@ describe("SIENodePostprocessor", () => {
     const mockScore = vi.fn().mockResolvedValue({
       scores: [{ itemId: "0", score: 0.9, rank: 0 }],
     });
-    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
-      return {
+    (SIEClient as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       score: mockScore,
       close: vi.fn(),
-    };
-    });
+    }));
 
     const nodes = [mockNodeWithScore("doc1")];
 

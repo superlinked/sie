@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  policy:
+    name: CI / Policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      python: ${{ steps.paths.outputs.python }}
+      typescript: ${{ steps.paths.outputs.typescript }}
+      rust: ${{ steps.paths.outputs.rust }}
+      contracts: ${{ steps.paths.outputs.contracts }}
+      helm: ${{ steps.paths.outputs.helm }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - id: paths
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          mise exec -- python tools/ci/classify_paths.py \
+            --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+      - run: mise exec -- uv run --frozen --project . pytest -q tools/ci/tests
+      - run: mise exec -- python tools/ci/check_public_tree.py
+
+  python:
+    name: CI / Python
+    needs: policy
+    if: needs.policy.outputs.python == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - run: mise exec -- uv lock --check --project .
+      - run: mise run sync
+      - run: mise run lint
+      - run: mise run typecheck
+      - run: mise run test
+
+  typescript:
+    name: CI / TypeScript
+    needs: policy
+    if: needs.policy.outputs.typescript == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - run: mise exec -- pnpm install --frozen-lockfile
+      - run: mise run ts -- lint
+      - run: mise run ts -- typecheck
+      - run: mise run ts -- build
+      - run: mise run ts -- test
+
+  rust:
+    name: CI / Rust
+    needs: policy
+    if: needs.policy.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - run: mise run rust-fmt -- --check
+      - run: mise run rust-check
+      - run: mise run rust-clippy
+      - run: mise run rust-test
+
+  contracts:
+    name: CI / Contracts
+    needs: policy
+    if: needs.policy.outputs.contracts == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - run: mise run sync
+      - run: mise exec -- python tools/check_ipc_types_parity.py
+      - run: mise exec -- python tools/check_response_chunk_protocol.py
+      - run: tests/parity/run_parity.sh
+
+  helm:
+    name: CI / Helm
+    needs: policy
+    if: needs.policy.outputs.helm == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - run: mise run helm -- dependencies
+      - run: mise run helm -- lint --set payloadStore.enabled=false
+      - run: mise run helm -- template --set payloadStore.enabled=false >/dev/null
+      - run: |
+          destination="$(mktemp -d)"
+          mise exec -- helm package deploy/helm/sie-cluster --destination "$destination"
+
+  required:
+    name: CI / Required
+    if: ${{ always() }}
+    needs: [policy, python, typescript, rust, contracts, helm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          case ",$RESULTS," in
+            *,failure,*|*,cancelled,*) exit 1 ;;
+          esac

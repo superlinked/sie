@@ -205,9 +205,9 @@ add a `ModelOption` entry and a HuggingFace model ID; SIE handles the rest.
 The demo runs on the `latest-cpu-transformers5` SIE image; this is the
 bundle where `lighton_ocr` / `glm_ocr` / `paddle` adapters live. The
 Florence-2 family ships in SIE's `default` bundle (which pins
-`transformers<5`) and is not loadable from this image. See
-[sie-internal#828](https://github.com/superlinked/sie-internal/issues/828)
-for the bundle-composition story.
+`transformers<5`) and is not loadable from this image. This separation keeps
+the incompatible tokenizer dependency sets reproducible; use the default
+bundle when evaluating Florence-2.
 
 ---
 

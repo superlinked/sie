@@ -195,8 +195,8 @@ process lifecycles. The semantic methods and their emitted instruments are
 nevertheless governed by the one contract:
 
 - `sie_gateway` owns HTTP completion, admission, KEDA capacity state, and the
-  request span/log boundary. `sie_cloud/gateway` calls the gateway facade for
-  the final i6pn-or-Modal dispatch result.
+  request span/log boundary. Downstream deployments can reuse that facade for
+  their final dispatch result.
 - The Modal dispatcher owns actual substrate invocation attempts.
 - `sie_config` owns config HTTP and authoritative state changes.
 - `sie_server_sidecar` owns realtime queueing and batch formation plus its
