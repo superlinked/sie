@@ -14,8 +14,6 @@ helm = "3.16.4"
 [env]
 UV_CACHE_DIR = "{{env.HOME}}/.cache/sie/uv"
 XDG_CACHE_HOME = "{{env.HOME}}/.cache/sie/xdg-cache"
-XDG_CONFIG_HOME = "{{config_root}}/.cache/xdg-config"
-XDG_STATE_HOME = "{{config_root}}/.cache/xdg-state"
 
 [task_config]
 includes = ["tools/mise_tasks"]

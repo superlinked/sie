@@ -28,6 +28,11 @@ The image train contains the declared server platform/bundle matrix plus
 L4 Candle worker. The chart is packaged only after every versioned image has
 been built and verified.
 
+`mise run docker -- matrix` prints the authoritative server matrix. The
+`build-server` and `build-service` subcommands require an exact 40-character
+source revision; `verify` checks the complete versioned set, and `alias`
+repeats that verification before moving any `latest` reference.
+
 ## Fail-closed publication
 
 Build, test, pack, artifact upload, and source-closure verification are safe to

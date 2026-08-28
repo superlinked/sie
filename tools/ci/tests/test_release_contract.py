@@ -22,3 +22,9 @@ def test_release_workflows_are_pinned_and_fail_closed() -> None:
 
 def test_public_seed_tag_is_ancestral() -> None:
     assert contract.tag_errors() == []
+
+
+def test_candle_and_docker_release_source_closure() -> None:
+    assert contract.candle_source_errors() == []
+    assert contract.docker_copy_errors() == []
+    assert contract.docker_release_errors() == []

@@ -23,12 +23,16 @@ def test_bootstrap_uses_root_locks_even_in_ci() -> None:
     full_sync = (REPOSITORY_ROOT / "tools/mise_tasks/full-sync.bash").read_text()
     init = (REPOSITORY_ROOT / "tools/init.sh").read_text()
     package = (REPOSITORY_ROOT / "package.json").read_text()
+    mise_config = (REPOSITORY_ROOT / "mise.toml").read_text()
     assert "mise run full-sync" in init
     assert "mise run sync" in full_sync
     assert "pnpm install --frozen-lockfile" in full_sync
     assert "packages/sie_ts_sdk" not in full_sync
     assert "CI:-" not in full_sync
     assert '"packageManager": "pnpm@9.15.9"' in package
+    assert "MISE_" not in mise_config
+    assert "XDG_CONFIG_HOME" not in mise_config
+    assert "XDG_STATE_HOME" not in mise_config
     assert not (REPOSITORY_ROOT / ".npmrc").exists()
     assert not (REPOSITORY_ROOT / "packages/sie_ts_sdk/pnpm-lock.yaml").exists()
 

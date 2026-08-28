@@ -1,0 +1,7 @@
+{
+  "bundles": ["default", "sglang", "transformers5"],
+  "platforms": ["cuda12", "cpu"],
+  "include": [
+    { "platform": "cuda13", "bundle": "sglang-cu130", "target": "gemma" }
+  ]
+}

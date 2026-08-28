@@ -54,6 +54,19 @@ mise exec -- cargo clippy --manifest-path packages/sie_server_rust/Cargo.toml --
 mise exec -- cargo test --manifest-path packages/sie_server_rust/Cargo.toml --locked
 ```
 
+The public Docker task resolves the checked-in release matrix and requires the
+full source commit for every build. A CPU-only Candle image can be built on a
+normal Docker host without publication credentials:
+
+```bash
+mise run docker -- matrix
+mise run docker -- build-service \
+  --registry local \
+  --version 0.7.2 \
+  --service sie-server-rust-cpu \
+  --source-revision <40-character-git-sha>
+```
+
 Helm dependency archives and the model/bundle files temporarily staged under
 the chart are generated and ignored. Do not add them to a commit.
 
