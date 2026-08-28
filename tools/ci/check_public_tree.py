@@ -16,6 +16,16 @@ FORBIDDEN = (
     b"packages/" + b"sie_cloud",
     b"tools/" + b"internal_python",
 )
+ARCHIVE_GENERATED_DIRS = {
+    ".cache",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+}
 
 
 def candidate_paths() -> list[Path]:
@@ -23,10 +33,18 @@ def candidate_paths() -> list[Path]:
     result = subprocess.run(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],  # noqa: S607
         cwd=REPOSITORY_ROOT,
-        check=True,
+        check=False,
         capture_output=True,
     )
-    return [REPOSITORY_ROOT / item.decode() for item in result.stdout.split(b"\0") if item]
+    if result.returncode == 0:
+        return [REPOSITORY_ROOT / item.decode() for item in result.stdout.split(b"\0") if item]
+    return sorted(
+        path
+        for path in REPOSITORY_ROOT.rglob("*")
+        if path.is_file()
+        and not ARCHIVE_GENERATED_DIRS.intersection(path.relative_to(REPOSITORY_ROOT).parts)
+        and "deploy/helm/sie-cluster/charts" not in path.as_posix()
+    )
 
 
 def violations(paths: list[Path]) -> list[str]:

@@ -19,6 +19,16 @@ def test_reference_guard_reports_forbidden_text(tmp_path: Path, monkeypatch) -> 
     assert "forbidden public-tree reference" in findings[0]
 
 
+def test_exported_tree_fallback_excludes_generated_dependencies(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(check_public_tree, "REPOSITORY_ROOT", tmp_path)
+    source = tmp_path / "source.py"
+    source.write_text("public\n")
+    generated = tmp_path / "node_modules/dependency.txt"
+    generated.parent.mkdir()
+    generated.write_bytes(b"packages/" + b"sie_cloud" + b"/gateway\n")
+    assert check_public_tree.candidate_paths() == [source]
+
+
 def test_bootstrap_uses_root_locks_even_in_ci() -> None:
     full_sync = (REPOSITORY_ROOT / "tools/mise_tasks/full-sync.bash").read_text()
     init = (REPOSITORY_ROOT / "tools/init.sh").read_text()
