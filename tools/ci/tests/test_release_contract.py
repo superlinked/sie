@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from tools.ci import check_release_contract as contract
 
 
@@ -21,6 +23,11 @@ def test_release_workflows_are_pinned_and_fail_closed() -> None:
 
 
 def test_public_seed_tag_is_ancestral() -> None:
+    assert contract.tag_errors() == []
+
+
+def test_exported_tree_does_not_require_git_metadata(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(contract, "ROOT", tmp_path)
     assert contract.tag_errors() == []
 
 

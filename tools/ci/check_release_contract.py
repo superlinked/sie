@@ -224,21 +224,28 @@ def release_workflow_errors() -> list[str]:
 def candle_source_errors() -> list[str]:
     errors: list[str] = []
     root = ROOT / "packages/sie_server_rust"
-    listed = subprocess.run(
-        [
-            "/usr/bin/git",
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "packages/sie_server_rust",
-        ],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    )
-    actual = {item.decode() for item in listed.stdout.split(b"\0") if item}
+    if (ROOT / ".git").exists():
+        listed = subprocess.run(
+            [
+                "/usr/bin/git",
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "packages/sie_server_rust",
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        actual = {item.decode() for item in listed.stdout.split(b"\0") if item}
+    else:
+        actual = {
+            str(path.relative_to(ROOT))
+            for path in root.rglob("*")
+            if path.is_file() and "target" not in path.relative_to(root).parts
+        }
     expected = set(CANDLE_PATHS)
     if actual != expected:
         errors.append(
@@ -390,6 +397,8 @@ def helm_release_errors() -> list[str]:
 
 
 def tag_errors() -> list[str]:
+    if not (ROOT / ".git").exists():
+        return []
     result = subprocess.run(
         ["git", "rev-parse", "v0.7.2^{commit}"],  # noqa: S607
         cwd=ROOT,
