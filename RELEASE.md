@@ -28,9 +28,11 @@ The npm train contains exactly: `@superlinked/sie-sdk`,
 exact Linux asset
 `sie_audio_prep-<version>-cp312-abi3-manylinux_2_28_x86_64.whl` at
 `https://github.com/superlinked/sie/releases/download/v<version>/<filename>`.
-The build checks out the release SHA, uses the pinned manylinux container,
-Maturin, and Zig toolchain, and validates the wheel tag, metadata, and native
-extension before attachment.
+The build checks out the release SHA, uses the digest-pinned manylinux
+container and repository-pinned Rust, Maturin, and Zig toolchains, and validates
+the wheel tag, metadata, and native extension before attachment. A retry accepts
+an existing asset only when its size and SHA-256 match the newly validated
+wheel; it never silently clobbers versioned bytes.
 
 The image train contains the declared server platform/bundle matrix plus
 `sie-gateway`, `sie-config`, `sie-mcp`, `sie-server-sidecar`, and the chart's
@@ -54,10 +56,10 @@ publishing; no long-lived registry token is part of the contract.
 Every reusable write job independently requires a `push` on
 `refs/heads/main` in `superlinked/sie`, requires `github.sha` to equal the
 release input SHA, and fetches the release tag to prove that it resolves to the
-same commit. A same-repository pull request or manually invoked caller cannot
-turn on publication even after the repository latch is enabled. The writers
-are additionally isolated behind protected `pypi`, `npm`, `ghcr`, `helm`, and
-`github-release` environments.
+same commit. A same-repository pull request or a manual caller cannot invoke
+these normal reusable writers even after the repository latch is enabled. The
+writers are additionally isolated behind protected `pypi`, `npm`, `ghcr`,
+`helm`, and `github-release` environments.
 
 Release-please and release-PR lock refreshes use a dedicated GitHub App token,
 not `GITHUB_TOKEN`. The protected `release-automation` environment supplies
@@ -68,6 +70,18 @@ any mutation. App-authored PR creation and lock pushes emit normal
 `pull_request` / `synchronize` events, and the workflow verifies the remote PR
 head after the final push. Branch protection must require `CI / Required` on
 that exact head before the release PR can merge.
+
+### Repairing the current stable audio asset
+
+`Repair current native audio release asset` is the sole manual write exception.
+It has no tag, SHA, version, or publish input. A dispatch must come from
+protected `main` in `superlinked/sie`; the workflow derives the audio version
+from that exact remote-main commit, accepts only an existing non-draft,
+non-prerelease `vX.Y.Z` release, proves the tag is an ancestor of main, and
+builds from the exact tag source. The writer also requires the publication
+latch and `github-release` environment approval. It uploads only the derived
+exact filename. If an asset already exists, byte identity is required; a
+different asset fails closed without overwrite.
 
 To activate publication after this setup is merged:
 
@@ -90,6 +104,14 @@ To activate publication after this setup is merged:
 6. Run and inspect all other no-write build/pack paths, including the exact
    native audio asset.
 7. Set `PUBLIC_RELEASE_PUBLISHING_ENABLED=true` only after those checks pass.
+8. Dispatch `Repair current native audio release asset` from `main`, approve
+   the protected `github-release` job, and verify the exact v0.7.2 browser URL,
+   filename, size, and SHA-256. Do not use a different tag or replace
+   non-identical existing bytes.
+9. Switch internal consumers only after that public asset is independently
+   readable and validated. If the repair is not completed, hold the consumer
+   cutover until a later public release successfully carries its exact wheel
+   and update the consumer to that released version.
 
 Repository settings, environments, trusted publishers, and the latch are not
 configured by this source change.

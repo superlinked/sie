@@ -69,6 +69,9 @@ EXTRA_VERSION_PATHS = {
 ACTION_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 JOB_FIELD_INDENT = 4
 REQUIRED_OCI_LABEL_OCCURRENCES = 2
+AUDIO_MANYLINUX_IMAGE = (
+    "quay.io/pypa/manylinux_2_28_x86_64@sha256:4dc41da7df20400310c80d162a2fe2d2c2f3d9734d8dec20f6b9843711618deb"
+)
 TRUSTED_WRITE_CONDITION_TERMS = (
     "inputs.publish == true",
     "vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
@@ -243,6 +246,44 @@ def trusted_publication_context(
     )
 
 
+def trusted_audio_repair_context(
+    *,
+    latch: str,
+    event_name: str,
+    ref: str,
+    ref_protected: bool,
+    repository: str,
+    github_sha: str,
+    main_sha: str,
+    tag_sha: str,
+    tag_name: str,
+    version: str,
+    filename: str,
+    tag_version: str,
+    tag_filename: str,
+    tag_is_ancestor: bool,
+    release_is_stable: bool,
+) -> bool:
+    """Model the narrow manual repair authorization for an existing release."""
+    return (
+        latch == "true"
+        and event_name == "workflow_dispatch"
+        and ref == "refs/heads/main"
+        and ref_protected
+        and repository == "superlinked/sie"
+        and re.fullmatch(r"[0-9a-f]{40}", main_sha) is not None
+        and re.fullmatch(r"[0-9a-f]{40}", tag_sha) is not None
+        and github_sha == main_sha
+        and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag_name) is not None
+        and tag_name == f"v{version}"
+        and filename == f"sie_audio_prep-{version}-cp312-abi3-manylinux_2_28_x86_64.whl"
+        and tag_version == version
+        and tag_filename == filename
+        and tag_is_ancestor
+        and release_is_stable
+    )
+
+
 def publisher_job_errors() -> list[str]:
     errors: list[str] = []
     for path, job_name, environment, expected_permissions in PUBLISHER_JOBS:
@@ -407,16 +448,23 @@ def audio_release_errors() -> list[str]:
     if filename != expected_filename:
         errors.append(f"native audio asset filename changed unexpectedly: {filename}")
     mise_config = tomllib.loads((ROOT / "mise.toml").read_text())
-    if mise_config.get("tools", {}).get("zig") != "0.13.0":
+    mise_tools = mise_config.get("tools", {})
+    if mise_tools.get("zig") != "0.13.0":
         errors.append("native audio release must pin Zig 0.13.0")
+    rust = mise_tools.get("rust", {})
+    if not isinstance(rust, dict) or rust.get("version") != "1.97.0":
+        errors.append("native audio release must use the repository Rust 1.97.0 pin")
     workflow = (ROOT / ".github/workflows/release-audio.yml").read_text()
     required = (
         "ref: ${{ inputs.sha }}",
-        "manylinux_2_28_x86_64@sha256:",
-        "tools/ci/build_audio_prep_release_asset.py --out dist",
+        AUDIO_MANYLINUX_IMAGE,
+        "version: 2026.7.11",
+        "mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0",
+        "rust@1.97.0 -- rustc --version",
+        "rust@1.97.0 -- cargo --version",
+        "python tools/ci/build_audio_prep_release_asset.py --out dist",
         expected_filename.replace(version, "$RELEASE_VERSION"),
-        "gh release upload",
-        "browser_download_url",
+        "tools/ci/upload_audio_prep_release_asset.bash",
         "environment: github-release",
     )
     missing = [item for item in required if item not in workflow]
@@ -424,12 +472,71 @@ def audio_release_errors() -> list[str]:
         errors.append(f"native audio release workflow is incomplete: {missing}")
     if not (ROOT / "tools/ci/build_audio_prep_release_asset.py").is_file():
         errors.append("native audio release asset builder is missing")
+    uploader_path = ROOT / "tools/ci/upload_audio_prep_release_asset.bash"
+    uploader = ""
+    if not uploader_path.is_file():
+        errors.append("native audio immutable release uploader is missing")
+    else:
+        uploader = uploader_path.read_text()
+        for item in ("gh release upload", "sha256sum", "browser_download_url", "identical audio release asset"):
+            if item not in uploader:
+                errors.append(f"native audio uploader is missing immutable check: {item}")
+        if "--clobber" in uploader:
+            errors.append("native audio uploader must never clobber a versioned asset")
     top = (ROOT / ".github/workflows/release.yml").read_text()
     if "uses: ./.github/workflows/release-audio.yml" not in top or "contents: write" not in workflow:
         errors.append("top-level release does not fan out the native audio asset writer")
     expected_url_fragment = "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$AUDIO_WHEEL_FILENAME"
-    if expected_url_fragment not in workflow:
+    if expected_url_fragment not in uploader:
         errors.append(f"native audio workflow does not verify browser URL contract {url}")
+    return errors
+
+
+def repair_audio_errors() -> list[str]:
+    errors: list[str] = []
+    path = ".github/workflows/repair-audio-asset.yml"
+    text = (ROOT / path).read_text()
+    if not re.search(r"^  workflow_dispatch:\s*$", text, re.MULTILINE):
+        errors.append("native audio repair must be an explicit dispatch")
+    dispatch_section = text.split("permissions:", maxsplit=1)[0]
+    if "inputs:" in dispatch_section:
+        errors.append("native audio repair must not accept a caller-selected tag or SHA")
+    block = workflow_job_blocks(path).get("publish", "")
+    condition = job_scalar(block, "if") or ""
+    for term in (
+        "vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
+        "github.event_name == 'workflow_dispatch'",
+        "github.ref == 'refs/heads/main'",
+        "github.ref_protected == true",
+        "github.repository == 'superlinked/sie'",
+        "github.sha == needs.authorize.outputs.main_sha",
+    ):
+        if term not in condition:
+            errors.append(f"native audio repair writer condition is missing: {term}")
+    if job_scalar(block, "environment") != "github-release":
+        errors.append("native audio repair writer must use protected github-release environment")
+    if job_permissions(block) != {"contents": "write"}:
+        errors.append("native audio repair writer must receive only contents write")
+    required = (
+        AUDIO_MANYLINUX_IMAGE,
+        "git merge-base --is-ancestor",
+        "refs/heads/main",
+        "refs/tags/$tag_name",
+        "refs/tags/$RELEASE_TAG",
+        'test "$(jq -r .draft',
+        'test "$(jq -r .prerelease',
+        "mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0",
+        "rust@1.97.0 -- rustc --version",
+        "rust@1.97.0 -- cargo --version",
+        "--project-root release-source",
+        "tools/ci/upload_audio_prep_release_asset.bash",
+        "environment: github-release",
+    )
+    missing = [item for item in required if item not in text]
+    if missing:
+        errors.append(f"native audio stable-release repair is incomplete: {missing}")
+    if "--clobber" in text:
+        errors.append("native audio repair must not overwrite an existing asset")
     return errors
 
 
@@ -642,6 +749,7 @@ def validate() -> list[str]:
         *release_app_errors(),
         *publisher_job_errors(),
         *audio_release_errors(),
+        *repair_audio_errors(),
         *docker_release_errors(),
         *helm_release_errors(),
         *workflow_pin_errors(),

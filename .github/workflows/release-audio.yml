@@ -33,12 +33,15 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.7.11
           install: false
           cache: false
       - name: Install pinned native build tools
         run: |
-          mise trust
-          mise install python uv zig
+          mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- rustc --version | cut -d' ' -f2)" = 1.97.0
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- cargo --version | cut -d' ' -f2)" = 1.97.0
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- zig version)" = 0.13.0
       - id: contract
         name: Validate exact release identity and asset filename
         env:
@@ -49,11 +52,13 @@ jobs:
           set -euo pipefail
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-          filename="$(mise exec -- python -c 'import runpy; print(runpy.run_path("packages/sie_audio_prep/build_wheel.py")["AUDIO_WHEEL_FILENAME"])')"
+          filename="$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- python -c 'import runpy; print(runpy.run_path("packages/sie_audio_prep/build_wheel.py")["AUDIO_WHEEL_FILENAME"])')"
           test "$filename" = "sie_audio_prep-$RELEASE_VERSION-cp312-abi3-manylinux_2_28_x86_64.whl"
           echo "filename=$filename" >> "$GITHUB_OUTPUT"
       - name: Build and validate exact Linux wheel
-        run: mise exec -- python tools/ci/build_audio_prep_release_asset.py --out dist
+        run: >-
+          mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 --
+          python tools/ci/build_audio_prep_release_asset.py --out dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: audio-prep-${{ inputs.version }}
@@ -111,7 +116,4 @@ jobs:
           wheel="artifact/$AUDIO_WHEEL_FILENAME"
           test -f "$wheel"
           python3 -c 'import runpy,sys; runpy.run_path("packages/sie_audio_prep/build_wheel.py")["_validate_wheel"](__import__("pathlib").Path(sys.argv[1]))' "$wheel"
-          gh release upload "$RELEASE_TAG" "$wheel#$AUDIO_WHEEL_FILENAME" --clobber
-          expected_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$AUDIO_WHEEL_FILENAME"
-          actual_url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq ".assets[] | select(.name == \"$AUDIO_WHEEL_FILENAME\") | .browser_download_url")"
-          test "$actual_url" = "$expected_url"
+          tools/ci/upload_audio_prep_release_asset.bash "$wheel"

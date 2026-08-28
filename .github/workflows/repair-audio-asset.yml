@@ -1,0 +1,174 @@
+name: Repair current native audio release asset
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repair-current-native-audio-asset
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      filename: ${{ steps.contract.outputs.filename }}
+      main_sha: ${{ steps.contract.outputs.main_sha }}
+      tag_name: ${{ steps.contract.outputs.tag_name }}
+      tag_sha: ${{ steps.contract.outputs.tag_sha }}
+      version: ${{ steps.contract.outputs.version }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: contract
+        name: Authorize the existing stable tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = superlinked/sie
+          git fetch --no-tags origin refs/heads/main
+          main_sha="$(git rev-parse FETCH_HEAD^{commit})"
+          test "$GITHUB_SHA" = "$main_sha"
+          version="$(python3 -c 'import runpy; print(runpy.run_path("packages/sie_audio_prep/build_wheel.py")["AUDIO_PREP_VERSION"])')"
+          filename="$(python3 -c 'import runpy; print(runpy.run_path("packages/sie_audio_prep/build_wheel.py")["AUDIO_WHEEL_FILENAME"])')"
+          tag_name="v$version"
+          [[ "$tag_name" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$filename" = "sie_audio_prep-$version-cp312-abi3-manylinux_2_28_x86_64.whl"
+          git fetch --no-tags origin "refs/tags/$tag_name"
+          tag_sha="$(git rev-parse FETCH_HEAD^{commit})"
+          git merge-base --is-ancestor "$tag_sha" "$main_sha"
+          git show "$tag_sha:packages/sie_audio_prep/build_wheel.py" > "$RUNNER_TEMP/tag-build-wheel.py"
+          tag_version="$(python3 -c 'import runpy,sys; print(runpy.run_path(sys.argv[1])["AUDIO_PREP_VERSION"])' "$RUNNER_TEMP/tag-build-wheel.py")"
+          tag_filename="$(python3 -c 'import runpy,sys; print(runpy.run_path(sys.argv[1])["AUDIO_WHEEL_FILENAME"])' "$RUNNER_TEMP/tag-build-wheel.py")"
+          test "$tag_version" = "$version"
+          test "$tag_filename" = "$filename"
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag_name")"
+          test "$(jq -r .tag_name <<<"$release_json")" = "$tag_name"
+          test "$(jq -r .draft <<<"$release_json")" = false
+          test "$(jq -r .prerelease <<<"$release_json")" = false
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "tag_sha=$tag_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: authorize
+    runs-on: ubuntu-24.04
+    container: quay.io/pypa/manylinux_2_28_x86_64@sha256:4dc41da7df20400310c80d162a2fe2d2c2f3d9734d8dec20f6b9843711618deb
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted repair workflow helpers
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.authorize.outputs.main_sha }}
+          persist-credentials: false
+      - name: Checkout exact stable release source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.authorize.outputs.tag_sha }}
+          path: release-source
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.7.11
+          install: false
+          cache: false
+      - name: Install exact native build toolchain
+        run: |
+          mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- rustc --version | cut -d' ' -f2)" = 1.97.0
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- cargo --version | cut -d' ' -f2)" = 1.97.0
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- zig version)" = 0.13.0
+      - name: Build and validate exact stable wheel source
+        env:
+          AUDIO_WHEEL_FILENAME: ${{ needs.authorize.outputs.filename }}
+          RELEASE_SHA: ${{ needs.authorize.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C release-source rev-parse HEAD)" = "$RELEASE_SHA"
+          python_filename="$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- python -c 'import runpy; print(runpy.run_path("release-source/packages/sie_audio_prep/build_wheel.py")["AUDIO_WHEEL_FILENAME"])')"
+          test "$python_filename" = "$AUDIO_WHEEL_FILENAME"
+          mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- \
+            python tools/ci/build_audio_prep_release_asset.py \
+            --project-root release-source --out dist
+          test -f "dist/$AUDIO_WHEEL_FILENAME"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: repair-audio-prep-${{ needs.authorize.outputs.version }}
+          path: dist/${{ needs.authorize.outputs.filename }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [authorize, build]
+    if: >-
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == needs.authorize.outputs.main_sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: github-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.authorize.outputs.main_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Revalidate protected main, stable tag ancestry, and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag_name }}
+          RELEASE_SHA: ${{ needs.authorize.outputs.tag_sha }}
+          RELEASE_VERSION: ${{ needs.authorize.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = superlinked/sie
+          test "$GITHUB_SHA" = "$MAIN_SHA"
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          git fetch --no-tags origin refs/heads/main
+          test "$(git rev-parse FETCH_HEAD^{commit})" = "$MAIN_SHA"
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse FETCH_HEAD^{commit})" = "$RELEASE_SHA"
+          git merge-base --is-ancestor "$RELEASE_SHA" "$MAIN_SHA"
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          test "$(jq -r .tag_name <<<"$release_json")" = "$RELEASE_TAG"
+          test "$(jq -r .draft <<<"$release_json")" = false
+          test "$(jq -r .prerelease <<<"$release_json")" = false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: repair-audio-prep-${{ needs.authorize.outputs.version }}
+          path: artifact
+      - name: Attach only a missing or byte-identical exact asset
+        env:
+          AUDIO_WHEEL_FILENAME: ${{ needs.authorize.outputs.filename }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          wheel="artifact/$AUDIO_WHEEL_FILENAME"
+          test -f "$wheel"
+          python3 -c 'import runpy,sys; runpy.run_path("packages/sie_audio_prep/build_wheel.py")["_validate_wheel"](__import__("pathlib").Path(sys.argv[1]))' "$wheel"
+          tools/ci/upload_audio_prep_release_asset.bash "$wheel"
