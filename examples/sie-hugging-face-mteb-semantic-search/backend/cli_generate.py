@@ -2,7 +2,7 @@
 
 Runs the same pipeline as the web UI Generate Descriptions buttons:
   1. Prepare 6K prompt (model metadata + README + MTEB summary)
-  2. Generate 6K detailed description via OpenRouter
+  2. Generate 6K detailed description via the configured LLM provider
   3. Generate 2K long description from the 6K output
   4. Generate 200-char short description from the 6K output
   5. Save both descriptions to the database
@@ -30,7 +30,7 @@ from app.db.models import Model, Storage
 from app.db.session import SessionLocal
 from app.prompts import load_prompt
 from app.services.chroma import reindex_all, upsert_embedding
-from app.services.openrouter import generate_text, generate_text_async
+from app.services.llm import generate_text, generate_text_async
 
 logging.basicConfig(
     level=logging.INFO,
@@ -312,7 +312,7 @@ def main():
     parser.add_argument(
         "--model",
         default=None,
-        help=f"OpenRouter model name (default: {settings.openrouter_model})",
+        help=f"LLM model name (default: {settings.llm_model})",
     )
     parser.add_argument(
         "--parallel",
@@ -400,7 +400,7 @@ def main():
             "Processing %d model(s) in storage '%s' with model '%s' (parallel=%d)",
             len(models),
             args.storage_id,
-            args.model or settings.openrouter_model,
+            args.model or settings.llm_model,
             args.parallel,
         )
 
