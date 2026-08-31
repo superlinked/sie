@@ -79,8 +79,12 @@ export async function toImageBytes(input: ImageInput): Promise<Uint8Array> {
 
   // Base64 string or data URL
   if (typeof input === "string") {
-    // Check if it's a data URL
-    const dataUrlMatch = input.match(/^data:[^;]+;base64,(.+)$/);
+    // Check if it's a base64 data URL. Per RFC 2397 the media type may carry
+    // parameters (e.g. ";charset=utf-8") or be omitted entirely, so match
+    // everything up to the ";base64," marker rather than a single ";"-free
+    // segment — otherwise such URLs fall through and the whole data URL is
+    // handed to the base64 decoder (corrupting the bytes or throwing).
+    const dataUrlMatch = input.match(/^data:[^,]*;base64,(.+)$/);
     if (dataUrlMatch?.[1]) {
       return base64ToBytes(dataUrlMatch[1]);
     }

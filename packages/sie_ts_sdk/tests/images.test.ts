@@ -51,6 +51,25 @@ describe("toImageBytes", () => {
     expect(new TextDecoder().decode(result)).toBe("test");
   });
 
+  it("decodes a data URL whose media type carries a parameter", async () => {
+    // Valid per RFC 2397: the media type may be followed by ";param=value"
+    // (e.g. charset) before ";base64,". "Hello" base64-encoded.
+    const dataUrl = "data:image/svg+xml;charset=utf-8;base64,SGVsbG8=";
+    const result = await toImageBytes(dataUrl);
+
+    expect(result).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(result)).toBe("Hello");
+  });
+
+  it("decodes a data URL with an omitted media type", async () => {
+    // RFC 2397 permits an empty media type (defaults to text/plain).
+    const dataUrl = "data:;base64,SGVsbG8=";
+    const result = await toImageBytes(dataUrl);
+
+    expect(result).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(result)).toBe("Hello");
+  });
+
   it("throws for unsupported input type", async () => {
     await expect(toImageBytes(123 as unknown as Uint8Array)).rejects.toThrow(
       "Unsupported image input type",
