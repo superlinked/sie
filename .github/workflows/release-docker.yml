@@ -406,6 +406,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - name: Reverify the complete versioned set before moving any alias
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: >-
           mise run docker -- alias --registry ghcr.io/superlinked
           --version '${{ inputs.version }}' --source-revision '${{ inputs.sha }}'

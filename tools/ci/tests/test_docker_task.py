@@ -234,3 +234,160 @@ def test_full_set_verifier_rejects_source_or_remote_digest_mismatch(complete_sou
     (evidence / "0.json").unlink()
     with pytest.raises(ValueError, match="exact complete"):
         docker_task.verify_release("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
+
+
+def published_release(version):
+    return {"tag_name": f"v{version}", "draft": False, "prerelease": False, "published_at": "2026-09-03T12:00:00Z"}
+
+
+@pytest.fixture
+def public_releases(monkeypatch):
+    state = {"pages": [[published_release(VERSION)]], "revisions": {f"v{VERSION}": FULL_SHA}, "status": "ahead"}
+
+    def capture(command):
+        assert command == ["gh", "api", "--paginate", "--slurp", "repos/superlinked/sie/releases?per_page=100"]
+        return json.dumps(state["pages"])
+
+    def api(path):
+        if path.startswith("git/ref/tags/"):
+            tag = path.removeprefix("git/ref/tags/")
+            return {"ref": f"refs/tags/{tag}", "object": {"type": "commit", "sha": state["revisions"][tag]}}
+        assert path.startswith("compare/")
+        return {"status": state["status"]}
+
+    monkeypatch.setattr(docker_task, "capture", capture)
+    monkeypatch.setattr(docker_task, "api", api)
+    monkeypatch.setattr(docker_task, "verify_release", lambda *_args, **_kwargs: None)
+    return state
+
+
+def test_failed_old_alias_retry_never_rolls_back_newer_success(complete_source, public_releases, monkeypatch, tmp_path):
+    writes = []
+
+    def interrupted_write(command):
+        if len(writes) == 1:
+            raise RuntimeError("interrupted old alias job")
+        writes.append(command)
+
+    monkeypatch.setattr(docker_task, "run", interrupted_write)
+    kwargs = {"evidence_dir": tmp_path, "source_revision": FULL_SHA, "run_id": "1234"}
+    with pytest.raises(RuntimeError, match="interrupted old alias job"):
+        docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
+    public_releases["pages"].append([published_release("0.7.5")])
+    public_releases["revisions"]["v0.7.5"] = "c" * 40
+    monkeypatch.setattr(docker_task, "run", writes.append)
+    docker_task.move_aliases(
+        "ghcr.io/superlinked",
+        "0.7.5",
+        complete_source,
+        evidence_dir=tmp_path,
+        source_revision="c" * 40,
+        run_id="1235",
+    )
+    newer_writes = writes[1:].copy()
+    assert len(newer_writes) == 15
+    assert all(":v0.7.5" in command[-1] for command in newer_writes)
+    docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
+    assert writes[1:] == newer_writes
+
+
+def test_same_release_alias_retry_is_idempotent(complete_source, public_releases, monkeypatch, tmp_path):
+    writes = []
+    monkeypatch.setattr(docker_task, "run", writes.append)
+    kwargs = {"evidence_dir": tmp_path, "source_revision": FULL_SHA, "run_id": "1234"}
+    docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
+    first = writes.copy()
+    docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
+    assert len(first) == 15
+    assert writes == first + first
+
+
+@pytest.mark.parametrize("state", ["invalid_version", "missing_release", "wrong_sha", "missing_tag", "diverged"])
+def test_unverifiable_published_release_never_writes_aliases(
+    complete_source, public_releases, monkeypatch, tmp_path, state
+):
+    public_releases["pages"].append([published_release("0.7.5")])
+    public_releases["revisions"]["v0.7.5"] = "c" * 40
+    if state == "invalid_version":
+        public_releases["pages"][1][0]["tag_name"] = "vnext"
+    elif state == "missing_release":
+        public_releases["pages"].pop(0)
+    elif state == "wrong_sha":
+        public_releases["revisions"][f"v{VERSION}"] = "b" * 40
+    elif state == "missing_tag":
+        public_releases["revisions"]["v0.7.5"] = "invalid"
+    else:
+        public_releases["status"] = "diverged"
+    writes = []
+    monkeypatch.setattr(docker_task, "run", writes.append)
+    with pytest.raises(ValueError, match=r"release|revision|version"):
+        docker_task.move_aliases(
+            "ghcr.io/superlinked",
+            VERSION,
+            complete_source,
+            evidence_dir=tmp_path,
+            source_revision=FULL_SHA,
+            run_id="1234",
+        )
+    assert writes == []
+
+
+def test_failed_public_release_read_never_writes_aliases(complete_source, monkeypatch, tmp_path):
+    def unavailable(_command):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(docker_task, "capture", unavailable)
+    monkeypatch.setattr(docker_task, "verify_release", lambda *_args, **_kwargs: None)
+    writes = []
+    monkeypatch.setattr(docker_task, "run", writes.append)
+    with pytest.raises(subprocess.CalledProcessError):
+        docker_task.move_aliases(
+            "ghcr.io/superlinked",
+            VERSION,
+            complete_source,
+            evidence_dir=tmp_path,
+            source_revision=FULL_SHA,
+            run_id="1234",
+        )
+    assert writes == []
+
+
+def test_published_tag_rejects_contradictory_reference_and_annotated_identity(monkeypatch):
+    tag = f"v{VERSION}"
+    monkeypatch.setattr(docker_task, "api", lambda _path: {"ref": "refs/tags/v0.7.5"})
+    with pytest.raises(ValueError, match="reference mismatch"):
+        docker_task.published_tag_revision(tag)
+    reference = {"ref": f"refs/tags/{tag}", "object": {"type": "tag", "sha": "d" * 40}}
+    annotated = {"tag": tag, "sha": "d" * 40, "object": {"type": "commit", "sha": FULL_SHA}}
+    monkeypatch.setattr(docker_task, "api", lambda path: reference if path.startswith("git/ref/") else annotated)
+    assert docker_task.published_tag_revision(tag) == FULL_SHA
+    annotated["sha"] = "e" * 40
+    with pytest.raises(ValueError, match="annotated tag identity mismatch"):
+        docker_task.published_tag_revision(tag)
+
+
+def test_draft_and_prerelease_do_not_block_current_stable_aliases(public_releases):
+    public_releases["pages"].append(
+        [
+            {**published_release("0.7.5"), "draft": True},
+            {**published_release("0.7.6"), "prerelease": True},
+        ]
+    )
+    assert docker_task.alias_release_is_current(VERSION, FULL_SHA)
+
+
+@pytest.mark.parametrize(
+    "pages",
+    [
+        {"not": "paginated releases"},
+        [[{**published_release(VERSION), "draft": "false"}]],
+        [[{**published_release(VERSION), "published_at": True}]],
+        [[{**published_release(VERSION), "published_at": "not a timestamp"}]],
+        [[{**published_release(VERSION), "published_at": "2026-02-30T12:00:00Z"}]],
+        [[published_release(VERSION), published_release(VERSION)]],
+    ],
+)
+def test_malformed_or_duplicate_release_listing_fails_closed(public_releases, pages):
+    public_releases["pages"] = pages
+    with pytest.raises(ValueError, match=r"malformed|duplicated"):
+        docker_task.alias_release_is_current(VERSION, FULL_SHA)

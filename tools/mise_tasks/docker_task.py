@@ -11,13 +11,14 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from tools.ci.release_artifact import create_manifest, validate_manifest
-from tools.ci.release_guard import stable_version
+from tools.ci.release_guard import api, stable_version
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MATRIX = ROOT / ".github/release-matrix.json"
@@ -425,8 +426,72 @@ def verify_release(
             raise ValueError(f"remote image differs from tested source-bound image: {image}")
 
 
+def published_tag_revision(tag: str) -> str:
+    reference = api(f"git/ref/tags/{tag}")
+    if not isinstance(reference, dict) or reference.get("ref") != f"refs/tags/{tag}":
+        raise ValueError("published release tag reference mismatch")
+    obj = reference.get("object", {})
+    for _ in range(5):
+        if not isinstance(obj, dict) or not isinstance(obj.get("sha"), str):
+            raise ValueError("published release tag object is malformed")
+        revision = validate_source_revision(obj.get("sha", ""))
+        if obj.get("type") == "commit":
+            return revision
+        if obj.get("type") != "tag":
+            raise ValueError("published release tag does not resolve to a commit")
+        annotated = api(f"git/tags/{revision}")
+        if not isinstance(annotated, dict) or annotated.get("sha") != revision or annotated.get("tag") != tag:
+            raise ValueError("published annotated tag identity mismatch")
+        obj = annotated.get("object", {})
+    raise ValueError("published release tag chain does not resolve to a commit")
+
+
+def alias_release_is_current(version: str, source_revision: str) -> bool:
+    requested = stable_version(version)
+    revision = validate_source_revision(source_revision)
+    pages = json.loads(capture(["gh", "api", "--paginate", "--slurp", "repos/superlinked/sie/releases?per_page=100"]))
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise ValueError("published release listing is malformed")
+    releases = {}
+    for release in (release for page in pages for release in page):
+        if (
+            not isinstance(release, dict)
+            or not isinstance(release.get("draft"), bool)
+            or not isinstance(release.get("prerelease"), bool)
+        ):
+            raise ValueError("published release state is malformed")
+        if release["draft"] or release["prerelease"]:
+            continue
+        tag = release.get("tag_name")
+        if not isinstance(tag, str) or not tag.startswith("v") or not release.get("published_at"):
+            raise ValueError("published stable release identity is malformed")
+        try:
+            datetime.strptime(release["published_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        except (TypeError, ValueError) as error:
+            raise ValueError("published stable release timestamp is malformed") from error
+        released = stable_version(tag[1:], new=False)
+        if released in releases:
+            raise ValueError("published stable release identity is duplicated")
+        releases[released] = tag
+    if requested not in releases:
+        raise ValueError("requested release is absent from published stable releases")
+    if published_tag_revision(releases[requested]) != revision:
+        raise ValueError("requested published release tag differs from its source revision")
+    latest = max(releases)
+    if latest == requested:
+        return True
+    latest_revision = published_tag_revision(releases[latest])
+    comparison = api(f"compare/{revision}...{latest_revision}")
+    if not isinstance(comparison, dict) or comparison.get("status") != "ahead":
+        raise ValueError("newer published release does not descend from the requested release")
+    print(f"Leaving floating aliases unchanged: newer stable release {releases[latest]} is published")
+    return False
+
+
 def move_aliases(registry: str, version: str, targets: tuple[ServerTarget, ...], **kwargs: Any) -> None:
     verify_release(registry, version, targets, **kwargs)
+    if not alias_release_is_current(version, kwargs["source_revision"]):
+        return
     for source, alias in alias_plan(registry, version, targets):
         run(["docker", "buildx", "imagetools", "create", "--tag", alias, source])
 
