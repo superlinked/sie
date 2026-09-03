@@ -3,6 +3,21 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable release version newer than 0.7.3
+        required: true
+        type: string
+      original_run:
+        description: Original failed release workflow run ID
+        required: true
+        type: string
+      family:
+        description: Failed artifact family to retry on the original run
+        type: choice
+        default: all
+        options: [all, python, npm, docker, helm, audio, native]
 
 permissions:
   contents: read
@@ -53,12 +68,32 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
+      - id: seed
+        name: Require the genuine stable seed tag and ancestral release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 tools/ci/release_guard.py seed
       - id: release
-        uses: googleapis/release-please-action@0dfd8538845b8e92600d271a895a5372865d4062 # v5
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-release: ${{ steps.seed.outputs.at_seed }}
+      - name: Validate immutable release outputs
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          EXPECTED_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$RELEASE_SHA" = "$EXPECTED_SHA"
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          python3 tools/ci/release_guard.py build --source-ref "$RELEASE_SHA" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
       - name: Refresh coupled locks on the release pull request
@@ -74,7 +109,7 @@ jobs:
           git checkout -B "$branch" FETCH_HEAD
           mise exec -- uv lock --project .
           mise exec -- pnpm install --lockfile-only
-          mise exec -- cargo check --workspace
+          mise exec -- cargo metadata --format-version 1 > /dev/null
           if git diff --quiet -- uv.lock pnpm-lock.yaml Cargo.lock; then
             exit 0
           fi
@@ -105,63 +140,125 @@ jobs:
           done
           test "$remote_sha" = "$expected_sha"
           echo "sha=$expected_sha" >> "$GITHUB_OUTPUT"
-      - name: Validate immutable release outputs
-        if: steps.release.outputs.release_created == 'true'
-        env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
-          RELEASE_VERSION: ${{ steps.release.outputs.version }}
-          RELEASE_SHA: ${{ steps.release.outputs.sha }}
-          EXPECTED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
-          test "$RELEASE_SHA" = "$EXPECTED_SHA"
-          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-
   python:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    permissions:
-      contents: read
-      id-token: write
+    if: github.event_name == 'push' && needs.release-please.outputs.release_created == 'true'
     uses: ./.github/workflows/release-python.yml
     with:
+      source_ref: ${{ needs.release-please.outputs.sha }}
       version: ${{ needs.release-please.outputs.version }}
       tag_name: ${{ needs.release-please.outputs.tag_name }}
-      sha: ${{ needs.release-please.outputs.sha }}
-      publish: true
+      build_only: false
 
   npm:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: github.event_name == 'push' && needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/release-npm.yml
+    with:
+      source_ref: ${{ needs.release-please.outputs.sha }}
+      version: ${{ needs.release-please.outputs.version }}
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      build_only: false
+
+  python-publish:
+    needs: [release-please, python]
+    if: >-
+      needs.release-please.outputs.release_created == 'true' &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == needs.release-please.outputs.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: pypi
     permissions:
       contents: read
       id-token: write
-    uses: ./.github/workflows/release-npm.yml
-    with:
-      version: ${{ needs.release-please.outputs.version }}
-      tag_name: ${{ needs.release-please.outputs.tag_name }}
-      sha: ${{ needs.release-please.outputs.sha }}
-      publish: true
+    env:
+      RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+      RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+      RELEASE_SHA: ${{ needs.release-please.outputs.sha }}
+      PUBLIC_RELEASE_PUBLISHING_ENABLED: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+          persist-credentials: false
+      - name: Validate trusted publication context and tag binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/ci/release_guard.py publish --source-ref "$RELEASE_SHA" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: artifacts
+      - name: Verify the complete original tested archive set
+        run: |
+          python3 -m tools.ci.release_artifact check --directory artifacts --kind python --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG" --source-revision "$RELEASE_SHA" --run-id "$GITHUB_RUN_ID"
+          python3 tools/ci/distributions.py verify python --directory artifacts --version "$RELEASE_VERSION"
+      - id: pending
+        name: Reject conflicting published bytes and select absent archives
+        run: python3 tools/ci/distributions.py prepare-pypi python --directory artifacts --destination pending --version "$RELEASE_VERSION"
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        if: steps.pending.outputs.pending == 'true'
+        with:
+          packages-dir: pending
 
-  audio:
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+  npm-publish:
+    needs: [release-please, npm]
+    if: >-
+      needs.release-please.outputs.release_created == 'true' &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == needs.release-please.outputs.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: npm
     permissions:
-      contents: write
-    uses: ./.github/workflows/release-audio.yml
-    with:
-      version: ${{ needs.release-please.outputs.version }}
-      tag_name: ${{ needs.release-please.outputs.tag_name }}
-      sha: ${{ needs.release-please.outputs.sha }}
-      publish: true
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+      RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+      RELEASE_SHA: ${{ needs.release-please.outputs.sha }}
+      PUBLIC_RELEASE_PUBLISHING_ENABLED: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+          persist-credentials: false
+      - name: Validate trusted publication context and tag binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/ci/release_guard.py publish --source-ref "$RELEASE_SHA" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-distributions
+          path: artifacts
+      - name: Verify the complete original tested archive set
+        run: |
+          python3 -m tools.ci.release_artifact check --directory artifacts --kind npm --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG" --source-revision "$RELEASE_SHA" --run-id "$GITHUB_RUN_ID"
+          python3 tools/ci/distributions.py verify npm --directory artifacts --version "$RELEASE_VERSION"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.12.0'
+      - name: Install the pinned OIDC-capable npm client
+        run: npm install --global npm@11.6.2 --ignore-scripts
+      - name: Publish absent versions or verify identical existing bytes
+        run: python3 tools/ci/distributions.py publish-npm npm --directory artifacts --version "$RELEASE_VERSION"
 
   docker:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: github.event_name == 'push' && needs.release-please.outputs.release_created == 'true'
     permissions:
       contents: read
       packages: write
+      actions: read
     uses: ./.github/workflows/release-docker.yml
     with:
       version: ${{ needs.release-please.outputs.version }}
@@ -171,7 +268,7 @@ jobs:
 
   helm:
     needs: [release-please, docker]
-    if: needs.release-please.outputs.release_created == 'true' && needs.docker.result == 'success'
+    if: github.event_name == 'push' && needs.release-please.outputs.release_created == 'true'
     permissions:
       contents: read
       packages: write
@@ -181,3 +278,73 @@ jobs:
       tag_name: ${{ needs.release-please.outputs.tag_name }}
       sha: ${{ needs.release-please.outputs.sha }}
       publish: true
+
+  audio:
+    needs: release-please
+    if: github.event_name == 'push' && needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-audio.yml
+    with:
+      version: ${{ needs.release-please.outputs.version }}
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      sha: ${{ needs.release-please.outputs.sha }}
+      publish: true
+
+  native:
+    needs: [release-please, docker]
+    if: github.event_name == 'push' && needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-native.yml
+    with:
+      version: ${{ needs.release-please.outputs.version }}
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      sha: ${{ needs.release-please.outputs.sha }}
+      publish: true
+
+  complete:
+    needs: [release-please, python-publish, npm-publish, docker, helm, audio, native]
+    if: always() && github.event_name == 'push' && needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every release family to finish successfully
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ["RESULTS"])
+          bad = {name: job["result"] for name, job in results.items() if job["result"] != "success"}
+          if bad:
+              raise SystemExit(f"Incomplete release: {bad}")
+          PY
+
+  recover:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-automation
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate retained original-run evidence and request failed-job retry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLIC_RELEASE_PUBLISHING_ENABLED: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          ORIGINAL_RUN: ${{ inputs.original_run }}
+          FAMILY: ${{ inputs.family }}
+        run: python3 -m tools.ci.release_recovery --version "$RELEASE_VERSION" --original-run "$ORIGINAL_RUN" --family "$FAMILY"

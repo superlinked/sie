@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -14,7 +17,7 @@ def run_audio_uploader(
     tmp_path: Path, *, asset_mode: str, remote_sha: str
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     tmp_path.mkdir()
-    filename = "sie_audio_prep-0.7.2-cp312-abi3-manylinux_2_28_x86_64.whl"
+    filename = "sie_audio_prep-0.7.4-cp312-abi3-manylinux_2_28_x86_64.whl"
     wheel = tmp_path / filename
     wheel.write_bytes(b"validated native wheel bytes")
     marker = tmp_path / "uploaded"
@@ -50,12 +53,12 @@ fi
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "AUDIO_WHEEL_FILENAME": filename,
         "GITHUB_REPOSITORY": "superlinked/sie",
-        "RELEASE_TAG": "v0.7.2",
+        "RELEASE_TAG": "v0.7.4",
         "GH_TOKEN": str(tmp_path),
         "FAKE_ASSET_MODE": asset_mode,
         "FAKE_REMOTE_SIZE": str(wheel.stat().st_size),
         "FAKE_REMOTE_SHA": remote_sha,
-        "FAKE_BROWSER_URL": f"https://github.com/superlinked/sie/releases/download/v0.7.2/{filename}",
+        "FAKE_BROWSER_URL": f"https://github.com/superlinked/sie/releases/download/v0.7.4/{filename}",
         "FAKE_UPLOAD_MARKER": str(marker),
         "FAKE_CALLS": str(calls),
     }
@@ -88,13 +91,23 @@ def test_release_workflows_are_pinned_and_fail_closed() -> None:
     assert contract.publisher_job_errors() == []
 
 
-def test_public_seed_tag_is_ancestral() -> None:
-    assert contract.tag_errors() == []
-
-
-def test_exported_tree_does_not_require_git_metadata(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(contract, "ROOT", tmp_path)
-    assert contract.tag_errors() == []
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
+def test_actual_release_completion_script_rejects_non_success(monkeypatch, result):
+    block = contract.workflow_job_blocks(".github/workflows/release.yml")["complete"]
+    script = re.search(r"python3 - <<'PY'\n(.*?)\n\s+PY", block, re.DOTALL)
+    assert script is not None
+    results = {
+        family: {"result": "success"}
+        for family in ("release-please", "python-publish", "npm-publish", "docker", "helm", "audio", "native")
+    }
+    results["native"]["result"] = result
+    monkeypatch.setenv("RESULTS", json.dumps(results))
+    code = compile(textwrap.dedent(script.group(1)), "release-complete", "exec")
+    if result == "success":
+        exec(code, {})  # noqa: S102
+    else:
+        with pytest.raises(SystemExit, match="Incomplete release"):
+            exec(code, {})  # noqa: S102
 
 
 def test_candle_and_docker_release_source_closure() -> None:
@@ -113,18 +126,14 @@ def test_public_release_app_hands_final_pr_head_to_ci() -> None:
 
 def test_native_audio_asset_matches_downstream_browser_download_contract() -> None:
     version, filename, url = contract.audio_release_contract()
-    assert version == "0.7.2"
-    assert filename == "sie_audio_prep-0.7.2-cp312-abi3-manylinux_2_28_x86_64.whl"
-    assert url == (
-        "https://github.com/superlinked/sie/releases/download/v0.7.2/"
-        "sie_audio_prep-0.7.2-cp312-abi3-manylinux_2_28_x86_64.whl"
-    )
+    assert filename == f"sie_audio_prep-{version}-cp312-abi3-manylinux_2_28_x86_64.whl"
+    assert url == f"https://github.com/superlinked/sie/releases/download/v{version}/{filename}"
     assert contract.audio_release_errors() == []
 
 
 def test_native_audio_builder_installs_exact_rust_and_never_clobbers() -> None:
     workflow = (contract.ROOT / ".github/workflows/release-audio.yml").read_text()
-    uploader = (contract.ROOT / "tools/ci/upload_audio_prep_release_asset.bash").read_text()
+    uploader = (contract.ROOT / "tools/ci/upload_native_release_asset.bash").read_text()
     assert contract.AUDIO_MANYLINUX_IMAGE in workflow
     assert "version: 2026.7.11" in workflow
     assert "mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0" in workflow
@@ -155,48 +164,8 @@ def test_native_audio_uploader_accepts_only_missing_or_identical_asset(tmp_path:
     )
     assert missing.returncode == 0, missing.stderr
     assert missing_marker.is_file()
-    assert calls.read_text().startswith("release upload --repo superlinked/sie v0.7.2 ")
+    assert calls.read_text().startswith("release upload --repo superlinked/sie v0.7.4 ")
     assert "--clobber" not in calls.read_text()
-
-
-def test_stable_audio_repair_is_narrow_and_fail_closed() -> None:
-    assert contract.repair_audio_errors() == []
-    sha = "a" * 40
-    base = {
-        "latch": "true",
-        "event_name": "workflow_dispatch",
-        "ref": "refs/heads/main",
-        "ref_protected": True,
-        "repository": "superlinked/sie",
-        "github_sha": sha,
-        "main_sha": sha,
-        "tag_sha": "b" * 40,
-        "tag_name": "v0.7.2",
-        "version": "0.7.2",
-        "filename": "sie_audio_prep-0.7.2-cp312-abi3-manylinux_2_28_x86_64.whl",
-        "tag_version": "0.7.2",
-        "tag_filename": "sie_audio_prep-0.7.2-cp312-abi3-manylinux_2_28_x86_64.whl",
-        "tag_is_ancestor": True,
-        "release_is_stable": True,
-    }
-    assert contract.trusted_audio_repair_context(**base)
-    for key, value in (
-        ("latch", "false"),
-        ("event_name", "pull_request"),
-        ("ref", "refs/heads/feature"),
-        ("ref_protected", False),
-        ("repository", "someone/fork"),
-        ("github_sha", "c" * 40),
-        ("main_sha", "not-a-sha"),
-        ("tag_sha", "not-a-sha"),
-        ("tag_name", "v0.7.3"),
-        ("filename", "sie_audio_prep-0.7.3-cp312-abi3-manylinux_2_28_x86_64.whl"),
-        ("tag_version", "0.7.3"),
-        ("tag_filename", "wrong.whl"),
-        ("tag_is_ancestor", False),
-        ("release_is_stable", False),
-    ):
-        assert not contract.trusted_audio_repair_context(**{**base, key: value})
 
 
 @pytest.mark.parametrize("event_name", ["pull_request", "workflow_dispatch"])
@@ -211,8 +180,8 @@ def test_pr_and_manual_callers_cannot_authorize_publication(event_name: str) -> 
         repository="superlinked/sie",
         github_sha=sha,
         input_sha=sha,
-        tag_name="v0.7.2",
-        version="0.7.2",
+        tag_name="v0.7.4",
+        version="0.7.4",
         tag_sha=sha,
     )
 
@@ -228,8 +197,8 @@ def test_only_exact_push_main_sha_and_tag_context_authorizes_publication() -> No
         "repository": "superlinked/sie",
         "github_sha": sha,
         "input_sha": sha,
-        "tag_name": "v0.7.2",
-        "version": "0.7.2",
+        "tag_name": "v0.7.4",
+        "version": "0.7.4",
         "tag_sha": sha,
     }
     assert contract.trusted_publication_context(**base)

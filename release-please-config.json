@@ -4,11 +4,15 @@
   "packages": {
     ".": {
       "release-type": "simple",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
       "include-v-in-tag": true,
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         { "type": "toml", "path": "packages/sie_sdk/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "toml", "path": "packages/sie_server/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "packages/sie_config/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "packages/sie_mcp/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "toml", "path": "integrations/sie_langchain/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "toml", "path": "integrations/sie_llamaindex/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "toml", "path": "integrations/sie_haystack/pyproject.toml", "jsonpath": "$.project.version" },

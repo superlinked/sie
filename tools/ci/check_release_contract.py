@@ -12,10 +12,15 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from tools.ci import distributions
+from tools.ci.release_guard import SEED_VERSION, stable_version, trusted_context
+
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON_DISTRIBUTIONS = (
     "sie-sdk",
     "sie-server",
+    "sie-config",
+    "sie-mcp",
     "sie-langchain",
     "sie-llamaindex",
     "sie-haystack",
@@ -44,6 +49,8 @@ PUBLIC_IMAGE_NAMES = {
 EXTRA_VERSION_PATHS = {
     "packages/sie_sdk/pyproject.toml",
     "packages/sie_server/pyproject.toml",
+    "packages/sie_config/pyproject.toml",
+    "packages/sie_mcp/pyproject.toml",
     "integrations/sie_langchain/pyproject.toml",
     "integrations/sie_llamaindex/pyproject.toml",
     "integrations/sie_haystack/pyproject.toml",
@@ -68,6 +75,7 @@ EXTRA_VERSION_PATHS = {
 }
 ACTION_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 JOB_FIELD_INDENT = 4
+ARTIFACT_RETENTION_DAYS = 30
 REQUIRED_OCI_LABEL_OCCURRENCES = 2
 AUDIO_MANYLINUX_IMAGE = (
     "quay.io/pypa/manylinux_2_28_x86_64@sha256:4dc41da7df20400310c80d162a2fe2d2c2f3d9734d8dec20f6b9843711618deb"
@@ -82,9 +90,10 @@ TRUSTED_WRITE_CONDITION_TERMS = (
     "github.sha == inputs.sha",
 )
 PUBLISHER_JOBS = (
-    (".github/workflows/release-python.yml", "publish", "pypi", {"contents": "read", "id-token": "write"}),
-    (".github/workflows/release-npm.yml", "publish", "npm", {"contents": "read", "id-token": "write"}),
+    (".github/workflows/release.yml", "python-publish", "pypi", {"contents": "read", "id-token": "write"}),
+    (".github/workflows/release.yml", "npm-publish", "npm", {"contents": "read", "id-token": "write"}),
     (".github/workflows/release-audio.yml", "publish", "github-release", {"contents": "write"}),
+    (".github/workflows/release-native.yml", "publish", "github-release", {"contents": "write"}),
     (".github/workflows/release-docker.yml", "push-server", "ghcr", {"contents": "read", "packages": "write"}),
     (".github/workflows/release-docker.yml", "push-service", "ghcr", {"contents": "read", "packages": "write"}),
     (".github/workflows/release-docker.yml", "alias", "ghcr", {"contents": "read", "packages": "write"}),
@@ -232,98 +241,59 @@ def trusted_publication_context(
     version: str,
     tag_sha: str,
 ) -> bool:
-    """Model the context every external writer must prove independently."""
-    return (
-        publish
-        and latch == "true"
-        and event_name == "push"
-        and ref == "refs/heads/main"
-        and ref_protected
-        and repository == "superlinked/sie"
-        and re.fullmatch(r"[0-9a-f]{40}", input_sha) is not None
-        and github_sha == input_sha == tag_sha
-        and tag_name == f"v{version}"
-    )
-
-
-def trusted_audio_repair_context(
-    *,
-    latch: str,
-    event_name: str,
-    ref: str,
-    ref_protected: bool,
-    repository: str,
-    github_sha: str,
-    main_sha: str,
-    tag_sha: str,
-    tag_name: str,
-    version: str,
-    filename: str,
-    tag_version: str,
-    tag_filename: str,
-    tag_is_ancestor: bool,
-    release_is_stable: bool,
-) -> bool:
-    """Model the narrow manual repair authorization for an existing release."""
-    return (
-        latch == "true"
-        and event_name == "workflow_dispatch"
-        and ref == "refs/heads/main"
-        and ref_protected
-        and repository == "superlinked/sie"
-        and re.fullmatch(r"[0-9a-f]{40}", main_sha) is not None
-        and re.fullmatch(r"[0-9a-f]{40}", tag_sha) is not None
-        and github_sha == main_sha
-        and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag_name) is not None
-        and tag_name == f"v{version}"
-        and filename == f"sie_audio_prep-{version}-cp312-abi3-manylinux_2_28_x86_64.whl"
-        and tag_version == version
-        and tag_filename == filename
-        and tag_is_ancestor
-        and release_is_stable
-    )
+    try:
+        stable_version(version)
+        trusted_context(
+            {
+                "GITHUB_REPOSITORY": repository,
+                "GITHUB_EVENT_NAME": event_name,
+                "GITHUB_REF": ref,
+                "GITHUB_REF_PROTECTED": str(ref_protected).lower(),
+                "PUBLIC_RELEASE_PUBLISHING_ENABLED": latch,
+                "GITHUB_SHA": github_sha,
+            },
+            input_sha,
+        )
+    except ValueError:
+        return False
+    return publish and input_sha == tag_sha and tag_name == f"v{version}"
 
 
 def publisher_job_errors() -> list[str]:
     errors: list[str] = []
     for path, job_name, environment, expected_permissions in PUBLISHER_JOBS:
-        block = workflow_job_blocks(path).get(job_name)
-        label = f"{path}:{job_name}"
-        if block is None:
-            errors.append(f"publisher job is missing: {label}")
+        if not (ROOT / path).exists():
+            errors.append(f"publisher workflow is missing: {path}")
             continue
+        block = workflow_job_blocks(path).get(job_name, "")
         condition = job_scalar(block, "if") or ""
-        missing_terms = [term for term in TRUSTED_WRITE_CONDITION_TERMS if term not in condition]
-        if missing_terms:
-            errors.append(f"{label} is not bound to trusted push/main/SHA context: {missing_terms}")
-        if job_scalar(block, "environment") != environment:
-            errors.append(f"{label} must use protected environment {environment}")
-        if job_permissions(block) != expected_permissions:
-            errors.append(f"{label} permissions differ from {expected_permissions}")
-        required_binding = (
-            "Validate trusted publication context and tag binding",
-            'test "$GITHUB_SHA" = "$RELEASE_SHA"',
-            'git fetch --no-tags origin "refs/tags/$RELEASE_TAG"',
-            "FETCH_HEAD^{commit}",
-        )
-        missing_binding = [item for item in required_binding if item not in block]
-        if missing_binding:
-            errors.append(f"{label} does not prove the immutable tag binding: {missing_binding}")
+        terms = TRUSTED_WRITE_CONDITION_TERMS
+        if path.endswith("/release.yml"):
+            terms = tuple(
+                term.replace("github.sha == inputs.sha", "github.sha == needs.release-please.outputs.sha")
+                for term in terms
+                if term != "inputs.publish == true"
+            )
+        missing = [term for term in terms if term not in condition]
+        if missing:
+            errors.append(f"{path}:{job_name} lacks write guards: {missing}")
+        if job_scalar(block, "environment") != environment or job_permissions(block) != expected_permissions:
+            errors.append(f"{path}:{job_name} environment/permissions mismatch")
+        if (
+            "release_guard.py publish" not in block
+            and "Validate trusted publication context and tag binding" not in block
+        ):
+            errors.append(f"{path}:{job_name} lacks runtime tag/SHA verification")
     return errors
 
 
 def python_matrices() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    workflow = (ROOT / ".github/workflows/release-python.yml").read_text()
-    build_section, publish_section = workflow.split("\n  publish:", maxsplit=1)
-    build = tuple(re.findall(r"distribution:\s*(sie-[a-z0-9-]+)", build_section))
-    publish = tuple(re.findall(r"^\s+- (sie-[a-z0-9-]+)\s*$", publish_section, re.MULTILINE))
-    return build, publish
+    names = tuple(distributions.manifests("python"))
+    return names, names
 
 
 def npm_matrix() -> tuple[str, ...]:
-    workflow = (ROOT / ".github/workflows/release-npm.yml").read_text()
-    publish_section = workflow.split("\n  publish:", maxsplit=1)[1]
-    return tuple(re.findall(r"package:\s*'(@superlinked/sie-[a-z0-9-]+)'", publish_section))
+    return tuple(distributions.manifests("npm"))
 
 
 def workflow_pin_errors() -> list[str]:
@@ -341,13 +311,22 @@ def workflow_pin_errors() -> list[str]:
 def release_config_errors() -> list[str]:
     errors: list[str] = []
     manifest = load_json(".release-please-manifest.json")
-    if manifest != {".": "0.7.2"}:
-        errors.append("release-please manifest must contain only the public 0.7.2 seed")
+    try:
+        if set(manifest) != {"."} or stable_version(manifest["."], new=False) < stable_version(SEED_VERSION, new=False):
+            errors.append("release-please manifest is below the public 0.7.3 seed")
+    except (ValueError, TypeError):
+        errors.append("release-please manifest must contain one stable root version")
     config = load_json("release-please-config.json")
     packages = config.get("packages", {})
     if set(packages) != {"."} or packages["."].get("release-type") != "simple":
         errors.append("release-please must define one simple root release")
         return errors
+    for flag in ("bump-minor-pre-major", "bump-patch-for-minor-pre-major", "include-v-in-tag"):
+        if packages["."].get(flag) is not True:
+            errors.append(f"release-please must preserve {flag}")
+    for override in ("release-as", "last-release-sha", "bootstrap-sha"):
+        if override in config or override in packages["."]:
+            errors.append(f"release-please must derive its native release boundary, not {override}")
     extra_paths = {item["path"] for item in packages["."]["extra-files"]}
     if extra_paths != EXTRA_VERSION_PATHS:
         errors.append("release-please extra-file version surface differs from the public contract")
@@ -360,32 +339,40 @@ def release_config_errors() -> list[str]:
 def release_workflow_errors() -> list[str]:
     errors: list[str] = []
     top = (ROOT / ".github/workflows/release.yml").read_text()
-    for reusable in (
-        "release-python.yml",
-        "release-npm.yml",
-        "release-audio.yml",
-        "release-docker.yml",
-        "release-helm.yml",
-    ):
-        if f"uses: ./.github/workflows/{reusable}" not in top:
-            errors.append(f"top-level release does not call {reusable} directly")
-    if "needs: [release-please, docker]" not in top:
-        errors.append("Helm release must wait for Docker verification")
+    for family in ("python", "npm", "audio", "docker", "helm", "native"):
+        if f"uses: ./.github/workflows/release-{family}.yml" not in top:
+            errors.append(f"top-level release does not call {family} directly")
+    for family in ("python", "npm"):
+        text = (ROOT / f".github/workflows/release-{family}.yml").read_text()
+        if "id-token:" in text or "environment:" in text or "  publish:" in text:
+            errors.append(f"{family} reusable must only build and test")
+        if f"distributions.py build {family}" not in text or "inputs.source_ref" not in text:
+            errors.append(f"{family} reusable lacks exact-source distribution checks")
     for path in sorted((ROOT / ".github/workflows").glob("release*.yml")):
         text = path.read_text()
-        if "workflow_dispatch" in text:
-            errors.append(f"{path.name} must not expose a publish-capable manual dispatch")
         for token_name in ("PYPI_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN"):
             if token_name in text:
                 errors.append(f"{path.name} references forbidden publication token {token_name}")
-    python_workflow = (ROOT / ".github/workflows/release-python.yml").read_text()
-    if "uv lock --check --project ." not in python_workflow or "uv build --package" not in python_workflow:
-        errors.append("Python release must check the root lock before isolated package builds")
-    if "uv build --frozen" in python_workflow:
-        errors.append("Python release passes an unsupported option to uv build")
-    npm_workflow = (ROOT / ".github/workflows/release-npm.yml").read_text()
-    if 'pnpm --dir "$package_path" pack' not in npm_workflow or 'pnpm --filter "$package_name" pack' in npm_workflow:
-        errors.append("npm release must pack from each workspace directory with pnpm 9")
+        for retention in re.findall(r"retention-days:\s*(\d+)", text):
+            if int(retention) < ARTIFACT_RETENTION_DAYS:
+                errors.append(f"{path.name} expires retry artifacts before 30 days")
+        if path.name != "release.yml" and "workflow_dispatch" in text:
+            errors.append(f"{path.name} must not expose a separate recovery writer")
+    blocks = workflow_job_blocks(".github/workflows/release.yml")
+    recover = blocks.get("recover", "")
+    if "release_recovery" not in recover or "id-token:" in recover or "publish-" in recover:
+        errors.append("manual recovery must only rerun the original jobs")
+    complete = blocks.get("complete", "")
+    if "always()" not in complete or 'job["result"] != "success"' not in complete:
+        errors.append("release completion must reject every non-success result")
+    if job_scalar(complete, "needs") != "[release-please, python-publish, npm-publish, docker, helm, audio, native]":
+        errors.append("release completion must include every artifact family")
+    if (ROOT / ".github/workflows/repair-audio-asset.yml").exists():
+        errors.append("obsolete audio repair workflow must be removed")
+    npm = blocks.get("npm-publish", "")
+    for term in ("runs-on: ubuntu-24.04", "node-version: '24.12.0'", "npm@11.6.2"):
+        if term not in npm:
+            errors.append(f"npm trusted publication is missing {term}")
     return errors
 
 
@@ -423,13 +410,19 @@ def release_app_errors() -> list[str]:
     missing = [item for item in required if item not in text]
     if missing:
         errors.append(f"public release GitHub App exact-head handoff is incomplete: {missing}")
-    forbidden = ("secrets.GITHUB_TOKEN", "${{ github.token }}", "GH_TOKEN: ${{ github.token }}")
-    leaked = [item for item in forbidden if item in text]
+    forbidden = ("secrets.GITHUB_TOKEN", "token: ${{ github.token }}")
+    leaked = [item for item in forbidden if item in block]
     if leaked:
         errors.append(f"release-please or lock pushes fall back to GITHUB_TOKEN: {leaked}")
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
     if "  pull_request:" not in ci:
         errors.append("App-authored release PR changes do not trigger public pull-request CI")
+    if (
+        "release_guard.py seed" not in block
+        or "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7" not in block
+        or "skip-github-release: ${{ steps.seed.outputs.at_seed }}" not in block
+    ):
+        errors.append("stock release-please must preflight the genuine 0.7.3 seed")
     return errors
 
 
@@ -472,13 +465,13 @@ def audio_release_errors() -> list[str]:
         errors.append(f"native audio release workflow is incomplete: {missing}")
     if not (ROOT / "tools/ci/build_audio_prep_release_asset.py").is_file():
         errors.append("native audio release asset builder is missing")
-    uploader_path = ROOT / "tools/ci/upload_audio_prep_release_asset.bash"
+    uploader_path = ROOT / "tools/ci/upload_native_release_asset.bash"
     uploader = ""
     if not uploader_path.is_file():
         errors.append("native audio immutable release uploader is missing")
     else:
         uploader = uploader_path.read_text()
-        for item in ("gh release upload", "sha256sum", "browser_download_url", "identical audio release asset"):
+        for item in ("gh release upload", "sha256sum", "browser_download_url", "identical"):
             if item not in uploader:
                 errors.append(f"native audio uploader is missing immutable check: {item}")
         if "--clobber" in uploader:
@@ -486,57 +479,11 @@ def audio_release_errors() -> list[str]:
     top = (ROOT / ".github/workflows/release.yml").read_text()
     if "uses: ./.github/workflows/release-audio.yml" not in top or "contents: write" not in workflow:
         errors.append("top-level release does not fan out the native audio asset writer")
-    expected_url_fragment = "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$AUDIO_WHEEL_FILENAME"
+    expected_url_fragment = (
+        "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$RELEASE_ASSET_FILENAME"
+    )
     if expected_url_fragment not in uploader:
         errors.append(f"native audio workflow does not verify browser URL contract {url}")
-    return errors
-
-
-def repair_audio_errors() -> list[str]:
-    errors: list[str] = []
-    path = ".github/workflows/repair-audio-asset.yml"
-    text = (ROOT / path).read_text()
-    if not re.search(r"^  workflow_dispatch:\s*$", text, re.MULTILINE):
-        errors.append("native audio repair must be an explicit dispatch")
-    dispatch_section = text.split("permissions:", maxsplit=1)[0]
-    if "inputs:" in dispatch_section:
-        errors.append("native audio repair must not accept a caller-selected tag or SHA")
-    block = workflow_job_blocks(path).get("publish", "")
-    condition = job_scalar(block, "if") or ""
-    for term in (
-        "vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
-        "github.event_name == 'workflow_dispatch'",
-        "github.ref == 'refs/heads/main'",
-        "github.ref_protected == true",
-        "github.repository == 'superlinked/sie'",
-        "github.sha == needs.authorize.outputs.main_sha",
-    ):
-        if term not in condition:
-            errors.append(f"native audio repair writer condition is missing: {term}")
-    if job_scalar(block, "environment") != "github-release":
-        errors.append("native audio repair writer must use protected github-release environment")
-    if job_permissions(block) != {"contents": "write"}:
-        errors.append("native audio repair writer must receive only contents write")
-    required = (
-        AUDIO_MANYLINUX_IMAGE,
-        "git merge-base --is-ancestor",
-        "refs/heads/main",
-        "refs/tags/$tag_name",
-        "refs/tags/$RELEASE_TAG",
-        'test "$(jq -r .draft',
-        'test "$(jq -r .prerelease',
-        "mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0",
-        "rust@1.97.0 -- rustc --version",
-        "rust@1.97.0 -- cargo --version",
-        "--project-root release-source",
-        "tools/ci/upload_audio_prep_release_asset.bash",
-        "environment: github-release",
-    )
-    missing = [item for item in required if item not in text]
-    if missing:
-        errors.append(f"native audio stable-release repair is incomplete: {missing}")
-    if "--clobber" in text:
-        errors.append("native audio repair must not overwrite an existing asset")
     return errors
 
 
@@ -663,8 +610,10 @@ def docker_release_errors() -> list[str]:
     pairs = {(platform, bundle) for platform in matrix.get("platforms", []) for bundle in matrix.get("bundles", [])}
     pairs.update((item.get("platform"), item.get("bundle")) for item in matrix.get("include", []))
     expected_pairs = {
-        (platform, bundle) for platform in ("cuda12", "cpu") for bundle in ("default", "sglang", "transformers5")
-    } | {("cuda13", "sglang-cu130")}
+        (platform, bundle)
+        for platform in ("cuda12", "cpu")
+        for bundle in ("default", "ctranslate2", "sglang", "transformers5")
+    } | {("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
     if pairs != expected_pairs:
         errors.append("Docker release matrix differs from the supported server pairs")
 
@@ -707,8 +656,7 @@ def helm_release_errors() -> list[str]:
         "inputs.publish == true",
         "PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
         "packages: write",
-        "helm push",
-        "helm show chart",
+        "tools.ci.publish_helm_archive",
     )
     missing = [item for item in required if item not in workflow]
     if missing:
@@ -722,26 +670,6 @@ def helm_release_errors() -> list[str]:
     return errors
 
 
-def tag_errors() -> list[str]:
-    if not (ROOT / ".git").exists():
-        return []
-    result = subprocess.run(
-        ["git", "rev-parse", "v0.7.2^{commit}"],  # noqa: S607
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return ["public v0.7.2 tag is missing"]
-    ancestor = subprocess.run(  # noqa: S603
-        ["git", "merge-base", "--is-ancestor", result.stdout.strip(), "HEAD"],  # noqa: S607
-        cwd=ROOT,
-        check=False,
-    )
-    return [] if ancestor.returncode == 0 else ["public v0.7.2 is not an ancestor of HEAD"]
-
-
 def validate() -> list[str]:
     errors = [
         *release_config_errors(),
@@ -749,14 +677,12 @@ def validate() -> list[str]:
         *release_app_errors(),
         *publisher_job_errors(),
         *audio_release_errors(),
-        *repair_audio_errors(),
         *docker_release_errors(),
         *helm_release_errors(),
         *workflow_pin_errors(),
-        *tag_errors(),
     ]
     if python_matrices() != (PYTHON_DISTRIBUTIONS, PYTHON_DISTRIBUTIONS):
-        errors.append("Python build/publish matrices differ from the exact 11-package contract")
+        errors.append("Python build/publish matrices differ from the exact 13-package contract")
     if npm_matrix() != NPM_PACKAGES:
         errors.append("npm publish matrix differs from the exact five-package contract")
     if not (ROOT / "pnpm-lock.yaml").is_file() or (ROOT / "packages/sie_ts_sdk/pnpm-lock.yaml").exists():

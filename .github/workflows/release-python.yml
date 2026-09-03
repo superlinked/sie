@@ -1,166 +1,62 @@
-name: Release Python
+name: Build Python distributions
 
 on:
   workflow_call:
     inputs:
+      source_ref:
+        required: true
+        type: string
       version:
-        required: true
         type: string
+        default: ''
       tag_name:
-        required: true
         type: string
-      sha:
-        required: true
-        type: string
-      publish:
-        required: true
+        default: ''
+      build_only:
         type: boolean
+        default: true
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { distribution: sie-sdk, package: sie-sdk, path: packages/sie_sdk }
-          - { distribution: sie-server, package: sie-server, path: packages/sie_server }
-          - { distribution: sie-langchain, package: sie-langchain, path: integrations/sie_langchain }
-          - { distribution: sie-llamaindex, package: sie-llamaindex, path: integrations/sie_llamaindex }
-          - { distribution: sie-haystack, package: sie-haystack, path: integrations/sie_haystack }
-          - { distribution: sie-dspy, package: sie-dspy, path: integrations/sie_dspy }
-          - { distribution: sie-crewai, package: sie-crewai, path: integrations/sie_crewai }
-          - { distribution: sie-chroma, package: sie-chroma, path: integrations/sie_chroma }
-          - { distribution: sie-lancedb, package: sie-lancedb, path: integrations/sie_lancedb }
-          - { distribution: sie-qdrant, package: sie-qdrant, path: integrations/sie_qdrant }
-          - { distribution: sie-weaviate, package: sie-weaviate, path: integrations/sie_weaviate }
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          ref: ${{ inputs.sha }}
+          ref: ${{ inputs.source_ref }}
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
-      - name: Validate release identity
+        with:
+          install_args: python uv
+      - name: Validate source and optional release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_ONLY" = false ]; then test -n "$RELEASE_VERSION"; fi
+          mise exec -- python tools/ci/release_guard.py build --source-ref "$SOURCE_REF" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
+      - name: Build complete archives and test clean packed consumers
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: mise exec -- python tools/ci/distributions.py build python --directory artifacts --version "$RELEASE_VERSION"
+      - name: Bind tested release bytes to the original run
+        if: inputs.build_only == false
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_TAG: ${{ inputs.tag_name }}
-          RELEASE_SHA: ${{ inputs.sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
-          set -euo pipefail
-          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
-          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-      - name: Build isolated sdist and wheel
-        env:
-          PACKAGE: ${{ matrix.package }}
-          PACKAGE_PATH: ${{ matrix.path }}
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          manifest_version="$(mise exec -- python -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$PACKAGE_PATH/pyproject.toml")"
-          test "$manifest_version" = "$RELEASE_VERSION"
-          mkdir -p artifact
-          mise exec -- uv lock --check --project .
-          mise exec -- uv build --package "$PACKAGE" --out-dir artifact
-      - name: Verify archive metadata and contents
-        env:
-          DISTRIBUTION: ${{ matrix.distribution }}
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          mise exec -- python - <<'PY'
-          import email
-          import os
-          import tarfile
-          import zipfile
-          from pathlib import Path
-
-          expected_name = os.environ["DISTRIBUTION"].replace("_", "-").lower()
-          expected_version = os.environ["RELEASE_VERSION"]
-          archives = sorted(
-              path for path in Path("artifact").iterdir()
-              if path.name.endswith((".whl", ".tar.gz"))
-          )
-          assert len(archives) == 2, archives
-          for archive in archives:
-              if archive.suffix == ".whl":
-                  with zipfile.ZipFile(archive) as package:
-                      metadata_name = next(name for name in package.namelist() if name.endswith(".dist-info/METADATA"))
-                      metadata = email.message_from_bytes(package.read(metadata_name))
-              else:
-                  with tarfile.open(archive, "r:gz") as package:
-                      member = next(item for item in package.getmembers() if item.name.endswith("/PKG-INFO"))
-                      extracted = package.extractfile(member)
-                      assert extracted is not None
-                      metadata = email.message_from_bytes(extracted.read())
-              assert metadata["Name"].replace("_", "-").lower() == expected_name
-              assert metadata["Version"] == expected_version
-          PY
+          mise exec -- python -m tools.ci.release_artifact stamp --directory artifacts --kind python --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG" --source-revision "$SOURCE_REF" --run-id "$GITHUB_RUN_ID"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: python-${{ matrix.distribution }}-${{ inputs.version }}
-          path: artifact/*
+          name: python-distributions
+          path: artifacts/*
           if-no-files-found: error
-          retention-days: 7
-
-  publish:
-    needs: build
-    if: >-
-      inputs.publish == true &&
-      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
-      github.ref_protected == true &&
-      github.repository == 'superlinked/sie' &&
-      github.sha == inputs.sha
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    environment: pypi
-    permissions:
-      contents: read
-      id-token: write
-    strategy:
-      fail-fast: false
-      matrix:
-        distribution:
-          - sie-sdk
-          - sie-server
-          - sie-langchain
-          - sie-llamaindex
-          - sie-haystack
-          - sie-dspy
-          - sie-crewai
-          - sie-chroma
-          - sie-lancedb
-          - sie-qdrant
-          - sie-weaviate
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          ref: ${{ inputs.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Validate trusted publication context and tag binding
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_TAG: ${{ inputs.tag_name }}
-          RELEASE_SHA: ${{ inputs.sha }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_EVENT_NAME" = push
-          test "$GITHUB_REF" = refs/heads/main
-          test "$GITHUB_REPOSITORY" = superlinked/sie
-          test "$GITHUB_SHA" = "$RELEASE_SHA"
-          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
-          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: python-${{ matrix.distribution }}-${{ inputs.version }}
-          path: artifact
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
-        with:
-          packages-dir: artifact
+          retention-days: 30
