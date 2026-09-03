@@ -15,9 +15,15 @@ test without access to another repository, private registry, or secret.
 - Bootstrap a clean checkout with `./tools/init.sh`.
 - Run `mise tasks` before assuming a task exists.
 
-The main gates are `mise run lint`, `mise run typecheck`, `mise run test`,
-`mise run ts -- lint`, `mise run rust-check`, `mise run rust-test`, and
-`mise run helm -- lint`. The standalone Candle worker uses
+Every pull request runs the public lint, typecheck, unit, integration, and
+package/container checks; these are not selected by changed paths. Benchmark
+and quality-evaluation jobs are not part of this CI.
+
+The main tasks are `mise run lint`, `mise run typecheck`, `mise run test`,
+`mise run test-integrations`, `mise run ts -- build`, `mise run ts -- lint`,
+`mise run rust-check`, `mise run rust-test`, and `mise run helm -- lint`.
+Build the TypeScript workspace before checking dependent packages in isolation.
+The standalone Candle worker uses
 `mise exec -- cargo <command> --manifest-path packages/sie_server_rust/Cargo.toml --locked`.
 
 ## Development boundaries
@@ -41,3 +47,7 @@ builds may run without publication authority; external publication additionally
 requires the protected workflow inputs and repository publishing latch described
 in `RELEASE.md`. Never bypass version, tag, source-revision, or full-set
 verification.
+
+The release-please baseline is 0.7.3. Do not create a substitute baseline tag or
+invent its commit SHA. Publication retries reuse the original release run and
+artifacts, not a newer-main rebuild.

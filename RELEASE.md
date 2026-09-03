@@ -1,129 +1,175 @@
-# Public release contract
+# Releases
 
-SIE uses one release-please train and one `vX.Y.Z` identity. Public commits on
-`main` produce a release pull request and update the public `CHANGELOG.md`.
-Merging that pull request creates the tag and GitHub Release, then the same
-workflow calls the Python, npm, Docker, and Helm reusable workflows directly
-with the exact tag, version, commit SHA, and publication intent. It also builds
-the native Linux audio wheel and attaches it to that exact GitHub Release. A
-tag event is not used as an indirect trigger.
+SIE uses one release-please train with `vX.Y.Z` tags. The last released version
+at setup is **0.7.3**. Changes after that release determine the next version;
+the setup does not create or republish 0.7.3.
 
-The release pull request updates all supported package manifests, public Rust
-service versions, native-audio release markers, the TypeScript runtime version,
-and Helm `version`/`appVersion`. The release job refreshes the coupled root
-locks on that pull-request branch. Publication jobs never rewrite source
-manifests or locks.
+## Versioning
 
-## Supported artifacts
+`.release-please-manifest.json` records the current released version. The
+workflow verifies that the public `v0.7.3` stable release and tag exist and that
+the tag belongs to the release branch. Release-please discovers the matching
+release commit natively, so no placeholder bootstrap SHA is checked in.
 
-The PyPI train contains exactly: `sie-sdk`, `sie-server`, `sie-langchain`,
-`sie-llamaindex`, `sie-haystack`, `sie-dspy`, `sie-crewai`, `sie-chroma`,
-`sie-lancedb`, `sie-qdrant`, and `sie-weaviate`.
+The current pre-1.0 policy is retained: ordinary features and fixes advance the
+patch version; breaking changes advance the minor version. Public conventional
+commits generate `CHANGELOG.md`. No old changelog sections are rewritten.
 
-The npm train contains exactly: `@superlinked/sie-sdk`,
-`@superlinked/sie-chroma`, `@superlinked/sie-langchain`,
-`@superlinked/sie-llamaindex`, and `@superlinked/sie-lancedb`.
+The release PR updates the coordinated Python/npm package versions, gateway,
+sidecar and audio release fields, TypeScript runtime version, and Helm metadata.
+It also refreshes the coupled public locks. Config and MCP join this train for
+their first PyPI publication. Independently versioned implementation crates are
+not silently renumbered: a Rust worker image follows the release image tag even
+where its crate has an independent version.
 
-`sie-audio-prep` is not published to PyPI. Each release instead carries the
-exact Linux asset
-`sie_audio_prep-<version>-cp312-abi3-manylinux_2_28_x86_64.whl` at
-`https://github.com/superlinked/sie/releases/download/v<version>/<filename>`.
-The build checks out the release SHA, uses the digest-pinned manylinux
-container and repository-pinned Rust, Maturin, and Zig toolchains, and validates
-the wheel tag, metadata, and native extension before attachment. A retry accepts
-an existing asset only when its size and SHA-256 match the newly validated
-wheel; it never silently clobbers versioned bytes.
+Release PRs receive the same mandatory CI checks as other PRs. Release-please
+and its lock refresh use a repository-scoped GitHub App so their PR updates
+trigger normal CI. No PR build is a publication job.
 
-The image train contains the declared server platform/bundle matrix plus
-`sie-gateway`, `sie-config`, `sie-mcp`, `sie-server-sidecar`, and the chart's
-L4 Candle worker. The chart is packaged only after every versioned image has
-been built and verified.
+## Published outputs
 
-`mise run docker -- matrix` prints the authoritative server matrix. The
-`build-server` and `build-service` subcommands require an exact 40-character
-source revision; `verify` checks the complete versioned set, and `alias`
-repeats that verification before moving any `latest` reference.
+The Python train contains 13 distributions:
 
-## Fail-closed publication
+- `sie-sdk`, `sie-server`, `sie-config`, and `sie-mcp`;
+- `sie-langchain`, `sie-llamaindex`, `sie-haystack`, `sie-dspy`,
+  `sie-crewai`, `sie-chroma`, `sie-lancedb`, `sie-qdrant`, and
+  `sie-weaviate`.
 
-Build, test, pack, artifact upload, and source-closure verification are safe to
-run before activation. Every registry write additionally requires both the
-reusable workflow's boolean `publish` input and repository variable
-`PUBLIC_RELEASE_PUBLISHING_ENABLED` to equal `true`. Only the isolated publish
-jobs receive OIDC or package-write permission. Python and npm use trusted
-publishing; no long-lived registry token is part of the contract.
+The npm train contains five packages under `@superlinked`: `sie-sdk`,
+`sie-chroma`, `sie-langchain`, `sie-llamaindex`, and `sie-lancedb`.
 
-Every reusable write job independently requires a `push` on
-`refs/heads/main` in `superlinked/sie`, requires `github.sha` to equal the
-release input SHA, and fetches the release tag to prove that it resolves to the
-same commit. A same-repository pull request or a manual caller cannot invoke
-these normal reusable writers even after the repository latch is enabled. The
-writers are additionally isolated behind protected `pypi`, `npm`, `ghcr`,
-`helm`, and `github-release` environments.
+The GHCR image names are `sie-server`, `sie-gateway`, `sie-config`, `sie-mcp`,
+`sie-server-sidecar`, and `sie-server-rust`, under `ghcr.io/superlinked`.
+`.github/release-matrix.json` defines the supported server platform/bundle
+combinations. Missing bundle source or build recipes are errors, not an
+instruction to skip a release target. The Rust worker retains its explicit
+CUDA/architecture image suffix.
 
-Release-please and release-PR lock refreshes use a dedicated GitHub App token,
-not `GITHUB_TOKEN`. The protected `release-automation` environment supplies
-`PUBLIC_RELEASE_APP_ID` and `PUBLIC_RELEASE_APP_PRIVATE_KEY`; the App must be
-installed only on `superlinked/sie` with repository Contents and Pull requests
-read/write permissions. Missing credentials fail the release workflow before
-any mutation. App-authored PR creation and lock pushes emit normal
-`pull_request` / `synchronize` events, and the workflow verifies the remote PR
-head after the final push. Branch protection must require `CI / Required` on
-that exact head before the release PR can merge.
+The Helm chart is published at
+`oci://ghcr.io/superlinked/charts/sie-cluster` after its versioned images verify.
 
-### Repairing the current stable audio asset
+Native audio is distributed as a GitHub Release asset, not a PyPI project:
 
-`Repair current native audio release asset` is the sole manual write exception.
-It has no tag, SHA, version, or publish input. A dispatch must come from
-protected `main` in `superlinked/sie`; the workflow derives the audio version
-from that exact remote-main commit, accepts only an existing non-draft,
-non-prerelease `vX.Y.Z` release, proves the tag is an ancestor of main, and
-builds from the exact tag source. The writer also requires the publication
-latch and `github-release` environment approval. It uploads only the derived
-exact filename. If an asset already exists, byte identity is required; a
-different asset fails closed without overwrite.
+```text
+sie_audio_prep-<version>-cp312-abi3-manylinux_2_28_x86_64.whl
+```
 
-To activate publication after this setup is merged:
+A Linux amd64 sidecar executable and checksum are also provided for consumers
+that embed the binary rather than run its container:
 
-1. Disable every previous writer and independently prove that it can no longer
-   write tags, releases, packages, images, or charts.
-2. Create and protect the `release-automation`, `pypi`, `npm`, `ghcr`, `helm`,
-   and `github-release` GitHub Environments. Restrict them to `main`; put the
-   App ID/private key only in `release-automation`.
-3. Install the narrowly permissioned public-release GitHub App and configure
-   its environment variable/secret. Confirm a release PR creation and a lock
-   refresh each trigger CI on the exact resulting head.
-4. Configure each registry trusted publisher for this exact repository,
-   reusable workflow filename, and matching environment.
-5. With the publication latch still absent, run every Docker matrix cell on
-   the declared public `ubuntu-24.04` runners, including CUDA 12, CUDA 13, and
-   SM89 Candle. Record disk, timeout, and build success evidence. Local testing
-   proves only the CPU Candle image; public CUDA runner capacity is not yet
-   proven. If capacity is insufficient, select a publicly governed runner in a
-   separate reviewed change.
-6. Run and inspect all other no-write build/pack paths, including the exact
-   native audio asset.
-7. Set `PUBLIC_RELEASE_PUBLISHING_ENABLED=true` only after those checks pass.
-8. Dispatch `Repair current native audio release asset` from `main`, approve
-   the protected `github-release` job, and verify the exact v0.7.2 browser URL,
-   filename, size, and SHA-256. Do not use a different tag or replace
-   non-identical existing bytes.
-9. Switch internal consumers only after that public asset is independently
-   readable and validated. If the repair is not completed, hold the consumer
-   cutover until a later public release successfully carries its exact wheel
-   and update the consumer to that released version.
+```text
+sie-server-sidecar-v<version>-linux-amd64
+sie-server-sidecar-v<version>-linux-amd64.sha256
+```
 
-Repository settings, environments, trusted publishers, and the latch are not
-configured by this source change.
+The executable is extracted from the already-verified sidecar image, not rebuilt.
+Its attached provenance records the source revision, architecture, and ABI;
+the compatibility check uses Debian 12. Rust library dependencies
+can still be consumed using Cargo's Git support; no crates.io publication is
+implied by an image or binary release.
 
-## Partial failures and reruns
+## Build, verify, publish
 
-A GitHub Release can exist while one publisher is red. That state is an
-incomplete release: do not create another tag and do not edit or move the
-existing tag. Rerun only the failed jobs from the original top-level workflow
-run so they retain the same immutable tag and SHA. Docker `latest` aliases do
-not move until the complete versioned image set verifies; Helm publication
-waits for that Docker verification. The native audio wheel is part of release
-completeness and must exist under the exact filename above. If source, version,
-tag, PR-head, or asset validation no longer matches, stop instead of repairing
-the release from a different commit.
+The top-level `release.yml` directly coordinates release-please, builds,
+verification, and publication. It does not rely on a tag push starting a second
+workflow.
+
+PR and candidate builds produce archives without publishing. They use the
+actual package versions in that source tree. Release builds additionally
+require the complete package set to match the release version.
+
+Build outputs are tested before upload. Publisher jobs consume those same
+archives or images; they do not independently rebuild them. Before a release
+upload, the run commit, release output commit, checked-out source, and stable
+tag must identify the same revision. Versioned outputs are immutable: an
+existing matching upload may be accepted, but different bytes at the same
+version are a failure.
+
+Floating image aliases move only after the full versioned image set verifies.
+The dependent chart waits for that verification. A GitHub Release can exist
+while a publisher fails; the release-completion check, not the release page
+alone, indicates that all expected outputs are available.
+
+Ordinary PR checks include lint, typechecking, unit tests, public integration,
+packed-distribution checks and CPU/container verification. Full release image
+builds include the declared CUDA variants. Building a CUDA image is not a claim
+that GPU inference was exercised.
+
+## Publisher setup
+
+Finalize these identities before enabling uploads:
+
+| Publisher | Repository | Workflow identity | Environment | Authority |
+| --- | --- | --- | --- | --- |
+| PyPI distributions | `superlinked/sie` | `release.yml` | `pypi` | Trusted Publishing, upload-job `id-token: write` |
+| npm packages | `superlinked/sie` | `release.yml` | `npm` | Trusted Publishing, upload-job `id-token: write` |
+| Images | `superlinked/sie` | Release image workflow | `ghcr` | `GITHUB_TOKEN`, `packages: write` |
+| Helm chart | `superlinked/sie` | Release chart workflow | `helm` | `GITHUB_TOKEN`, `packages: write` |
+| Release assets | `superlinked/sie` | Native asset workflows | `github-release` | `GITHUB_TOKEN`, `contents: write` |
+
+PyPI/npm upload jobs live in the top-level workflow so the configured OIDC
+identity is unambiguous. Existing package names use their existing registry
+settings; only new PyPI projects need pending publishers. Register config and
+MCP when their first upload is ready. Audio assets do not need another PyPI
+registration.
+
+npm supports one trusted publisher per package. Its actual upload job uses a
+GitHub-hosted runner and a pinned supported npm version. Ordinary builds and
+tests use Blacksmith. Do not carry a long-lived npm token into the OIDC upload
+job. See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+
+For GHCR, explicitly grant this repository's Actions jobs access to each
+existing package and confirm public visibility. A source label or successful
+anonymous pull does not prove write permission. GHCR uses the repository token,
+not an external OIDC registration.
+
+Protect the release environments and restrict their workflow control to
+`main`. The `release-automation` environment supplies
+`PUBLIC_RELEASE_APP_ID` and `PUBLIC_RELEASE_APP_PRIVATE_KEY`. Install that App
+only on this repository with Contents and Pull requests read/write permission.
+These App credentials are not distribution-registry credentials.
+
+Actual publication additionally requires
+`PUBLIC_RELEASE_PUBLISHING_ENABLED=true`. Keep it absent until the release
+baseline, required checks, publisher identities, package access and build
+capacity have been checked. Build-only paths need neither this setting nor
+registry credentials. Do not enable two competing publishers for the same
+artifact destination.
+
+## Recovery
+
+Retain release build artifacts for at least 30 days. Normal recovery reruns
+failed publication jobs from the original release workflow run. This preserves
+the original commit/ref and reuses the original outputs.
+
+The manual recovery entrypoint validates an existing version and its original
+run before requesting those reruns. It is not an alternate uploader from newer
+source. npm's automatic provenance uses the run's commit; checking out an older
+tag inside a newer run would not change that identity.
+
+In **Actions → Release → Run workflow**, select `main` and provide `version`
+(without `v`), the numeric `original_run` ID, and an optional `family` selection.
+The tag is derived from the version. The original release-please job must have
+succeeded, a selected publisher family must have failed, and its original
+archives must still exist. A skipped-only family or a failure only in the
+completion check is not treated as a successful retry request. Diagnose those
+conditions explicitly instead of rerunning release-please and losing its
+original release outputs. Failed builds can be rerun from the original run
+before retrying publication.
+
+If the original run or artifacts are unavailable, or an existing version has
+conflicting bytes, stop and resolve that release explicitly. Do not move a tag,
+overwrite a package, or attach a newly rebuilt conflicting native asset.
+
+## Candidate compatibility checks
+
+An unmerged public commit can be built without creating a stable release.
+Consumers may select its exact archives/image digests for an isolated test run
+while their stable dependency pins stay unchanged. Candidate artifacts are
+code: approve the exact source before executing them in an environment with
+private access. Candidate builds do not receive production or publishing
+credentials.
+
+Local build, pack, and smoke checks cannot prove account-side OIDC trust,
+registry permissions, or hosted-runner capacity. Those remain checks for the
+first authorized publication from the final release source.
