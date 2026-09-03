@@ -70,9 +70,25 @@ implied by an image or binary release.
 
 ## Build, verify, publish
 
-The top-level `release.yml` directly coordinates release-please, builds,
-verification, and publication. It does not rely on a tag push starting a second
-workflow.
+The top-level `release.yml` has two automatic entrypoints:
+
+- A push to `main` runs the App-authored release-please and release-PR lock
+  refresh steps.
+- The App-created stable `release: published` event runs preparation, builds,
+  verification, and direct publisher fanout at the tagged commit.
+
+This separates the commit that triggers release-please from the commit it
+releases. A later `main` push cannot cause packages from an earlier release to
+be published with the later run's provenance. The App credential is required
+because its events trigger workflows; a release created with `GITHUB_TOKEN`
+does not provide that handoff. Publication does not depend on a tag-push event.
+
+Release work is serialized with GitHub's `queue: max` concurrency mode and no
+in-progress cancellation, so newer events do not replace pending releases. The
+queue has GitHub's documented bound of 100 pending runs. The current actionlint
+schema does not recognize `queue`; CI exempts only that diagnostic and separately
+checks the required queue setting. See [workflow
+concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
 PR and candidate builds produce archives without publishing. They use the
 actual package versions in that source tree. Release builds additionally
@@ -125,8 +141,18 @@ existing package and confirm public visibility. A source label or successful
 anonymous pull does not prove write permission. GHCR uses the repository token,
 not an external OIDC registration.
 
-Protect the release environments and restrict their workflow control to
-`main`. The `release-automation` environment supplies
+Protect `main` and the `v*` tag namespace before enabling publication. Restrict
+stable tag creation to the release App, and forbid tag updates/deletions. A tag
+pattern allowed by an environment is not a substitute for those repository
+rules. Keep creation bypass and tag immutability in separate rulesets so the
+App's permission to create does not also permit replacing or deleting tags.
+The App does not need a bypass of main-branch review or CI requirements.
+Preparation and every publisher verify the protected tag, exact source,
+and ancestry in protected `main`.
+
+The App and manual recovery use the main-only `release-automation` environment.
+The `pypi`, `npm`, `ghcr`, `helm`, and `github-release` environments allow only
+the protected release tags, not pull-request branches. `release-automation` supplies
 `PUBLIC_RELEASE_APP_ID` and `PUBLIC_RELEASE_APP_PRIVATE_KEY`. Install that App
 only on this repository with Contents and Pull requests read/write permission.
 These App credentials are not distribution-registry credentials.
@@ -151,7 +177,8 @@ tag inside a newer run would not change that identity.
 
 In **Actions → Release → Run workflow**, select `main` and provide `version`
 (without `v`), the numeric `original_run` ID, and an optional `family` selection.
-The tag is derived from the version. The original release-please job must have
+The tag is derived from the version. Select the original release-event
+publication run, not the main-push authoring run. Its `prepare` job must have
 succeeded, a selected publisher family must have failed, and its original
 archives must still exist. A skipped-only family or a failure only in the
 completion check is not treated as a successful retry request. Diagnose those
@@ -162,6 +189,11 @@ before retrying publication.
 If the original run or artifacts are unavailable, or an existing version has
 conflicting bytes, stop and resolve that release explicitly. Do not move a tag,
 overwrite a package, or attach a newly rebuilt conflicting native asset.
+
+When filling a missing older npm version after a newer version is already
+`latest`, recovery uses the version-scoped `release-vX.Y.Z` dist-tag. It does not
+move `latest` backwards. Normal new releases use `latest`; identical existing
+versions are verified and left untouched.
 
 ## Candidate compatibility checks
 
