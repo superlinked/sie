@@ -86,6 +86,8 @@ existing matching upload may be accepted, but different bytes at the same
 version are a failure.
 
 Floating image aliases move only after the full versioned image set verifies.
+An older release recovery keeps those aliases unchanged when a newer stable
+release exists; it repairs only the requested versioned outputs.
 The dependent chart waits for that verification. A GitHub Release can exist
 while a publisher fails; the release-completion check, not the release page
 alone, indicates that all expected outputs are available.
