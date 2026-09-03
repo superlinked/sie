@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.ci import distributions
-from tools.ci.release_guard import SEED_VERSION, stable_version, trusted_context
+from tools.ci.release_guard import SEED_VERSION, stable_version
 
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON_DISTRIBUTIONS = (
@@ -83,8 +83,11 @@ AUDIO_MANYLINUX_IMAGE = (
 TRUSTED_WRITE_CONDITION_TERMS = (
     "inputs.publish == true",
     "vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
-    "github.event_name == 'push'",
-    "github.ref == 'refs/heads/main'",
+    "github.event_name == 'release'",
+    "github.event.action == 'published'",
+    "github.event.release.draft == false",
+    "github.event.release.prerelease == false",
+    "github.ref == format('refs/tags/{0}', inputs.tag_name)",
     "github.ref_protected == true",
     "github.repository == 'superlinked/sie'",
     "github.sha == inputs.sha",
@@ -227,38 +230,6 @@ def job_permissions(block: str) -> dict[str, str]:
     return {}
 
 
-def trusted_publication_context(
-    *,
-    publish: bool,
-    latch: str,
-    event_name: str,
-    ref: str,
-    ref_protected: bool,
-    repository: str,
-    github_sha: str,
-    input_sha: str,
-    tag_name: str,
-    version: str,
-    tag_sha: str,
-) -> bool:
-    try:
-        stable_version(version)
-        trusted_context(
-            {
-                "GITHUB_REPOSITORY": repository,
-                "GITHUB_EVENT_NAME": event_name,
-                "GITHUB_REF": ref,
-                "GITHUB_REF_PROTECTED": str(ref_protected).lower(),
-                "PUBLIC_RELEASE_PUBLISHING_ENABLED": latch,
-                "GITHUB_SHA": github_sha,
-            },
-            input_sha,
-        )
-    except ValueError:
-        return False
-    return publish and input_sha == tag_sha and tag_name == f"v{version}"
-
-
 def publisher_job_errors() -> list[str]:
     errors: list[str] = []
     for path, job_name, environment, expected_permissions in PUBLISHER_JOBS:
@@ -270,7 +241,9 @@ def publisher_job_errors() -> list[str]:
         terms = TRUSTED_WRITE_CONDITION_TERMS
         if path.endswith("/release.yml"):
             terms = tuple(
-                term.replace("github.sha == inputs.sha", "github.sha == needs.release-please.outputs.sha")
+                term.replace("inputs.sha", "needs.prepare.outputs.sha").replace(
+                    "inputs.tag_name", "needs.prepare.outputs.tag_name"
+                )
                 for term in terms
                 if term != "inputs.publish == true"
             )
@@ -336,6 +309,24 @@ def release_config_errors() -> list[str]:
     return errors
 
 
+QUEUE_SCHEMA_DIAGNOSTIC = (
+    r'^unexpected key "queue" for "concurrency" section\. '
+    r'expected one of "cancel-in-progress", "group"$'
+)
+
+
+def release_queue_errors(top: str, ci: str) -> list[str]:
+    errors = []
+    concurrency = top.partition("concurrency:\n")[2].partition("\njobs:")[0]
+    if re.findall(r"^  queue: (.+)$", concurrency, re.MULTILINE) != ["max"]:
+        errors.append("release concurrency must preserve all pending runs with queue: max")
+    if re.findall(r"^  cancel-in-progress: (.+)$", concurrency, re.MULTILINE) != ["false"]:
+        errors.append("release concurrency must not cancel original publication runs")
+    if re.findall(r"-ignore '([^']*)'", ci) != [QUEUE_SCHEMA_DIAGNOSTIC]:
+        errors.append("actionlint may ignore only the exact unsupported concurrency.queue diagnostic")
+    return errors
+
+
 def release_workflow_errors() -> list[str]:
     errors: list[str] = []
     top = (ROOT / ".github/workflows/release.yml").read_text()
@@ -359,13 +350,20 @@ def release_workflow_errors() -> list[str]:
         if path.name != "release.yml" and "workflow_dispatch" in text:
             errors.append(f"{path.name} must not expose a separate recovery writer")
     blocks = workflow_job_blocks(".github/workflows/release.yml")
+    prepare = blocks.get("prepare", "")
+    if "release_guard.py prepare" not in prepare or "ref: ${{ github.sha }}" not in prepare:
+        errors.append("publication must prepare the exact published tag event")
+    for family in ("python", "npm", "docker", "helm", "audio", "native", "python-publish", "npm-publish"):
+        if "needs.prepare" not in blocks.get(family, "") or "needs.release-please" in blocks.get(family, ""):
+            errors.append(f"{family} must consume the published-release prepare identity")
+    errors.extend(release_queue_errors(top, (ROOT / ".github/workflows/ci.yml").read_text()))
     recover = blocks.get("recover", "")
     if "release_recovery" not in recover or "id-token:" in recover or "publish-" in recover:
         errors.append("manual recovery must only rerun the original jobs")
     complete = blocks.get("complete", "")
     if "always()" not in complete or 'job["result"] != "success"' not in complete:
         errors.append("release completion must reject every non-success result")
-    if job_scalar(complete, "needs") != "[release-please, python-publish, npm-publish, docker, helm, audio, native]":
+    if job_scalar(complete, "needs") != "[prepare, python-publish, npm-publish, docker, helm, audio, native]":
         errors.append("release completion must include every artifact family")
     if (ROOT / ".github/workflows/repair-audio-asset.yml").exists():
         errors.append("obsolete audio repair workflow must be removed")

@@ -28,7 +28,9 @@ jobs:
           mise exec -- uv run --frozen --project . pytest -q
           tools/ci/tests/test_required_ci.py tools/ci/tests/test_public_tree.py
       - run: mise exec -- python tools/ci/check_public_tree.py
-      - run: mise exec -- actionlint
+      - run: >-
+          mise exec -- actionlint
+          -ignore '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'
 
   bootstrap:
     name: CI / Fresh bootstrap

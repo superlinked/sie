@@ -65,23 +65,69 @@ def stable_release(version: str, source_sha: str | None = None) -> str:
     return sha
 
 
-def trusted_context(environment: dict[str, str], source_sha: str, *, recovery: bool = False) -> None:
-    expected = {
-        "GITHUB_REPOSITORY": REPOSITORY,
-        "GITHUB_EVENT_NAME": "workflow_dispatch" if recovery else "push",
-        "GITHUB_REF": "refs/heads/main",
-        "GITHUB_REF_PROTECTED": "true",
-        "PUBLIC_RELEASE_PUBLISHING_ENABLED": "true",
-    }
+def published_event(environment: dict[str, str], event: dict, source_sha: str) -> str:
+    release = event.get("release", {})
+    tag = release.get("tag_name", "")
+    version = tag.removeprefix("v")
+    stable_version(version)
+    if (
+        environment.get("GITHUB_REPOSITORY") != REPOSITORY
+        or event.get("repository", {}).get("full_name") != REPOSITORY
+        or environment.get("GITHUB_EVENT_NAME") != "release"
+        or environment.get("GITHUB_REF_PROTECTED") != "true"
+        or event.get("action") != "published"
+        or release.get("draft") is not False
+        or release.get("prerelease") is not False
+        or tag != f"v{version}"
+        or environment.get("GITHUB_REF") != f"refs/tags/{tag}"
+        or not SHA.fullmatch(source_sha)
+        or environment.get("GITHUB_SHA") != source_sha
+    ):
+        raise ValueError("publication requires the exact stable published release event and tag SHA")
+    return version
+
+
+def protected_main_ancestor(source_sha: str) -> None:
+    if api("branches/main").get("protected") is not True:
+        raise ValueError("publication requires independently verified protected main")
+    command("git", "fetch", "--no-tags", "origin", "refs/heads/main")
+    command("git", "merge-base", "--is-ancestor", source_sha, "FETCH_HEAD")
+
+
+def event_payload(environment: dict[str, str]) -> dict:
+    return json.loads(Path(environment["GITHUB_EVENT_PATH"]).read_text())
+
+
+def trusted_context(
+    environment: dict[str, str], source_sha: str, *, recovery: bool = False, event: dict | None = None
+) -> None:
+    expected = {"GITHUB_REPOSITORY": REPOSITORY, "PUBLIC_RELEASE_PUBLISHING_ENABLED": "true"}
+    if recovery:
+        expected.update(
+            GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_REF="refs/heads/main", GITHUB_REF_PROTECTED="true"
+        )
     if any(environment.get(key) != value for key, value in expected.items()):
         raise ValueError("publication requires activated protected public main and the correct event")
-    if not SHA.fullmatch(source_sha) or (not recovery and environment.get("GITHUB_SHA") != source_sha):
+    if not SHA.fullmatch(source_sha) or environment.get("GITHUB_SHA") != source_sha:
         raise ValueError("publication SHA must be the original workflow SHA")
+    if not recovery:
+        published_event(environment, event if event is not None else event_payload(environment), source_sha)
+
+
+def prepare_release(environment: dict[str, str], event: dict) -> dict[str, str]:
+    source_sha = environment["GITHUB_SHA"]
+    version = published_event(environment, event, source_sha)
+    if command("git", "rev-parse", "HEAD") != source_sha:
+        raise ValueError("release event checkout differs from the tagged commit")
+    stable_release(SEED_VERSION)
+    stable_release(version, source_sha)
+    protected_main_ancestor(source_sha)
+    return {"sha": source_sha, "version": version, "tag_name": f"v{version}"}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["seed", "build", "publish"])
+    parser.add_argument("mode", choices=["seed", "prepare", "build", "publish"])
     parser.add_argument("--version", default="")
     parser.add_argument("--tag-name", default="")
     parser.add_argument("--source-ref", default="")
@@ -91,6 +137,12 @@ def main() -> None:
         stable_release(SEED_VERSION)
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
             output.write(f"at_seed={str(at_seed).lower()}\n")
+        return
+    environment = dict(os.environ)
+    if args.mode == "prepare":
+        identity = prepare_release(environment, event_payload(environment))
+        with Path(environment["GITHUB_OUTPUT"]).open("a") as output:
+            output.writelines(f"{key}={value}\n" for key, value in identity.items())
         return
     if not SHA.fullmatch(args.source_ref) or command("git", "rev-parse", "HEAD") != args.source_ref:
         raise ValueError("checkout is not the exact requested source SHA")
@@ -102,7 +154,11 @@ def main() -> None:
     elif args.tag_name or args.mode == "publish":
         raise ValueError("publication requires an exact stable release version")
     if args.mode == "publish":
-        trusted_context(dict(os.environ), args.source_ref)
+        event = event_payload(environment)
+        trusted_context(environment, args.source_ref, event=event)
+        if published_event(environment, event, args.source_ref) != args.version:
+            raise ValueError("publisher version differs from the original release event")
+        protected_main_ancestor(args.source_ref)
 
 
 if __name__ == "__main__":

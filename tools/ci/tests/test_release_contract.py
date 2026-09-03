@@ -91,6 +91,41 @@ def test_release_workflows_are_pinned_and_fail_closed() -> None:
     assert contract.publisher_job_errors() == []
 
 
+@pytest.mark.parametrize("replacement", ["  queue: single", "  queue: arbitrary", "", "  queue: max\n  queue: single"])
+def test_release_queue_must_retain_pending_runs(replacement):
+    top = (contract.ROOT / ".github/workflows/release.yml").read_text()
+    ci = (contract.ROOT / ".github/workflows/ci.yml").read_text()
+    assert contract.release_queue_errors(top, ci) == []
+    assert contract.release_queue_errors(top.replace("  queue: max", replacement), ci)
+
+
+def test_release_queue_cancellation_and_linter_exception_are_exact():
+    top = (contract.ROOT / ".github/workflows/release.yml").read_text()
+    ci = (contract.ROOT / ".github/workflows/ci.yml").read_text()
+    assert contract.release_queue_errors(top.replace("cancel-in-progress: false", "cancel-in-progress: true"), ci)
+    assert contract.release_queue_errors(top, ci.replace(contract.QUEUE_SCHEMA_DIAGNOSTIC, ".*"))
+    diagnostic = 'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'
+    assert re.fullmatch(contract.QUEUE_SCHEMA_DIAGNOSTIC, diagnostic)
+    assert not re.fullmatch(contract.QUEUE_SCHEMA_DIAGNOSTIC, diagnostic.replace('"queue"', '"bogus"'))
+
+
+def test_authoring_no_longer_assumes_release_sha_is_push_sha():
+    jobs = contract.workflow_job_blocks(".github/workflows/release.yml")
+    assert 'test "$RELEASE_SHA" = "$EXPECTED_SHA"' not in jobs["release-please"]
+    assert "needs.release-please.outputs" not in (contract.ROOT / ".github/workflows/release.yml").read_text()
+    assert "release_guard.py prepare" in jobs["prepare"]
+
+
+def test_prereleases_are_ignored_by_prepare_and_completion():
+    jobs = contract.workflow_job_blocks(".github/workflows/release.yml")
+    for job in ("prepare", "complete"):
+        condition = contract.job_scalar(jobs[job], "if")
+        assert "github.event_name == 'release'" in condition
+        assert "github.event.action == 'published'" in condition
+        assert "github.event.release.draft == false" in condition
+        assert "github.event.release.prerelease == false" in condition
+
+
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
 def test_actual_release_completion_script_rejects_non_success(monkeypatch, result):
     block = contract.workflow_job_blocks(".github/workflows/release.yml")["complete"]
@@ -98,7 +133,7 @@ def test_actual_release_completion_script_rejects_non_success(monkeypatch, resul
     assert script is not None
     results = {
         family: {"result": "success"}
-        for family in ("release-please", "python-publish", "npm-publish", "docker", "helm", "audio", "native")
+        for family in ("prepare", "python-publish", "npm-publish", "docker", "helm", "audio", "native")
     }
     results["native"]["result"] = result
     monkeypatch.setenv("RESULTS", json.dumps(results))
@@ -166,50 +201,3 @@ def test_native_audio_uploader_accepts_only_missing_or_identical_asset(tmp_path:
     assert missing_marker.is_file()
     assert calls.read_text().startswith("release upload --repo superlinked/sie v0.7.4 ")
     assert "--clobber" not in calls.read_text()
-
-
-@pytest.mark.parametrize("event_name", ["pull_request", "workflow_dispatch"])
-def test_pr_and_manual_callers_cannot_authorize_publication(event_name: str) -> None:
-    sha = "a" * 40
-    assert not contract.trusted_publication_context(
-        publish=True,
-        latch="true",
-        event_name=event_name,
-        ref="refs/heads/main",
-        ref_protected=True,
-        repository="superlinked/sie",
-        github_sha=sha,
-        input_sha=sha,
-        tag_name="v0.7.4",
-        version="0.7.4",
-        tag_sha=sha,
-    )
-
-
-def test_only_exact_push_main_sha_and_tag_context_authorizes_publication() -> None:
-    sha = "a" * 40
-    base = {
-        "publish": True,
-        "latch": "true",
-        "event_name": "push",
-        "ref": "refs/heads/main",
-        "ref_protected": True,
-        "repository": "superlinked/sie",
-        "github_sha": sha,
-        "input_sha": sha,
-        "tag_name": "v0.7.4",
-        "version": "0.7.4",
-        "tag_sha": sha,
-    }
-    assert contract.trusted_publication_context(**base)
-    for key, value in (
-        ("ref", "refs/heads/release"),
-        ("ref_protected", False),
-        ("repository", "someone/fork"),
-        ("input_sha", "b" * 40),
-        ("tag_sha", "b" * 40),
-        ("tag_name", "v0.7.3"),
-        ("latch", "false"),
-    ):
-        untrusted = {**base, key: value}
-        assert not contract.trusted_publication_context(**untrusted)

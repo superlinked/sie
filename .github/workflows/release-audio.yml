@@ -80,9 +80,12 @@ jobs:
     if: >-
       inputs.publish == true &&
       vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
+      github.event_name == 'release' &&
+      github.event.action == 'published' &&
+      github.event.release.draft == false &&
+      github.event.release.prerelease == false &&
       github.ref_protected == true &&
+      github.ref == format('refs/tags/{0}', inputs.tag_name) &&
       github.repository == 'superlinked/sie' &&
       github.sha == inputs.sha
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -101,21 +104,11 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_TAG: ${{ inputs.tag_name }}
           RELEASE_SHA: ${{ inputs.sha }}
-          RELEASE_LATCH: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
-          REF_PROTECTED: ${{ github.ref_protected }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_EVENT_NAME" = push
-          test "$GITHUB_REF" = refs/heads/main
-          test "$REF_PROTECTED" = true
-          test "$RELEASE_LATCH" = true
-          test "$GITHUB_REPOSITORY" = superlinked/sie
-          test "$GITHUB_SHA" = "$RELEASE_SHA"
-          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
-          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-          python3 -c 'import os,re; v=os.environ["RELEASE_VERSION"]; assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",v); assert tuple(map(int,v.split("."))) > (0,7,3)'
-          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
+          PUBLIC_RELEASE_PUBLISHING_ENABLED: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 tools/ci/release_guard.py publish --source-ref "$RELEASE_SHA"
+          --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: audio-prep-${{ inputs.version }}

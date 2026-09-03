@@ -9,7 +9,15 @@ import os
 import re
 from datetime import UTC, datetime, timedelta
 
-from tools.ci.release_guard import REPOSITORY, api, command, stable_release, stable_version, trusted_context
+from tools.ci.release_guard import (
+    REPOSITORY,
+    api,
+    command,
+    protected_main_ancestor,
+    stable_release,
+    stable_version,
+    trusted_context,
+)
 
 FAMILIES = ("python", "npm", "docker", "helm", "audio", "native")
 FAILED = {"failure", "timed_out", "cancelled", "action_required"}
@@ -36,17 +44,17 @@ def artifact_names(family: str, version: str) -> set[str]:
     return {f"{ {'helm': 'helm-sie-cluster', 'audio': 'audio-prep', 'native': 'native-sidecar'}[family] }-{version}"}
 
 
-def validate_run(run: dict, *, original_run: int, source_sha: str, now: datetime) -> None:
+def validate_run(run: dict, *, original_run: int, source_sha: str, tag_name: str, now: datetime) -> None:
     expected = {
         "id": original_run,
-        "event": "push",
-        "head_branch": "main",
+        "event": "release",
+        "head_branch": tag_name,
         "head_sha": source_sha,
         "path": ".github/workflows/release.yml",
         "status": "completed",
     }
     if any(run.get(key) != value for key, value in expected.items()):
-        raise ValueError("original run must be the completed release.yml push for the exact release SHA")
+        raise ValueError("original run must be the completed release.yml release event for the exact tag and SHA")
     if (
         run.get("repository", {}).get("full_name") != REPOSITORY
         or run.get("head_repository", {}).get("full_name") != REPOSITORY
@@ -60,7 +68,7 @@ def validate_run(run: dict, *, original_run: int, source_sha: str, now: datetime
 
 
 def validate_artifacts(
-    artifacts: list[dict], wanted: set[str], *, original_run: int, source_sha: str, now: datetime
+    artifacts: list[dict], wanted: set[str], *, original_run: int, source_sha: str, tag_name: str, now: datetime
 ) -> None:
     for name in wanted:
         matches = [artifact for artifact in artifacts if artifact.get("name") == name]
@@ -71,7 +79,7 @@ def validate_artifacts(
         if (
             linkage.get("id") != original_run
             or linkage.get("head_sha") != source_sha
-            or linkage.get("head_branch") != "main"
+            or linkage.get("head_branch") != tag_name
         ):
             raise ValueError(f"archive is not bound to the original release run: {name}")
         if artifact.get("expired") is not False or datetime.fromisoformat(artifact["expires_at"]) <= now:
@@ -84,9 +92,9 @@ def validate_artifacts(
 
 
 def selected_jobs(jobs: list[dict], family: str) -> list[int]:
-    release_jobs = [job for job in jobs if job.get("name") == "release-please"]
+    release_jobs = [job for job in jobs if job.get("name") == "prepare"]
     if len(release_jobs) != 1 or release_jobs[0].get("conclusion") != "success":
-        raise ValueError("original release-please must remain successful; it must not be rerun")
+        raise ValueError("original prepare must remain successful; it must not be rerun")
     prefixes = ("python-publish",) if family == "python" else ("npm-publish",) if family == "npm" else (f"{family} /",)
     if family == "all":
         prefixes = ("python-publish", "npm-publish", "docker /", "helm /", "audio /", "native /")
@@ -133,9 +141,11 @@ def main() -> None:
     if command("git", "rev-parse", "HEAD") != os.environ["GITHUB_SHA"]:
         raise ValueError("recovery must execute the reviewed dispatch commit")
     source_sha = stable_release(args.version)
+    protected_main_ancestor(source_sha)
     now = datetime.now(UTC)
     run = api(f"actions/runs/{args.original_run}")
-    validate_run(run, original_run=args.original_run, source_sha=source_sha, now=now)
+    tag_name = f"v{args.version}"
+    validate_run(run, original_run=args.original_run, source_sha=source_sha, tag_name=tag_name, now=now)
     pages = json.loads(
         command(
             "gh",
@@ -148,7 +158,9 @@ def main() -> None:
     artifacts = [artifact for page in pages for artifact in page["artifacts"]]
     families = FAMILIES if args.family == "all" else (args.family,)
     wanted = set().union(*(artifact_names(family, args.version) for family in families))
-    validate_artifacts(artifacts, wanted, original_run=args.original_run, source_sha=source_sha, now=now)
+    validate_artifacts(
+        artifacts, wanted, original_run=args.original_run, source_sha=source_sha, tag_name=tag_name, now=now
+    )
     pages = json.loads(
         command(
             "gh",
