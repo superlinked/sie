@@ -305,7 +305,7 @@ def _emit_audit_log(
     body_bytes: int | None = None,
 ) -> None:
     """Emit a structured audit log entry for config API operations."""
-    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    token = _extract_bearer_token(request.headers.get("Authorization", ""))
     token_id = hashlib.sha256(token.encode()).hexdigest()[:12] if token else None
 
     entry = AuditEntry(
@@ -387,6 +387,19 @@ def _refuse_open_in_prod() -> None:
         )
 
 
+def _extract_bearer_token(header: str) -> str:
+    """Token from an Authorization header.
+
+    Matches the gateway: trim, then a case-insensitive ``Bearer `` prefix
+    (RFC 7235), then trim the token. A raw value with no prefix is kept as-is
+    so existing clients that send the token alone still work.
+    """
+    value = header.strip()
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return value
+
+
 def _check_read_auth(request: Request) -> None:
     """Validate read auth (inference token or admin token)."""
     auth_token = os.environ.get("SIE_AUTH_TOKEN")
@@ -395,7 +408,7 @@ def _check_read_auth(request: Request) -> None:
         _refuse_open_in_prod()
         return  # No auth configured (dev / self-host localhost posture)
 
-    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    token = _extract_bearer_token(request.headers.get("Authorization", ""))
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     token_match = (auth_token is not None and hmac.compare_digest(token, auth_token)) or (
@@ -419,7 +432,7 @@ def _check_write_auth(request: Request) -> None:
         _refuse_open_in_prod()
         return  # No auth configured at all (dev / self-host localhost posture)
 
-    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    token = _extract_bearer_token(request.headers.get("Authorization", ""))
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     if not hmac.compare_digest(token, admin_token):
