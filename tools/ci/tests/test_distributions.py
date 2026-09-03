@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -132,4 +133,90 @@ def test_npm_retry_checks_all_versions_before_any_upload(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="different bytes"):
         packages.publish_npm(tmp_path, "0.7.4")
+    assert uploads == []
+
+
+def npm_publish_fixture(tmp_path, monkeypatch, replies, *, count=1):
+    archives = [tmp_path / f"package-{index}.tgz" for index in range(count)]
+    for archive in archives:
+        archive.write_bytes(b"tested archive")
+    monkeypatch.setattr(packages, "verify", lambda *args: archives)
+    monkeypatch.setattr(packages, "archive_metadata", lambda path: (f"@superlinked/{path.stem}", "0.7.4"))
+    calls, uploads = [], []
+    results = iter(replies)
+
+    def query(args, **kwargs):
+        calls.append(args)
+        return next(results)
+
+    monkeypatch.setattr(packages.subprocess, "run", query)
+    monkeypatch.setattr(packages, "run", lambda *args: uploads.append(args))
+    return calls, uploads
+
+
+def npm_missing():
+    return subprocess.CompletedProcess([], 1, '{"error":{"code":"E404"}}', "npm error code E404")
+
+
+@pytest.mark.parametrize(
+    ("latest", "tag"), [("0.7.5", "release-v0.7.4"), ("0.7.3", "latest"), ("0.7.10", "release-v0.7.4")]
+)
+def test_npm_publish_preserves_newer_latest_on_historical_repair(tmp_path, monkeypatch, latest, tag):
+    calls, uploads = npm_publish_fixture(
+        tmp_path, monkeypatch, [npm_missing(), subprocess.CompletedProcess([], 0, json.dumps(latest), "")]
+    )
+    packages.publish_npm(tmp_path, "0.7.4")
+    assert calls[0][2:4] == ["@superlinked/package-0@0.7.4", "dist.integrity"]
+    assert calls[1][2:4] == ["@superlinked/package-0", "dist-tags.latest"]
+    assert len(uploads) == 1
+    assert uploads[0][3:5] == ("--tag", tag)
+    assert uploads[0][:2] == ("npm", "publish")
+
+
+def test_first_npm_publication_uses_latest(tmp_path, monkeypatch):
+    _, uploads = npm_publish_fixture(tmp_path, monkeypatch, [npm_missing(), npm_missing()])
+    packages.publish_npm(tmp_path, "0.7.4")
+    assert uploads[0][3:5] == ("--tag", "latest")
+
+
+@pytest.mark.parametrize("reply", ["not-json", "null", "{}", "[]", '"0.7.5-rc.1"', '"bogus"', '"01.2.3"', '""'])
+def test_malformed_latest_blocks_all_pending_uploads(tmp_path, monkeypatch, reply):
+    _, uploads = npm_publish_fixture(
+        tmp_path,
+        monkeypatch,
+        [
+            npm_missing(),
+            subprocess.CompletedProcess([], 0, '"0.7.3"', ""),
+            npm_missing(),
+            subprocess.CompletedProcess([], 0, reply, ""),
+        ],
+        count=2,
+    )
+    with pytest.raises(ValueError, match="malformed npm"):
+        packages.publish_npm(tmp_path, "0.7.4")
+    assert uploads == []
+
+
+@pytest.mark.parametrize("code", ["E500", "E401", "ETIMEDOUT"])
+def test_latest_query_failure_does_not_publish(tmp_path, monkeypatch, code):
+    _, uploads = npm_publish_fixture(
+        tmp_path,
+        monkeypatch,
+        [
+            npm_missing(),
+            subprocess.CompletedProcess([], 1, json.dumps({"error": {"code": code}}), code),
+        ],
+    )
+    with pytest.raises(ValueError, match="cannot check npm"):
+        packages.publish_npm(tmp_path, "0.7.4")
+    assert uploads == []
+
+
+def test_identical_existing_npm_version_never_touches_latest(tmp_path, monkeypatch):
+    integrity = "sha512-" + base64.b64encode(hashlib.sha512(b"tested archive").digest()).decode()
+    calls, uploads = npm_publish_fixture(
+        tmp_path, monkeypatch, [subprocess.CompletedProcess([], 0, json.dumps(integrity), "")]
+    )
+    packages.publish_npm(tmp_path, "0.7.4")
+    assert len(calls) == 1
     assert uploads == []

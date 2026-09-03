@@ -222,30 +222,52 @@ def prepare_pypi(directory: Path, destination: Path, version: str) -> None:
         output.write(f"pending={'true' if any(destination.iterdir()) else 'false'}\n")
 
 
+def npm_view(spec: str, field: str) -> str | None:
+    result = subprocess.run(  # noqa: S603
+        ["npm", "view", spec, field, "--json", "--registry=https://registry.npmjs.org"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        reply = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"malformed npm reply for {spec} {field}") from error
+    if result.returncode:
+        if isinstance(reply, dict) and isinstance(reply.get("error"), dict) and reply["error"].get("code") == "E404":
+            return None
+        raise ValueError(f"cannot check npm {spec} {field}: {result.stderr}")
+    if not isinstance(reply, str):
+        raise ValueError(f"malformed npm reply for {spec} {field}")
+    return reply
+
+
 def publish_npm(directory: Path, version: str) -> None:
+    stable = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    if not re.fullmatch(stable, version):
+        raise ValueError("npm publication requires a stable version")
     archives = verify("npm", directory, version)
     pending = []
     for archive in archives:
         name, _ = archive_metadata(archive)
-        result = subprocess.run(  # noqa: S603
-            ["npm", "view", f"{name}@{version}", "dist.integrity", "--json", "--registry=https://registry.npmjs.org"],  # noqa: S607
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode:
-            if "E404" not in result.stderr:
-                raise ValueError(f"cannot check existing npm version: {result.stderr}")
-            pending.append(archive)
+        published = npm_view(f"{name}@{version}", "dist.integrity")
+        if published is None:
+            latest = npm_view(name, "dist-tags.latest")
+            if latest is not None and not re.fullmatch(stable, latest):
+                raise ValueError(f"malformed npm latest version for {name}: {latest}")
+            older = latest is not None and tuple(map(int, latest.split("."))) > tuple(map(int, version.split(".")))
+            pending.append((archive, f"release-v{version}" if older else "latest"))
         else:
             integrity = "sha512-" + base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode()
-            if json.loads(result.stdout) != integrity:
+            if published != integrity:
                 raise ValueError(f"npm already has different bytes for {name}@{version}")
-    for archive in pending:
+    for archive, tag in pending:
         run(
             "npm",
             "publish",
             str(archive),
+            "--tag",
+            tag,
             "--access",
             "public",
             "--provenance",
