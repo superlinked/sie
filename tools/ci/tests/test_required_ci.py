@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -108,3 +109,22 @@ def test_typescript_build_precedes_typecheck():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     commands = [step.get("run") for step in workflow["jobs"]["typescript"]["steps"]]
     assert commands.index("mise run ts -- build") < commands.index("mise run ts -- typecheck")
+
+
+def test_rust_audits_both_committed_dependency_graphs():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    commands = [shlex.split(step.get("run", "")) for step in workflow["jobs"]["rust"]["steps"]]
+    assert ["mise", "run", "gateway-deny"] in commands
+    assert [
+        "mise",
+        "exec",
+        "--",
+        "cargo-deny",
+        "--locked",
+        "--manifest-path",
+        "packages/sie_server_rust/Cargo.toml",
+        "--all-features",
+        "--config",
+        "deny.toml",
+        "check",
+    ] in commands

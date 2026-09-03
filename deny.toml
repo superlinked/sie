@@ -1,7 +1,7 @@
-# cargo-deny policy for the public Rust workspace. Standalone crates excluded
-# from the root workspace are outside this single-lock audit.
+# cargo-deny policy shared by the public Rust workspace and standalone worker.
+# Each dependency graph is audited against its own committed lockfile.
 #
-# Run with: `mise run gateway-deny`
+# Workspace: `mise run gateway-deny`; standalone worker: the CI Rust audit lane.
 # Docs:     https://embarkstudios.github.io/cargo-deny/
 
 [graph]

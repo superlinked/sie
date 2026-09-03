@@ -107,6 +107,11 @@ jobs:
       - run: mise run rust-check
       - run: mise run rust-clippy
       - run: mise run gateway-deny
+      - name: Audit standalone Rust worker dependencies
+        run: >-
+          mise exec -- cargo-deny --locked
+          --manifest-path packages/sie_server_rust/Cargo.toml --all-features
+          --config deny.toml check
       - run: mise exec -- cargo fmt --manifest-path packages/sie_server_rust/Cargo.toml -- --check
       - run: mise exec -- cargo check --manifest-path packages/sie_server_rust/Cargo.toml --locked --all-targets
       - run: mise exec -- cargo clippy --manifest-path packages/sie_server_rust/Cargo.toml --locked --all-targets -- -D warnings
