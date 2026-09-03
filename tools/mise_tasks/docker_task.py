@@ -6,14 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
-import time
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from tools.ci.release_artifact import create_manifest, validate_manifest
+from tools.ci.release_guard import stable_version
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MATRIX = ROOT / ".github/release-matrix.json"
@@ -70,11 +74,30 @@ def validate_source_revision(source_revision: str) -> str:
     return source_revision
 
 
+def validate_release_versions(version: str) -> None:
+    for package in ("sie_server", "sie_sdk", "sie_config", "sie_mcp"):
+        path = ROOT / "packages" / package / "pyproject.toml"
+        if tomllib.loads(path.read_text())["project"]["version"] != version:
+            raise ValueError(f"release version mismatch: {path.relative_to(ROOT)}")
+    for package in ("sie_gateway", "sie_server_sidecar", "sie_audio_prep"):
+        path = ROOT / "packages" / package / "Cargo.toml"
+        if tomllib.loads(path.read_text())["package"]["version"] != version:
+            raise ValueError(f"release version mismatch: {path.relative_to(ROOT)}")
+
+
 def bundle_platform(bundle: str) -> str:
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", bundle) is None:
+        raise ValueError("invalid release bundle name")
     path = ROOT / "packages/sie_server/bundles" / f"{bundle}.yaml"
     if not path.is_file():
         raise ValueError(f"release bundle does not exist: {bundle}")
     data = yaml.safe_load(path.read_text()) or {}
+    for adapter in data.get("adapters", []):
+        if not isinstance(adapter, str) or not adapter.startswith("sie_server.adapters."):
+            raise ValueError(f"bundle {bundle} contains an invalid adapter path")
+        module = ROOT / "packages/sie_server/src" / adapter.replace(".", "/")
+        if not module.with_suffix(".py").is_file() and not (module / "__init__.py").is_file():
+            raise ValueError(f"release bundle {bundle} adapter source is missing: {adapter}")
     declared = data.get("platform", "cuda12")
     if not isinstance(declared, str) or declared not in {"cuda12", "cuda13"}:
         raise ValueError(f"bundle {bundle} declares unsupported platform {declared!r}")
@@ -169,7 +192,6 @@ def build_server_command(
     version: str,
     target: ServerTarget,
     source_revision: str,
-    push: bool,
 ) -> list[str]:
     validate_target(target)
     revision = validate_source_revision(source_revision)
@@ -194,7 +216,7 @@ def build_server_command(
         "org.opencontainers.image.source=https://github.com/superlinked/sie",
         "--tag",
         server_image(registry, version, target),
-        "--push" if push else "--load",
+        "--load",
         ".",
     ]
     return command
@@ -206,7 +228,6 @@ def build_service_command(
     version: str,
     service: str,
     source_revision: str,
-    push: bool,
 ) -> list[str]:
     revision = validate_source_revision(source_revision)
     dockerfile = SINGLETON_DOCKERFILES.get(service)
@@ -235,7 +256,7 @@ def build_service_command(
         [
             "--tag",
             singleton_image(registry, version, service),
-            "--push" if push else "--load",
+            "--load",
             ".",
         ]
     )
@@ -246,31 +267,166 @@ def run(command: list[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)  # noqa: S603
 
 
-def image_exists(image: str, *, attempts: int = 4) -> bool:
-    for attempt in range(attempts):
-        result = subprocess.run(  # noqa: S603
-            ["docker", "buildx", "imagetools", "inspect", image],  # noqa: S607
-            cwd=ROOT,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if result.returncode == 0:
-            return True
-        if attempt + 1 < attempts:
-            time.sleep(2**attempt)
-    return False
+def capture(command: list[str]) -> str:
+    return subprocess.check_output(command, cwd=ROOT, text=True).strip()  # noqa: S603
 
 
-def verify_release(registry: str, version: str, targets: tuple[ServerTarget, ...]) -> None:
-    images = expected_versioned_images(registry, version, targets)
-    missing = [image for image in images if not image_exists(image)]
-    if missing:
-        raise RuntimeError("missing versioned release images:\n" + "\n".join(missing))
+def inspect_loaded(image: str, source_revision: str) -> dict[str, str]:
+    records = json.loads(capture(["docker", "image", "inspect", image]))
+    if len(records) != 1:
+        raise ValueError("expected exactly one loaded image")
+    record = records[0]
+    labels = record.get("Config", {}).get("Labels", {})
+    if labels.get("org.opencontainers.image.revision") != validate_source_revision(source_revision):
+        raise ValueError("loaded image source revision mismatch")
+    if labels.get("org.opencontainers.image.source") != "https://github.com/superlinked/sie":
+        raise ValueError("loaded image source repository mismatch")
+    if record.get("Os") != "linux" or record.get("Architecture") != "amd64":
+        raise ValueError("release image must be linux/amd64")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", record.get("Id", "")) is None:
+        raise ValueError("loaded image has no valid configuration digest")
+    return {"image": image, "image_id": record["Id"], "os": "linux", "architecture": "amd64"}
 
 
-def move_aliases(registry: str, version: str, targets: tuple[ServerTarget, ...]) -> None:
-    verify_release(registry, version, targets)
+def smoke_image(image: str, *, bundle: str | None = None) -> None:
+    command = ["docker", "run", "--rm", "--pull", "never", "--network", "none"]
+    if bundle is not None:
+        imports = "import sie_server, sie_sdk, sie_audio_prep, torch, transformers; "
+        if bundle == "ctranslate2":
+            imports += "import ctranslate2; "
+        elif bundle in {"sglang", "sglang-cu130"}:
+            imports += "import sglang; "
+        elif bundle == "tensorrt-llm":
+            imports += "import tensorrt_llm; "
+        if bundle in {"sglang-cu130", "tensorrt-llm"}:
+            imports += "assert torch.version.cuda.startswith('13.'); assert transformers.__version__.startswith('5.'); "
+        imports += "print('release image imports passed')"
+        command.extend(["--entrypoint", "python", image, "-c", imports])
+    else:
+        command.extend([image, "--help"])
+    run(command)
+
+
+def export_image(image: str, directory: Path, *, version: str, source_revision: str, run_id: str) -> dict[str, Any]:
+    metadata = inspect_loaded(image, source_revision)
+    directory.mkdir(parents=True, exist_ok=True)
+    if any(directory.iterdir()):
+        raise ValueError("refusing to overwrite an existing image archive")
+    run(["docker", "image", "save", "--output", str(directory / "image.tar"), image])
+    return create_manifest(
+        directory,
+        kind="docker",
+        version=version,
+        tag_name=f"v{version}",
+        source_revision=source_revision,
+        run_id=run_id,
+        metadata=metadata,
+    )
+
+
+def load_image_archive(
+    image: str, directory: Path, *, version: str, source_revision: str, run_id: str
+) -> dict[str, Any]:
+    manifest = validate_manifest(
+        directory,
+        kind="docker",
+        version=version,
+        tag_name=f"v{version}",
+        source_revision=source_revision,
+        run_id=run_id,
+    )
+    if [item["name"] for item in manifest["files"]] != ["image.tar"]:
+        raise ValueError("image archive must contain exactly image.tar")
+    if manifest["metadata"].get("image") != image:
+        raise ValueError("image archive reference mismatch")
+    run(["docker", "image", "load", "--input", str(directory / "image.tar")])
+    if inspect_loaded(image, source_revision) != manifest["metadata"]:
+        raise ValueError("loaded image configuration digest mismatch")
+    return manifest
+
+
+def remote_image_id(image: str, *, allow_missing: bool = False) -> str | None:
+    result = subprocess.run(  # noqa: S603
+        ["docker", "buildx", "imagetools", "inspect", "--raw", image],  # noqa: S607
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        if allow_missing and any(
+            marker in result.stderr.lower() for marker in ("manifest unknown", "not found", "name unknown")
+        ):
+            return None
+        raise RuntimeError(f"cannot inspect remote image {image}: {result.stderr.strip()}")
+    manifest = json.loads(result.stdout)
+    if "manifests" in manifest:
+        descriptors = [
+            item for item in manifest["manifests"] if item.get("platform") == {"architecture": "amd64", "os": "linux"}
+        ]
+        if len(descriptors) != 1:
+            raise ValueError("remote index must contain exactly one linux/amd64 image")
+        repository = image.split("@", 1)[0].rsplit(":", 1)[0]
+        return remote_image_id(f"{repository}@{descriptors[0]['digest']}")
+    digest = manifest.get("config", {}).get("digest", "")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise ValueError("remote image configuration digest is missing")
+    return digest
+
+
+def publish_archive(image: str, directory: Path, *, version: str, source_revision: str, run_id: str) -> None:
+    stable_version(version)
+    if not image.startswith("ghcr.io/superlinked/") or f":v{version}" not in image:
+        raise ValueError("publication requires a versioned public image reference")
+    manifest = load_image_archive(image, directory, version=version, source_revision=source_revision, run_id=run_id)
+    expected = manifest["metadata"]["image_id"]
+    existing = remote_image_id(image, allow_missing=True)
+    if existing is not None and existing != expected:
+        raise ValueError("refusing to overwrite a different versioned image")
+    if existing is None:
+        run(["docker", "push", image])
+    if remote_image_id(image) != expected:
+        raise ValueError("remote image does not match the tested image configuration digest")
+
+
+def verify_release(
+    registry: str,
+    version: str,
+    targets: tuple[ServerTarget, ...],
+    *,
+    evidence_dir: Path,
+    source_revision: str,
+    run_id: str,
+) -> None:
+    images = set(expected_versioned_images(registry, version, targets))
+    evidence = {}
+    for path in evidence_dir.rglob("*.json"):
+        manifest = json.loads(path.read_text())
+        expected_identity = {
+            "schema": 1,
+            "repository": "superlinked/sie",
+            "kind": "docker",
+            "version": version,
+            "tag_name": f"v{version}",
+            "source_revision": validate_source_revision(source_revision),
+            "run_id": str(run_id),
+        }
+        if any(manifest.get(key) != value for key, value in expected_identity.items()):
+            raise ValueError("image evidence source/run identity mismatch")
+        metadata = manifest["metadata"]
+        image = metadata["image"]
+        if metadata.get("architecture") != "amd64" or metadata.get("os") != "linux" or image in evidence:
+            raise ValueError("duplicate or wrong-platform image evidence")
+        evidence[image] = metadata["image_id"]
+    if set(evidence) != images:
+        raise ValueError("image evidence does not cover the exact complete release set")
+    for image, image_id in evidence.items():
+        if remote_image_id(image) != image_id:
+            raise ValueError(f"remote image differs from tested source-bound image: {image}")
+
+
+def move_aliases(registry: str, version: str, targets: tuple[ServerTarget, ...], **kwargs: Any) -> None:
+    verify_release(registry, version, targets, **kwargs)
     for source, alias in alias_plan(registry, version, targets):
         run(["docker", "buildx", "imagetools", "create", "--tag", alias, source])
 
@@ -280,12 +436,17 @@ def parser() -> argparse.ArgumentParser:
     subparsers = result.add_subparsers(dest="command", required=True)
     matrix = subparsers.add_parser("matrix")
     matrix.add_argument("--file", type=Path, default=DEFAULT_MATRIX)
+    matrix.add_argument("--version")
 
     for name in ("expected", "verify", "alias"):
         command = subparsers.add_parser(name)
         command.add_argument("--registry", required=True)
         command.add_argument("--version", required=True)
         command.add_argument("--matrix-file", type=Path, default=DEFAULT_MATRIX)
+        if name != "expected":
+            command.add_argument("--evidence-dir", type=Path, required=True)
+            command.add_argument("--source-revision", required=True)
+            command.add_argument("--run-id", required=True)
 
     server = subparsers.add_parser("build-server")
     server.add_argument("--registry", required=True)
@@ -293,22 +454,36 @@ def parser() -> argparse.ArgumentParser:
     server.add_argument("--platform", required=True)
     server.add_argument("--bundle", required=True)
     server.add_argument("--source-revision", required=True)
-    server.add_argument("--push", action="store_true")
 
     service = subparsers.add_parser("build-service")
     service.add_argument("--registry", required=True)
     service.add_argument("--version", required=True)
     service.add_argument("--service", choices=sorted(SINGLETON_DOCKERFILES), required=True)
     service.add_argument("--source-revision", required=True)
-    service.add_argument("--push", action="store_true")
+    for command in (server, service):
+        command.add_argument("--archive-dir", type=Path)
+        command.add_argument("--evidence-dir", type=Path)
+        command.add_argument("--run-id")
+
+    for name in ("load", "publish"):
+        command = subparsers.add_parser(name)
+        command.add_argument("--image", required=True)
+        command.add_argument("--archive-dir", type=Path, required=True)
+        command.add_argument("--version", required=True)
+        command.add_argument("--source-revision", required=True)
+        command.add_argument("--run-id", required=True)
     return result
 
 
 def main() -> int:
     args = parser().parse_args()
     try:
+        if args.command in {"build-server", "build-service"} and args.archive_dir and not args.run_id:
+            raise ValueError("archiving requires the original Actions run ID")
         if args.command == "matrix":
             print(json.dumps({"include": [item.as_json() for item in load_release_matrix(args.file)]}))
+            if args.version:
+                validate_release_versions(args.version)
         elif args.command == "expected":
             targets = load_release_matrix(args.matrix_file)
             print("\n".join(expected_versioned_images(args.registry, args.version, targets)))
@@ -319,7 +494,6 @@ def main() -> int:
                     version=args.version,
                     target=ServerTarget(args.platform, args.bundle),
                     source_revision=args.source_revision,
-                    push=args.push,
                 )
             )
         elif args.command == "build-service":
@@ -329,13 +503,48 @@ def main() -> int:
                     version=args.version,
                     service=args.service,
                     source_revision=args.source_revision,
-                    push=args.push,
                 )
             )
+        elif args.command in {"load", "publish"}:
+            operation = load_image_archive if args.command == "load" else publish_archive
+            operation(
+                args.image,
+                args.archive_dir,
+                version=args.version,
+                source_revision=args.source_revision,
+                run_id=args.run_id,
+            )
         elif args.command == "verify":
-            verify_release(args.registry, args.version, load_release_matrix(args.matrix_file))
+            verify_release(
+                args.registry,
+                args.version,
+                load_release_matrix(args.matrix_file),
+                evidence_dir=args.evidence_dir,
+                source_revision=args.source_revision,
+                run_id=args.run_id,
+            )
         elif args.command == "alias":
-            move_aliases(args.registry, args.version, load_release_matrix(args.matrix_file))
+            move_aliases(
+                args.registry,
+                args.version,
+                load_release_matrix(args.matrix_file),
+                evidence_dir=args.evidence_dir,
+                source_revision=args.source_revision,
+                run_id=args.run_id,
+            )
+        if args.command in {"build-server", "build-service"} and args.archive_dir:
+            image = (
+                server_image(args.registry, args.version, ServerTarget(args.platform, args.bundle))
+                if args.command == "build-server"
+                else singleton_image(args.registry, args.version, args.service)
+            )
+            smoke_image(image, bundle=args.bundle if args.command == "build-server" else None)
+            export_image(
+                image, args.archive_dir, version=args.version, source_revision=args.source_revision, run_id=args.run_id
+            )
+            if args.evidence_dir:
+                args.evidence_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(args.archive_dir / "provenance.json", args.evidence_dir / "provenance.json")
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         print(f"docker task failed: {error}", file=sys.stderr)
         return 1

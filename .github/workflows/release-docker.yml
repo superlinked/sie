@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   matrix:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
       server: ${{ steps.resolve.outputs.server }}
@@ -32,10 +32,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - id: resolve
-        run: |
-          matrix="$(mise run docker -- matrix)"
-          echo "server=$(jq -c . <<<"$matrix")" >> "$GITHUB_OUTPUT"
-      - name: Validate immutable release identity and source closure
+        name: Validate source closure and coordinated versions
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_TAG: ${{ inputs.tag_name }}
@@ -44,12 +41,16 @@ jobs:
           set -euo pipefail
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-          mise exec -- python tools/ci/check_release_contract.py
+          matrix="$(mise run docker -- matrix --version "$RELEASE_VERSION")"
+          echo "server=$(jq -c . <<<"$matrix")" >> "$GITHUB_OUTPUT"
 
   build-server:
     needs: matrix
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.server) }}
@@ -60,35 +61,55 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - run: >-
+      - id: restore
+        name: Reuse an already retained original-run image on retry
+        if: github.run_attempt > 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m tools.ci.restore_release_artifact
+          --directory artifact --name 'docker-server-${{ matrix.platform }}-${{ matrix.bundle }}-${{ inputs.version }}'
+          --kind docker --version '${{ inputs.version }}' --tag-name '${{ inputs.tag_name }}'
+          --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
+      - name: Build once, smoke the loaded image, and save those bytes
+        if: steps.restore.outputs.restored != 'true'
+        run: >-
           mise run docker -- build-server
-          --registry ghcr.io/superlinked
-          --version '${{ inputs.version }}'
-          --platform '${{ matrix.platform }}'
-          --bundle '${{ matrix.bundle }}'
+          --registry ghcr.io/superlinked --version '${{ inputs.version }}'
+          --platform '${{ matrix.platform }}' --bundle '${{ matrix.bundle }}'
           --source-revision '${{ inputs.sha }}'
-
-  build-service:
-    needs: matrix
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        service: [sie-gateway, sie-config, sie-mcp, sie-server-sidecar, sie-server-rust]
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+          --run-id '${{ github.run_id }}' --archive-dir artifact --evidence-dir evidence
+      - if: steps.restore.outputs.restored != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          ref: ${{ inputs.sha }}
-          persist-credentials: false
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - run: >-
-          mise run docker -- build-service
-          --registry ghcr.io/superlinked
-          --version '${{ inputs.version }}'
-          --service '${{ matrix.service }}'
-          --source-revision '${{ inputs.sha }}'
+          name: docker-server-${{ matrix.platform }}-${{ matrix.bundle }}-${{ inputs.version }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - id: restore-evidence
+        name: Reuse original image verification evidence on retry
+        if: github.run_attempt > 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m tools.ci.restore_release_artifact
+          --directory retained-evidence --evidence-of artifact
+          --name 'docker-evidence-server-${{ matrix.platform }}-${{ matrix.bundle }}-${{ inputs.version }}'
+          --kind docker --version '${{ inputs.version }}' --tag-name '${{ inputs.tag_name }}'
+          --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
+      - name: Derive verification evidence from the retained archive
+        if: steps.restore-evidence.outputs.restored != 'true'
+        run: |
+          mkdir -p evidence
+          cp artifact/provenance.json evidence/provenance.json
+      - if: steps.restore-evidence.outputs.restored != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docker-evidence-server-${{ matrix.platform }}-${{ matrix.bundle }}-${{ inputs.version }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
 
   push-server:
     needs: [matrix, build-server, build-service]
@@ -100,7 +121,7 @@ jobs:
       github.ref_protected == true &&
       github.repository == 'superlinked/sie' &&
       github.sha == inputs.sha
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 90
     environment: ghcr
     permissions:
@@ -119,31 +140,106 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_TAG: ${{ inputs.tag_name }}
           RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_LATCH: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+          REF_PROTECTED: ${{ github.ref_protected }}
         run: |
           set -euo pipefail
           test "$GITHUB_EVENT_NAME" = push
           test "$GITHUB_REF" = refs/heads/main
+          test "$REF_PROTECTED" = true
+          test "$RELEASE_LATCH" = true
           test "$GITHUB_REPOSITORY" = superlinked/sie
           test "$GITHUB_SHA" = "$RELEASE_SHA"
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          python3 -c 'import os,re; v=os.environ["RELEASE_VERSION"]; assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",v); assert tuple(map(int,v.split("."))) > (0,7,3)'
           git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-server-${{ matrix.platform }}-${{ matrix.bundle }}-${{ inputs.version }}
+          path: artifact
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - run: >-
-          mise run docker -- build-server
-          --registry ghcr.io/superlinked
-          --version '${{ inputs.version }}'
-          --platform '${{ matrix.platform }}'
-          --bundle '${{ matrix.bundle }}'
+      - name: Publish only the retained tested image; reject different existing bytes
+        run: >-
+          mise run docker-push-loaded --
+          --image 'ghcr.io/superlinked/sie-server:v${{ inputs.version }}-${{ matrix.platform }}-${{ matrix.bundle }}'
+          --archive-dir artifact --version '${{ inputs.version }}'
+          --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
+
+  build-service:
+    needs: matrix
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [sie-gateway, sie-config, sie-mcp, sie-server-sidecar, sie-server-rust]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - id: restore
+        name: Reuse an already retained original-run image on retry
+        if: github.run_attempt > 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m tools.ci.restore_release_artifact
+          --directory artifact --name 'docker-service-${{ matrix.service }}-${{ inputs.version }}'
+          --kind docker --version '${{ inputs.version }}' --tag-name '${{ inputs.tag_name }}'
+          --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
+      - name: Build once, smoke the loaded image, and save those bytes
+        if: steps.restore.outputs.restored != 'true'
+        run: >-
+          mise run docker -- build-service
+          --registry ghcr.io/superlinked --version '${{ inputs.version }}'
+          --service '${{ matrix.service }}'
           --source-revision '${{ inputs.sha }}'
-          --push
+          --run-id '${{ github.run_id }}' --archive-dir artifact --evidence-dir evidence
+      - if: steps.restore.outputs.restored != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docker-service-${{ matrix.service }}-${{ inputs.version }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - id: restore-evidence
+        name: Reuse original image verification evidence on retry
+        if: github.run_attempt > 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m tools.ci.restore_release_artifact
+          --directory retained-evidence --evidence-of artifact
+          --name 'docker-evidence-service-${{ matrix.service }}-${{ inputs.version }}'
+          --kind docker --version '${{ inputs.version }}' --tag-name '${{ inputs.tag_name }}'
+          --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
+      - name: Derive verification evidence from the retained archive
+        if: steps.restore-evidence.outputs.restored != 'true'
+        run: |
+          mkdir -p evidence
+          cp artifact/provenance.json evidence/provenance.json
+      - if: steps.restore-evidence.outputs.restored != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docker-evidence-service-${{ matrix.service }}-${{ inputs.version }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
 
   push-service:
     needs: [matrix, build-server, build-service]
@@ -155,7 +251,7 @@ jobs:
       github.ref_protected == true &&
       github.repository == 'superlinked/sie' &&
       github.sha == inputs.sha
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 90
     environment: ghcr
     permissions:
@@ -175,30 +271,38 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_TAG: ${{ inputs.tag_name }}
           RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_LATCH: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+          REF_PROTECTED: ${{ github.ref_protected }}
         run: |
           set -euo pipefail
           test "$GITHUB_EVENT_NAME" = push
           test "$GITHUB_REF" = refs/heads/main
+          test "$REF_PROTECTED" = true
+          test "$RELEASE_LATCH" = true
           test "$GITHUB_REPOSITORY" = superlinked/sie
           test "$GITHUB_SHA" = "$RELEASE_SHA"
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          python3 -c 'import os,re; v=os.environ["RELEASE_VERSION"]; assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",v); assert tuple(map(int,v.split("."))) > (0,7,3)'
           git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-service-${{ matrix.service }}-${{ inputs.version }}
+          path: artifact
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - run: >-
-          mise run docker -- build-service
-          --registry ghcr.io/superlinked
-          --version '${{ inputs.version }}'
-          --service '${{ matrix.service }}'
-          --source-revision '${{ inputs.sha }}'
-          --push
+      - name: Publish only the retained tested image; reject different existing bytes
+        run: >-
+          mise run docker-push-loaded --
+          --image 'ghcr.io/superlinked/${{ matrix.service }}:v${{ inputs.version }}${{ matrix.service == 'sie-server-rust' && '-cuda12-sm89' || '' }}'
+          --archive-dir artifact --version '${{ inputs.version }}'
+          --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
 
   verify:
     needs: [matrix, push-server, push-service]
@@ -210,8 +314,8 @@ jobs:
       github.ref_protected == true &&
       github.repository == 'superlinked/sie' &&
       github.sha == inputs.sha
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: read
@@ -222,12 +326,32 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: docker-evidence-*-${{ inputs.version }}
+          path: evidence
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - run: mise run docker -- verify --registry ghcr.io/superlinked --version '${{ inputs.version }}'
+      - name: Verify every versioned image against source-bound build evidence
+        run: >-
+          mise run docker -- verify --registry ghcr.io/superlinked
+          --version '${{ inputs.version }}' --source-revision '${{ inputs.sha }}'
+          --run-id '${{ github.run_id }}' --evidence-dir evidence
+
+  complete:
+    if: always() && inputs.publish
+    needs: [matrix, build-server, build-service, push-server, push-service, verify, alias]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - name: Require every release build and publisher to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 -c 'import json,os; results=json.loads(os.environ["RESULTS"]); failed={name: job["result"] for name,job in results.items() if job["result"] != "success"}; print(failed); assert not failed'
 
   alias:
     needs: [matrix, verify]
@@ -238,10 +362,9 @@ jobs:
       github.ref == 'refs/heads/main' &&
       github.ref_protected == true &&
       github.repository == 'superlinked/sie' &&
-      github.sha == inputs.sha &&
-      needs.verify.result == 'success'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+      github.sha == inputs.sha
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 25
     environment: ghcr
     permissions:
       contents: read
@@ -256,21 +379,34 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_TAG: ${{ inputs.tag_name }}
           RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_LATCH: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+          REF_PROTECTED: ${{ github.ref_protected }}
         run: |
           set -euo pipefail
           test "$GITHUB_EVENT_NAME" = push
           test "$GITHUB_REF" = refs/heads/main
+          test "$REF_PROTECTED" = true
+          test "$RELEASE_LATCH" = true
           test "$GITHUB_REPOSITORY" = superlinked/sie
           test "$GITHUB_SHA" = "$RELEASE_SHA"
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          python3 -c 'import os,re; v=os.environ["RELEASE_VERSION"]; assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",v); assert tuple(map(int,v.split("."))) > (0,7,3)'
           git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: docker-evidence-*-${{ inputs.version }}
+          path: evidence
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - run: mise run docker -- alias --registry ghcr.io/superlinked --version '${{ inputs.version }}'
+      - name: Reverify the complete versioned set before moving any alias
+        run: >-
+          mise run docker -- alias --registry ghcr.io/superlinked
+          --version '${{ inputs.version }}' --source-revision '${{ inputs.sha }}'
+          --run-id '${{ github.run_id }}' --evidence-dir evidence

@@ -1,7 +1,8 @@
 {
-  "bundles": ["default", "sglang", "transformers5"],
+  "bundles": ["default", "ctranslate2", "sglang", "transformers5"],
   "platforms": ["cuda12", "cpu"],
   "include": [
-    { "platform": "cuda13", "bundle": "sglang-cu130", "target": "gemma" }
+    { "platform": "cuda13", "bundle": "sglang-cu130" },
+    { "platform": "cuda13", "bundle": "tensorrt-llm" }
   ]
 }

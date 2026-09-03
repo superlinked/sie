@@ -37,7 +37,10 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("required audio wheel build returned no artifact")
     args.out.mkdir(parents=True, exist_ok=True)
     destination = args.out / wheel.name
-    shutil.copyfile(wheel, destination)
+    if wheel.resolve() != destination.resolve():
+        if destination.exists() and destination.read_bytes() != wheel.read_bytes():
+            raise ValueError("refusing to replace a different retained audio wheel")
+        shutil.copyfile(wheel, destination)
     build_wheel._validate_wheel(destination)
     print(destination)
     return 0

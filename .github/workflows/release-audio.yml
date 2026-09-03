@@ -19,9 +19,13 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     container: quay.io/pypa/manylinux_2_28_x86_64@sha256:4dc41da7df20400310c80d162a2fe2d2c2f3d9734d8dec20f6b9843711618deb
     timeout-minutes: 30
     outputs:
@@ -59,12 +63,17 @@ jobs:
         run: >-
           mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 --
           python tools/ci/build_audio_prep_release_asset.py --out dist
+      - name: Record exact tested wheel and original run provenance
+        run: >-
+          mise --no-config exec python@3.12.12 -- python -m tools.ci.release_artifact stamp
+          --directory dist --kind audio --version '${{ inputs.version }}' --tag-name '${{ inputs.tag_name }}'
+          --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: audio-prep-${{ inputs.version }}
-          path: dist/${{ steps.contract.outputs.filename }}
+          path: dist/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   publish:
     needs: build
@@ -76,7 +85,7 @@ jobs:
       github.ref_protected == true &&
       github.repository == 'superlinked/sie' &&
       github.sha == inputs.sha
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: github-release
     permissions:
@@ -92,14 +101,19 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_TAG: ${{ inputs.tag_name }}
           RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_LATCH: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+          REF_PROTECTED: ${{ github.ref_protected }}
         run: |
           set -euo pipefail
           test "$GITHUB_EVENT_NAME" = push
           test "$GITHUB_REF" = refs/heads/main
+          test "$REF_PROTECTED" = true
+          test "$RELEASE_LATCH" = true
           test "$GITHUB_REPOSITORY" = superlinked/sie
           test "$GITHUB_SHA" = "$RELEASE_SHA"
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          python3 -c 'import os,re; v=os.environ["RELEASE_VERSION"]; assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",v); assert tuple(map(int,v.split("."))) > (0,7,3)'
           git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -115,5 +129,18 @@ jobs:
           set -euo pipefail
           wheel="artifact/$AUDIO_WHEEL_FILENAME"
           test -f "$wheel"
+          python3 -m tools.ci.release_artifact check --directory artifact --kind audio --version '${{ inputs.version }}' --tag-name '${{ inputs.tag_name }}' --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
           python3 -c 'import runpy,sys; runpy.run_path("packages/sie_audio_prep/build_wheel.py")["_validate_wheel"](__import__("pathlib").Path(sys.argv[1]))' "$wheel"
           tools/ci/upload_audio_prep_release_asset.bash "$wheel"
+
+  complete:
+    if: always() && inputs.publish
+    needs: [build, publish]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - name: Require every release build and publisher to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 -c 'import json,os; results=json.loads(os.environ["RESULTS"]); failed={name: job["result"] for name,job in results.items() if job["result"] != "success"}; print(failed); assert not failed'
