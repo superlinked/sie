@@ -21,6 +21,12 @@ from sie_sdk.exceptions import GatedModelError
 from sie_sdk.storage import OSSBackend
 
 
+@pytest.fixture(autouse=True)
+def offline_hf_metadata():
+    with patch("huggingface_hub.file_exists", return_value=False) as metadata:
+        yield metadata
+
+
 class FakeOSSCacheBucket:
     """Small hierarchical OSS fake backed by realistic HF cache objects."""
 
@@ -224,6 +230,7 @@ class TestEnsureModelCached:
         config = CacheConfig(
             local_cache=local_cache,
             cluster_cache="s3://my-bucket/cache",
+            hf_fallback=False,
         )
 
         # Mock the storage backend
@@ -234,18 +241,17 @@ class TestEnsureModelCached:
             # Simulate model exists in cluster cache (snapshots prefix non-empty)
             mock_backend.has_children.return_value = True
 
-            # list_dirs returns subdirectories - we need to simulate the HF cache structure
-            # First call lists snapshots dir contents, subsequent calls return empty
-            list_dirs_calls = [["abc123"], []]  # abc123 is a snapshot, then no more subdirs
-            mock_backend.list_dirs.side_effect = lambda _: list_dirs_calls.pop(0) if list_dirs_calls else []
-            mock_backend.list_files.return_value = iter(["model.bin"])
+            cluster_root = "s3://my-bucket/cache/models--BAAI--bge-m3"
+            directories = {cluster_root: ["snapshots"], f"{cluster_root}/snapshots": ["abc123"]}
+            mock_backend.list_dirs.side_effect = lambda path: directories.get(path, [])
+            mock_backend.list_files.side_effect = lambda path: ["model.bin"] if path.endswith("/abc123") else []
+            mock_backend.download_file.side_effect = lambda _source, destination: destination.write_bytes(b"weights")
 
-            ensure_model_cached("BAAI/bge-m3", config)
+            result = ensure_model_cached("BAAI/bge-m3", config)
 
-            # Should call backend methods
+            assert result == local_cache / "models--BAAI--bge-m3"
+            assert is_model_cached("BAAI/bge-m3", config)
             mock_backend.has_children.assert_called()
-            # Result depends on whether files were actually downloaded
-            # In mocked scenario, we just verify the logic flow
 
     def test_model_not_in_cluster_cache(self, tmp_path: Path) -> None:
         """Raises error if model not in cluster cache and HF fallback disabled."""
