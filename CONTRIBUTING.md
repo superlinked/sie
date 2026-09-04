@@ -42,9 +42,10 @@ The script trusts the repository's mise configuration, installs the pinned
 toolchain, synchronizes the root Python workspace, and installs the root pnpm
 workspace. A clean checkout does not need package-registry credentials.
 
-Native audio development additionally requires `cmake`. After installing it,
-synchronize the package and its optional dependencies with the locked Python
-workspace:
+Native audio development and the root Rust workspace checks require `cmake`,
+because the audio crate is a member of that workspace. After installing it,
+synchronize the native Python package and its optional dependencies with the
+locked Python workspace when working on that package:
 
 ```bash
 mise exec -- uv sync --frozen --project . --all-packages --all-extras
@@ -137,8 +138,8 @@ mise run typecheck
 mise run test
 ```
 
-Then run the checks for every surface your change affects. The commands below
-match the hosted CI workflow.
+Then run the scoped checks for every surface your change affects. The hosted CI
+workflow adds full-workspace harnesses and policy gates described below.
 
 | Surface | Commands |
 | --- | --- |
@@ -146,7 +147,7 @@ match the hosted CI workflow.
 | Python integrations | `mise run test-integrations -- --python-only` |
 | All Python and TypeScript integrations | `mise run test-integrations` |
 | TypeScript SDK and integrations | `mise run ts -- build`, then `mise run ts -- typecheck`, `mise run ts -- lint`, and `mise run ts -- test` |
-| Root Rust workspace | `mise run rust-fmt -- --check`, `mise run rust-check`, `mise run rust-clippy`, and `mise run rust-test` |
+| Root Rust workspace (scoped local checks; requires `cmake`) | `mise run rust-fmt -- --check`, `mise run rust-check`, `mise run rust-clippy`, and `mise run rust-test` |
 | Root Rust dependency changes | `mise run gateway-deny` in addition to the root Rust checks |
 | HTTP and wire contracts | `mise exec -- python tools/check_ipc_types_parity.py`, `mise exec -- python tools/check_response_chunk_protocol.py`, and `tests/parity/run_parity.sh` |
 | Helm chart | `mise run helm -- dependencies`, `mise run helm -- lint --set payloadStore.enabled=false`, and `mise run helm -- template --set payloadStore.enabled=false` |
@@ -167,14 +168,33 @@ For a standalone worker dependency change, also run its dependency policy:
 mise exec -- cargo-deny --locked --manifest-path packages/sie_server_rust/Cargo.toml --all-features --config deny.toml check
 ```
 
+For full parity with the hosted Rust test job, run the CI harness:
+
+```bash
+mise exec -- uv run --frozen --project . --no-sync python tools/ci/rust_tests.py
+```
+
+This harness starts JetStream, enables the NATS publisher regression coverage,
+tests the sidecar with its `cloud-storage` feature, and tests the standalone
+worker. The narrower Rust commands above remain useful while iterating on one
+crate, but they do not replace this full harness.
+
 Changes under `tools/ci`, `tools/mise_tasks`, or `.github/workflows` should run
-the same focused policy checks as CI:
+the broader tooling checks from the Python CI job:
 
 ```bash
 mise exec -- uv run --frozen --project . --no-sync ruff format --check tools/ci
 mise exec -- uv run --frozen --project . --no-sync ruff check --select E,F,I,UP,B tools/ci
 mise exec -- uv run --frozen --project . --no-sync ruff check --select E9,F63,F7,F82 tools/mise_tasks
 mise exec -- uv run --frozen --project . --no-sync pytest -q tools/ci/tests --ignore tools/ci/tests/test_required_ci.py --ignore tools/ci/tests/test_public_tree.py
+```
+
+For workflow, required-check, or public-tree changes, also run the complete
+policy gate:
+
+```bash
+mise exec -- uv run --frozen --project . pytest -q tools/ci/tests/test_required_ci.py tools/ci/tests/test_public_tree.py
+mise exec -- python tools/ci/check_public_tree.py
 mise exec -- actionlint -ignore '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'
 ```
 
