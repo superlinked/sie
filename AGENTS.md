@@ -48,6 +48,13 @@ requires the protected workflow inputs and repository publishing latch described
 in `RELEASE.md`. Never bypass version, tag, source-revision, or full-set
 verification.
 
-The release-please baseline is 0.7.3. Do not create a substitute baseline tag or
-invent its commit SHA. Publication retries reuse the original release run and
-artifacts, not a newer-main rebuild.
+Release-PR authoring is independently default-off and requires the repository
+variable `PUBLIC_RELEASE_AUTOMATION_ENABLED` to be exactly `true`. Configure the
+release App and protected `release-automation` environment before enabling it;
+do not confuse this authoring gate with artifact publication enablement.
+
+The release-please baseline is 0.7.3 at exact public commit
+`60996d9c30168e0f8e85b680295f147fdee87f61`. Keep that full SHA as the
+checked-in bootstrap boundary; do not create a substitute baseline tag or move
+the boundary to a later commit. Publication retries reuse the original release
+run and artifacts, not a newer-main rebuild.

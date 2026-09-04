@@ -6,6 +6,8 @@ import os
 import re
 import subprocess
 import textwrap
+import tomllib
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -85,6 +87,54 @@ def test_release_please_surface_is_exact() -> None:
     assert contract.release_config_errors() == []
 
 
+def test_release_please_bootstrap_is_the_exact_public_v073_commit() -> None:
+    config = contract.load_json("release-please-config.json")
+    assert config["bootstrap-sha"] == contract.RELEASE_BOOTSTRAP_SHA
+    assert config["bootstrap-sha"] == "60996d9c30168e0f8e85b680295f147fdee87f61"
+    assert "bootstrap-sha" not in config["packages"]["."]
+
+
+@pytest.mark.parametrize("bootstrap_sha", [None, "60996d9", "b" * 40])
+def test_release_please_rejects_any_other_bootstrap_boundary(monkeypatch, bootstrap_sha) -> None:
+    real_load_json = contract.load_json
+
+    def load_json(path):
+        document = real_load_json(path)
+        if path == "release-please-config.json":
+            document = deepcopy(document)
+            if bootstrap_sha is None:
+                document.pop("bootstrap-sha")
+            else:
+                document["bootstrap-sha"] = bootstrap_sha
+        return document
+
+    monkeypatch.setattr(contract, "load_json", load_json)
+    assert "release-please bootstrap-sha must be the exact public v0.7.3 commit" in contract.release_config_errors()
+
+
+def test_option_ext_mpl_exception_is_exact_and_cannot_broaden() -> None:
+    policy = tomllib.loads((contract.ROOT / "deny.toml").read_text())
+    assert contract._license_policy_errors(policy) == []
+
+    globally_allowed = deepcopy(policy)
+    globally_allowed["licenses"]["allow"].append("MPL-2.0")
+    assert "MPL-2.0 must not be globally allowed" in contract._license_policy_errors(globally_allowed)
+
+    wildcard_version = deepcopy(policy)
+    option_ext = next(entry for entry in wildcard_version["licenses"]["exceptions"] if entry["name"] == "option-ext")
+    option_ext["version"] = "*"
+    assert "option-ext MPL-2.0 allowance must be confined to exact version 0.2.0" in contract._license_policy_errors(
+        wildcard_version
+    )
+
+    extra_crate = deepcopy(policy)
+    extra_crate["licenses"]["exceptions"].append({"name": "unreviewed", "allow": ["MPL-2.0"]})
+    assert (
+        "cargo-deny MPL-2.0 exception surface differs from the reviewed crate set"
+        in contract._license_policy_errors(extra_crate)
+    )
+
+
 def test_release_workflows_are_pinned_and_fail_closed() -> None:
     assert contract.workflow_pin_errors() == []
     assert contract.release_workflow_errors() == []
@@ -157,6 +207,24 @@ def test_helm_release_follows_verified_images() -> None:
 
 def test_public_release_app_hands_final_pr_head_to_ci() -> None:
     assert contract.release_app_errors() == []
+
+
+def test_release_authoring_is_default_off_until_its_app_is_configured() -> None:
+    block = contract.workflow_job_blocks(".github/workflows/release.yml")["release-please"]
+    condition = contract.job_scalar(block, "if")
+    assert condition is not None
+    assert "vars.PUBLIC_RELEASE_AUTOMATION_ENABLED == 'true'" in condition
+    assert "vars.PUBLIC_RELEASE_AUTOMATION_ENABLED != 'false'" not in condition
+    assert "PUBLIC_RELEASE_PUBLISHING_ENABLED" not in condition
+    assert contract.release_automation_gate_errors(condition) == []
+
+    gate = "vars.PUBLIC_RELEASE_AUTOMATION_ENABLED == 'true'"
+    for unsafe in (
+        condition.replace(gate, "vars.PUBLIC_RELEASE_AUTOMATION_ENABLED != 'false'"),
+        f"{condition} || true",
+        condition.replace(gate, f"({gate} || vars.PUBLIC_RELEASE_AUTOMATION_ENABLED == '')"),
+    ):
+        assert contract.release_automation_gate_errors(unsafe)
 
 
 def test_native_audio_asset_matches_downstream_browser_download_contract() -> None:

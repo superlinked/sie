@@ -32,6 +32,7 @@ concurrency:
 jobs:
   release-please:
     if: >-
+      vars.PUBLIC_RELEASE_AUTOMATION_ENABLED == 'true' &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
       github.ref_protected == true &&

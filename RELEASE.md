@@ -6,10 +6,13 @@ the setup does not create or republish 0.7.3.
 
 ## Versioning
 
-`.release-please-manifest.json` records the current released version. The
-workflow verifies that the public `v0.7.3` stable release and tag exist and that
-the tag belongs to the release branch. Release-please discovers the matching
-release commit natively, so no placeholder bootstrap SHA is checked in.
+`.release-please-manifest.json` records the current released version, and
+`release-please-config.json` fixes the public history boundary at the actual
+`v0.7.3` commit `60996d9c30168e0f8e85b680295f147fdee87f61`. The workflow
+also verifies that the public `v0.7.3` stable release and tag exist and that the
+tag belongs to the release branch. Release-please discovers the matching
+release natively; the checked-in bootstrap SHA remains the fail-closed fallback
+for that same historical boundary.
 
 The current pre-1.0 policy is retained: ordinary features and fixes advance the
 patch version; breaking changes advance the minor version. Public conventional
@@ -73,7 +76,8 @@ implied by an image or binary release.
 The top-level `release.yml` has two automatic entrypoints:
 
 - A push to `main` runs the App-authored release-please and release-PR lock
-  refresh steps.
+  refresh steps only when `PUBLIC_RELEASE_AUTOMATION_ENABLED` is exactly
+  `true`. An absent variable leaves authoring cleanly skipped.
 - The App-created stable `release: published` event runs preparation, builds,
   verification, and direct publisher fanout at the tagged commit.
 
@@ -156,6 +160,14 @@ the protected release tags, not pull-request branches. `release-automation` supp
 `PUBLIC_RELEASE_APP_ID` and `PUBLIC_RELEASE_APP_PRIVATE_KEY`. Install that App
 only on this repository with Contents and Pull requests read/write permission.
 These App credentials are not distribution-registry credentials.
+
+Keep the repository variable `PUBLIC_RELEASE_AUTOMATION_ENABLED` absent while
+setting up the App and `release-automation` environment. After the App is
+installed, its ID/private key are configured, protected `main` and stable-tag
+rules are in force, and the release workflow has passed review, set the variable
+to exactly `true` to enable release-PR authoring. This authoring gate is separate
+from artifact publication and must not be enabled as a substitute for publisher
+configuration.
 
 Actual publication additionally requires
 `PUBLIC_RELEASE_PUBLISHING_ENABLED=true`. Keep it absent until the release

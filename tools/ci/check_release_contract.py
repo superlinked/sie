@@ -77,6 +77,27 @@ ACTION_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 JOB_FIELD_INDENT = 4
 ARTIFACT_RETENTION_DAYS = 30
 REQUIRED_OCI_LABEL_OCCURRENCES = 2
+RELEASE_BOOTSTRAP_SHA = "60996d9c30168e0f8e85b680295f147fdee87f61"
+MPL_LICENSE_EXCEPTION_NAMES = frozenset(
+    {
+        "option-ext",
+        "symphonia",
+        "symphonia-adapter-libopus",
+        "symphonia-bundle-flac",
+        "symphonia-bundle-mp3",
+        "symphonia-codec-aac",
+        "symphonia-codec-alac",
+        "symphonia-codec-pcm",
+        "symphonia-codec-vorbis",
+        "symphonia-common",
+        "symphonia-core",
+        "symphonia-format-isomp4",
+        "symphonia-format-mkv",
+        "symphonia-format-ogg",
+        "symphonia-format-riff",
+        "symphonia-metadata",
+    }
+)
 AUDIO_MANYLINUX_IMAGE = (
     "quay.io/pypa/manylinux_2_28_x86_64@sha256:4dc41da7df20400310c80d162a2fe2d2c2f3d9734d8dec20f6b9843711618deb"
 )
@@ -297,7 +318,9 @@ def release_config_errors() -> list[str]:
     for flag in ("bump-minor-pre-major", "bump-patch-for-minor-pre-major", "include-v-in-tag"):
         if packages["."].get(flag) is not True:
             errors.append(f"release-please must preserve {flag}")
-    for override in ("release-as", "last-release-sha", "bootstrap-sha"):
+    if config.get("bootstrap-sha") != RELEASE_BOOTSTRAP_SHA or "bootstrap-sha" in packages["."]:
+        errors.append("release-please bootstrap-sha must be the exact public v0.7.3 commit")
+    for override in ("release-as", "last-release-sha"):
         if override in config or override in packages["."]:
             errors.append(f"release-please must derive its native release boundary, not {override}")
     extra_paths = {item["path"] for item in packages["."]["extra-files"]}
@@ -307,6 +330,36 @@ def release_config_errors() -> list[str]:
         if not (ROOT / path).is_file():
             errors.append(f"release-please extra file does not exist: {path}")
     return errors
+
+
+def _license_policy_errors(policy: object) -> list[str]:
+    if not isinstance(policy, dict) or not isinstance(policy.get("licenses"), dict):
+        return ["cargo-deny license policy is malformed"]
+    licenses = policy["licenses"]
+    allow = licenses.get("allow")
+    exceptions = licenses.get("exceptions")
+    if not isinstance(allow, list) or not isinstance(exceptions, list):
+        return ["cargo-deny license allowlists are malformed"]
+
+    errors: list[str] = []
+    if "MPL-2.0" in allow:
+        errors.append("MPL-2.0 must not be globally allowed")
+    option_ext = [entry for entry in exceptions if isinstance(entry, dict) and entry.get("name") == "option-ext"]
+    expected_option_ext = {"name": "option-ext", "version": "=0.2.0", "allow": ["MPL-2.0"]}
+    if option_ext != [expected_option_ext]:
+        errors.append("option-ext MPL-2.0 allowance must be confined to exact version 0.2.0")
+    mpl_names = {
+        entry.get("name")
+        for entry in exceptions
+        if isinstance(entry, dict) and isinstance(entry.get("allow"), list) and "MPL-2.0" in entry["allow"]
+    }
+    if mpl_names != MPL_LICENSE_EXCEPTION_NAMES:
+        errors.append("cargo-deny MPL-2.0 exception surface differs from the reviewed crate set")
+    return errors
+
+
+def license_policy_errors() -> list[str]:
+    return _license_policy_errors(tomllib.loads((ROOT / "deny.toml").read_text()))
 
 
 QUEUE_SCHEMA_DIAGNOSTIC = (
@@ -374,6 +427,13 @@ def release_workflow_errors() -> list[str]:
     return errors
 
 
+def release_automation_gate_errors(condition: str) -> list[str]:
+    gate = "vars.PUBLIC_RELEASE_AUTOMATION_ENABLED == 'true'"
+    if condition.count(gate) != 1 or condition.count("PUBLIC_RELEASE_AUTOMATION_ENABLED") != 1 or "||" in condition:
+        return ["release-please authoring must use one exact default-off activation gate"]
+    return []
+
+
 def release_app_errors() -> list[str]:
     errors: list[str] = []
     path = ".github/workflows/release.yml"
@@ -384,6 +444,7 @@ def release_app_errors() -> list[str]:
     if job_permissions(block) != {"contents": "read"}:
         errors.append("release-please GITHUB_TOKEN permissions must remain read-only")
     release_condition = job_scalar(block, "if") or ""
+    errors.extend(release_automation_gate_errors(release_condition))
     for term in (
         "github.event_name == 'push'",
         "github.ref == 'refs/heads/main'",
@@ -671,6 +732,7 @@ def helm_release_errors() -> list[str]:
 def validate() -> list[str]:
     errors = [
         *release_config_errors(),
+        *license_policy_errors(),
         *release_workflow_errors(),
         *release_app_errors(),
         *publisher_job_errors(),
