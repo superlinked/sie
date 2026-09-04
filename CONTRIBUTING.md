@@ -220,11 +220,12 @@ linting, type checks, unit and integration tests, contracts, packaging, and CPU
 container checks. `CI / Required` is the protected aggregate merge gate.
 Automated review feedback may also be posted on the pull request.
 
-All paths are owned through `.github/CODEOWNERS`, so an outside contribution is
-reviewed by a member of the Core team. Before merge, required CI must pass, the
-required approval must be present, and all review conversations must be
-resolved. Pushing another commit dismisses earlier approvals, so request review
-again after addressing feedback.
+`.github/CODEOWNERS` assigns all paths to `@superlinked/core-team`, so GitHub
+automatically requests the team for review. Before merge, required CI must pass,
+one approval must be present, and all review conversations must be resolved.
+Pushing another commit dismisses earlier approvals, so request review again
+after addressing feedback. Only Core team members have merge-capable access;
+they decide whether a contribution is accepted and perform the merge.
 
 ## Releases
 
