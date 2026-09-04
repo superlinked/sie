@@ -596,7 +596,7 @@ CI should reject a change unless it proves all of the following:
    fields, events, linked spans, trace-state and status text while the local
    Tempo branch remains unchanged;
 9. median-of-three warmed telemetry-off/on benchmarks cover the gateway
-   facade/Tower path, the managed cloud-gateway final-dispatch wrapper, Python
+   facade/Tower path, the downstream final-dispatch facade integration, Python
    and Rust workers, config, sidecar, and dispatcher hot paths; a paired
    durability-disabled/enabled benchmark separately gates the gateway
    dispatch-durability lifecycle before the change is declared ready;
