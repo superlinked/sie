@@ -168,7 +168,8 @@ For a standalone worker dependency change, also run its dependency policy:
 mise exec -- cargo-deny --locked --manifest-path packages/sie_server_rust/Cargo.toml --all-features --config deny.toml check
 ```
 
-For full parity with the hosted Rust test job, run the CI harness:
+After the applicable formatting, check, Clippy, and dependency commands above,
+run the hosted Rust test phase with the CI harness:
 
 ```bash
 mise exec -- uv run --frozen --project . --no-sync python tools/ci/rust_tests.py
@@ -215,10 +216,10 @@ request title. In the description, include:
 - any public compatibility, security, or operational impact; and
 - the exact commands and results used to validate the change.
 
-Every pull request runs the complete credential-free CI matrix, including
-linting, type checks, unit and integration tests, contracts, packaging, and CPU
-container checks. `CI / Required` is the protected aggregate merge gate.
-Automated review feedback may also be posted on the pull request.
+Pull requests are validated by the complete credential-free CI matrix,
+including linting, type checks, unit and integration tests, contracts,
+packaging, and CPU container checks. `CI / Required` is the protected aggregate
+merge gate. Automated review feedback may also be posted on the pull request.
 
 `.github/CODEOWNERS` assigns all paths to `@superlinked/core-team`, so GitHub
 automatically requests the team for review. Before merge, required CI must pass,
