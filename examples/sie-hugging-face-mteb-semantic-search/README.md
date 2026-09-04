@@ -20,8 +20,10 @@ the SIE model IDs.
 
 **Two modes.** *Zero-setup mode* runs a local text ranker against the
 bundled demo catalog (no SIE, no API keys required, good for kicking
-the tires). *Full mode* uses your SIE endpoint for embeddings and
-OpenRouter for LLM-generated descriptions (the production path). Copy
+the tires). *Full mode* uses your SIE endpoint for embeddings and a
+configurable LLM provider — OpenRouter by default, or
+[OrcaRouter](https://www.orcarouter.ai) — for LLM-generated
+descriptions (the production path). Copy
 `backend/.env.example` to `backend/.env` and fill in only the keys for
 the mode you want. The sections below walk through both.
 
@@ -53,7 +55,7 @@ the mode you want. The sections below walk through both.
   - SQLite in `backend/data/sqlite/sie.db` with tables `storage_ids` and `models`.
   - ChromaDB in `backend/data/chroma/` as the local vector store.
   - Superlinked Inference Engine (SIE) produces embeddings for short and long descriptions.
-  - OpenRouter generates descriptions from HF metadata + README + MTEB scores.
+  - The configured LLM provider (OpenRouter by default, or OrcaRouter) generates descriptions from HF metadata + README + MTEB scores.
 - **Frontend**: TypeScript + React app in `frontend/` that calls the backend APIs for search, browse, and model details.
 
 ```mermaid
@@ -63,7 +65,7 @@ flowchart LR
     SQL[(SQLite<br/>models, storage_ids)]
     Chroma[(ChromaDB<br/>short + long vectors)]
     SIE[SIE<br/>embeddings]
-    OR[OpenRouter<br/>description LLM]
+    OR[LLM provider<br/>OpenRouter / OrcaRouter]
     HF[HuggingFace<br/>metadata + README]
     MTEB[MTEB cache<br/>benchmark scores]
 
@@ -80,7 +82,7 @@ flowchart LR
 
 ## Try It Locally First
 
-You can run the project without a SIE endpoint, OpenRouter key, or Hugging Face token.
+You can run the project without a SIE endpoint, LLM API key, or Hugging Face token.
 The repo includes a small bundled demo catalog plus a local text-ranking fallback.
 
 ```bash
@@ -105,7 +107,7 @@ What works in local demo mode:
 What still needs live services:
 
 - downloading fresh Hugging Face model metadata
-- generating descriptions through OpenRouter
+- generating descriptions through the configured LLM provider
 - vector search and Chroma reindexing through a real SIE endpoint
 
 ---
@@ -132,7 +134,7 @@ sie-hugging-face-mteb-semantic-search/
 │   ├── app/
 │   │   ├── api/routes/        # FastAPI routers: models, generate, search, chroma
 │   │   ├── db/                # SQLAlchemy models, session, migrations
-│   │   ├── services/          # chroma, fallback search, llm, openrouter, sie_chroma
+│   │   ├── services/          # chroma, fallback search, llm, openrouter, orcarouter, sie_chroma
 │   │   ├── prompts/           # description prompt templates (.md)
 │   │   ├── config.py          # pydantic-settings, reads backend/.env
 │   │   └── main.py            # FastAPI app factory
@@ -157,7 +159,7 @@ sie-hugging-face-mteb-semantic-search/
 
 - **Python 3.12** and `pip`.
 - **Node.js 18+** and `npm`.
-- An **OpenRouter** API key if you want to generate new descriptions.
+- An **OpenRouter** or **OrcaRouter** API key if you want to generate new descriptions (set `LLM_PROVIDER` to choose the provider).
 - A running **SIE** endpoint if you want live vector indexing and embedding search. `SIE_API_KEY` is optional and only needed for managed/auth-enabled clusters.
 - Optional: a **Hugging Face** token, useful for higher rate limits.
 
@@ -189,9 +191,12 @@ See `backend/app/config.py` for the full list; the important keys are:
 | Variable              | Default                              | Purpose                                    |
 |-----------------------|--------------------------------------|--------------------------------------------|
 | `HF_TOKEN`            | _(empty)_                            | Optional, raises HuggingFace rate limits   |
+| `LLM_PROVIDER`        | `openrouter`                         | Description LLM provider: `openrouter`, `orcarouter`, or `openai` |
 | `OPENROUTER_API_KEY`  | _(empty, required for generation)_   | Auth for OpenRouter description calls      |
-| `OPENROUTER_MODEL`    | `google/gemini-3.1-pro-preview`      | Default LLM used by CLI + UI               |
-| `LLM_MAX_PARALLEL`    | `20`                                 | Max in-flight OpenRouter calls             |
+| `OPENROUTER_MODEL`    | `google/gemini-3.1-pro-preview`      | Default LLM used by CLI + UI when provider is OpenRouter |
+| `ORCAROUTER_API_KEY`  | _(empty, required for generation)_   | Auth for OrcaRouter description calls      |
+| `ORCAROUTER_MODEL`    | `google/gemini-2.5-flash`            | Default LLM used by CLI + UI when provider is OrcaRouter |
+| `LLM_MAX_PARALLEL`    | `20`                                 | Max in-flight LLM provider calls           |
 | `SIE_API_ENDPOINT`    | _(empty, required for embeddings)_   | URL of the SIE server                      |
 | `SIE_API_KEY`         | _(empty)_                            | Optional bearer token for managed/auth-enabled SIE clusters |
 | `SIE_EMBED_MODEL`     | `NovaSearch/stella_en_400M_v5`       | Embedding model registered on SIE          |
@@ -199,10 +204,23 @@ See `backend/app/config.py` for the full list; the important keys are:
 | `SQLITE_PATH`         | `data/sqlite/sie.db`                 | Local SQLite database path                 |
 | `CHROMA_PATH`         | `data/chroma`                        | Local ChromaDB directory                   |
 
-Minimal `backend/.env` for live services:
+Minimal `backend/.env` for live services (OpenRouter):
 
 ```env
+LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=sk-or-...
+SIE_API_ENDPOINT=https://your-sie-host
+# Optional: only needed for managed/auth-enabled SIE clusters.
+SIE_API_KEY=
+HF_TOKEN=hf_...        # optional
+```
+
+To use OrcaRouter instead, set `LLM_PROVIDER=orcarouter` and add the
+OrcaRouter key:
+
+```env
+LLM_PROVIDER=orcarouter
+ORCAROUTER_API_KEY=sk-orca-...
 SIE_API_ENDPOINT=https://your-sie-host
 # Optional: only needed for managed/auth-enabled SIE clusters.
 SIE_API_KEY=
@@ -286,7 +304,7 @@ for downloaded models (see [Operations notes](#operations-notes)).
 Runs the same pipeline as the web UI *Generate Descriptions* buttons:
 
 1. Prepare 6K prompt (HF metadata + live README + MTEB summary).
-2. Generate 6K detailed description via OpenRouter.
+2. Generate 6K detailed description via the configured LLM provider.
 3. Generate 2K long description from the 6K output.
 4. Generate 200-char short description from the 6K output.
 5. Save short + long to SQLite.
@@ -499,9 +517,9 @@ is what actually reclaims disk.
 The CLI and UI both follow the same six-step pipeline:
 
 1. Render the **6K detailed** prompt from model JSON, live README (4K chars max), and MTEB summary.
-2. Call OpenRouter → **6K detailed description** (not persisted).
-3. Call OpenRouter with the 6K text → **2K long description**.
-4. Call OpenRouter with the 6K text → **200-char short description**.
+2. Call the configured LLM provider → **6K detailed description** (not persisted).
+3. Call the provider with the 6K text → **2K long description**.
+4. Call the provider with the 6K text → **200-char short description**.
 5. Save short + long into the `models` table.
 6. Upsert short + long embeddings into ChromaDB via SIE.
 

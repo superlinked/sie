@@ -15,9 +15,17 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
+    # LLM provider used for description generation: "openrouter" (default) or "orcarouter"
+    llm_provider: str = "openrouter"
+
     # OpenRouter
     openrouter_api_key: str = ""
     openrouter_model: str = "google/gemini-3.1-pro-preview"
+
+    # OrcaRouter
+    orcarouter_api_key: str = ""
+    orcarouter_model: str = "google/gemini-2.5-flash"
+
     llm_max_parallel: int = 20
 
     # Superlinked Inference Engine
@@ -34,6 +42,13 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         db_path = self.sqlite_path.resolve()
         return f"sqlite:///{db_path}"
+
+    @property
+    def llm_model(self) -> str:
+        """Default LLM model for the active provider."""
+        if self.llm_provider.strip().lower() == "orcarouter":
+            return self.orcarouter_model
+        return self.openrouter_model
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
