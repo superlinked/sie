@@ -39,7 +39,7 @@ SIE is an open-source inference engine that runs the models behind every agent t
 
 ## Development
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for the complete public development
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the complete development
 workflow and [AGENTS.md](AGENTS.md) for repository automation boundaries.
 
 Install [mise](https://mise.jdx.dev/getting-started.html), then bootstrap the
