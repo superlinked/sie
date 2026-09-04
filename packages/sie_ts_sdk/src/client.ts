@@ -70,6 +70,7 @@ import {
   ESTIMATE_PATH,
   buildEstimateEnvelope,
   getErrorCode,
+  getErrorParam,
   getRetryAfter,
   handleError,
   parseCapacityInfo,
@@ -77,6 +78,7 @@ import {
   parseExtractResults,
   parseGenerateResult,
   parseScoreResult,
+  readRequestId,
   settledChargeFields,
   throwIfEstimateUnroutable,
   throwIfInputTooLong,
@@ -414,6 +416,10 @@ function parseRequestMetadata(headers: Headers, body?: unknown): RequestMetadata
   if (executionIdentitySha256 !== null && /^[0-9a-f]{64}$/.test(executionIdentitySha256)) {
     metadata.executionIdentitySha256 = executionIdentitySha256;
   }
+  const executionBindingSha256 = headers.get("x-sie-execution-binding-sha256");
+  if (executionBindingSha256 !== null && /^[0-9a-f]{64}$/.test(executionBindingSha256)) {
+    metadata.executionBindingSha256 = executionBindingSha256;
+  }
 
   const usageHeaders = {
     inputTokens: "x-sie-units-input-tokens",
@@ -668,21 +674,36 @@ async function itemsForExtractWire(items: ExtractItem[]): Promise<ExtractItemFor
  * normal delta. Defined at module scope so it has zero coupling to
  * `SIEClient` state.
  */
+function validatedStreamRetryAfter(error: {
+  code?: string;
+  retry_after_s?: unknown;
+}): number | undefined {
+  const value = error.retry_after_s;
+  return error.code === RESOURCE_EXHAUSTED_ERROR_CODE &&
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= 60
+    ? value * 1_000
+    : undefined;
+}
+
+function validatedStreamErrorParam(error: { param?: unknown }): string | null | undefined {
+  return typeof error.param === "string" || error.param === null ? error.param : undefined;
+}
+
 function extractChatChunkError(chunk: ChatCompletionChunk): SIEStreamError | null {
-  const withError = chunk as ChatCompletionChunk & {
-    error?: { message?: string; type?: string; param?: string | null; code?: string };
-    request_id?: string;
-  };
-  if (!withError.error) return null;
+  if (!chunk.error) return null;
   // The gateway request id rides in-band on the chat error chunk too (#3136)
   // — the `chatcmpl-*` id is not the correlation key gateway logs use, and
   // streamed responses have no terminal headers. Forward it for correlation.
-  const requestId = validateRequestId(withError.request_id);
-  return new SIEStreamError(withError.error.message ?? "stream error", {
-    code: withError.error.code,
-    errorType: withError.error.type,
-    param: withError.error.param,
+  const requestId = validateRequestId(chunk.request_id);
+  return new SIEStreamError(chunk.error.message ?? "stream error", {
+    code: chunk.error.code,
+    errorType: chunk.error.type,
+    param: validatedStreamErrorParam(chunk.error),
     requestId,
+    retryAfter: validatedStreamRetryAfter(chunk.error),
   });
 }
 
@@ -765,13 +786,27 @@ function modalContinuationUrl(baseUrl: string, response: Response): string | und
   }
 }
 
+function requireVisibleManualRedirect(response: Response): void {
+  if (response.type === "opaqueredirect") {
+    throw new SIEConnectionError(
+      "Modal result continuations require a server-side Fetch runtime that exposes manual redirect status and Location",
+      "other",
+    );
+  }
+}
+
 /** SIE-native chunk variant — see `sse.rs::build_generate_chunk_event`. */
 function extractGenerateChunkError(chunk: GenerateChunk): SIEStreamError | null {
   if (!chunk.error) return null;
   // The gateway request id rides in-band on the error chunk (streamed
   // responses have no terminal headers), so forward it for correlation (#3136).
   const requestId = validateRequestId(chunk.request_id);
-  return new SIEStreamError(chunk.error.message, { code: chunk.error.code, requestId });
+  return new SIEStreamError(chunk.error.message, {
+    code: chunk.error.code,
+    param: validatedStreamErrorParam(chunk.error),
+    requestId,
+    retryAfter: validatedStreamRetryAfter(chunk.error),
+  });
 }
 
 /**
@@ -1316,6 +1351,7 @@ export class SIEClient {
         redirect: "manual",
       });
       for (let hop = 0; hop < MODAL_CONTINUATION_MAX_HOPS; hop += 1) {
+        requireVisibleManualRedirect(response);
         const continuationUrl = modalContinuationUrl(this.baseUrl, response);
         if (!continuationUrl) return response;
         response = await fetch(continuationUrl, {
@@ -1324,6 +1360,12 @@ export class SIEClient {
           signal: controller.signal,
           redirect: "manual",
         });
+      }
+      requireVisibleManualRedirect(response);
+      if (modalContinuationUrl(this.baseUrl, response)) {
+        throw new ProvisioningError(
+          `Provisioning result remained in flight after ${MODAL_CONTINUATION_MAX_HOPS} continuation hops`,
+        );
       }
       return response;
     } catch (err) {
@@ -1656,6 +1698,7 @@ export class SIEClient {
                 "No capacity available. Server is provisioning.",
                 gpu,
                 getRetryAfter(attemptResponse),
+                await getErrorParam(attemptResponse.clone()),
               );
             }
             const elapsed = Date.now() - startTime;
@@ -1664,6 +1707,7 @@ export class SIEClient {
                 `Provisioning timeout after ${elapsed}ms`,
                 gpu,
                 getRetryAfter(attemptResponse),
+                await getErrorParam(attemptResponse.clone()),
               );
             }
             const retryAfter = getRetryAfter(attemptResponse);
@@ -1684,7 +1728,11 @@ export class SIEClient {
           if (errorCode === MODEL_LOADING_ERROR_CODE) {
             const elapsed = Date.now() - startTime;
             if (elapsed >= this.provisionTimeout) {
-              throw new ModelLoadingError(`Model loading timeout for '${model}'`, model);
+              throw new ModelLoadingError(
+                `Model loading timeout for '${model}'`,
+                model,
+                await getErrorParam(attemptResponse.clone()),
+              );
             }
             const delay = getRetryAfter(attemptResponse) ?? MODEL_LOADING_DEFAULT_DELAY;
             if (
@@ -1704,7 +1752,11 @@ export class SIEClient {
             if (!waitForCapacity) {
               throw new ResourceExhaustedError(
                 `Server resource exhausted after ${oomRetries} retry attempt(s) for model '${model}'`,
-                { model, retries: oomRetries },
+                {
+                  model,
+                  retries: oomRetries,
+                  param: await getErrorParam(attemptResponse.clone()),
+                },
               );
             }
             const delay = nextOomRetryDelay({
@@ -1714,6 +1766,7 @@ export class SIEClient {
               elapsedMs: Date.now() - startTime,
               provisionTimeoutMs: this.provisionTimeout,
               model,
+              param: await getErrorParam(attemptResponse.clone()),
             });
             oomRetries += 1;
             if (await abortableSleep(delay, controller.signal)) {
@@ -1733,6 +1786,8 @@ export class SIEClient {
               "non-idempotent (retrying could double-bill).",
             await getErrorCode(attemptResponse.clone()),
             HTTP_GATEWAY_TIMEOUT,
+            readRequestId(attemptResponse),
+            await getErrorParam(attemptResponse.clone()),
           );
         }
 
@@ -2449,7 +2504,7 @@ export class SIEClient {
     while (true) {
       let response: Response;
       try {
-        response = await this.request(path, body, pool, gpu);
+        response = await this.request(path, body, pool, gpu, startTime);
       } catch (err) {
         // Only retry connect-time failures; see docstring for rationale.
         if (waitForCapacity && err instanceof SIEConnectionError && err.kind === "connect") {
@@ -2494,6 +2549,7 @@ export class SIEClient {
               `No capacity available for GPU '${gpu}'. Server is provisioning.`,
               gpu,
               retryAfter,
+              await getErrorParam(response.clone()),
             );
           }
 
@@ -2503,6 +2559,7 @@ export class SIEClient {
               `Provisioning timeout after ${elapsed}ms waiting for GPU '${gpu}'`,
               gpu,
               retryAfter,
+              await getErrorParam(response.clone()),
             );
           }
 
@@ -2521,6 +2578,7 @@ export class SIEClient {
               `LoRA loading timeout after ${loraRetries} retries`,
               undefined, // We don't have lora name at this level
               model,
+              await getErrorParam(response.clone()),
             );
           }
 
@@ -2538,6 +2596,7 @@ export class SIEClient {
             throw new ModelLoadingError(
               `Model loading timeout after ${(elapsed / 1000).toFixed(1)}s for '${model}'`,
               model,
+              await getErrorParam(response.clone()),
             );
           }
 
@@ -2562,6 +2621,7 @@ export class SIEClient {
             elapsedMs: Date.now() - startTime,
             provisionTimeoutMs: this.provisionTimeout,
             model,
+            param: await getErrorParam(response.clone()),
           });
           oomRetries += 1;
           await sleep(delay);
@@ -2617,6 +2677,7 @@ export class SIEClient {
     body?: unknown,
     pool?: string,
     gpu?: string,
+    startTime = Date.now(),
   ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
 
@@ -2642,30 +2703,77 @@ export class SIEClient {
       headers.Authorization = `Bearer ${this.apiKey}`;
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const fetchWithinBudget = async (
+      requestUrl: string,
+      init: Omit<RequestInit, "signal">,
+      followingContinuation: boolean,
+    ): Promise<Response> => {
+      const remaining = this.provisionTimeout - (Date.now() - startTime);
+      if (followingContinuation && remaining <= 0) {
+        throw new ProvisioningError(
+          `Provisioning timeout after ${this.provisionTimeout}ms awaiting request result`,
+          gpu,
+        );
+      }
+      const requestTimeout = followingContinuation
+        ? Math.min(this.timeout, remaining)
+        : this.timeout;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), requestTimeout);
+      try {
+        return await fetch(requestUrl, { ...init, signal: controller.signal });
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new SIEConnectionError(`Request timeout after ${requestTimeout}ms`, "timeout");
+        }
+        if (error instanceof TypeError) {
+          if (followingContinuation) {
+            throw new SIEConnectionError(
+              `Failed to retrieve the in-flight request result: ${error.message}`,
+              "other",
+            );
+          }
+          throw connectionErrorFromFetchTypeError(error);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
 
-    try {
-      const response = await fetch(url, {
+    let response = await fetchWithinBudget(
+      url,
+      {
         method: "POST",
         headers,
         body: body !== undefined ? packMessage(body) : undefined,
-        signal: controller.signal,
-        redirect: "error",
-      });
+        redirect: "manual",
+      },
+      false,
+    );
 
-      return response;
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new SIEConnectionError(`Request timeout after ${this.timeout}ms`, "timeout");
-      }
-      if (error instanceof TypeError) {
-        throw connectionErrorFromFetchTypeError(error);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
+    for (let hop = 0; hop < MODAL_CONTINUATION_MAX_HOPS; hop += 1) {
+      requireVisibleManualRedirect(response);
+      const continuationUrl = modalContinuationUrl(this.baseUrl, response);
+      if (!continuationUrl) return response;
+      response = await fetchWithinBudget(
+        continuationUrl,
+        {
+          method: "GET",
+          headers,
+          redirect: "manual",
+        },
+        true,
+      );
     }
+    requireVisibleManualRedirect(response);
+    if (modalContinuationUrl(this.baseUrl, response)) {
+      throw new ProvisioningError(
+        `Provisioning result remained in flight after ${MODAL_CONTINUATION_MAX_HOPS} continuation hops`,
+        gpu,
+      );
+    }
+    return response;
   }
 
   /**

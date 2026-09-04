@@ -223,6 +223,7 @@ class RequestMetadata(TypedDict, total=False):
     #: response reported one.
     rate_book_version: str
     execution_identity_sha256: str
+    execution_binding_sha256: str
 
 
 class EncodeResult(TypedDict, total=False):
@@ -278,6 +279,7 @@ class ModelCapabilities(TypedDict, total=False):
     alias). Treat them as "can do this", not "guaranteed to score X".
     """
 
+    streaming: bool | None
     grammar: list[str]
     tools: bool
     lora_adapters: list[str]
@@ -628,6 +630,16 @@ class GenerateResult(TypedDict, total=False):
     request: RequestMetadata
 
 
+class GenerateChunkError(TypedDict):
+    """Typed terminal generation error carried by an SSE chunk."""
+
+    code: str
+    message: str
+    type: NotRequired[str | None]
+    param: NotRequired[str | None]
+    retry_after_s: NotRequired[int | None]
+
+
 class GenerateChunk(TypedDict, total=False):
     """One SSE event from :meth:`SIEClient.stream_generate` (SIE-native shape).
 
@@ -646,7 +658,9 @@ class GenerateChunk(TypedDict, total=False):
         finish_reason: Termination reason (terminal chunk only).
         usage: Prompt / completion / total token counts (terminal chunk only).
         ttft_ms: Time-to-first-token in milliseconds (terminal chunk only).
-        error: ``{code, message}`` when generation failed mid-stream.
+        error: ``{code, message, param?, retry_after_s?}`` when generation
+            failed mid-stream. ``retry_after_s`` is meaningful only for
+            ``RESOURCE_EXHAUSTED``.
     """
 
     request_id: str
@@ -657,7 +671,7 @@ class GenerateChunk(TypedDict, total=False):
     finish_reason: FinishReason
     usage: GenerationUsage
     ttft_ms: float
-    error: dict[str, str]
+    error: GenerateChunkError
 
 
 # --- Chat completions (OpenAI-compatible) — /v1/chat/completions ------------
@@ -769,6 +783,8 @@ class ChatCompletionChunk(TypedDict, total=False):
     system_fingerprint: str | None
     choices: list[ChatChunkChoice]
     usage: ChatUsage
+    request_id: str
+    error: GenerateChunkError
 
 
 # --- Responses (OpenAI-compatible) — /v1/responses -------------------------

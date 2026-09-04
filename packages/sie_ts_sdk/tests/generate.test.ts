@@ -507,7 +507,13 @@ describe("SIEClient.generate retry semantics (B1c)", () => {
     mockFetch
       .mockResolvedValueOnce(
         new Response(
-          JSON.stringify({ error: { code: "RESOURCE_EXHAUSTED", message: "out of memory" } }),
+          JSON.stringify({
+            error: {
+              code: "RESOURCE_EXHAUSTED",
+              message: "out of memory",
+              param: "max_new_tokens",
+            },
+          }),
           { status: 503, headers: { "Content-Type": "application/json" } },
         ),
       )
@@ -540,18 +546,26 @@ describe("SIEClient.generate retry semantics (B1c)", () => {
     mockFetch.mockImplementation(() =>
       Promise.resolve(
         new Response(
-          JSON.stringify({ error: { code: "RESOURCE_EXHAUSTED", message: "out of memory" } }),
+          JSON.stringify({
+            error: {
+              code: "RESOURCE_EXHAUSTED",
+              message: "out of memory",
+              param: "max_new_tokens",
+            },
+          }),
           { status: 503, headers: { "Content-Type": "application/json" } },
         ),
       ),
     );
 
     const promise = client.generate("m", "hi", { maxNewTokens: 8 });
-    const expectation = expect(promise).rejects.toThrow(ResourceExhaustedError);
+    const errorPromise = promise.catch((error: unknown) => error);
 
     // Max backoff schedule (no Retry-After): ≤5s, ≤10s, ≤20s → ≤35s total.
     await vi.advanceTimersByTimeAsync(35_000);
-    await expectation;
+    const error = await errorPromise;
+    expect(error).toBeInstanceOf(ResourceExhaustedError);
+    expect(error).toMatchObject({ param: "max_new_tokens" });
 
     // RESOURCE_EXHAUSTED_MAX_RETRIES = 3 → 4 requests (initial + 3 retries).
     expect(mockFetch).toHaveBeenCalledTimes(4);
@@ -568,18 +582,27 @@ describe("SIEClient.generate retry semantics (B1c)", () => {
     mockFetch.mockResolvedValue(
       new Response(
         JSON.stringify({ error: { code: "GATEWAY_TIMEOUT", message: "result deadline" } }),
-        { status: 504, headers: { "Content-Type": "application/json" } },
+        {
+          status: 504,
+          headers: {
+            "Content-Type": "application/json",
+            "x-sie-request-id": "req-generate-504",
+          },
+        },
       ),
     );
 
     await expect(
       client.generate("m", "hi", { maxNewTokens: 8, waitForCapacity: true }),
-    ).rejects.toThrow(/non-idempotent/);
-    await expect(
-      client.generate("m", "hi", { maxNewTokens: 8, waitForCapacity: true }),
-    ).rejects.toBeInstanceOf(ServerError);
+    ).rejects.toMatchObject({
+      name: "ServerError",
+      code: "GATEWAY_TIMEOUT",
+      statusCode: 504,
+      requestId: "req-generate-504",
+      message: expect.stringMatching(/non-idempotent/),
+    } satisfies Partial<ServerError>);
 
-    // Crucially: one call per generate() invocation, no retry.
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // Crucially: the generate() invocation is not retried.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });

@@ -53,6 +53,7 @@ import { getRetryAfter as getRetryAfterFromHeader } from "./retry.js";
 
 const SIE_ERROR_CODE_HEADER = "X-SIE-Error-Code";
 const REQUEST_ID_HEADER = "x-sie-request-id";
+const INVALID_ERROR_MESSAGE = "Request failed";
 
 function normalizeErrorCode(code: string | undefined): string | undefined {
   if (code === "provisioning") return PROVISIONING_ERROR_CODE;
@@ -143,6 +144,19 @@ export async function getErrorDetail(
   return undefined;
 }
 
+/** Preserve the OpenAI-compatible nullable/string `error.param` contract. */
+function errorParamFromDetail(
+  detail: Record<string, unknown> | undefined,
+): string | null | undefined {
+  const param = detail?.param;
+  return typeof param === "string" || param === null ? param : undefined;
+}
+
+/** Extract a validated nullable/string error parameter from JSON or msgpack. */
+export async function getErrorParam(response: Response): Promise<string | null | undefined> {
+  return errorParamFromDetail(await getErrorDetail(response));
+}
+
 /**
  * Extract error code from response body (handles both JSON and msgpack)
  */
@@ -195,6 +209,7 @@ export async function throwIfModelLoadFailed(response: Response, model?: string)
     errorClass,
     permanent,
     attempts,
+    param: errorParamFromDetail(detail),
   });
 }
 
@@ -218,7 +233,7 @@ export async function throwIfInputTooLong(response: Response, model?: string): P
     typeof detail.message === "string"
       ? detail.message
       : "Input exceeds the model's maximum token capacity";
-  throw new InputTooLongError(message, { model });
+  throw new InputTooLongError(message, { model, param: errorParamFromDetail(detail) });
 }
 
 /** The one exact path of the cost-estimate dry run (#2435). */
@@ -278,7 +293,7 @@ export async function throwIfEstimateUnroutable(response: Response): Promise<voi
     detail && typeof detail.message === "string"
       ? detail.message
       : "the active rate book cannot price this request";
-  throw new EstimateUnroutableError(message, code);
+  throw new EstimateUnroutableError(message, code, errorParamFromDetail(detail));
 }
 
 /**
@@ -294,12 +309,14 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
 
   let code: string | undefined;
   let message: string;
+  let param: string | null | undefined;
 
   if (detail) {
     const c = detail.code;
     code = typeof c === "string" ? c : undefined;
     const m = detail.message;
-    message = typeof m === "string" ? m : JSON.stringify(detail);
+    message = typeof m === "string" ? m : INVALID_ERROR_MESSAGE;
+    param = errorParamFromDetail(detail);
   } else {
     try {
       const data = (await response.json()) as Record<string, unknown>;
@@ -313,9 +330,11 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
         code = typeof data.code === "string" ? data.code : undefined;
         message = response.statusText;
       }
+      param = errorParamFromDetail(data);
     } catch {
       code = undefined;
       message = response.statusText;
+      param = undefined;
     }
   }
   code = response.headers.get(SIE_ERROR_CODE_HEADER) ?? normalizeErrorCode(code);
@@ -323,7 +342,7 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
 
   if (status === 503 && code === PROVISIONING_ERROR_CODE) {
     const retryAfter = getRetryAfter(response);
-    throw new ProvisioningError(message, gpu, retryAfter);
+    throw new ProvisioningError(message, gpu, retryAfter, param);
   }
 
   // Rate limit (pass-2 audit B1). Retried on the admission ladder in the
@@ -331,7 +350,12 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
   // covers the terminal paths (streaming, listModels, estimate, …) so a 429 is
   // always a typed RateLimitError rather than a generic RequestError.
   if (status === HTTP_TOO_MANY_REQUESTS) {
-    throw new RateLimitError(message, { retryAfter: getRetryAfter(response), code, requestId });
+    throw new RateLimitError(message, {
+      retryAfter: getRetryAfter(response),
+      code,
+      requestId,
+      param,
+    });
   }
 
   // Terminal credit / account failures (pass-2 audit B3). 402/403 are NEVER
@@ -339,34 +363,34 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
   // first response. Unrecognised 402/403 codes stay generic RequestError.
   if (status === HTTP_PAYMENT_REQUIRED) {
     if (code === INSUFFICIENT_CREDITS_ERROR_CODE)
-      throw new InsufficientCreditsError(message, { requestId });
+      throw new InsufficientCreditsError(message, { requestId, param });
     if (code === KEY_SPEND_LIMIT_EXCEEDED_ERROR_CODE)
-      throw new SpendLimitError(message, { requestId });
+      throw new SpendLimitError(message, { requestId, param });
   }
   if (
     status === HTTP_FORBIDDEN &&
     (code === ACCOUNT_SUSPENDED_ERROR_CODE || code === ACCOUNT_PENDING_REVIEW_ERROR_CODE)
   ) {
-    throw new AccountInactiveError(message, code, requestId);
+    throw new AccountInactiveError(message, code, requestId, param);
   }
   if (status === 503 && code === ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE) {
-    throw new AccountStateUnavailableError(message, requestId);
+    throw new AccountStateUnavailableError(message, requestId, param);
   }
 
   if (status >= HTTP_CLIENT_ERROR_MIN && status <= HTTP_CLIENT_ERROR_MAX) {
     if (status === 400 && code === "INPUT_TOO_LONG") {
       // Fallback dispatch — ``model`` is only attached by the helper-style
       // short-circuit (``throwIfInputTooLong``) on the extract path.
-      throw new InputTooLongError(message);
+      throw new InputTooLongError(message, { param });
     }
-    throw new RequestError(message, code, status, requestId);
+    throw new RequestError(message, code, status, requestId, param);
   }
 
   if (status >= HTTP_SERVER_ERROR_MIN && status <= HTTP_SERVER_ERROR_MAX) {
-    throw new ServerError(message, code, status, requestId);
+    throw new ServerError(message, code, status, requestId, param);
   }
 
-  throw new ServerError(message, code, status, requestId);
+  throw new ServerError(message, code, status, requestId, param);
 }
 
 // Wire format types (what server sends)

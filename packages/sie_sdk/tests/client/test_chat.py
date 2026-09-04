@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from sie_sdk import SIEClient
-from sie_sdk.client.errors import RequestError, ServerError
+from sie_sdk.client.errors import RequestError, ResourceExhaustedError, ServerError
 
 
 def _ok_json(payload: dict[str, Any]) -> MagicMock:
@@ -257,14 +257,15 @@ def test_stream_raises_server_error_on_error_chunk() -> None:
         "text_delta": "",
         "done": True,
         "finish_reason": "error",
-        "error": {"code": "inference_error", "message": "boom"},
+        "error": {"code": "unsupported_field", "message": "boom", "param": "top_k"},
     }
     with patch("sie_sdk.client.sync.httpx.Client") as mc:
         mc.return_value.stream.return_value = _FakeStream(lines=_sse(err))
         client = SIEClient("http://localhost:8080")
         with pytest.raises(ServerError) as ei:
             list(client.stream_generate("m", "hi", max_new_tokens=8))
-        assert ei.value.code == "inference_error"
+        assert ei.value.code == "unsupported_field"
+        assert ei.value.param == "top_k"
         assert ei.value.request == {"id": "r"}
         client.close()
 
@@ -325,14 +326,15 @@ def test_stream_generate_error_after_output_retains_request_id() -> None:
         "text_delta": "",
         "done": True,
         "finish_reason": "error",
-        "error": {"code": "inference_error", "message": "boom"},
+        "error": {"code": "unsupported_field", "message": "boom", "param": "top_k"},
     }
     with patch("sie_sdk.client.sync.httpx.Client") as mc:
         mc.return_value.stream.return_value = _FakeStream(lines=_sse(delta, err))
         client = SIEClient("http://localhost:8080")
         with pytest.raises(ServerError) as ei:
             list(client.stream_generate("m", "hi", max_new_tokens=8))
-        assert ei.value.code == "inference_error"
+        assert ei.value.code == "unsupported_field"
+        assert ei.value.param == "top_k"
         assert ei.value.request == {"id": "req-mid-1"}
         client.close()
 
@@ -353,6 +355,104 @@ def _chat_error_chunk(code: str, message: str, request_id: str) -> dict[str, Any
         "error": {"message": message, "type": "server_error", "param": None, "code": code},
         "request_id": request_id,
     }
+
+
+def _capacity_error_chunk(surface: str, retry_after_s: object) -> dict[str, Any]:
+    error: dict[str, Any] = {
+        "message": "scheduler full",
+        "type": "server_error",
+        "param": "model",
+        "code": "RESOURCE_EXHAUSTED",
+        "retry_after_s": retry_after_s,
+    }
+    if surface == "chat":
+        chunk = _chat_error_chunk("RESOURCE_EXHAUSTED", "scheduler full", "req-capacity")
+        chunk["error"] = error
+        return chunk
+    return {
+        "request_id": "req-capacity",
+        "seq": 1,
+        "text_delta": "",
+        "done": True,
+        "finish_reason": "error",
+        "error": error,
+    }
+
+
+def _stream_surface(client: SIEClient, surface: str, *, wait_for_capacity: bool = True):
+    if surface == "chat":
+        return client.stream_chat_completions(
+            "m",
+            [{"role": "user", "content": "hi"}],
+            wait_for_capacity=wait_for_capacity,
+        )
+    return client.stream_generate(
+        "m",
+        "hi",
+        max_new_tokens=8,
+        wait_for_capacity=wait_for_capacity,
+    )
+
+
+@pytest.mark.parametrize("surface", ["chat", "native"])
+@pytest.mark.parametrize(
+    ("retry_after_s", "expected"),
+    [pytest.param(12, 12.0, id="valid"), pytest.param(True, None, id="malformed")],
+)
+def test_stream_capacity_give_up_preserves_validated_retry_hint(
+    surface: str,
+    retry_after_s: object,
+    expected: float | None,
+) -> None:
+    error = _capacity_error_chunk(surface, retry_after_s)
+    with patch("sie_sdk.client.sync.httpx.Client") as mc:
+        mc.return_value.stream.return_value = _FakeStream(lines=_sse(error))
+        client = SIEClient("http://localhost:8080")
+
+        with pytest.raises(ResourceExhaustedError) as exc_info:
+            list(_stream_surface(client, surface, wait_for_capacity=False))
+
+        assert exc_info.value.code == "RESOURCE_EXHAUSTED"
+        assert exc_info.value.param == "model"
+        assert exc_info.value.request == {"id": "req-capacity"}
+        assert exc_info.value.retry_after == expected
+        client.close()
+
+
+@pytest.mark.parametrize("surface", ["chat", "native"])
+@pytest.mark.parametrize(
+    ("retry_after_s", "expected"),
+    [pytest.param(12, 12.0, id="valid"), pytest.param(True, None, id="malformed")],
+)
+def test_stream_capacity_after_output_preserves_hint_without_retry(
+    surface: str,
+    retry_after_s: object,
+    expected: float | None,
+) -> None:
+    delta = (
+        _chat_chunk("partial")
+        if surface == "chat"
+        else {
+            "request_id": "req-capacity",
+            "seq": 0,
+            "text_delta": "partial",
+            "done": False,
+        }
+    )
+    error = _capacity_error_chunk(surface, retry_after_s)
+    with patch("sie_sdk.client.sync.httpx.Client") as mc:
+        mc.return_value.stream.return_value = _FakeStream(lines=_sse(delta, error))
+        client = SIEClient("http://localhost:8080")
+
+        with pytest.raises(ServerError) as exc_info:
+            list(_stream_surface(client, surface))
+
+        assert exc_info.value.code == "RESOURCE_EXHAUSTED"
+        assert exc_info.value.param == "model"
+        assert exc_info.value.request == {"id": "req-capacity"}
+        assert exc_info.value.retry_after == expected
+        assert mc.return_value.stream.call_count == 1
+        client.close()
 
 
 def test_stream_chat_error_chunk_surfaces_request_id() -> None:
@@ -415,6 +515,59 @@ def test_stream_chat_retries_first_sse_model_loading_then_streams() -> None:
         assert [c["choices"][0]["delta"].get("content") for c in out] == ["ok"]
         assert mc.return_value.stream.call_count == 2
         assert client.last_retry_count == 1
+        client.close()
+
+
+@pytest.mark.parametrize(
+    ("code", "retry_after_s", "expected_hint", "expected_delay"),
+    [
+        pytest.param("RESOURCE_EXHAUSTED", 12, 12.0, 12.0, id="valid"),
+        pytest.param("RESOURCE_EXHAUSTED", None, None, 0.25, id="missing"),
+        pytest.param("RESOURCE_EXHAUSTED", True, None, 0.25, id="boolean"),
+        pytest.param("RESOURCE_EXHAUSTED", 12.5, None, 0.25, id="fractional"),
+        pytest.param("RESOURCE_EXHAUSTED", 61, None, 0.25, id="out-of-domain"),
+        pytest.param("MODEL_LOADING", 12, None, 5.0, id="wrong-code"),
+    ],
+)
+def test_stream_chat_first_sse_retry_hint_is_validated(
+    code: str,
+    retry_after_s: object,
+    expected_hint: float | None,
+    expected_delay: float,
+) -> None:
+    error: dict[str, Any] = {"code": code, "message": "capacity unavailable"}
+    if retry_after_s is not None:
+        error["retry_after_s"] = retry_after_s
+    capacity = _FakeStream(lines=_sse({"error": error}))
+    success = _FakeStream(lines=_sse(_chat_chunk("ok", finish="stop")))
+
+    def backoff(retry_after: float | None, attempt: int) -> float:
+        assert retry_after == expected_hint
+        assert attempt == 0
+        return retry_after if retry_after is not None else 0.25
+
+    with (
+        patch("sie_sdk.client.sync.httpx.Client") as mc,
+        patch("sie_sdk.client.sync.time.sleep") as sleep,
+        patch("sie_sdk.client._shared.compute_oom_backoff", side_effect=backoff) as oom_backoff,
+    ):
+        mc.return_value.stream.side_effect = [capacity, success]
+        client = SIEClient("http://localhost:8080")
+
+        out = list(
+            client.stream_chat_completions(
+                "m",
+                [{"role": "user", "content": "hi"}],
+                provision_timeout_s=60.0,
+            )
+        )
+
+        assert [chunk["choices"][0]["delta"].get("content") for chunk in out] == ["ok"]
+        sleep.assert_called_once_with(expected_delay)
+        if code == "RESOURCE_EXHAUSTED":
+            oom_backoff.assert_called_once()
+        else:
+            oom_backoff.assert_not_called()
         client.close()
 
 

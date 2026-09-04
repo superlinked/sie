@@ -142,6 +142,7 @@ from ._shared import (
     convert_score_images_for_wire,
     copy_base_url_headers,
     get_error_code,
+    get_error_param,
     get_retry_after,
     get_sdk_version,
     handle_error,
@@ -306,7 +307,9 @@ def _handle_oom_retry(
             msg,
             model=model,
             retries=oom_retries,
+            param=get_error_param(response),
             request=parse_request_metadata(response.headers),
+            retry_after=get_retry_after(response),
         )
     retry_after = get_retry_after(response)
     raw_delay = compute_oom_backoff(retry_after, oom_retries)
@@ -335,7 +338,9 @@ def _handle_oom_retry(
             msg,
             model=model,
             retries=oom_retries,
+            param=get_error_param(response),
             request=parse_request_metadata(response.headers),
+            retry_after=get_retry_after(response),
         )
     delay = raw_delay
     # First retry surfaces at WARNING so a user with default log level
@@ -548,6 +553,7 @@ class SIEClient:
         *,
         start_time: float,
         budget_s: float,
+        accept: str = JSON_CONTENT_TYPE,
     ) -> httpx.Response:
         """Consume bounded same-origin Modal 303 result URLs without replaying POST."""
         for _ in range(MODAL_CONTINUATION_MAX_HOPS):
@@ -556,12 +562,12 @@ class SIEClient:
                 return response
             remaining = budget_s - (time.monotonic() - start_time)
             if remaining <= 0:
-                msg = f"Provision timeout ({budget_s:.1f}s) exceeded while awaiting generation result"
+                msg = f"Provision timeout ({budget_s:.1f}s) exceeded while awaiting request result"
                 raise ProvisioningError(msg)
             try:
                 response = self._client.get(
                     path,
-                    headers={"Accept": JSON_CONTENT_TYPE},
+                    headers={"Accept": accept},
                     timeout=min(self._timeout, remaining),
                 )
             except httpx.HTTPError as exc:
@@ -1351,6 +1357,13 @@ class SIEClient:
                         f"the peer closed the connection before sending a complete response: {e}"
                     )
                 raise SIEConnectionError(msg) from e
+
+            response = self._follow_modal_continuations(
+                response,
+                start_time=start_time,
+                budget_s=timeout,
+                accept=MSGPACK_CONTENT_TYPE,
+            )
 
             # Short-circuit terminal load failures BEFORE engaging the
             # MODEL_LOADING retry budget. The server emits 502
@@ -2180,6 +2193,13 @@ class SIEClient:
                     )
                 raise SIEConnectionError(msg) from e
 
+            response = self._follow_modal_continuations(
+                response,
+                start_time=start_time,
+                budget_s=timeout,
+                accept=MSGPACK_CONTENT_TYPE,
+            )
+
             # Short-circuit terminal load failures.
             raise_if_model_load_failed(response, model=model)
 
@@ -2580,6 +2600,7 @@ class SIEClient:
                     msg,
                     code=get_error_code(response),
                     status_code=response.status_code,
+                    param=get_error_param(response),
                     request=parse_request_metadata(response.headers),
                 )
 
@@ -3106,7 +3127,7 @@ class SIEClient:
                             if isinstance(chunk, dict):
                                 err = sse_chunk_error(chunk)
                                 if err is not None:
-                                    code, message = err
+                                    code, message, param, retry_after_s = err
                                     # Terminal error chunks — on both the
                                     # SIE-native generate shape and the OpenAI
                                     # chat shape — carry the gateway request
@@ -3115,12 +3136,23 @@ class SIEClient:
                                     # errors like ``empty_model_output`` stay
                                     # correlatable (#3136).
                                     request_id = valid_stream_request_id(chunk.get("request_id"))
-                                    error_headers = {REQUEST_ID_HEADER: request_id} if request_id else None
+                                    error_headers: dict[str, str] = {}
+                                    if request_id:
+                                        error_headers[REQUEST_ID_HEADER] = request_id
+                                    if retry_after_s is not None:
+                                        error_headers["Retry-After"] = str(retry_after_s)
                                     if not yielded_chunk:
                                         capacity_response = httpx.Response(
                                             HTTP_SERVICE_UNAVAILABLE,
-                                            json={"error": {"code": code, "message": message}},
-                                            headers=error_headers,
+                                            json={
+                                                "error": {
+                                                    "code": code,
+                                                    "message": message,
+                                                    "param": param,
+                                                    "retry_after_s": retry_after_s,
+                                                }
+                                            },
+                                            headers=error_headers or None,
                                         )
                                         retry_delay, oom_retries = next_stream_retry_delay(
                                             capacity_response,
@@ -3137,7 +3169,9 @@ class SIEClient:
                                     raise ServerError(
                                         message,
                                         code=code,
-                                        request=parse_request_metadata(error_headers or {}),
+                                        param=param,
+                                        request=parse_request_metadata(error_headers),
+                                        retry_after=float(retry_after_s) if retry_after_s is not None else None,
                                     )
                             yield chunk
                             yielded_chunk = True
@@ -3411,6 +3445,13 @@ class SIEClient:
                         f"the peer closed the connection before sending a complete response: {e}"
                     )
                 raise SIEConnectionError(msg) from e
+
+            response = self._follow_modal_continuations(
+                response,
+                start_time=start_time,
+                budget_s=timeout,
+                accept=MSGPACK_CONTENT_TYPE,
+            )
 
             # Short-circuit terminal load failures.
             raise_if_model_load_failed(response, model=model)

@@ -65,6 +65,7 @@ struct RequestObservation {
     operation: &'static str,
     status: u16,
     machine_profile: String,
+    model: String,
 }
 
 #[derive(Clone, Default)]
@@ -189,9 +190,13 @@ where
                 // the request exited before normalization (e.g. `model is
                 // required`). Empty strings also collapse to `"other"`
                 // so dashboards never render a blank label row.
-                let profile_label = slot
-                    .get()
+                let labels = slot.get();
+                let profile_label = labels
                     .map(|l| l.machine_profile.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("other");
+                let model_label = labels
+                    .map(|l| l.model.as_str())
                     .filter(|s| !s.is_empty())
                     .unwrap_or("other");
 
@@ -202,13 +207,17 @@ where
                 let admission_outcome = admission_slot
                     .get()
                     .unwrap_or(telemetry::AdmissionOutcome::Admitted);
+                let observation = telemetry::RequestCompletionObservation {
+                    operation: endpoint,
+                    status,
+                    machine_profile: profile_label,
+                    model: model_label,
+                    duration_s: elapsed,
+                    admission_outcome,
+                };
                 telemetry::record_request_completed(
                     Some(request_cx_for_log.span().span_context()),
-                    endpoint,
-                    status,
-                    profile_label,
-                    elapsed,
-                    admission_outcome,
+                    &observation,
                 );
                 #[cfg(test)]
                 if let Some(observations) = observations {
@@ -216,6 +225,7 @@ where
                         operation: endpoint,
                         status,
                         machine_profile: profile_label.to_string(),
+                        model: model_label.to_string(),
                     });
                 }
 
@@ -294,6 +304,7 @@ mod tests {
         if let Some(slot) = req.extensions().get::<telemetry::MetricLabelsSlot>() {
             slot.set(telemetry::MetricLabels {
                 machine_profile: profile.to_string(),
+                model: "org/model".to_string(),
             });
         }
         axum::response::IntoResponse::into_response((StatusCode::OK, "ok"))
@@ -325,6 +336,7 @@ mod tests {
                     if let Some(slot) = req.extensions().get::<telemetry::MetricLabelsSlot>() {
                         slot.set(telemetry::MetricLabels {
                             machine_profile: "a100".to_string(),
+                            model: "org/model".to_string(),
                         });
                     }
                     axum::response::IntoResponse::into_response((
@@ -444,6 +456,7 @@ mod tests {
                 if let Some(slot) = req.extensions().get::<telemetry::MetricLabelsSlot>() {
                     slot.set(telemetry::MetricLabels {
                         machine_profile: "l4-spot".to_string(),
+                        model: "org/model".to_string(),
                     });
                 }
                 StatusCode::OK
@@ -531,6 +544,7 @@ mod tests {
                 operation: "encode",
                 status: 200,
                 machine_profile: "l4-spot".to_string(),
+                model: "org/model".to_string(),
             }]
         );
     }
@@ -557,6 +571,7 @@ mod tests {
                 operation: "score",
                 status: 503,
                 machine_profile: "other".to_string(),
+                model: "other".to_string(),
             }]
         );
     }
@@ -573,6 +588,7 @@ mod tests {
                 operation: "extract",
                 status: 504,
                 machine_profile: "a100".to_string(),
+                model: "org/model".to_string(),
             }]
         );
     }
@@ -589,6 +605,7 @@ mod tests {
                 operation: "embeddings",
                 status: 200,
                 machine_profile: "l4-spot".to_string(),
+                model: "org/model".to_string(),
             }]
         );
     }
@@ -611,6 +628,7 @@ mod tests {
                     operation: "generate",
                     status: 200,
                     machine_profile: "a100".to_string(),
+                    model: "org/model".to_string(),
                 }
         }));
     }
@@ -627,6 +645,7 @@ mod tests {
                 operation: "extract",
                 status: 200,
                 machine_profile: "l4-spot".to_string(),
+                model: "org/model".to_string(),
             }]
         );
     }
@@ -643,6 +662,7 @@ mod tests {
                 operation: "moderations",
                 status: 501,
                 machine_profile: "other".to_string(),
+                model: "other".to_string(),
             }]
         );
     }

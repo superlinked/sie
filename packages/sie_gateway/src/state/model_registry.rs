@@ -2401,6 +2401,7 @@ impl ModelRegistry {
             // config — refresh here so a delta-update can rescind or
             // tighten the advertised set without a full reload.
             existing.grammar_capabilities = refreshed.grammar_capabilities;
+            existing.streaming_supported = refreshed.streaming_supported;
             existing.tools_supported = refreshed.tools_supported;
             // ``grammar_profile`` is likewise derived from
             // ``tasks.generate`` — refresh it too so a delta that changes
@@ -4232,6 +4233,100 @@ encode:
     }
 
     #[test]
+    fn test_tasks_delta_refreshes_streaming_capability_for_base_and_variants() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - module\n",
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let profile = || crate::types::model::ProfileConfig {
+            kv_budget_tokens: None,
+            max_output_tokens: None,
+            grammar_profile: None,
+            chat_template_kwargs: None,
+            adapter_path: Some("module:Adapter".to_string()),
+            max_batch_tokens: Some(4096),
+            compute_precision: None,
+            adapter_options: None,
+            extends: None,
+        };
+        registry
+            .add_model_config(ModelConfig {
+                name: "test/generator".to_string(),
+                hf_revision: None,
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles: HashMap::from([
+                    ("default".to_string(), profile()),
+                    ("buffered".to_string(), profile()),
+                ]),
+                inputs: None,
+                max_sequence_length: None,
+                tasks: Some(
+                    serde_yaml::from_str("generate:\n  capabilities:\n    streaming: false\n")
+                        .unwrap(),
+                ),
+            })
+            .unwrap();
+
+        for name in ["test/generator", "test/generator:buffered"] {
+            assert_eq!(
+                registry
+                    .get_model_info(name)
+                    .unwrap()
+                    .info_extras
+                    .streaming_supported,
+                Some(false),
+                "seeded capability for {name}",
+            );
+        }
+
+        let apply_tasks_delta = |streaming: bool| {
+            registry
+                .add_model_config(ModelConfig {
+                    name: "test/generator".to_string(),
+                    hf_revision: None,
+                    adapter_module: None,
+                    default_bundle: None,
+                    pool: None,
+                    profiles: HashMap::from([
+                        ("default".to_string(), profile()),
+                        ("buffered".to_string(), profile()),
+                    ]),
+                    inputs: None,
+                    max_sequence_length: None,
+                    tasks: Some(
+                        serde_yaml::from_str(&format!(
+                            "generate:\n  capabilities:\n    streaming: {streaming}\n"
+                        ))
+                        .unwrap(),
+                    ),
+                })
+                .unwrap();
+        };
+
+        for expected in [true, false] {
+            apply_tasks_delta(expected);
+            for name in ["test/generator", "test/generator:buffered"] {
+                let entry = registry.get_model_info(name).unwrap();
+                assert_eq!(
+                    entry.info_extras.streaming_supported,
+                    Some(expected),
+                    "delta for {name}"
+                );
+                assert_eq!(
+                    entry.to_model_info_value(false)["capabilities"]["streaming"],
+                    serde_json::json!(expected),
+                    "discovery projection for {name}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_add_model_config_preserves_info_extras_for_profile_only_update() {
         let (_dir, bundles_dir, models_dir) = create_test_dirs();
 
@@ -4833,6 +4928,65 @@ profiles:
         registry.reload();
         let second = registry.compute_bundle_config_hash("default");
 
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_compute_bundle_config_hash_changes_with_serving_artifact_manifest() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../conformance/bundle_config_hash/serving_artifact_expanded_profile_vector.json"
+        ))
+        .expect("valid shared serving-artifact hash vector");
+        let bundle_id = vector["bundle_id"].as_str().expect("bundle id");
+        fs::write(
+            bundles_dir.join(format!("{bundle_id}.yaml")),
+            serde_json::to_vec(&vector["bundle"]).expect("serialize bundle vector"),
+        )
+        .unwrap();
+        let model_path = models_dir.join("derived.yaml");
+        let write_model = |manifest_sha256: &str| {
+            let mut model = vector["model"].clone();
+            *model
+                .pointer_mut(
+                    "/profiles/default/adapter_options/loadtime/serving_artifact/manifest_sha256",
+                )
+                .expect("manifest pointer") =
+                serde_json::Value::String(manifest_sha256.to_string());
+            fs::write(
+                &model_path,
+                serde_json::to_vec(&model).expect("serialize model vector"),
+            )
+            .unwrap();
+        };
+        write_model(
+            vector["manifest_sha256"]["initial"]
+                .as_str()
+                .expect("initial manifest digest"),
+        );
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let first = registry.compute_bundle_config_hash(bundle_id);
+
+        write_model(
+            vector["manifest_sha256"]["changed"]
+                .as_str()
+                .expect("changed manifest digest"),
+        );
+        registry.reload();
+        let second = registry.compute_bundle_config_hash(bundle_id);
+
+        assert_eq!(
+            first,
+            vector["expected_hash"]["initial"]
+                .as_str()
+                .expect("initial expected hash")
+        );
+        assert_eq!(
+            second,
+            vector["expected_hash"]["changed"]
+                .as_str()
+                .expect("changed expected hash")
+        );
         assert_ne!(first, second);
     }
 

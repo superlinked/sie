@@ -15,6 +15,10 @@ from sie_server.config.package_artifacts import (
     has_package_artifact_declaration,
     parse_package_artifact_declaration,
 )
+from sie_server.config.serving_artifacts import (
+    ServingArtifactDeclaration,
+    parse_serving_artifact_declaration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +30,14 @@ _MAX_POOL_NAME_LEN = 128
 _CHAT_TEMPLATE_KWARGS = frozenset({"enable_thinking", "guardian_config"})
 _GUARDIAN_CONFIG_KWARGS = frozenset({"risk_name"})
 _MAX_GUARDIAN_RISK_NAME_LEN = 128
+_SERVING_ARTIFACT_PRECISION: dict[str, ComputePrecision] = {
+    "bfloat16": "bfloat16",
+    "float16": "float16",
+    "float32": "float32",
+    "int8_bfloat16": "bfloat16",
+    "int8_float16": "float16",
+    "int8_float32": "float32",
+}
 
 
 def validate_chat_template_kwargs(value: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -211,9 +223,12 @@ class PrewarmGrammar(BaseModel):
 class GenerateTask(BaseModel):
     """Generation task declaration.
 
-    ``context_length`` is the maximum total tokens (prompt + completion) the
-    model can process. ``max_output_tokens`` is the per-request hard cap on
-    ``max_new_tokens`` enforced by the gateway.
+    ``context_length`` is the maximum shared prompt-plus-completion envelope by
+    default. Encoder-decoder adapters may instead declare independent axes, in
+    which case it bounds encoder input and ``max_output_tokens`` independently
+    caps decoder output. The gateway uses ``max_output_tokens`` for
+    pre-admission, and the worker authoritatively enforces it as the per-request
+    hard cap on ``max_new_tokens`` before adapter dispatch.
 
     ``chat_template_kwargs`` are a bounded operator-owned mapping forwarded
     to the tokenizer's ``apply_chat_template(**kwargs)`` call when the worker
@@ -348,6 +363,13 @@ class AdapterOptions(BaseModel):
                 "40-char commit SHA; pin the resolved draft checkpoint commit"
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_serving_artifact_shape(self) -> "AdapterOptions":
+        # Source identity lives on ModelConfig, so only parse the closed nested
+        # declaration and reject loader-owned injection fields at this layer.
+        parse_serving_artifact_declaration(self.loadtime)
         return self
 
 
@@ -932,6 +954,42 @@ class ModelConfig(BaseModel):
         if self.package_backed and len(declarations) != 1:
             raise ValueError("all profiles of a package-backed model must declare identical package artifacts")
         return self
+
+    @model_validator(mode="after")
+    def validate_serving_artifacts(self) -> "ModelConfig":
+        resolved_profiles = {name: self._resolve_profile_uncached(name) for name in self.profiles}
+        declarations = {
+            name: parse_serving_artifact_declaration(dict(resolved.loadtime))
+            for name, resolved in resolved_profiles.items()
+        }
+        if not any(declarations.values()):
+            return self
+        if self.package_backed or self.weights_path is not None:
+            raise ValueError("derived serving artifacts require an HF source checkpoint")
+        if self.hf_id is None or not is_immutable_revision(self.hf_revision):
+            raise ValueError("derived serving artifacts require source hf_id and an immutable 40-char hf_revision")
+        for name, declaration in declarations.items():
+            if declaration is None:
+                continue
+            # Bare CT2 ``int8`` leaves the floating-point accumulation type to
+            # runtime/device selection. Only the explicit compute types can be
+            # compared to SIE's declared profile precision without guessing.
+            expected_precision = _SERVING_ARTIFACT_PRECISION.get(declaration.compute_type)
+            if expected_precision is None:
+                continue
+            actual_precision = resolved_profiles[name].compute_precision
+            if actual_precision is not None and actual_precision != expected_precision:
+                raise ValueError(
+                    f"Profile '{name}' compute_precision={actual_precision!r} does not match "
+                    f"serving artifact compute_type={declaration.compute_type!r}; "
+                    f"expected {expected_precision!r}"
+                )
+        return self
+
+    def serving_artifact_declaration(self, profile: str = "default") -> ServingArtifactDeclaration | None:
+        """Return the effective profile's immutable derived-artifact declaration."""
+        loadtime = dict(self.resolve_profile(profile).loadtime)
+        return parse_serving_artifact_declaration(loadtime)
 
     def _effective_package_artifact_loadtime(self, name: str) -> dict[str, Any]:
         # Keep artifact validation on the exact same inheritance/replacement

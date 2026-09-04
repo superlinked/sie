@@ -126,6 +126,19 @@ struct ResultChunkReservationObservableState {
 #[derive(Clone, Debug, Default)]
 pub struct MetricLabels {
     pub machine_profile: String,
+    pub model: String,
+}
+
+/// One terminal inference-request observation. The type deliberately has no
+/// customer, credential, request, URL, payload, or error-text field.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestCompletionObservation<'a> {
+    pub operation: &'a str,
+    pub status: u16,
+    pub machine_profile: &'a str,
+    pub model: &'a str,
+    pub duration_s: f64,
+    pub admission_outcome: AdmissionOutcome,
 }
 
 /// First-write-wins request-extension carrier for [`MetricLabels`].
@@ -1128,21 +1141,21 @@ impl GatewayTelemetry {
         }
     }
 
-    fn request_completed(
-        &self,
-        operation: &str,
-        status: u16,
-        machine_profile: &str,
-        duration_s: f64,
-        admission_outcome: AdmissionOutcome,
-    ) {
-        let request_attributes = request_attributes(operation, status, machine_profile);
+    fn request_completed(&self, observation: &RequestCompletionObservation<'_>) {
+        let request_attributes = request_attributes(
+            observation.operation,
+            observation.status,
+            observation.machine_profile,
+        );
         self.requests.add(1, &request_attributes);
         self.request_duration
-            .record(duration_s.max(0.0), &request_attributes);
+            .record(observation.duration_s.max(0.0), &request_attributes);
         self.admission_decisions.add(
             1,
-            &admission_attributes(operation, admission_outcome.as_str()),
+            &admission_attributes(
+                observation.operation,
+                observation.admission_outcome.as_str(),
+            ),
         );
     }
 
@@ -1629,7 +1642,7 @@ fn pinned_model_key(pool: &str, model: &str) -> PinnedModelKey {
     (sanitize_label(pool), sanitize_model_label(model))
 }
 
-fn sanitize_model_label(value: &str) -> String {
+pub(super) fn sanitize_model_label(value: &str) -> String {
     const MAX_MODEL_LABEL_LEN: usize = 256;
     if value.is_empty()
         || value.len() > MAX_MODEL_LABEL_LEN
@@ -1717,47 +1730,25 @@ fn record_lane_updates(instrument: &Gauge<f64>, values: &[LaneSnapshot]) {
 fn record_request_completed_to(
     telemetry: Option<&GatewayTelemetry>,
     span_context: Option<&SpanContext>,
-    operation: &str,
-    status: u16,
-    machine_profile: &str,
-    duration_s: f64,
-    admission_outcome: AdmissionOutcome,
+    observation: &RequestCompletionObservation<'_>,
 ) {
     if let Some(telemetry) = telemetry {
-        telemetry.request_completed(
-            operation,
-            status,
-            machine_profile,
-            duration_s,
-            admission_outcome,
-        );
+        telemetry.request_completed(observation);
     }
-    super::tracing::record_inference_completion_log(
-        span_context,
-        bounded_operation(operation),
-        status,
-    );
+    let bounded = RequestCompletionObservation {
+        operation: bounded_operation(observation.operation),
+        ..*observation
+    };
+    super::tracing::record_inference_completion_log(span_context, &bounded);
 }
 
 /// Record one completed inference request, its admission decision, and its one
 /// privacy-safe completion log from a single semantic call site.
 pub fn record_request_completed(
     span_context: Option<&SpanContext>,
-    operation: &str,
-    status: u16,
-    machine_profile: &str,
-    duration_s: f64,
-    admission_outcome: AdmissionOutcome,
+    observation: &RequestCompletionObservation<'_>,
 ) {
-    record_request_completed_to(
-        telemetry(),
-        span_context,
-        operation,
-        status,
-        machine_profile,
-        duration_s,
-        admission_outcome,
-    );
+    record_request_completed_to(telemetry(), span_context, observation);
 }
 
 #[allow(dead_code)] // Managed composition API plus disabled-path benchmark seam.
@@ -3288,7 +3279,14 @@ mod tests {
     #[test]
     fn request_and_keda_contract_exports_exact_names_units_labels_and_freshness() {
         let (telemetry, exporter, provider) = metric_points();
-        telemetry.request_completed("encode", 200, "l4-spot", 0.025, AdmissionOutcome::Admitted);
+        telemetry.request_completed(&RequestCompletionObservation {
+            operation: "encode",
+            status: 200,
+            machine_profile: "l4-spot",
+            model: "BAAI/bge-m3",
+            duration_s: 0.025,
+            admission_outcome: AdmissionOutcome::Admitted,
+        });
         let lane = |value| LaneSnapshot {
             pool: "DEFAULT".to_string(),
             machine_profile: "L4-SPOT".to_string(),
@@ -3992,27 +3990,28 @@ mod tests {
         let (telemetry, _exporter, provider) = metric_points();
         let exercise_enabled = |target: &GatewayTelemetry, iterations: usize| {
             for index in 0..iterations {
-                record_request_completed_to(
-                    Some(target),
-                    None,
-                    black_box("encode"),
-                    black_box(200),
-                    black_box("l4-spot"),
-                    black_box((index % 100) as f64 / 1_000.0),
-                    black_box(AdmissionOutcome::Admitted),
-                );
+                let observation = RequestCompletionObservation {
+                    operation: black_box("encode"),
+                    status: black_box(200),
+                    machine_profile: black_box("l4-spot"),
+                    model: black_box("BAAI/bge-m3"),
+                    duration_s: black_box((index % 100) as f64 / 1_000.0),
+                    admission_outcome: black_box(AdmissionOutcome::Admitted),
+                };
+                record_request_completed_to(Some(target), None, black_box(&observation));
             }
         };
         let exercise_disabled = |iterations: usize| {
             for index in 0..iterations {
-                record_request_completed(
-                    None,
-                    black_box("encode"),
-                    black_box(200),
-                    black_box("l4-spot"),
-                    black_box((index % 100) as f64 / 1_000.0),
-                    black_box(AdmissionOutcome::Admitted),
-                );
+                let observation = RequestCompletionObservation {
+                    operation: black_box("encode"),
+                    status: black_box(200),
+                    machine_profile: black_box("l4-spot"),
+                    model: black_box("BAAI/bge-m3"),
+                    duration_s: black_box((index % 100) as f64 / 1_000.0),
+                    admission_outcome: black_box(AdmissionOutcome::Admitted),
+                };
+                record_request_completed(None, black_box(&observation));
             }
         };
 

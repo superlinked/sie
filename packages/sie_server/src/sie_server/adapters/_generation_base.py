@@ -14,10 +14,13 @@ terminal chunk carrying ``finish_reason`` and ``usage``.
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
+import sys
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar, Literal, cast
 
@@ -48,6 +51,326 @@ _REASONING_BOUNDARIES: dict[ReasoningFormat, tuple[str, str]] = {
 # tool-call parser when one or more ``<tool_call>...</tool_call>`` blocks
 # were consumed before the underlying model stopped.
 FinishReason = Literal["stop", "length", "cancelled", "error", "tool_calls"]
+
+
+class GenerationError(RuntimeError):
+    """Base for adapter-declared generation failures with stable semantics."""
+
+    code: ClassVar[str] = "inference_error"
+    param: str | None = None
+
+
+class GenerationUnsupportedFieldError(GenerationError):
+    """A request parameter is not supported by the active generation backend."""
+
+    code = "unsupported_field"
+
+    def __init__(self, param: str, message: str | None = None) -> None:
+        self.param = param
+        super().__init__(message or f"'{param}' is not supported by this generation backend")
+
+
+class GenerationInvalidRequestError(GenerationError):
+    """An adapter-specific request relationship is invalid."""
+
+    code = "invalid_request"
+
+    def __init__(self, param: str, message: str) -> None:
+        self.param = param
+        super().__init__(message)
+
+
+class GenerationInputTooLongError(GenerationError):
+    """The rendered input exceeds an adapter's qualified token ceiling."""
+
+    code = "INPUT_TOO_LONG"
+
+    def __init__(self, message: str, *, param: str = "prompt") -> None:
+        self.param = param
+        super().__init__(message)
+
+
+class GenerationCapacityError(GenerationError):
+    """The generation backend is temporarily at bounded capacity."""
+
+    code = "RESOURCE_EXHAUSTED"
+
+
+class GenerationDrainingError(GenerationCapacityError):
+    """The generation backend is draining and cannot accept new work."""
+
+    code = "MODEL_LOADING"
+
+
+_CLIENT_SAFE_GENERATION_ERROR_MESSAGES = {
+    "inference_error": "internal error during generation",
+    "grammar_compile_failed": "internal error compiling grammar",
+}
+_CLIENT_SAFE_GENERATION_ERROR_CODES = frozenset(
+    {
+        "inference_error",
+        "grammar_compile_failed",
+        "INPUT_TOO_LONG",
+        "MODEL_LOADING",
+        "MODEL_OUTPUT_PARSE_ERROR",
+        "RESOURCE_EXHAUSTED",
+        "COLD_START_RATE_LIMITED",
+        "LORA_LOADING",
+        "PAYLOAD_TOO_LARGE",
+        "cancelled",
+        "context_exceeded",
+        "empty_model_output",
+        "grammar_invalid",
+        "invalid_request",
+        "parallel_tool_calls_violated",
+        "rate_limit_exceeded",
+        "tool_call_parse_error",
+        "transport_failure",
+        "unsupported_field",
+    }
+)
+_CLIENT_PASSTHROUGH_GENERATION_ERROR_CODES = frozenset(
+    {
+        "INPUT_TOO_LONG",
+        "MODEL_LOADING",
+        "MODEL_OUTPUT_PARSE_ERROR",
+        "RESOURCE_EXHAUSTED",
+        "empty_model_output",
+        "grammar_invalid",
+        "invalid_request",
+        "parallel_tool_calls_violated",
+        "tool_call_parse_error",
+        "unsupported_field",
+    }
+)
+_GENERIC_UPSTREAM_GENERATION_ERROR_MESSAGE = "generation terminated with an upstream error"
+_CLIENT_SAFE_GENERATION_PARAMS = frozenset(
+    {
+        "prompt",
+        "max_new_tokens",
+        "n",
+        "best_of",
+        "lora_adapter",
+        "temperature",
+        "top_p",
+        "stop",
+        "frequency_penalty",
+        "presence_penalty",
+        "top_k",
+        "repetition_penalty",
+        "min_new_tokens",
+        "grammar",
+        "seed",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "images",
+        "stream",
+    }
+)
+_CLIENT_REFUSAL_ERROR_TYPES = (
+    GenerationUnsupportedFieldError,
+    GenerationInvalidRequestError,
+    GenerationInputTooLongError,
+)
+_INTERNAL_TO_PUBLIC_GENERATION_PARAMS = {"lora_path": "lora_adapter"}
+
+
+def client_safe_generation_error_code(error_code: str | None) -> str:
+    """Return the closed public discriminator for an adapter terminal error."""
+    code = error_code or "inference_error"
+    return code if code in _CLIENT_SAFE_GENERATION_ERROR_CODES else "inference_error"
+
+
+def client_safe_generation_error_message(error_code: str | None, error_message: str | None) -> str:
+    """Return the public message for an adapter-yielded terminal error.
+
+    Adapter terminal chunks are an untrusted backend boundary just like raised
+    exceptions. Generic runtime/grammar-internal codes therefore use stable
+    public text, while only explicitly approved client/model codes retain
+    their actionable message. Unknown future adapter codes fail closed rather
+    than making their backend-controlled message public. A terminal error
+    without a code is the generic ``inference_error`` fallback used by every
+    public generation surface.
+    """
+    code = error_code or "inference_error"
+    if safe_message := _CLIENT_SAFE_GENERATION_ERROR_MESSAGES.get(code):
+        return safe_message
+    if code in _CLIENT_PASSTHROUGH_GENERATION_ERROR_CODES and error_message:
+        return error_message
+    return _GENERIC_UPSTREAM_GENERATION_ERROR_MESSAGE
+
+
+def client_safe_generation_error_param(error: GenerationError) -> str | None:
+    """Return a bounded public parameter for an adapter-raised refusal.
+
+    A generic/future ``GenerationError`` may set ``param`` arbitrarily, so the
+    parameter is public only for concrete client-refusal types and the finite
+    generation parameter contract. New types or fields require an explicit
+    contract update and regression before they can cross this boundary.
+    """
+    if type(error) not in _CLIENT_REFUSAL_ERROR_TYPES:
+        return None
+    raw_param = error.param
+    if raw_param is None:
+        return None
+    param = _INTERNAL_TO_PUBLIC_GENERATION_PARAMS.get(raw_param, raw_param)
+    return param if param in _CLIENT_SAFE_GENERATION_PARAMS else None
+
+
+def _freeze_preflight_value(value: Any) -> Any:
+    """Return a deeply immutable comparison snapshot for generation kwargs."""
+    if isinstance(value, Mapping):
+        return tuple(sorted((key, _freeze_preflight_value(item)) for key, item in value.items()))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_preflight_value(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return frozenset(_freeze_preflight_value(item) for item in value)
+    return value
+
+
+class GenerationPreflightResult:
+    """Opaque, request-scoped adapter preflight evidence.
+
+    The result is carried by the caller into :meth:`generate_with_preflight`
+    and may be consumed exactly once by the adapter that produced it, for an
+    exact deeply-immutable parameter snapshot. It is never stored on the
+    adapter or keyed by prompt/model text, so concurrent requests cannot share
+    evidence accidentally.
+    """
+
+    __slots__ = ("_adapter", "_consumed", "_parameters", "_payload")
+
+    def __init__(self, adapter: object, parameters: Mapping[str, Any], payload: Any) -> None:
+        self._adapter: object | None = adapter
+        self._parameters: Any | None = _freeze_preflight_value(parameters)
+        self._payload: Any | None = payload
+        self._consumed = False
+
+    def _consume(self, adapter: object, parameters: Mapping[str, Any]) -> Any | None:
+        matches = (
+            not self._consumed and self._adapter is adapter and self._parameters == _freeze_preflight_value(parameters)
+        )
+        payload = self._payload if matches else None
+        self.discard()
+        return payload
+
+    def discard(self) -> None:
+        """Erase request-owned references and make the result unusable."""
+        self._adapter = None
+        self._parameters = None
+        self._payload = None
+        self._consumed = True
+
+
+_ACTIVE_GENERATION_PREFLIGHT: ContextVar[GenerationPreflightResult | None] = ContextVar(
+    "active_generation_preflight",
+    default=None,
+)
+
+
+def consume_generation_preflight(adapter: object, parameters: Mapping[str, Any]) -> Any | None:
+    """Consume exact preflight evidence bound by ``generate_with_preflight``."""
+    result = _ACTIVE_GENERATION_PREFLIGHT.get()
+    return None if result is None else result._consume(adapter, parameters)
+
+
+class _PreflightBoundGenerationIterator(AsyncIterator["GenerationChunk"]):
+    """Own one preflight result from binding through iterator teardown.
+
+    A plain nested async generator cannot run its ``finally`` block when it is
+    closed before its first ``__anext__``. This explicit owner discards the
+    evidence from ``aclose()`` even in that unstarted state. The state lock
+    also serializes first-start and close, while the queue remains free to run
+    successive ``__anext__`` calls in distinct child tasks.
+    """
+
+    def __init__(
+        self,
+        adapter: Any,
+        parameters: Mapping[str, Any],
+        preflight: GenerationPreflightResult | None,
+    ) -> None:
+        self._adapter: Any | None = adapter
+        self._parameters: dict[str, Any] | None = dict(parameters)
+        self._preflight = preflight
+        self._chunks: AsyncIterator[GenerationChunk] | None = None
+        self._terminal_outcome_selected = False
+        self._closed = False
+        self._exhausted = False
+        self._state_lock = asyncio.Lock()
+
+    def __aiter__(self) -> _PreflightBoundGenerationIterator:
+        return self
+
+    async def __anext__(self) -> GenerationChunk:
+        async with self._state_lock:
+            if self._closed or self._exhausted:
+                raise StopAsyncIteration
+
+            if self._chunks is None:
+                adapter = self._adapter
+                parameters = self._parameters
+                if adapter is None or parameters is None:
+                    raise StopAsyncIteration
+                try:
+                    self._chunks = adapter.generate(**dict(parameters))
+                except BaseException:
+                    await self._close_locked()
+                    raise
+
+            token = _ACTIVE_GENERATION_PREFLIGHT.set(self._preflight)
+            exhausted = False
+            try:
+                try:
+                    chunk = await self._chunks.__anext__()
+                except StopAsyncIteration:
+                    exhausted = True
+                except BaseException:
+                    await self._close_locked()
+                    raise
+            finally:
+                _ACTIVE_GENERATION_PREFLIGHT.reset(token)
+
+            if exhausted:
+                # The effective iterator's caller owns final closure. Defer
+                # upstream ``aclose`` until that outer finally block so a
+                # cleanup failure remains authoritative after clean
+                # exhaustion instead of being misclassified as an inference
+                # error from ``__anext__``.
+                self._exhausted = True
+                self._discard_owned_references()
+                raise StopAsyncIteration
+            if chunk.done:
+                self._terminal_outcome_selected = True
+            return chunk
+
+    async def aclose(self) -> None:
+        async with self._state_lock:
+            await self._close_locked()
+
+    async def _close_locked(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        chunks = self._chunks
+        self._chunks = None
+        outcome_selected = self._terminal_outcome_selected
+        self._discard_owned_references()
+        if chunks is not None:
+            await aclose_with_error_precedence(
+                chunks,
+                outcome_selected=outcome_selected,
+                context="preflight-bound adapter iterator",
+            )
+
+    def _discard_owned_references(self) -> None:
+        preflight = self._preflight
+        self._preflight = None
+        self._adapter = None
+        self._parameters = None
+        if preflight is not None:
+            preflight.discard()
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +582,48 @@ def _candidates_have_visible_text(candidates: tuple[dict[str, Any], ...] | None)
     return any(isinstance(text := candidate.get("text"), str) and text.strip() for candidate in candidates)
 
 
+async def aclose_with_error_precedence(
+    resource: Any,
+    *,
+    outcome_selected: bool,
+    context: str,
+    timeout_s: float | None = None,
+) -> None:
+    """Close an async resource without replacing a primary outcome.
+
+    ``finally: await resource.aclose()`` has a subtle failure mode: a cleanup
+    exception replaces an exception already propagating through the
+    ``finally`` block. That is especially harmful for ``CancelledError`` and
+    ``GeneratorExit`` because an ordinary cleanup ``RuntimeError`` can then be
+    translated into a successful/in-band response. Preserve the in-flight
+    exception (or an already-selected public terminal outcome) and log the
+    secondary close failure instead. With no primary exception or selected
+    outcome, the close failure remains authoritative and is re-raised.
+    """
+    aclose = getattr(resource, "aclose", None)
+    if aclose is None:
+        return
+
+    primary = sys.exception()
+    try:
+        close_awaitable = aclose()
+        if timeout_s is None:
+            await close_awaitable
+        else:
+            await asyncio.wait_for(close_awaitable, timeout=timeout_s)
+    except BaseException as cleanup_error:
+        if isinstance(cleanup_error, asyncio.CancelledError):
+            raise
+        if primary is not None or outcome_selected:
+            logger.warning(
+                "%s cleanup failed after a primary exception or selected outcome; preserving the primary",
+                context,
+                exc_info=True,
+            )
+            return
+        raise
+
+
 async def suppress_thinking_blocks(
     chunks: AsyncIterator[GenerationChunk],
     *,
@@ -295,6 +660,7 @@ async def suppress_thinking_blocks(
     emitted_meaningful_text = False
     emitted_tool_call = False
     hid_reasoning = False
+    terminal_outcome_selected = False
     try:
         async for chunk in chunks:
             rewritten_candidates = chunk.candidates
@@ -369,11 +735,15 @@ async def suppress_thinking_blocks(
             ):
                 continue
 
+            if rewritten.done:
+                terminal_outcome_selected = True
             yield rewritten
     finally:
-        aclose = getattr(chunks, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        await aclose_with_error_precedence(
+            chunks,
+            outcome_selected=terminal_outcome_selected,
+            context="thinking-suppression upstream iterator",
+        )
 
 
 def thinking_blocks_must_be_hidden(config: Any) -> bool:
@@ -455,26 +825,36 @@ async def collect_generation(
     completion_tokens = 0
     error_code: str | None = None
     error_message: str | None = None
-    async for chunk in chunks:
-        if chunk.text_delta:
-            parts.append(chunk.text_delta)
-        if chunk.done:
-            finish_reason = chunk.finish_reason or "stop"
-            if chunk.prompt_tokens is not None:
-                prompt_tokens = chunk.prompt_tokens
-            if chunk.completion_tokens is not None:
-                completion_tokens = chunk.completion_tokens
-            error_code = chunk.error_code
-            error_message = chunk.error_message
-            break
-    return GenerationResult(
-        text="".join(parts),
-        finish_reason=cast("Any", finish_reason),
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        error_code=error_code,
-        error_message=error_message,
-    )
+    result_selected = False
+    try:
+        async for chunk in chunks:
+            if chunk.text_delta:
+                parts.append(chunk.text_delta)
+            if chunk.done:
+                finish_reason = chunk.finish_reason or "stop"
+                if chunk.prompt_tokens is not None:
+                    prompt_tokens = chunk.prompt_tokens
+                if chunk.completion_tokens is not None:
+                    completion_tokens = chunk.completion_tokens
+                error_code = chunk.error_code
+                error_message = chunk.error_message
+                break
+        result = GenerationResult(
+            text="".join(parts),
+            finish_reason=cast("Any", finish_reason),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        result_selected = True
+        return result
+    finally:
+        await aclose_with_error_precedence(
+            chunks,
+            outcome_selected=result_selected,
+            context="buffered generation input iterator",
+        )
 
 
 class GenerationAdapter(ModelAdapter):
@@ -488,6 +868,14 @@ class GenerationAdapter(ModelAdapter):
     """
 
     spec: ClassVar[AdapterSpec]
+    # Decoder-only adapters share one prompt-plus-output context envelope.
+    # Encoder-decoder adapters with separately bounded axes must opt in.
+    context_length_accounting: ClassVar[Literal["shared", "independent"]] = "shared"
+    # The worker-side context guard tokenizes the exact prompt string before
+    # dispatch. The default preserves the currently qualified worker behavior;
+    # adapters whose engine tokenizer adds boundary tokens must opt in so
+    # context validation and terminal usage share one rule.
+    prompt_tokenization_add_special_tokens: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -520,6 +908,14 @@ class GenerationAdapter(ModelAdapter):
 
     # -- Lifecycle -----------------------------------------------------------
 
+    async def drain_generation(self) -> None:
+        """Stop admission and drain adapter-owned generation work.
+
+        The registry awaits this hook before synchronous :meth:`unload`.
+        In-process adapters without their own scheduler have nothing to drain.
+        Implementations must be safe to call more than once.
+        """
+
     def unload(self) -> None:
         """Unload model state. Iterates ``spec.unload_fields`` and clears each."""
         for attr in self.spec.unload_fields:
@@ -529,6 +925,28 @@ class GenerationAdapter(ModelAdapter):
         gc.collect()
 
     # -- Contract ------------------------------------------------------------
+
+    def preflight_generate(
+        self,
+        parameters: Mapping[str, Any],
+        *,
+        stream: bool,
+    ) -> GenerationPreflightResult | None:
+        """Validate one resolved request before admission or engine dispatch.
+
+        ``parameters`` is the exact keyword mapping that will be passed to
+        :meth:`generate`; ``stream`` is the public response mode even when the
+        backend does not need it as a generation kwarg. Adapters should raise
+        one of the typed generation exceptions above for expected refusals.
+        """
+
+    def generate_with_preflight(
+        self,
+        parameters: Mapping[str, Any],
+        preflight: GenerationPreflightResult | None,
+    ) -> AsyncIterator[GenerationChunk]:
+        """Drive one request with its opaque, consume-once preflight result."""
+        return _PreflightBoundGenerationIterator(self, parameters, preflight)
 
     @abstractmethod
     def generate(

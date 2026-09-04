@@ -22,7 +22,11 @@ use crate::queue::dispatch::{
     DispatchDurability, DispatchError, PendingDispatchKind, WorkDispatcher, WorkDispatcherExt,
 };
 use crate::queue::publisher;
-use crate::queue::streaming::is_lower_sha256;
+use crate::queue::streaming::{
+    client_safe_worker_error_code, client_safe_worker_error_message,
+    client_safe_worker_error_param, is_lower_sha256, MODEL_LOAD_FAILED_ERROR_CODE,
+    MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
+};
 
 use crate::server::{
     AppState, GenerationRequestIntent, GovernedGenerationRoute, ModelAccessPolicy,
@@ -368,10 +372,6 @@ const RESOURCE_EXHAUSTED_RETRY_AFTER: &str = RetryAfter::DEFAULT.resource_exhaus
 /// see ``sie_sdk.client._shared.LORA_LOADING_*``.
 const LORA_LOADING_ERROR_CODE: &str = "LORA_LOADING";
 const LORA_LOADING_RETRY_AFTER: &str = RetryAfter::DEFAULT.lora_loading;
-/// Terminal model load failure (non-retryable). Matches ``sie_server`` HTTP 502
-/// contract so ``sie_sdk`` can short-circuit before the ``MODEL_LOADING`` retry
-/// budget (see ``raise_if_model_load_failed``).
-const MODEL_LOAD_FAILED_ERROR_CODE: &str = "MODEL_LOAD_FAILED";
 const INVALID_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
 const PAYLOAD_TOO_LARGE_ERROR_CODE: &str = err_code::PAYLOAD_TOO_LARGE;
 
@@ -2235,6 +2235,18 @@ async fn proxy_request_inner(
         Err(resp) => return *resp,
     };
 
+    if let Some((items, params)) = governed_generate_parsed.as_ref() {
+        if let Some(response) = validate_native_generate_pre_admission(
+            &state,
+            &model_name,
+            &dispatch_model,
+            items,
+            params,
+        ) {
+            return response;
+        }
+    }
+
     // Publish the canonical `machine_profile` to the HTTP metrics
     // middleware via a request extension slot. The middleware reads
     // this AFTER the inner service responds, so every downstream
@@ -2255,6 +2267,7 @@ async fn proxy_request_inner(
                 // space stays bounded.
                 "invalid".to_string()
             },
+            model: model_name.clone(),
         });
     }
 
@@ -2566,6 +2579,158 @@ fn queue_parse_error_response(endpoint: &str, error: QueueParseError) -> Respons
     }
 }
 
+fn unsupported_streaming_response(
+    registry: &crate::state::model_registry::ModelRegistry,
+    model: &str,
+    display_model: &str,
+    stream: bool,
+) -> Option<Response> {
+    if !stream {
+        return None;
+    }
+    let streaming_supported = registry
+        .get_model_info(model)
+        .and_then(|info| info.info_extras.streaming_supported);
+    if streaming_supported != Some(false) {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json_openai_error(
+                format!("Model '{display_model}' does not support streaming generation"),
+                oai_type::INVALID_REQUEST,
+                Some("stream"),
+                oai_code::UNSUPPORTED_FIELD,
+            )),
+        )
+            .into_response(),
+    )
+}
+
+fn validate_native_generate_pre_admission(
+    state: &AppState,
+    display_model: &str,
+    model: &str,
+    items: &[rmpv::Value],
+    params: &publisher::WorkParams,
+) -> Option<Response> {
+    if let Err(message) = publisher::validate_queue_request_item_count(items.len()) {
+        return Some(endpoint_error_response(
+            "generate",
+            StatusCode::BAD_REQUEST,
+            err_code::INVALID_REQUEST,
+            oai_type::INVALID_REQUEST,
+            oai_code::INVALID_REQUEST,
+            None,
+            message,
+        ));
+    }
+
+    let Some(generate) = params.generate.as_ref() else {
+        return Some(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json_openai_error(
+                    "generate request requires non-empty 'prompt' and positive integer 'max_new_tokens'",
+                    oai_type::INVALID_REQUEST,
+                    Some("prompt"),
+                    oai_code::INVALID_REQUEST,
+                )),
+            )
+                .into_response(),
+        );
+    };
+
+    if let Some(response) =
+        unsupported_streaming_response(&state.model_registry, model, display_model, generate.stream)
+    {
+        return Some(response);
+    }
+
+    if let Some(grammar) = generate.grammar.as_ref() {
+        let capabilities = state
+            .model_registry
+            .get_model_info(model)
+            .as_ref()
+            .and_then(|entry| entry.info_extras.grammar_capabilities.clone());
+        if let Err(response) =
+            super::grammar::check_capability(grammar, capabilities.as_deref(), display_model)
+        {
+            return Some(response);
+        }
+    }
+
+    if let Some(requested_lora) = generate.lora_adapter.as_deref() {
+        if let Some(info) = state.model_registry.get_model_info(model) {
+            let profile_name = params
+                .options
+                .as_ref()
+                .and_then(|options| options.get("profile"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("default");
+            match validate_lora_for_profile(&info, profile_name, requested_lora) {
+                LoraValidation::Ok => {}
+                LoraValidation::UnknownProfile => {
+                    return Some(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json_openai_error(
+                                format!(
+                                    "unknown profile '{profile_name}' for model '{display_model}'"
+                                ),
+                                oai_type::INVALID_REQUEST,
+                                Some("profile"),
+                                oai_code::INVALID_REQUEST,
+                            )),
+                        )
+                            .into_response(),
+                    );
+                }
+                LoraValidation::UnknownAdapter => {
+                    return Some(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json_openai_error(
+                                format!(
+                                    "unknown lora_adapter '{requested_lora}' for model '{display_model}'"
+                                ),
+                                oai_type::INVALID_REQUEST,
+                                Some("lora_adapter"),
+                                oai_code::UNKNOWN_LORA_ADAPTER,
+                            )),
+                        )
+                            .into_response(),
+                    );
+                }
+            }
+        }
+    }
+
+    if generate_params_have_images(generate) {
+        let image_supported = state
+            .model_registry
+            .get_model_info(model)
+            .is_some_and(|info| info.info_extras.supports_vision_generation());
+        if !native_generate_image_input_allowed(Some(generate), image_supported) {
+            return Some(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        format!("Model '{display_model}' does not support image input"),
+                        oai_type::INVALID_REQUEST,
+                        Some("images"),
+                        oai_code::UNSUPPORTED_FIELD,
+                    )),
+                )
+                    .into_response(),
+            );
+        }
+    }
+
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn queue_mode_proxy(
     state: &AppState,
@@ -2621,121 +2786,6 @@ async fn queue_mode_proxy(
             None,
             message,
         );
-    }
-
-    // Generate requires the typed ``params.generate`` block from the parser.
-    // The parser returns ``None`` for missing/invalid prompt / max_new_tokens
-    // and we translate that to a 400 with an instructive message here. This
-    // is the gateway-side enforcement called out in §4.5.1.1 of the POC plan.
-    if endpoint == "generate" && params.generate.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json_openai_error(
-                "generate request requires non-empty 'prompt' and positive integer 'max_new_tokens'",
-                oai_type::INVALID_REQUEST,
-                Some("prompt"),
-                oai_code::INVALID_REQUEST,
-            )),
-        )
-            .into_response();
-    }
-
-    // Grammar capability gate. After ``parse_grammar`` has accepted
-    // the wire shape and enforced the safety caps, check the model's
-    // YAML-declared ``capabilities.grammar`` list. Rejecting here (not
-    // inside the parser) keeps :func:`parse_grammar` decoupled from
-    // the model registry and shareable with the chat translator
-    // upstream of model resolution.
-    if endpoint == "generate" {
-        if let Some(g) = params.generate.as_ref().and_then(|p| p.grammar.as_ref()) {
-            let caps = state
-                .model_registry
-                .get_model_info(model)
-                .as_ref()
-                .and_then(|m| m.info_extras.grammar_capabilities.clone());
-            // Look the capabilities up on the DISPATCH variant, but name the
-            // requested (DISPLAY) model in the rejection so the client never
-            // sees the internal ``:no-spec`` id (mirrors the chat path).
-            if let Err(resp) = super::grammar::check_capability(g, caps.as_deref(), display_model) {
-                return resp;
-            }
-        }
-        // M8/M10: lora_adapter allow-list gate (mirrors chat's gate).
-        // Cross-check the requested served-name against the *selected
-        // profile's* advertised adapters — not the union across
-        // profiles — before the request crosses the JetStream boundary.
-        // Worker still validates redundantly; this exists so SDKs see a
-        // fast 400 with the stable ``unknown_lora_adapter`` code
-        // instead of a queue-bounce error chunk. Profile selection
-        // follows the same idiom as ``generation_timeout_config``:
-        // ``options.profile`` (default ``"default"``).
-        if let Some(req_lora) = params
-            .generate
-            .as_ref()
-            .and_then(|p| p.lora_adapter.as_deref())
-        {
-            if let Some(info) = state.model_registry.get_model_info(model) {
-                let profile_name = params
-                    .options
-                    .as_ref()
-                    .and_then(|opts| opts.get("profile"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("default");
-                match validate_lora_for_profile(&info, profile_name, req_lora) {
-                    LoraValidation::Ok => {}
-                    LoraValidation::UnknownProfile => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json_openai_error(
-                                format!(
-                                    "unknown profile '{profile_name}' for model '{display_model}'"
-                                ),
-                                oai_type::INVALID_REQUEST,
-                                Some("profile"),
-                                oai_code::INVALID_REQUEST,
-                            )),
-                        )
-                            .into_response();
-                    }
-                    LoraValidation::UnknownAdapter => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json_openai_error(
-                                format!(
-                                    "unknown lora_adapter '{req_lora}' for model '{display_model}'"
-                                ),
-                                oai_type::INVALID_REQUEST,
-                                Some("lora_adapter"),
-                                oai_code::UNKNOWN_LORA_ADAPTER,
-                            )),
-                        )
-                            .into_response();
-                    }
-                }
-            }
-        }
-        let has_images = params
-            .generate
-            .as_ref()
-            .is_some_and(generate_params_have_images);
-        if has_images {
-            let image_supported = state
-                .model_registry
-                .get_model_info(model)
-                .is_some_and(|info| info.info_extras.supports_vision_generation());
-            if !native_generate_image_input_allowed(params.generate.as_ref(), image_supported) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json_openai_error(
-                        format!("Model '{display_model}' does not support image input"),
-                        oai_type::INVALID_REQUEST,
-                        Some("images"),
-                        oai_code::UNSUPPORTED_FIELD,
-                    )),
-                )
-                    .into_response();
-            }
-        }
     }
 
     // Generate has its own publish + result-collection path
@@ -3075,11 +3125,7 @@ async fn queue_mode_proxy(
             .iter()
             .all(|r| r.error_code.as_deref() == Some(MODEL_LOAD_FAILED_ERROR_CODE))
         {
-            let first_msg = errors
-                .first()
-                .and_then(|r| r.error.as_deref())
-                .unwrap_or("Model load failed");
-            return build_model_load_failed_response(model, first_msg);
+            return build_model_load_failed_response();
         }
         // Translate retryable worker error codes into the SDK-expected 503
         // contract. Without this every per-item failure surfaced as 500
@@ -3213,6 +3259,7 @@ async fn queue_mode_proxy(
         &successful,
     );
     insert_execution_identity_header(response.headers_mut(), &successful);
+    insert_execution_binding_header(response.headers_mut(), &successful);
     response.headers_mut().insert(
         HeaderName::from_static("x-sie-request-id"),
         HeaderValue::from_str(&request_id).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -3491,11 +3538,13 @@ pub(crate) enum StreamingDriverErr {
     /// ``"first_chunk"`` | ``"inter_chunk"`` | ``"overall"``.
     Timeout { kind: &'static str },
     /// Worker emitted a terminal chunk with ``error`` populated. The
-    /// caller chooses the wire status/code mapping; this enum just
-    /// surfaces the raw worker fields.
+    /// caller chooses the wire status/code mapping; message, parameter,
+    /// and retry metadata are bounded at the worker trust boundary.
     WorkerError {
         code: String,
         message: String,
+        param: Option<String>,
+        retry_after_s: Option<u16>,
         request_id: String,
         attempt_id: String,
     },
@@ -3993,8 +4042,10 @@ pub(crate) async fn run_streaming_generate(
     // failure. The caller chooses the HTTP status / wire envelope.
     if let Some(err) = outcome.error.as_ref() {
         return Err(StreamingDriverErr::WorkerError {
-            code: err.code.clone(),
-            message: err.message.clone(),
+            code: err.client_safe_code().to_string(),
+            message: err.client_safe_message().to_string(),
+            param: err.client_safe_param().map(str::to_string),
+            retry_after_s: err.validated_retry_after_s(),
             request_id: request_id.clone(),
             attempt_id: outcome.attempt_id.clone(),
         });
@@ -4021,6 +4072,7 @@ pub(crate) fn worker_error_http_status(code: &str) -> StatusCode {
         RESOURCE_EXHAUSTED_ERROR_CODE | MODEL_LOADING_ERROR_CODE | LORA_LOADING_ERROR_CODE => {
             StatusCode::SERVICE_UNAVAILABLE
         }
+        MODEL_LOAD_FAILED_ERROR_CODE => StatusCode::BAD_GATEWAY,
         "transport_failure" => StatusCode::SERVICE_UNAVAILABLE,
         "cancelled" => StatusCode::REQUEST_TIMEOUT,
         "rate_limit_exceeded" => StatusCode::TOO_MANY_REQUESTS,
@@ -4052,14 +4104,26 @@ pub(crate) fn worker_error_openai_type(code: &str) -> &'static str {
 /// (SIE-native [`build_retryable_error_response`]) paths — the two surfaces
 /// render the error body differently but agree on the retry semantics. Pairs
 /// with [`worker_error_http_status`] / [`worker_error_openai_type`].
-fn worker_error_retry_after(code: &str) -> Option<(&'static str, &'static str)> {
+fn worker_error_retry_after(
+    code: &str,
+    resource_exhausted_retry_after_s: Option<u16>,
+) -> Option<(String, &'static str)> {
     match code {
         RESOURCE_EXHAUSTED_ERROR_CODE => Some((
-            RESOURCE_EXHAUSTED_RETRY_AFTER,
+            resource_exhausted_retry_after_s
+                .filter(|value| (1..=60).contains(value))
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| RESOURCE_EXHAUSTED_RETRY_AFTER.to_string()),
             RESOURCE_EXHAUSTED_ERROR_CODE,
         )),
-        MODEL_LOADING_ERROR_CODE => Some((MODEL_LOADING_RETRY_AFTER, MODEL_LOADING_ERROR_CODE)),
-        LORA_LOADING_ERROR_CODE => Some((LORA_LOADING_RETRY_AFTER, LORA_LOADING_ERROR_CODE)),
+        MODEL_LOADING_ERROR_CODE => Some((
+            MODEL_LOADING_RETRY_AFTER.to_string(),
+            MODEL_LOADING_ERROR_CODE,
+        )),
+        LORA_LOADING_ERROR_CODE => Some((
+            LORA_LOADING_RETRY_AFTER.to_string(),
+            LORA_LOADING_ERROR_CODE,
+        )),
         _ => None,
     }
 }
@@ -4164,34 +4228,37 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
         StreamingDriverErr::WorkerError {
             code,
             message,
+            param,
+            retry_after_s,
             request_id,
             attempt_id,
         } => {
-            let status = worker_error_http_status(code);
-            let err_type = worker_error_openai_type(code);
-            // Worker codes that already match our stable set get
-            // surfaced verbatim; unknowns fall back to a generic
-            // ``server_error`` discriminator.
-            let stable_code: &'static str = match code.as_str() {
-                "invalid_request" => oai_code::INVALID_REQUEST,
-                "unsupported_field" => oai_code::UNSUPPORTED_FIELD,
-                "context_exceeded" => oai_code::CONTEXT_EXCEEDED,
+            if code == MODEL_LOAD_FAILED_ERROR_CODE {
+                let mut resp = build_model_load_failed_response();
+                resp.headers_mut().insert(
+                    HeaderName::from_static("x-sie-request-id"),
+                    HeaderValue::from_str(request_id)
+                        .unwrap_or_else(|_| HeaderValue::from_static("")),
+                );
+                return resp;
+            }
+            let stable_code = client_safe_worker_error_code(code);
+            // OpenAI represents oversized request payloads as the canonical
+            // invalid-request discriminator while the SIE code remains on the
+            // response header. This is a compatibility rendering of an
+            // already-classified safe code, not a second worker allowlist.
+            let openai_code = match stable_code {
                 PAYLOAD_TOO_LARGE_ERROR_CODE => oai_code::INVALID_REQUEST,
-                RESOURCE_EXHAUSTED_ERROR_CODE => RESOURCE_EXHAUSTED_ERROR_CODE,
-                MODEL_LOADING_ERROR_CODE => MODEL_LOADING_ERROR_CODE,
-                LORA_LOADING_ERROR_CODE => LORA_LOADING_ERROR_CODE,
-                "transport_failure" => oai_code::TRANSPORT_FAILURE,
-                "cancelled" => oai_code::CANCELLED,
-                "rate_limit_exceeded" => oai_code::RATE_LIMIT_EXCEEDED,
-                COLD_START_RATE_LIMITED_ERROR_CODE => COLD_START_RATE_LIMITED_ERROR_CODE,
-                // Terminal empty-output stamp (#3136): forwarded verbatim so
-                // buffered consumers see the same typed code the SSE path
-                // already streams. Same 500 / ``server_error`` / no-retry
-                // convention as the generic ``inference_error`` fallback.
-                oai_code::EMPTY_MODEL_OUTPUT => oai_code::EMPTY_MODEL_OUTPUT,
-                _ => "inference_error",
+                _ => stable_code,
             };
-            let mut body = json_openai_error(message.clone(), err_type, None, stable_code);
+            let status = worker_error_http_status(stable_code);
+            let err_type = worker_error_openai_type(stable_code);
+            let mut body = json_openai_error(
+                client_safe_worker_error_message(code, message),
+                err_type,
+                client_safe_worker_error_param(code, param.as_deref()),
+                openai_code,
+            );
             // Surface the SIE-native ``attempt_id`` alongside the
             // OpenAI envelope so SIE-aware SDKs can correlate retries.
             if let Some(obj) = body.as_object_mut() {
@@ -4213,24 +4280,27 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             // quota refusal, whose whole point is an HOURLY ceiling: a
             // 1-second retry hint would re-create the auto-retry hot loop
             // the rail exists to prevent (review finding).
-            if status == StatusCode::TOO_MANY_REQUESTS && code != COLD_START_RATE_LIMITED_ERROR_CODE
+            if status == StatusCode::TOO_MANY_REQUESTS
+                && stable_code != COLD_START_RATE_LIMITED_ERROR_CODE
             {
                 resp.headers_mut().insert(
                     HeaderName::from_static("retry-after"),
                     HeaderValue::from_static("1"),
                 );
             }
-            let retryable = worker_error_retry_after(code.as_str());
+            let retryable = worker_error_retry_after(stable_code, *retry_after_s);
             if let Some((retry_after, error_code)) = retryable {
                 resp.headers_mut().insert(
                     HeaderName::from_static("retry-after"),
-                    HeaderValue::from_static(retry_after),
+                    HeaderValue::from_str(&retry_after).unwrap_or_else(|_| {
+                        HeaderValue::from_static(RESOURCE_EXHAUSTED_RETRY_AFTER)
+                    }),
                 );
                 resp.headers_mut().insert(
                     HeaderName::from_static("x-sie-error-code"),
                     HeaderValue::from_static(error_code),
                 );
-            } else if code == PAYLOAD_TOO_LARGE_ERROR_CODE {
+            } else if stable_code == PAYLOAD_TOO_LARGE_ERROR_CODE {
                 resp.headers_mut().insert(
                     HeaderName::from_static("x-sie-error-code"),
                     HeaderValue::from_static(PAYLOAD_TOO_LARGE_ERROR_CODE),
@@ -4386,6 +4456,7 @@ async fn queue_mode_streaming_generate(
         &outcome,
     );
     insert_stream_execution_identity_header(response.headers_mut(), &outcome);
+    insert_stream_execution_binding_header(response.headers_mut(), &outcome);
     response.headers_mut().insert(
         HeaderName::from_static("x-sie-request-id"),
         HeaderValue::from_str(&request_id).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -6717,6 +6788,7 @@ async fn resolve_generation_route(
     if let Some(slot) = metric_labels_slot {
         slot.set(telemetry::MetricLabels {
             machine_profile: effective_machine_profile.clone(),
+            model: customer_model.to_string(),
         });
     }
 
@@ -6955,6 +7027,14 @@ async fn proxy_chat_inner(
     //    Gates resolve against the routed DISPATCH model so the profile-scoped
     //    LoRA allow-list and capabilities match the profile that will serve.
     if let Some(info) = state.model_registry.get_model_info(&dispatch_model) {
+        if let Some(response) = unsupported_streaming_response(
+            &state.model_registry,
+            &dispatch_model,
+            &model_name,
+            params.stream,
+        ) {
+            return response;
+        }
         // Multi-LoRA: pre-validate the requested adapter against the
         // *selected profile's* advertised served-names — not the union
         // across profiles. The chat path has no explicit profile
@@ -7250,6 +7330,7 @@ async fn proxy_chat_inner(
         &outcome,
     );
     insert_stream_execution_identity_header(response.headers_mut(), &outcome);
+    insert_stream_execution_binding_header(response.headers_mut(), &outcome);
     response.headers_mut().insert(
         HeaderName::from_static("x-sie-request-id"),
         HeaderValue::from_str(&request_id).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -7758,6 +7839,15 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
         };
     let (explicit_bundle_override, _) = parse_model_spec(&params.model);
 
+    if let Some(response) = unsupported_streaming_response(
+        &state.model_registry,
+        &model_name,
+        &model_name,
+        params.stream,
+    ) {
+        return response;
+    }
+
     let ResolvedRoute {
         physical_lane,
         bundle,
@@ -7886,6 +7976,7 @@ pub async fn proxy_completions(State(state): State<Arc<AppState>>, req: Request)
         &outcome,
     );
     insert_stream_execution_identity_header(h, &outcome);
+    insert_stream_execution_binding_header(h, &outcome);
     if let Ok(val) = HeaderValue::from_str(&request_id) {
         h.insert(HeaderName::from_static("x-sie-request-id"), val);
     }
@@ -8485,6 +8576,7 @@ pub async fn proxy_responses(State(state): State<Arc<AppState>>, req: Request) -
         &outcome,
     );
     insert_stream_execution_identity_header(h, &outcome);
+    insert_stream_execution_binding_header(h, &outcome);
     if let Ok(val) = HeaderValue::from_str(&request_id) {
         h.insert(HeaderName::from_static("x-sie-request-id"), val);
     }
@@ -8653,15 +8745,13 @@ pub(crate) fn enforce_first_chunk_invariant(
     }
 }
 
-fn build_model_load_failed_response(model: &str, message: &str) -> Response {
+fn build_model_load_failed_response() -> Response {
     let mut resp = (
         StatusCode::BAD_GATEWAY,
         Json(json!({
             "error": {
                 "code": MODEL_LOAD_FAILED_ERROR_CODE,
-                "message": format!(
-                    "Model '{model}' failed to load ({MODEL_LOAD_FAILED_ERROR_CODE}, attempts=1): {message}"
-                ),
+                "message": MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
                 "error_class": MODEL_LOAD_FAILED_ERROR_CODE,
                 "attempts": 1,
                 "permanent": true,
@@ -8893,7 +8983,7 @@ fn build_terminal_client_error_response(
 fn build_retryable_error_response(code: &'static str, message: &str) -> Response {
     // Retry hint via the shared `worker_error_retry_after` classifier — the
     // same source of truth the streaming path uses.
-    let retry_after = worker_error_retry_after(code)
+    let retry_after = worker_error_retry_after(code, None)
         .map(|(retry_after, _)| retry_after)
         .unwrap_or_else(|| {
             // Defensive default. Should be unreachable given the
@@ -8906,7 +8996,7 @@ fn build_retryable_error_response(code: &'static str, message: &str) -> Response
                 false,
                 "build_retryable_error_response called with unmapped code: {code}"
             );
-            MODEL_LOADING_RETRY_AFTER
+            MODEL_LOADING_RETRY_AFTER.to_string()
         });
     let mut resp = (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -8920,7 +9010,7 @@ fn build_retryable_error_response(code: &'static str, message: &str) -> Response
         .into_response();
     resp.headers_mut().insert(
         HeaderName::from_static("retry-after"),
-        HeaderValue::from_str(retry_after).unwrap_or_else(|_| HeaderValue::from_static("5")),
+        HeaderValue::from_str(&retry_after).unwrap_or_else(|_| HeaderValue::from_static("5")),
     );
     resp.headers_mut().insert(
         HeaderName::from_static("x-sie-error-code"),
@@ -9301,24 +9391,37 @@ fn insert_execution_identity_header(
     headers: &mut HeaderMap,
     successful: &[&publisher::WorkResult],
 ) {
-    let Some(first) = successful
-        .first()
-        .and_then(|result| result.execution_identity_sha256.as_deref())
-    else {
+    insert_unanimous_sha256_header(
+        headers,
+        successful,
+        "x-sie-execution-identity-sha256",
+        |result| result.execution_identity_sha256.as_deref(),
+    );
+}
+
+fn insert_execution_binding_header(headers: &mut HeaderMap, successful: &[&publisher::WorkResult]) {
+    insert_unanimous_sha256_header(
+        headers,
+        successful,
+        "x-sie-execution-binding-sha256",
+        |result| result.execution_binding_sha256.as_deref(),
+    );
+}
+
+fn insert_unanimous_sha256_header<'a>(
+    headers: &mut HeaderMap,
+    successful: &[&'a publisher::WorkResult],
+    header_name: &'static str,
+    field: impl Fn(&'a publisher::WorkResult) -> Option<&'a str>,
+) {
+    let Some(first) = successful.first().and_then(|result| field(result)) else {
         return;
     };
-    if !is_lower_sha256(first)
-        || successful
-            .iter()
-            .any(|result| result.execution_identity_sha256.as_deref() != Some(first))
-    {
+    if !is_lower_sha256(first) || successful.iter().any(|result| field(result) != Some(first)) {
         return;
     }
     if let Ok(value) = HeaderValue::from_str(first) {
-        headers.insert(
-            HeaderName::from_static("x-sie-execution-identity-sha256"),
-            value,
-        );
+        headers.insert(HeaderName::from_static(header_name), value);
     }
 }
 
@@ -9326,17 +9429,34 @@ fn insert_stream_execution_identity_header(
     headers: &mut HeaderMap,
     outcome: &crate::queue::streaming::StreamOutcome,
 ) {
-    let Some(identity) = outcome.execution_identity_sha256.as_deref() else {
+    insert_stream_sha256_header(
+        headers,
+        "x-sie-execution-identity-sha256",
+        outcome.execution_identity_sha256.as_deref(),
+    );
+}
+
+fn insert_stream_execution_binding_header(
+    headers: &mut HeaderMap,
+    outcome: &crate::queue::streaming::StreamOutcome,
+) {
+    insert_stream_sha256_header(
+        headers,
+        "x-sie-execution-binding-sha256",
+        outcome.execution_binding_sha256.as_deref(),
+    );
+}
+
+fn insert_stream_sha256_header(
+    headers: &mut HeaderMap,
+    header_name: &'static str,
+    value: Option<&str>,
+) {
+    let Some(value) = value.filter(|value| is_lower_sha256(value)) else {
         return;
     };
-    if !is_lower_sha256(identity) {
-        return;
-    }
-    if let Ok(value) = HeaderValue::from_str(identity) {
-        headers.insert(
-            HeaderName::from_static("x-sie-execution-identity-sha256"),
-            value,
-        );
+    if let Ok(value) = HeaderValue::from_str(value) {
+        headers.insert(HeaderName::from_static(header_name), value);
     }
 }
 
@@ -9397,6 +9517,7 @@ pub(crate) fn is_openai_compat_forwarded_header(name: &str) -> bool {
         "x-queue-time",
         "x-sie-model-revision",
         "x-sie-execution-identity-sha256",
+        "x-sie-execution-binding-sha256",
         "x-inference-time",
         "x-tokenization-time",
         "x-postprocessing-time",
@@ -13806,11 +13927,13 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: Some(execution_hash.clone()),
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         insert_stream_model_revision_header(
             &mut headers,
@@ -13913,11 +14036,13 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: Some(identity.clone()),
+            execution_binding_sha256: None,
         };
         insert_stream_execution_identity_header(&mut headers, &outcome);
         assert_eq!(
@@ -13931,6 +14056,89 @@ mod tests {
         outcome.execution_identity_sha256 = Some("bad".to_string());
         insert_stream_execution_identity_header(&mut headers, &outcome);
         assert!(headers.get("x-sie-execution-identity-sha256").is_none());
+    }
+
+    #[test]
+    fn test_execution_binding_header_requires_valid_unanimous_worker_proof() {
+        let binding = "e".repeat(64);
+        let matching: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-1",
+            "success": true,
+            "execution_binding_sha256": binding.clone()
+        }))
+        .unwrap();
+        let same: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-2",
+            "success": true,
+            "execution_binding_sha256": binding.clone()
+        }))
+        .unwrap();
+        let mismatching: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-3",
+            "success": true,
+            "execution_binding_sha256": "f".repeat(64)
+        }))
+        .unwrap();
+        let missing: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-4",
+            "success": true
+        }))
+        .unwrap();
+        let malformed: publisher::WorkResult = serde_json::from_value(json!({
+            "request_id": "request-5",
+            "success": true,
+            "execution_binding_sha256": "E".repeat(64)
+        }))
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        insert_execution_binding_header(&mut headers, &[&matching, &same]);
+        assert_eq!(
+            headers
+                .get("x-sie-execution-binding-sha256")
+                .and_then(|value| value.to_str().ok()),
+            Some(binding.as_str())
+        );
+
+        for results in [
+            vec![&matching, &mismatching],
+            vec![&matching, &missing],
+            vec![&malformed],
+            Vec::new(),
+        ] {
+            headers.clear();
+            insert_execution_binding_header(&mut headers, &results);
+            assert!(headers.get("x-sie-execution-binding-sha256").is_none());
+        }
+
+        let mut outcome = crate::queue::streaming::StreamOutcome {
+            text: "ok".to_string(),
+            finish_reason: "stop".to_string(),
+            usage: None,
+            attempt_id: "attempt-1".to_string(),
+            ttft_ms: None,
+            tpot_ms: None,
+            error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
+            tool_calls: None,
+            logprobs: None,
+            candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
+            execution_binding_sha256: Some(binding.clone()),
+        };
+        insert_stream_execution_binding_header(&mut headers, &outcome);
+        assert_eq!(
+            headers
+                .get("x-sie-execution-binding-sha256")
+                .and_then(|value| value.to_str().ok()),
+            Some(binding.as_str())
+        );
+
+        headers.clear();
+        outcome.execution_binding_sha256 = Some("bad".to_string());
+        insert_stream_execution_binding_header(&mut headers, &outcome);
+        assert!(headers.get("x-sie-execution-binding-sha256").is_none());
     }
 
     #[tokio::test]
@@ -14305,6 +14513,10 @@ mod tests {
                 .pop()
                 .expect("generation publish target")
         }
+
+        fn target_count(&self) -> usize {
+            self.targets.lock().expect("target probe lock").len()
+        }
     }
 
     #[async_trait::async_trait]
@@ -14364,11 +14576,13 @@ mod tests {
                 ttft_ms: None,
                 tpot_ms: None,
                 error: None,
+                origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
                 tool_calls: None,
                 logprobs: None,
                 candidates: Vec::new(),
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
+                execution_binding_sha256: None,
             })
             .expect("target probe outcome receiver");
             Ok((
@@ -14464,9 +14678,10 @@ mod tests {
                 extends: None,
             },
         );
-        let tasks: serde_yaml::Value =
-            serde_yaml::from_str("generate:\n  capabilities:\n    grammar: [json_schema]\n")
-                .expect("generation task");
+        let tasks: serde_yaml::Value = serde_yaml::from_str(
+            "generate:\n  capabilities:\n    grammar: [json_schema]\n    streaming: false\n",
+        )
+        .expect("generation task");
         registry
             .add_model_config(ModelConfig {
                 name: "org/h".to_string(),
@@ -14816,6 +15031,152 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             assert_generation_target(probe.take_target(), "org/h", "org/h", "h100");
         }
+    }
+
+    #[tokio::test]
+    async fn non_streaming_model_rejects_all_streaming_ingresses_before_publish() {
+        let (state, probe) = mixed_governed_generation_state(false).await;
+        let cases = [
+            (
+                "/v1/generate/org%2Fh",
+                serde_json::json!({
+                    "prompt": "hello",
+                    "max_new_tokens": 4,
+                    "stream": true
+                }),
+                "generate",
+            ),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({
+                    "model": "org/h",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                    "stream": true
+                }),
+                "chat",
+            ),
+            (
+                "/v1/completions",
+                serde_json::json!({
+                    "model": "org/h",
+                    "prompt": "hello",
+                    "max_tokens": 4,
+                    "stream": true
+                }),
+                "completions",
+            ),
+        ];
+
+        for (uri, body, endpoint) in cases {
+            let response = match endpoint {
+                "generate" => {
+                    proxy_request(State(Arc::clone(&state)), json_request(uri, body), endpoint)
+                        .await
+                }
+                "chat" => proxy_chat(State(Arc::clone(&state)), json_request(uri, body)).await,
+                "completions" => {
+                    proxy_completions(State(Arc::clone(&state)), json_request(uri, body)).await
+                }
+                _ => unreachable!("bounded streaming ingress"),
+            };
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{endpoint}");
+            let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+                .await
+                .expect("error response body");
+            let value: serde_json::Value =
+                serde_json::from_slice(&body).expect("error response JSON");
+            assert_eq!(
+                value["error"]["code"],
+                oai_code::UNSUPPORTED_FIELD,
+                "{endpoint}"
+            );
+            assert_eq!(value["error"]["param"], "stream", "{endpoint}");
+            assert_eq!(probe.target_count(), 0, "{endpoint} published queue work");
+        }
+    }
+
+    #[tokio::test]
+    async fn non_streaming_native_generate_rejects_before_cold_lane_demand() {
+        let (state, probe) = mixed_governed_generation_state(false).await;
+        let mut state = Arc::try_unwrap(state).unwrap_or_else(|_| panic!("unique test state"));
+        state.registry = Arc::new(WorkerRegistry::new(Duration::from_secs(30), None));
+        let state = Arc::new(state);
+
+        let response = proxy_request(
+            State(Arc::clone(&state)),
+            json_request(
+                "/v1/generate/org%2Fh",
+                serde_json::json!({
+                    "prompt": "hello",
+                    "max_new_tokens": 4,
+                    "stream": true
+                }),
+            ),
+            "generate",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.demand_tracker.active_lanes().is_empty());
+        assert_eq!(probe.target_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn non_streaming_native_generate_rejects_before_zero_cap_admission() {
+        let pool_manager = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        pool_manager.create_default_pool().await;
+        pool_manager
+            .create_pool_with_caps(
+                "tenant",
+                std::collections::HashMap::from([("l4".to_string(), 0)]),
+                std::collections::HashMap::from([("l4".to_string(), 0)]),
+                None,
+                None,
+                0,
+                vec![],
+            )
+            .await
+            .expect("zero-cap test pool");
+        let mut state = admission_test_state(pool_manager);
+        state.model_registry = Arc::new(mixed_governed_registry());
+        install_generation_policy(
+            &mut state,
+            Arc::new(MappedGenerationRoutePolicy {
+                routes: [(
+                    ("org/h".to_string(), GenerationRequestIntent::Default),
+                    GovernedGenerationRoute {
+                        model: "org/h".to_string(),
+                        bundle: "default".to_string(),
+                        pool: "tenant".to_string(),
+                        machine_profile: "l4".to_string(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+        );
+        let probe = Arc::new(GenerationTargetProbe::default());
+        state.work_publisher = Some(probe.clone());
+        let state = Arc::new(state);
+
+        let response = proxy_request(
+            State(Arc::clone(&state)),
+            json_request(
+                "/v1/generate/org%2Fh",
+                serde_json::json!({
+                    "prompt": "hello",
+                    "max_new_tokens": 4,
+                    "stream": true
+                }),
+            ),
+            "generate",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.demand_tracker.active_lanes().is_empty());
+        assert_eq!(probe.target_count(), 0);
     }
 
     #[tokio::test]
@@ -17231,6 +17592,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let body = build_generate_success_body("Qwen/Qwen3-4B-Instruct", &[&r], false);
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -17326,11 +17688,13 @@ mod tests {
             ttft_ms: Some(120.5),
             tpot_ms: Some(45.2),
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let body = build_generate_success_body_v2("Qwen/Qwen3-4B-Instruct", &outcome, false);
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -17401,7 +17765,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_model_load_failed_response_uses_legacy_error_envelope_and_headers() {
-        let resp = build_model_load_failed_response("BAAI/bge-m3", "repository is gated");
+        let resp = build_model_load_failed_response();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(
             resp.headers().get("x-sie-error-code").unwrap(),
@@ -17415,6 +17779,7 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_slice(&body_bytes).expect("response body is valid JSON");
         assert_eq!(body["error"]["code"], MODEL_LOAD_FAILED_ERROR_CODE);
+        assert_eq!(body["error"]["message"], MODEL_LOAD_FAILED_PUBLIC_MESSAGE);
         assert!(body.get("detail").is_none());
     }
 
@@ -17600,6 +17965,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         }
     }
 
@@ -17647,6 +18013,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         }
     }
 
@@ -18013,6 +18380,8 @@ mod tests {
             "x-queue-publish-time",
             "x-queue-wait-time",
             "x-queue-time",
+            "x-sie-execution-identity-sha256",
+            "x-sie-execution-binding-sha256",
             "x-inference-time",
             "x-tokenization-time",
             "x-postprocessing-time",
@@ -19425,6 +19794,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let resp_body = result.result_msgpack.clone();
         assert_eq!(resp_body, payload);
@@ -19464,6 +19834,7 @@ mod tests {
                 worker_direct: false,
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
+                execution_binding_sha256: None,
             },
             publisher::WorkResult {
                 work_item_id: "r1.1".to_string(),
@@ -19484,6 +19855,7 @@ mod tests {
                 worker_direct: false,
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
+                execution_binding_sha256: None,
             },
         ];
         let items: Vec<serde_json::Value> = results
@@ -20175,6 +20547,60 @@ mod tests {
             models_dir.path(),
             true,
         )
+    }
+
+    #[tokio::test]
+    async fn non_streaming_model_rejects_stream_with_exact_parameter() {
+        use crate::types::model::{ModelConfig, ProfileConfig};
+
+        let registry = empty_registry();
+        let profiles = [(
+            "default".to_string(),
+            ProfileConfig {
+                kv_budget_tokens: None,
+                max_output_tokens: None,
+                grammar_profile: None,
+                chat_template_kwargs: None,
+                adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
+                max_batch_tokens: Some(4096),
+                compute_precision: None,
+                adapter_options: None,
+                extends: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let tasks =
+            serde_yaml::from_str("generate:\n  capabilities:\n    streaming: false\n").unwrap();
+        registry
+            .add_model_config(ModelConfig {
+                name: "org/buffered".to_string(),
+                hf_revision: None,
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles,
+                inputs: None,
+                max_sequence_length: None,
+                tasks: Some(tasks),
+            })
+            .unwrap();
+
+        let response =
+            unsupported_streaming_response(&registry, "org/buffered", "org/buffered", true)
+                .expect("streaming must be rejected");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], oai_code::UNSUPPORTED_FIELD);
+        assert_eq!(value["error"]["param"], "stream");
+        assert!(
+            unsupported_streaming_response(&registry, "org/buffered", "org/buffered", false,)
+                .is_none()
+        );
     }
 
     fn grammar_routed_registry() -> crate::state::model_registry::ModelRegistry {
@@ -21638,6 +22064,7 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: vec![
@@ -21656,6 +22083,7 @@ mod tests {
             ],
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -21691,6 +22119,7 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: vec![
@@ -21716,6 +22145,7 @@ mod tests {
             ],
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -21756,6 +22186,7 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: vec![CandidateData {
@@ -21766,6 +22197,7 @@ mod tests {
             }],
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req-lp", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -22136,11 +22568,13 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_text_completion_body("m", "req-1", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -22757,11 +23191,13 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_responses_body("m", "req-1", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -22812,11 +23248,13 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_chat_completion_body("Qwen/Qwen3-4B-Instruct-2507", "req-1", &outcome)
             .expect("ok");
@@ -22900,6 +23338,7 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: Some(vec![serde_json::json!({
                 "token": "Hi",
@@ -22910,6 +23349,7 @@ mod tests {
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -22935,11 +23375,13 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -22965,6 +23407,7 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: Some(vec![crate::queue::streaming::AggregatedToolCall {
                 index: 0,
                 id: "call_xyz".to_string(),
@@ -22976,6 +23419,7 @@ mod tests {
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -23001,11 +23445,13 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let resp = build_chat_completion_body("m", "req-1", &outcome).expect_err("missing usage");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -23090,6 +23536,8 @@ mod tests {
         let err = StreamingDriverErr::WorkerError {
             code: "rate_limit_exceeded".to_string(),
             message: "KV cache saturated and pool republish failed".to_string(),
+            param: None,
+            retry_after_s: None,
             request_id: "req-rl-1".to_string(),
             attempt_id: "att-rl-1".to_string(),
         };
@@ -23121,6 +23569,8 @@ mod tests {
         let err = StreamingDriverErr::WorkerError {
             code: PAYLOAD_TOO_LARGE_ERROR_CODE.to_string(),
             message: "referenced payload exceeds the worker size limit".to_string(),
+            param: None,
+            retry_after_s: None,
             request_id: "req-large-1".to_string(),
             attempt_id: "att-large-1".to_string(),
         };
@@ -23140,6 +23590,29 @@ mod tests {
         assert_eq!(value["error"]["attempt_id"], "att-large-1");
     }
 
+    #[tokio::test]
+    async fn test_streaming_unsupported_field_preserves_exact_parameter() {
+        let err = StreamingDriverErr::WorkerError {
+            code: oai_code::UNSUPPORTED_FIELD.to_string(),
+            message: "top_k is unavailable".to_string(),
+            param: Some("top_k".to_string()),
+            retry_after_s: None,
+            request_id: "req-unsupported-1".to_string(),
+            attempt_id: "att-unsupported-1".to_string(),
+        };
+        let response = build_streaming_error_response(&err);
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get("retry-after").is_none());
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], oai_code::UNSUPPORTED_FIELD);
+        assert_eq!(value["error"]["param"], "top_k");
+        assert_eq!(value["error"]["attempt_id"], "att-unsupported-1");
+    }
+
     /// The cold-start quota refusal must reach the wire with NO Retry-After:
     /// the blanket 429 header block previously stamped `Retry-After: 1` on it,
     /// re-creating the exact auto-retry hot loop the hourly ceiling exists to
@@ -23150,6 +23623,8 @@ mod tests {
         let err = StreamingDriverErr::WorkerError {
             code: COLD_START_RATE_LIMITED_ERROR_CODE.to_string(),
             message: "org exceeded its sealed cold-starts-per-hour ceiling".to_string(),
+            param: None,
+            retry_after_s: None,
             request_id: "req-cold-1".to_string(),
             attempt_id: "att-cold-1".to_string(),
         };
@@ -23175,6 +23650,8 @@ mod tests {
         let err = StreamingDriverErr::WorkerError {
             code: oai_code::EMPTY_MODEL_OUTPUT.to_string(),
             message: "model produced no visible output text".to_string(),
+            param: None,
+            retry_after_s: None,
             request_id: "req-empty-1".to_string(),
             attempt_id: "att-empty-1".to_string(),
         };
@@ -23195,7 +23672,128 @@ mod tests {
         assert_eq!(v["error"]["code"], oai_code::EMPTY_MODEL_OUTPUT);
         assert_eq!(v["error"]["attempt_id"], "att-empty-1");
         // The retry classifier must keep treating it as terminal.
-        assert_eq!(worker_error_retry_after(oai_code::EMPTY_MODEL_OUTPUT), None);
+        assert_eq!(
+            worker_error_retry_after(oai_code::EMPTY_MODEL_OUTPUT, None),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_model_load_failed_uses_terminal_sdk_contract() {
+        let err = StreamingDriverErr::WorkerError {
+            code: MODEL_LOAD_FAILED_ERROR_CODE.to_string(),
+            message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+            param: None,
+            retry_after_s: None,
+            request_id: "req-load-failed-1".to_string(),
+            attempt_id: "att-load-failed-1".to_string(),
+        };
+        let resp = build_streaming_error_response(&err);
+
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            resp.headers().get("x-sie-error-code").unwrap(),
+            MODEL_LOAD_FAILED_ERROR_CODE
+        );
+        assert_eq!(
+            resp.headers().get("x-sie-request-id").unwrap(),
+            "req-load-failed-1"
+        );
+        assert!(resp.headers().get("retry-after").is_none());
+
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], MODEL_LOAD_FAILED_ERROR_CODE);
+        assert_eq!(value["error"]["message"], MODEL_LOAD_FAILED_PUBLIC_MESSAGE);
+        assert_eq!(value["error"]["error_class"], MODEL_LOAD_FAILED_ERROR_CODE);
+        assert_eq!(value["error"]["attempts"], 1);
+        assert_eq!(value["error"]["permanent"], true);
+        assert!(!String::from_utf8_lossy(&body).contains("SENSITIVE_WORKER_FAILURE_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_unknown_worker_error_fails_closed() {
+        let err = StreamingDriverErr::WorkerError {
+            code: "SENSITIVE_WORKER_ERROR_CODE_SENTINEL".to_string(),
+            message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+            param: None,
+            retry_after_s: None,
+            request_id: "req-unknown-1".to_string(),
+            attempt_id: "att-unknown-1".to_string(),
+        };
+        let resp = build_streaming_error_response(&err);
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(resp.headers().get("retry-after").is_none());
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "inference_error");
+        assert_eq!(
+            value["error"]["message"],
+            crate::queue::streaming::UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE
+        );
+        let serialized = String::from_utf8_lossy(&body);
+        assert!(!serialized.contains("SENSITIVE_WORKER_ERROR_CODE_SENTINEL"));
+        assert!(!serialized.contains("SENSITIVE_WORKER_FAILURE_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn test_buffered_worker_inference_error_sanitizes_untrusted_message() {
+        let sentinel = "SENSITIVE_BACKEND_SENTINEL";
+        let err = StreamingDriverErr::WorkerError {
+            code: "inference_error".to_string(),
+            message: sentinel.to_string(),
+            param: Some(sentinel.to_string()),
+            retry_after_s: None,
+            request_id: "req-sensitive-1".to_string(),
+            attempt_id: "att-sensitive-1".to_string(),
+        };
+
+        let response = build_streaming_error_response(&err);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["error"]["message"],
+            "internal error during generation"
+        );
+        assert!(value["error"]["param"].is_null());
+        assert!(!value.to_string().contains(sentinel));
+    }
+
+    #[tokio::test]
+    async fn test_buffered_unknown_worker_error_sanitizes_untrusted_message() {
+        let sentinel = "SENSITIVE_WORKER_ERROR_CODE_SENTINEL";
+        let err = StreamingDriverErr::WorkerError {
+            code: sentinel.to_string(),
+            message: sentinel.to_string(),
+            param: Some(sentinel.to_string()),
+            retry_after_s: None,
+            request_id: "req-future-1".to_string(),
+            attempt_id: "att-future-1".to_string(),
+        };
+
+        let response = build_streaming_error_response(&err);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "inference_error");
+        assert_eq!(
+            value["error"]["message"],
+            crate::queue::streaming::UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE
+        );
+        assert!(value["error"]["param"].is_null());
+        assert!(!value.to_string().contains(sentinel));
     }
 
     async fn assert_streaming_worker_error_is_retryable(
@@ -23205,6 +23803,8 @@ mod tests {
         let err = StreamingDriverErr::WorkerError {
             code: code.to_string(),
             message: "Retryable worker error; retry later.".to_string(),
+            param: None,
+            retry_after_s: None,
             request_id: "req-retry-1".to_string(),
             attempt_id: "att-retry-1".to_string(),
         };
@@ -23242,6 +23842,32 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_resource_exhausted_uses_worker_configured_retry_hint() {
+        let err = StreamingDriverErr::WorkerError {
+            code: RESOURCE_EXHAUSTED_ERROR_CODE.to_string(),
+            message: "scheduler full".to_string(),
+            param: Some("SENSITIVE_CAPACITY_PARAM".to_string()),
+            retry_after_s: Some(12),
+            request_id: "req-retry-configured".to_string(),
+            attempt_id: "att-retry-configured".to_string(),
+        };
+
+        let response = build_streaming_error_response(&err);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "12");
+        assert_eq!(
+            response.headers().get("x-sie-error-code").unwrap(),
+            RESOURCE_EXHAUSTED_ERROR_CODE
+        );
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(value["error"]["param"].is_null());
+    }
+
     /// HTTP status mapping unit test — guards against an off-by-one
     /// edit that drops the 429 mapping without touching
     /// ``build_streaming_error_response``.
@@ -23250,6 +23876,14 @@ mod tests {
         assert_eq!(
             worker_error_http_status("rate_limit_exceeded"),
             StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[test]
+    fn test_worker_error_http_status_model_load_failed_is_502() {
+        assert_eq!(
+            worker_error_http_status(MODEL_LOAD_FAILED_ERROR_CODE),
+            StatusCode::BAD_GATEWAY
         );
     }
 
@@ -23267,7 +23901,7 @@ mod tests {
             worker_error_openai_type(COLD_START_RATE_LIMITED_ERROR_CODE),
             oai_type::RATE_LIMIT
         );
-        assert!(worker_error_retry_after(COLD_START_RATE_LIMITED_ERROR_CODE).is_none());
+        assert!(worker_error_retry_after(COLD_START_RATE_LIMITED_ERROR_CODE, None).is_none());
     }
 
     /// Envelope ``type`` mapping unit test.
@@ -23286,23 +23920,45 @@ mod tests {
     #[test]
     fn test_worker_error_retry_after_maps_retryable_codes() {
         assert_eq!(
-            worker_error_retry_after(RESOURCE_EXHAUSTED_ERROR_CODE),
+            worker_error_retry_after(RESOURCE_EXHAUSTED_ERROR_CODE, None),
             Some((
-                RESOURCE_EXHAUSTED_RETRY_AFTER,
+                RESOURCE_EXHAUSTED_RETRY_AFTER.to_string(),
                 RESOURCE_EXHAUSTED_ERROR_CODE
             ))
         );
         assert_eq!(
-            worker_error_retry_after(MODEL_LOADING_ERROR_CODE),
-            Some((MODEL_LOADING_RETRY_AFTER, MODEL_LOADING_ERROR_CODE))
+            worker_error_retry_after(MODEL_LOADING_ERROR_CODE, None),
+            Some((
+                MODEL_LOADING_RETRY_AFTER.to_string(),
+                MODEL_LOADING_ERROR_CODE
+            ))
         );
         assert_eq!(
-            worker_error_retry_after(LORA_LOADING_ERROR_CODE),
-            Some((LORA_LOADING_RETRY_AFTER, LORA_LOADING_ERROR_CODE))
+            worker_error_retry_after(LORA_LOADING_ERROR_CODE, None),
+            Some((
+                LORA_LOADING_RETRY_AFTER.to_string(),
+                LORA_LOADING_ERROR_CODE
+            ))
         );
         // Terminal / non-retryable codes carry no retry hint.
-        assert_eq!(worker_error_retry_after("invalid_request"), None);
-        assert_eq!(worker_error_retry_after("transport_failure"), None);
+        assert_eq!(worker_error_retry_after("invalid_request", None), None);
+        assert_eq!(
+            worker_error_retry_after("transport_failure", Some(12)),
+            None
+        );
+        assert_eq!(
+            worker_error_retry_after(RESOURCE_EXHAUSTED_ERROR_CODE, Some(12)),
+            Some(("12".to_string(), RESOURCE_EXHAUSTED_ERROR_CODE))
+        );
+        for invalid in [0, 61] {
+            assert_eq!(
+                worker_error_retry_after(RESOURCE_EXHAUSTED_ERROR_CODE, Some(invalid)),
+                Some((
+                    RESOURCE_EXHAUSTED_RETRY_AFTER.to_string(),
+                    RESOURCE_EXHAUSTED_ERROR_CODE
+                ))
+            );
+        }
     }
 
     /// Regression guard: the non-streaming aggregating path (the
@@ -23324,11 +23980,13 @@ mod tests {
             ttft_ms: None,
             tpot_ms: None,
             error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let bytes = build_chat_completion_body("m", "req-x", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -23364,6 +24022,7 @@ mod tests {
             max_output_tokens: None,
             profile_max_output_tokens: std::collections::HashMap::new(),
             grammar_capabilities: None,
+            streaming_supported: None,
             grammar_profile: None,
             profile_parents: std::collections::HashMap::new(),
             tools_supported: None,
@@ -23413,6 +24072,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         }
     }
 

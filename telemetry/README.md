@@ -67,6 +67,15 @@ safe completion log that belong to that one semantic event. The request path
 still calls the facade only once. It must never call a Prometheus client and an
 OTel client for the same event.
 
+The sampled `inference.request.completed` log schema v2 carries the canonical
+model, machine profile, request duration, admission outcome, HTTP outcome, and
+operation. It does not carry account, WorkOS user, API-key, request, contact,
+or payload identifiers. Durable per-account product events belong to the
+authenticated control-plane analytics export, not the Better Stack pipeline.
+Collectors accept schema v1 only while older gateway pods drain during a
+rolling update; they preserve its version and never relabel an incomplete v1
+record as v2.
+
 Every deployment uses the same application path: OTel instruments and log
 records leave the process through OTLP. Prometheus is a collector exporter, not
 an application instrumentation API. The bundled OSS/Kubernetes collector

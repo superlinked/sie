@@ -25,7 +25,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
-from sie_server.adapters._generation_base import FinishReason, GenerationChunk, ToolCallDelta
+from sie_server.adapters._generation_base import (
+    FinishReason,
+    GenerationChunk,
+    ToolCallDelta,
+    aclose_with_error_precedence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,17 +87,22 @@ async def parse_tool_call_stream(
     always ``aclose()``d (on cancel, early parse-error ``return``, and normal
     completion alike).
     """
+    terminal_outcome_selected = False
     try:
         async for out in _parse_tool_call_stream_impl(
             chunks,
             tool_call_format=tool_call_format,
             parallel_tool_calls=parallel_tool_calls,
         ):
+            if out.done:
+                terminal_outcome_selected = True
             yield out
     finally:
-        aclose = getattr(chunks, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        await aclose_with_error_precedence(
+            chunks,
+            outcome_selected=terminal_outcome_selected,
+            context="tool-call parser upstream iterator",
+        )
 
 
 @dataclass
@@ -432,6 +442,8 @@ async def _parse_tool_call_stream_impl(
                     completion_tokens=chunk.completion_tokens,
                     candidates=tuple(updated_candidates),
                     logprobs=chunk.logprobs,
+                    error_code=chunk.error_code,
+                    error_message=chunk.error_message,
                 )
             # Global terminal. Close any choices that did not see a
             # per-choice finish event (single-candidate path: this is
@@ -476,6 +488,8 @@ async def _parse_tool_call_stream_impl(
                 finish_reason=global_finish,  # type: ignore[arg-type]
                 prompt_tokens=chunk.prompt_tokens,
                 completion_tokens=chunk.completion_tokens,
+                error_code=chunk.error_code,
+                error_message=chunk.error_message,
                 # Preserve ``candidates`` (with any per-candidate
                 # ``tool_calls`` injected above for the non-streaming
                 # ``n>1`` + tools path) through the wrap.

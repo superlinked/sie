@@ -1,14 +1,12 @@
 # syntax=docker/dockerfile:1
-# SIE Server - CUDA 13 Image (SGLang cu130 bundles)
+# SIE Server - CUDA 13 Image (engine-isolated cu130 bundles)
 # Build from repo root:
 #   docker build -f packages/sie_server/Dockerfile.cuda13 --build-arg BUNDLE=sglang-cu130 -t sie-server:cuda13-sglang-cu130 .
 #
-# WHY A SEPARATE PLATFORM: the sglang-cu130 bundle needs sglang 0.5.13, which pins
-# torch==2.11.0 (cu130) + transformers 5.8.x and JIT-compiles cu130 kernels
-# (flashinfer / tvm_ffi) through nvcc on first decode — so it requires a CUDA 13
-# devel runtime. Keeping it here (platform ``cuda13``) instead of inside
-# Dockerfile.cuda12 means a ``cuda13-sglang-cu130`` image is honestly labelled CUDA 13,
-# not a CUDA-13 image hiding under a ``cuda12-*`` tag (see #1415).
+# WHY A SEPARATE PLATFORM: CUDA 13 engines carry independent exact Torch,
+# Transformers, FlashInfer, and native-library closures. Keeping them here
+# (platform ``cuda13``) instead of Dockerfile.cuda12 makes image tags honest
+# while still sharing the expensive CUDA 13 base layers.
 #
 # STRUCTURE: mirrors Dockerfile.cuda12's deps→base→builder→runtime stages so the
 # shared logic (standalone Python, editable installs, bundle-libs .pth shadow,
@@ -18,7 +16,7 @@
 # cu130 bundle), so there is no per-bundle runtime indirection.
 #
 # DUAL-TORCH CARRY: the shared base venv still installs torch 2.9 (cu129) from
-# pyproject, and the sglang-cu130 bundle overlays torch 2.11 (cu130) into bundle-libs
+# pyproject, and CUDA 13 bundles overlay torch 2.11 (cu130) into bundle-libs
 # (~+3 GB). Slimming torch out of sie-server core to drop the carry is a tracked
 # follow-up (#1415).
 
@@ -50,13 +48,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_PYTHON_INSTALL_DIR=/opt/python \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Minimal apt footprint: just enough for curl + git; no deadsnakes PPA.
+# Minimal apt footprint: curl/git plus the MPI runtime required by
+# TensorRT-LLM's Python import; no OpenMPI development headers are needed.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    git
+    git \
+    libopenmpi3 \
+    openmpi-bin
 
 ARG UV_VERSION
 RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh \
@@ -117,12 +118,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Sanity-check shared venv imports.
 RUN .venv/bin/python -c "import sie_audio_prep, torch; print(torch.__version__)"
 
-# Register bundle-libs on sys.path via a .pth executed by site.py at startup.
-# sys.path.insert(0, ...) puts bundle-libs at position 0 so bundle-specific
-# versions SHADOW the shared venv (the cu130 torch/transformers/sglang
-# overlay). Content is identical for every bundle, so writing it here keeps the
-# shared venv layer byte-identical.
-RUN echo "import sys; sys.path.insert(0, '/app/bundle-libs')" \
+# Register bundle-libs as a site directory so dependency-owned .pth files are
+# processed at interpreter startup. Then move every discovered bundle path
+# ahead of the shared venv so bundle-specific versions SHADOW it (the cu130
+# torch/transformers/engine overlay). Content is identical for every bundle, so
+# writing it here keeps the shared venv layer byte-identical.
+RUN echo "import site, sys; _sie_bundle_start = len(sys.path); site.addsitedir('/app/bundle-libs'); sys.path[:] = sys.path[_sie_bundle_start:] + sys.path[:_sie_bundle_start]" \
     > /app/.venv/lib/python3.12/site-packages/_sie_bundle.pth
 
 # Conservative venv cleanup — only runtime-safe removals. Keep torch/include
@@ -155,7 +156,7 @@ RUN .venv/bin/python -m sie_server.cli resolve-deps \
     && cat /tmp/bundle-requirements.txt
 
 # cu130 bundle deps go into a separate site-packages tree (``bundle-libs``,
-# prepended to sys.path via the .pth above). The sglang-cu130 bundle needs torch 2.11
+# prepended to sys.path via the .pth above). CUDA 13 engines need torch 2.11
 # from the cu130 PyTorch index, where the only ``2.11.0`` is the ``+cu130``
 # local-version wheel; pip's multi-index resolution does not reliably prefer it
 # over PyPI's default-CUDA build, so cuda13 bundles resolve with ``uv`` and
@@ -164,7 +165,7 @@ RUN .venv/bin/python -m sie_server.cli resolve-deps \
 # cu130-index resolution was validated with sglang 0.5.13, torch 2.11, and a
 # cu130 runtime in a fresh GPU environment.
 #
-# COVERAGE NOTE: the cuda13 image CI smoke (.github/workflows/sglang-cu130-image.yml)
+# COVERAGE NOTE: the CUDA 13 image CI callers
 # builds this image and asserts on CPU that the bundle-libs cu130 overlay
 # SHADOWS the base venv (import torch -> 2.11+cu130, transformers 5.x). It does
 # NOT exercise GPU init: the cu12 base venv + cu130 bundle-libs both expose the
@@ -220,6 +221,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # libnuma1: required by sgl_kernel; import fails with a misleading SM-arch error
 #   without it.
 # libgomp1: torch OpenMP runtime.
+# libopenmpi3/openmpi-bin: TensorRT-LLM imports MPI at runtime; headers are not
+#   required by the qualified wheel closure.
 # libspatialindex-c6 / libgl1 / libglib2.0-0 / libice6 / libsm6 / libx11-6 /
 #   libxcb1 / libxext6: docling/opencv dlopen chain (kept symmetric with the
 #   cuda12 runtime so the same model bundle deps import cleanly).
@@ -235,9 +238,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libgomp1 \
     libice6 \
     libnuma1 \
+    libopenmpi3 \
     libsm6 \
     libspatialindex-c6 \
     ninja-build \
+    openmpi-bin \
     libx11-6 \
     libxcb1 \
     libxext6
@@ -278,7 +283,8 @@ LABEL org.opencontainers.image.title="SIE Server" \
       org.opencontainers.image.description="Search Inference Engine - ${BUNDLE} bundle (CUDA 13)" \
       sie.bundle="${BUNDLE}"
 
-ENV PATH="/app/.venv/bin:$PATH" \
+# ``uv --target`` writes engine entrypoints beside the package overlay.
+ENV PATH="/app/bundle-libs/bin:/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/app/.cache/huggingface \

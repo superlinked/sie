@@ -13,6 +13,7 @@ import {
   RequestError,
   SIEConnectionError,
   SIEStreamError,
+  type ServerError,
 } from "../src/errors.js";
 import type { ChatCompletionChunk, GenerateChunk } from "../src/types.js";
 import { MINIMAL_JPEG_BASE64, MINIMAL_JPEG_BYTES } from "./fixtures.js";
@@ -273,9 +274,71 @@ describe("SIEClient.streamChatCompletions", () => {
       expect(streamErr.code).toBe("context_exceeded");
       expect(streamErr.errorType).toBe("context_length_exceeded");
       expect(streamErr.message).toBe("prompt too long");
+      expect(streamErr.param).toBeNull();
       // Pre-#3136 gateways omit request_id on chat error chunks; the SDK
       // must tolerate its absence.
       expect(streamErr.requestId).toBeUndefined();
+    }
+  });
+
+  it("drops a malformed chat stream error param", async () => {
+    const errorChunkBody = {
+      id: "chatcmpl-x",
+      object: "chat.completion.chunk",
+      created: 1_700_000_000,
+      model: "m",
+      system_fingerprint: null,
+      choices: [],
+      error: {
+        message: "bad request",
+        type: "invalid_request_error",
+        param: { private: "must-not-surface" },
+        code: "invalid_request",
+      },
+    };
+    mockFetch.mockResolvedValueOnce(sseResponse([JSON.stringify(errorChunkBody)]));
+
+    const client = new SIEClient("http://localhost:8080");
+    const gen = client.streamChatCompletions({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    await expect(gen.next()).rejects.toMatchObject({
+      name: "SIEStreamError",
+      param: undefined,
+    });
+  });
+
+  it("exposes a validated RESOURCE_EXHAUSTED retry hint on chat stream errors", async () => {
+    const errorChunkBody: ChatCompletionChunk = {
+      id: "chatcmpl-x",
+      object: "chat.completion.chunk",
+      created: 1_700_000_000,
+      model: "m",
+      system_fingerprint: null,
+      choices: [],
+      error: {
+        message: "capacity unavailable",
+        type: "server_error",
+        code: "RESOURCE_EXHAUSTED",
+        retry_after_s: 12,
+      },
+    };
+    mockFetch.mockResolvedValueOnce(sseResponse([JSON.stringify(errorChunkBody)]));
+
+    const client = new SIEClient("http://localhost:8080");
+    const gen = client.streamChatCompletions({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    try {
+      await gen.next();
+      throw new Error("expected SIEStreamError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(SIEStreamError);
+      expect((err as SIEStreamError).retryAfter).toBe(12_000);
     }
   });
 
@@ -517,7 +580,7 @@ describe("SIEClient.streamGenerate", () => {
         generateChunk(0, "", {
           done: true,
           finish_reason: "error",
-          error: { code: "cancelled", message: "client closed" },
+          error: { code: "unsupported_field", message: "top_k is unavailable", param: "top_k" },
         }),
       ]),
     );
@@ -530,9 +593,102 @@ describe("SIEClient.streamGenerate", () => {
       throw new Error("expected SIEStreamError");
     } catch (err) {
       expect(err).toBeInstanceOf(SIEStreamError);
-      expect((err as SIEStreamError).code).toBe("cancelled");
-      expect((err as SIEStreamError).message).toBe("client closed");
+      expect((err as SIEStreamError).code).toBe("unsupported_field");
+      expect((err as SIEStreamError).message).toBe("top_k is unavailable");
+      expect((err as SIEStreamError).param).toBe("top_k");
       expect((err as SIEStreamError).requestId).toBe("req-1");
+    }
+  });
+
+  it("drops a malformed native stream error param", async () => {
+    mockFetch.mockResolvedValueOnce(
+      sseResponse([
+        JSON.stringify({
+          request_id: "req-1",
+          seq: 0,
+          text_delta: "",
+          done: true,
+          finish_reason: "error",
+          error: {
+            code: "invalid_request",
+            message: "bad request",
+            param: ["must-not-surface"],
+          },
+        }),
+      ]),
+    );
+
+    const client = new SIEClient("http://localhost:8080");
+    const gen = client.streamGenerate("m", "hi", { maxNewTokens: 8 });
+
+    await expect(gen.next()).rejects.toMatchObject({
+      name: "SIEStreamError",
+      param: undefined,
+    });
+  });
+
+  it("exposes a validated RESOURCE_EXHAUSTED retry hint on native stream errors", async () => {
+    mockFetch.mockResolvedValueOnce(
+      sseResponse([
+        generateChunk(0, "", {
+          done: true,
+          finish_reason: "error",
+          error: {
+            code: "RESOURCE_EXHAUSTED",
+            message: "capacity unavailable",
+            retry_after_s: 12,
+          },
+        }),
+      ]),
+    );
+
+    const client = new SIEClient("http://localhost:8080");
+    const gen = client.streamGenerate("m", "hi", { maxNewTokens: 8 });
+    try {
+      await gen.next();
+      throw new Error("expected SIEStreamError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(SIEStreamError);
+      expect((err as SIEStreamError).retryAfter).toBe(12_000);
+    }
+  });
+
+  it.each([
+    ["missing", "RESOURCE_EXHAUSTED", undefined],
+    ["null", "RESOURCE_EXHAUSTED", null],
+    ["boolean", "RESOURCE_EXHAUSTED", true],
+    ["fractional", "RESOURCE_EXHAUSTED", 12.5],
+    ["string", "RESOURCE_EXHAUSTED", "12"],
+    ["below-domain", "RESOURCE_EXHAUSTED", 0],
+    ["above-domain", "RESOURCE_EXHAUSTED", 61],
+    ["wrong-code", "MODEL_LOADING", 12],
+  ])("drops a %s native retry hint", async (_label, code, retryAfterSeconds) => {
+    const error: Record<string, unknown> = {
+      code,
+      message: "capacity unavailable",
+    };
+    if (retryAfterSeconds !== undefined) error.retry_after_s = retryAfterSeconds;
+    mockFetch.mockResolvedValueOnce(
+      sseResponse([
+        JSON.stringify({
+          request_id: "req-1",
+          seq: 0,
+          text_delta: "",
+          done: true,
+          finish_reason: "error",
+          error,
+        }),
+      ]),
+    );
+
+    const client = new SIEClient("http://localhost:8080");
+    const gen = client.streamGenerate("m", "hi", { maxNewTokens: 8 });
+    try {
+      await gen.next();
+      throw new Error("expected SIEStreamError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(SIEStreamError);
+      expect((err as SIEStreamError).retryAfter).toBeUndefined();
     }
   });
 
@@ -728,6 +884,32 @@ describe("SIEClient.streamGenerate", () => {
       expect(err).toBeInstanceOf(ProvisioningError);
       expect((err as ProvisioningError).retryAfter).toBe(7_000);
     }
+  });
+
+  it("preserves the request id on a terminal streaming 504", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: "GATEWAY_TIMEOUT", message: "result deadline" } }),
+        {
+          status: 504,
+          headers: {
+            "Content-Type": "application/json",
+            "x-sie-request-id": "req-stream-504",
+          },
+        },
+      ),
+    );
+
+    const client = new SIEClient("http://localhost:8080");
+    const gen = client.streamGenerate("m", "hi", { maxNewTokens: 8 });
+
+    await expect(gen.next()).rejects.toMatchObject({
+      name: "ServerError",
+      code: "GATEWAY_TIMEOUT",
+      statusCode: 504,
+      requestId: "req-stream-504",
+    } satisfies Partial<ServerError>);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   // BUG 13b (MEDIUM): the streaming path must retry SAFE pre-execution

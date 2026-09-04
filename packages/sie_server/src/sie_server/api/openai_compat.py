@@ -620,7 +620,7 @@ async def _create_embeddings(
                 detail={
                     "error": {
                         "code": "inference_error",
-                        "message": f"Inference error: {e}",
+                        "message": "internal error during embeddings",
                         "type": "server_error",
                     }
                 },

@@ -14,9 +14,11 @@ All SIE packages are at **0.x pre-release** (currently 0.1.x). Per [SemVer 2.0.0
 
 ## Versioning Scheme
 
-### Mono-Version
+### SIE Release Version
 
-All packages share a **single version number**, managed by [release-please](https://github.com/googleapis/release-please). A release bumps the version across every artifact simultaneously:
+Artifacts produced by this repository share a **single version number**,
+managed by [release-please](https://github.com/googleapis/release-please). An
+SIE release bumps these artifacts together:
 
 | Artifact | Registry | Example |
 |----------|----------|---------|
@@ -25,13 +27,18 @@ All packages share a **single version number**, managed by [release-please](http
 | `@superlinked/sie-sdk`, `@superlinked/sie-langchain`, `@superlinked/sie-llamaindex`, `@superlinked/sie-chroma` | npm | 0.1.6 |
 | `sie-cluster` Helm chart | OCI (`ghcr.io/superlinked/charts`) | 0.1.6 |
 | `sie-server`, `sie-gateway` Docker images | ghcr.io | 0.1.6 |
-| `superlinked/sie/google`, `superlinked/sie/aws` Terraform modules | Terraform Registry | 0.1.6 |
 
 `sie-server` and `sie-gateway` are distributed as Docker images rather than PyPI packages.
 
-**Why mono-version:** Simplifies compatibility reasoning. Users deploy matching versions of SDK, server, gateway, and Helm chart. The version skew detection (see below) depends on this guarantee.
+The Alibaba Cloud, AWS, Azure, and Google Cloud Terraform modules are
+independently versioned libraries. Their public repositories own their source,
+compatibility policy, tags, releases, and Terraform Registry versions. A
+Terraform module version does not identify an SIE, image, or Helm chart
+version; consumers pin a tested combination deliberately.
 
-**Post-1.0 plan:** Re-evaluate independent versioning after 1.0 if package release cadences diverge significantly. Until then, mono-version remains the approach.
+**Why one SIE release version:** It simplifies compatibility reasoning for the
+SDK, server, gateway, images, and Helm chart. The version skew detection (see
+below) depends on this guarantee.
 
 ### SemVer Interpretation
 
@@ -220,7 +227,7 @@ SIE will declare 1.0 when all of the following are true:
 
 ### Publishing
 
-- [ ] All packages published to public registries (PyPI, npm, ghcr.io, OCI Helm, Terraform Registry)
+- [ ] All SIE release artifacts published to public registries (PyPI, npm, ghcr.io, OCI Helm)
 - [ ] CI/CD pipeline runs tests, linting, and type checking on every PR
 - [ ] Release automation produces changelogs and publishes artifacts on tag
 

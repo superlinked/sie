@@ -17,6 +17,7 @@ from sie_server.config.model import (
     ScoreTask,
     Tasks,
 )
+from sie_server.config.serving_artifacts import VerifiedServingArtifact
 from sie_server.core.loader import (
     _build_adapter_kwargs,
     load_adapter,
@@ -543,6 +544,116 @@ class TestBuildAdapterKwargs:
 
         with pytest.raises(ValueError, match="live external downloads"):
             _build_adapter_kwargs(config, "float16")
+
+    def test_serving_artifact_requires_loader_verification(self) -> None:
+        config = ModelConfig(
+            sie_id="google/source-model",
+            hf_id="google/source-model",
+            hf_revision="a" * 40,
+            tasks=Tasks(),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:Adapter",
+                    max_batch_tokens=128,
+                    adapter_options=AdapterOptions(
+                        loadtime={
+                            "serving_artifact": {
+                                "format": "ctranslate2",
+                                "repo_id": "superlinked/derived-model",
+                                "revision": "b" * 40,
+                                "manifest_path": "sie-serving-artifact.json",
+                                "manifest_sha256": "c" * 64,
+                                "compute_type": "bfloat16",
+                            }
+                        }
+                    ),
+                )
+            },
+        )
+
+        with pytest.raises(ValueError, match="loader did not verify"):
+            _build_adapter_kwargs(config, "float16")
+
+    def test_serving_artifact_declaration_is_removed_and_verified_root_is_injected(self, tmp_path: Path) -> None:
+        config = ModelConfig(
+            sie_id="google/source-model",
+            hf_id="google/source-model",
+            hf_revision="a" * 40,
+            tasks=Tasks(),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:Adapter",
+                    max_batch_tokens=128,
+                    adapter_options=AdapterOptions(
+                        loadtime={
+                            "serving_artifact": {
+                                "format": "ctranslate2",
+                                "repo_id": "superlinked/derived-model",
+                                "revision": "b" * 40,
+                                "manifest_path": "sie-serving-artifact.json",
+                                "manifest_sha256": "c" * 64,
+                                "compute_type": "bfloat16",
+                            }
+                        }
+                    ),
+                )
+            },
+        )
+        verified = VerifiedServingArtifact(
+            root=tmp_path / "materialized" / ("c" * 64),
+            manifest_sha256="c" * 64,
+            repo_id="superlinked/derived-model",
+            revision="b" * 40,
+            compute_type="bfloat16",
+            artifact_count=4,
+            manifest=None,  # ty: ignore[invalid-argument-type] -- constructor ownership is tested, not manifest parsing
+        )
+
+        kwargs = _build_adapter_kwargs(config, "float16", verified_serving_artifact=verified)
+
+        assert "serving_artifact" not in kwargs
+        assert kwargs["artifact_path"] == verified.root
+        assert kwargs["ct2_compute_type"] == "bfloat16"
+        assert "model_name_or_path" not in kwargs
+        assert "revision" not in kwargs
+
+    def test_serving_artifact_rejects_stale_loader_registration(self, tmp_path: Path) -> None:
+        config = ModelConfig(
+            sie_id="google/source-model",
+            hf_id="google/source-model",
+            hf_revision="a" * 40,
+            tasks=Tasks(),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="test:Adapter",
+                    max_batch_tokens=128,
+                    adapter_options=AdapterOptions(
+                        loadtime={
+                            "serving_artifact": {
+                                "format": "ctranslate2",
+                                "repo_id": "superlinked/derived-model",
+                                "revision": "b" * 40,
+                                "manifest_path": "sie-serving-artifact.json",
+                                "manifest_sha256": "c" * 64,
+                                "compute_type": "bfloat16",
+                            }
+                        }
+                    ),
+                )
+            },
+        )
+        stale = VerifiedServingArtifact(
+            root=tmp_path,
+            manifest_sha256="d" * 64,
+            repo_id="superlinked/derived-model",
+            revision="b" * 40,
+            compute_type="bfloat16",
+            artifact_count=1,
+            manifest=None,  # ty: ignore[invalid-argument-type]
+        )
+
+        with pytest.raises(ValueError, match="stale or mismatched"):
+            _build_adapter_kwargs(config, "float16", verified_serving_artifact=stale)
 
 
 class TestLoadAdapter:

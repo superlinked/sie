@@ -56,6 +56,153 @@ function createMsgpackResponse(
   });
 }
 
+type TerminalOperation = "encode" | "score" | "extract";
+
+function terminalPayload(operation: TerminalOperation): Record<string, unknown> {
+  if (operation === "encode") {
+    return { model: "m", items: [{ dense: { values: new Float32Array([0.5]) } }] };
+  }
+  if (operation === "score") {
+    return { model: "m", scores: [{ item_id: "0", score: 0.5, rank: 0 }] };
+  }
+  return { model: "m", items: [{ entities: [] }] };
+}
+
+async function invokeTerminal(client: SIEClient, operation: TerminalOperation): Promise<unknown> {
+  if (operation === "encode") return client.encode("m", { text: "input" });
+  if (operation === "score") return client.score("m", { text: "query" }, [{ text: "candidate" }]);
+  return client.extract("m", { text: "input" }, { labels: ["entity"] });
+}
+
+describe("SIEClient terminal Modal continuations", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(["encode", "score", "extract"] as const)(
+    "consumes a same-origin %s continuation by authenticated MsgPack GET",
+    async (operation) => {
+      const path = `/v1/${operation}/m?__modal_attempt_token=opaque`;
+      mockFetch
+        .mockResolvedValueOnce(new Response(null, { status: 303, headers: { Location: path } }))
+        .mockResolvedValueOnce(createMsgpackResponse(terminalPayload(operation)));
+
+      const client = new SIEClient("https://gateway.example.test", { apiKey: "secret" });
+      await invokeTerminal(client, operation);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch.mock.calls[0]?.[1]).toMatchObject({ method: "POST", redirect: "manual" });
+      expect(mockFetch.mock.calls[1]?.[0]).toBe(`https://gateway.example.test${path}`);
+      expect(mockFetch.mock.calls[1]?.[1]).toMatchObject({ method: "GET", redirect: "manual" });
+      const headers = mockFetch.mock.calls[1]?.[1]?.headers as Record<string, string>;
+      expect(headers.Accept).toBe("application/msgpack");
+      expect(headers.Authorization).toBe("Bearer secret");
+    },
+  );
+
+  it("preserves MsgPack credentials across every continuation hop", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 303,
+          headers: { Location: "/result?__modal_attempt_token=one" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 303,
+          headers: { Location: "/result?__modal_attempt_token=two" },
+        }),
+      )
+      .mockResolvedValueOnce(createMsgpackResponse(terminalPayload("encode")));
+
+    const client = new SIEClient("https://gateway.example.test", { apiKey: "secret" });
+    await client.encode("m", { text: "input" });
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    const signals = mockFetch.mock.calls.map((call) => (call[1] as RequestInit).signal);
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    expect(new Set(signals).size).toBe(signals.length);
+    for (const call of mockFetch.mock.calls.slice(1)) {
+      const init = call[1] as RequestInit;
+      const headers = init.headers as Record<string, string>;
+      expect(init).toMatchObject({ method: "GET", redirect: "manual" });
+      expect(headers.Accept).toBe("application/msgpack");
+      expect(headers.Authorization).toBe("Bearer secret");
+    }
+  });
+
+  it("does not replay the POST when continuation retrieval fails", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 303,
+          headers: { Location: "/result?__modal_attempt_token=opaque" },
+        }),
+      )
+      .mockRejectedValueOnce(new TypeError("fetch failed"));
+
+    const client = new SIEClient("https://gateway.example.test", {
+      provisionTimeout: 60_000,
+    });
+
+    await expect(
+      client.encode("m", { text: "input" }, { waitForCapacity: true }),
+    ).rejects.toBeInstanceOf(SIEConnectionError);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[0]?.[1].method).toBe("POST");
+    expect(mockFetch.mock.calls[1]?.[1].method).toBe("GET");
+  });
+
+  it("refuses a continuation GET after the provisioning budget expires", async () => {
+    vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(60_001);
+    mockFetch.mockResolvedValueOnce(
+      new Response(null, {
+        status: 303,
+        headers: { Location: "/result?__modal_attempt_token=opaque" },
+      }),
+    );
+    const client = new SIEClient("https://gateway.example.test", {
+      provisionTimeout: 60_000,
+    });
+
+    await expect(client.encode("m", { text: "input" })).rejects.toBeInstanceOf(ProvisioningError);
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when browser Fetch hides a manual redirect", async () => {
+    mockFetch.mockResolvedValueOnce({ type: "opaqueredirect" } as Response);
+    const client = new SIEClient("https://gateway.example.test");
+
+    await expect(client.encode("m", { text: "input" })).rejects.toMatchObject({
+      name: "SIEConnectionError",
+      kind: "other",
+    });
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
+
+  it("raises ProvisioningError when the continuation hop limit is exhausted", async () => {
+    mockFetch.mockImplementation(async () =>
+      Promise.resolve(
+        new Response(null, {
+          status: 303,
+          headers: { Location: "/result?__modal_attempt_token=opaque" },
+        }),
+      ),
+    );
+    const client = new SIEClient("https://gateway.example.test");
+
+    await expect(client.encode("m", { text: "input" })).rejects.toThrow(
+      /remained in flight after 20 continuation hops/,
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(21);
+  });
+});
+
 describe("SIEClient construction", () => {
   beforeEach(() => {
     mockFetch.mockClear();
@@ -290,6 +437,7 @@ describe("SIEClient.encode() - basic usage", () => {
         {
           "x-sie-request-id": "req-encode",
           "x-sie-execution-identity-sha256": "a".repeat(64),
+          "x-sie-execution-binding-sha256": "b".repeat(64),
           "x-sie-units-input-tokens": "11",
           "x-sie-units-pairs": "2",
           "x-sie-units-images": "1",
@@ -309,6 +457,7 @@ describe("SIEClient.encode() - basic usage", () => {
     expect(results[0]?.request).toEqual({
       id: "req-encode",
       executionIdentitySha256: "a".repeat(64),
+      executionBindingSha256: "b".repeat(64),
       usage: {
         inputTokens: 11,
         pairs: 2,
@@ -329,6 +478,7 @@ describe("SIEClient.encode() - basic usage", () => {
       createMsgpackResponse({ items: [{ dense: { values: new Float32Array([0.1]) } }] }, 200, {
         "x-sie-request-id": "réq-bad",
         "x-sie-execution-identity-sha256": "A".repeat(64),
+        "x-sie-execution-binding-sha256": "B".repeat(64),
         "x-sie-units-input-tokens": "01",
         "x-sie-units-pairs": "2",
         "x-sie-credits-debited": "9007199254740992",

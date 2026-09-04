@@ -92,6 +92,14 @@ def test_openapi_documents_generate_contract() -> None:
     assert chunk_schema["properties"]["usage"]["anyOf"][0] == {"$ref": "#/components/schemas/GenerateUsageModel"}
     assert chunk_schema["properties"]["error"]["anyOf"][0] == {"$ref": "#/components/schemas/GenerateChunkErrorModel"}
     assert chunk_schema["properties"]["logprobs"]["anyOf"][0]["type"] == "array"
+    chunk_error_schema = spec["components"]["schemas"]["GenerateChunkErrorModel"]
+    assert chunk_error_schema["properties"]["param"]["anyOf"][0] == {"type": "string"}
+    assert "param" not in chunk_error_schema["required"]
+    retry_after = chunk_error_schema["properties"]["retry_after_s"]
+    assert retry_after["anyOf"][0]["type"] == "integer"
+    assert retry_after["anyOf"][0]["minimum"] == 1
+    assert retry_after["anyOf"][0]["maximum"] == 60
+    assert "retry_after_s" not in chunk_error_schema["required"]
 
     responses = operation["responses"]
     assert "INPUT_TOO_LONG" in responses["413"]["description"]
@@ -116,6 +124,15 @@ def test_openapi_documents_generate_contract() -> None:
         "attempts",
     }
     assert model_load_failed_detail["properties"]["code"]["const"] == "MODEL_LOAD_FAILED"
+
+
+def test_openapi_documents_streaming_model_capability() -> None:
+    result = runner.invoke(app, ["openapi"])
+    assert result.exit_code == 0, result.output
+    spec = json.loads(result.output)
+    streaming = spec["components"]["schemas"]["ModelCapabilities"]["properties"]["streaming"]
+    assert streaming["type"] == "boolean"
+    assert streaming["default"] is True
 
 
 def test_openapi_documents_direct_completions_contract() -> None:

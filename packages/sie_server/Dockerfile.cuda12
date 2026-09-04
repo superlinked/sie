@@ -110,12 +110,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # intentionally not imported here.
 RUN .venv/bin/python -c "import sie_audio_prep, torch; print(torch.__version__)"
 
-# Register bundle-libs on sys.path via a .pth file executed by site.py at
-# interpreter startup. `sys.path.insert(0, ...)` puts bundle-libs at
-# position 0 so bundle-specific versions SHADOW shared venv versions
-# (required for the transformers5 bundle). Content is identical for every
-# bundle, so writing it here keeps the shared venv layer byte-identical.
-RUN echo "import sys; sys.path.insert(0, '/app/bundle-libs')" \
+# Register bundle-libs as a site directory so dependency-owned .pth files are
+# processed at interpreter startup. Then move every discovered bundle path
+# ahead of the shared venv so bundle-specific versions SHADOW it (required for
+# the transformers5 bundle). Content is identical for every bundle, so writing
+# it here keeps the shared venv layer byte-identical.
+RUN echo "import site, sys; _sie_bundle_start = len(sys.path); site.addsitedir('/app/bundle-libs'); sys.path[:] = sys.path[_sie_bundle_start:] + sys.path[:_sie_bundle_start]" \
     > /app/.venv/lib/python3.12/site-packages/_sie_bundle.pth
 
 # Conservative venv cleanup — only things known to be runtime-safe. Keep
@@ -210,6 +210,8 @@ RUN set -eux; \
 # smaller CUDA base runtime; SGLang-family bundles need the devel toolkit
 # because flashinfer/tvm_ffi perform runtime JIT through nvcc on first decode.
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS runtime-default
+# The CTranslate2 bundle uses the CUDA runtime image, not the devel toolchain.
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime-ctranslate2
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS runtime-transformers5
 FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04 AS runtime-sglang
 ENV CUDA_HOME=/usr/local/cuda \

@@ -448,6 +448,8 @@ workers:
     bundlePlatforms:
       # SGLang cu130 (Gemma 4 plus newer Qwen profiles) ships only as a CUDA 13 image.
       sglang-cu130: cuda13
+      # TensorRT-LLM direct-HF encoder-decoder workers ship only as CUDA 13 images.
+      tensorrt-llm: cuda13
 
     # -- Image pre-pull DaemonSet (caches worker image on GPU nodes before worker pods schedule)
     imagePrepull:

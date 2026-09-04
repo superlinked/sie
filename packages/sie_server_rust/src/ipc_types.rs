@@ -3,7 +3,7 @@
 //! This mirrors the subset of `sie_server_sidecar::protocol::ipc_types`
 //! needed by a Rust adapter process. The response-chunk v1 envelope and
 //! limits are pinned across the native worker, sidecar, and Python worker by
-//! `tools/ci/check_response_chunk_protocol.py`. The wire format is named-map
+//! `tools/check_response_chunk_protocol.py`. The wire format is named-map
 //! msgpack framed as `[4-byte BE length][msgpack body]`.
 
 use half::f16;

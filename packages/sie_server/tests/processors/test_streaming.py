@@ -17,7 +17,7 @@ import asyncio
 import base64
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -25,14 +25,20 @@ import msgpack
 import pytest
 from sie_server.adapters._generation_base import (
     GenerationAdapter,
+    GenerationCapacityError,
     GenerationChunk,
+    GenerationError,
+    GenerationInputTooLongError,
+    GenerationUnsupportedFieldError,
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig
 from sie_server.observability import worker_telemetry as worker_metrics
 from sie_server.processors import streaming as streaming_mod
 from sie_server.processors.streaming import StreamingProcessor, _ValidationError
+from sie_server.types.grammar import GrammarSpec
 
 _GEMMA_OPEN = "<" + "|channel" + ">" + "thought\n"
 _GEMMA_CLOSE = "<" + "channel|" + ">"
@@ -47,6 +53,7 @@ class _FakeGenAdapter(GenerationAdapter):
         self._device = None
         self._script = script
         self._hold = hold_event
+        self.close_calls = 0
 
     def load(self, device: str) -> None:  # pragma: no cover — registry-mocked
         self._device = device
@@ -70,11 +77,47 @@ class _FakeGenAdapter(GenerationAdapter):
         **kwargs: Any,
     ) -> AsyncIterator[GenerationChunk]:
         _ = (prompt, max_new_tokens, temperature, top_p, stop, kwargs)
-        for chunk in self._script:
-            if self._hold is not None:
-                # Block here until externally released — used for cancel test.
-                await self._hold.wait()
-            yield chunk
+        try:
+            for chunk in self._script:
+                if self._hold is not None:
+                    # Block here until externally released — used for cancel test.
+                    await self._hold.wait()
+                yield chunk
+        finally:
+            self.close_calls += 1
+
+
+class _IndependentContextGenAdapter(_FakeGenAdapter):
+    context_length_accounting = "independent"
+
+
+class _PreflightGenAdapter(_FakeGenAdapter):
+    def __init__(self, error: Exception | None = None, *, raise_during_generate: bool = False) -> None:
+        super().__init__([GenerationChunk(text_delta="", done=True, finish_reason="stop")])
+        self.error = error
+        self.raise_during_generate = raise_during_generate
+        self.preflight_parameters: dict[str, Any] | None = None
+        self.preflight_stream: bool | None = None
+        self.dispatched_parameters: dict[str, Any] | None = None
+
+    def preflight_generate(self, parameters: Mapping[str, Any], *, stream: bool) -> None:
+        self.preflight_parameters = dict(parameters)
+        self.preflight_stream = stream
+        if self.error is not None and not self.raise_during_generate:
+            raise self.error
+
+    async def generate(self, prompt: str, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        self.dispatched_parameters = {"prompt": prompt, **kwargs}
+        try:
+            if self.error is not None and self.raise_during_generate:
+                raise self.error
+            yield GenerationChunk(text_delta="", done=True, finish_reason="stop")
+        finally:
+            self.close_calls += 1
+
+
+class _FutureUnsupportedFieldError(GenerationUnsupportedFieldError):
+    pass
 
 
 def _make_work_item(
@@ -113,13 +156,19 @@ def _make_work_item(
     return wi
 
 
-def _make_generation_config(*, min_new_tokens: int = 10) -> ModelConfig:
+def _make_generation_config(*, min_new_tokens: int = 10, streaming: bool = True) -> ModelConfig:
     return ModelConfig.model_validate(
         {
             "sie_id": "test/model",
             "hf_id": "test/model",
             "inputs": {"text": True},
-            "tasks": {"generate": {"context_length": 4096, "max_output_tokens": 512}},
+            "tasks": {
+                "generate": {
+                    "context_length": 4096,
+                    "max_output_tokens": 512,
+                    "capabilities": {"streaming": streaming},
+                }
+            },
             "max_sequence_length": 4096,
             "profiles": {
                 "default": {
@@ -235,6 +284,7 @@ async def test_streaming_publishes_per_chunk_with_terminal(monkeypatch: pytest.M
     assert seqs == sorted(seqs)
     # ACK happened.
     msg.ack.assert_awaited()
+    assert adapter.close_calls == 1
     _assert_one_generation_completion(telemetry, outcome="success")
     # Worker-side phase boundary (#3136): one worker-wait observation per
     # dispatched request, labeled with the grammar mode ("none" here) so the
@@ -244,6 +294,342 @@ async def test_streaming_publishes_per_chunk_with_terminal(monkeypatch: pytest.M
     assert wait_kwargs["model"] == "test/model"
     assert wait_kwargs["grammar"] == "none"
     assert wait_kwargs["duration_s"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_adapter_preflight_matches_dispatch_and_precedes_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    nc = AsyncMock()
+    adapter = _PreflightGenAdapter()
+    registry = _make_registry(adapter)
+    registry.get_config.return_value = _make_generation_config()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    original_reserve = proc._try_reserve
+
+    async def reserve_after_preflight(*args: Any, **kwargs: Any) -> bool:
+        assert adapter.preflight_parameters is not None
+        return await original_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(proc, "_try_reserve", reserve_after_preflight)
+
+    await proc.process(_make_msg(_make_work_item()), "test/model")
+
+    assert adapter.preflight_parameters == adapter.dispatched_parameters
+    assert adapter.preflight_stream is False
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_error"),
+    [
+        (
+            GenerationUnsupportedFieldError("top_k"),
+            {
+                "code": "unsupported_field",
+                "message": "'top_k' is not supported by this generation backend",
+                "param": "top_k",
+            },
+        ),
+        (
+            GenerationUnsupportedFieldError("n", "TensorRT-LLM completions support n=1 only"),
+            {
+                "code": "unsupported_field",
+                "message": "TensorRT-LLM completions support n=1 only",
+                "param": "n",
+            },
+        ),
+        (
+            GenerationUnsupportedFieldError("best_of", "TensorRT-LLM completions support best_of=1 only"),
+            {
+                "code": "unsupported_field",
+                "message": "TensorRT-LLM completions support best_of=1 only",
+                "param": "best_of",
+            },
+        ),
+        (
+            GenerationUnsupportedFieldError(
+                "lora_path",
+                "'lora_adapter' is not supported by this generation backend",
+            ),
+            {
+                "code": "unsupported_field",
+                "message": "'lora_adapter' is not supported by this generation backend",
+                "param": "lora_adapter",
+            },
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_adapter_preflight_refusal_preserves_code_param_and_skips_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    error: GenerationUnsupportedFieldError,
+    expected_error: dict[str, str],
+) -> None:
+    nc = AsyncMock()
+    adapter = _PreflightGenAdapter(error)
+    registry = _make_registry(adapter)
+    registry.get_config.return_value = _make_generation_config()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    reserve = AsyncMock(return_value=True)
+    monkeypatch.setattr(proc, "_try_reserve", reserve)
+    msg = _make_msg(_make_work_item())
+
+    await proc.process(msg, "test/model")
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"] == expected_error
+    assert terminal["error"].get("param") != "lora_path"
+    assert "lora_path" not in str(terminal["error"])
+    reserve.assert_not_awaited()
+    assert adapter.dispatched_parameters is None
+    msg.ack.assert_awaited_once()
+
+
+@pytest.mark.parametrize("raise_during_generate", [False, True])
+@pytest.mark.asyncio
+async def test_future_refusal_subclass_param_is_sanitized_on_worker_wire(
+    monkeypatch: pytest.MonkeyPatch,
+    raise_during_generate: bool,
+) -> None:
+    nc = AsyncMock()
+    adapter = _PreflightGenAdapter(
+        _FutureUnsupportedFieldError("n", "future refusal"),
+        raise_during_generate=raise_during_generate,
+    )
+    registry = _make_registry(adapter)
+    registry.get_config.return_value = _make_generation_config()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+
+    await proc.process(_make_msg(_make_work_item()), "test/model")
+
+    assert _decode_chunks(nc)[-1]["error"] == {
+        "code": "unsupported_field",
+        "message": "future refusal",
+    }
+
+
+@pytest.mark.asyncio
+async def test_input_too_long_preflight_preserves_code_param_and_skips_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nc = AsyncMock()
+    adapter = _PreflightGenAdapter(GenerationInputTooLongError("prompt token count (129) exceeds max_input_len (128)"))
+    registry = _make_registry(adapter)
+    registry.get_config.return_value = _make_generation_config()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    reserve = AsyncMock(return_value=True)
+    monkeypatch.setattr(proc, "_try_reserve", reserve)
+    msg = _make_msg(_make_work_item())
+
+    await proc.process(msg, "test/model")
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"] == {
+        "code": "INPUT_TOO_LONG",
+        "message": "prompt token count (129) exceeds max_input_len (128)",
+        "param": "prompt",
+    }
+    reserve.assert_not_awaited()
+    assert adapter.dispatched_parameters is None
+    msg.ack.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_typed_capacity_raised_by_iterator_keeps_retryable_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    nc = AsyncMock()
+    adapter = _PreflightGenAdapter(GenerationCapacityError("scheduler full"), raise_during_generate=True)
+    registry = _make_registry(adapter)
+    registry.engine_config = EngineConfig.model_validate({"oom_recovery": {"retry_after_s": 12}})
+    registry.get_config.return_value = _make_generation_config()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+
+    await proc.process(_make_msg(_make_work_item()), "test/model")
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"]["code"] == "RESOURCE_EXHAUSTED"
+    assert terminal["error"]["message"] == "scheduler full"
+    assert terminal["error"]["retry_after_s"] == 12
+    assert adapter.close_calls == 1
+
+
+@pytest.mark.parametrize("raise_during_generate", [False, True])
+@pytest.mark.asyncio
+async def test_generic_typed_generation_error_is_sanitized_on_worker_wire(
+    monkeypatch: pytest.MonkeyPatch,
+    raise_during_generate: bool,
+) -> None:
+    sentinel = "SENSITIVE_TYPED_WORKER_ERROR"
+    nc = AsyncMock()
+    error = GenerationError(sentinel)
+    error.param = sentinel
+    adapter = _PreflightGenAdapter(
+        error,
+        raise_during_generate=raise_during_generate,
+    )
+    registry = _make_registry(adapter)
+    registry.get_config.return_value = _make_generation_config()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+
+    await proc.process(_make_msg(_make_work_item()), "test/model")
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"] == {
+        "code": "inference_error",
+        "message": "internal error during generation",
+    }
+    assert sentinel not in str(terminal)
+
+
+@pytest.mark.asyncio
+async def test_typed_capacity_preflight_keeps_configured_retry_hint_and_skips_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nc = AsyncMock()
+    adapter = _PreflightGenAdapter(GenerationCapacityError("scheduler full"))
+    registry = _make_registry(adapter)
+    registry.engine_config = EngineConfig.model_validate({"oom_recovery": {"retry_after_s": 12}})
+    registry.get_config.return_value = _make_generation_config()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    reserve = AsyncMock(return_value=True)
+    monkeypatch.setattr(proc, "_try_reserve", reserve)
+
+    await proc.process(_make_msg(_make_work_item()), "test/model")
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"] == {
+        "code": "RESOURCE_EXHAUSTED",
+        "message": "scheduler full",
+        "retry_after_s": 12,
+    }
+    reserve.assert_not_awaited()
+    assert adapter.dispatched_parameters is None
+
+
+@pytest.mark.asyncio
+async def test_unexpected_preflight_error_is_sanitized_on_worker_wire(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = "SENSITIVE_PREFLIGHT_SENTINEL"
+    nc = AsyncMock()
+    adapter = _PreflightGenAdapter(RuntimeError(sentinel))
+    registry = _make_registry(adapter)
+    registry.get_config.return_value = _make_generation_config()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+
+    await proc.process(_make_msg(_make_work_item()), "test/model")
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"] == {
+        "code": "inference_error",
+        "message": "internal error during generation preflight",
+    }
+    assert sentinel not in str(terminal)
+    assert adapter.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_unexpected_iterator_error_is_sanitized_on_worker_wire(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = "SENSITIVE_ITERATOR_SENTINEL"
+    nc = AsyncMock()
+    adapter = _PreflightGenAdapter(RuntimeError(sentinel), raise_during_generate=True)
+    registry = _make_registry(adapter)
+    registry.get_config.return_value = _make_generation_config()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+
+    await proc.process(_make_msg(_make_work_item()), "test/model")
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"] == {
+        "code": "inference_error",
+        "message": "internal error during generation",
+    }
+    assert sentinel not in str(terminal)
+    assert adapter.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "expected_code", "expected_message"),
+    [
+        (
+            "inference_error",
+            "SENSITIVE_YIELDED_RUNTIME",
+            "inference_error",
+            "internal error during generation",
+        ),
+        (
+            "grammar_compile_failed",
+            "SENSITIVE_YIELDED_GRAMMAR",
+            "grammar_compile_failed",
+            "internal error compiling grammar",
+        ),
+        (
+            "grammar_invalid",
+            "invalid grammar at byte 4",
+            "grammar_invalid",
+            "invalid grammar at byte 4",
+        ),
+        (
+            "SENSITIVE_WORKER_WIRE_ERROR_CODE",
+            "SENSITIVE_WORKER_WIRE_ERROR_CODE",
+            "inference_error",
+            "generation terminated with an upstream error",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_adapter_yielded_terminal_error_is_sanitized_before_worker_wire(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    message: str,
+    expected_code: str,
+    expected_message: str,
+) -> None:
+    nc = AsyncMock()
+    adapter = _FakeGenAdapter(
+        [
+            GenerationChunk(
+                text_delta="",
+                done=True,
+                finish_reason="error",
+                error_code=code,
+                error_message=message,
+            )
+        ]
+    )
+    proc = StreamingProcessor(nc=nc, registry=_make_registry(adapter), worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+
+    await proc.process(_make_msg(_make_work_item()), "test/model")
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"] == {"code": expected_code, "message": expected_message}
+    if message.startswith("SENSITIVE_"):
+        assert message not in str(terminal)
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_capability_rejects_stream_before_preflight() -> None:
+    nc = AsyncMock()
+    adapter = _PreflightGenAdapter()
+    registry = _make_registry(adapter)
+    registry.get_config.return_value = _make_generation_config(streaming=False)
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+
+    await proc.process(
+        _make_msg(_make_work_item(generate={"prompt": "Hello", "max_new_tokens": 64, "stream": True})),
+        "test/model",
+    )
+
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"]["code"] == "unsupported_field"
+    assert terminal["error"]["param"] == "stream"
+    assert adapter.preflight_parameters is None
+    assert adapter.dispatched_parameters is None
 
 
 @pytest.mark.asyncio
@@ -311,10 +697,13 @@ async def test_cancel_event_emits_cancelled_terminal(monkeypatch: pytest.MonkeyP
 
     class _AdapterFirstFree(_FakeGenAdapter):
         async def generate(self, prompt, *, max_new_tokens, temperature=1.0, top_p=1.0, stop=None):
-            for i, chunk in enumerate(self._script):
-                if i > 0 and self._hold is not None:
-                    await self._hold.wait()
-                yield chunk
+            try:
+                for i, chunk in enumerate(self._script):
+                    if i > 0 and self._hold is not None:
+                        await self._hold.wait()
+                    yield chunk
+            finally:
+                self.close_calls += 1
 
     adapter = _AdapterFirstFree(script, hold_event=hold)
     proc = StreamingProcessor(nc=nc, registry=_make_registry(adapter), worker_id="w1")
@@ -338,7 +727,113 @@ async def test_cancel_event_emits_cancelled_terminal(monkeypatch: pytest.MonkeyP
     assert terminal["done"] is True
     assert terminal["finish_reason"] == "cancelled"
     msg.ack.assert_awaited()
+    assert adapter.close_calls == 1
     _assert_one_generation_completion(telemetry, outcome="cancelled")
+
+
+@pytest.mark.asyncio
+async def test_outer_task_cancellation_drains_children_and_closes_iterator_once() -> None:
+    nc = AsyncMock()
+    started = asyncio.Event()
+
+    class _BlockingAdapter(_FakeGenAdapter):
+        async def generate(self, *args: Any, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+            _ = (args, kwargs)
+            try:
+                started.set()
+                await asyncio.Event().wait()
+                yield GenerationChunk(text_delta="unreachable")  # pragma: no cover
+            finally:
+                self.close_calls += 1
+
+    adapter = _BlockingAdapter([])
+    proc = StreamingProcessor(nc=nc, registry=_make_registry(adapter), worker_id="w1")
+    task = asyncio.create_task(proc.process(_make_msg(_make_work_item()), "test/model"))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=3.0)
+
+    assert adapter.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_iterator_close_failure_waits_for_heartbeat_and_publisher_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _EmptyFailingCloseIterator:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def __aiter__(self) -> _EmptyFailingCloseIterator:
+            return self
+
+        async def __anext__(self) -> GenerationChunk:
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("iterator close failed")
+
+    class _CloseFailureAdapter(_FakeGenAdapter):
+        def __init__(self, source: _EmptyFailingCloseIterator) -> None:
+            super().__init__([])
+            self.source = source
+
+        def generate(self, *args: Any, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+            _ = (args, kwargs)
+            return self.source
+
+    heartbeat_stopped = asyncio.Event()
+    publisher_stopped = asyncio.Event()
+
+    async def _tracking_heartbeat(_self: Any, _msg: Any, stop: asyncio.Event) -> None:
+        try:
+            await stop.wait()
+        finally:
+            heartbeat_stopped.set()
+
+    async def _tracking_publisher(
+        _self: Any,
+        chunk_queue: asyncio.Queue[tuple[bytes, bool] | None],
+        _reply_subject: str,
+    ) -> bool:
+        while await chunk_queue.get() is not None:
+            pass
+        publisher_stopped.set()
+        return False
+
+    real_wait_for = streaming_mod._wait_for
+    failed_terminal_put = False
+
+    async def _fail_terminal_put_once(awaitable: Any, **options: float) -> Any:
+        nonlocal failed_terminal_put
+        if not failed_terminal_put:
+            failed_terminal_put = True
+            awaitable.close()
+            raise TimeoutError
+        return await real_wait_for(awaitable, timeout=options["timeout"])
+
+    monkeypatch.setattr(StreamingProcessor, "_heartbeat_loop", _tracking_heartbeat)
+    monkeypatch.setattr(StreamingProcessor, "_publisher_loop", _tracking_publisher)
+    monkeypatch.setattr(streaming_mod, "_wait_for", _fail_terminal_put_once)
+
+    source = _EmptyFailingCloseIterator()
+    proc = StreamingProcessor(
+        nc=AsyncMock(),
+        registry=_make_registry(_CloseFailureAdapter(source)),
+        worker_id="w1",
+    )
+    msg = _make_msg(_make_work_item())
+
+    with pytest.raises(RuntimeError, match="iterator close failed"):
+        await proc.process(msg, "test/model")
+
+    assert source.close_calls == 1
+    assert heartbeat_stopped.is_set()
+    assert publisher_stopped.is_set()
+    msg.ack.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -542,6 +1037,7 @@ def _make_registry_with_chat_config(
     *,
     chat_template_kwargs: dict[str, Any] | None = None,
     context_length: int = 32768,
+    max_output_tokens: int = 512,
     hf_id: str = "test/model",
     hf_revision: str | None = None,
     reasoning_parser: str | None = None,
@@ -561,6 +1057,7 @@ def _make_registry_with_chat_config(
     config.weights_path = None
     config.tasks.generate.chat_template_kwargs = chat_template_kwargs or {}
     config.tasks.generate.context_length = context_length
+    config.tasks.generate.max_output_tokens = max_output_tokens
     profile = MagicMock()
     profile.loadtime = {"reasoning_parser": reasoning_parser} if reasoning_parser is not None else {}
     config.resolve_profile.return_value = profile
@@ -619,6 +1116,7 @@ async def test_streaming_processor_hides_reasoning_for_every_resolved_profile(
     decoded = _decode_chunks(nc)
     visible = "".join(chunk.get("text_delta", "") for chunk in decoded)
     assert visible == "Visible answer"
+    assert adapter.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -728,14 +1226,15 @@ async def test_streaming_processor_pins_tokenizer_revision(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_processor_chat_template_render_error_becomes_terminal_chunk(monkeypatch) -> None:
-    """A tokenizer that raises mid-render → terminal ``invalid_request``."""
+    """A tokenizer that raises mid-render never discloses backend details."""
+    sentinel = "SENSITIVE_TEMPLATE_RENDER_SENTINEL"
     nc = AsyncMock()
     adapter = _FakeGenAdapter([])
     registry = _make_registry_with_chat_config(adapter)
 
     class _BrokenTok:
         def apply_chat_template(self, *a, **kw):
-            raise ValueError("template not found")
+            raise ValueError(sentinel)
 
         def encode(self, text, *, add_special_tokens):  # pragma: no cover
             return []
@@ -754,8 +1253,37 @@ async def test_streaming_processor_chat_template_render_error_becomes_terminal_c
     terminal = decoded[-1]
     assert terminal["done"] is True
     assert terminal["error"]["code"] == "invalid_request"
-    assert "chat template render failed" in terminal["error"]["message"]
+    assert terminal["error"]["message"] == "failed to render the model-native message prompt"
+    assert sentinel not in str(terminal)
     msg.ack.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_streaming_processor_tokenizer_load_error_never_discloses_backend_details(monkeypatch) -> None:
+    sentinel = "SENSITIVE_TOKENIZER_LOAD_SENTINEL"
+    nc = AsyncMock()
+    adapter = _FakeGenAdapter([])
+    registry = _make_registry_with_chat_config(adapter)
+
+    def _raise_tokenizer_error(*args: Any, **kwargs: Any) -> Any:
+        _ = (args, kwargs)
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(streaming_mod, "load_tokenizer", _raise_tokenizer_error)
+
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    wi = _make_work_item(messages=[{"role": "user", "content": "hi"}])
+    msg = _make_msg(wi)
+    await proc.process(msg, "test/model")
+
+    [terminal] = _decode_chunks(nc)
+    assert terminal["done"] is True
+    assert terminal["error"] == {
+        "code": "invalid_request",
+        "message": "failed to render the model-native message prompt",
+    }
+    assert sentinel not in str(terminal)
+    msg.ack.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -857,6 +1385,187 @@ async def test_streaming_processor_context_exceeded_emits_terminal_chunk(monkeyp
     assert terminal["error"]["code"] == "context_exceeded"
     assert "context_length" in terminal["error"]["message"]
     msg.ack.assert_awaited()
+
+
+@pytest.mark.parametrize(
+    "adapter_type",
+    [_FakeGenAdapter, _IndependentContextGenAdapter],
+    ids=["shared", "independent"],
+)
+@pytest.mark.parametrize(("max_new_tokens", "should_reject"), [(8, False), (9, True)])
+@pytest.mark.asyncio
+async def test_worker_enforces_resolved_output_cap_before_context_check(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_type: type[_FakeGenAdapter],
+    max_new_tokens: int,
+    should_reject: bool,
+) -> None:
+    class _StubTok:
+        def encode(self, _text: str, *, add_special_tokens: bool) -> list[int]:
+            assert add_special_tokens is False
+            return [0]
+
+    adapter = adapter_type(
+        [
+            GenerationChunk(
+                text_delta="",
+                done=True,
+                finish_reason="stop",
+                prompt_tokens=1,
+                completion_tokens=max_new_tokens,
+            )
+        ]
+    )
+    registry = _make_registry_with_chat_config(
+        adapter,
+        context_length=32,
+        max_output_tokens=8,
+    )
+    nc = AsyncMock()
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    get_tokenizer = AsyncMock(return_value=_StubTok())
+    monkeypatch.setattr(proc, "_get_tokenizer", get_tokenizer)
+
+    await proc.process(
+        _make_msg(_make_work_item(generate={"prompt": "boundary", "max_new_tokens": max_new_tokens})),
+        "test/model",
+    )
+
+    terminal = _decode_chunks(nc)[-1]
+    if should_reject:
+        assert terminal["error"] == {
+            "code": "context_exceeded",
+            "message": "max_new_tokens (9) exceeds model cap (8)",
+        }
+        assert adapter.close_calls == 0
+        get_tokenizer.assert_not_awaited()
+    else:
+        assert terminal.get("error") is None
+        assert adapter.close_calls == 1
+        get_tokenizer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_context_guard_matches_adapter_special_token_policy_at_boundary(monkeypatch) -> None:
+    class _SpecialTokenAdapter(_FakeGenAdapter):
+        prompt_tokenization_add_special_tokens = True
+
+    class _StubTok:
+        def __init__(self, tokens_without_specials: int) -> None:
+            self.tokens_without_specials = tokens_without_specials
+            self.calls: list[bool] = []
+
+        def encode(self, _text: str, *, add_special_tokens: bool) -> list[int]:
+            self.calls.append(add_special_tokens)
+            return list(range(self.tokens_without_specials + int(add_special_tokens)))
+
+    adapter = _SpecialTokenAdapter([])
+    registry = _make_registry_with_chat_config(adapter, context_length=512)
+    proc = StreamingProcessor(nc=AsyncMock(), registry=registry, worker_id="w1")
+    overflow_tokenizer = _StubTok(511)
+    equality_tokenizer = _StubTok(510)
+    monkeypatch.setattr(
+        proc,
+        "_get_tokenizer",
+        AsyncMock(side_effect=(overflow_tokenizer, equality_tokenizer)),
+    )
+
+    error = await proc._check_context_length(
+        "test/model",
+        "boundary prompt",
+        1,
+        adapter=adapter,
+    )
+
+    assert error is not None
+    assert error.code == "context_exceeded"
+    assert "prompt_tokens (512) + max_new_tokens (1) = 513" in error.message
+    assert overflow_tokenizer.calls == [True]
+
+    allowed = await proc._check_context_length(
+        "test/model",
+        "exact boundary prompt",
+        1,
+        adapter=adapter,
+    )
+
+    assert allowed is None
+    assert equality_tokenizer.calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_context_guard_keeps_shared_default_and_allows_independent_output(monkeypatch) -> None:
+    class _StubTok:
+        def encode(self, _text: str, *, add_special_tokens: bool) -> list[int]:
+            assert add_special_tokens is False
+            return list(range(400))
+
+    shared_adapter = _FakeGenAdapter([])
+    independent_adapter = _IndependentContextGenAdapter([])
+    registry = _make_registry_with_chat_config(shared_adapter, context_length=512)
+    proc = StreamingProcessor(nc=AsyncMock(), registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_get_tokenizer", AsyncMock(return_value=_StubTok()))
+
+    shared_error = await proc._check_context_length(
+        "test/model",
+        "boundary prompt",
+        200,
+        adapter=shared_adapter,
+    )
+    independent_error = await proc._check_context_length(
+        "test/model",
+        "boundary prompt",
+        200,
+        adapter=independent_adapter,
+    )
+
+    assert shared_error is not None
+    assert shared_error.code == "context_exceeded"
+    assert "prompt_tokens (400) + max_new_tokens (200) = 600" in shared_error.message
+    assert independent_error is None
+
+
+@pytest.mark.asyncio
+async def test_independent_context_guard_checks_input_axis_with_images(monkeypatch) -> None:
+    class _StubTok:
+        def __init__(self, token_count: int) -> None:
+            self.token_count = token_count
+
+        def encode(self, _text: str, *, add_special_tokens: bool) -> list[int]:
+            assert add_special_tokens is False
+            return list(range(self.token_count))
+
+    adapter = _IndependentContextGenAdapter([])
+    registry = _make_registry_with_chat_config(adapter, context_length=1281)
+    proc = StreamingProcessor(nc=AsyncMock(), registry=registry, worker_id="w1")
+    monkeypatch.setattr(
+        proc,
+        "_get_tokenizer",
+        AsyncMock(side_effect=(_StubTok(1), _StubTok(2))),
+    )
+
+    allowed = await proc._check_context_length(
+        "test/model",
+        "exact boundary prompt",
+        64,
+        adapter=adapter,
+        num_images=1,
+    )
+    error = await proc._check_context_length(
+        "test/model",
+        "overflow prompt",
+        64,
+        adapter=adapter,
+        num_images=1,
+    )
+
+    assert allowed is None
+    assert error is not None
+    assert error.code == "context_exceeded"
+    assert (
+        error.message == "prompt_tokens (2) + ~image_tokens (1280) = 1282 exceeds context_length "
+        "(1281) for model 'test/model'"
+    )
 
 
 @pytest.mark.asyncio
@@ -1177,6 +1886,97 @@ async def test_grammar_compile_validation_error_surfaces_with_code(
     assert terminal["error"]["code"] == "grammar_compile_failed"
     assert "bad schema" in terminal["error"]["message"]
     msg.ack.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_grammar_compile_error_is_sanitized(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = "SENSITIVE_GRAMMAR_COMPILE_SENTINEL"
+
+    def _fail(_tok: Any, _g: Any) -> Any:
+        raise RuntimeError(sentinel)
+
+    nc = AsyncMock()
+    proc = StreamingProcessor(nc=nc, registry=_make_registry(_FakeGenAdapter([])), worker_id="w1")
+    _patch_compile(monkeypatch, _fail)
+
+    msg = _make_msg(
+        _make_work_item(
+            generate={
+                "prompt": "Hi",
+                "max_new_tokens": 8,
+                "grammar": {"kind": "regex", "value": r"\d+"},
+            }
+        )
+    )
+    await proc.process(msg, "test/model")
+
+    terminal = _terminal_chunk(nc)
+    assert terminal["error"] == {
+        "code": "grammar_compile_failed",
+        "message": "internal error compiling grammar",
+    }
+    assert sentinel not in str(terminal)
+
+
+@pytest.mark.asyncio
+async def test_grammar_tokenizer_load_error_is_sanitized(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = "SENSITIVE_TOKENIZER_SENTINEL"
+    nc = AsyncMock()
+    registry = _make_registry(_FakeGenAdapter([]))
+    registry.get_config.side_effect = KeyError("no config")
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+
+    async def _fail_tokenizer(_model_id: str) -> Any:
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(proc, "_get_tokenizer", _fail_tokenizer)
+    result = await proc._ensure_grammar_ready(
+        GrammarSpec(kind="regex", value=r"\d+"),
+        model_id="test/model",
+        reply_subject="_INBOX.test",
+        request_id="req-tokenizer",
+        attempt_id="att-tokenizer",
+        msg=_make_msg(_make_work_item()),
+    )
+
+    assert result is False
+    terminal = _terminal_chunk(nc)
+    assert terminal["error"] == {
+        "code": "grammar_compile_failed",
+        "message": "internal error compiling grammar",
+    }
+    assert sentinel not in str(terminal)
+
+
+@pytest.mark.asyncio
+async def test_shared_grammar_compile_error_is_sanitized() -> None:
+    sentinel = "SENSITIVE_SHARED_GRAMMAR_SENTINEL"
+    nc = AsyncMock()
+    registry = _make_registry(_FakeGenAdapter([]))
+    registry.get_config.side_effect = KeyError("no config")
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    grammar = GrammarSpec(kind="regex", value=r"\d+")
+    key = ("test/model", streaming_mod.hash_grammar(grammar), "outlines")
+    failed = asyncio.get_running_loop().create_future()
+    failed.set_exception(RuntimeError(sentinel))
+    proc._grammar_inflight[key] = failed
+
+    result = await proc._ensure_grammar_ready(
+        grammar,
+        model_id="test/model",
+        reply_subject="_INBOX.test",
+        request_id="req-follower",
+        attempt_id="att-follower",
+        msg=_make_msg(_make_work_item()),
+    )
+
+    assert result is False
+    terminal = _terminal_chunk(nc)
+    assert terminal["error"] == {
+        "code": "grammar_compile_failed",
+        "message": "internal error compiling grammar",
+    }
+    assert sentinel not in str(terminal)
 
 
 @pytest.mark.asyncio
@@ -1854,10 +2654,11 @@ _WEATHER_TOOLS = [
 
 
 @pytest.mark.asyncio
-async def test_streaming_tool_call_emits_incremental_deltas() -> None:
+async def test_streaming_tool_call_emits_incremental_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
     """A <tool_call> block in the model output surfaces as well-formed
     incremental OpenAI ``delta.tool_calls`` (id+name first, args after).
     """
+    telemetry = _capture_worker_completion(monkeypatch)
     nc = AsyncMock()
     script = [
         GenerationChunk(
@@ -1866,11 +2667,15 @@ async def test_streaming_tool_call_emits_incremental_deltas() -> None:
         ),
         GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=5, completion_tokens=9),
     ]
-    proc = StreamingProcessor(nc=nc, registry=_make_registry(_FakeGenAdapter(script)), worker_id="w1")
+    adapter = _FakeGenAdapter(script)
+    proc = StreamingProcessor(nc=nc, registry=_make_registry(adapter), worker_id="w1")
     wi = _make_work_item(generate={"prompt": "weather?", "max_new_tokens": 64, "tools": _WEATHER_TOOLS})
-    await proc.process(_make_msg(wi), "test/model")
+    msg = _make_msg(wi)
+    await proc.process(msg, "test/model")
 
     decoded = _decode_chunks(nc)
+    terminals = [chunk for chunk in decoded if chunk.get("done") is True]
+    assert len(terminals) == 1
     tcs = _tool_call_deltas(decoded)
     assert len(tcs) == 2
     # Announcement delta: id + function name, empty arguments.
@@ -1883,6 +2688,66 @@ async def test_streaming_tool_call_emits_incremental_deltas() -> None:
     assert tcs[1]["function"]["arguments"] == '{"city":"Tokyo"}'
     # Terminal reason flips to tool_calls.
     assert decoded[-1]["finish_reason"] == "tool_calls"
+    assert "error" not in decoded[-1]
+    msg.ack.assert_awaited_once()
+    _assert_one_generation_completion(telemetry, outcome="success")
+    assert adapter.close_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "error_code", "error_message", "expected_message"),
+    [
+        (
+            "stop",
+            "empty_model_output",
+            "model produced no visible output text",
+            "model produced no visible output text",
+        ),
+        ("error", "grammar_invalid", "invalid grammar", "invalid grammar"),
+        (
+            "error",
+            "inference_error",
+            "SECRET engine path /models/private",
+            "internal error during generation",
+        ),
+    ],
+)
+async def test_tools_enabled_queue_preserves_safe_terminal_error_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: str,
+    error_code: str,
+    error_message: str,
+    expected_message: str,
+) -> None:
+    telemetry = _capture_worker_completion(monkeypatch)
+    nc = AsyncMock()
+    script = [
+        GenerationChunk(
+            text_delta="",
+            done=True,
+            finish_reason=finish_reason,  # type: ignore[arg-type]
+            error_code=error_code,
+            error_message=error_message,
+        )
+    ]
+    adapter = _FakeGenAdapter(script)
+    proc = StreamingProcessor(nc=nc, registry=_make_registry(adapter), worker_id="w1")
+    wi = _make_work_item(generate={"prompt": "weather?", "max_new_tokens": 64, "tools": _WEATHER_TOOLS})
+    msg = _make_msg(wi)
+
+    await proc.process(msg, "test/model")
+
+    decoded = _decode_chunks(nc)
+    terminals = [chunk for chunk in decoded if chunk.get("done") is True]
+    assert len(terminals) == 1
+    terminal = terminals[0]
+    assert terminal["finish_reason"] == finish_reason
+    assert terminal["error"] == {"code": error_code, "message": expected_message}
+    assert "SECRET" not in repr(terminal)
+    msg.ack.assert_awaited_once()
+    _assert_one_generation_completion(telemetry, outcome="error")
+    assert adapter.close_calls == 1
 
 
 @pytest.mark.asyncio

@@ -284,6 +284,7 @@ class TestModelCapabilitiesField:
                 "gen-model",
                 "org/gen-model",
                 capabilities=GenerateCapabilities(
+                    streaming=False,
                     grammar=["json_schema", "regex"],
                     tools=True,
                     code=True,
@@ -317,6 +318,7 @@ class TestModelCapabilitiesField:
         assert response.status_code == 200
         caps = response.json()["capabilities"]
         assert caps is not None
+        assert caps["streaming"] is False
         assert caps["grammar"] == ["json_schema", "regex"]
         assert caps["tools"] is True
         assert caps["code"] is True
@@ -334,6 +336,7 @@ class TestModelCapabilitiesField:
         response = caps_client.get("/v1/models")
         assert response.status_code == 200
         by_name = {m["name"]: m for m in response.json()["models"]}
+        assert by_name["gen-model"]["capabilities"]["streaming"] is False
         assert by_name["gen-model"]["capabilities"]["code"] is True
         assert by_name["enc-model"]["capabilities"] is None
 

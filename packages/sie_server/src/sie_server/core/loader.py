@@ -35,6 +35,12 @@ from sie_server.config.package_artifacts import (
     PackageArtifactMode,
     verify_staged_package_artifacts,
 )
+from sie_server.config.serving_artifacts import (
+    SERVING_ARTIFACT_COMPUTE_TYPE_KEY,
+    SERVING_ARTIFACT_KEY,
+    SERVING_ARTIFACT_PATH_KEY,
+    VerifiedServingArtifact,
+)
 from sie_server.core.inference import AttentionBackend
 
 logger = logging.getLogger(__name__)
@@ -410,6 +416,7 @@ def load_adapter(
     device: str,
     default_compute_precision: ComputePrecision = "float16",
     attention_backend: AttentionBackend = "auto",
+    verified_serving_artifact: VerifiedServingArtifact | None = None,
 ) -> ModelAdapter:
     """Load and instantiate a model adapter.
 
@@ -454,7 +461,11 @@ def load_adapter(
     effective_default_precision: ComputePrecision = (
         default_compute_precision if device.startswith("cuda") else "float32"
     )
-    adapter_kwargs = _build_adapter_kwargs(config, effective_default_precision)
+    adapter_kwargs = _build_adapter_kwargs(
+        config,
+        effective_default_precision,
+        verified_serving_artifact=verified_serving_artifact,
+    )
 
     # MPS bfloat16 support is incomplete in torch and can HANG model load (verified:
     # bge-m3 bf16 load wedges at ~1% CPU on Apple Silicon). fp16 is the MPS-verified
@@ -614,6 +625,8 @@ def _import_custom_adapter(file_path: Path, class_name: str) -> type[ModelAdapte
 def _build_adapter_kwargs(
     config: ModelConfig,
     default_compute_precision: ComputePrecision,
+    *,
+    verified_serving_artifact: VerifiedServingArtifact | None = None,
 ) -> dict[str, Any]:
     """Build keyword arguments for adapter instantiation.
 
@@ -660,6 +673,25 @@ def _build_adapter_kwargs(
         kwargs["revision"] = config.hf_revision
 
     kwargs.update(resolved.loadtime)
+
+    serving_artifact = config.serving_artifact_declaration()
+    kwargs.pop(SERVING_ARTIFACT_KEY, None)
+    if serving_artifact is not None:
+        if verified_serving_artifact is None:
+            raise ValueError(
+                f"Model '{config.sie_id}' declares a derived serving artifact but the loader did not verify it"
+            )
+        if (
+            verified_serving_artifact.repo_id != serving_artifact.repo_id
+            or verified_serving_artifact.revision != serving_artifact.revision
+            or verified_serving_artifact.manifest_sha256 != serving_artifact.manifest_sha256
+            or verified_serving_artifact.compute_type != serving_artifact.compute_type
+        ):
+            raise ValueError(f"Model '{config.sie_id}' received a stale or mismatched verified serving artifact")
+        kwargs[SERVING_ARTIFACT_PATH_KEY] = verified_serving_artifact.root
+        kwargs[SERVING_ARTIFACT_COMPUTE_TYPE_KEY] = verified_serving_artifact.compute_type
+        kwargs.pop("model_name_or_path", None)
+        kwargs.pop("revision", None)
 
     # Adapter constructors take ``lora_paths`` as served-name -> bare path/id
     # (the sglang ``--lora-paths`` shape). A pinned ``{id, revision}`` value

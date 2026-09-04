@@ -34,8 +34,9 @@ function detailResponse(
   status: number,
   code: string,
   headers: Record<string, string> = {},
+  param?: string | null,
 ): Response {
-  return new Response(JSON.stringify({ detail: { code, message: code.toLowerCase() } }), {
+  return new Response(JSON.stringify({ detail: { code, message: code.toLowerCase(), param } }), {
     status,
     headers: { "Content-Type": "application/json", ...headers },
   });
@@ -262,7 +263,10 @@ describe("handleError billing/backpressure mapping", () => {
     [403, "ACCOUNT_PENDING_REVIEW", AccountInactiveError],
     [503, "ACCOUNT_STATE_UNAVAILABLE", AccountStateUnavailableError],
   ] as const)("maps %s %s", async (status, code, ctor) => {
-    await expect(handleError(detailResponse(status, code))).rejects.toBeInstanceOf(ctor);
+    await expect(handleError(detailResponse(status, code, {}, "account"))).rejects.toMatchObject({
+      name: ctor.name,
+      param: "account",
+    });
   });
 
   it("leaves an unrecognized 403 code as a generic RequestError", async () => {

@@ -405,11 +405,16 @@ processors:
       log_record:
         - 'resource.attributes["service.name"] != "sie-gateway"'
         - 'attributes["event.name"] != "inference.request.completed"'
-        - 'attributes["event.schema.version"] != "1"'
+        # Keep v1 readable while old gateway pods drain during a rolling update.
+        - 'attributes["event.schema.version"] != "1" and attributes["event.schema.version"] != "2"'
         - 'body != "inference.request.completed"'
         - 'attributes["operation"] != "encode" and attributes["operation"] != "score" and attributes["operation"] != "extract" and attributes["operation"] != "generate" and attributes["operation"] != "embeddings" and attributes["operation"] != "moderations" and attributes["operation"] != "other"'
         - 'attributes["outcome"] != "success" and attributes["outcome"] != "redirect" and attributes["outcome"] != "client_error" and attributes["outcome"] != "server_error" and attributes["outcome"] != "other"'
         - 'attributes["http.status_code"] < 100 or attributes["http.status_code"] > 599'
+        - 'attributes["event.schema.version"] == "2" and attributes["model"] == nil'
+        - 'attributes["event.schema.version"] == "2" and attributes["machine_profile"] == nil'
+        - 'attributes["event.schema.version"] == "2" and attributes["duration_ms"] == nil'
+        - 'attributes["event.schema.version"] == "2" and attributes["admission_outcome"] != "admitted" and attributes["admission_outcome"] != "unauthenticated" and attributes["admission_outcome"] != "forbidden" and attributes["admission_outcome"] != "auth_misconfigured" and attributes["admission_outcome"] != "region_mismatch" and attributes["admission_outcome"] != "license_excluded" and attributes["admission_outcome"] != "payload_too_large" and attributes["admission_outcome"] != "invalid_request" and attributes["admission_outcome"] != "insufficient_credits" and attributes["admission_outcome"] != "key_spend_limit_exceeded" and attributes["admission_outcome"] != "rate_limited"'
   transform/contract_logs:
     error_mode: propagate
     log_statements:
@@ -425,9 +430,12 @@ processors:
           - set(schema_url, "")
       - context: log
         statements:
-          - keep_keys(attributes, ["event.name", "event.schema.version", "operation", "outcome", "http.status_code"])
+          - keep_keys(attributes, ["event.name", "event.schema.version", "operation", "outcome", "http.status_code", "model", "machine_profile", "duration_ms", "admission_outcome"])
+          # Canonical release domains are rechecked at the collector boundary
+          # so malformed producer values cannot become vendor dimensions.
+          - 'set(attributes["model"], "other") where attributes["event.schema.version"] == "2" and not IsMatch(attributes["model"], "^(BAAI/bge-m3|IDEA-Research/grounding-dino-base|Qwen/Qwen3-Embedding-4B|Qwen/Qwen3-Reranker-0[.]6B|Qwen/Qwen3-Reranker-4B|Qwen/Qwen3-VL-Reranker-2B|Qwen/Qwen3[.]5-4B|Qwen/Qwen3[.]6-27B|Snowflake/snowflake-arctic-embed-l-v2[.]0|docling|fastino/gliguard-LLMGuardrails-300M|fastino/gliner2-base-v1|fastino/gliner2-large-v1|google/owlv2-base-patch16-ensemble|google/siglip-so400m-patch14-384|google/siglip2-base-patch16-224|ibm-granite/granite-guardian-3[.]0-2b|knowledgator/gliclass-large-v3[.]0|lightonai/GTE-ModernColBERT-v1|lightonai/LightOnOCR-2-1B|numind/NuNER_Zero|openai/whisper-large-v3-turbo|other|prithivida/Splade_PP_en_v2|tencent/R3-embedding-0[.]6b|tencent/R3-rerank-0[.]6b|urchade/gliner_multi-v2[.]1|urchade/gliner_multi_pii-v1)$")'
+          - 'set(attributes["machine_profile"], "other") where attributes["event.schema.version"] == "2" and not IsMatch(attributes["machine_profile"], "^(a10|a100-40gb|a100-80gb|cpu|h100|l4|l4-spot|other|sglang-cu130|t4)$")'
           - set(attributes["event.name"], "inference.request.completed")
-          - set(attributes["event.schema.version"], "1")
           - set(body, "inference.request.completed")
           - set(severity_text, "INFO")
           - set(severity_number, SEVERITY_NUMBER_INFO)

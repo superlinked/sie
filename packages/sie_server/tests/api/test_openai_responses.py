@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk
+from sie_server.adapters._generation_base import (
+    GenerationAdapter,
+    GenerationCapacityError,
+    GenerationChunk,
+    GenerationError,
+    GenerationUnsupportedFieldError,
+)
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.api import openai_responses
 from sie_server.api.openai_completions import _CompletionError
@@ -22,16 +28,36 @@ from sie_server.types.inputs import ImageInput
 _VECTORS = Path(__file__).parents[4] / "conformance" / "openai_generation" / "responses_request_vectors.json"
 
 
+class _UntrustedUnsupportedFieldError(GenerationUnsupportedFieldError):
+    code = "SENSITIVE_UNSUPPORTED_CODE"
+
+
+class _UntrustedCapacityError(GenerationCapacityError):
+    code = "SENSITIVE_CAPACITY_CODE"
+
+
 class _FakeResponsesAdapter(GenerationAdapter):
     spec = AdapterSpec(inputs=("text",), outputs=("tokens",), unload_fields=())
 
     def __init__(self) -> None:
         self.last_call: dict[str, object] | None = None
+        self.preflight_call: dict[str, object] | None = None
+        self.preflight_error: GenerationError | None = None
+        self.generate_error_after_chunks: int | None = None
+        self.closed = False
         self.text_chunks = ["hello", " world"]
         self.include_usage = True
+        self.error_code: str | None = None
+        self.error_message: str | None = None
 
     def load(self, device: str) -> None:  # pragma: no cover - registry is mocked loaded
         _ = device
+
+    def preflight_generate(self, parameters: Mapping[str, object], *, stream: bool) -> None:
+        assert stream is False
+        self.preflight_call = dict(parameters)
+        if self.preflight_error is not None:
+            raise self.preflight_error
 
     async def generate(
         self,
@@ -66,15 +92,24 @@ class _FakeResponsesAdapter(GenerationAdapter):
             "seed": seed,
         }
         _ = repetition_penalty, grammar, logit_bias, logprobs, top_logprobs, images
-        for index, text in enumerate(self.text_chunks):
-            yield GenerationChunk(text_delta=text, is_first=index == 0)
-        yield GenerationChunk(
-            text_delta="",
-            done=True,
-            finish_reason="stop",
-            prompt_tokens=3 if self.include_usage else None,
-            completion_tokens=2 if self.include_usage else None,
-        )
+        try:
+            if self.generate_error_after_chunks == 0:
+                raise GenerationUnsupportedFieldError("top_k")
+            for index, text in enumerate(self.text_chunks):
+                yield GenerationChunk(text_delta=text, is_first=index == 0)
+                if self.generate_error_after_chunks == index + 1:
+                    raise GenerationUnsupportedFieldError("top_k")
+            yield GenerationChunk(
+                text_delta="",
+                done=True,
+                finish_reason="stop",
+                prompt_tokens=3 if self.include_usage else None,
+                completion_tokens=2 if self.include_usage else None,
+                error_code=self.error_code,
+                error_message=self.error_message,
+            )
+        finally:
+            self.closed = True
 
 
 def _config(*, chat_template_kwargs: dict[str, object] | None = None) -> ModelConfig:
@@ -174,6 +209,7 @@ def test_blocking_responses_uses_direct_adapter_and_openai_shape(
         "min_new_tokens": 2,
         "seed": -1,
     }
+    assert adapter.preflight_call == adapter.last_call
 
 
 def test_message_input_uses_model_native_template(
@@ -278,6 +314,58 @@ def test_responses_rejects_terminal_event_without_usage(
     assert response.json()["error"]["code"] == "malformed_worker_response"
 
 
+@pytest.mark.parametrize(
+    ("code", "message", "expected_code", "expected_message"),
+    [
+        (
+            "inference_error",
+            "SENSITIVE_RESPONSES_RUNTIME",
+            "inference_error",
+            "internal error during generation",
+        ),
+        (
+            "grammar_compile_failed",
+            "SENSITIVE_RESPONSES_GRAMMAR",
+            "grammar_compile_failed",
+            "internal error compiling grammar",
+        ),
+        (
+            "empty_model_output",
+            "model produced no visible output",
+            "empty_model_output",
+            "model produced no visible output",
+        ),
+        (
+            "SENSITIVE_RESPONSES_ERROR_CODE",
+            "SENSITIVE_RESPONSES_ERROR_CODE",
+            "inference_error",
+            "generation terminated with an upstream error",
+        ),
+    ],
+)
+def test_responses_classifies_adapter_yielded_terminal_errors(
+    client: TestClient,
+    adapter: _FakeResponsesAdapter,
+    code: str,
+    message: str,
+    expected_code: str,
+    expected_message: str,
+) -> None:
+    adapter.error_code = code
+    adapter.error_message = message
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "input": "x"},
+    )
+
+    assert response.status_code == 500, response.text
+    assert response.json()["error"]["code"] == expected_code
+    assert response.json()["error"]["message"] == expected_message
+    if message.startswith("SENSITIVE_"):
+        assert message not in response.text
+
+
 def test_responses_rejects_oversized_rendered_input(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -292,3 +380,86 @@ def test_responses_rejects_oversized_rendered_input(
     assert response.status_code == 413
     assert response.json()["error"]["param"] == "input"
     assert response.json()["error"]["code"] == "context_exceeded"
+
+
+def test_responses_preflight_preserves_exact_parameter_and_skips_dispatch(
+    client: TestClient,
+    adapter: _FakeResponsesAdapter,
+) -> None:
+    adapter.preflight_error = GenerationUnsupportedFieldError("top_k")
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "input": "x"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == "top_k"
+    assert adapter.preflight_call is not None
+    assert adapter.last_call is None
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code"),
+    [
+        (_UntrustedUnsupportedFieldError("top_k", "private unsupported detail"), 400),
+        (_UntrustedCapacityError("private capacity detail"), 503),
+    ],
+)
+def test_responses_sanitizes_untrusted_typed_error_codes(
+    client: TestClient,
+    adapter: _FakeResponsesAdapter,
+    error: GenerationError,
+    status_code: int,
+) -> None:
+    adapter.preflight_error = error
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "input": "x"},
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["error"]["code"] == "inference_error"
+    assert "SENSITIVE_" not in response.text
+
+
+def test_responses_preserves_typed_synchronous_dispatch_error(
+    client: TestClient,
+    adapter: _FakeResponsesAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(**parameters: object) -> AsyncIterator[GenerationChunk]:
+        _ = parameters
+        raise GenerationUnsupportedFieldError("top_k")
+
+    monkeypatch.setattr(adapter, "generate", refuse)
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "input": "x"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == "top_k"
+
+
+@pytest.mark.parametrize("error_after", [0, 1])
+def test_responses_preserves_typed_iterator_error_and_closes(
+    client: TestClient,
+    adapter: _FakeResponsesAdapter,
+    error_after: int,
+) -> None:
+    adapter.generate_error_after_chunks = error_after
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "input": "x"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == "top_k"
+    assert adapter.closed is True

@@ -5642,20 +5642,24 @@ mod tests {
         }
 
         let work = wi("req-load", 0, "Qwen/Qwen3-4B-Instruct-2507", "generate");
-        let bytes =
-            encode_generate_terminal_error_chunk(&work, MODEL_LOADING_ERROR_CODE, "loading")
-                .expect("chunk encodes");
-        let decoded: DecodedChunk = rmp_serde::from_slice(&bytes).expect("chunk decodes");
+        for (code, message) in [
+            (MODEL_LOADING_ERROR_CODE, "loading"),
+            (MODEL_LOAD_FAILED_ERROR_CODE, "load failed"),
+        ] {
+            let bytes =
+                encode_generate_terminal_error_chunk(&work, code, message).expect("chunk encodes");
+            let decoded: DecodedChunk = rmp_serde::from_slice(&bytes).expect("chunk decodes");
 
-        assert_eq!(decoded.kind, "chunk");
-        assert_eq!(decoded.request_id, "req-load");
-        assert_eq!(decoded.attempt_id, "req-load.0:model-loading");
-        assert_eq!(decoded.seq, 0);
-        assert_eq!(decoded.text_delta, "");
-        assert!(decoded.done);
-        assert_eq!(decoded.finish_reason, "error");
-        assert_eq!(decoded.error.code, MODEL_LOADING_ERROR_CODE);
-        assert_eq!(decoded.error.message, "loading");
+            assert_eq!(decoded.kind, "chunk");
+            assert_eq!(decoded.request_id, "req-load");
+            assert_eq!(decoded.attempt_id, "req-load.0:model-loading");
+            assert_eq!(decoded.seq, 0);
+            assert_eq!(decoded.text_delta, "");
+            assert!(decoded.done);
+            assert_eq!(decoded.finish_reason, "error");
+            assert_eq!(decoded.error.code, code);
+            assert_eq!(decoded.error.message, message);
+        }
     }
 
     #[test]

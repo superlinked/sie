@@ -62,6 +62,7 @@ class ModelCapabilities(BaseModel):
     alias).
     """
 
+    streaming: bool = True
     grammar: list[str] = []
     tools: bool = False
     code: bool = False
@@ -156,6 +157,7 @@ def _resolve_capabilities(config: Any) -> ModelCapabilities | None:
         return None
     caps = generate.capabilities
     return ModelCapabilities(
+        streaming=caps.streaming,
         grammar=list(caps.grammar),
         tools=caps.tools,
         code=caps.code,

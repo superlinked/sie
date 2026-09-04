@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: "2026-08-14"
+contract_version: "2026-08-27"
 
 # This is the machine-readable telemetry source of truth. A request path emits
 # one typed semantic event; the owning facade is the only code allowed to turn
@@ -694,6 +694,7 @@ traces:
 enums:
   operation: [encode, score, extract, embeddings, moderations, generate, other]
   activity_window: [1h, 24h]
+  signup_review_status: [pending, approved, rejected, other]
   launch_credit_status: [pending, approved, rejected, other]
   request_outcome: [success, redirect, client_error, server_error, other]
   admission_outcome:
@@ -967,6 +968,8 @@ attribute_sets:
     operation: operation
   control_plane_activity:
     window: activity_window
+  control_plane_signup_review:
+    status: signup_review_status
   control_plane_launch_credit:
     status: launch_credit_status
   gateway_request:
@@ -1321,6 +1324,14 @@ metrics:
     attributes: none
     prometheus_name: sie_control_plane_signup_activated
     export: [otlp]
+  - name: sie.control_plane.signup.reviews
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{account}"
+    attributes: control_plane_signup_review
+    prometheus_name: sie_control_plane_signup_reviews
+    export: [otlp]
   - name: sie.control_plane.starter.credits
     owner: control_plane
     facade_event: control_plane.aggregate_snapshot
@@ -1328,6 +1339,22 @@ metrics:
     unit: "{credit}"
     attributes: none
     prometheus_name: sie_control_plane_starter_credits
+    export: [otlp]
+  - name: sie.control_plane.starter.grants
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{grant}"
+    attributes: control_plane_activity
+    prometheus_name: sie_control_plane_starter_grants
+    export: [otlp]
+  - name: sie.control_plane.starter.grant.limit
+    owner: control_plane
+    facade_event: control_plane.aggregate_snapshot
+    type: gauge
+    unit: "{grant}"
+    attributes: control_plane_activity
+    prometheus_name: sie_control_plane_starter_grant_limit
     export: [otlp]
   - name: sie.control_plane.terminal.requests
     owner: control_plane
@@ -2554,15 +2581,20 @@ logs:
     sampling: enclosing_trace_sampled
     attributes:
       event.name: inference.request.completed
-      event.schema.version: "1"
+      event.schema.version: "2"
       operation: operation
       outcome: request_outcome
       http.status_code: http.status_code
+      model: canonical_model_or_other
+      machine_profile: canonical_machine_profile
+      duration_ms: request_duration_ms
+      admission_outcome: bounded_admission_outcome
     correlation: [trace_id, span_id]
     export: [structured_stdout, otlp]
 
 log_processing:
   declared_events_only: true
+  accepted_schema_versions: ["1", "2"]
   helm_receiver_binding:
     receiver: gateway
     other_receivers: reject
@@ -2574,6 +2606,7 @@ log_processing:
     service.version: producer_optional
 
 forbidden_metric_attributes:
+  - account_id
   - tenant_id
   - organization_id
   - api_key_id
@@ -2589,6 +2622,10 @@ forbidden_metric_attributes:
 forbidden_managed_log_fields:
   - authorization
   - api_key
+  - api_key_id
+  - account_id
+  - workos_user_id
+  - email
   - prompt
   - document
   - embedding

@@ -32,11 +32,13 @@ class RequestError(SIEError):
         code: str | None = None,
         status_code: int | None = None,
         *,
+        param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        self.param = param
         self.request = request
 
 
@@ -45,6 +47,9 @@ class ServerError(SIEError):
 
     ``request`` contains canonical request, usage, and debit metadata parsed
     from the terminal response headers when the server supplied any.
+    ``retry_after`` preserves a validated server retry hint in seconds when
+    the terminal error carries one; callers must not infer that retrying a
+    non-idempotent request is safe merely because the hint is present.
     """
 
     def __init__(
@@ -53,12 +58,16 @@ class ServerError(SIEError):
         code: str | None = None,
         status_code: int | None = None,
         *,
+        param: str | None = None,
         request: RequestMetadata | None = None,
+        retry_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        self.param = param
         self.request = request
+        self.retry_after = retry_after
 
 
 class ProvisioningError(SIEError):
@@ -80,10 +89,12 @@ class ProvisioningError(SIEError):
         *,
         gpu: str | None = None,
         retry_after: float | None = None,
+        param: str | None = None,
     ) -> None:
         super().__init__(message)
         self.gpu = gpu
         self.retry_after = retry_after
+        self.param = param
 
 
 class PoolError(SIEError):
@@ -205,9 +216,10 @@ class ModelLoadFailedError(ServerError):
         error_class: str | None = None,
         permanent: bool = True,
         attempts: int = 1,
+        param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code="MODEL_LOAD_FAILED", status_code=502, request=request)
+        super().__init__(message, code="MODEL_LOAD_FAILED", status_code=502, param=param, request=request)
         self.model = model
         self.error_class = error_class
         self.permanent = permanent
@@ -236,9 +248,10 @@ class InputTooLongError(RequestError):
         message: str,
         *,
         model: str | None = None,
+        param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code="INPUT_TOO_LONG", status_code=400, request=request)
+        super().__init__(message, code="INPUT_TOO_LONG", status_code=400, param=param, request=request)
         self.model = model
 
 
@@ -265,9 +278,10 @@ class EstimateUnroutableError(ServerError):
         message: str,
         *,
         code: str | None = None,
+        param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code=code, status_code=503, request=request)
+        super().__init__(message, code=code, status_code=503, param=param, request=request)
 
 
 class RateLimitError(RequestError):
@@ -294,9 +308,10 @@ class RateLimitError(RequestError):
         *,
         code: str | None = "RATE_LIMIT",
         retry_after: float | None = None,
+        param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code=code, status_code=429, request=request)
+        super().__init__(message, code=code, status_code=429, param=param, request=request)
         self.retry_after = retry_after
 
 
@@ -316,9 +331,10 @@ class InsufficientCreditsError(RequestError):
         self,
         message: str,
         *,
+        param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code="INSUFFICIENT_CREDITS", status_code=402, request=request)
+        super().__init__(message, code="INSUFFICIENT_CREDITS", status_code=402, param=param, request=request)
 
 
 class SpendLimitError(RequestError):
@@ -336,9 +352,10 @@ class SpendLimitError(RequestError):
         self,
         message: str,
         *,
+        param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code="KEY_SPEND_LIMIT_EXCEEDED", status_code=402, request=request)
+        super().__init__(message, code="KEY_SPEND_LIMIT_EXCEEDED", status_code=402, param=param, request=request)
 
 
 class AccountInactiveError(RequestError):
@@ -359,9 +376,10 @@ class AccountInactiveError(RequestError):
         message: str,
         *,
         code: str | None = None,
+        param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code=code, status_code=403, request=request)
+        super().__init__(message, code=code, status_code=403, param=param, request=request)
 
 
 class AccountStateUnavailableError(ServerError):
@@ -381,9 +399,10 @@ class AccountStateUnavailableError(ServerError):
         self,
         message: str,
         *,
+        param: str | None = None,
         request: RequestMetadata | None = None,
     ) -> None:
-        super().__init__(message, code="ACCOUNT_STATE_UNAVAILABLE", status_code=503, request=request)
+        super().__init__(message, code="ACCOUNT_STATE_UNAVAILABLE", status_code=503, param=param, request=request)
 
 
 class ResourceExhaustedError(ServerError):
@@ -401,6 +420,7 @@ class ResourceExhaustedError(ServerError):
     Attributes:
         model: The model that was requested.
         retries: Number of retry attempts made before giving up.
+        retry_after: Last validated server retry hint, in seconds.
     """
 
     def __init__(
@@ -409,9 +429,18 @@ class ResourceExhaustedError(ServerError):
         *,
         model: str | None = None,
         retries: int = 0,
+        param: str | None = None,
         request: RequestMetadata | None = None,
+        retry_after: float | None = None,
     ) -> None:
-        super().__init__(message, code="RESOURCE_EXHAUSTED", status_code=503, request=request)
+        super().__init__(
+            message,
+            code="RESOURCE_EXHAUSTED",
+            status_code=503,
+            param=param,
+            request=request,
+            retry_after=retry_after,
+        )
         self.model = model
         self.retries = retries
 

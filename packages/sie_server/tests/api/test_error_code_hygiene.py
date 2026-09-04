@@ -28,6 +28,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import msgpack_numpy as m
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sie_server.adapters.base import ModelCapabilities, ModelDims
@@ -255,3 +256,26 @@ class TestInputTooLongMapping:
 
         assert response.status_code == 400, response.text
         assert _detail(response)["code"] == "INVALID_INPUT"
+
+
+class TestUnexpectedInferenceErrorSanitization:
+    @pytest.mark.parametrize(
+        ("post", "build_client", "message"),
+        [
+            (_post_encode, _build_encode_client, "internal error during encoding"),
+            (_post_score, _build_score_client, "internal error during scoring"),
+        ],
+        ids=["encode", "score"],
+    )
+    def test_internal_exception_text_is_not_returned(
+        self,
+        post: Any,
+        build_client: Any,
+        message: str,
+    ) -> None:
+        response = post(build_client(RuntimeError("sensitive worker detail")))
+
+        assert response.status_code == 500
+        detail = _detail(response)
+        assert detail == {"code": "INFERENCE_ERROR", "message": message}
+        assert "sensitive worker detail" not in response.text
