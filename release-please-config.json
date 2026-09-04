@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "always-update": true,
+  "bootstrap-sha": "60996d9c30168e0f8e85b680295f147fdee87f61",
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "include-v-in-tag": true,
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        { "type": "toml", "path": "packages/sie_sdk/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "packages/sie_server/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "packages/sie_config/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "packages/sie_mcp/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_langchain/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_llamaindex/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_haystack/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_dspy/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_crewai/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_chroma/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_lancedb/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_qdrant/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_weaviate/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "json", "path": "packages/sie_ts_sdk/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "integrations/sie_ts_chroma/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "integrations/sie_ts_langchain/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "integrations/sie_ts_llamaindex/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "integrations/sie_ts_lancedb/package.json", "jsonpath": "$.version" },
+        { "type": "generic", "path": "packages/sie_ts_sdk/src/version.ts" },
+        { "type": "toml", "path": "packages/sie_gateway/Cargo.toml", "jsonpath": "$.package.version" },
+        { "type": "toml", "path": "packages/sie_server_sidecar/Cargo.toml", "jsonpath": "$.package.version" },
+        { "type": "toml", "path": "packages/sie_audio_prep/Cargo.toml", "jsonpath": "$.package.version" },
+        { "type": "toml", "path": "packages/sie_audio_prep/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "generic", "path": "packages/sie_audio_prep/build_wheel.py" },
+        { "type": "generic", "path": "deploy/helm/sie-cluster/Chart.yaml" }
+      ]
+    }
+  }
+}

@@ -3,8 +3,8 @@ services:
     # GPU compose uses the transformers5 bundle so we can serve LightOnOCR /
     # GLM-OCR / Paddle (their adapters need transformers>=5). Florence-2 is
     # in the catalog but its tokenizer relies on a transformers<5 API and is
-    # therefore unavailable on this image (sie-internal#828, #832). The CPU
-    # compose covers Florence-2.
+    # therefore unavailable on this image. The CPU compose covers Florence-2
+    # through the default bundle.
     image: ghcr.io/superlinked/sie-server:latest-cuda12-transformers5
     command:
       - serve

@@ -470,12 +470,10 @@ services:
     managed_collector: regional
     runtimes:
       - packages/sie_gateway
-      - packages/sie_cloud/gateway
   dispatcher:
     service_name: sie-dispatcher
     managed_collector: regional
-    runtimes:
-      - packages/sie_cloud/dispatcher
+    runtimes: []
   config:
     service_name: sie-config
     managed_collector: regional

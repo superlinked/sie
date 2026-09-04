@@ -1,0 +1,373 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable release version newer than 0.7.3
+        required: true
+        type: string
+      original_run:
+        description: Original failed release workflow run ID
+        required: true
+        type: string
+      family:
+        description: Failed artifact family to retry on the original run
+        type: choice
+        default: all
+        options: [all, python, npm, docker, helm, audio, native]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-release-main
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: >-
+      vars.PUBLIC_RELEASE_AUTOMATION_ENABLED == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release-automation
+    permissions:
+      contents: read
+    outputs:
+      release_pr_head: ${{ steps.release-pr-head.outputs.sha }}
+    steps:
+      - name: Require activated public release GitHub App credentials
+        env:
+          APP_ID: ${{ vars.PUBLIC_RELEASE_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.PUBLIC_RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$APP_ID"
+          [[ "$APP_ID" =~ ^[0-9]+$ ]]
+          test -n "$APP_PRIVATE_KEY"
+          [[ "$APP_PRIVATE_KEY" == *"BEGIN"*"PRIVATE KEY"* ]]
+      - id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.PUBLIC_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PUBLIC_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - id: seed
+        name: Require the genuine stable seed tag and ancestral release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 tools/ci/release_guard.py seed
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: ${{ steps.seed.outputs.at_seed }}
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
+      - name: Refresh coupled locks on the release pull request
+        if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PRS: ${{ steps.release.outputs.prs }}
+        run: |
+          set -euo pipefail
+          branch="$(jq -r '.[0].headBranchName // empty' <<<"$RELEASE_PRS")"
+          test -n "$branch"
+          git fetch origin "$branch"
+          git checkout -B "$branch" FETCH_HEAD
+          mise exec -- uv lock --project .
+          mise exec -- pnpm install --lockfile-only
+          mise exec -- cargo metadata --format-version 1 > /dev/null
+          if git diff --quiet -- uv.lock pnpm-lock.yaml Cargo.lock; then
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add uv.lock pnpm-lock.yaml Cargo.lock
+          git commit -m 'chore: refresh release locks'
+          git push origin "HEAD:refs/heads/$branch"
+      - id: release-pr-head
+        name: Verify the release PR final head after the App-authored push
+        if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PRS: ${{ steps.release.outputs.prs }}
+        run: |
+          set -euo pipefail
+          pr_number="$(jq -r '.[0].number // empty' <<<"$RELEASE_PRS")"
+          expected_sha="$(git rev-parse HEAD)"
+          test -n "$pr_number"
+          [[ "$expected_sha" =~ ^[0-9a-f]{40}$ ]]
+          remote_sha=""
+          for _ in 1 2 3 4 5 6; do
+            remote_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --jq .head.sha)"
+            if [ "$remote_sha" = "$expected_sha" ]; then
+              break
+            fi
+            sleep 2
+          done
+          test "$remote_sha" = "$expected_sha"
+          echo "sha=$expected_sha" >> "$GITHUB_OUTPUT"
+
+  prepare:
+    if: >-
+      github.event_name == 'release' &&
+      github.event.action == 'published' &&
+      github.event.release.draft == false &&
+      github.event.release.prerelease == false &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.identity.outputs.sha }}
+      version: ${{ steps.identity.outputs.version }}
+      tag_name: ${{ steps.identity.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: identity
+        name: Verify published tag and protected-main ancestry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/ci/release_guard.py prepare
+
+  python:
+    needs: prepare
+    if: github.event_name == 'release' && needs.prepare.result == 'success'
+    uses: ./.github/workflows/release-python.yml
+    with:
+      source_ref: ${{ needs.prepare.outputs.sha }}
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      build_only: false
+
+  npm:
+    needs: prepare
+    if: github.event_name == 'release' && needs.prepare.result == 'success'
+    uses: ./.github/workflows/release-npm.yml
+    with:
+      source_ref: ${{ needs.prepare.outputs.sha }}
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      build_only: false
+
+  python-publish:
+    needs: [prepare, python]
+    if: >-
+      needs.prepare.result == 'success' &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'release' &&
+      github.event.action == 'published' &&
+      github.event.release.draft == false &&
+      github.event.release.prerelease == false &&
+      github.ref_protected == true &&
+      github.ref == format('refs/tags/{0}', needs.prepare.outputs.tag_name) &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == needs.prepare.outputs.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag_name }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+      PUBLIC_RELEASE_PUBLISHING_ENABLED: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - name: Validate trusted publication context and tag binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/ci/release_guard.py publish --source-ref "$RELEASE_SHA" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: artifacts
+      - name: Verify the complete original tested archive set
+        run: |
+          python3 -m tools.ci.release_artifact check --directory artifacts --kind python --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG" --source-revision "$RELEASE_SHA" --run-id "$GITHUB_RUN_ID"
+          python3 tools/ci/distributions.py verify python --directory artifacts --version "$RELEASE_VERSION"
+      - id: pending
+        name: Reject conflicting published bytes and select absent archives
+        run: python3 tools/ci/distributions.py prepare-pypi python --directory artifacts --destination pending --version "$RELEASE_VERSION"
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        if: steps.pending.outputs.pending == 'true'
+        with:
+          packages-dir: pending
+
+  npm-publish:
+    needs: [prepare, npm]
+    if: >-
+      needs.prepare.result == 'success' &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'release' &&
+      github.event.action == 'published' &&
+      github.event.release.draft == false &&
+      github.event.release.prerelease == false &&
+      github.ref_protected == true &&
+      github.ref == format('refs/tags/{0}', needs.prepare.outputs.tag_name) &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == needs.prepare.outputs.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag_name }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+      PUBLIC_RELEASE_PUBLISHING_ENABLED: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - name: Validate trusted publication context and tag binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/ci/release_guard.py publish --source-ref "$RELEASE_SHA" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-distributions
+          path: artifacts
+      - name: Verify the complete original tested archive set
+        run: |
+          python3 -m tools.ci.release_artifact check --directory artifacts --kind npm --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG" --source-revision "$RELEASE_SHA" --run-id "$GITHUB_RUN_ID"
+          python3 tools/ci/distributions.py verify npm --directory artifacts --version "$RELEASE_VERSION"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.12.0'
+      - name: Install the pinned OIDC-capable npm client
+        run: npm install --global npm@11.6.2 --ignore-scripts
+      - name: Publish absent versions or verify identical existing bytes
+        run: python3 tools/ci/distributions.py publish-npm npm --directory artifacts --version "$RELEASE_VERSION"
+
+  docker:
+    needs: prepare
+    if: github.event_name == 'release' && needs.prepare.result == 'success'
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    uses: ./.github/workflows/release-docker.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      sha: ${{ needs.prepare.outputs.sha }}
+      publish: true
+
+  helm:
+    needs: [prepare, docker]
+    if: github.event_name == 'release' && needs.prepare.result == 'success'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/release-helm.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      sha: ${{ needs.prepare.outputs.sha }}
+      publish: true
+
+  audio:
+    needs: prepare
+    if: github.event_name == 'release' && needs.prepare.result == 'success'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-audio.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      sha: ${{ needs.prepare.outputs.sha }}
+      publish: true
+
+  native:
+    needs: [prepare, docker]
+    if: github.event_name == 'release' && needs.prepare.result == 'success'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-native.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      sha: ${{ needs.prepare.outputs.sha }}
+      publish: true
+
+  complete:
+    needs: [prepare, python-publish, npm-publish, docker, helm, audio, native]
+    if: >-
+      always() && github.event_name == 'release' &&
+      github.event.action == 'published' &&
+      github.event.release.draft == false &&
+      github.event.release.prerelease == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every release family to finish successfully
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ["RESULTS"])
+          bad = {name: job["result"] for name, job in results.items() if job["result"] != "success"}
+          if bad:
+              raise SystemExit(f"Incomplete release: {bad}")
+          PY
+
+  recover:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.repository == 'superlinked/sie' &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-automation
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate retained original-run evidence and request failed-job retry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLIC_RELEASE_PUBLISHING_ENABLED: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          ORIGINAL_RUN: ${{ inputs.original_run }}
+          FAMILY: ${{ inputs.family }}
+        run: python3 -m tools.ci.release_recovery --version "$RELEASE_VERSION" --original-run "$ORIGINAL_RUN" --family "$FAMILY"

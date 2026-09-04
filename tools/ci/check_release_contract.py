@@ -1,0 +1,763 @@
+#!/usr/bin/env python3
+"""Validate the public version, artifact, and fail-closed publication contract."""
+
+from __future__ import annotations
+
+import json
+import re
+import runpy
+import shlex
+import subprocess
+import tomllib
+from pathlib import Path
+from typing import Any
+
+from tools.ci import distributions
+from tools.ci.release_guard import SEED_VERSION, stable_version
+
+ROOT = Path(__file__).resolve().parents[2]
+PYTHON_DISTRIBUTIONS = (
+    "sie-sdk",
+    "sie-server",
+    "sie-config",
+    "sie-mcp",
+    "sie-langchain",
+    "sie-llamaindex",
+    "sie-haystack",
+    "sie-dspy",
+    "sie-crewai",
+    "sie-chroma",
+    "sie-lancedb",
+    "sie-qdrant",
+    "sie-weaviate",
+)
+NPM_PACKAGES = (
+    "@superlinked/sie-sdk",
+    "@superlinked/sie-chroma",
+    "@superlinked/sie-langchain",
+    "@superlinked/sie-llamaindex",
+    "@superlinked/sie-lancedb",
+)
+PUBLIC_IMAGE_NAMES = {
+    "sie-server",
+    "sie-gateway",
+    "sie-config",
+    "sie-mcp",
+    "sie-server-sidecar",
+    "sie-server-rust",
+}
+EXTRA_VERSION_PATHS = {
+    "packages/sie_sdk/pyproject.toml",
+    "packages/sie_server/pyproject.toml",
+    "packages/sie_config/pyproject.toml",
+    "packages/sie_mcp/pyproject.toml",
+    "integrations/sie_langchain/pyproject.toml",
+    "integrations/sie_llamaindex/pyproject.toml",
+    "integrations/sie_haystack/pyproject.toml",
+    "integrations/sie_dspy/pyproject.toml",
+    "integrations/sie_crewai/pyproject.toml",
+    "integrations/sie_chroma/pyproject.toml",
+    "integrations/sie_lancedb/pyproject.toml",
+    "integrations/sie_qdrant/pyproject.toml",
+    "integrations/sie_weaviate/pyproject.toml",
+    "packages/sie_ts_sdk/package.json",
+    "integrations/sie_ts_chroma/package.json",
+    "integrations/sie_ts_langchain/package.json",
+    "integrations/sie_ts_llamaindex/package.json",
+    "integrations/sie_ts_lancedb/package.json",
+    "packages/sie_ts_sdk/src/version.ts",
+    "packages/sie_gateway/Cargo.toml",
+    "packages/sie_server_sidecar/Cargo.toml",
+    "packages/sie_audio_prep/Cargo.toml",
+    "packages/sie_audio_prep/pyproject.toml",
+    "packages/sie_audio_prep/build_wheel.py",
+    "deploy/helm/sie-cluster/Chart.yaml",
+}
+ACTION_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
+JOB_FIELD_INDENT = 4
+ARTIFACT_RETENTION_DAYS = 30
+REQUIRED_OCI_LABEL_OCCURRENCES = 2
+RELEASE_BOOTSTRAP_SHA = "60996d9c30168e0f8e85b680295f147fdee87f61"
+MPL_LICENSE_EXCEPTION_NAMES = frozenset(
+    {
+        "option-ext",
+        "symphonia",
+        "symphonia-adapter-libopus",
+        "symphonia-bundle-flac",
+        "symphonia-bundle-mp3",
+        "symphonia-codec-aac",
+        "symphonia-codec-alac",
+        "symphonia-codec-pcm",
+        "symphonia-codec-vorbis",
+        "symphonia-common",
+        "symphonia-core",
+        "symphonia-format-isomp4",
+        "symphonia-format-mkv",
+        "symphonia-format-ogg",
+        "symphonia-format-riff",
+        "symphonia-metadata",
+    }
+)
+AUDIO_MANYLINUX_IMAGE = (
+    "quay.io/pypa/manylinux_2_28_x86_64@sha256:4dc41da7df20400310c80d162a2fe2d2c2f3d9734d8dec20f6b9843711618deb"
+)
+TRUSTED_WRITE_CONDITION_TERMS = (
+    "inputs.publish == true",
+    "vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
+    "github.event_name == 'release'",
+    "github.event.action == 'published'",
+    "github.event.release.draft == false",
+    "github.event.release.prerelease == false",
+    "github.ref == format('refs/tags/{0}', inputs.tag_name)",
+    "github.ref_protected == true",
+    "github.repository == 'superlinked/sie'",
+    "github.sha == inputs.sha",
+)
+PUBLISHER_JOBS = (
+    (".github/workflows/release.yml", "python-publish", "pypi", {"contents": "read", "id-token": "write"}),
+    (".github/workflows/release.yml", "npm-publish", "npm", {"contents": "read", "id-token": "write"}),
+    (".github/workflows/release-audio.yml", "publish", "github-release", {"contents": "write"}),
+    (".github/workflows/release-native.yml", "publish", "github-release", {"contents": "write"}),
+    (".github/workflows/release-docker.yml", "push-server", "ghcr", {"contents": "read", "packages": "write"}),
+    (".github/workflows/release-docker.yml", "push-service", "ghcr", {"contents": "read", "packages": "write"}),
+    (".github/workflows/release-docker.yml", "alias", "ghcr", {"contents": "read", "packages": "write"}),
+    (".github/workflows/release-helm.yml", "publish", "helm", {"contents": "read", "packages": "write"}),
+)
+
+CANDLE_PATHS = (
+    "packages/sie_server_rust/Cargo.lock",
+    "packages/sie_server_rust/Cargo.toml",
+    "packages/sie_server_rust/Dockerfile",
+    "packages/sie_server_rust/Dockerfile.candle",
+    "packages/sie_server_rust/src/candle_backend.rs",
+    "packages/sie_server_rust/src/candle_bert_flash.rs",
+    "packages/sie_server_rust/src/candle_embedding.rs",
+    "packages/sie_server_rust/src/candle_gte_rope.rs",
+    "packages/sie_server_rust/src/candle_layers.rs",
+    "packages/sie_server_rust/src/candle_modernbert.rs",
+    "packages/sie_server_rust/src/candle_residency.rs",
+    "packages/sie_server_rust/src/candle_rope.rs",
+    "packages/sie_server_rust/src/candle_splade.rs",
+    "packages/sie_server_rust/src/candle_xlm_roberta.rs",
+    "packages/sie_server_rust/src/ipc.rs",
+    "packages/sie_server_rust/src/ipc_types.rs",
+    "packages/sie_server_rust/src/lib.rs",
+    "packages/sie_server_rust/src/main.rs",
+    "packages/sie_server_rust/src/native_backend.rs",
+    "packages/sie_server_rust/src/observability/metrics.rs",
+    "packages/sie_server_rust/src/observability/mod.rs",
+    "packages/sie_server_rust/src/observability/propagation.rs",
+    "packages/sie_server_rust/src/observability/resource.rs",
+    "packages/sie_server_rust/src/observability/tracing.rs",
+    "packages/sie_server_rust/src/observability/transport.rs",
+    "packages/sie_server_rust/src/text_prep.rs",
+    "packages/sie_server_rust/vendor/candle-cublaslt/Cargo.toml",
+    "packages/sie_server_rust/vendor/candle-cublaslt/LICENSE-APACHE",
+    "packages/sie_server_rust/vendor/candle-cublaslt/LICENSE-MIT",
+    "packages/sie_server_rust/vendor/candle-cublaslt/README.md",
+    "packages/sie_server_rust/vendor/candle-cublaslt/src/lib.rs",
+    "packages/sie_server_rust/vendor/candle-gated-activation/Cargo.toml",
+    "packages/sie_server_rust/vendor/candle-gated-activation/build.rs",
+    "packages/sie_server_rust/vendor/candle-gated-activation/kernels/gated_activation.cu",
+    "packages/sie_server_rust/vendor/candle-gated-activation/kernels/gelu_erf_gate.cu",
+    "packages/sie_server_rust/vendor/candle-gated-activation/src/ffi.rs",
+    "packages/sie_server_rust/vendor/candle-gated-activation/src/lib.rs",
+    "packages/sie_server_rust/vendor/candle-layer-norm/Cargo.toml",
+    "packages/sie_server_rust/vendor/candle-layer-norm/LICENSE",
+    "packages/sie_server_rust/vendor/candle-layer-norm/LICENSE-APACHE",
+    "packages/sie_server_rust/vendor/candle-layer-norm/LICENSE-MIT",
+    "packages/sie_server_rust/vendor/candle-layer-norm/README.md",
+    "packages/sie_server_rust/vendor/candle-layer-norm/build.rs",
+    "packages/sie_server_rust/vendor/candle-layer-norm/kernels/ln.h",
+    "packages/sie_server_rust/vendor/candle-layer-norm/kernels/ln_api.cu",
+    "packages/sie_server_rust/vendor/candle-layer-norm/kernels/ln_fwd_kernels.cuh",
+    "packages/sie_server_rust/vendor/candle-layer-norm/kernels/ln_kernel_traits.h",
+    "packages/sie_server_rust/vendor/candle-layer-norm/kernels/ln_utils.cuh",
+    "packages/sie_server_rust/vendor/candle-layer-norm/kernels/static_switch.h",
+    "packages/sie_server_rust/vendor/candle-layer-norm/src/ffi.rs",
+    "packages/sie_server_rust/vendor/candle-layer-norm/src/lib.rs",
+    "packages/sie_server_rust/vendor/candle-rotary/Cargo.toml",
+    "packages/sie_server_rust/vendor/candle-rotary/LICENSE-APACHE",
+    "packages/sie_server_rust/vendor/candle-rotary/LICENSE-MIT",
+    "packages/sie_server_rust/vendor/candle-rotary/README.md",
+    "packages/sie_server_rust/vendor/candle-rotary/build.rs",
+    "packages/sie_server_rust/vendor/candle-rotary/kernels/cuda_compat.h",
+    "packages/sie_server_rust/vendor/candle-rotary/kernels/rotary.cu",
+    "packages/sie_server_rust/vendor/candle-rotary/src/ffi.rs",
+    "packages/sie_server_rust/vendor/candle-rotary/src/lib.rs",
+    "packages/sie_server_rust/vendor/candle-rotary/tests/rotary_tests.rs",
+    "packages/sie_server_rust/vendor/candle-splade-pool/Cargo.toml",
+    "packages/sie_server_rust/vendor/candle-splade-pool/build.rs",
+    "packages/sie_server_rust/vendor/candle-splade-pool/kernels/splade_pool.cu",
+    "packages/sie_server_rust/vendor/candle-splade-pool/src/ffi.rs",
+    "packages/sie_server_rust/vendor/candle-splade-pool/src/lib.rs",
+)
+
+
+def load_json(path: str) -> Any:
+    return json.loads((ROOT / path).read_text())
+
+
+def workflow_job_blocks(path: str) -> dict[str, str]:
+    """Extract top-level job blocks without requiring a YAML dependency."""
+    lines = (ROOT / path).read_text().splitlines()
+    try:
+        jobs_index = lines.index("jobs:")
+    except ValueError:
+        return {}
+    starts: list[tuple[str, int]] = []
+    for index, line in enumerate(lines[jobs_index + 1 :], start=jobs_index + 1):
+        match = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+        if match:
+            starts.append((match.group(1), index))
+    blocks: dict[str, str] = {}
+    for offset, (name, start) in enumerate(starts):
+        end = starts[offset + 1][1] if offset + 1 < len(starts) else len(lines)
+        blocks[name] = "\n".join(lines[start:end])
+    return blocks
+
+
+def job_scalar(block: str, key: str) -> str | None:
+    lines = block.splitlines()
+    prefix = f"    {key}:"
+    for index, line in enumerate(lines):
+        if not line.startswith(prefix):
+            continue
+        value = line.removeprefix(prefix).strip()
+        if value not in {">", ">-", "|", "|-"}:
+            return value
+        parts: list[str] = []
+        for continuation in lines[index + 1 :]:
+            if continuation and len(continuation) - len(continuation.lstrip()) <= JOB_FIELD_INDENT:
+                break
+            if continuation.strip():
+                parts.append(continuation.strip())
+        return " ".join(parts)
+    return None
+
+
+def job_permissions(block: str) -> dict[str, str]:
+    lines = block.splitlines()
+    for index, line in enumerate(lines):
+        if line != "    permissions:":
+            continue
+        permissions: dict[str, str] = {}
+        for continuation in lines[index + 1 :]:
+            match = re.fullmatch(r"      ([A-Za-z0-9_-]+):\s*([^\s]+)", continuation)
+            if not match:
+                break
+            permissions[match.group(1)] = match.group(2)
+        return permissions
+    return {}
+
+
+def publisher_job_errors() -> list[str]:
+    errors: list[str] = []
+    for path, job_name, environment, expected_permissions in PUBLISHER_JOBS:
+        if not (ROOT / path).exists():
+            errors.append(f"publisher workflow is missing: {path}")
+            continue
+        block = workflow_job_blocks(path).get(job_name, "")
+        condition = job_scalar(block, "if") or ""
+        terms = TRUSTED_WRITE_CONDITION_TERMS
+        if path.endswith("/release.yml"):
+            terms = tuple(
+                term.replace("inputs.sha", "needs.prepare.outputs.sha").replace(
+                    "inputs.tag_name", "needs.prepare.outputs.tag_name"
+                )
+                for term in terms
+                if term != "inputs.publish == true"
+            )
+        missing = [term for term in terms if term not in condition]
+        if missing:
+            errors.append(f"{path}:{job_name} lacks write guards: {missing}")
+        if job_scalar(block, "environment") != environment or job_permissions(block) != expected_permissions:
+            errors.append(f"{path}:{job_name} environment/permissions mismatch")
+        if (
+            "release_guard.py publish" not in block
+            and "Validate trusted publication context and tag binding" not in block
+        ):
+            errors.append(f"{path}:{job_name} lacks runtime tag/SHA verification")
+    return errors
+
+
+def python_matrices() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    names = tuple(distributions.manifests("python"))
+    return names, names
+
+
+def npm_matrix() -> tuple[str, ...]:
+    return tuple(distributions.manifests("npm"))
+
+
+def workflow_pin_errors() -> list[str]:
+    errors: list[str] = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            match = re.search(r"\buses:\s*([^\s#]+)", line)
+            if not match or match.group(1).startswith("./"):
+                continue
+            if not ACTION_PIN.fullmatch(match.group(1)):
+                errors.append(f"{path.relative_to(ROOT)}:{line_number}: action is not pinned by full SHA")
+    return errors
+
+
+def release_config_errors() -> list[str]:
+    errors: list[str] = []
+    manifest = load_json(".release-please-manifest.json")
+    try:
+        if set(manifest) != {"."} or stable_version(manifest["."], new=False) < stable_version(SEED_VERSION, new=False):
+            errors.append("release-please manifest is below the public 0.7.3 seed")
+    except (ValueError, TypeError):
+        errors.append("release-please manifest must contain one stable root version")
+    config = load_json("release-please-config.json")
+    packages = config.get("packages", {})
+    if set(packages) != {"."} or packages["."].get("release-type") != "simple":
+        errors.append("release-please must define one simple root release")
+        return errors
+    for flag in ("bump-minor-pre-major", "bump-patch-for-minor-pre-major", "include-v-in-tag"):
+        if packages["."].get(flag) is not True:
+            errors.append(f"release-please must preserve {flag}")
+    if config.get("bootstrap-sha") != RELEASE_BOOTSTRAP_SHA or "bootstrap-sha" in packages["."]:
+        errors.append("release-please bootstrap-sha must be the exact public v0.7.3 commit")
+    for override in ("release-as", "last-release-sha"):
+        if override in config or override in packages["."]:
+            errors.append(f"release-please must derive its native release boundary, not {override}")
+    extra_paths = {item["path"] for item in packages["."]["extra-files"]}
+    if extra_paths != EXTRA_VERSION_PATHS:
+        errors.append("release-please extra-file version surface differs from the public contract")
+    for path in extra_paths:
+        if not (ROOT / path).is_file():
+            errors.append(f"release-please extra file does not exist: {path}")
+    return errors
+
+
+def _license_policy_errors(policy: object) -> list[str]:
+    if not isinstance(policy, dict) or not isinstance(policy.get("licenses"), dict):
+        return ["cargo-deny license policy is malformed"]
+    licenses = policy["licenses"]
+    allow = licenses.get("allow")
+    exceptions = licenses.get("exceptions")
+    if not isinstance(allow, list) or not isinstance(exceptions, list):
+        return ["cargo-deny license allowlists are malformed"]
+
+    errors: list[str] = []
+    if "MPL-2.0" in allow:
+        errors.append("MPL-2.0 must not be globally allowed")
+    option_ext = [entry for entry in exceptions if isinstance(entry, dict) and entry.get("name") == "option-ext"]
+    expected_option_ext = {"name": "option-ext", "version": "=0.2.0", "allow": ["MPL-2.0"]}
+    if option_ext != [expected_option_ext]:
+        errors.append("option-ext MPL-2.0 allowance must be confined to exact version 0.2.0")
+    mpl_names = {
+        entry.get("name")
+        for entry in exceptions
+        if isinstance(entry, dict) and isinstance(entry.get("allow"), list) and "MPL-2.0" in entry["allow"]
+    }
+    if mpl_names != MPL_LICENSE_EXCEPTION_NAMES:
+        errors.append("cargo-deny MPL-2.0 exception surface differs from the reviewed crate set")
+    return errors
+
+
+def license_policy_errors() -> list[str]:
+    return _license_policy_errors(tomllib.loads((ROOT / "deny.toml").read_text()))
+
+
+QUEUE_SCHEMA_DIAGNOSTIC = (
+    r'^unexpected key "queue" for "concurrency" section\. '
+    r'expected one of "cancel-in-progress", "group"$'
+)
+
+
+def release_queue_errors(top: str, ci: str) -> list[str]:
+    errors = []
+    concurrency = top.partition("concurrency:\n")[2].partition("\njobs:")[0]
+    if re.findall(r"^  queue: (.+)$", concurrency, re.MULTILINE) != ["max"]:
+        errors.append("release concurrency must preserve all pending runs with queue: max")
+    if re.findall(r"^  cancel-in-progress: (.+)$", concurrency, re.MULTILINE) != ["false"]:
+        errors.append("release concurrency must not cancel original publication runs")
+    if re.findall(r"-ignore '([^']*)'", ci) != [QUEUE_SCHEMA_DIAGNOSTIC]:
+        errors.append("actionlint may ignore only the exact unsupported concurrency.queue diagnostic")
+    return errors
+
+
+def release_workflow_errors() -> list[str]:
+    errors: list[str] = []
+    top = (ROOT / ".github/workflows/release.yml").read_text()
+    for family in ("python", "npm", "audio", "docker", "helm", "native"):
+        if f"uses: ./.github/workflows/release-{family}.yml" not in top:
+            errors.append(f"top-level release does not call {family} directly")
+    for family in ("python", "npm"):
+        text = (ROOT / f".github/workflows/release-{family}.yml").read_text()
+        if "id-token:" in text or "environment:" in text or "  publish:" in text:
+            errors.append(f"{family} reusable must only build and test")
+        if f"distributions.py build {family}" not in text or "inputs.source_ref" not in text:
+            errors.append(f"{family} reusable lacks exact-source distribution checks")
+    for path in sorted((ROOT / ".github/workflows").glob("release*.yml")):
+        text = path.read_text()
+        for token_name in ("PYPI_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN"):
+            if token_name in text:
+                errors.append(f"{path.name} references forbidden publication token {token_name}")
+        for retention in re.findall(r"retention-days:\s*(\d+)", text):
+            if int(retention) < ARTIFACT_RETENTION_DAYS:
+                errors.append(f"{path.name} expires retry artifacts before 30 days")
+        if path.name != "release.yml" and "workflow_dispatch" in text:
+            errors.append(f"{path.name} must not expose a separate recovery writer")
+    blocks = workflow_job_blocks(".github/workflows/release.yml")
+    prepare = blocks.get("prepare", "")
+    if "release_guard.py prepare" not in prepare or "ref: ${{ github.sha }}" not in prepare:
+        errors.append("publication must prepare the exact published tag event")
+    for family in ("python", "npm", "docker", "helm", "audio", "native", "python-publish", "npm-publish"):
+        if "needs.prepare" not in blocks.get(family, "") or "needs.release-please" in blocks.get(family, ""):
+            errors.append(f"{family} must consume the published-release prepare identity")
+    errors.extend(release_queue_errors(top, (ROOT / ".github/workflows/ci.yml").read_text()))
+    recover = blocks.get("recover", "")
+    if "release_recovery" not in recover or "id-token:" in recover or "publish-" in recover:
+        errors.append("manual recovery must only rerun the original jobs")
+    complete = blocks.get("complete", "")
+    if "always()" not in complete or 'job["result"] != "success"' not in complete:
+        errors.append("release completion must reject every non-success result")
+    if job_scalar(complete, "needs") != "[prepare, python-publish, npm-publish, docker, helm, audio, native]":
+        errors.append("release completion must include every artifact family")
+    if (ROOT / ".github/workflows/repair-audio-asset.yml").exists():
+        errors.append("obsolete audio repair workflow must be removed")
+    npm = blocks.get("npm-publish", "")
+    for term in ("runs-on: ubuntu-24.04", "node-version: '24.12.0'", "npm@11.6.2"):
+        if term not in npm:
+            errors.append(f"npm trusted publication is missing {term}")
+    return errors
+
+
+def release_automation_gate_errors(condition: str) -> list[str]:
+    gate = "vars.PUBLIC_RELEASE_AUTOMATION_ENABLED == 'true'"
+    if condition.count(gate) != 1 or condition.count("PUBLIC_RELEASE_AUTOMATION_ENABLED") != 1 or "||" in condition:
+        return ["release-please authoring must use one exact default-off activation gate"]
+    return []
+
+
+def release_app_errors() -> list[str]:
+    errors: list[str] = []
+    path = ".github/workflows/release.yml"
+    text = (ROOT / path).read_text()
+    block = workflow_job_blocks(path).get("release-please", "")
+    if job_scalar(block, "environment") != "release-automation":
+        errors.append("release-please must use the protected release-automation environment")
+    if job_permissions(block) != {"contents": "read"}:
+        errors.append("release-please GITHUB_TOKEN permissions must remain read-only")
+    release_condition = job_scalar(block, "if") or ""
+    errors.extend(release_automation_gate_errors(release_condition))
+    for term in (
+        "github.event_name == 'push'",
+        "github.ref == 'refs/heads/main'",
+        "github.ref_protected == true",
+        "github.repository == 'superlinked/sie'",
+    ):
+        if term not in release_condition:
+            errors.append(f"release-please is missing trusted context condition: {term}")
+    required = (
+        "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
+        "vars.PUBLIC_RELEASE_APP_ID",
+        "secrets.PUBLIC_RELEASE_APP_PRIVATE_KEY",
+        "permission-contents: write",
+        "permission-pull-requests: write",
+        "token: ${{ steps.app-token.outputs.token }}",
+        "git push origin",
+        "Verify the release PR final head after the App-authored push",
+        'gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --jq .head.sha',
+        'test "$remote_sha" = "$expected_sha"',
+        "release_pr_head: ${{ steps.release-pr-head.outputs.sha }}",
+    )
+    missing = [item for item in required if item not in text]
+    if missing:
+        errors.append(f"public release GitHub App exact-head handoff is incomplete: {missing}")
+    forbidden = ("secrets.GITHUB_TOKEN", "token: ${{ github.token }}")
+    leaked = [item for item in forbidden if item in block]
+    if leaked:
+        errors.append(f"release-please or lock pushes fall back to GITHUB_TOKEN: {leaked}")
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    if "  pull_request:" not in ci:
+        errors.append("App-authored release PR changes do not trigger public pull-request CI")
+    if (
+        "release_guard.py seed" not in block
+        or "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7" not in block
+        or "skip-github-release: ${{ steps.seed.outputs.at_seed }}" not in block
+    ):
+        errors.append("stock release-please must preflight the genuine 0.7.3 seed")
+    return errors
+
+
+def audio_release_contract() -> tuple[str, str, str]:
+    values = runpy.run_path(str(ROOT / "packages/sie_audio_prep/build_wheel.py"))
+    version = values["AUDIO_PREP_VERSION"]
+    filename = values["AUDIO_WHEEL_FILENAME"]
+    url = f"https://github.com/superlinked/sie/releases/download/v{version}/{filename}"
+    return version, filename, url
+
+
+def audio_release_errors() -> list[str]:
+    errors: list[str] = []
+    version, filename, url = audio_release_contract()
+    expected_filename = f"sie_audio_prep-{version}-cp312-abi3-manylinux_2_28_x86_64.whl"
+    if filename != expected_filename:
+        errors.append(f"native audio asset filename changed unexpectedly: {filename}")
+    mise_config = tomllib.loads((ROOT / "mise.toml").read_text())
+    mise_tools = mise_config.get("tools", {})
+    if mise_tools.get("zig") != "0.13.0":
+        errors.append("native audio release must pin Zig 0.13.0")
+    rust = mise_tools.get("rust", {})
+    if not isinstance(rust, dict) or rust.get("version") != "1.97.0":
+        errors.append("native audio release must use the repository Rust 1.97.0 pin")
+    workflow = (ROOT / ".github/workflows/release-audio.yml").read_text()
+    required = (
+        "ref: ${{ inputs.sha }}",
+        AUDIO_MANYLINUX_IMAGE,
+        "version: 2026.7.11",
+        "mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0",
+        "rust@1.97.0 -- rustc --version",
+        "rust@1.97.0 -- cargo --version",
+        "python tools/ci/build_audio_prep_release_asset.py --out dist",
+        expected_filename.replace(version, "$RELEASE_VERSION"),
+        "tools/ci/upload_audio_prep_release_asset.bash",
+        "environment: github-release",
+    )
+    missing = [item for item in required if item not in workflow]
+    if missing:
+        errors.append(f"native audio release workflow is incomplete: {missing}")
+    if not (ROOT / "tools/ci/build_audio_prep_release_asset.py").is_file():
+        errors.append("native audio release asset builder is missing")
+    uploader_path = ROOT / "tools/ci/upload_native_release_asset.bash"
+    uploader = ""
+    if not uploader_path.is_file():
+        errors.append("native audio immutable release uploader is missing")
+    else:
+        uploader = uploader_path.read_text()
+        for item in ("gh release upload", "sha256sum", "browser_download_url", "identical"):
+            if item not in uploader:
+                errors.append(f"native audio uploader is missing immutable check: {item}")
+        if "--clobber" in uploader:
+            errors.append("native audio uploader must never clobber a versioned asset")
+    top = (ROOT / ".github/workflows/release.yml").read_text()
+    if "uses: ./.github/workflows/release-audio.yml" not in top or "contents: write" not in workflow:
+        errors.append("top-level release does not fan out the native audio asset writer")
+    expected_url_fragment = (
+        "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$RELEASE_ASSET_FILENAME"
+    )
+    if expected_url_fragment not in uploader:
+        errors.append(f"native audio workflow does not verify browser URL contract {url}")
+    return errors
+
+
+def candle_source_errors() -> list[str]:
+    errors: list[str] = []
+    root = ROOT / "packages/sie_server_rust"
+    if (ROOT / ".git").exists():
+        listed = subprocess.run(
+            [
+                "/usr/bin/git",
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "packages/sie_server_rust",
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        actual = {item.decode() for item in listed.stdout.split(b"\0") if item}
+    else:
+        actual = {
+            str(path.relative_to(ROOT))
+            for path in root.rglob("*")
+            if path.is_file() and "target" not in path.relative_to(root).parts
+        }
+    expected = set(CANDLE_PATHS)
+    if actual != expected:
+        errors.append(
+            "Candle source closure differs from the reviewed 66-path allowlist: "
+            f"missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
+        )
+        return errors
+    for relative in sorted(expected):
+        path = ROOT / relative
+        if path.is_symlink():
+            errors.append(f"Candle source closure must not contain symlinks: {relative}")
+        try:
+            path.read_text()
+        except UnicodeDecodeError:
+            errors.append(f"Candle source closure contains non-text content: {relative}")
+
+    required_licenses = {
+        "packages/sie_server_rust/vendor/candle-cublaslt/LICENSE-APACHE",
+        "packages/sie_server_rust/vendor/candle-cublaslt/LICENSE-MIT",
+        "packages/sie_server_rust/vendor/candle-layer-norm/LICENSE",
+        "packages/sie_server_rust/vendor/candle-layer-norm/LICENSE-APACHE",
+        "packages/sie_server_rust/vendor/candle-layer-norm/LICENSE-MIT",
+        "packages/sie_server_rust/vendor/candle-rotary/LICENSE-APACHE",
+        "packages/sie_server_rust/vendor/candle-rotary/LICENSE-MIT",
+    }
+    if not required_licenses.issubset(actual):
+        errors.append("Candle vendored license set is incomplete")
+
+    def walk_paths(value: Any) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "path" and isinstance(item, str):
+                    found.append(item)
+                else:
+                    found.extend(walk_paths(item))
+        elif isinstance(value, list):
+            for item in value:
+                found.extend(walk_paths(item))
+        return found
+
+    for manifest in root.rglob("Cargo.toml"):
+        data = tomllib.loads(manifest.read_text())
+        for dependency_path in walk_paths(data):
+            if not (manifest.parent / dependency_path).resolve().exists():
+                errors.append(
+                    f"Candle manifest path does not resolve: {manifest.relative_to(ROOT)} -> {dependency_path}"
+                )
+    return errors
+
+
+def docker_copy_errors() -> list[str]:
+    errors: list[str] = []
+    dockerfiles = [
+        ROOT / "packages/sie_server/Dockerfile.cpu",
+        ROOT / "packages/sie_server/Dockerfile.cuda12",
+        ROOT / "packages/sie_server/Dockerfile.cuda13",
+        ROOT / "packages/sie_gateway/Dockerfile",
+        ROOT / "packages/sie_config/Dockerfile",
+        ROOT / "packages/sie_mcp/Dockerfile",
+        ROOT / "packages/sie_server_sidecar/Dockerfile",
+        ROOT / "packages/sie_server_rust/Dockerfile",
+        ROOT / "packages/sie_server_rust/Dockerfile.candle",
+    ]
+    for dockerfile in dockerfiles:
+        logical_text = dockerfile.read_text().replace("\\\n", " ")
+        for line_number, line in enumerate(logical_text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped.startswith("COPY "):
+                continue
+            tokens = shlex.split(stripped)
+            if any(token.startswith("--from=") for token in tokens[1:]):
+                continue
+            arguments = [token for token in tokens[1:] if not token.startswith("--")]
+            for source in arguments[:-1]:
+                if source.startswith("/") or "$" in source:
+                    errors.append(
+                        f"{dockerfile.relative_to(ROOT)}:{line_number}: unsupported release COPY source {source}"
+                    )
+                    continue
+                matches = list(ROOT.glob(source))
+                if not matches:
+                    errors.append(f"{dockerfile.relative_to(ROOT)}:{line_number}: missing release COPY source {source}")
+        for line in logical_text.splitlines():
+            if (
+                "org.opencontainers.image.source=" in line
+                and 'org.opencontainers.image.source="https://github.com/superlinked/sie"' not in line
+            ):
+                errors.append(f"{dockerfile.relative_to(ROOT)} has a non-public OCI source label")
+    return errors
+
+
+def docker_release_errors() -> list[str]:
+    errors = [*candle_source_errors(), *docker_copy_errors()]
+    matrix = load_json(".github/release-matrix.json")
+    pairs = {(platform, bundle) for platform in matrix.get("platforms", []) for bundle in matrix.get("bundles", [])}
+    pairs.update((item.get("platform"), item.get("bundle")) for item in matrix.get("include", []))
+    expected_pairs = {
+        (platform, bundle)
+        for platform in ("cuda12", "cpu")
+        for bundle in ("default", "ctranslate2", "sglang", "transformers5")
+    } | {("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
+    if pairs != expected_pairs:
+        errors.append("Docker release matrix differs from the supported server pairs")
+
+    values = (ROOT / "deploy/helm/sie-cluster/values.yaml").read_text()
+    chart_images = set(re.findall(r"repository:\s*ghcr\.io/superlinked/(sie-[a-z-]+)", values))
+    if chart_images != PUBLIC_IMAGE_NAMES:
+        errors.append(f"chart-advertised SIE repositories differ from release set: {sorted(chart_images)}")
+
+    workflow = (ROOT / ".github/workflows/release-docker.yml").read_text()
+    if "inputs.publish == true" not in workflow or "PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'" not in workflow:
+        errors.append("Docker release is missing its dual publication latch")
+    if "needs: [matrix, verify]" not in workflow:
+        errors.append("Docker latest aliases are not ordered after full-set verification")
+    docker_task = (ROOT / "tools/mise_tasks/docker_task.py").read_text()
+    for label in (
+        "org.opencontainers.image.revision={revision}",
+        "org.opencontainers.image.source=https://github.com/superlinked/sie",
+    ):
+        if docker_task.count(label) < REQUIRED_OCI_LABEL_OCCURRENCES:
+            errors.append(f"server and singleton builds must both carry OCI label {label}")
+    return errors
+
+
+def helm_release_errors() -> list[str]:
+    errors: list[str] = []
+    chart = (ROOT / "deploy/helm/sie-cluster/Chart.yaml").read_text()
+    version_match = re.search(r"^version:\s*([^\s#]+)", chart, re.MULTILINE)
+    app_match = re.search(r"^appVersion:\s*([^\s#]+)", chart, re.MULTILINE)
+    if not version_match or not app_match or app_match.group(1) != f"v{version_match.group(1)}":
+        errors.append("Helm Chart version and appVersion must share the vX.Y.Z release identity")
+
+    workflow = (ROOT / ".github/workflows/release-helm.yml").read_text()
+    required = (
+        "ref: ${{ inputs.sha }}",
+        "mise run helm -- dependencies",
+        "mise run helm -- lint --set payloadStore.enabled=false",
+        "mise run helm -- template --set payloadStore.enabled=false",
+        "helm package deploy/helm/sie-cluster",
+        "needs: build",
+        "inputs.publish == true",
+        "PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
+        "packages: write",
+        "tools.ci.publish_helm_archive",
+    )
+    missing = [item for item in required if item not in workflow]
+    if missing:
+        errors.append(f"Helm release workflow is missing contract elements: {missing}")
+    if "latest" in workflow or "alias" in workflow:
+        errors.append("Helm release must not move a floating chart alias")
+
+    docker_task = (ROOT / "tools/mise_tasks/docker_task.py").read_text()
+    if ":v{validate_version(version)}" not in docker_task:
+        errors.append("Docker versioned tags must match the chart's v-prefixed appVersion")
+    return errors
+
+
+def validate() -> list[str]:
+    errors = [
+        *release_config_errors(),
+        *license_policy_errors(),
+        *release_workflow_errors(),
+        *release_app_errors(),
+        *publisher_job_errors(),
+        *audio_release_errors(),
+        *docker_release_errors(),
+        *helm_release_errors(),
+        *workflow_pin_errors(),
+    ]
+    if python_matrices() != (PYTHON_DISTRIBUTIONS, PYTHON_DISTRIBUTIONS):
+        errors.append("Python build/publish matrices differ from the exact 13-package contract")
+    if npm_matrix() != NPM_PACKAGES:
+        errors.append("npm publish matrix differs from the exact five-package contract")
+    if not (ROOT / "pnpm-lock.yaml").is_file() or (ROOT / "packages/sie_ts_sdk/pnpm-lock.yaml").exists():
+        errors.append("root pnpm lock must be the only TypeScript lock authority")
+    return errors
+
+
+def main() -> int:
+    errors = validate()
+    if errors:
+        print("\n".join(f"ERROR: {error}" for error in errors))
+        return 1
+    print("Public release contract passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

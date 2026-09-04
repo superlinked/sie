@@ -51,7 +51,7 @@ def _make_html_bytes() -> bytes:
 @pytest.mark.parametrize(
     ("format_hint", "maker"),
     [
-        ("pdf", _make_pdf_bytes),
+        pytest.param("pdf", _make_pdf_bytes, marks=pytest.mark.model),
         ("docx", _make_docx_bytes),
         ("html", _make_html_bytes),
     ],
