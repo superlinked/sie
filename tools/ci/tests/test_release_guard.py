@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 
@@ -25,9 +26,8 @@ NOW = datetime(2026, 9, 3, tzinfo=UTC)
     ],
 )
 def test_new_publication_rejects_seed_and_nonstable_versions(version, message):
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         guard.stable_version(version)
-    assert str(error.value) == message
 
 
 def published():
@@ -92,9 +92,8 @@ def context():
 )
 def test_actual_writer_guard_rejects_untrusted_context(key, value, message):
     guard.trusted_context(context(), SHA, event=published())
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         guard.trusted_context({**context(), key: value}, SHA, event=published())
-    assert str(error.value) == message
 
 
 @pytest.mark.parametrize(("key", "value"), [("draft", True), ("prerelease", True), ("tag_name", "v0.7.5")])
@@ -303,11 +302,10 @@ def run_record():
 )
 def test_recovery_cannot_change_original_provenance(key, value, message):
     recovery.validate_run(run_record(), original_run=123, source_sha=SHA, tag_name="v0.7.4", now=NOW)
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         recovery.validate_run(
             {**run_record(), key: value}, original_run=123, source_sha=SHA, tag_name="v0.7.4", now=NOW
         )
-    assert str(error.value) == message
 
 
 def artifact():
@@ -344,9 +342,8 @@ def artifact():
 def test_recovery_rejects_missing_expired_or_unbound_archives(key, value, message):
     kwargs = {"original_run": 123, "source_sha": SHA, "tag_name": "v0.7.4", "now": NOW}
     recovery.validate_artifacts([artifact()], {"python-distributions"}, **kwargs)
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         recovery.validate_artifacts([{**artifact(), key: value}], {"python-distributions"}, **kwargs)
-    assert str(error.value) == message
 
 
 def test_retry_selector_only_reruns_failed_original_jobs():
@@ -359,9 +356,9 @@ def test_retry_selector_only_reruns_failed_original_jobs():
     assert recovery.selected_jobs(jobs, "python") == [1]
     assert recovery.selected_jobs(jobs, "docker") == [3]
     assert recovery.selected_jobs(jobs, "all") == [1, 3]
-    with pytest.raises(ValueError) as error:
+    message = "no failed original family jobs to rerun; skipped-only publication requires operator diagnosis"
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         recovery.selected_jobs(jobs, "npm")
-    assert str(error.value) == "no failed original family jobs to rerun; skipped-only publication requires operator diagnosis"
 
 
 def test_archive_recovery_scope_contains_all_families():
