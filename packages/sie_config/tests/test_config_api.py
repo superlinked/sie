@@ -1120,6 +1120,22 @@ class TestConfigAPIExportAuth:
         assert resp.status_code == 401
         assert "Missing Authorization header" in resp.text
 
+    def test_lowercase_bearer_prefix_is_accepted(self, monkeypatch) -> None:
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "the-real-admin")
+        resp = self.client.get(
+            "/v1/configs/export",
+            headers={"Authorization": "bearer the-real-admin"},
+        )
+        assert resp.status_code == 200
+
+    def test_bearer_prefix_is_trimmed_and_case_insensitive(self, monkeypatch) -> None:
+        monkeypatch.setenv("SIE_ADMIN_TOKEN", "the-real-admin")
+        resp = self.client.get(
+            "/v1/configs/export",
+            headers={"Authorization": "  BEARER  the-real-admin  "},
+        )
+        assert resp.status_code == 200
+
     def test_export_forbidden_with_wrong_admin_token(self, monkeypatch) -> None:
         monkeypatch.setenv("SIE_ADMIN_TOKEN", "the-real-admin")
         resp = self.client.get(
