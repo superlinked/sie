@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -12,6 +13,27 @@ from pathlib import Path
 import pytest
 
 from tools.ci import distributions as packages
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (
+            ["prepare-pypi", "npm", "--destination", "pending", "--version", "0.7.4"],
+            "prepare-pypi requires the python family",
+        ),
+        (["prepare-pypi", "python", "--version", "0.7.4"], "prepare-pypi requires --destination"),
+        (["prepare-pypi", "python", "--destination", "pending"], "prepare-pypi requires --version"),
+        (["publish-npm", "python", "--version", "0.7.4"], "publish-npm requires the npm family"),
+        (["publish-npm", "npm"], "publish-npm requires --version"),
+    ],
+)
+def test_mode_specific_cli_arguments_are_required(arguments, message, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["distributions.py", *arguments, "--directory", str(tmp_path)])
+    with pytest.raises(SystemExit) as error:
+        packages.main()
+    assert error.value.code == 2
+    assert capsys.readouterr().err.endswith(f"distributions.py: error: {message}\n")
 
 
 def python_archives(tmp_path, name="sie-sdk", version="0.7.2"):

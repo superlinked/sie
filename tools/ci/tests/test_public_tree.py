@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 from tools.ci import check_public_tree
@@ -19,13 +20,20 @@ def test_reference_guard_reports_forbidden_text(tmp_path: Path, monkeypatch) -> 
     assert "forbidden public-tree reference" in findings[0]
 
 
-def test_exported_tree_fallback_excludes_generated_dependencies(tmp_path: Path, monkeypatch) -> None:
+def test_exported_tree_fallback_excludes_repository_metadata_and_generated_dependencies(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setattr(check_public_tree, "REPOSITORY_ROOT", tmp_path)
+    failed_git = subprocess.CompletedProcess([], 1)
+    monkeypatch.setattr(check_public_tree.subprocess, "run", lambda *_args, **_kwargs: failed_git)
     source = tmp_path / "source.py"
     source.write_text("public\n")
     generated = tmp_path / "node_modules/dependency.txt"
     generated.parent.mkdir()
     generated.write_bytes(b"packages/" + b"sie_cloud" + b"/gateway\n")
+    metadata = tmp_path / ".git/config"
+    metadata.parent.mkdir()
+    metadata.write_bytes(b"packages/" + b"sie_cloud" + b"/gateway\n")
     assert check_public_tree.candidate_paths() == [source]
 
 

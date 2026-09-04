@@ -12,10 +12,22 @@ SHA = "a" * 40
 NOW = datetime(2026, 9, 3, tzinfo=UTC)
 
 
-@pytest.mark.parametrize("version", ["0.7.2", "0.7.3", "0.0.1", "0.7.4-rc.1", "v0.7.4", "01.2.3", "bad"])
-def test_new_publication_rejects_seed_and_nonstable_versions(version):
-    with pytest.raises(ValueError, match=r"release|publication|original|archive|successful"):
+@pytest.mark.parametrize(
+    ("version", "message"),
+    [
+        ("0.7.2", "new publication must be newer than the 0.7.3 seed"),
+        ("0.7.3", "new publication must be newer than the 0.7.3 seed"),
+        ("0.0.1", "new publication must be newer than the 0.7.3 seed"),
+        ("0.7.4-rc.1", "release version must be stable X.Y.Z"),
+        ("v0.7.4", "release version must be stable X.Y.Z"),
+        ("01.2.3", "release version must be stable X.Y.Z"),
+        ("bad", "release version must be stable X.Y.Z"),
+    ],
+)
+def test_new_publication_rejects_seed_and_nonstable_versions(version, message):
+    with pytest.raises(ValueError) as error:
         guard.stable_version(version)
+    assert str(error.value) == message
 
 
 def published():
@@ -38,22 +50,51 @@ def context():
 
 
 @pytest.mark.parametrize(
-    ("key", "value"),
+    ("key", "value", "message"),
     [
-        ("GITHUB_REPOSITORY", "someone/fork"),
-        ("GITHUB_EVENT_NAME", "push"),
-        ("GITHUB_EVENT_NAME", "workflow_dispatch"),
-        ("GITHUB_EVENT_NAME", "pull_request"),
-        ("GITHUB_REF", "refs/heads/feature"),
-        ("GITHUB_REF_PROTECTED", "false"),
-        ("PUBLIC_RELEASE_PUBLISHING_ENABLED", "false"),
-        ("GITHUB_SHA", "b" * 40),
+        (
+            "GITHUB_REPOSITORY",
+            "someone/fork",
+            "publication requires activated protected public main and the correct event",
+        ),
+        (
+            "GITHUB_EVENT_NAME",
+            "push",
+            "publication requires the exact stable published release event and tag SHA",
+        ),
+        (
+            "GITHUB_EVENT_NAME",
+            "workflow_dispatch",
+            "publication requires the exact stable published release event and tag SHA",
+        ),
+        (
+            "GITHUB_EVENT_NAME",
+            "pull_request",
+            "publication requires the exact stable published release event and tag SHA",
+        ),
+        (
+            "GITHUB_REF",
+            "refs/heads/feature",
+            "publication requires the exact stable published release event and tag SHA",
+        ),
+        (
+            "GITHUB_REF_PROTECTED",
+            "false",
+            "publication requires the exact stable published release event and tag SHA",
+        ),
+        (
+            "PUBLIC_RELEASE_PUBLISHING_ENABLED",
+            "false",
+            "publication requires activated protected public main and the correct event",
+        ),
+        ("GITHUB_SHA", "b" * 40, "publication SHA must be the original workflow SHA"),
     ],
 )
-def test_actual_writer_guard_rejects_untrusted_context(key, value):
+def test_actual_writer_guard_rejects_untrusted_context(key, value, message):
     guard.trusted_context(context(), SHA, event=published())
-    with pytest.raises(ValueError, match=r"release|publication|original|archive|successful"):
+    with pytest.raises(ValueError) as error:
         guard.trusted_context({**context(), key: value}, SHA, event=published())
+    assert str(error.value) == message
 
 
 @pytest.mark.parametrize(("key", "value"), [("draft", True), ("prerelease", True), ("tag_name", "v0.7.5")])
@@ -204,28 +245,69 @@ def run_record():
 
 
 @pytest.mark.parametrize(
-    ("key", "value"),
+    ("key", "value", "message"),
     [
-        ("id", 999),
-        ("event", "workflow_dispatch"),
-        ("head_branch", "main"),
-        ("head_branch", "v0.7.5"),
-        ("head_sha", "b" * 40),
-        ("path", ".github/workflows/other.yml"),
-        ("status", "in_progress"),
-        ("conclusion", "success"),
-        ("repository", {"full_name": "someone/fork"}),
-        ("head_repository", {"full_name": "someone/fork"}),
-        ("created_at", (NOW - timedelta(days=30)).isoformat()),
-        ("created_at", (NOW + timedelta(days=1)).isoformat()),
+        ("id", 999, "original run must be the completed release.yml release event for the exact tag and SHA"),
+        (
+            "event",
+            "workflow_dispatch",
+            "original run must be the completed release.yml release event for the exact tag and SHA",
+        ),
+        (
+            "head_branch",
+            "main",
+            "original run must be the completed release.yml release event for the exact tag and SHA",
+        ),
+        (
+            "head_branch",
+            "v0.7.5",
+            "original run must be the completed release.yml release event for the exact tag and SHA",
+        ),
+        (
+            "head_sha",
+            "b" * 40,
+            "original run must be the completed release.yml release event for the exact tag and SHA",
+        ),
+        (
+            "path",
+            ".github/workflows/other.yml",
+            "original run must be the completed release.yml release event for the exact tag and SHA",
+        ),
+        (
+            "status",
+            "in_progress",
+            "original run must be the completed release.yml release event for the exact tag and SHA",
+        ),
+        ("conclusion", "success", "successful releases do not need recovery"),
+        (
+            "repository",
+            {"full_name": "someone/fork"},
+            "original run must belong to the public repository, not a fork",
+        ),
+        (
+            "head_repository",
+            {"full_name": "someone/fork"},
+            "original run must belong to the public repository, not a fork",
+        ),
+        (
+            "created_at",
+            (NOW - timedelta(days=30)).isoformat(),
+            "original run is outside GitHub's 30-day rerun window",
+        ),
+        (
+            "created_at",
+            (NOW + timedelta(days=1)).isoformat(),
+            "original run is outside GitHub's 30-day rerun window",
+        ),
     ],
 )
-def test_recovery_cannot_change_original_provenance(key, value):
+def test_recovery_cannot_change_original_provenance(key, value, message):
     recovery.validate_run(run_record(), original_run=123, source_sha=SHA, tag_name="v0.7.4", now=NOW)
-    with pytest.raises(ValueError, match=r"release|publication|original|archive|successful"):
+    with pytest.raises(ValueError) as error:
         recovery.validate_run(
             {**run_record(), key: value}, original_run=123, source_sha=SHA, tag_name="v0.7.4", now=NOW
         )
+    assert str(error.value) == message
 
 
 def artifact():
@@ -240,22 +322,31 @@ def artifact():
 
 
 @pytest.mark.parametrize(
-    ("key", "value"),
+    ("key", "value", "message"),
     [
-        ("name", "wrong"),
-        ("expired", True),
-        ("expires_at", NOW.isoformat()),
-        ("digest", ""),
-        ("size_in_bytes", 0),
-        ("workflow_run", {"id": 999, "head_sha": SHA, "head_branch": "v0.7.4"}),
-        ("workflow_run", {"id": 123, "head_sha": "b" * 40, "head_branch": "v0.7.4"}),
+        ("name", "wrong", "missing or ambiguous original archive: python-distributions"),
+        ("expired", True, "original archive has expired: python-distributions"),
+        ("expires_at", NOW.isoformat(), "original archive has expired: python-distributions"),
+        ("digest", "", "original archive has no immutable digest: python-distributions"),
+        ("size_in_bytes", 0, "original archive has no immutable digest: python-distributions"),
+        (
+            "workflow_run",
+            {"id": 999, "head_sha": SHA, "head_branch": "v0.7.4"},
+            "archive is not bound to the original release run: python-distributions",
+        ),
+        (
+            "workflow_run",
+            {"id": 123, "head_sha": "b" * 40, "head_branch": "v0.7.4"},
+            "archive is not bound to the original release run: python-distributions",
+        ),
     ],
 )
-def test_recovery_rejects_missing_expired_or_unbound_archives(key, value):
+def test_recovery_rejects_missing_expired_or_unbound_archives(key, value, message):
     kwargs = {"original_run": 123, "source_sha": SHA, "tag_name": "v0.7.4", "now": NOW}
     recovery.validate_artifacts([artifact()], {"python-distributions"}, **kwargs)
-    with pytest.raises(ValueError, match=r"release|publication|original|archive|successful"):
+    with pytest.raises(ValueError) as error:
         recovery.validate_artifacts([{**artifact(), key: value}], {"python-distributions"}, **kwargs)
+    assert str(error.value) == message
 
 
 def test_retry_selector_only_reruns_failed_original_jobs():
@@ -268,8 +359,9 @@ def test_retry_selector_only_reruns_failed_original_jobs():
     assert recovery.selected_jobs(jobs, "python") == [1]
     assert recovery.selected_jobs(jobs, "docker") == [3]
     assert recovery.selected_jobs(jobs, "all") == [1, 3]
-    with pytest.raises(ValueError, match=r"release|publication|original|archive|successful"):
+    with pytest.raises(ValueError) as error:
         recovery.selected_jobs(jobs, "npm")
+    assert str(error.value) == "no failed original family jobs to rerun; skipped-only publication requires operator diagnosis"
 
 
 def test_archive_recovery_scope_contains_all_families():

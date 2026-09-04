@@ -284,6 +284,18 @@ def main() -> None:
     parser.add_argument("--version", default="")
     parser.add_argument("--destination", type=Path)
     args = parser.parse_args()
+    if args.mode == "prepare-pypi":
+        if args.family != "python":
+            parser.error("prepare-pypi requires the python family")
+        if args.destination is None:
+            parser.error("prepare-pypi requires --destination")
+        if not args.version:
+            parser.error("prepare-pypi requires --version")
+    elif args.mode == "publish-npm":
+        if args.family != "npm":
+            parser.error("publish-npm requires the npm family")
+        if not args.version:
+            parser.error("publish-npm requires --version")
     directory = args.directory.resolve()
     if args.mode == "build":
         build(args.family, directory, args.version)

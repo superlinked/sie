@@ -17,6 +17,7 @@ FORBIDDEN = (
     b"tools/" + b"internal_python",
 )
 ARCHIVE_GENERATED_DIRS = {
+    ".git",
     ".cache",
     ".pytest_cache",
     ".venv",

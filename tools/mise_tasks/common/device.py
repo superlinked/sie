@@ -27,10 +27,11 @@ def detect_gpu() -> str | None:
                 ["nvidia-smi"],  # noqa: S607 — intentional partial path
                 capture_output=True,
                 check=False,
+                timeout=5,
             )
             if result.returncode == 0:
                 return "cuda"
-        except FileNotFoundError:
+        except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
     return None
