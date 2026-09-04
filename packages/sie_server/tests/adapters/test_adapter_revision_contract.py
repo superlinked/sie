@@ -1,4 +1,4 @@
-"""Loader contract: every adapter must accept (and honor) a pinned HF ``revision``.
+"""Loader contract: every adapter must accept its loader-owned source identity.
 
 The model loader adds ``revision=config.hf_revision`` to the adapter constructor
 kwargs whenever a model YAML pins ``hf_revision`` (version identity).
@@ -7,10 +7,14 @@ An adapter whose ``__init__`` rejects ``revision`` hard-fails at load
 CI eval-loader failure this suite regresses against), and an adapter that accepts
 it via ``**kwargs`` but never forwards it silently drops the pin.
 
-This module enforces the *acceptance* half of that contract for EVERY adapter
-class the package exposes, parameterized so a future adapter cannot regress
-silently, plus *forwarding* spot-checks (clip / siglip / a flash adapter) that a
-pinned revision actually reaches the HuggingFace ``from_pretrained`` call.
+An adapter backed by a verified derived serving artifact is the deliberate
+exception: the loader removes the source repo and revision and injects only the
+explicit ``artifact_path`` and ``ct2_compute_type`` constructor fields.
+
+This module enforces the applicable acceptance contract for EVERY adapter class
+the package exposes, parameterized so a future adapter cannot regress silently,
+plus forwarding spot-checks (clip / siglip / a flash adapter) that a pinned
+revision actually reaches the HuggingFace ``from_pretrained`` call.
 
 Pure and offline: no weights are downloaded and no model is loaded — HF loaders
 are mocked, and signature inspection imports only the adapter modules.
@@ -68,6 +72,12 @@ def _accepts_revision(cls: type) -> bool:
     return any(param.name == "revision" or param.kind is inspect.Parameter.VAR_KEYWORD for param in params)
 
 
+def _accepts_verified_serving_artifact(cls: type) -> bool:
+    """True when ``cls`` explicitly accepts the complete loader-owned artifact identity."""
+    params = inspect.signature(cls.__init__).parameters
+    return {"artifact_path", "ct2_compute_type"}.issubset(params)
+
+
 def test_discovery_imported_the_adapter_package() -> None:
     """Guard: discovery actually walked the package (not a mass import failure)."""
     # There are dozens of adapters; a tiny count means imports broke wholesale.
@@ -81,7 +91,9 @@ def test_discovery_imported_the_adapter_package() -> None:
 
 @pytest.mark.parametrize("adapter_cls", _ADAPTER_CLASSES, ids=lambda cls: cls.__name__)
 def test_adapter_init_accepts_revision(adapter_cls: type) -> None:
-    """Every adapter ``__init__`` must accept the loader's pinned ``revision`` kwarg."""
+    """HF-source adapters accept ``revision``; verified-artifact adapters accept their injected identity."""
+    if _accepts_verified_serving_artifact(adapter_cls):
+        return
     assert _accepts_revision(adapter_cls), (
         f"{adapter_cls.__module__}.{adapter_cls.__name__}.__init__ must accept a 'revision' keyword "
         "(explicit 'revision: str | None = None' or **kwargs) so a YAML-pinned hf_revision is not "

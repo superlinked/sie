@@ -10,18 +10,27 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk
+from sie_server.adapters._generation_base import (
+    GenerationAdapter,
+    GenerationCapacityError,
+    GenerationChunk,
+    GenerationDrainingError,
+    GenerationError,
+    GenerationInputTooLongError,
+    GenerationUnsupportedFieldError,
+)
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.api import generate as generate_api
 from sie_server.api.generate import router as generate_router
+from sie_server.config.engine import EngineConfig
 from sie_server.config.model import (
     AdapterOptions,
     GenerateCapabilities,
@@ -37,6 +46,51 @@ from sie_server.types.inputs import ImageInput
 
 _GEMMA_OPEN = "<" + "|channel" + ">" + "thought\n"
 _GEMMA_CLOSE = "<" + "channel|" + ">"
+
+
+class _UntrustedUnsupportedFieldError(GenerationUnsupportedFieldError):
+    code = "SENSITIVE_UNSUPPORTED_CODE"
+
+
+class _UntrustedCapacityError(GenerationCapacityError):
+    code = "SENSITIVE_CAPACITY_CODE"
+
+
+class _FutureUnsupportedFieldError(GenerationUnsupportedFieldError):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_param"),
+    [
+        (GenerationUnsupportedFieldError("n", "n refusal"), "n"),
+        (GenerationUnsupportedFieldError("best_of", "best_of refusal"), "best_of"),
+        (
+            GenerationUnsupportedFieldError(
+                "lora_path",
+                "'lora_adapter' is not supported by this generation backend",
+            ),
+            "lora_adapter",
+        ),
+    ],
+)
+def test_generation_http_exception_preserves_public_refusal_param(
+    error: GenerationUnsupportedFieldError,
+    expected_param: str,
+) -> None:
+    exception = generate_api._generation_http_exception(error)
+
+    assert exception.status_code == 400
+    assert exception.detail["param"] == expected_param
+    assert exception.detail["param"] != "lora_path"
+    assert "lora_path" not in str(exception.detail)
+
+
+def test_generation_http_exception_redacts_future_refusal_subclass_param() -> None:
+    exception = generate_api._generation_http_exception(_FutureUnsupportedFieldError("n", "future refusal"))
+
+    assert exception.status_code == 400
+    assert exception.detail == {"code": "unsupported_field", "message": "future refusal"}
 
 
 class _FakeGenAdapter(GenerationAdapter):
@@ -206,10 +260,37 @@ class _ThinkingGenAdapter(_FakeGenAdapter):
         )
 
 
+class _PreflightAdapter(_FakeGenAdapter):
+    def __init__(self, error: Exception | None = None, *, raise_during_generate: bool = False) -> None:
+        super().__init__()
+        self.error = error
+        self.raise_during_generate = raise_during_generate
+        self.preflight_parameters: dict[str, object] | None = None
+        self.preflight_stream: bool | None = None
+        self.dispatched_parameters: dict[str, object] | None = None
+        self.events: list[str] = []
+
+    def preflight_generate(self, parameters: Mapping[str, object], *, stream: bool) -> None:
+        self.events.append("preflight")
+        self.preflight_parameters = dict(parameters)
+        self.preflight_stream = stream
+        if self.error is not None and not self.raise_during_generate:
+            raise self.error
+
+    async def generate(self, prompt: str, **kwargs: object) -> AsyncIterator[GenerationChunk]:
+        self.events.append("generate")
+        self.dispatched_parameters = {"prompt": prompt, **kwargs}
+        if self.error is not None and self.raise_during_generate:
+            raise self.error
+        async for chunk in super().generate(prompt, **kwargs):  # type: ignore[arg-type]
+            yield chunk
+
+
 def _make_config(
     *,
     model_id: str = "Qwen/Qwen3-4B-Instruct",
     grammar: list[Literal["json_schema", "regex", "ebnf"]] | None = None,
+    streaming: bool = True,
 ) -> ModelConfig:
     return ModelConfig(
         sie_id=model_id,
@@ -218,7 +299,7 @@ def _make_config(
             generate=GenerateTask(
                 context_length=32768,
                 max_output_tokens=4096,
-                capabilities=GenerateCapabilities(grammar=grammar or []),
+                capabilities=GenerateCapabilities(grammar=grammar or [], streaming=streaming),
             ),
         ),
         profiles={
@@ -1280,6 +1361,58 @@ class TestGenerateEndpoint:
         assert detail["code"] == "tool_call_parse_error"
         assert detail["message"] == "model emitted a malformed tool call"
 
+    @pytest.mark.parametrize(
+        ("code", "message", "expected_code", "expected_message"),
+        [
+            (
+                "inference_error",
+                "SENSITIVE_NATIVE_BUFFERED_RUNTIME",
+                "inference_error",
+                "internal error during generation",
+            ),
+            (
+                "grammar_compile_failed",
+                "SENSITIVE_NATIVE_BUFFERED_GRAMMAR",
+                "grammar_compile_failed",
+                "internal error compiling grammar",
+            ),
+            (
+                "MODEL_OUTPUT_PARSE_ERROR",
+                "invalid model JSON",
+                "MODEL_OUTPUT_PARSE_ERROR",
+                "invalid model JSON",
+            ),
+            (
+                "SENSITIVE_NATIVE_BUFFERED_ERROR_CODE",
+                "SENSITIVE_NATIVE_BUFFERED_ERROR_CODE",
+                "inference_error",
+                "generation terminated with an upstream error",
+            ),
+        ],
+    )
+    def test_terminal_error_message_is_classified_at_buffered_boundary(
+        self,
+        client: TestClient,
+        fake_adapter: _FakeGenAdapter,
+        code: str,
+        message: str,
+        expected_code: str,
+        expected_message: str,
+    ) -> None:
+        fake_adapter.finish_reason = "error"
+        fake_adapter.error_code = code
+        fake_adapter.error_message = message
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 500, response.text
+        assert response.json()["detail"] == {"code": expected_code, "message": expected_message}
+        if message.startswith("SENSITIVE_"):
+            assert message not in response.text
+
     def test_terminal_cancelled_finish_reason_returns_503(
         self, client: TestClient, fake_adapter: _FakeGenAdapter
     ) -> None:
@@ -1303,3 +1436,223 @@ class TestGenerateEndpoint:
             json={"prompt": "Hi", "max_new_tokens": 8},
         )
         assert response.status_code == 200, response.text
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_preflight_receives_exact_dispatched_parameters(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        stream: bool,
+    ) -> None:
+        adapter = _PreflightAdapter()
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8, "stream": stream},
+        )
+
+        assert response.status_code == 200, response.text
+        assert adapter.events[:2] == ["preflight", "generate"]
+        assert adapter.preflight_stream is stream
+        assert adapter.preflight_parameters == adapter.dispatched_parameters
+        if stream:
+            assert adapter.preflight_parameters is not None
+            assert adapter.preflight_parameters["logprobs"] is False
+            assert adapter.preflight_parameters["top_logprobs"] is None
+        else:
+            assert adapter.preflight_parameters is not None
+            assert "logprobs" not in adapter.preflight_parameters
+            assert "top_logprobs" not in adapter.preflight_parameters
+
+    def test_streaming_capability_rejects_before_adapter_lookup(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        registry.get_config.return_value = _make_config(streaming=False)
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8, "stream": True},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "unsupported_field",
+            "message": "Model 'Qwen__Qwen3-4B-Instruct' does not support streaming generation",
+            "param": "stream",
+        }
+        registry.get.assert_not_called()
+
+    def test_preflight_unsupported_field_is_exact_400(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        adapter = _PreflightAdapter(GenerationUnsupportedFieldError("top_k"))
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "unsupported_field"
+        assert response.json()["detail"]["param"] == "top_k"
+        assert adapter.events == ["preflight"]
+
+    def test_preflight_input_too_long_is_exact_400(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        adapter = _PreflightAdapter(
+            GenerationInputTooLongError(
+                "prompt token count (129) exceeds max_input_len (128)",
+            )
+        )
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "code": "INPUT_TOO_LONG",
+            "message": "prompt token count (129) exceeds max_input_len (128)",
+            "param": "prompt",
+        }
+        assert adapter.events == ["preflight"]
+
+    @pytest.mark.parametrize(
+        ("error", "status_code"),
+        [
+            (_UntrustedUnsupportedFieldError("top_k", "private unsupported detail"), 400),
+            (_UntrustedCapacityError("private capacity detail"), 503),
+        ],
+    )
+    def test_typed_generation_errors_sanitize_untrusted_codes(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        error: GenerationError,
+        status_code: int,
+    ) -> None:
+        adapter = _PreflightAdapter(error)
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == status_code
+        assert response.json()["detail"]["code"] == "inference_error"
+        assert "SENSITIVE_" not in response.text
+
+    @pytest.mark.parametrize(
+        ("raise_during_generate", "message", "events"),
+        [
+            (False, "internal error during generation preflight", ["preflight"]),
+            (True, "internal error during generation", ["preflight", "generate"]),
+        ],
+    )
+    def test_unexpected_generation_errors_do_not_leak_exception_text(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        raise_during_generate: bool,
+        message: str,
+        events: list[str],
+    ) -> None:
+        adapter = _PreflightAdapter(
+            RuntimeError("sensitive internal generation detail"),
+            raise_during_generate=raise_during_generate,
+        )
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == {"code": "inference_error", "message": message}
+        assert "sensitive internal generation detail" not in response.text
+        assert adapter.events == events
+
+    @pytest.mark.parametrize("raise_during_generate", [False, True])
+    def test_generic_typed_generation_error_does_not_leak_exception_text(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        raise_during_generate: bool,
+    ) -> None:
+        sentinel = "SENSITIVE_TYPED_NATIVE_BUFFERED"
+        adapter = _PreflightAdapter(
+            GenerationError(sentinel),
+            raise_during_generate=raise_during_generate,
+        )
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == {
+            "code": "inference_error",
+            "message": "internal error during generation",
+        }
+        assert sentinel not in response.text
+
+    @pytest.mark.parametrize(
+        ("error", "code", "retry_after"),
+        [
+            (GenerationCapacityError("scheduler full"), "RESOURCE_EXHAUSTED", "5"),
+            (GenerationDrainingError("scheduler draining"), "MODEL_LOADING", "5"),
+        ],
+    )
+    def test_typed_capacity_after_preflight_remains_retryable(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+        error: GenerationError,
+        code: str,
+        retry_after: str,
+    ) -> None:
+        adapter = _PreflightAdapter(error, raise_during_generate=True)
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == code
+        assert response.headers["retry-after"] == retry_after
+        assert adapter.events == ["preflight", "generate"]
+
+    def test_generation_capacity_uses_configured_resource_exhausted_retry_hint(
+        self,
+        client: TestClient,
+        registry: MagicMock,
+    ) -> None:
+        registry.engine_config = EngineConfig.model_validate({"oom_recovery": {"retry_after_s": 12}})
+        adapter = _PreflightAdapter(GenerationCapacityError("scheduler full"))
+        registry.get.return_value = adapter
+
+        response = client.post(
+            "/v1/generate/Qwen__Qwen3-4B-Instruct",
+            json={"prompt": "Hi", "max_new_tokens": 8},
+        )
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "RESOURCE_EXHAUSTED"
+        assert response.headers["retry-after"] == "12"

@@ -19,6 +19,7 @@ from sie_sdk.queue_types import denormalize_model_id
 
 from sie_server.adapters._generation_base import (
     GenerationAdapter,
+    GenerationError,
     reasoning_starts_in_prompt,
     resolve_reasoning_format,
     suppress_thinking_blocks,
@@ -32,6 +33,7 @@ from sie_server.api.openai_completions import (
     _collect_completion,
     _CompletionError,
     _error_response,
+    _from_generation_error,
     _from_http_exception,
     _number,
     _read_json_body,
@@ -305,18 +307,34 @@ async def responses(
                     code="inference_error",
                 )
 
-            chunks = adapter.generate(
-                prompt=prompt,
-                max_new_tokens=params.max_output_tokens,
-                temperature=float(runtime_params.get("temperature", 1.0)),
-                top_p=float(runtime_params.get("top_p", 1.0)),
-                stop=runtime_params.get("stop"),
-                frequency_penalty=runtime_params.get("frequency_penalty"),
-                presence_penalty=runtime_params.get("presence_penalty"),
-                top_k=runtime_params.get("top_k"),
-                min_new_tokens=runtime_params.get("min_tokens"),
-                seed=runtime_params.get("seed"),
-            )
+            generation_parameters: dict[str, Any] = {
+                "prompt": prompt,
+                "max_new_tokens": params.max_output_tokens,
+                "temperature": float(runtime_params.get("temperature", 1.0)),
+                "top_p": float(runtime_params.get("top_p", 1.0)),
+                "stop": runtime_params.get("stop"),
+                "frequency_penalty": runtime_params.get("frequency_penalty"),
+                "presence_penalty": runtime_params.get("presence_penalty"),
+                "top_k": runtime_params.get("top_k"),
+                "min_new_tokens": runtime_params.get("min_tokens"),
+                "seed": runtime_params.get("seed"),
+            }
+            try:
+                adapter.preflight_generate(generation_parameters, stream=False)
+            except GenerationError as exc:
+                raise _from_generation_error(exc, registry) from exc
+            except Exception as exc:
+                logger.warning("OpenAI Responses preflight failed for %s", params.model, exc_info=True)
+                raise _CompletionError(
+                    "internal error during generation",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    code="inference_error",
+                ) from exc
+
+            try:
+                chunks = adapter.generate(**generation_parameters)
+            except GenerationError as exc:
+                raise _from_generation_error(exc, registry) from exc
             if thinking_blocks_must_be_hidden(config):
                 reasoning_format = resolve_reasoning_format(config, adapter)
                 chunks = suppress_thinking_blocks(
@@ -328,6 +346,8 @@ async def responses(
                 text, terminal = await _collect_completion(chunks)
             except _CompletionError:
                 raise
+            except GenerationError as exc:
+                raise _from_generation_error(exc, registry) from exc
             except Exception as exc:
                 logger.warning("OpenAI Responses generation failed for %s", params.model, exc_info=True)
                 raise _CompletionError(

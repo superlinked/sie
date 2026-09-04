@@ -834,6 +834,19 @@ class SGLangGenerationAdapter(GenerationAdapter):
         self._abort_tasks.add(task)
         task.add_done_callback(self._abort_tasks.discard)
 
+    def _spawn_abort_request_if_live(self, client: httpx.AsyncClient, rid: str) -> None:
+        """Schedule an abort only while the shared SGLang client is usable."""
+        server_url = self._server_url
+        if server_url is None:
+            return
+        if client.is_closed:
+            logger.debug(
+                "skipping /abort_request for rid=%s: shared HTTP client already closed",
+                rid,
+            )
+            return
+        self._spawn_abort_request(client, server_url, rid)
+
     def _clear_pending_aclose(self, task: asyncio.Task[None]) -> None:
         # Only clear the slot if it still references *this* task. A second
         # ``unload()`` call between the first task finishing and its
@@ -1196,11 +1209,12 @@ class SGLangGenerationAdapter(GenerationAdapter):
         if stream and return_count > 1:
             sp = dict(sampling_params)
             sp["n"] = return_count
+            rid = uuid.uuid4().hex
             sbody: dict[str, Any] = {
                 "text": prompt,
                 "sampling_params": sp,
                 "stream": True,
-                "rid": uuid.uuid4().hex,
+                "rid": rid,
             }
             if lora_path:
                 sbody["lora_path"] = lora_path
@@ -1227,105 +1241,112 @@ class SGLangGenerationAdapter(GenerationAdapter):
             prompt_tokens: int | None = None
             total_completion = 0
             emitted_first = False
-            async with sclient.stream("POST", f"{self._server_url}/generate", json=sbody) as sresp:
-                sresp.raise_for_status()
-                async for raw_line in sresp.aiter_lines():
-                    line = raw_line.strip()
-                    if line.startswith("data:"):
-                        line = line[len("data:") :].strip()
-                    if not line or line == "[DONE]":
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    _raise_for_sglang_event_error(event)
-                    idx = int(event.get("index", 0))
-                    cumulative = event.get("text", "")
-                    if not isinstance(cumulative, str):
-                        cumulative = last_text.get(idx, "")
-                    delta = cumulative[len(last_text.get(idx, "")) :]
-                    last_text[idx] = cumulative
-                    meta = event.get("meta_info") or {}
-                    if prompt_tokens is None and isinstance(meta.get("prompt_tokens"), int):
-                        prompt_tokens = meta["prompt_tokens"]
-                    fr = meta.get("finish_reason")
-                    fr_type = fr.get("type") if isinstance(fr, dict) else fr
-                    candidate_done = fr_type is not None
-                    if candidate_done and isinstance(meta.get("completion_tokens"), int):
-                        total_completion += meta["completion_tokens"]
-                    # Per-candidate logprob slice — same shape conversion as the
-                    # single-candidate path (`_chunk_from_sglang_event`), but
-                    # the cursor is keyed by candidate index so each candidate
-                    # gets its own monotonic slice.
-                    chunk_logprobs: tuple[dict[str, Any], ...] | None = None
-                    if logprobs and isinstance(meta, dict):
-                        all_token_lp = meta.get("output_token_logprobs")
-                        all_top_lp = meta.get("output_top_logprobs")
-                        prior = logprobs_surfaced.get(idx, 0)
-                        if isinstance(all_token_lp, list) and len(all_token_lp) > prior:
-                            new_slice = all_token_lp[prior:]
-                            new_top_slice = (
-                                all_top_lp[prior:]
-                                if isinstance(all_top_lp, list) and len(all_top_lp) >= len(all_token_lp)
-                                else [None] * len(new_slice)
-                            )
-                            built: list[dict[str, Any]] = []
-                            for token_entry, top_entry in zip(new_slice, new_top_slice, strict=False):
-                                tok_lp, _tok_id, tok_text = _unpack_sglang_token_logprob(token_entry)
-                                if tok_lp is None:
-                                    continue
-                                top_list: list[dict[str, Any]] = []
-                                if isinstance(top_entry, list):
-                                    for top_token in top_entry:
-                                        t_lp, _t_id, t_text = _unpack_sglang_token_logprob(top_token)
-                                        if t_lp is None:
-                                            continue
-                                        top_list.append(
-                                            {
-                                                "token": t_text or "",
-                                                "logprob": float(t_lp),
-                                                "bytes": list((t_text or "").encode("utf-8")),
-                                            }
-                                        )
-                                built.append(
-                                    {
-                                        "token": tok_text or "",
-                                        "logprob": float(tok_lp),
-                                        "bytes": list((tok_text or "").encode("utf-8")),
-                                        "top_logprobs": top_list,
-                                    }
+            terminal_yielded = False
+            try:
+                async with sclient.stream("POST", f"{self._server_url}/generate", json=sbody) as sresp:
+                    sresp.raise_for_status()
+                    async for raw_line in sresp.aiter_lines():
+                        line = raw_line.strip()
+                        if line.startswith("data:"):
+                            line = line[len("data:") :].strip()
+                        if not line or line == "[DONE]":
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        _raise_for_sglang_event_error(event)
+                        idx = int(event.get("index", 0))
+                        cumulative = event.get("text", "")
+                        if not isinstance(cumulative, str):
+                            cumulative = last_text.get(idx, "")
+                        delta = cumulative[len(last_text.get(idx, "")) :]
+                        last_text[idx] = cumulative
+                        meta = event.get("meta_info") or {}
+                        if prompt_tokens is None and isinstance(meta.get("prompt_tokens"), int):
+                            prompt_tokens = meta["prompt_tokens"]
+                        fr = meta.get("finish_reason")
+                        fr_type = fr.get("type") if isinstance(fr, dict) else fr
+                        candidate_done = fr_type is not None
+                        if candidate_done and isinstance(meta.get("completion_tokens"), int):
+                            total_completion += meta["completion_tokens"]
+                        # Per-candidate logprob slice — same shape conversion as the
+                        # single-candidate path (`_chunk_from_sglang_event`), but
+                        # the cursor is keyed by candidate index so each candidate
+                        # gets its own monotonic slice.
+                        chunk_logprobs: tuple[dict[str, Any], ...] | None = None
+                        if logprobs and isinstance(meta, dict):
+                            all_token_lp = meta.get("output_token_logprobs")
+                            all_top_lp = meta.get("output_top_logprobs")
+                            prior = logprobs_surfaced.get(idx, 0)
+                            if isinstance(all_token_lp, list) and len(all_token_lp) > prior:
+                                new_slice = all_token_lp[prior:]
+                                new_top_slice = (
+                                    all_top_lp[prior:]
+                                    if isinstance(all_top_lp, list) and len(all_top_lp) >= len(all_token_lp)
+                                    else [None] * len(new_slice)
                                 )
-                            if built:
-                                chunk_logprobs = tuple(built)
-                            # Advance to the cumulative reported length rather
-                            # than incrementing by ``len(built)`` so a skipped
-                            # malformed entry does not re-surface next event.
-                            logprobs_surfaced[idx] = len(all_token_lp)
-                    if not delta and not candidate_done and not chunk_logprobs:
-                        continue
-                    is_first = bool(delta) and not emitted_first
-                    emitted_first = emitted_first or bool(delta)
-                    yield GenerationChunk(
-                        text_delta=delta,
-                        done=False,
-                        is_first=is_first,
-                        finish_reason=cast("FinishReason | None", fr_type if candidate_done else None),
-                        choice_index=idx,
-                        logprobs=chunk_logprobs,
-                    )
-            # Single global terminal closes the multi-candidate stream (carries
-            # aggregate usage). Each candidate already received its own
-            # ``finish_reason`` on the per-choice completion chunk above; this
-            # terminal is the stream-level "all candidates done" signal that
-            # drives the processor's loop break and the gateway's [DONE].
-            yield GenerationChunk(
-                text_delta="",
-                done=True,
-                finish_reason="stop",
-                prompt_tokens=prompt_tokens,
-                completion_tokens=total_completion,
-            )
+                                built: list[dict[str, Any]] = []
+                                for token_entry, top_entry in zip(new_slice, new_top_slice, strict=False):
+                                    tok_lp, _tok_id, tok_text = _unpack_sglang_token_logprob(token_entry)
+                                    if tok_lp is None:
+                                        continue
+                                    top_list: list[dict[str, Any]] = []
+                                    if isinstance(top_entry, list):
+                                        for top_token in top_entry:
+                                            t_lp, _t_id, t_text = _unpack_sglang_token_logprob(top_token)
+                                            if t_lp is None:
+                                                continue
+                                            top_list.append(
+                                                {
+                                                    "token": t_text or "",
+                                                    "logprob": float(t_lp),
+                                                    "bytes": list((t_text or "").encode("utf-8")),
+                                                }
+                                            )
+                                    built.append(
+                                        {
+                                            "token": tok_text or "",
+                                            "logprob": float(tok_lp),
+                                            "bytes": list((tok_text or "").encode("utf-8")),
+                                            "top_logprobs": top_list,
+                                        }
+                                    )
+                                if built:
+                                    chunk_logprobs = tuple(built)
+                                # Advance to the cumulative reported length rather
+                                # than incrementing by ``len(built)`` so a skipped
+                                # malformed entry does not re-surface next event.
+                                logprobs_surfaced[idx] = len(all_token_lp)
+                        if not delta and not candidate_done and not chunk_logprobs:
+                            continue
+                        is_first = bool(delta) and not emitted_first
+                        emitted_first = emitted_first or bool(delta)
+                        yield GenerationChunk(
+                            text_delta=delta,
+                            done=False,
+                            is_first=is_first,
+                            finish_reason=cast("FinishReason | None", fr_type if candidate_done else None),
+                            choice_index=idx,
+                            logprobs=chunk_logprobs,
+                        )
+                # Single global terminal closes the multi-candidate stream (carries
+                # aggregate usage). Each candidate already received its own
+                # ``finish_reason`` on the per-choice completion chunk above; this
+                # terminal is the stream-level "all candidates done" signal that
+                # drives the processor's loop break and the gateway's [DONE].
+                terminal_yielded = True
+                yield GenerationChunk(
+                    text_delta="",
+                    done=True,
+                    finish_reason="stop",
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=total_completion,
+                )
+            except (GeneratorExit, asyncio.CancelledError):
+                if not terminal_yielded:
+                    self._spawn_abort_request_if_live(sclient, rid)
+                raise
             return
 
         gen_count = best_of if (best_of is not None and best_of > 1) else return_count
@@ -1479,6 +1500,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # ``async with`` — we just borrow a reference. Cancellation /
         # GeneratorExit still cleans up the stream context below.
         client = await self._get_or_create_http_client()
+        terminal_yielded = False
         try:
             async with client.stream("POST", f"{self._server_url}/generate", json=body) as response:
                 if response.status_code != 200:
@@ -1493,7 +1515,6 @@ class SGLangGenerationAdapter(GenerationAdapter):
 
                 last_cumulative_text = ""
                 first_yield_done = False
-                terminal_yielded = False
                 # Number of token-logprob entries already surfaced
                 # on prior chunks. SGLang accumulates them on
                 # ``meta_info.output_token_logprobs`` (a flat list,
@@ -1627,7 +1648,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
 
                 if not terminal_yielded:
                     raise RuntimeError("SGLang stream terminated without terminal event")
-        except GeneratorExit:
+        except (GeneratorExit, asyncio.CancelledError):
             # Caller dropped the iterator (cancellation / aclose). Issue a
             # best-effort POST to /abort_request so SGLang frees the slot
             # promptly. CRITICAL: do NOT ``await`` the abort here. The
@@ -1640,7 +1661,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
             # ignored GeneratorExit`` if the await is interrupted. Instead
             # we spawn the abort as an independent, tracked background task
             # (bounded by ``_ABORT_REQUEST_TIMEOUT_S`` < the 2s cap) on the
-            # adapter's long-lived loop and re-raise GeneratorExit cleanly.
+            # adapter's long-lived loop and re-raise cancellation cleanly.
             # The shared client is reused so the abort piggybacks on an
             # existing connection rather than paying a fresh TCP handshake.
             # If a concurrent ``unload()`` / ``aclose_client()`` already
@@ -1648,14 +1669,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
             # in ``_abort_request``) and the abort silently no-ops, leaking
             # the SGLang GPU slot until SGLang's own timeout. Skip the abort
             # in that case — there is no live client to drive it.
-            server_url = self._server_url
-            if server_url is not None and not client.is_closed:
-                self._spawn_abort_request(client, server_url, rid)
-            elif server_url is not None:
-                logger.debug(
-                    "skipping /abort_request for rid=%s: shared HTTP client already closed",
-                    rid,
-                )
+            if not terminal_yielded:
+                self._spawn_abort_request_if_live(client, rid)
             raise
         finally:
             # Emit TPOT regardless of normal completion vs cancellation.

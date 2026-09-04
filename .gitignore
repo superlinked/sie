@@ -1,4 +1,6 @@
 # Byte-compiled / optimized / DLL files
+.codex/artifacts/worktree-task/
+
 __pycache__/
 *.py[codz]
 *$py.class

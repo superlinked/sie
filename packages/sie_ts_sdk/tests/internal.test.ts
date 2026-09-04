@@ -19,6 +19,7 @@ import {
   parseGpuParam,
 } from "../src/internal/parsing.js";
 import { computeBackoffWithJitter, getRetryAfter } from "../src/internal/retry.js";
+import { packMessage } from "../src/msgpack.js";
 
 describe("Default provision timeout", () => {
   it("matches the Python SDK's DEFAULT_PROVISION_TIMEOUT_S (900s)", () => {
@@ -261,6 +262,33 @@ describe("handleError (gateway / FastAPI bodies)", () => {
     });
   });
 
+  it("uses a non-sensitive fallback for a non-string nested error message", async () => {
+    const res = new Response(
+      JSON.stringify({
+        detail: {
+          code: "INTERNAL_ERROR",
+          message: { private: "message-secret" },
+          param: "param-secret",
+        },
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+
+    try {
+      await handleError(res);
+      throw new Error("expected handleError to throw");
+    } catch (error) {
+      expect(error).toMatchObject({
+        name: "ServerError",
+        message: "Request failed",
+        code: "INTERNAL_ERROR",
+        param: "param-secret",
+      });
+      expect((error as Error).message).not.toContain("message-secret");
+      expect((error as Error).message).not.toContain("param-secret");
+    }
+  });
+
   it("carries the x-sie-request-id header onto typed errors (#3136)", async () => {
     const res = new Response(
       JSON.stringify({
@@ -391,6 +419,7 @@ describe("handleError (gateway / FastAPI bodies)", () => {
       message: 'field "model" is required',
       code: "invalid_request",
       statusCode: 400,
+      param: "model",
     });
   });
 
@@ -411,6 +440,36 @@ describe("handleError (gateway / FastAPI bodies)", () => {
       message: "queue unavailable",
       code: "transport_failure",
       statusCode: 503,
+      param: null,
+    });
+  });
+
+  it("preserves nullable/string param from msgpack and rejects other types", async () => {
+    const msgpack = new Response(
+      packMessage({
+        error: {
+          message: "bad sampling field",
+          code: "unsupported_field",
+          param: "top_k",
+        },
+      }),
+      { status: 400, headers: { "Content-Type": "application/msgpack" } },
+    );
+    await expect(handleError(msgpack)).rejects.toMatchObject({
+      name: "RequestError",
+      code: "unsupported_field",
+      param: "top_k",
+    });
+
+    const malformed = new Response(
+      JSON.stringify({
+        error: { message: "bad field", code: "unsupported_field", param: { field: "top_k" } },
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+    await expect(handleError(malformed)).rejects.toMatchObject({
+      name: "RequestError",
+      param: undefined,
     });
   });
 

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
 from sie_server.adapters._generation_base import (
     GenerationChunk,
+    GenerationError,
+    GenerationInputTooLongError,
+    GenerationInvalidRequestError,
+    GenerationUnsupportedFieldError,
     ToolCallDelta,
+    client_safe_generation_error_code,
+    client_safe_generation_error_message,
+    client_safe_generation_error_param,
     collect_generation,
     reasoning_starts_in_prompt,
     suppress_thinking_blocks,
@@ -15,9 +23,122 @@ _GEMMA_OPEN = "<" + "|channel" + ">" + "thought\n"
 _GEMMA_CLOSE = "<" + "channel|" + ">"
 
 
+class _FutureUnsupportedFieldError(GenerationUnsupportedFieldError):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "expected"),
+    [
+        ("inference_error", "SENSITIVE_RUNTIME", "internal error during generation"),
+        ("MODEL_OUTPUT_PARSE_ERROR", "invalid model JSON", "invalid model JSON"),
+        ("future_adapter_error", "SENSITIVE_FUTURE_DETAIL", "generation terminated with an upstream error"),
+    ],
+)
+def test_client_safe_generation_error_message_is_allowlisted(
+    code: str,
+    message: str,
+    expected: str,
+) -> None:
+    assert client_safe_generation_error_message(code, message) == expected
+
+
+def test_client_safe_generation_error_code_is_closed() -> None:
+    for code in [
+        "inference_error",
+        "grammar_compile_failed",
+        "INPUT_TOO_LONG",
+        "MODEL_LOADING",
+        "MODEL_OUTPUT_PARSE_ERROR",
+        "RESOURCE_EXHAUSTED",
+        "COLD_START_RATE_LIMITED",
+        "LORA_LOADING",
+        "PAYLOAD_TOO_LARGE",
+        "cancelled",
+        "context_exceeded",
+        "empty_model_output",
+        "grammar_invalid",
+        "invalid_request",
+        "parallel_tool_calls_violated",
+        "rate_limit_exceeded",
+        "tool_call_parse_error",
+        "transport_failure",
+        "unsupported_field",
+    ]:
+        assert client_safe_generation_error_code(code) == code
+    assert client_safe_generation_error_code("SENSITIVE_ADAPTER_ERROR_CODE_SENTINEL") == "inference_error"
+
+
+def test_client_safe_generation_error_param_is_subtype_and_value_bounded() -> None:
+    internal = GenerationError("internal")
+    internal.param = "n"
+
+    assert client_safe_generation_error_param(internal) is None
+    assert client_safe_generation_error_param(_FutureUnsupportedFieldError("n")) is None
+    assert client_safe_generation_error_param(GenerationUnsupportedFieldError("SENSITIVE_FIELD")) is None
+    assert client_safe_generation_error_param(GenerationUnsupportedFieldError("top_k")) == "top_k"
+    assert client_safe_generation_error_param(GenerationUnsupportedFieldError("n")) == "n"
+    assert client_safe_generation_error_param(GenerationUnsupportedFieldError("best_of")) == "best_of"
+    assert client_safe_generation_error_param(GenerationInvalidRequestError("SENSITIVE_FIELD", "bad")) is None
+    assert client_safe_generation_error_param(GenerationInvalidRequestError("top_logprobs", "bad")) == "top_logprobs"
+    assert client_safe_generation_error_param(GenerationInputTooLongError("too long")) == "prompt"
+    assert client_safe_generation_error_param(GenerationUnsupportedFieldError("lora_path")) == "lora_adapter"
+    assert client_safe_generation_error_param(GenerationInvalidRequestError("lora_path", "bad")) == "lora_adapter"
+    assert (
+        client_safe_generation_error_param(GenerationInputTooLongError("too long", param="lora_path")) == "lora_adapter"
+    )
+
+
 async def _chunks(*chunks: GenerationChunk) -> AsyncIterator[GenerationChunk]:
     for chunk in chunks:
         yield chunk
+
+
+class _FailingCloseSource:
+    def __init__(self, chunks: list[GenerationChunk]) -> None:
+        self._chunks = chunks
+        self._index = 0
+        self.close_calls = 0
+
+    def __aiter__(self) -> _FailingCloseSource:
+        return self
+
+    async def __anext__(self) -> GenerationChunk:
+        if self._index >= len(self._chunks):
+            raise StopAsyncIteration
+        chunk = self._chunks[self._index]
+        self._index += 1
+        return chunk
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        raise RuntimeError("cleanup failed")
+
+
+class _CloseTrackingSource:
+    def __init__(self, chunks: list[GenerationChunk], *, error: BaseException | None = None) -> None:
+        self._chunks = chunks
+        self._index = 0
+        self._error = error
+        self.close_calls = 0
+        self.next_started = asyncio.Event()
+
+    def __aiter__(self) -> _CloseTrackingSource:
+        return self
+
+    async def __anext__(self) -> GenerationChunk:
+        self.next_started.set()
+        if self._index < len(self._chunks):
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+        if self._error is not None:
+            raise self._error
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
 
 
 @pytest.mark.asyncio
@@ -278,6 +399,27 @@ async def test_suppress_thinking_blocks_closes_upstream_on_client_cancel() -> No
 
 
 @pytest.mark.asyncio
+async def test_suppress_thinking_blocks_preserves_selected_terminal_when_close_fails() -> None:
+    source = _FailingCloseSource([GenerationChunk(text_delta="visible", done=True, finish_reason="stop")])
+
+    normalized = [chunk async for chunk in suppress_thinking_blocks(source)]
+
+    assert normalized[-1].done is True
+    assert normalized[-1].finish_reason == "stop"
+    assert source.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_suppress_thinking_blocks_surfaces_standalone_close_failure() -> None:
+    source = _FailingCloseSource([])
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        _ = [chunk async for chunk in suppress_thinking_blocks(source)]
+
+    assert source.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_reasoning_consuming_the_whole_budget_stamps_empty_output_error() -> None:
     """#3104/#3136: budget exhausted inside a think block -> only whitespace is
     visible and the terminal chunk must carry the typed empty-output error.
@@ -432,3 +574,46 @@ async def test_collect_generation_defaults_error_fields_to_none_on_success() -> 
     assert result.text == "Visible answer"
     assert result.error_code is None
     assert result.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_collect_generation_closes_terminal_input_exactly_once() -> None:
+    source = _CloseTrackingSource([GenerationChunk(text_delta="done", done=True, finish_reason="stop")])
+
+    result = await collect_generation(source)
+
+    assert result.text == "done"
+    assert source.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_generation_closes_input_and_preserves_iterator_error() -> None:
+    source = _CloseTrackingSource([], error=RuntimeError("primary iterator failure"))
+
+    with pytest.raises(RuntimeError, match="primary iterator failure"):
+        await collect_generation(source)
+
+    assert source.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_generation_closes_input_on_cancellation() -> None:
+    source = _CloseTrackingSource([])
+    task = asyncio.create_task(collect_generation(source))
+    await asyncio.wait_for(source.next_started.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert source.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_generation_preserves_selected_result_when_close_fails() -> None:
+    source = _FailingCloseSource([GenerationChunk(text_delta="done", done=True, finish_reason="stop")])
+
+    result = await collect_generation(source)
+
+    assert result.text == "done"
+    assert source.close_calls == 1

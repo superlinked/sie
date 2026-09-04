@@ -36,9 +36,10 @@ import json
 import logging
 import math
 import os
+import sys
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,14 +53,23 @@ from sie_sdk.queue_types import WorkItem
 from sie_server.adapters._generation_base import (
     FinishReason,
     GenerationAdapter,
+    GenerationCapacityError,
     GenerationChunk,
+    GenerationDrainingError,
+    GenerationError,
+    GenerationPreflightResult,
     ReasoningFormat,
     ToolCallDelta,
+    aclose_with_error_precedence,
+    client_safe_generation_error_code,
+    client_safe_generation_error_message,
+    client_safe_generation_error_param,
     reasoning_starts_in_prompt,
     resolve_reasoning_format,
     suppress_thinking_blocks,
     thinking_blocks_must_be_hidden,
 )
+from sie_server.api.helpers import oom_retry_after_from_registry
 from sie_server.config.model import validate_chat_template_kwargs
 from sie_server.core.runtime_options import apply_generation_runtime_options
 from sie_server.core.text_tokens import estimate_tokens_from_chars
@@ -178,6 +188,12 @@ class NatsPublisher(Protocol):
 
 logger = logging.getLogger(__name__)
 
+_INTERNAL_GENERATION_PREFLIGHT_MESSAGE = "internal error during generation preflight"
+_INTERNAL_GENERATION_MESSAGE = "internal error during generation"
+_INTERNAL_GRAMMAR_COMPILE_MESSAGE = "internal error compiling grammar"
+_INTERNAL_CHAT_TEMPLATE_MESSAGE = "failed to render the model-native message prompt"
+_GENERATION_ITERATOR_CLOSE_TIMEOUT_S = 2.0
+
 # Default delay when NAKing a generate item because the model is not yet
 # loaded — matches the encode/extract path's behavior.
 _NAK_DELAY_S = 5.0
@@ -202,6 +218,10 @@ _CHUNK_QUEUE_MAX = 64
 # tripping promptly when the gateway is genuinely wedged.
 # Per H6 remediation (workstream C).
 _CHUNK_PUT_TIMEOUT_S = 0.1
+
+# Matches the validated EngineConfig.oom_recovery.retry_after_s domain and
+# the gateway's independent trust-boundary check.
+_RESOURCE_EXHAUSTED_RETRY_AFTER_MAX_S = 60
 
 # Longer timeout for enqueuing the ``transport_failure`` terminal itself.
 # Reached only after a content-chunk enqueue already gave up: the publisher
@@ -682,6 +702,53 @@ class _GenerateRequestParams:
     lora_adapter: str | None = None
 
 
+def _adapter_generate_parameters(
+    *,
+    prompt: str,
+    params: _GenerateRequestParams,
+    grammar: GrammarSpec | None,
+    images: list[ImageInput] | None,
+) -> dict[str, Any]:
+    """Build the exact adapter keyword mapping used for preflight and dispatch."""
+    values: dict[str, Any] = {
+        "prompt": prompt,
+        "max_new_tokens": params.max_new_tokens,
+        "temperature": params.temperature,
+        "top_p": params.top_p,
+        "stop": params.stop,
+    }
+    if params.frequency_penalty is not None:
+        values["frequency_penalty"] = params.frequency_penalty
+    if params.presence_penalty is not None:
+        values["presence_penalty"] = params.presence_penalty
+    if params.top_k is not None:
+        values["top_k"] = params.top_k
+    if params.repetition_penalty is not None:
+        values["repetition_penalty"] = params.repetition_penalty
+    if params.min_tokens is not None:
+        values["min_new_tokens"] = params.min_tokens
+    if grammar is not None:
+        values["grammar"] = grammar
+    if params.seed is not None:
+        values["seed"] = params.seed
+    if params.logit_bias:
+        values["logit_bias"] = params.logit_bias
+    if params.logprobs:
+        values["logprobs"] = True
+        if params.top_logprobs is not None and params.top_logprobs > 0:
+            values["top_logprobs"] = params.top_logprobs
+    if params.n is not None and params.n > 1:
+        values["n"] = params.n
+        values["stream"] = params.stream
+    if params.best_of is not None and params.best_of > 1:
+        values["best_of"] = params.best_of
+    if params.lora_adapter:
+        values["lora_path"] = params.lora_adapter
+    if images:
+        values["images"] = images
+    return values
+
+
 class StreamingProcessor:
     """Process a single generate work item end-to-end (streaming)."""
 
@@ -795,9 +862,8 @@ class StreamingProcessor:
     async def prewarm_grammars_for_model(self, model_id: str) -> None:
         """Compile and cache ``tasks.generate.prewarm_grammars`` for ``model_id``.
 
-        Called once per generation model at worker boot through
-        ``IpcServer`` after the registry knows the config but before the
-        sidecar dispatches request-shape work.
+        Called once for the requested generation model through ``IpcServer``
+        before its first routed request reaches generation processing.
         The cache key shape mirrors :meth:`_ensure_grammar_ready` exactly
         so a request hitting one of the prewarmed grammars takes the
         cache-hit branch.
@@ -808,10 +874,9 @@ class StreamingProcessor:
         continues to the next entry. The model still loads. Operators
         see the failure via metrics + logs rather than as a startup crash.
 
-        Non-generation models are silent no-ops (the
-        :func:`~sie_server.core.pool_isolation.is_generation_model` gate
-        runs at the call site; this method also short-circuits on
-        missing ``tasks.generate`` for defence-in-depth).
+        Non-generation models are silent no-ops. ``IpcServer`` checks the
+        requested config before calling, and this method also short-circuits
+        on missing ``tasks.generate`` for defence-in-depth.
         """
         try:
             config = self._registry.get_config(model_id)
@@ -1598,6 +1663,23 @@ class StreamingProcessor:
             )
             return
         params = validation
+        if (
+            params.stream
+            and config is not None
+            and config.tasks.generate is not None
+            and not config.tasks.generate.capabilities.streaming
+        ):
+            await self._terminal_error_then_settle(
+                reply_subject,
+                request_id=request_id,
+                attempt_id=attempt_id,
+                seq=0,
+                code="unsupported_field",
+                message=f"Model '{model_id}' does not support streaming generation",
+                param="stream",
+                msg=msg,
+            )
+            return
         suppress_thinking = thinking_blocks_must_be_hidden(config)
         reasoning_format = resolve_reasoning_format(config, adapter)
 
@@ -1689,6 +1771,7 @@ class StreamingProcessor:
             model_id,
             prompt_str,
             params.max_new_tokens,
+            adapter=adapter,
             num_images=len(request_images) if request_images else 0,
         )
         if ctx_error is not None:
@@ -1779,6 +1862,40 @@ class StreamingProcessor:
                     )
                     return
 
+        generation_parameters = _adapter_generate_parameters(
+            prompt=prompt_str,
+            params=params,
+            grammar=effective_grammar,
+            images=request_images,
+        )
+        try:
+            preflight_result = adapter.preflight_generate(generation_parameters, stream=params.stream)
+        except GenerationError as exc:
+            await self._terminal_error_then_settle(
+                reply_subject,
+                request_id=request_id,
+                attempt_id=attempt_id,
+                seq=0,
+                code=exc.code,
+                message=client_safe_generation_error_message(exc.code, str(exc)),
+                param=client_safe_generation_error_param(exc),
+                retry_after_s=_generation_error_retry_after_s(exc, self._registry),
+                msg=msg,
+            )
+            return
+        except Exception:  # noqa: BLE001 - unexpected backend faults are terminal
+            logger.warning("Generate preflight failed for %s/%s", request_id, attempt_id, exc_info=True)
+            await self._terminal_error_then_settle(
+                reply_subject,
+                request_id=request_id,
+                attempt_id=attempt_id,
+                seq=0,
+                code="inference_error",
+                message=_INTERNAL_GENERATION_PREFLIGHT_MESSAGE,
+                msg=msg,
+            )
+            return
+
         # KV-cache admission control. The reservation covers
         # both the (cheap, char-based) input-token estimate and the
         # client-requested ``max_new_tokens``. When admission is on and
@@ -1848,17 +1965,6 @@ class StreamingProcessor:
                 request_id=request_id,
                 attempt_id=attempt_id,
                 received_at=received_at,
-                prompt=prompt_str,
-                max_new_tokens=params.max_new_tokens,
-                temperature=params.temperature,
-                top_p=params.top_p,
-                stop=params.stop,
-                frequency_penalty=params.frequency_penalty,
-                presence_penalty=params.presence_penalty,
-                top_k=params.top_k,
-                repetition_penalty=params.repetition_penalty,
-                min_tokens=params.min_tokens,
-                chat_template_kwargs=params.chat_template_kwargs,
                 suppress_thinking=suppress_thinking,
                 thinking_starts_in_prompt=thinking_starts_in_prompt,
                 reasoning_format=reasoning_format,
@@ -1867,15 +1973,10 @@ class StreamingProcessor:
                 enable_tool_parser=enable_tool_parser,
                 tool_call_format=tool_call_format,
                 parallel_tool_calls=params.parallel_tool_calls,
-                seed=params.seed,
-                logit_bias=params.logit_bias,
-                logprobs=params.logprobs,
-                top_logprobs=params.top_logprobs,
                 n=params.n,
-                best_of=params.best_of,
                 stream=params.stream,
-                lora_adapter=params.lora_adapter,
-                images=request_images,
+                generation_parameters=generation_parameters,
+                preflight_result=preflight_result,
                 cancel_event=cancel_event,
             )
         finally:
@@ -1907,21 +2008,6 @@ class StreamingProcessor:
         request_id: str,
         attempt_id: str,
         received_at: float,
-        prompt: str,
-        max_new_tokens: int,
-        temperature: float,
-        top_p: float,
-        stop: list[str] | None,
-        frequency_penalty: float | None = None,
-        presence_penalty: float | None = None,
-        top_k: int | None = None,
-        repetition_penalty: float | None = None,
-        min_tokens: int | None = None,
-        # ``chat_template_kwargs`` is consumed upstream in
-        # :meth:`_render_chat_template`; accepted here only so the
-        # caller can forward the whole ``params`` block without sniffing
-        # which fields belong to which stage.
-        chat_template_kwargs: dict[str, Any] | None = None,
         suppress_thinking: bool = False,
         thinking_starts_in_prompt: bool = False,
         reasoning_format: ReasoningFormat = "qwen3",
@@ -1930,15 +2016,10 @@ class StreamingProcessor:
         enable_tool_parser: bool | None = None,
         tool_call_format: ToolCallFormat = "auto",
         parallel_tool_calls: bool = True,
-        seed: int | None = None,
-        logit_bias: dict[str, float] | None = None,
-        logprobs: bool = False,
-        top_logprobs: int | None = None,
         n: int | None = None,
-        best_of: int | None = None,
         stream: bool = False,
-        lora_adapter: str | None = None,
-        images: list[ImageInput] | None = None,
+        generation_parameters: Mapping[str, Any],
+        preflight_result: GenerationPreflightResult | None = None,
         cancel_event: asyncio.Event,
     ) -> None:
         # ``adapter.generate`` is typed as returning ``AsyncIterator`` on
@@ -1946,68 +2027,10 @@ class StreamingProcessor:
         # ``yield``) — narrow here so we can call ``aclose()`` for
         # cancellation cleanup.
         #
-        # ``grammar`` is passed via ``**kwargs`` so existing
-        # GenerationAdapter implementations that don't accept the kwarg
-        # still work for non-grammar requests (``grammar is None`` →
-        # not forwarded). The SGLang adapter accepts the kwarg and
-        # forwards the raw schema/regex to its ``/generate`` endpoint.
-        gen_kwargs: dict[str, Any] = {
-            "prompt": prompt,
-            "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "stop": stop,
-        }
-        # Only forward penalties when set. Older adapters that don't
-        # accept the kwarg still work for the (overwhelmingly common)
-        # no-penalty path; the SGLang adapter accepts both.
-        if frequency_penalty is not None:
-            gen_kwargs["frequency_penalty"] = frequency_penalty
-        if presence_penalty is not None:
-            gen_kwargs["presence_penalty"] = presence_penalty
-        # Non-OpenAI sampler knobs — forward only when set so older
-        # adapters that don't accept the kwargs still work for the common
-        # path; the SGLang adapter accepts both.
-        if top_k is not None:
-            gen_kwargs["top_k"] = top_k
-        if repetition_penalty is not None:
-            gen_kwargs["repetition_penalty"] = repetition_penalty
-        if min_tokens is not None:
-            # SGLang names the knob ``min_new_tokens`` server-side; the
-            # OpenAI-compat surface (mirroring vLLM / Together) takes it
-            # as ``min_tokens``. Translate at this edge.
-            gen_kwargs["min_new_tokens"] = min_tokens
-        # ``chat_template_kwargs`` is consumed in _render_chat_template
-        # upstream; nothing to forward from here.
-        _ = chat_template_kwargs
-        if grammar is not None:
-            gen_kwargs["grammar"] = grammar
-        # Optional sampler controls: seed / logit_bias / logprobs / top_logprobs. Only
-        # forward when set so older adapters that don't accept the
-        # kwargs still work for the (common) no-extra-sampler path.
-        if seed is not None:
-            gen_kwargs["seed"] = seed
-        if logit_bias:
-            gen_kwargs["logit_bias"] = logit_bias
-        if logprobs:
-            gen_kwargs["logprobs"] = logprobs
-            if top_logprobs is not None and top_logprobs > 0:
-                gen_kwargs["top_logprobs"] = top_logprobs
-        if n is not None and n > 1:
-            gen_kwargs["n"] = n
-            # Streaming n>1 fans candidates out as per-choice_index deltas;
-            # non-streaming collects them into the terminal candidates[].
-            gen_kwargs["stream"] = stream
-        if best_of is not None and best_of > 1:
-            gen_kwargs["best_of"] = best_of
-        if lora_adapter:
-            # SGLang selects the adapter by its registered served-name via
-            # sampling_params.lora_path; no path resolution needed here.
-            gen_kwargs["lora_path"] = lora_adapter
-        # Vision: forward decoded images only when present so text-only
-        # requests (and adapters that don't accept the kwarg) are unaffected.
-        if images:
-            gen_kwargs["images"] = images
+        # The exact mapping was built once and already passed to preflight.
+        # Dispatch a copy of that mapping so admission and execution cannot
+        # drift through a second set of keyword-construction rules.
+        gen_kwargs = dict(generation_parameters)
         # Worker-side phase boundary (#3136): everything between work receipt
         # and this adapter dispatch — deserialization, validation, model load,
         # chat-template render, context checks, and KV-admission wait — is the
@@ -2021,18 +2044,12 @@ class StreamingProcessor:
                 grammar="none" if grammar is None else grammar.kind,
                 duration_s=time.perf_counter() - received_at,
             )
-        chunks_iter = cast(
-            "AsyncGenerator[GenerationChunk, None]",
-            adapter.generate(**gen_kwargs),
-        )
+        chunks_iter: AsyncIterator[GenerationChunk] = adapter.generate_with_preflight(gen_kwargs, preflight_result)
         if suppress_thinking:
-            chunks_iter = cast(
-                "AsyncGenerator[GenerationChunk, None]",
-                suppress_thinking_blocks(
-                    chunks_iter,
-                    start_inside=thinking_starts_in_prompt,
-                    reasoning_format=reasoning_format,
-                ),
+            chunks_iter = suppress_thinking_blocks(
+                chunks_iter,
+                start_inside=thinking_starts_in_prompt,
+                reasoning_format=reasoning_format,
             )
         # OpenAI tools: when enabled, wrap the adapter iterator with the
         # tool-call parser so ``<tool_call>{...}</tool_call>`` blocks
@@ -2044,13 +2061,10 @@ class StreamingProcessor:
         # ``parallel_tool_calls`` is honoured by the parser.
         wrap_parser = enable_tool_parser if enable_tool_parser is not None else bool(tools)
         if wrap_parser:
-            chunks_iter = cast(
-                "AsyncGenerator[GenerationChunk, None]",
-                parse_tool_call_stream(
-                    chunks_iter,
-                    tool_call_format=tool_call_format,
-                    parallel_tool_calls=parallel_tool_calls,
-                ),
+            chunks_iter = parse_tool_call_stream(
+                chunks_iter,
+                tool_call_format=tool_call_format,
+                parallel_tool_calls=parallel_tool_calls,
             )
 
         # Bounded chunk queue + a single publisher task drains it. If the
@@ -2134,6 +2148,8 @@ class StreamingProcessor:
             last_flush_ts = time.monotonic()
             return True
 
+        next_task: asyncio.Task[GenerationChunk] | None = None
+        cancel_task: asyncio.Task[bool] | None = None
         try:
             # Drive the iterator and the cancel-event together. When the
             # cancel event fires, we close the adapter iterator which
@@ -2148,7 +2164,7 @@ class StreamingProcessor:
             while True:
                 next_task = asyncio.create_task(_next_chunk())
                 cancel_task = asyncio.create_task(cancel_event.wait())
-                done, _pending = await asyncio.wait(
+                await asyncio.wait(
                     {next_task, cancel_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
@@ -2156,30 +2172,18 @@ class StreamingProcessor:
                 # tick as the next chunk resolved, treat it as a cancel so
                 # the caller's intent is honoured promptly.
                 if cancel_event.is_set():
-                    if next_task in done:
-                        # Drain the result (or exception) to avoid warnings.
-                        with _suppress():
-                            next_task.result()
-                    else:
-                        next_task.cancel()
-                        with _suppress():
-                            await next_task
-                    # Bound the time we spend in adapter teardown. The
-                    # SGLang adapter's aclose handler spawns /abort_request
-                    # as an independent background task (bounded separately)
-                    # rather than awaiting it here, so aclose returns
-                    # promptly; the cap is defence-in-depth against a
-                    # misbehaving adapter blocking the publisher loop and
-                    # stalling the JetStream heartbeat for the inflight
-                    # window. ``TimeoutError`` is a subclass of ``Exception``
-                    # so a single ``except Exception`` covers the cap.
-                    try:
-                        await asyncio.wait_for(chunks_iter.aclose(), timeout=2.0)
-                    except Exception:  # noqa: BLE001
-                        logger.warning(
-                            "adapter aclose timed out / errored on cancel for %s; continuing teardown",
-                            request_id,
-                        )
+                    await _cancel_and_drain_generation_task(
+                        next_task,
+                        preserve_failure=True,
+                        context="generation next-chunk task",
+                    )
+                    next_task = None
+                    await _cancel_and_drain_generation_task(
+                        cancel_task,
+                        preserve_failure=True,
+                        context="generation cancel-wait task",
+                    )
+                    cancel_task = None
                     # Flush whatever we have, then emit a cancelled terminal.
                     # If the pending flush fails, do NOT enqueue the cancel
                     # terminal — putting the terminal ahead of unflushed text
@@ -2214,9 +2218,12 @@ class StreamingProcessor:
                         _record_failure()
                     break
 
-                cancel_task.cancel()
-                with _suppress():
-                    await cancel_task
+                await _cancel_and_drain_generation_task(
+                    cancel_task,
+                    preserve_failure=True,
+                    context="generation cancel-wait task",
+                )
+                cancel_task = None
 
                 try:
                     chunk: GenerationChunk = next_task.result()
@@ -2254,6 +2261,16 @@ class StreamingProcessor:
                     break
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Generate iterator raised for %s/%s", request_id, attempt_id, exc_info=True)
+                    if isinstance(exc, GenerationError):
+                        error_code = exc.code
+                        error_message = client_safe_generation_error_message(exc.code, str(exc))
+                        error_param = client_safe_generation_error_param(exc)
+                        error_retry_after_s = _generation_error_retry_after_s(exc, self._registry)
+                    else:
+                        error_code = "inference_error"
+                        error_message = _INTERNAL_GENERATION_MESSAGE
+                        error_param = None
+                        error_retry_after_s = None
                     err_payload = _encode_chunk(
                         kind="chunk",
                         request_id=request_id,
@@ -2262,8 +2279,10 @@ class StreamingProcessor:
                         text_delta="",
                         done=True,
                         finish_reason="error",
-                        error_code="inference_error",
-                        error_message=str(exc),
+                        error_code=error_code,
+                        error_message=error_message,
+                        error_param=error_param,
+                        error_retry_after_s=error_retry_after_s,
                     )
                     try:
                         await _wait_for(
@@ -2274,6 +2293,8 @@ class StreamingProcessor:
                     except (asyncio.QueueFull, TimeoutError):
                         _record_failure()
                     break
+                finally:
+                    next_task = None
 
                 # Record first-text timing for TTFT.
                 if chunk.text_delta and first_text_at is None:
@@ -2348,6 +2369,11 @@ class StreamingProcessor:
                     # gateway can surface the parse failure as a normal
                     # error chunk instead of swallowing it under the
                     # default ``stop`` reason.
+                    terminal_has_error = (
+                        chunk.error_code is not None
+                        or chunk.error_message is not None
+                        or chunk.finish_reason == "error"
+                    )
                     terminal = _encode_chunk(
                         kind="chunk",
                         request_id=request_id,
@@ -2359,8 +2385,12 @@ class StreamingProcessor:
                         prompt_tokens=chunk.prompt_tokens,
                         completion_tokens=chunk.completion_tokens,
                         ttft_ms=_compute_ttft_ms(publish_at, first_text_at),
-                        error_code=chunk.error_code,
-                        error_message=chunk.error_message,
+                        error_code=(chunk.error_code or "inference_error") if terminal_has_error else None,
+                        error_message=(
+                            client_safe_generation_error_message(chunk.error_code, chunk.error_message)
+                            if terminal_has_error
+                            else None
+                        ),
                         candidates=list(chunk.candidates) if chunk.candidates else None,
                     )
                     try:
@@ -2438,6 +2468,38 @@ class StreamingProcessor:
                         terminal_sent = await self._enqueue_transport_failure(chunk_queue, request_id, attempt_id, seq)
                         break
         finally:
+            # The per-iteration tasks are owned by this method. An outer-task
+            # cancellation can land while ``asyncio.wait`` is pending, so drain
+            # both children before closing the effective iterator. Then close
+            # the outermost thinking/tool wrapper exactly once: each wrapper's
+            # own ``finally`` recursively closes its upstream adapter iterator.
+            # The two-second cap prevents a broken backend teardown from
+            # holding the JetStream heartbeat and publisher forever.
+            preserve_cleanup_failure = sys.exception() is not None or terminal_sent
+            await _cancel_and_drain_generation_task(
+                next_task,
+                preserve_failure=preserve_cleanup_failure,
+                context="generation next-chunk task",
+            )
+            await _cancel_and_drain_generation_task(
+                cancel_task,
+                preserve_failure=preserve_cleanup_failure,
+                context="generation cancel-wait task",
+            )
+            iterator_close_error: BaseException | None = None
+            try:
+                await aclose_with_error_precedence(
+                    chunks_iter,
+                    outcome_selected=terminal_sent,
+                    context=f"queue generation iterator for {request_id}",
+                    timeout_s=_GENERATION_ITERATOR_CLOSE_TIMEOUT_S,
+                )
+            except BaseException as exc:  # noqa: BLE001 - teardown must run even when this task is cancelled
+                # Keep the close failure authoritative, but only after the
+                # heartbeat and publisher tasks owned by this request have
+                # been stopped and awaited below.
+                iterator_close_error = exc
+
             # Stop the heartbeat before draining the publisher so a
             # late in_progress() call doesn't race the final ACK.
             heartbeat_stop.set()
@@ -2469,6 +2531,9 @@ class StreamingProcessor:
                 with _suppress():
                     await publisher_task
                 publisher_ok = False
+
+            if iterator_close_error is not None:
+                raise iterator_close_error
 
         # ACK after terminal publish (durable guarantee per §4.4 ACK timing).
         # H6: withhold ACK when the terminal we published was a
@@ -2697,6 +2762,13 @@ class StreamingProcessor:
             return _ValidationError(
                 code="invalid_request",
                 message="'max_new_tokens' must be a positive integer",
+            )
+        generate_task = config.tasks.generate if config is not None else None
+        max_output_tokens = getattr(generate_task, "max_output_tokens", None)
+        if isinstance(max_output_tokens, int) and max_new_tokens > max_output_tokens:
+            return _ValidationError(
+                code="context_exceeded",
+                message=f"max_new_tokens ({max_new_tokens}) exceeds model cap ({max_output_tokens})",
             )
 
         has_prompt = "prompt" in params
@@ -3228,7 +3300,7 @@ class StreamingProcessor:
         """
         try:
             tok = await self._get_tokenizer(model_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to load tokenizer for chat-template rendering on %s",
                 model_id,
@@ -3236,7 +3308,7 @@ class StreamingProcessor:
             )
             return _ValidationError(
                 code="invalid_request",
-                message=f"failed to load tokenizer for chat-template rendering: {exc}",
+                message=_INTERNAL_CHAT_TEMPLATE_MESSAGE,
             )
 
         # Tokenizer-extension kwargs (e.g. Qwen3's ``enable_thinking``).
@@ -3323,15 +3395,15 @@ class StreamingProcessor:
                     **kwargs,
                 ),
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.info(
-                "chat template render failed for %s: %s",
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Chat template render failed for %s",
                 model_id,
-                exc,
+                exc_info=True,
             )
             return _ValidationError(
                 code="invalid_request",
-                message=f"chat template render failed: {exc}",
+                message=_INTERNAL_CHAT_TEMPLATE_MESSAGE,
             )
         if not isinstance(rendered, str):
             return _ValidationError(
@@ -3345,12 +3417,16 @@ class StreamingProcessor:
         model_id: str,
         prompt: str,
         max_new_tokens: int,
+        *,
+        adapter: GenerationAdapter,
         num_images: int = 0,
     ) -> _ValidationError | None:
-        """Worker-side ``prompt_tokens + max_new_tokens > context_length``
-        guard. Emits a terminal ``code: "context_exceeded"`` chunk when
-        the rendered prompt already overflows the budget the model
-        config declares.
+        """Worker-side context-length guard.
+
+        Shared accounting checks prompt plus requested output against one
+        envelope. Independent accounting checks only the encoder input axis.
+        Prompt tokenization follows the adapter's declared special-token
+        policy so the guard matches backend usage accounting.
 
         Returns ``None`` if the budget is OK or if the model has no
         declared ``context_length`` (defensive — config validation
@@ -3404,7 +3480,12 @@ class StreamingProcessor:
             loop = asyncio.get_running_loop()
             prompt_tokens = await loop.run_in_executor(
                 _GRAMMAR_EXECUTOR,
-                lambda: len(tok.encode(encode_prompt, add_special_tokens=False)),
+                lambda: len(
+                    tok.encode(
+                        encode_prompt,
+                        add_special_tokens=adapter.prompt_tokenization_add_special_tokens,
+                    )
+                ),
             )
         except Exception:  # noqa: BLE001
             logger.debug(
@@ -3418,9 +3499,20 @@ class StreamingProcessor:
         # many tokens at inference. Add a coarse per-image estimate so the
         # guard fires before SGLang overflows its context window.
         image_tokens = num_images * _VISION_TOKENS_PER_IMAGE_ESTIMATE
-        total = prompt_tokens + image_tokens + max_new_tokens
+        input_tokens = prompt_tokens + image_tokens
+        image_note = f" + ~image_tokens ({image_tokens})" if image_tokens else ""
+        if adapter.context_length_accounting == "independent":
+            if input_tokens > context_length:
+                return _ValidationError(
+                    code="context_exceeded",
+                    message=(
+                        f"prompt_tokens ({prompt_tokens}){image_note} = {input_tokens} "
+                        f"exceeds context_length ({context_length}) for model '{model_id}'"
+                    ),
+                )
+            return None
+        total = input_tokens + max_new_tokens
         if total > context_length:
-            image_note = f" + ~image_tokens ({image_tokens})" if image_tokens else ""
             return _ValidationError(
                 code="context_exceeded",
                 message=(
@@ -3534,16 +3626,22 @@ class StreamingProcessor:
                 # follower settles its own work item rather than hanging
                 # until ack_wait and triggering redelivery.
                 await _wait_for(future_to_await, timeout=_GRAMMAR_FOLLOWER_TIMEOUT_S)
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 # Leader's compile failed, was cancelled, or did not
                 # resolve in time; surface the same terminal-error path.
+                logger.warning(
+                    "Shared grammar compile failed for %s/%s",
+                    request_id,
+                    attempt_id,
+                    exc_info=True,
+                )
                 await self._terminal_error_then_settle(
                     reply_subject,
                     request_id=request_id,
                     attempt_id=attempt_id,
                     seq=0,
                     code="grammar_compile_failed",
-                    message=f"shared grammar compile failed: {exc}",
+                    message=_INTERNAL_GRAMMAR_COMPILE_MESSAGE,
                     msg=msg,
                 )
                 return False
@@ -3631,13 +3729,19 @@ class StreamingProcessor:
         except Exception as exc:  # noqa: BLE001
             record_compile("error")
             future_to_await.set_exception(exc)
+            logger.warning(
+                "Tokenizer load failed during grammar compile for %s/%s",
+                request_id,
+                attempt_id,
+                exc_info=True,
+            )
             await self._terminal_error_then_settle(
                 reply_subject,
                 request_id=request_id,
                 attempt_id=attempt_id,
                 seq=0,
                 code="grammar_compile_failed",
-                message=f"failed to load tokenizer for grammar compile: {exc}",
+                message=_INTERNAL_GRAMMAR_COMPILE_MESSAGE,
                 msg=msg,
             )
             return False
@@ -3690,13 +3794,19 @@ class StreamingProcessor:
             # code rather than ``inference_error``.
             record_compile("error")
             future_to_await.set_exception(exc)
+            logger.warning(
+                "Unexpected grammar compile failure for %s/%s",
+                request_id,
+                attempt_id,
+                exc_info=True,
+            )
             await self._terminal_error_then_settle(
                 reply_subject,
                 request_id=request_id,
                 attempt_id=attempt_id,
                 seq=0,
                 code="grammar_compile_failed",
-                message=f"grammar compile raised: {exc}",
+                message=_INTERNAL_GRAMMAR_COMPILE_MESSAGE,
                 msg=msg,
             )
             return False
@@ -3765,6 +3875,8 @@ class StreamingProcessor:
         seq: int,
         code: str,
         message: str,
+        param: str | None = None,
+        retry_after_s: int | None = None,
         msg: Any,
     ) -> None:
         """Publish a terminal error chunk, then ACK on success / NAK on failure.
@@ -3783,6 +3895,8 @@ class StreamingProcessor:
             seq=seq,
             code=code,
             message=message,
+            param=param,
+            retry_after_s=retry_after_s,
         )
         if published:
             await _safe_ack(msg)
@@ -3836,6 +3950,8 @@ class StreamingProcessor:
         seq: int,
         code: str,
         message: str,
+        param: str | None = None,
+        retry_after_s: int | None = None,
     ) -> bool:
         """Publish a terminal error chunk to the inbox.
 
@@ -3856,6 +3972,8 @@ class StreamingProcessor:
             finish_reason="error",
             error_code=code,
             error_message=message,
+            error_param=param,
+            error_retry_after_s=retry_after_s,
         )
         try:
             await self._publish_terminal_envelope(reply_subject, payload)
@@ -3891,10 +4009,50 @@ class _Suppress:
 _suppress = _Suppress
 
 
+async def _cancel_and_drain_generation_task(
+    task: asyncio.Task[Any] | None,
+    *,
+    preserve_failure: bool,
+    context: str,
+) -> None:
+    """Cancel and await one iterator-driver child task.
+
+    A child cancellation is the expected cleanup result. Any other child
+    failure remains authoritative only when there is no primary exception or
+    already-selected terminal outcome to preserve.
+    """
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        return
+    except BaseException:
+        if preserve_failure:
+            logger.warning(
+                "%s failed during generation cleanup; preserving the primary outcome",
+                context,
+                exc_info=True,
+            )
+            return
+        raise
+
+
 def _compute_ttft_ms(publish_at: float, first_text_at: float | None) -> float | None:
     if first_text_at is None:
         return None
     return max(0.0, (first_text_at - publish_at) * 1000.0)
+
+
+def _generation_error_retry_after_s(error: GenerationError, registry: Any) -> int | None:
+    """Return the configured hint only for a true OOM-capacity refusal."""
+    if isinstance(error, GenerationDrainingError):
+        return None
+    if isinstance(error, GenerationCapacityError):
+        return oom_retry_after_from_registry(registry)
+    return None
 
 
 def _encode_chunk(
@@ -3912,6 +4070,8 @@ def _encode_chunk(
     ttft_ms: float | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    error_param: str | None = None,
+    error_retry_after_s: int | None = None,
     tool_call_delta: ToolCallDelta | None = None,
     logprobs: list[dict[str, Any]] | None = None,
     candidates: list[dict[str, Any]] | None = None,
@@ -3948,10 +4108,21 @@ def _encode_chunk(
     if ttft_ms is not None:
         payload["ttft_ms"] = ttft_ms
     if error_code is not None or error_message is not None:
-        payload["error"] = {
-            "code": error_code or "error",
+        safe_error_code = client_safe_generation_error_code(error_code)
+        error: dict[str, Any] = {
+            "code": safe_error_code,
             "message": error_message or "",
         }
+        if error_param is not None:
+            error["param"] = error_param
+        if (
+            safe_error_code == "RESOURCE_EXHAUSTED"
+            and isinstance(error_retry_after_s, int)
+            and not isinstance(error_retry_after_s, bool)
+            and 1 <= error_retry_after_s <= _RESOURCE_EXHAUSTED_RETRY_AFTER_MAX_S
+        ):
+            error["retry_after_s"] = error_retry_after_s
+        payload["error"] = error
     if logprobs:
         # OpenAI ``ChatCompletionTokenLogprob`` entries, produced by the
         # adapter for the tokens in ``text_delta``. Forwarded verbatim;

@@ -37,6 +37,7 @@ from sie_sdk.queue_types import denormalize_model_id
 from sie_server.adapters._generation_base import (
     ReasoningFormat,
     ThinkingBlockStripper,
+    aclose_with_error_precedence,
     resolve_reasoning_format,
     thinking_blocks_must_be_hidden,
 )
@@ -687,11 +688,13 @@ async def _sanitize_sse_stream(
     buffered = bytearray()
     received = 0
     saw_done = False
+    terminal_outcome_selected = False
     try:
         async for chunk in response.aiter_bytes():
             received += len(chunk)
             if received > _MAX_CHAT_RESPONSE_BYTES:
                 logger.error("generation child SSE exceeded %d bytes", _MAX_CHAT_RESPONSE_BYTES)
+                terminal_outcome_selected = True
                 yield _upstream_error_event("upstream response exceeded the byte limit")
                 return
             buffered.extend(chunk)
@@ -707,6 +710,7 @@ async def _sanitize_sse_stream(
                 data = line[len(b"data:") :].lstrip()
                 if data == b"[DONE]":
                     saw_done = True
+                    terminal_outcome_selected = True
                     yield b"data: [DONE]\n"
                     continue
                 if not data:
@@ -729,21 +733,36 @@ async def _sanitize_sse_stream(
             line = bytes(buffered).removesuffix(b"\r")
             if line.startswith(b"data:") and line[len(b"data:") :].lstrip() == b"[DONE]":
                 saw_done = True
+                terminal_outcome_selected = True
                 yield b"data: [DONE]\n"
             elif line:
                 raise ValueError("upstream SSE ended with an incomplete event")
         if not saw_done:
             logger.warning("generation child SSE ended without [DONE]")
+            terminal_outcome_selected = True
             yield _upstream_error_event("upstream stream ended unexpectedly")
     except (httpx.HTTPError, UnicodeError, ValueError, json.JSONDecodeError):
         logger.warning("generation child chat proxy stream failed", exc_info=True)
         if not saw_done:
+            terminal_outcome_selected = True
             yield _upstream_error_event()
     finally:
-        await response.aclose()
-        await client.aclose()
-        if slot is not None:
-            slot.release()
+        try:
+            await aclose_with_error_precedence(
+                response,
+                outcome_selected=terminal_outcome_selected,
+                context="generation child SSE response",
+            )
+        finally:
+            try:
+                await aclose_with_error_precedence(
+                    client,
+                    outcome_selected=terminal_outcome_selected,
+                    context="generation child SSE client",
+                )
+            finally:
+                if slot is not None:
+                    slot.release()
 
 
 # -- /v1/chat/completions (proxy to the managed generation child) ------------
@@ -821,6 +840,13 @@ async def _chat_completions(
         if gen_task is None:
             raise _bad_request(
                 f"Model '{model}' does not support generation (no generate task). Use a generation model."
+            )
+        streaming_supported = getattr(getattr(gen_task, "capabilities", None), "streaming", True)
+        if bool(stream_opt) and not streaming_supported:
+            raise _bad_request(
+                f"Model '{model}' does not support streaming generation",
+                param="stream",
+                code="unsupported_field",
             )
         if str(device).startswith("cuda"):
             _validate_cuda_chat_body(body)
@@ -1086,7 +1112,7 @@ async def _rerank(
             logger.warning("rerank failed for %s", model, exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"code": "inference_error", "message": str(exc)},
+                detail={"code": "inference_error", "message": "internal error during reranking"},
             ) from exc
 
         score_output: ScoreOutput = worker_result.output

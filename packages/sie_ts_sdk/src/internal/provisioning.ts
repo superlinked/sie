@@ -47,6 +47,7 @@ import {
 } from "./constants.js";
 import {
   getErrorCode,
+  getErrorParam,
   getRetryAfter,
   handleError,
   readRequestId,
@@ -116,15 +117,17 @@ export function nextOomRetryDelay(opts: {
   elapsedMs: number;
   provisionTimeoutMs: number;
   model: string;
+  param?: string | null;
 }): number {
-  const { retryAfter, oomRetries, maxOomRetries, elapsedMs, provisionTimeoutMs, model } = opts;
+  const { retryAfter, oomRetries, maxOomRetries, elapsedMs, provisionTimeoutMs, model, param } =
+    opts;
   const message = `Server resource exhausted after ${oomRetries} retry attempt(s) for model '${model}'`;
   if (oomRetries >= maxOomRetries || elapsedMs >= provisionTimeoutMs) {
-    throw new ResourceExhaustedError(message, { model, retries: oomRetries });
+    throw new ResourceExhaustedError(message, { model, retries: oomRetries, param });
   }
   const delay = computeOomBackoff(retryAfter, oomRetries);
   if (delay >= provisionTimeoutMs - elapsedMs) {
-    throw new ResourceExhaustedError(message, { model, retries: oomRetries });
+    throw new ResourceExhaustedError(message, { model, retries: oomRetries, param });
   }
   return delay;
 }
@@ -179,7 +182,11 @@ export async function admissionRetryDelay(
       // terminal 429 mapped by `handleError` (#3136).
       throw new RateLimitError(
         `Rate limited (429); retry budget (${provisionTimeoutMs}ms) exhausted after ${elapsed}ms`,
-        { retryAfter, requestId: readRequestId(response) },
+        {
+          retryAfter,
+          requestId: readRequestId(response),
+          param: await getErrorParam(response.clone()),
+        },
       );
     }
     return delay;
@@ -250,6 +257,7 @@ export async function withProvisioningRetry(
             "No capacity available. Server is provisioning.",
             opts.gpu,
             getRetryAfter(response),
+            await getErrorParam(response.clone()),
           );
         }
         const elapsed = Date.now() - startTime;
@@ -258,6 +266,7 @@ export async function withProvisioningRetry(
             `Provisioning timeout after ${elapsed}ms`,
             opts.gpu,
             getRetryAfter(response),
+            await getErrorParam(response.clone()),
           );
         }
         const retryAfter = getRetryAfter(response);
@@ -268,7 +277,11 @@ export async function withProvisioningRetry(
       if (errorCode === MODEL_LOADING_ERROR_CODE) {
         const elapsed = Date.now() - startTime;
         if (elapsed >= opts.provisionTimeoutMs) {
-          throw new ModelLoadingError(`Model loading timeout for '${opts.model}'`, opts.model);
+          throw new ModelLoadingError(
+            `Model loading timeout for '${opts.model}'`,
+            opts.model,
+            await getErrorParam(response.clone()),
+          );
         }
         const delay = getRetryAfter(response) ?? MODEL_LOADING_DEFAULT_DELAY;
         await sleep(Math.min(delay, opts.provisionTimeoutMs - elapsed));
@@ -284,6 +297,7 @@ export async function withProvisioningRetry(
           elapsedMs: Date.now() - startTime,
           provisionTimeoutMs: opts.provisionTimeoutMs,
           model: opts.model,
+          param: await getErrorParam(response.clone()),
         });
         oomRetries += 1;
         await sleep(delay);
@@ -320,6 +334,8 @@ export async function withProvisioningRetry(
           "non-idempotent (retrying could double-bill). Re-issue manually if needed.",
         await getErrorCode(response.clone()),
         HTTP_GATEWAY_TIMEOUT,
+        readRequestId(response),
+        await getErrorParam(response.clone()),
       );
     }
 

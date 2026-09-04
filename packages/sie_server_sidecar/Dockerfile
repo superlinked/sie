@@ -30,7 +30,7 @@ ARG RUST_VERSION=1.97.0
 # =============================================================================
 # Dependency planner: capture the Cargo graph only.
 # =============================================================================
-FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+FROM rust:${RUST_VERSION}-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d AS chef
 RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
@@ -108,7 +108,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # =============================================================================
 # `distroless/cc-debian12` ships glibc + common C runtime libs, matching what
 # the Rust build links against. `nonroot` gives us uid/gid 65532.
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS runtime
 
 COPY --from=builder /usr/local/bin/sie-server-sidecar /sie-server-sidecar
 

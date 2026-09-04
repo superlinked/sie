@@ -24,6 +24,7 @@ use super::payload_store::PayloadStore;
 use super::stream_durability;
 use super::streaming::{
     ChunkApplied, ChunkEnvelope, ChunkError, NakEnvelope, StreamCollector, StreamOutcome,
+    StreamOutcomeOrigin,
 };
 use crate::endpoint::InferenceEndpoint;
 use crate::observability::metrics::{
@@ -690,6 +691,10 @@ pub struct WorkResult {
     /// observed resource shape. Optional for rolling/self-host compatibility.
     #[serde(default)]
     pub execution_identity_sha256: Option<String>,
+    /// Runtime-independent release and deployment-route binding. Optional for
+    /// rolling/self-host compatibility.
+    #[serde(default)]
+    pub execution_binding_sha256: Option<String>,
 }
 
 /// One bounded fragment of a named-msgpack encoded [`WorkResult`].
@@ -1530,6 +1535,7 @@ fn fail_pending_result_chunk_request(
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         })
         .collect();
     if let Some(sender) = collector.sender.take() {
@@ -3814,12 +3820,16 @@ impl WorkPublisher {
             error: Some(crate::queue::streaming::ChunkError {
                 code: code.to_string(),
                 message: message.to_string(),
+                param: None,
+                retry_after_s: None,
             }),
+            origin: StreamOutcomeOrigin::GatewaySynthetic,
             tool_calls: None,
             logprobs: None,
             candidates: Vec::new(),
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         if let Some(sender) = collector.sender.take() {
             if sender.send(outcome).is_err() {
@@ -5099,12 +5109,16 @@ impl WorkPublisher {
                     error: Some(ChunkError {
                         code: "shutdown".to_string(),
                         message: "gateway shutdown before stream completed".to_string(),
+                        param: None,
+                        retry_after_s: None,
                     }),
+                    origin: StreamOutcomeOrigin::GatewaySynthetic,
                     tool_calls: None,
                     logprobs: None,
                     candidates: Vec::new(),
                     executed_bundle_config_hash: None,
                     execution_identity_sha256: None,
+                    execution_binding_sha256: None,
                 });
                 if let Some(sender) = collector.sender.take() {
                     if sender.send(outcome).is_err() {
@@ -6467,6 +6481,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         }
     }
 
@@ -7070,6 +7085,7 @@ mod tests {
                     worker_direct: false,
                     executed_bundle_config_hash: None,
                     execution_identity_sha256: None,
+                    execution_binding_sha256: None,
                 }),
                 None,
             ],
@@ -7143,6 +7159,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let duplicate = WorkResult {
             result_msgpack: vec![2],
@@ -7206,6 +7223,7 @@ mod tests {
             worker_direct: true,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let pool_result = WorkResult {
             result_msgpack: vec![2],
@@ -7610,6 +7628,9 @@ mod tests {
             worker_direct: true,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            ),
         };
 
         let encoded = rmp_serde::to_vec(&result).unwrap();
@@ -7621,6 +7642,10 @@ mod tests {
         assert_eq!(decoded.result_msgpack, vec![5, 6, 7]);
         assert_eq!(decoded.units.and_then(|units| units.audio_ms), Some(1_001));
         assert!(decoded.worker_direct);
+        assert_eq!(
+            decoded.execution_binding_sha256.as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        );
     }
 
     #[test]
@@ -7819,6 +7844,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         })
         .expect("encode work result")
     }
@@ -7966,6 +7992,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let encoded = rmp_serde::to_vec(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -7993,6 +8020,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let encoded = rmp_serde::to_vec_named(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);
@@ -8037,6 +8065,7 @@ mod tests {
             worker_direct: false,
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
+            execution_binding_sha256: None,
         };
         let encoded = rmp_serde::to_vec(&result).unwrap();
         let extracted = extract_request_id_fast(&encoded);

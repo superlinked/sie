@@ -4,8 +4,8 @@ description: >-
   SIE (Search Inference Engine) Kubernetes deployment with gateway, GPU workers,
   and observability
 type: application
-version: 0.7.2  # x-release-please-version
-appVersion: v0.7.2  # x-release-please-version
+version: 0.7.3  # x-release-please-version
+appVersion: v0.7.3  # x-release-please-version
 keywords:
   - inference
   - embedding

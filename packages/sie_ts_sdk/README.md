@@ -29,6 +29,13 @@ const managed = new SIEClient("https://your-gateway.example.com", {
 > For browser apps, route requests through a backend proxy that holds
 > the key.
 
+> **Cold-start continuations:** non-streaming requests through a managed
+> gateway may receive a bounded Modal result continuation. Consuming it safely
+> requires a server-side Fetch runtime (Node.js >= 22) that exposes the status
+> and `Location` of a `redirect: "manual"` response. Browser Fetch exposes an
+> opaque redirect instead, so the SDK fails closed; route these browser calls
+> through a backend proxy as well.
+
 ## Encoding
 
 ```typescript
@@ -130,7 +137,9 @@ the HTTP connection was healthy but the worker or gateway emitted an
 error envelope partway through. Branch on `error.code` (for example
 `empty_model_output`, a terminal generation that produced no visible
 text) and, when `error.requestId` is present, use it to correlate with
-gateway logs.
+gateway logs. For a validated `RESOURCE_EXHAUSTED` terminal,
+`error.retryAfter` carries the operator hint in milliseconds; its presence
+does not make retrying generation safe after output has already arrived.
 
 ## License
 

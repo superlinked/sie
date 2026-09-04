@@ -18,10 +18,13 @@ const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 function inputTooLongResponse(message = "Input exceeds capacity (4096 tokens)"): Response {
-  return new Response(JSON.stringify({ detail: { code: "INPUT_TOO_LONG", message } }), {
-    status: 400,
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response(
+    JSON.stringify({ detail: { code: "INPUT_TOO_LONG", message, param: "input" } }),
+    {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    },
+  );
 }
 
 function validationErrorResponse(): Response {
@@ -86,6 +89,7 @@ describe("400 INPUT_TOO_LONG short-circuit", () => {
       expect(e.code).toBe("INPUT_TOO_LONG");
       expect(e.statusCode).toBe(400);
       expect(e.message).toBe("Too many tokens");
+      expect(e.param).toBe("input");
     }
   });
 
@@ -132,6 +136,7 @@ describe("handleError dispatch (direct)", () => {
       code: "INPUT_TOO_LONG",
       statusCode: 400,
       message: "Too many tokens",
+      param: "input",
     });
   });
 

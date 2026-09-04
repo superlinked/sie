@@ -210,9 +210,11 @@ class TestEncode:
         mock_response.status_code = 200
         revision = "a" * 64
         execution_identity = "b" * 64
+        execution_binding = "c" * 64
         mock_response.headers = {
             "X-SIE-Model-Revision": revision,
             "X-SIE-Execution-Identity-SHA256": execution_identity,
+            "X-SIE-Execution-Binding-SHA256": execution_binding,
             "X-SIE-Request-ID": "req-encode",
             "X-SIE-Units-Input-Tokens": "2",
             "X-SIE-Units-Pairs": "3",
@@ -261,6 +263,7 @@ class TestEncode:
                 },
                 "credits_debited": 19,
                 "execution_identity_sha256": execution_identity,
+                "execution_binding_sha256": execution_binding,
             }
             assert client.last_model_revision == revision
             client.close()
@@ -646,6 +649,7 @@ class TestListModels:
                     "dims": {},
                     "max_sequence_length": 32768,
                     "capabilities": {
+                        "streaming": False,
                         "grammar": ["json_schema", "regex"],
                         "tools": True,
                         "code": True,
@@ -662,6 +666,7 @@ class TestListModels:
             models = client.list_models()
 
             caps: ModelCapabilities = models[0]["capabilities"]
+            assert caps["streaming"] is False
             assert caps["grammar"] == ["json_schema", "regex"]
             assert caps["tools"] is True
             assert caps["code"] is True

@@ -1364,6 +1364,9 @@ fn inject_inference_response_headers(paths: &mut serde_json::Map<String, Value>)
         "X-SIE-Execution-Identity-SHA256": sha256_header(
             "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
         ),
+        "X-SIE-Execution-Binding-SHA256": sha256_header(
+            "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+        ),
         "X-SIE-Request-Id": header("Gateway request id for queue-backed inference"),
         "X-SIE-Worker": header("Logical queue worker tag that produced the response"),
         "X-Queue-Publish-Time": header("Milliseconds spent publishing work to the queue"),
@@ -1997,6 +2000,13 @@ pub struct GenerateResponse {
 pub struct GenerateChunkError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
+    /// Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null
+    /// for other terminal errors.
+    #[schema(minimum = 1, maximum = 60)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_s: Option<u16>,
 }
 
 /// One JSON payload from a SIE-native generation SSE ``data:`` event.
@@ -2589,6 +2599,10 @@ pub struct ModelInfoWire {
 /// alias). Treat them as "can do this", not "guaranteed to score X".
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ModelCapabilitiesWire {
+    /// Whether the model supports incremental public generation output.
+    /// Defaults to true for generation models when omitted from older configs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub streaming: Option<bool>,
     /// Union of LoRA served-names across profiles. Back-compat summary
     /// for consumers that don't care about profile scope; validation
     /// MUST go through ``profile_lora_adapters``.
@@ -3493,9 +3507,31 @@ mod tests {
             chunk["properties"]["error"]["oneOf"][1]["$ref"],
             "#/components/schemas/GenerateChunkError"
         );
+        let chunk_error = &spec["components"]["schemas"]["GenerateChunkError"];
+        assert_eq!(
+            chunk_error["properties"]["param"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(chunk_error["required"], json!(["code", "message"]));
+        assert_eq!(
+            chunk_error["properties"]["retry_after_s"]["type"],
+            json!(["integer", "null"])
+        );
+        assert_eq!(chunk_error["properties"]["retry_after_s"]["minimum"], 1);
+        assert_eq!(chunk_error["properties"]["retry_after_s"]["maximum"], 60);
         assert_eq!(
             chunk["properties"]["logprobs"]["type"],
             json!(["array", "null"])
+        );
+    }
+
+    #[test]
+    fn openapi_json_documents_streaming_model_capability() {
+        let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
+        assert_eq!(
+            spec["components"]["schemas"]["ModelCapabilitiesWire"]["properties"]["streaming"]
+                ["type"],
+            json!(["boolean", "null"]),
         );
     }
 
@@ -3836,6 +3872,12 @@ mod tests {
                     .is_some(),
                 "{path} missing documented worker execution identity header"
             );
+            assert!(
+                responses["200"]["headers"]
+                    .get("X-SIE-Execution-Binding-SHA256")
+                    .is_some(),
+                "{path} missing documented stable execution binding header"
+            );
         }
 
         let pool_post = &spec["paths"]["/v1/pools"]["post"]["responses"];
@@ -3902,6 +3944,7 @@ mod tests {
                 "X-SIE-Request-Id",
                 "X-SIE-Model-Revision",
                 "X-SIE-Execution-Identity-SHA256",
+                "X-SIE-Execution-Binding-SHA256",
             ] {
                 assert!(
                     headers.get(name).is_some(),
@@ -3910,6 +3953,10 @@ mod tests {
             }
             assert_eq!(
                 headers["X-SIE-Execution-Identity-SHA256"]["schema"]["pattern"],
+                "^[0-9a-f]{64}$"
+            );
+            assert_eq!(
+                headers["X-SIE-Execution-Binding-SHA256"]["schema"]["pattern"],
                 "^[0-9a-f]{64}$"
             );
         }

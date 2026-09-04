@@ -36,5 +36,15 @@ const modelWithExplicitNulls: ModelInfo = {
   aliases: [],
 };
 
+const modelWithExplicitNullStreaming: ModelInfo = {
+  name: "Qwen/Qwen3-4B-Instruct",
+  loaded: true,
+  inputs: ["text"],
+  outputs: ["text"],
+  aliases: [],
+  capabilities: { streaming: null },
+};
+
 void wireWithExplicitNulls;
 void modelWithExplicitNulls;
+void modelWithExplicitNullStreaming;

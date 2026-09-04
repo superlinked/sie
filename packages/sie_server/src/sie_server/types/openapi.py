@@ -690,6 +690,13 @@ class GenerateChunkErrorModel(BaseModel):
 
     code: str = Field(..., description="Stable error code")
     message: str = Field(..., description="Client-safe error message")
+    param: str | None = Field(default=None, description="Exact unsupported request field, when applicable")
+    retry_after_s: int | None = Field(
+        default=None,
+        ge=1,
+        le=60,
+        description=("Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null for other terminal errors"),
+    )
 
 
 class GenerateChunk(BaseModel):

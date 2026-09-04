@@ -54,6 +54,15 @@ def _resp_model_loading() -> MagicMock:
     return resp
 
 
+def _resp_gateway_load_failed() -> MagicMock:
+    """Build the gateway's SDK-style buffered generation envelope."""
+    resp = _resp_load_failed(error_class="MODEL_LOAD_FAILED", message="model failed to load")
+    detail = resp.json.return_value.pop("detail")
+    resp.json.return_value["error"] = detail
+    resp.headers["x-sie-error-code"] = "MODEL_LOAD_FAILED"
+    return resp
+
+
 def _resp_200_encode() -> MagicMock:
     resp = MagicMock()
     resp.status_code = 200
@@ -153,6 +162,27 @@ class TestSyncModelLoadFailed:
                 client.score("org/test", query={"text": "q"}, items=[{"text": "d"}])
 
             assert mock_client.return_value.post.call_count == 1
+            mock_sleep.assert_not_called()
+            client.close()
+
+    def test_generate_gateway_envelope_short_circuits(self) -> None:
+        """Buffered generation raises before any terminal retry can occur."""
+        with (
+            patch("sie_sdk.client.sync.httpx.Client") as mock_client,
+            patch("sie_sdk.client.sync.time.sleep") as mock_sleep,
+        ):
+            mock_client.return_value.post = MagicMock(side_effect=[_resp_gateway_load_failed()])
+            client = SIEClient("http://localhost:8080")
+
+            with pytest.raises(ModelLoadFailedError) as excinfo:
+                client.generate("org/test", "translate this", max_new_tokens=8)
+
+            assert excinfo.value.model == "org/test"
+            assert excinfo.value.error_class == "MODEL_LOAD_FAILED"
+            assert excinfo.value.permanent is True
+            assert excinfo.value.attempts == 1
+            assert mock_client.return_value.post.call_count == 1
+            assert client.last_retry_count == 0
             mock_sleep.assert_not_called()
             client.close()
 

@@ -116,7 +116,11 @@ class _SIEExtractor {
       extractOptions.threshold = this.threshold;
     }
 
-    const result: ExtractResult = await this.client.extract(this.modelName, { text }, extractOptions);
+    const result: ExtractResult = await this.client.extract(
+      this.modelName,
+      { text },
+      extractOptions,
+    );
 
     return JSON.stringify({
       entities: result.entities.map((e) => ({

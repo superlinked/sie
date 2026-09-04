@@ -273,7 +273,7 @@ async def score(
         except ValueError as e:
             raise error_handler.handle_value_error(e) from e
         except Exception as e:
-            raise error_handler.handle_inference_error(e) from e
+            raise error_handler.handle_inference_error(e, "Scoring") from e
 
         # Fail closed on non-finite (NaN/inf) model output before it reaches
         # serialization: JSON would 500 un-enveloped and msgpack would silently

@@ -56,9 +56,10 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
 use crate::observability::metrics::{
-    ACTIVE_LEASE_GPUS_METRIC_NAME, KEDA_SCALE_UP_REJECTION_REASON_CARDINALITY,
-    LANE_QUEUE_DEPTH_METRIC_NAME, LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME,
-    PENDING_DEMAND_METRIC_NAME, POOL_WARM_FLOOR_METRIC_NAME, REJECTED_REQUESTS_METRIC_NAME,
+    RequestCompletionObservation, ACTIVE_LEASE_GPUS_METRIC_NAME,
+    KEDA_SCALE_UP_REJECTION_REASON_CARDINALITY, LANE_QUEUE_DEPTH_METRIC_NAME,
+    LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME, PENDING_DEMAND_METRIC_NAME,
+    POOL_WARM_FLOOR_METRIC_NAME, REJECTED_REQUESTS_METRIC_NAME,
 };
 use crate::state::demand_tracker::MAX_CONFIGURED_PHYSICAL_LANES;
 
@@ -156,7 +157,7 @@ pub fn install_metrics_benchmark_provider() {
 /// The only managed log event emitted by the first privacy-safe producer.
 /// Both event name and body are fixed; no generic message reaches OTLP.
 pub const REQUEST_COMPLETION_LOG_EVENT: &str = "inference.request.completed";
-const REQUEST_COMPLETION_LOG_SCHEMA: &str = "1";
+const REQUEST_COMPLETION_LOG_SCHEMA: &str = "2";
 
 /// True when the OTLP trace exporter/provider is installed.
 pub fn exporter_enabled() -> bool {
@@ -646,13 +647,12 @@ fn build_log_exporter(
 /// The record is deliberately omitted unless it can be joined to a valid,
 /// sampled gateway span.  The metric above remains 100%; logs follow the same
 /// parent-based sampling decision as the trace to avoid orphan records and an
-/// accidental independent-volume policy.  Every field below is bounded and
-/// produced by gateway code—no request/model/id/URL/header/body/error value is
-/// accepted by this API.
+/// accidental independent-volume policy. Every field below is bounded and
+/// produced by gateway code. Customer identifiers, credential material,
+/// request bodies, URLs, headers, and error text are not accepted by this API.
 pub fn record_inference_completion_log(
     span_context: Option<&SpanContext>,
-    operation: &str,
-    status: u16,
+    observation: &RequestCompletionObservation<'_>,
 ) {
     let Some(span_context) = sampled_log_span_context(span_context) else {
         return;
@@ -664,8 +664,7 @@ pub fn record_inference_completion_log(
     logger.emit(build_request_completion_log_record(
         logger,
         span_context,
-        operation,
-        status,
+        observation,
     ));
 }
 
@@ -676,10 +675,9 @@ fn sampled_log_span_context(span_context: Option<&SpanContext>) -> Option<&SpanC
 fn build_request_completion_log_record(
     logger: &SdkLogger,
     span_context: &SpanContext,
-    operation: &str,
-    status: u16,
+    observation: &RequestCompletionObservation<'_>,
 ) -> opentelemetry_sdk::logs::SdkLogRecord {
-    let status = super::metrics::bounded_http_status(status);
+    let status = super::metrics::bounded_http_status(observation.status);
     let mut record = logger.create_log_record();
     record.set_timestamp(SystemTime::now());
     record.set_severity_number(Severity::Info);
@@ -692,9 +690,19 @@ fn build_request_completion_log_record(
     );
     record.add_attribute("event.name", REQUEST_COMPLETION_LOG_EVENT);
     record.add_attribute("event.schema.version", REQUEST_COMPLETION_LOG_SCHEMA);
-    record.add_attribute("operation", operation.to_string());
+    record.add_attribute("operation", observation.operation.to_string());
     record.add_attribute("outcome", super::metrics::request_outcome(status));
     record.add_attribute("http.status_code", i64::from(status));
+    record.add_attribute(
+        "model",
+        super::metrics::sanitize_model_label(observation.model),
+    );
+    record.add_attribute(
+        "machine_profile",
+        super::metrics::sanitize_label(observation.machine_profile),
+    );
+    record.add_attribute("duration_ms", observation.duration_s.max(0.0) * 1_000.0);
+    record.add_attribute("admission_outcome", observation.admission_outcome.as_str());
     record
 }
 
@@ -1568,7 +1576,15 @@ mod tests {
         );
         let provider = SdkLoggerProvider::builder().build();
         let logger = provider.logger("test");
-        let record = build_request_completion_log_record(&logger, &span_context, "encode", 200);
+        let observation = RequestCompletionObservation {
+            operation: "encode",
+            status: 200,
+            model: "BAAI/bge-m3",
+            machine_profile: "l4-spot",
+            duration_s: 0.125,
+            admission_outcome: super::super::metrics::AdmissionOutcome::Admitted,
+        };
+        let record = build_request_completion_log_record(&logger, &span_context, &observation);
 
         assert_eq!(record.event_name(), None);
         assert_eq!(
@@ -1585,21 +1601,26 @@ mod tests {
             .attributes_iter()
             .map(|(key, value)| (key.as_str(), value.clone()))
             .collect();
-        assert_eq!(attributes.len(), 5);
+        assert_eq!(attributes.len(), 9);
         assert_eq!(
             attributes["event.name"],
             AnyValue::from("inference.request.completed")
         );
-        assert_eq!(attributes["event.schema.version"], AnyValue::from("1"));
+        assert_eq!(attributes["event.schema.version"], AnyValue::from("2"));
         assert_eq!(attributes["operation"], AnyValue::from("encode"));
         assert_eq!(attributes["outcome"], AnyValue::from("success"));
         assert_eq!(attributes["http.status_code"], AnyValue::from(200_i64));
+        assert_eq!(attributes["model"], AnyValue::from("BAAI/bge-m3"));
+        assert_eq!(attributes["machine_profile"], AnyValue::from("l4-spot"));
+        assert_eq!(attributes["duration_ms"], AnyValue::from(125.0_f64));
+        assert_eq!(attributes["admission_outcome"], AnyValue::from("admitted"));
         for forbidden in [
             "request_id",
-            "model",
             "url",
             "header",
             "error",
+            "api_key",
+            "email",
             "prompt",
             "document",
             "embedding",
@@ -1619,7 +1640,15 @@ mod tests {
         );
         let provider = SdkLoggerProvider::builder().build();
         let logger = provider.logger("test");
-        let record = build_request_completion_log_record(&logger, &span_context, "encode", 700);
+        let observation = RequestCompletionObservation {
+            operation: "encode",
+            status: 700,
+            model: "invalid model value with spaces",
+            machine_profile: "invalid/profile",
+            duration_s: 0.0,
+            admission_outcome: super::super::metrics::AdmissionOutcome::Admitted,
+        };
+        let record = build_request_completion_log_record(&logger, &span_context, &observation);
         let attributes: HashMap<_, _> = record
             .attributes_iter()
             .map(|(key, value)| (key.as_str(), value.clone()))
@@ -1627,6 +1656,8 @@ mod tests {
 
         assert_eq!(attributes["outcome"], AnyValue::from("other"));
         assert_eq!(attributes["http.status_code"], AnyValue::from(0_i64));
+        assert_eq!(attributes["model"], AnyValue::from("other"));
+        assert_eq!(attributes["machine_profile"], AnyValue::from("other"));
     }
 
     #[test]

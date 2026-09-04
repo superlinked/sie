@@ -213,6 +213,31 @@ def test_chat_rejects_non_bool_stream() -> None:
     assert r.json()["error"]["param"] == "stream"
 
 
+def test_chat_rejects_unsupported_streaming_before_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, registry = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("unsupported streaming must not reach the child"),
+    )
+    generate_task = registry.get_config.return_value.tasks.generate
+    generate_task.capabilities = SimpleNamespace(streaming=False)
+    registry.is_loaded.return_value = False
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == "stream"
+    registry.start_load_async.assert_not_called()
+    registry.get.assert_not_called()
+
+
 def test_chat_rejects_invalid_max_tokens() -> None:
     msgs = [{"role": "user", "content": "hi"}]
     for bad in (0, -5, "100", True):
@@ -1084,7 +1109,7 @@ def test_rerank_inference_error_returns_top_level_openai_500() -> None:
     client, registry = _rerank_client()
 
     async def _boom() -> None:
-        raise RuntimeError("boom")
+        raise RuntimeError("sensitive reranker detail")
 
     worker = MagicMock()
     worker.submit_score = AsyncMock(return_value=_boom())
@@ -1097,7 +1122,8 @@ def test_rerank_inference_error_returns_top_level_openai_500() -> None:
     error = body["error"]
     assert error["code"] == "inference_error"
     assert error["type"] == "server_error"
-    assert error["message"] == "boom"
+    assert error["message"] == "internal error during reranking"
+    assert "sensitive reranker detail" not in r.text
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])

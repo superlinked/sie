@@ -287,6 +287,7 @@ fn worker_only_model_info(name: &str, loaded: bool) -> Value {
             max_output_tokens: None,
             profile_max_output_tokens: HashMap::new(),
             grammar_capabilities: None,
+            streaming_supported: None,
             grammar_profile: None,
             profile_parents: HashMap::new(),
             tools_supported: None,

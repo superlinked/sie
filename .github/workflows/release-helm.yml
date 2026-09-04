@@ -1,0 +1,116 @@
+name: Release Helm
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      tag_name:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+      publish:
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - name: Validate, render, and retain the exact chart
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["version"])' deploy/helm/sie-cluster/Chart.yaml)" = "$RELEASE_VERSION"
+          test "$(mise exec -- uv run --frozen --project . python -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1]))["appVersion"])' deploy/helm/sie-cluster/Chart.yaml)" = "$RELEASE_TAG"
+          mise run helm -- dependencies
+          mise run helm -- lint --set payloadStore.enabled=false
+          mise run helm -- template --set payloadStore.enabled=false >/dev/null
+          mkdir -p artifact
+          mise exec -- helm package deploy/helm/sie-cluster --destination artifact
+          python3 -m tools.ci.release_artifact stamp --directory artifact --kind helm --version '${{ inputs.version }}' --tag-name '${{ inputs.tag_name }}' --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: helm-sie-cluster-${{ inputs.version }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: build
+    if: >-
+      inputs.publish == true &&
+      vars.PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true' &&
+      github.event_name == 'release' &&
+      github.event.action == 'published' &&
+      github.event.release.draft == false &&
+      github.event.release.prerelease == false &&
+      github.ref_protected == true &&
+      github.ref == format('refs/tags/{0}', inputs.tag_name) &&
+      github.repository == 'superlinked/sie' &&
+      github.sha == inputs.sha
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 20
+    environment: helm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Validate trusted publication context and tag binding
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          RELEASE_SHA: ${{ inputs.sha }}
+          PUBLIC_RELEASE_PUBLISHING_ENABLED: ${{ vars.PUBLIC_RELEASE_PUBLISHING_ENABLED }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 tools/ci/release_guard.py publish --source-ref "$RELEASE_SHA"
+          --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: helm-sie-cluster-${{ inputs.version }}
+          path: artifact
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish and verify the same chart bytes without replacing a version
+        run: >-
+          mise exec -- python -m tools.ci.publish_helm_archive
+          --directory artifact --version '${{ inputs.version }}'
+          --source-revision '${{ inputs.sha }}' --run-id '${{ github.run_id }}'
+
+  complete:
+    if: always() && inputs.publish
+    needs: [build, publish]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - name: Require every release build and publisher to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 -c 'import json,os; results=json.loads(os.environ["RESULTS"]); failed={name: job["result"] for name,job in results.items() if job["result"] != "success"}; print(failed); assert not failed'

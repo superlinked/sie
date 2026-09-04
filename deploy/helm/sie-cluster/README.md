@@ -10,6 +10,21 @@ helm install sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
   --create-namespace
 ```
 
+## Local validation
+
+Prepare dependencies from the checked-in `Chart.yaml` and `Chart.lock`, then
+render with an explicit non-secret payload-store choice:
+
+```bash
+mise run helm -- dependencies
+mise run helm -- lint --set payloadStore.enabled=false
+mise run helm -- template --set payloadStore.enabled=false
+```
+
+The task temporarily stages the public model and bundle YAML files into the
+chart and removes them after each render. Helm's generated `charts/` directory
+is ignored and must not be committed.
+
 ## Architecture
 
 ```

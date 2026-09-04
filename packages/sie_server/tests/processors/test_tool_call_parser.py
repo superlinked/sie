@@ -241,6 +241,61 @@ async def test_parse_tool_call_stream_terminal_propagates_usage_and_tool_calls_r
     assert terminal.completion_tokens == 13
 
 
+@pytest.mark.asyncio
+async def test_parse_tool_call_stream_preserves_terminal_error_metadata() -> None:
+    out = [
+        item
+        async for item in parse_tool_call_stream(
+            _chunks(
+                [
+                    GenerationChunk(
+                        text_delta="",
+                        done=True,
+                        finish_reason="error",
+                        error_code="grammar_invalid",
+                        error_message="invalid grammar",
+                    )
+                ]
+            )
+        )
+    ]
+
+    terminal = out[-1]
+    assert terminal.done is True
+    assert terminal.finish_reason == "error"
+    assert terminal.error_code == "grammar_invalid"
+    assert terminal.error_message == "invalid grammar"
+
+
+@pytest.mark.asyncio
+async def test_parse_tool_call_stream_candidate_rewrite_preserves_terminal_error_metadata() -> None:
+    out = [
+        item
+        async for item in parse_tool_call_stream(
+            _chunks(
+                [
+                    GenerationChunk(
+                        text_delta="",
+                        done=True,
+                        finish_reason="stop",
+                        candidates=({"text": "plain answer", "finish_reason": "stop", "logprobs": None},),
+                        error_code="empty_model_output",
+                        error_message="model produced no visible output text",
+                    )
+                ]
+            )
+        )
+    ]
+
+    terminal = out[-1]
+    assert terminal.done is True
+    assert terminal.finish_reason == "stop"
+    assert terminal.error_code == "empty_model_output"
+    assert terminal.error_message == "model produced no visible output text"
+    assert terminal.candidates is not None
+    assert terminal.candidates[0]["text"] == "plain answer"
+
+
 # ── Qwen XML format ────────────────────────────────────────────────
 
 

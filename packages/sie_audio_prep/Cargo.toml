@@ -1,6 +1,6 @@
 [package]
 name = "sie-audio-prep"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "Bounded, shared audio decoding and resampling for SIE workers."

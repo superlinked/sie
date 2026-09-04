@@ -30,11 +30,16 @@ from sie_sdk.queue_types import denormalize_model_id
 from sie_server.adapters._generation_base import (
     GenerationAdapter,
     GenerationChunk,
+    GenerationError,
+    aclose_with_error_precedence,
+    client_safe_generation_error_code,
+    client_safe_generation_error_message,
     reasoning_starts_in_prompt,
     resolve_reasoning_format,
     suppress_thinking_blocks,
     thinking_blocks_must_be_hidden,
 )
+from sie_server.api.generate import _generation_http_exception
 from sie_server.api.helpers import ModelStateChecker, check_sdk_version
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
 from sie_server.core.runtime_options import apply_generation_runtime_options
@@ -49,6 +54,7 @@ _MAX_COMPLETIONS_BODY_BYTES = int(os.environ.get("SIE_GENERATE_MAX_BODY_BYTES", 
 _MAX_PROMPT_BYTES = int(os.environ.get("SIE_GENERATE_MAX_PROMPT_BYTES", str(4 * 1024 * 1024)))
 _MAX_U32 = (1 << 32) - 1
 _MAX_F32 = 3.4028234663852886e38
+_MAX_RETRY_AFTER_S = 60
 _SUPPORTED_FIELDS = frozenset(
     {
         "model",
@@ -141,6 +147,22 @@ def _from_http_exception(exc: HTTPException) -> _CompletionError:
         code=code,
         headers=dict(exc.headers) if exc.headers is not None else None,
     )
+
+
+def _from_generation_error(error: GenerationError, registry: Any) -> _CompletionError:
+    """Preserve the native generation error contract on compatibility routes."""
+    return _from_http_exception(_generation_http_exception(error, registry))
+
+
+def _validated_retry_after_s(error: _CompletionError) -> int | None:
+    """Read the trusted direct-route retry authority for in-band SSE use."""
+    if error.code != "RESOURCE_EXHAUSTED" or error.headers is None:
+        return None
+    raw = error.headers.get("Retry-After")
+    if raw is None or not raw.isascii() or not raw.isdecimal():
+        return None
+    value = int(raw)
+    return value if 1 <= value <= _MAX_RETRY_AFTER_S else None
 
 
 async def _read_json_body(request: Request) -> dict[str, Any]:
@@ -371,19 +393,27 @@ async def _stream_completion(
     created: int,
     model: str,
     include_usage: bool,
+    registry: Any,
 ) -> AsyncIterator[str]:
     terminal: GenerationChunk | None = None
+    terminal_outcome_selected = False
+    cleanup_failed = False
     try:
         async for chunk in chunks:
             if chunk.done:
                 terminal = chunk
             cancelled = chunk.done and chunk.finish_reason == "cancelled"
+            errored = chunk.done and (
+                chunk.finish_reason == "error" or chunk.error_code is not None or chunk.error_message is not None
+            )
             body = _chunk_body(
                 completion_id=completion_id,
                 created=created,
                 model=model,
                 text=chunk.text_delta,
-                finish_reason=None if cancelled else (_finish_reason(chunk.finish_reason) if chunk.done else None),
+                finish_reason=(
+                    None if cancelled or errored else (_finish_reason(chunk.finish_reason) if chunk.done else None)
+                ),
             )
             if cancelled:
                 body["error"] = {
@@ -392,46 +422,80 @@ async def _stream_completion(
                     "param": None,
                     "code": "generation_cancelled",
                 }
-            elif chunk.done and (chunk.finish_reason == "error" or chunk.error_code or chunk.error_message):
+            elif errored:
                 body["error"] = {
-                    "message": chunk.error_message or "generation terminated with an upstream error",
+                    "message": client_safe_generation_error_message(chunk.error_code, chunk.error_message),
                     "type": "server_error",
                     "param": None,
-                    "code": chunk.error_code or "inference_error",
+                    "code": client_safe_generation_error_code(chunk.error_code),
                 }
             yield f"data: {json.dumps(body)}\n\n"
             if chunk.done:
                 break
-    except Exception:  # noqa: BLE001 - the stream must terminate in-band after headers are committed
-        logger.warning("OpenAI completion failed mid-stream", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - the stream must terminate in-band after headers are committed
+        terminal_outcome_selected = True
+        if isinstance(exc, GenerationError):
+            error = _from_generation_error(exc, registry)
+            logger.info("OpenAI completion received typed generation refusal mid-stream: %s", error.code)
+        else:
+            error = _CompletionError(
+                "internal error during generation",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                code="inference_error",
+            )
+            logger.warning("OpenAI completion failed mid-stream", exc_info=True)
         body = _chunk_body(
             completion_id=completion_id,
             created=created,
             model=model,
             text="",
-            finish_reason="stop",
+            finish_reason=None,
+        )
+        error_body: dict[str, Any] = {
+            "message": error.message,
+            "type": error.error_type,
+            "param": error.param,
+            "code": error.code,
+        }
+        if (retry_after_s := _validated_retry_after_s(error)) is not None:
+            error_body["retry_after_s"] = retry_after_s
+        body["error"] = error_body
+        yield f"data: {json.dumps(body)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    finally:
+        try:
+            await aclose_with_error_precedence(
+                chunks,
+                outcome_selected=terminal_outcome_selected or terminal is not None,
+                context="OpenAI completion effective iterator",
+            )
+        except Exception:  # noqa: BLE001 - establish the streaming terminal below
+            cleanup_failed = True
+            logger.warning("OpenAI completion iterator cleanup failed", exc_info=True)
+
+    if cleanup_failed:
+        body = _chunk_body(
+            completion_id=completion_id,
+            created=created,
+            model=model,
+            text="",
+            finish_reason=None,
         )
         body["error"] = {
-            "message": "internal error during generation",
+            "message": "internal error during generation cleanup",
             "type": "server_error",
             "param": None,
             "code": "inference_error",
         }
         yield f"data: {json.dumps(body)}\n\n"
-        yield "data: [DONE]\n\n"
-        return
-    finally:
-        aclose = getattr(chunks, "aclose", None)
-        if aclose is not None:
-            await aclose()
-
-    if terminal is None:
+    elif terminal is None:
         body = _chunk_body(
             completion_id=completion_id,
             created=created,
             model=model,
             text="",
-            finish_reason="stop",
+            finish_reason=None,
         )
         body["error"] = {
             "message": "generation stream ended before a terminal event",
@@ -480,9 +544,11 @@ async def _collect_completion(chunks: AsyncIterator[GenerationChunk]) -> tuple[s
                 terminal = chunk
                 break
     finally:
-        aclose = getattr(chunks, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        await aclose_with_error_precedence(
+            chunks,
+            outcome_selected=terminal is not None,
+            context="buffered OpenAI completion iterator",
+        )
     if terminal is None:
         raise _CompletionError(
             "generation stream ended before a terminal event",
@@ -491,9 +557,9 @@ async def _collect_completion(chunks: AsyncIterator[GenerationChunk]) -> tuple[s
         )
     if terminal.finish_reason == "error" or terminal.error_code or terminal.error_message:
         raise _CompletionError(
-            terminal.error_message or "generation terminated with an upstream error",
+            client_safe_generation_error_message(terminal.error_code, terminal.error_message),
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            code=terminal.error_code or "inference_error",
+            code=client_safe_generation_error_code(terminal.error_code),
         )
     if terminal.finish_reason == "cancelled":
         raise _CompletionError(
@@ -558,6 +624,12 @@ async def completions(
                     param="model",
                     code="model_not_found",
                 )
+            if params.stream and not generate_task.capabilities.streaming:
+                raise _CompletionError(
+                    f"Model '{params.model}' does not support streaming generation",
+                    param="stream",
+                    code="unsupported_field",
+                )
             if params.max_tokens > generate_task.max_output_tokens:
                 raise _CompletionError(
                     f"max_tokens ({params.max_tokens}) exceeds model cap ({generate_task.max_output_tokens})",
@@ -597,21 +669,37 @@ async def completions(
                     code="inference_error",
                 )
 
+            generation_parameters: dict[str, Any] = {
+                "prompt": params.prompt,
+                "max_new_tokens": params.max_tokens,
+                "temperature": float(runtime_params.get("temperature", 1.0)),
+                "top_p": float(runtime_params.get("top_p", 1.0)),
+                "stop": runtime_params.get("stop"),
+                "frequency_penalty": runtime_params.get("frequency_penalty"),
+                "presence_penalty": runtime_params.get("presence_penalty"),
+                "top_k": runtime_params.get("top_k"),
+                "min_new_tokens": runtime_params.get("min_tokens"),
+                "seed": runtime_params.get("seed"),
+            }
+            try:
+                adapter.preflight_generate(generation_parameters, stream=params.stream)
+            except GenerationError as exc:
+                raise _from_generation_error(exc, registry) from exc
+            except Exception as exc:
+                logger.warning("OpenAI completion preflight failed for %s", params.model, exc_info=True)
+                raise _CompletionError(
+                    "internal error during generation",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    code="inference_error",
+                ) from exc
+
             canonical_model = getattr(config, "name", None) or registry_key
             completion_id = f"cmpl-{uuid.uuid4().hex}"
             created = int(time.time())
-            chunks = adapter.generate(
-                prompt=params.prompt,
-                max_new_tokens=params.max_tokens,
-                temperature=float(runtime_params.get("temperature", 1.0)),
-                top_p=float(runtime_params.get("top_p", 1.0)),
-                stop=runtime_params.get("stop"),
-                frequency_penalty=runtime_params.get("frequency_penalty"),
-                presence_penalty=runtime_params.get("presence_penalty"),
-                top_k=runtime_params.get("top_k"),
-                min_new_tokens=runtime_params.get("min_tokens"),
-                seed=runtime_params.get("seed"),
-            )
+            try:
+                chunks = adapter.generate(**generation_parameters)
+            except GenerationError as exc:
+                raise _from_generation_error(exc, registry) from exc
             if thinking_blocks_must_be_hidden(config):
                 reasoning_format = resolve_reasoning_format(config, adapter)
                 chunks = suppress_thinking_blocks(
@@ -627,6 +715,7 @@ async def completions(
                         created=created,
                         model=canonical_model,
                         include_usage=params.include_usage,
+                        registry=registry,
                     ),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -636,6 +725,8 @@ async def completions(
                 text, terminal = await _collect_completion(chunks)
             except _CompletionError:
                 raise
+            except GenerationError as exc:
+                raise _from_generation_error(exc, registry) from exc
             except Exception as exc:
                 logger.warning("OpenAI completion failed for %s", params.model, exc_info=True)
                 raise _CompletionError(

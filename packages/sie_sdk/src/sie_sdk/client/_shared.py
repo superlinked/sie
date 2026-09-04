@@ -426,6 +426,7 @@ def raise_if_estimate_unroutable(response: _HttpResponse) -> None:
     raise EstimateUnroutableError(
         str(message or "the active rate book cannot price this request"),
         code=code,
+        param=get_error_param(response),
         request=parse_request_metadata(response.headers),
     )
 
@@ -532,6 +533,7 @@ SDK_VERSION_HEADER = "X-SIE-SDK-Version"
 SERVER_VERSION_HEADER = "X-SIE-Server-Version"
 MODEL_REVISION_HEADER = "X-SIE-Model-Revision"
 EXECUTION_IDENTITY_SHA256_HEADER = "X-SIE-Execution-Identity-SHA256"
+EXECUTION_BINDING_SHA256_HEADER = "X-SIE-Execution-Binding-SHA256"
 REQUEST_ID_HEADER = "X-SIE-Request-ID"
 CREDITS_DEBITED_HEADER = "X-SIE-Credits-Debited"
 REQUEST_USAGE_HEADERS = {
@@ -938,6 +940,14 @@ def parse_request_metadata(headers: Any, body: Any = None) -> RequestMetadata | 
     ):
         metadata["execution_identity_sha256"] = execution_identity_sha256
 
+    execution_binding_sha256 = _header_value(headers, EXECUTION_BINDING_SHA256_HEADER)
+    if (
+        isinstance(execution_binding_sha256, str)
+        and len(execution_binding_sha256) == 64
+        and all(char in "0123456789abcdef" for char in execution_binding_sha256)
+    ):
+        metadata["execution_binding_sha256"] = execution_binding_sha256
+
     return metadata or None
 
 
@@ -1082,6 +1092,15 @@ def get_error_detail(response: _HttpResponse) -> dict[str, Any] | None:
     return None
 
 
+def get_error_param(response: _HttpResponse) -> str | None:
+    """Return the exact field name from a typed error envelope, if present."""
+    detail = get_error_detail(response)
+    if detail is None:
+        return None
+    param = detail.get("param")
+    return param if isinstance(param, str) else None
+
+
 def raise_if_model_load_failed(response: _HttpResponse, model: str | None = None) -> None:
     """Raise :class:`ModelLoadFailedError` if the response is 502 ``MODEL_LOAD_FAILED``.
 
@@ -1129,6 +1148,7 @@ def raise_if_model_load_failed(response: _HttpResponse, model: str | None = None
         error_class=str(error_class) if error_class is not None else None,
         permanent=permanent,
         attempts=attempts,
+        param=get_error_param(response),
         request=parse_request_metadata(response.headers),
     )
 
@@ -1157,7 +1177,12 @@ def raise_if_input_too_long(response: _HttpResponse, model: str | None = None) -
     if detail.get("code") != INPUT_TOO_LONG_ERROR_CODE:
         return
     message = str(detail.get("message") or "Input exceeds the model's maximum token capacity")
-    raise InputTooLongError(message, model=model, request=parse_request_metadata(response.headers))
+    raise InputTooLongError(
+        message,
+        model=model,
+        param=get_error_param(response),
+        request=parse_request_metadata(response.headers),
+    )
 
 
 def handle_error(response: _HttpResponse) -> NoReturn:
@@ -1179,6 +1204,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
         ServerError: For other 5xx responses.
     """
     code = None
+    param = None
     message = f"HTTP {response.status_code}"
 
     try:
@@ -1193,6 +1219,8 @@ def handle_error(response: _HttpResponse) -> NoReturn:
             if isinstance(error, dict):
                 code = error.get("code")
                 message = error.get("message", message)
+                error_param = error.get("param")
+                param = error_param if isinstance(error_param, str) else None
             else:
                 # error is a string, use it as the message
                 message = str(error)
@@ -1201,6 +1229,8 @@ def handle_error(response: _HttpResponse) -> NoReturn:
             if isinstance(detail, dict):
                 code = detail.get("code")
                 message = detail.get("message", str(detail))
+                detail_param = detail.get("param")
+                param = detail_param if isinstance(detail_param, str) else None
             else:
                 message = str(detail)
     except (ValueError, KeyError, TypeError, UnpackException):
@@ -1218,33 +1248,33 @@ def handle_error(response: _HttpResponse) -> NoReturn:
     # Fallback dispatch — ``model`` is only attached by the helper-style
     # short-circuit (``raise_if_input_too_long``) on the extract path.
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == PROVISIONING_ERROR_CODE:
-        raise ProvisioningError(message, retry_after=get_retry_after(response))
+        raise ProvisioningError(message, retry_after=get_retry_after(response), param=param)
     if response.status_code == HTTP_CLIENT_ERROR and code == INPUT_TOO_LONG_ERROR_CODE:
-        raise InputTooLongError(message, request=request)
+        raise InputTooLongError(message, param=param, request=request)
     # Rate limit (pass-2 audit B1). Retried on the admission ladder in the
     # buffered loops; a give-up there raises RateLimitError directly. This arm
     # covers the terminal paths (streaming, list_models, estimate, …) so a 429
     # is always a typed RateLimitError rather than a generic RequestError.
     if response.status_code == HTTP_TOO_MANY_REQUESTS:
-        raise RateLimitError(message, code=code, retry_after=get_retry_after(response), request=request)
+        raise RateLimitError(message, code=code, retry_after=get_retry_after(response), param=param, request=request)
     # Terminal credit / account failures (pass-2 audit B3). 402/403 are NEVER
     # retried — they have no arm on any retry ladder, so they surface here on
     # the first response. Unrecognised 402/403 codes stay generic RequestError.
     if response.status_code == HTTP_PAYMENT_REQUIRED:
         if code == INSUFFICIENT_CREDITS_ERROR_CODE:
-            raise InsufficientCreditsError(message, request=request)
+            raise InsufficientCreditsError(message, param=param, request=request)
         if code == KEY_SPEND_LIMIT_EXCEEDED_ERROR_CODE:
-            raise SpendLimitError(message, request=request)
+            raise SpendLimitError(message, param=param, request=request)
     if response.status_code == HTTP_FORBIDDEN and code in (
         ACCOUNT_SUSPENDED_ERROR_CODE,
         ACCOUNT_PENDING_REVIEW_ERROR_CODE,
     ):
-        raise AccountInactiveError(message, code=code, request=request)
+        raise AccountInactiveError(message, code=code, param=param, request=request)
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE:
-        raise AccountStateUnavailableError(message, request=request)
+        raise AccountStateUnavailableError(message, param=param, request=request)
     if response.status_code >= HTTP_SERVER_ERROR:
-        raise ServerError(message, code=code, status_code=response.status_code, request=request)
-    raise RequestError(message, code=code, status_code=response.status_code, request=request)
+        raise ServerError(message, code=code, status_code=response.status_code, param=param, request=request)
+    raise RequestError(message, code=code, status_code=response.status_code, param=param, request=request)
 
 
 def provisioning_retry_delay(
@@ -1257,13 +1287,14 @@ def provisioning_retry_delay(
 ) -> float:
     """Return a retry delay for ``503 PROVISIONING`` or raise ``ProvisioningError``."""
     retry_after = get_retry_after(response)
+    param = get_error_param(response)
     if not wait_for_capacity:
         msg = f"No capacity available for GPU '{gpu}'. Server is provisioning."
-        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after)
+        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after, param=param)
     elapsed = time.monotonic() - start_time
     if elapsed >= timeout:
         msg = f"Provisioning timeout after {elapsed:.1f}s waiting for GPU '{gpu}'"
-        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after)
+        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after, param=param)
     remaining = timeout - elapsed
     if retry_after is not None:
         return min(retry_after, remaining)
@@ -1315,7 +1346,12 @@ def admission_retry_delay(
         delay = retry_after if retry_after is not None else apply_jitter(min(RATE_LIMIT_DEFAULT_DELAY_S, remaining))
         if remaining <= 0 or delay >= remaining:
             msg = f"Rate limited (429); retry budget ({timeout:.1f}s) exhausted after {elapsed:.1f}s"
-            raise RateLimitError(msg, retry_after=retry_after, request=parse_request_metadata(response.headers))
+            raise RateLimitError(
+                msg,
+                retry_after=retry_after,
+                param=get_error_param(response),
+                request=parse_request_metadata(response.headers),
+            )
         return delay
     if status == HTTP_SERVICE_UNAVAILABLE and get_error_code(response) in BACKPRESSURE_503_ERROR_CODES:
         retry_after = get_retry_after(response)
@@ -1392,7 +1428,9 @@ def next_stream_retry_delay(
                     msg,
                     model=model,
                     retries=oom_retries,
+                    param=get_error_param(response),
                     request=parse_request_metadata(response.headers),
+                    retry_after=get_retry_after(response),
                 )
             delay = compute_oom_backoff(get_retry_after(response), oom_retries)
             return min(delay, timeout - elapsed), oom_retries + 1
@@ -1407,6 +1445,7 @@ def next_stream_retry_delay(
             msg,
             code=get_error_code(response),
             status_code=status,
+            param=get_error_param(response),
             request=parse_request_metadata(response.headers),
         )
 
@@ -1428,6 +1467,7 @@ def next_stream_retry_delay(
         msg,
         code=get_error_code(response),
         status_code=status,
+        param=get_error_param(response),
         request=parse_request_metadata(response.headers),
     )
 
@@ -1553,16 +1593,35 @@ def sse_headers(resolved_gpu: str | None, pool_name: str | None) -> dict[str, st
     return headers
 
 
-def sse_chunk_error(chunk: dict[str, Any]) -> tuple[str, str] | None:
-    """Return ``(code, message)`` if an SSE chunk carries a mid-stream error.
+def sse_chunk_error(chunk: dict[str, Any]) -> tuple[str, str, str | None, int | None] | None:
+    """Return ``(code, message, param, retry_after_s)`` for a typed SSE error.
 
     Both the chat and SIE-native generate surfaces put the error object at the
     top level of the chunk (see ``send_error_chunk`` in
-    ``packages/sie_gateway/src/handlers/sse.rs``).
+    ``packages/sie_gateway/src/handlers/sse.rs``). The additive retry hint is
+    trusted only for ``RESOURCE_EXHAUSTED`` and only in the engine config's
+    integer ``1..=60`` domain; booleans are integers in Python, so exclude
+    them explicitly.
     """
     err = chunk.get("error")
     if isinstance(err, dict):
-        return str(err.get("code") or "error"), str(err.get("message") or "stream error")
+        code = str(err.get("code") or "error")
+        param = err.get("param")
+        retry_after_s = err.get("retry_after_s")
+        validated_retry_after_s = (
+            retry_after_s
+            if code == RESOURCE_EXHAUSTED_ERROR_CODE
+            and isinstance(retry_after_s, int)
+            and not isinstance(retry_after_s, bool)
+            and 1 <= retry_after_s <= 60
+            else None
+        )
+        return (
+            code,
+            str(err.get("message") or "stream error"),
+            param if isinstance(param, str) else None,
+            validated_retry_after_s,
+        )
     return None
 
 

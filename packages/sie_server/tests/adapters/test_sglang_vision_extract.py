@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 import yaml
 from sie_server.adapters._generation_base import GenerationChunk
@@ -238,6 +239,81 @@ async def test_extract_async_refills_bounded_requests_and_preserves_order(
 
     assert [result.text for result in results] == ["one", "two", "three"]
     assert peak_active == 2
+
+
+@pytest.mark.asyncio
+async def test_extract_async_closes_each_buffered_generation_iterator(
+    adapter: SGLangVisionExtractAdapter,
+) -> None:
+    sources: list[Any] = []
+
+    class _TrackingPageGeneration:
+        def __init__(self, marker: str) -> None:
+            self.marker = marker
+            self.yielded = False
+            self.close_calls = 0
+
+        def __aiter__(self) -> _TrackingPageGeneration:
+            return self
+
+        async def __anext__(self) -> GenerationChunk:
+            if self.yielded:
+                raise StopAsyncIteration
+            self.yielded = True
+            return GenerationChunk(
+                text_delta=self.marker,
+                done=True,
+                finish_reason="stop",
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    def generate(*args: Any, images: list[ImageInput], **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        _ = (args, kwargs)
+        source = _TrackingPageGeneration(images[0]["data"].decode())
+        sources.append(source)
+        return source
+
+    adapter.generate = generate  # ty: ignore[invalid-assignment]
+
+    results = await adapter._extract_async(
+        "rendered prompt",
+        [_image("one"), _image("two")],
+        max_new_tokens=32,
+    )
+
+    assert [result.text for result in results] == ["one", "two"]
+    assert len(sources) == 2
+    assert all(source.close_calls == 1 for source in sources)
+
+
+@pytest.mark.asyncio
+async def test_extract_async_success_does_not_abort_completed_sglang_request(
+    adapter: SGLangVisionExtractAdapter,
+) -> None:
+    paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"text": "page", "meta_info": {"prompt_tokens": 10, '
+                b'"completion_tokens": 1, "finish_reason": {"type": "stop"}}}\n\n'
+            ),
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    adapter._http_client = client
+
+    results = await adapter._extract_async("rendered prompt", [_image("page")], max_new_tokens=32)
+    await client.aclose()
+
+    assert [result.text for result in results] == ["page"]
+    assert paths == ["/generate"]
 
 
 def test_extract_requires_loaded_request_loop(adapter: SGLangVisionExtractAdapter) -> None:

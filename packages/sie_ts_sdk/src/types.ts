@@ -140,6 +140,8 @@ export interface RequestMetadata {
   id?: string;
   /** Worker-origin immutable release/runtime identity digest. */
   executionIdentitySha256?: string;
+  /** Stable release/deployment binding shared by placement variants. */
+  executionBindingSha256?: string;
   usage?: RequestUsage;
   /**
    * Exact committed debit — the authoritative charge for this request.
@@ -202,6 +204,8 @@ export interface ModelDims {
  * under FP8; route SQL-critical traffic to a BF16 bundle via the `sql` alias).
  */
 export interface ModelCapabilities {
+  /** Whether the model supports incremental public generation output */
+  streaming?: boolean | null;
   /** Supported grammar kinds: ["json_schema", "regex", "ebnf"] */
   grammar?: string[];
   /** Whether the model supports tool / function calling */
@@ -1322,6 +1326,16 @@ export interface ChatChunkChoice {
   logprobs: null;
 }
 
+/** Typed terminal error carried by a generation SSE chunk. */
+export interface GenerationChunkError {
+  code: string;
+  message: string;
+  type?: string;
+  param?: string | null;
+  /** Authoritative retry hint for RESOURCE_EXHAUSTED, in seconds. */
+  retry_after_s?: number | null;
+}
+
 /**
  * One SSE event from `streamChatCompletions`.
  *
@@ -1336,6 +1350,10 @@ export interface ChatCompletionChunk {
   system_fingerprint: string | null;
   choices: ChatChunkChoice[];
   usage?: ChatUsage;
+  /** Gateway correlation id carried in-band on terminal errors. */
+  request_id?: string;
+  /** Populated when the worker / gateway errored mid-stream. */
+  error?: GenerationChunkError;
 }
 
 /**
@@ -1399,7 +1417,7 @@ export interface GenerateChunk {
   /** Time-to-first-token, milliseconds. Terminal chunk only. */
   ttft_ms?: number;
   /** Populated when the worker / gateway errored mid-stream. */
-  error?: { code: string; message: string };
+  error?: GenerationChunkError;
 }
 
 /**

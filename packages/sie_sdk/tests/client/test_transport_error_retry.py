@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,13 +22,38 @@ from sie_sdk.client._shared import url_origin_for_logging
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No-op the retry sleeps; budget tests still use real time.monotonic.
+    # No-op ordinary retry sleeps; budget tests install a deterministic clock.
     monkeypatch.setattr("sie_sdk.client.sync.time.sleep", lambda _: None)
 
     async def _noop_async_sleep(_: float) -> None:
         return None
 
     monkeypatch.setattr("sie_sdk.client.async_.asyncio.sleep", _noop_async_sleep)
+
+
+class _RetryClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, delay: float) -> None:
+        self.now += delay
+
+    async def async_sleep(self, delay: float) -> None:
+        self.sleep(delay)
+
+
+@pytest.fixture
+def retry_clock(monkeypatch: pytest.MonkeyPatch) -> _RetryClock:
+    clock = _RetryClock()
+    monkeypatch.setattr("sie_sdk.client.sync.time", clock)
+    monkeypatch.setattr("sie_sdk.client.async_.time", clock)
+    monkeypatch.setattr("sie_sdk.client._shared.time", clock)
+    monkeypatch.setattr("sie_sdk.client.async_.asyncio.sleep", clock.async_sleep)
+    monkeypatch.setattr("sie_sdk.client._shared.apply_jitter", lambda delay, **_kwargs: delay)
+    return clock
 
 
 def _logged_origin(message: str) -> str:
@@ -173,7 +197,7 @@ class TestSyncTransportErrorRetry:
             assert mock_client.return_value.post.call_count == 1
             client.close()
 
-    def test_transport_error_retries_bounded_by_provision_timeout(self) -> None:
+    def test_transport_error_retries_bounded_by_provision_timeout(self, retry_clock: _RetryClock) -> None:
         from sie_sdk import ProvisioningError, SIEClient
         from sie_sdk.client.errors import SIEConnectionError
 
@@ -182,7 +206,7 @@ class TestSyncTransportErrorRetry:
             mock_client.return_value.post = MagicMock(side_effect=exc)
             client = SIEClient("http://localhost:8080")
 
-            start = time.monotonic()
+            start = retry_clock.monotonic()
             # Either error type is valid: SIEConnectionError after budget
             # exhausted, or ProvisioningError if the pre-request budget
             # check caught a freshly-zeroed remaining timeout.
@@ -193,10 +217,10 @@ class TestSyncTransportErrorRetry:
                     wait_for_capacity=True,
                     provision_timeout_s=0.05,
                 )
-            elapsed = time.monotonic() - start
+            elapsed = retry_clock.monotonic() - start
 
-            assert elapsed < 0.25, f"Retry loop did not honour provision_timeout_s: {elapsed:.2f}s"
-            assert mock_client.return_value.post.call_count >= 1
+            assert elapsed == pytest.approx(0.05)
+            assert mock_client.return_value.post.call_count == 1
             client.close()
 
     def test_connect_error_retried_when_wait_for_capacity_true_then_succeeds(self) -> None:
@@ -238,7 +262,7 @@ class TestSyncTransportErrorRetry:
             assert mock_client.return_value.post.call_count == 1
             client.close()
 
-    def test_connect_error_retries_bounded_by_provision_timeout(self) -> None:
+    def test_connect_error_retries_bounded_by_provision_timeout(self, retry_clock: _RetryClock) -> None:
         from sie_sdk import ProvisioningError, SIEClient
         from sie_sdk.client.errors import SIEConnectionError
 
@@ -247,7 +271,7 @@ class TestSyncTransportErrorRetry:
             mock_client.return_value.post = MagicMock(side_effect=exc)
             client = SIEClient("http://localhost:8080")
 
-            start = time.monotonic()
+            start = retry_clock.monotonic()
             with pytest.raises((SIEConnectionError, ProvisioningError)):
                 client.encode(
                     "bge-m3",
@@ -255,10 +279,10 @@ class TestSyncTransportErrorRetry:
                     wait_for_capacity=True,
                     provision_timeout_s=0.05,
                 )
-            elapsed = time.monotonic() - start
+            elapsed = retry_clock.monotonic() - start
 
-            assert elapsed < 0.25, f"Retry loop did not honour provision_timeout_s: {elapsed:.2f}s"
-            assert mock_client.return_value.post.call_count >= 1
+            assert elapsed == pytest.approx(0.05)
+            assert mock_client.return_value.post.call_count == 1
             client.close()
 
 
@@ -371,7 +395,7 @@ class TestAsyncTransportErrorRetry:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_connector_error_retries_bounded_by_provision_timeout(self) -> None:
+    async def test_connector_error_retries_bounded_by_provision_timeout(self, retry_clock: _RetryClock) -> None:
         from sie_sdk import ProvisioningError, SIEAsyncClient
         from sie_sdk.client.errors import SIEConnectionError
 
@@ -379,7 +403,7 @@ class TestAsyncTransportErrorRetry:
         client = SIEAsyncClient("http://localhost:8080")
         client._post = AsyncMock(side_effect=exc)  # type: ignore
 
-        start = time.monotonic()
+        start = retry_clock.monotonic()
         with pytest.raises((SIEConnectionError, ProvisioningError)):
             await client.encode(
                 "bge-m3",
@@ -387,10 +411,10 @@ class TestAsyncTransportErrorRetry:
                 wait_for_capacity=True,
                 provision_timeout_s=0.05,
             )
-        elapsed = time.monotonic() - start
+        elapsed = retry_clock.monotonic() - start
 
-        assert elapsed < 0.25, f"Retry loop did not honour provision_timeout_s: {elapsed:.2f}s"
-        assert client._post.call_count >= 1
+        assert elapsed == pytest.approx(0.05)
+        assert client._post.call_count == 1
         await client.close()
 
 

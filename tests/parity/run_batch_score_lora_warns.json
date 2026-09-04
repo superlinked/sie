@@ -1,0 +1,38 @@
+{
+  "description": "RunBatch with op=score AND non-empty lora_key. Score is base-only on the Python adapter path: ModelWorker.submit_score uses _batchers[None] only. Python must (1) log a WARN, (2) NOT inject options['lora'], and (3) serve the base path successfully — NOT NAK, NOT reject. The pinned invariant: score is unconditionally base-served regardless of lora_key.",
+  "input": {
+    "model_id": "test/parity-score-warn",
+    "batch_id": 401,
+    "lora_key": "ignored-on-score-path",
+    "total_cost": 10,
+    "items": [
+      {
+        "op": "score",
+        "score": {
+          "work_item_id": "w0",
+          "request_id": "r0",
+          "item_index": 0,
+          "total_items": 1,
+          "timestamp": 0.0,
+          "query_item": {"text": "Q"},
+          "score_items": [{"text": "D1"}, {"text": "D2"}],
+          "options": null
+        }
+      }
+    ]
+  },
+  "expected_canonical_outcomes": [
+    {
+      "work_item_id": "w0",
+      "request_id": "r0",
+      "item_index": 0,
+      "disposition": "publish_and_ack",
+      "error_code": null
+    }
+  ],
+  "expected_lora_in_options": null,
+  "notes": {
+    "elided_fields": ["inference_ms", "tokenization_ms", "postprocessing_ms", "result_msgpack", "raw_output", "error", "nak_delay_ms"],
+    "rationale": "expected_lora_in_options=null even though input.lora_key is non-empty: this is the WARN-and-strip-LoRA contract. The matching log assertion (per side) belongs in language-specific log tests; the parity contract is the wire shape, which must be base-output regardless of the WARN."
+  }
+}

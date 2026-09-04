@@ -67,6 +67,15 @@ safe completion log that belong to that one semantic event. The request path
 still calls the facade only once. It must never call a Prometheus client and an
 OTel client for the same event.
 
+The sampled `inference.request.completed` log schema v2 carries the canonical
+model, machine profile, request duration, admission outcome, HTTP outcome, and
+operation. It does not carry account, WorkOS user, API-key, request, contact,
+or payload identifiers. Durable per-account product events belong to the
+authenticated control-plane analytics export, not the Better Stack pipeline.
+Collectors accept schema v1 only while older gateway pods drain during a
+rolling update; they preserve its version and never relabel an incomplete v1
+record as v2.
+
 Every deployment uses the same application path: OTel instruments and log
 records leave the process through OTLP. Prometheus is a collector exporter, not
 an application instrumentation API. The bundled OSS/Kubernetes collector
@@ -195,8 +204,8 @@ process lifecycles. The semantic methods and their emitted instruments are
 nevertheless governed by the one contract:
 
 - `sie_gateway` owns HTTP completion, admission, KEDA capacity state, and the
-  request span/log boundary. `sie_cloud/gateway` calls the gateway facade for
-  the final i6pn-or-Modal dispatch result.
+  request span/log boundary. Downstream deployments can reuse that facade for
+  their final dispatch result.
 - The Modal dispatcher owns actual substrate invocation attempts.
 - `sie_config` owns config HTTP and authoritative state changes.
 - `sie_server_sidecar` owns realtime queueing and batch formation plus its
@@ -587,7 +596,7 @@ CI should reject a change unless it proves all of the following:
    fields, events, linked spans, trace-state and status text while the local
    Tempo branch remains unchanged;
 9. median-of-three warmed telemetry-off/on benchmarks cover the gateway
-   facade/Tower path, the managed cloud-gateway final-dispatch wrapper, Python
+   facade/Tower path, the downstream final-dispatch facade integration, Python
    and Rust workers, config, sidecar, and dispatcher hot paths; a paired
    durability-disabled/enabled benchmark separately gates the gateway
    dispatch-durability lifecycle before the change is declared ready;

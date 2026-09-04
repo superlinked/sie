@@ -607,7 +607,7 @@ class InferenceErrorHandler:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "code": ErrorCode.INFERENCE_ERROR.value,
-                "message": f"{operation} error: {error}",
+                "message": f"internal error during {operation.lower()}",
             },
         )
 

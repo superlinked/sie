@@ -81,13 +81,22 @@ export class RequestError extends SIEError {
    * so failures stay correlatable with gateway logs (#3136).
    */
   readonly requestId: string | undefined;
+  /** Offending request field from the server error envelope, when known. */
+  readonly param: string | null | undefined;
 
-  constructor(message: string, code?: string, statusCode?: number, requestId?: string) {
+  constructor(
+    message: string,
+    code?: string,
+    statusCode?: number,
+    requestId?: string,
+    param?: string | null,
+  ) {
     super(message);
     this.name = "RequestError";
     this.code = code;
     this.statusCode = statusCode;
     this.requestId = requestId;
+    this.param = param;
   }
 }
 
@@ -111,13 +120,22 @@ export class ServerError extends SIEError {
    * so failures stay correlatable with gateway logs (#3136).
    */
   readonly requestId: string | undefined;
+  /** Offending request field from the server error envelope, when known. */
+  readonly param: string | null | undefined;
 
-  constructor(message: string, code?: string, statusCode?: number, requestId?: string) {
+  constructor(
+    message: string,
+    code?: string,
+    statusCode?: number,
+    requestId?: string,
+    param?: string | null,
+  ) {
     super(message);
     this.name = "ServerError";
     this.code = code;
     this.statusCode = statusCode;
     this.requestId = requestId;
+    this.param = param;
   }
 }
 
@@ -136,12 +154,15 @@ export class ProvisioningError extends SIEError {
   readonly gpu: string | undefined;
   /** Suggested retry delay in milliseconds (from server Retry-After header) */
   readonly retryAfter: number | undefined;
+  /** Offending request field from the server error envelope, when known. */
+  readonly param: string | null | undefined;
 
-  constructor(message: string, gpu?: string, retryAfter?: number) {
+  constructor(message: string, gpu?: string, retryAfter?: number, param?: string | null) {
     super(message);
     this.name = "ProvisioningError";
     this.gpu = gpu;
     this.retryAfter = retryAfter;
+    this.param = param;
   }
 }
 
@@ -183,12 +204,15 @@ export class LoraLoadingError extends SIEError {
   readonly lora: string | undefined;
   /** The model the LoRA was requested for */
   readonly model: string | undefined;
+  /** Offending request field from the server error envelope, when known. */
+  readonly param: string | null | undefined;
 
-  constructor(message: string, lora?: string, model?: string) {
+  constructor(message: string, lora?: string, model?: string, param?: string | null) {
     super(message);
     this.name = "LoraLoadingError";
     this.lora = lora;
     this.model = model;
+    this.param = param;
   }
 }
 
@@ -205,11 +229,14 @@ export class LoraLoadingError extends SIEError {
 export class ModelLoadingError extends SIEError {
   /** The model that was requested */
   readonly model: string | undefined;
+  /** Offending request field from the server error envelope, when known. */
+  readonly param: string | null | undefined;
 
-  constructor(message: string, model?: string) {
+  constructor(message: string, model?: string, param?: string | null) {
     super(message);
     this.name = "ModelLoadingError";
     this.model = model;
+    this.param = param;
   }
 }
 
@@ -233,8 +260,11 @@ export class ResourceExhaustedError extends ServerError {
   /** Number of retry attempts made before giving up */
   readonly retries: number;
 
-  constructor(message: string, options?: { model?: string; retries?: number }) {
-    super(message, "RESOURCE_EXHAUSTED", 503);
+  constructor(
+    message: string,
+    options?: { model?: string; retries?: number; param?: string | null },
+  ) {
+    super(message, "RESOURCE_EXHAUSTED", 503, undefined, options?.param);
     this.name = "ResourceExhaustedError";
     this.model = options?.model;
     this.retries = options?.retries ?? 0;
@@ -244,9 +274,9 @@ export class ResourceExhaustedError extends ServerError {
 /**
  * Error surfaced mid-stream from `streamChatCompletions` / `streamGenerate`.
  *
- * The SSE wire shape includes optional `error: {message, type, param, code}`
- * (chat) or `error: {code, message}` (SIE-native generate) on the terminal
- * chunk. When the SDK sees such a chunk it does NOT yield the chunk; instead
+ * The SSE wire shape includes optional
+ * `error: {message, type, param, code, retry_after_s?}` on the terminal chunk.
+ * When the SDK sees such a chunk it does NOT yield the chunk; instead
  * it throws `SIEStreamError`, mirroring the non-streaming `handleError` path
  * so callers can catch the same way they would for HTTP-level failures.
  *
@@ -260,8 +290,10 @@ export class SIEStreamError extends SIEError {
   readonly code: string | undefined;
   /** OpenAI-style error type (e.g. `context_length_exceeded`, `server_error`). */
   readonly errorType: string | undefined;
-  /** Offending field name when known (chat shape only). */
+  /** Offending field name when known. */
   readonly param: string | null | undefined;
+  /** Validated RESOURCE_EXHAUSTED retry hint, in milliseconds. */
+  readonly retryAfter: number | undefined;
   /**
    * Gateway request id carried in-band by the error chunk (SIE-native
    * generate shape only — streamed responses have no terminal headers).
@@ -272,7 +304,13 @@ export class SIEStreamError extends SIEError {
 
   constructor(
     message: string,
-    options?: { code?: string; errorType?: string; param?: string | null; requestId?: string },
+    options?: {
+      code?: string;
+      errorType?: string;
+      param?: string | null;
+      requestId?: string;
+      retryAfter?: number;
+    },
   ) {
     super(message);
     this.name = "SIEStreamError";
@@ -280,6 +318,7 @@ export class SIEStreamError extends SIEError {
     this.errorType = options?.errorType;
     this.param = options?.param;
     this.requestId = options?.requestId;
+    this.retryAfter = options?.retryAfter;
   }
 }
 
@@ -317,9 +356,10 @@ export class ModelLoadFailedError extends ServerError {
       errorClass?: string;
       permanent?: boolean;
       attempts?: number;
+      param?: string | null;
     },
   ) {
-    super(message, "MODEL_LOAD_FAILED", 502);
+    super(message, "MODEL_LOAD_FAILED", 502, undefined, options?.param);
     this.name = "ModelLoadFailedError";
     this.model = options?.model;
     this.errorClass = options?.errorClass;
@@ -345,8 +385,8 @@ export class InputTooLongError extends RequestError {
   /** The model that was requested */
   readonly model: string | undefined;
 
-  constructor(message: string, options?: { model?: string }) {
-    super(message, "INPUT_TOO_LONG", 400);
+  constructor(message: string, options?: { model?: string; param?: string | null }) {
+    super(message, "INPUT_TOO_LONG", 400, undefined, options?.param);
     this.name = "InputTooLongError";
     this.model = options?.model;
   }
@@ -400,9 +440,10 @@ export class IncompleteBatchError extends ServerError {
       model?: string;
       missingIds?: string[];
       requestId?: string;
+      param?: string | null;
     },
   ) {
-    super(message, options.code, 200, options.requestId);
+    super(message, options.code, 200, options.requestId, options.param);
     this.name = "IncompleteBatchError";
     this.expected = options.expected;
     this.received = options.received;
@@ -492,8 +533,8 @@ export class MalformedChunkError extends SIEError {
  * Subclass of {@link ServerError} so existing 5xx handlers keep working.
  */
 export class EstimateUnroutableError extends ServerError {
-  constructor(message: string, code?: string) {
-    super(message, code, 503);
+  constructor(message: string, code?: string, param?: string | null) {
+    super(message, code, 503, undefined, param);
     this.name = "EstimateUnroutableError";
   }
 }
@@ -518,9 +559,9 @@ export class RateLimitError extends RequestError {
 
   constructor(
     message: string,
-    options?: { retryAfter?: number; code?: string; requestId?: string },
+    options?: { retryAfter?: number; code?: string; requestId?: string; param?: string | null },
   ) {
-    super(message, options?.code ?? "RATE_LIMIT", 429, options?.requestId);
+    super(message, options?.code ?? "RATE_LIMIT", 429, options?.requestId, options?.param);
     this.name = "RateLimitError";
     this.retryAfter = options?.retryAfter;
   }
@@ -537,8 +578,8 @@ export class RateLimitError extends RequestError {
  * Mirrors the Python SDK's `InsufficientCreditsError`.
  */
 export class InsufficientCreditsError extends RequestError {
-  constructor(message: string, options?: { requestId?: string }) {
-    super(message, "INSUFFICIENT_CREDITS", 402, options?.requestId);
+  constructor(message: string, options?: { requestId?: string; param?: string | null }) {
+    super(message, "INSUFFICIENT_CREDITS", 402, options?.requestId, options?.param);
     this.name = "InsufficientCreditsError";
   }
 }
@@ -555,8 +596,8 @@ export class InsufficientCreditsError extends RequestError {
  * Mirrors the Python SDK's `SpendLimitError`.
  */
 export class SpendLimitError extends RequestError {
-  constructor(message: string, options?: { requestId?: string }) {
-    super(message, "KEY_SPEND_LIMIT_EXCEEDED", 402, options?.requestId);
+  constructor(message: string, options?: { requestId?: string; param?: string | null }) {
+    super(message, "KEY_SPEND_LIMIT_EXCEEDED", 402, options?.requestId, options?.param);
     this.name = "SpendLimitError";
   }
 }
@@ -574,8 +615,8 @@ export class SpendLimitError extends RequestError {
  * Mirrors the Python SDK's `AccountInactiveError`.
  */
 export class AccountInactiveError extends RequestError {
-  constructor(message: string, code?: string, requestId?: string) {
-    super(message, code, 403, requestId);
+  constructor(message: string, code?: string, requestId?: string, param?: string | null) {
+    super(message, code, 403, requestId, param);
     this.name = "AccountInactiveError";
   }
 }
@@ -594,8 +635,8 @@ export class AccountInactiveError extends RequestError {
  * Mirrors the Python SDK's `AccountStateUnavailableError`.
  */
 export class AccountStateUnavailableError extends ServerError {
-  constructor(message: string, requestId?: string) {
-    super(message, "ACCOUNT_STATE_UNAVAILABLE", 503, requestId);
+  constructor(message: string, requestId?: string, param?: string | null) {
+    super(message, "ACCOUNT_STATE_UNAVAILABLE", 503, requestId, param);
     this.name = "AccountStateUnavailableError";
   }
 }

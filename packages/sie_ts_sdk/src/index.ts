@@ -134,6 +134,7 @@ export type {
   StreamGenerateOptions,
   GenerateResult,
   // Streaming generate (SSE)
+  GenerationChunkError,
   GenerateChunk,
   // Chat completions (OpenAI-compatible)
   ChatMessage,

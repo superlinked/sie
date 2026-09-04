@@ -336,7 +336,7 @@ class TestOpenAIEmbeddings:
         with patch(
             "sie_server.api.openai_compat.EncodePipeline.run_encode",
             new_callable=AsyncMock,
-            side_effect=RuntimeError("boom"),
+            side_effect=RuntimeError("sensitive embeddings detail"),
         ):
             response = client.post(
                 "/v1/embeddings",
@@ -349,7 +349,8 @@ class TestOpenAIEmbeddings:
         error = data["error"]
         assert error["code"] == "inference_error"
         assert error["type"] == "server_error"
-        assert "message" in error
+        assert error["message"] == "internal error during embeddings"
+        assert "sensitive embeddings detail" not in response.text
 
 
 class TestOpenAIEmbeddingsModelLoadStates:

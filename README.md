@@ -39,6 +39,9 @@ SIE is an open-source inference engine that runs the models behind every agent t
 
 ## Development
 
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the complete development
+workflow and [AGENTS.md](AGENTS.md) for repository automation boundaries.
+
 Install [mise](https://mise.jdx.dev/getting-started.html), then bootstrap the
 versioned Python, Rust, Node.js, and Helm toolchains from the repository root:
 
@@ -57,6 +60,9 @@ mise run rust-check
 mise run rust-test
 mise run gateway-test
 mise run server-sidecar-test
+mise run helm -- dependencies
+mise run helm -- lint --set payloadStore.enabled=false
+mise run helm -- template --set payloadStore.enabled=false
 ```
 
 The Python workspace uses the committed root lock. Package membership is

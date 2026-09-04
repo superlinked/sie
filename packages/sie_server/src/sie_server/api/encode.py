@@ -394,7 +394,7 @@ async def encode(
         except ValueError as e:
             raise error_handler.handle_value_error(e) from e
         except Exception as e:
-            raise error_handler.handle_inference_error(e) from e
+            raise error_handler.handle_inference_error(e, "Encoding") from e
 
         # Build response (quantization already done by postprocessor)
         response_items = _build_response_items(items, results, config)

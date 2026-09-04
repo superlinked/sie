@@ -44,7 +44,9 @@ def _resp_504() -> MagicMock:
         "X-SIE-Units-Output-Tokens": "5",
         "X-SIE-Credits-Debited": "13",
     }
-    response.json.return_value = {"detail": {"code": "GATEWAY_TIMEOUT", "message": "Timeout waiting for queue result"}}
+    response.json.return_value = {
+        "detail": {"code": "GATEWAY_TIMEOUT", "message": "Timeout waiting for queue result", "param": "model"}
+    }
     response.content = json.dumps(response.json.return_value).encode("utf-8")
     return response
 
@@ -598,6 +600,7 @@ class TestSyncGenerate:
             # No backoff sleep happened for the 504.
             mock_sleep.assert_not_called()
             assert excinfo.value.status_code == 504
+            assert excinfo.value.param == "model"
             assert excinfo.value.request == {
                 "id": "req-generate-timeout",
                 "usage": {"output_tokens": 5},
@@ -922,7 +925,7 @@ class TestAsyncGenerate:
             side_effect=[
                 _aio_resp(
                     504,
-                    {"error": {"code": "MODEL_LOADING", "message": "timeout"}},
+                    {"error": {"code": "GATEWAY_TIMEOUT", "message": "timeout"}},
                     {
                         "Retry-After": "0.01",
                         "content-type": "application/json",
@@ -949,6 +952,8 @@ class TestAsyncGenerate:
         assert client._post.call_count == 1
         mock_sleep.assert_not_called()
         assert excinfo.value.status_code == 504
+        assert excinfo.value.code == "GATEWAY_TIMEOUT"
+        assert excinfo.value.param is None
         assert excinfo.value.request == {
             "id": "req-async-generate-timeout",
             "usage": {"output_tokens": 5},

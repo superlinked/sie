@@ -123,6 +123,12 @@ def test_bundle_and_model_dirs_are_non_empty() -> None:
     assert sorted(MODELS_DIR.glob("*.yaml")), f"No model YAML files found in {MODELS_DIR}"
 
 
+def test_tensorrt_llm_bundle_pins_qualified_cuda_tile() -> None:
+    bundle = yaml.safe_load((BUNDLES_DIR / "tensorrt-llm.yaml").read_text()) or {}
+
+    assert bundle["deps"]["cuda-tile"] == "==1.6.0rc8"
+
+
 def test_candle_bundle_only_exposes_profile_variants() -> None:
     matches = match_bundle_models(BUNDLES_DIR / "candle.yaml", MODELS_DIR)
     assert matches, "candle bundle should expose at least one model profile variant"

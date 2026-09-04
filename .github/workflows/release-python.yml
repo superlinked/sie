@@ -1,0 +1,62 @@
+name: Build Python distributions
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+      version:
+        type: string
+        default: ''
+      tag_name:
+        type: string
+        default: ''
+      build_only:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          install_args: python uv
+      - name: Validate source and optional release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_ONLY" = false ]; then test -n "$RELEASE_VERSION"; fi
+          mise exec -- python tools/ci/release_guard.py build --source-ref "$SOURCE_REF" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
+      - name: Build complete archives and test clean packed consumers
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: mise exec -- python tools/ci/distributions.py build python --directory artifacts --version "$RELEASE_VERSION"
+      - name: Bind tested release bytes to the original run
+        if: inputs.build_only == false
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          mise exec -- python -m tools.ci.release_artifact stamp --directory artifacts --kind python --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG" --source-revision "$SOURCE_REF" --run-id "$GITHUB_RUN_ID"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-distributions
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30

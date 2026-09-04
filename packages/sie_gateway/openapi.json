@@ -1578,6 +1578,22 @@
           },
           "message": {
             "type": "string"
+          },
+          "param": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retry_after_s": {
+            "description": "Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null\nfor other terminal errors.",
+            "format": "int32",
+            "maximum": 60,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -2135,6 +2151,13 @@
           "sql": {
             "description": "Whether the model targets the SQL path — backs the ``model=\"sql\"``\nalias. Informational only; never request-gated. Precision-sensitive:\nSQL quality can regress sharply under FP8, so this model-level flag is a\nsupport signal, not a per-profile quality guarantee.",
             "type": "boolean"
+          },
+          "streaming": {
+            "description": "Whether the model supports incremental public generation output.\nDefaults to true for generation models when omitted from older configs.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "tools": {
             "description": "Whether the model supports tool / function calling.",
@@ -3871,7 +3894,7 @@
       "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
     },
     "title": "SIE Gateway",
-    "version": "0.7.2"
+    "version": "0.7.3"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -4131,6 +4154,13 @@
               "X-Queue-Wait-Time": {
                 "description": "Milliseconds spent waiting for worker results",
                 "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -4423,6 +4453,13 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
                 "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
                 "schema": {
@@ -4618,6 +4655,13 @@
               "X-Queue-Wait-Time": {
                 "description": "Milliseconds spent waiting for worker results",
                 "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -5205,6 +5249,13 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
                 "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
                 "schema": {
@@ -5540,6 +5591,13 @@
               "X-Queue-Wait-Time": {
                 "description": "Milliseconds spent waiting for worker results",
                 "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -5882,6 +5940,13 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
                 "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
                 "schema": {
@@ -6197,6 +6262,13 @@
               "X-Queue-Wait-Time": {
                 "description": "Milliseconds spent waiting for worker results",
                 "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },
@@ -7181,6 +7253,13 @@
                   "type": "string"
                 }
               },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
               "X-SIE-Execution-Identity-SHA256": {
                 "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available",
                 "schema": {
@@ -7461,6 +7540,13 @@
               "X-Queue-Wait-Time": {
                 "description": "Milliseconds spent waiting for worker results",
                 "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
                   "type": "string"
                 }
               },

@@ -3,7 +3,7 @@
   "info": {
     "title": "SIE Server",
     "description": "Search Inference Engine - GPU inference server for search workloads",
-    "version": "0.7.2"
+    "version": "0.7.3"
   },
   "paths": {
     "/healthz": {
@@ -1428,6 +1428,11 @@
       },
       "ModelCapabilities": {
         "properties": {
+          "streaming": {
+            "type": "boolean",
+            "title": "Streaming",
+            "default": true
+          },
           "grammar": {
             "items": {
               "type": "string"
@@ -2985,6 +2990,34 @@
             "description": "Client-safe error message",
             "title": "Message",
             "type": "string"
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Exact unsupported request field, when applicable",
+            "title": "Param"
+          },
+          "retry_after_s": {
+            "anyOf": [
+              {
+                "maximum": 60,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null for other terminal errors",
+            "title": "Retry After S"
           }
         },
         "required": [

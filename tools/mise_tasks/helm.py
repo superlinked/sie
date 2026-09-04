@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # fmt: off
 #MISE description="Helm chart operations for SIE cluster deployment"
-#USAGE arg "[command]" help="Command: lint, template, install, upgrade, uninstall, status"
+#USAGE arg "[command]" help="Command: dependencies, lint, template, install, upgrade, uninstall, status"
 #USAGE arg "[args]..." help="Additional arguments to pass to helm"
 # fmt: on
 
@@ -27,6 +27,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+
 from common.colors import (
     log,
     log_error,
@@ -40,6 +42,7 @@ apply_mise_env()
 CHART_DIR = Path("deploy/helm/sie-cluster")
 RELEASE_NAME = os.environ.get("SIE_HELM_RELEASE", "sie")
 NAMESPACE = os.environ.get("SIE_HELM_NAMESPACE", "sie")
+DEFAULT_VALIDATION_ARGS = ["--set", "payloadStore.enabled=false"]
 
 
 @contextmanager
@@ -117,6 +120,40 @@ def run_helm(args: list[str]) -> int:
     return result.returncode
 
 
+def dependency_command() -> list[str]:
+    """Return the locked chart dependency preparation command."""
+    return ["dependency", "build", str(CHART_DIR)]
+
+
+def dependency_repository_commands() -> list[list[str]]:
+    """Return idempotent Helm repo setup commands derived from Chart.yaml."""
+    root = resolve_project_root()
+    chart = root / CHART_DIR / "Chart.yaml"
+    repositories: list[str] = []
+    for line in chart.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("repository:"):
+            continue
+        repository = stripped.split(":", maxsplit=1)[1].strip().strip("\"'")
+        if repository.startswith(("https://", "http://")) and repository not in repositories:
+            repositories.append(repository)
+    return [
+        [
+            "repo",
+            "add",
+            f"sie-dependency-{hashlib.sha256(repository.encode()).hexdigest()[:12]}",
+            repository,
+            "--force-update",
+        ]
+        for repository in repositories
+    ]
+
+
+def validation_args(extra_args: list[str]) -> list[str]:
+    """Provide deterministic, non-secret values for local chart validation."""
+    return [*DEFAULT_VALIDATION_ARGS, *extra_args]
+
+
 def show_help() -> None:
     """Show usage information."""
     log("SIE Helm Chart Operations")
@@ -124,6 +161,7 @@ def show_help() -> None:
     log("Usage: mise run helm -- <command> [options]")
     log("")
     log("Commands:")
+    log("  dependencies      Build dependencies from Chart.yaml and Chart.lock")
     log("  lint              Lint the Helm chart")
     log("  template          Render templates locally")
     log("  install           Install to cluster (dry-run by default)")
@@ -137,15 +175,28 @@ def show_help() -> None:
     log(f"  SIE_HELM_NAMESPACE  Namespace (default: {NAMESPACE})")
     log("")
     log("Examples:")
+    log("  mise run helm -- dependencies")
     log("  mise run helm -- lint")
     log("  mise run helm -- template --set gateway.replicas=3")
     log("  mise run helm -- install --apply --set workers.pools.l4.enabled=true")
 
 
+def cmd_dependencies(extra_args: list[str]) -> int:
+    """Prepare locked chart dependencies."""
+    if extra_args:
+        log_error("dependencies does not accept additional arguments")
+        return 1
+    log(f"[helm] Preparing locked dependencies for: {CHART_DIR}")
+    for command in dependency_repository_commands():
+        if run_helm(command) != 0:
+            return 1
+    return run_helm(dependency_command())
+
+
 def cmd_lint(extra_args: list[str]) -> int:
     """Lint the Helm chart."""
     log(f"[helm] Linting chart: {CHART_DIR}")
-    if run_helm(["lint", str(CHART_DIR), *extra_args]) != 0:
+    if run_helm(["lint", str(CHART_DIR), *validation_args(extra_args)]) != 0:
         return 1
     log_success("Lint passed!")
     return 0
@@ -161,7 +212,7 @@ def cmd_template(extra_args: list[str]) -> int:
             str(CHART_DIR),
             "--namespace",
             NAMESPACE,
-            *extra_args,
+            *validation_args(extra_args),
         ]
     )
 
@@ -280,6 +331,7 @@ def main() -> int:
         return 0
 
     commands = {
+        "dependencies": cmd_dependencies,
         "lint": cmd_lint,
         "template": cmd_template,
         "install": cmd_install,
@@ -297,6 +349,8 @@ def main() -> int:
     # Commands that render templates need bundle/model configs in files/
     needs_configs = command in ("lint", "template", "install", "upgrade")
     if needs_configs:
+        if cmd_dependencies([]) != 0:
+            return 1
         with _helm_config_sync_lock():
             _sync_configs_to_helm()
             try:

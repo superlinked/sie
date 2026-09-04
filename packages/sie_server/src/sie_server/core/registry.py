@@ -17,13 +17,15 @@ import contextlib
 import hashlib
 import json
 import logging
+import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Coroutine, Iterable
 from pathlib import Path
 from typing import Any
 
 from sie_sdk.storage import is_cloud_path
 
+from sie_server.adapters._generation_base import GenerationAdapter
 from sie_server.adapters.base import ModelAdapter
 from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig
@@ -261,6 +263,13 @@ class ModelRegistry:
         # Concurrency-safe loading
         self._load_lock: asyncio.Lock | None = None  # Created lazily on first use
         self._config_update_lock: asyncio.Lock | None = None
+        # Async lifecycle state is owned by one long-lived server event loop.
+        # Legacy synchronous callers are serialized independently until that
+        # loop is known; after binding they submit work back to the owner loop.
+        self._lifecycle_loop: asyncio.AbstractEventLoop | None = None
+        self._lifecycle_state_lock = threading.Lock()
+        self._sync_lifecycle_lock = threading.RLock()
+        self._sync_lifecycle_depth = 0
         self._loading: set[str] = set()  # Models currently being loaded
         self._unloading: set[str] = set()  # Models currently being unloaded
         # Terminal-failed state. Populated by ``_load_model_background`` when a
@@ -356,25 +365,31 @@ class ModelRegistry:
     def _pinned_disk_repo_ids(self) -> set[str]:
         """HF repo ids of pinned models, for disk-cache eviction protection.
 
-        Matched at BASE-model granularity: a profile variant shares its base
-        model's ``hf_id`` (disk weights), so a pinned ``org/model:fp8`` protects
-        the same repo as ``org/model``. Mapping pinned ids to the configs'
-        ``hf_id`` keeps a long-tail download from evicting a pinned model's
-        weights and reintroducing its cold start.
+        Matched at BASE-model granularity. Every materialized profile variant
+        of a pinned model is protected: ordinary HF profiles name their source
+        repo, while profiles backed by a derived serving artifact name the
+        downloaded derived repo instead. This mirrors ``ModelLoader`` cache
+        accounting and prevents an offline reload from losing a pinned derived
+        snapshot while its source repo remains unnecessarily protected.
 
         The disk cache matches by exact ``hf_id`` (no case-folding, unlike the
         in-memory sie_id path), which is safe because the cache key also derives
-        from ``config.hf_id`` (model_loader passes it to ``ensure_space_before_download``
-        and ``touch``).
+        from the same effective source/derived repo id that ``ModelLoader``
+        passes to ``ensure_space_before_download`` and ``touch``.
         """
         if not self._pinned_models:
             return set()
         pinned_bases = {_base_model_id(pinned_id) for pinned_id in self._pinned_models}
-        return {
-            config.hf_id
-            for sie_id, config in self._configs.items()
-            if config.hf_id and _base_model_id(sie_id) in pinned_bases
-        }
+        repo_ids: set[str] = set()
+        for sie_id, config in self._configs.items():
+            if _base_model_id(sie_id) not in pinned_bases:
+                continue
+            serving_artifact = config.serving_artifact_declaration()
+            if serving_artifact is not None:
+                repo_ids.add(serving_artifact.repo_id)
+            elif config.hf_id is not None:
+                repo_ids.add(config.hf_id)
+        return repo_ids
 
     async def _eager_load_pinned(self) -> None:
         """Eager-load every pinned model that has a config and is not yet resident.
@@ -718,14 +733,75 @@ class ModelRegistry:
         """
         return self._failed.pop(name, None) is not None
 
+    def _bind_lifecycle_loop(self) -> asyncio.AbstractEventLoop:
+        """Bind every asynchronous registry lifecycle operation to one loop."""
+        loop = asyncio.get_running_loop()
+        with self._lifecycle_state_lock:
+            if self._sync_lifecycle_depth > 0:
+                msg = "a synchronous model lifecycle operation is already in progress"
+                raise RuntimeError(msg)
+            if self._lifecycle_loop is None:
+                self._lifecycle_loop = loop
+            elif self._lifecycle_loop is not loop:
+                msg = "model lifecycle is bound to a different event loop"
+                raise RuntimeError(msg)
+        return loop
+
+    @staticmethod
+    def _reject_sync_on_running_loop(operation: str) -> None:
+        """Fail before taking a thread lock that a foreign bridge may hold."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        msg = f"synchronous {operation} is unsafe inside a running event loop; await {operation}_async()"
+        raise RuntimeError(msg)
+
+    def _begin_sync_lifecycle(self, operation: str) -> asyncio.AbstractEventLoop | None:
+        """Select the owner-loop bridge or enter the serialized sync-only path."""
+        self._reject_sync_on_running_loop(operation)
+
+        with self._lifecycle_state_lock:
+            owner = self._lifecycle_loop
+            if owner is None:
+                self._sync_lifecycle_depth += 1
+                return None
+
+        if owner.is_closed() or not owner.is_running():
+            msg = f"cannot run synchronous {operation}: the registry lifecycle event loop is not running"
+            raise RuntimeError(msg)
+        return owner
+
+    def _end_sync_lifecycle(self) -> None:
+        with self._lifecycle_state_lock:
+            if self._sync_lifecycle_depth <= 0:
+                msg = "synchronous model lifecycle depth underflow"
+                raise RuntimeError(msg)
+            self._sync_lifecycle_depth -= 1
+
+    @staticmethod
+    def _run_on_lifecycle_loop(
+        loop: asyncio.AbstractEventLoop,
+        coroutine: Coroutine[Any, Any, Any],
+    ) -> Any:
+        """Submit one synchronous caller to the registry's owning event loop."""
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except BaseException:
+            coroutine.close()
+            raise
+        return future.result()
+
     def _get_load_lock(self) -> asyncio.Lock:
-        """Get or create the load lock (must be called from async context)."""
+        """Get or create the load lock on the registry lifecycle loop."""
+        self._bind_lifecycle_loop()
         if self._load_lock is None:
             self._load_lock = asyncio.Lock()
         return self._load_lock
 
     def _get_config_update_lock(self) -> asyncio.Lock:
         """Serialize async config mutations across IPC/hot-reload entrypoints."""
+        self._bind_lifecycle_loop()
         if self._config_update_lock is None:
             self._config_update_lock = asyncio.Lock()
         return self._config_update_lock
@@ -832,7 +908,10 @@ class ModelRegistry:
     def load(self, name: str, device: str) -> ModelAdapter:
         """Load a model onto a device.
 
-        If loading fails due to OOM, attempts to evict LRU model and retry once.
+        Before the registry belongs to an async server loop, this legacy
+        entrypoint uses a serialized synchronous lifecycle. Once the server
+        loop is bound, callers from other threads submit to ``load_async`` on
+        that loop; callers already on an event loop must await ``load_async``.
 
         Args:
             name: Model name.
@@ -847,6 +926,18 @@ class ModelRegistry:
             ImportError: If adapter cannot be loaded.
             RuntimeError: If OOM persists after eviction.
         """
+        self._reject_sync_on_running_loop("load")
+        with self._sync_lifecycle_lock:
+            owner = self._begin_sync_lifecycle("load")
+            if owner is not None:
+                return self._run_on_lifecycle_loop(owner, self.load_async(name, device))
+            try:
+                return self._load_sync(name, device)
+            finally:
+                self._end_sync_lifecycle()
+
+    def _load_sync(self, name: str, device: str) -> ModelAdapter:
+        """Synchronous-only load implementation under ``_sync_lifecycle_lock``."""
         # Pre-load validation: config existence + dependency checking
         config, model_dir = self._check_model_loadable(name)
 
@@ -888,7 +979,7 @@ class ModelRegistry:
                     lru_model,
                     name,
                 )
-                self.unload(lru_model, reason="preload_pressure")
+                self._unload_sync(lru_model, reason="preload_pressure")
 
             # Try to load onto device, with OOM retry.
             try:
@@ -908,7 +999,7 @@ class ModelRegistry:
                     name,
                     lru_model,
                 )
-                self.unload(lru_model, reason="load_oom")
+                self._unload_sync(lru_model, reason="load_oom")
 
                 # Retry once after eviction - weights still on disk so we
                 # skip ``ensure_weights_cached`` here.
@@ -1115,6 +1206,8 @@ class ModelRegistry:
         Raises:
             KeyError: If model not found.
         """
+        self._bind_lifecycle_loop()
+
         # Already loaded - no action needed
         if name in self._loaded:
             return False
@@ -1229,13 +1322,32 @@ class ModelRegistry:
             )
 
     def unload(self, name: str, *, reason: str = "manual") -> None:
-        """Unload a model and free resources.
+        """Unload a model through the serialized registry lifecycle.
 
         Args:
             name: Model name.
+            reason: Bounded telemetry reason for the eviction.
 
         Raises:
             KeyError: If model not found or not loaded.
+        """
+        self._reject_sync_on_running_loop("unload")
+        with self._sync_lifecycle_lock:
+            owner = self._begin_sync_lifecycle("unload")
+            if owner is not None:
+                self._run_on_lifecycle_loop(owner, self.unload_async(name, reason=reason))
+                return
+            try:
+                self._unload_sync(name, reason=reason)
+            finally:
+                self._end_sync_lifecycle()
+
+    def _unload_sync(self, name: str, *, reason: str) -> None:
+        """Synchronous-only unload under ``_sync_lifecycle_lock``.
+
+        Generation adapters own asynchronous drain work and therefore require
+        an owning lifecycle loop. A sync-only registry fails closed instead of
+        inventing a temporary event loop for that teardown.
         """
         if name not in self._configs:
             msg = _ERR_MODEL_NOT_FOUND.format(name=name)
@@ -1244,6 +1356,10 @@ class ModelRegistry:
         if name not in self._loaded:
             msg = _ERR_MODEL_NOT_LOADED.format(name=name)
             raise KeyError(msg)
+
+        if isinstance(self._loaded[name].adapter, GenerationAdapter):
+            msg = "synchronous unload of a generation adapter requires an owning event loop; await unload_async()"
+            raise RuntimeError(msg)
 
         logger.info("Unloading model '%s'", name)
 
@@ -1309,6 +1425,33 @@ class ModelRegistry:
                 await asyncio.shield(unload_future)
             raise
 
+    async def _drain_generation_before_deadline(
+        self,
+        adapter: GenerationAdapter,
+        *,
+        deadline: float,
+    ) -> None:
+        """Enter the adapter drain hook even when the shared budget is spent.
+
+        ``asyncio.wait_for(coro, 0)`` cancels ``coro`` before its first line,
+        which can leave adapter admission open during teardown. Starting a
+        task and yielding one scheduler turn establishes the drain barrier;
+        any remaining deadline then bounds only the asynchronous wait.
+        """
+        task = asyncio.create_task(adapter.drain_generation())
+        await asyncio.sleep(0)
+        if task.done():
+            await task
+            return
+
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        if remaining == 0:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            raise TimeoutError
+        await asyncio.wait_for(task, timeout=remaining)
+
     async def _do_unload(self, name: str, *, reason: str = "other") -> None:
         """Unload a model safely (drains worker first).
 
@@ -1327,12 +1470,14 @@ class ModelRegistry:
         try:
             logger.info("Unloading model '%s' (draining worker first)", name)
 
+            drain_deadline = asyncio.get_running_loop().time() + self._drain_timeout_s
+
             # Stop worker (waits for pending batches, up to drain_timeout_s)
             if loaded.worker is not None and loaded.worker.is_running:
                 try:
                     await asyncio.wait_for(
                         loaded.worker.stop(),
-                        timeout=self._drain_timeout_s,
+                        timeout=max(0.0, drain_deadline - asyncio.get_running_loop().time()),
                     )
                     logger.info("Worker drained for model '%s'", name)
                 except TimeoutError:
@@ -1342,6 +1487,26 @@ class ModelRegistry:
                         self._drain_timeout_s,
                     )
                     # Force stop is handled by the worker.stop() method
+
+            # Generation adapters bypass ``ModelWorker`` and can own their
+            # own queue or child-runtime scheduler. Drain that async work under
+            # the same unload deadline, while the registry still advertises
+            # the loaded entry and before the synchronous teardown begins.
+            if isinstance(loaded.adapter, GenerationAdapter):
+                try:
+                    await self._drain_generation_before_deadline(
+                        loaded.adapter,
+                        deadline=drain_deadline,
+                    )
+                    logger.info("Generation adapter drained for model '%s'", name)
+                except TimeoutError:
+                    logger.warning(
+                        "Generation adapter drain timeout for model '%s' after %.1fs, continuing unload",
+                        name,
+                        self._drain_timeout_s,
+                    )
+                except Exception:  # noqa: BLE001 - teardown continues after best-effort drain
+                    logger.warning("Generation adapter drain failed during unload of '%s'", name, exc_info=True)
 
             # Remove from loaded dict before unloading adapter
             del self._loaded[name]
@@ -1415,7 +1580,7 @@ class ModelRegistry:
         finally:
             self._unloading.discard(name)
 
-    async def unload_async(self, name: str) -> None:
+    async def unload_async(self, name: str, *, reason: str = "manual") -> None:
         """Unload a model and free resources (async, concurrency-safe).
 
         This method acquires the load lock and safely drains the worker
@@ -1423,6 +1588,7 @@ class ModelRegistry:
 
         Args:
             name: Model name.
+            reason: Bounded telemetry reason for the eviction.
 
         Raises:
             KeyError: If model not found or not loaded.
@@ -1437,12 +1603,28 @@ class ModelRegistry:
                 msg = _ERR_MODEL_NOT_LOADED.format(name=name)
                 raise KeyError(msg)
 
-            await self._do_unload(name, reason="manual")
+            await self._do_unload(name, reason=reason)
 
     def unload_all(self) -> None:
-        """Unload all loaded models (sync version, for non-async contexts)."""
+        """Unload all models through the serialized registry lifecycle."""
+        self._reject_sync_on_running_loop("unload_all")
+        with self._sync_lifecycle_lock:
+            owner = self._begin_sync_lifecycle("unload_all")
+            if owner is not None:
+                self._run_on_lifecycle_loop(owner, self.unload_all_async())
+                return
+            try:
+                self._unload_all_sync()
+            finally:
+                self._end_sync_lifecycle()
+
+    def _unload_all_sync(self) -> None:
+        """Synchronous-only bulk unload under ``_sync_lifecycle_lock``."""
+        if any(isinstance(loaded.adapter, GenerationAdapter) for loaded in self._loaded.values()):
+            msg = "synchronous unload_all with a generation adapter requires an owning event loop; await unload_all_async()"
+            raise RuntimeError(msg)
         for name in list(self._loaded.keys()):
-            self.unload(name, reason="shutdown")
+            self._unload_sync(name, reason="shutdown")
 
     async def unload_all_async(self) -> None:
         """Unload all loaded models (async, concurrency-safe)."""
@@ -1986,6 +2168,7 @@ class ModelRegistry:
         The monitor periodically checks memory pressure and evicts LRU models
         if needed. This catches memory growth during inference.
         """
+        self._bind_lifecycle_loop()
         if self._monitor_task is not None:
             return  # Already running
 

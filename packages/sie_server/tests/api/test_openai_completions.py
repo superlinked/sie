@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sie_server.adapters._generation_base import FinishReason, GenerationAdapter, GenerationChunk
+from sie_server.adapters._generation_base import (
+    FinishReason,
+    GenerationAdapter,
+    GenerationCapacityError,
+    GenerationChunk,
+    GenerationDrainingError,
+    GenerationError,
+    GenerationUnsupportedFieldError,
+)
 from sie_server.adapters._spec import AdapterSpec
-from sie_server.api.openai_completions import router
+from sie_server.api import openai_completions
+from sie_server.api.openai_completions import _CompletionError, _stream_completion, router
+from sie_server.config.engine import EngineConfig
 from sie_server.config.model import AdapterOptions, GenerateTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.registry import ModelRegistry
 from sie_server.types.grammar import GrammarSpec
@@ -21,16 +31,37 @@ _GEMMA_OPEN = "<" + "|channel" + ">" + "thought\n"
 _GEMMA_CLOSE = "<" + "channel|" + ">"
 
 
+class _UntrustedUnsupportedFieldError(GenerationUnsupportedFieldError):
+    code = "SENSITIVE_UNSUPPORTED_CODE"
+
+
+class _UntrustedCapacityError(GenerationCapacityError):
+    code = "SENSITIVE_CAPACITY_CODE"
+
+
 class _FakeCompletionAdapter(GenerationAdapter):
     spec = AdapterSpec(inputs=("text",), outputs=("tokens",), unload_fields=())
 
     def __init__(self) -> None:
         self.last_call: dict[str, object] | None = None
+        self.preflight_call: dict[str, object] | None = None
+        self.preflight_stream: bool | None = None
+        self.preflight_error: GenerationError | None = None
+        self.generate_error_after_chunks: int | None = None
+        self.closed = False
         self.text_chunks = ["hello", " world"]
         self.finish_reason: FinishReason = "stop"
+        self.error_code: str | None = None
+        self.error_message: str | None = None
 
     def load(self, device: str) -> None:  # pragma: no cover - registry is mocked loaded
         _ = device
+
+    def preflight_generate(self, parameters: Mapping[str, object], *, stream: bool) -> None:
+        self.preflight_call = dict(parameters)
+        self.preflight_stream = stream
+        if self.preflight_error is not None:
+            raise self.preflight_error
 
     async def generate(
         self,
@@ -65,15 +96,24 @@ class _FakeCompletionAdapter(GenerationAdapter):
             "seed": seed,
         }
         _ = repetition_penalty, grammar, logit_bias, logprobs, top_logprobs, images
-        for index, text in enumerate(self.text_chunks):
-            yield GenerationChunk(text_delta=text, is_first=index == 0)
-        yield GenerationChunk(
-            text_delta="",
-            done=True,
-            finish_reason=self.finish_reason,
-            prompt_tokens=3,
-            completion_tokens=2,
-        )
+        try:
+            if self.generate_error_after_chunks == 0:
+                raise GenerationUnsupportedFieldError("top_k")
+            for index, text in enumerate(self.text_chunks):
+                yield GenerationChunk(text_delta=text, is_first=index == 0)
+                if self.generate_error_after_chunks == index + 1:
+                    raise GenerationUnsupportedFieldError("top_k")
+            yield GenerationChunk(
+                text_delta="",
+                done=True,
+                finish_reason=self.finish_reason,
+                prompt_tokens=3,
+                completion_tokens=2,
+                error_code=self.error_code,
+                error_message=self.error_message,
+            )
+        finally:
+            self.closed = True
 
 
 def _config(model_id: str = "Qwen/Qwen3-4B-Instruct") -> ModelConfig:
@@ -168,6 +208,8 @@ def test_blocking_completion_uses_direct_adapter_and_openai_shape(
         "min_new_tokens": 2,
         "seed": -1,
     }
+    assert adapter.preflight_call == adapter.last_call
+    assert adapter.preflight_stream is False
 
 
 def test_completion_uses_profile_frequency_penalty_and_seed_defaults(
@@ -264,6 +306,324 @@ def test_streaming_completion_surfaces_cancelled_terminal_as_error(
         "code": "generation_cancelled",
     }
     assert all("usage" not in event for event in events)
+
+
+def test_completion_preflight_preserves_exact_parameter_and_skips_dispatch(
+    client: TestClient,
+    adapter: _FakeCompletionAdapter,
+) -> None:
+    adapter.preflight_error = GenerationUnsupportedFieldError("top_k")
+
+    response = client.post(
+        "/v1/completions",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "prompt": "x"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == "top_k"
+    assert adapter.preflight_call is not None
+    assert adapter.last_call is None
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code"),
+    [
+        (_UntrustedUnsupportedFieldError("top_k", "private unsupported detail"), 400),
+        (_UntrustedCapacityError("private capacity detail"), 503),
+    ],
+)
+def test_completion_sanitizes_untrusted_typed_error_codes(
+    client: TestClient,
+    adapter: _FakeCompletionAdapter,
+    error: GenerationError,
+    status_code: int,
+) -> None:
+    adapter.preflight_error = error
+
+    response = client.post(
+        "/v1/completions",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "prompt": "x"},
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["error"]["code"] == "inference_error"
+    assert "SENSITIVE_" not in response.text
+
+
+def test_completion_preserves_typed_synchronous_dispatch_error(
+    client: TestClient,
+    adapter: _FakeCompletionAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(**parameters: object) -> AsyncIterator[GenerationChunk]:
+        _ = parameters
+        raise GenerationUnsupportedFieldError("top_k")
+
+    monkeypatch.setattr(adapter, "generate", refuse)
+
+    response = client.post(
+        "/v1/completions",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "prompt": "x"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == "top_k"
+
+
+@pytest.mark.parametrize("error_after", [0, 1])
+def test_blocking_completion_preserves_typed_iterator_error_and_closes(
+    client: TestClient,
+    adapter: _FakeCompletionAdapter,
+    error_after: int,
+) -> None:
+    adapter.generate_error_after_chunks = error_after
+
+    response = client.post(
+        "/v1/completions",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "prompt": "x"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == "top_k"
+    assert adapter.closed is True
+
+
+def test_streaming_completion_preserves_typed_iterator_error_and_closes(
+    client: TestClient,
+    adapter: _FakeCompletionAdapter,
+) -> None:
+    adapter.generate_error_after_chunks = 1
+
+    response = client.post(
+        "/v1/completions",
+        json={
+            "model": "Qwen/Qwen3-4B-Instruct",
+            "prompt": "x",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+    error = json.loads(payloads[-2])
+    assert error["choices"][0]["finish_reason"] is None
+    assert error["error"]["code"] == "unsupported_field"
+    assert error["error"]["param"] == "top_k"
+    assert payloads[-1] == "[DONE]"
+    assert adapter.closed is True
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("code", "message", "expected_code", "expected_message"),
+    [
+        (
+            "inference_error",
+            "SENSITIVE_COMPLETION_RUNTIME",
+            "inference_error",
+            "internal error during generation",
+        ),
+        (
+            "grammar_compile_failed",
+            "SENSITIVE_COMPLETION_GRAMMAR",
+            "grammar_compile_failed",
+            "internal error compiling grammar",
+        ),
+        (
+            "empty_model_output",
+            "model produced no visible output",
+            "empty_model_output",
+            "model produced no visible output",
+        ),
+        (
+            "SENSITIVE_COMPLETION_ERROR_CODE",
+            "SENSITIVE_COMPLETION_ERROR_CODE",
+            "inference_error",
+            "generation terminated with an upstream error",
+        ),
+    ],
+)
+def test_completion_classifies_adapter_yielded_terminal_errors(
+    client: TestClient,
+    adapter: _FakeCompletionAdapter,
+    stream: bool,
+    code: str,
+    message: str,
+    expected_code: str,
+    expected_message: str,
+) -> None:
+    adapter.finish_reason = "error"
+    adapter.error_code = code
+    adapter.error_message = message
+
+    response = client.post(
+        "/v1/completions",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "prompt": "x", "stream": stream},
+    )
+
+    if stream:
+        assert response.status_code == 200, response.text
+        payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+        error_event = json.loads(payloads[-2])
+        assert error_event["choices"][0]["finish_reason"] is None
+        assert error_event["error"]["code"] == expected_code
+        assert error_event["error"]["message"] == expected_message
+        assert payloads[-1] == "[DONE]"
+    else:
+        assert response.status_code == 500, response.text
+        assert response.json()["error"]["code"] == expected_code
+        assert response.json()["error"]["message"] == expected_message
+    if message.startswith("SENSITIVE_"):
+        assert message not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_delta", [False, True])
+@pytest.mark.parametrize(
+    ("error", "expected_retry_after_s"),
+    [
+        (
+            _CompletionError(
+                "scheduler full",
+                status_code=503,
+                code="RESOURCE_EXHAUSTED",
+                headers={"Retry-After": "12"},
+            ),
+            12,
+        ),
+        (
+            _CompletionError(
+                "scheduler full",
+                status_code=503,
+                code="RESOURCE_EXHAUSTED",
+                headers={"Retry-After": "malformed"},
+            ),
+            None,
+        ),
+        (
+            _CompletionError(
+                "wrong code",
+                status_code=503,
+                code="MODEL_LOADING",
+                headers={"Retry-After": "12"},
+            ),
+            None,
+        ),
+        (
+            _CompletionError(
+                "scheduler draining",
+                status_code=503,
+                code="MODEL_LOADING",
+                headers={"Retry-After": "5"},
+            ),
+            None,
+        ),
+    ],
+)
+async def test_streaming_completion_in_band_retry_authority_matches_gateway_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    after_delta: bool,
+    error: _CompletionError,
+    expected_retry_after_s: int | None,
+) -> None:
+    async def chunks() -> AsyncIterator[GenerationChunk]:
+        if after_delta:
+            yield GenerationChunk(text_delta="partial")
+        if error.code == "MODEL_LOADING" and error.message == "scheduler draining":
+            raise GenerationDrainingError(error.message)
+        raise GenerationCapacityError(error.message)
+
+    monkeypatch.setattr(openai_completions, "_from_generation_error", lambda _exc, _registry: error)
+
+    raw = [
+        event
+        async for event in _stream_completion(
+            chunks(),
+            completion_id="cmpl-test",
+            created=1,
+            model="test/model",
+            include_usage=False,
+            registry=MagicMock(),
+        )
+    ]
+    payloads = [line.removeprefix("data: ").strip() for block in raw for line in block.splitlines() if line]
+    assert payloads[-1] == "[DONE]"
+    events = [json.loads(payload) for payload in payloads[:-1]]
+    if after_delta:
+        assert events[0]["choices"][0]["text"] == "partial"
+    error_event = events[-1]
+    assert error_event["choices"][0]["finish_reason"] is None
+    assert error_event["error"]["code"] == error.code
+    assert error_event["error"]["type"] == error.error_type
+    assert error_event["error"]["param"] == error.param
+    if expected_retry_after_s is None:
+        assert "retry_after_s" not in error_event["error"]
+    else:
+        assert error_event["error"]["retry_after_s"] == expected_retry_after_s
+
+
+@pytest.mark.parametrize("after_delta", [False, True])
+def test_streaming_completion_capacity_error_uses_configured_retry_authority(
+    client: TestClient,
+    registry: MagicMock,
+    adapter: _FakeCompletionAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    after_delta: bool,
+) -> None:
+    registry.engine_config = EngineConfig.model_validate({"oom_recovery": {"retry_after_s": 12}})
+
+    async def refuse(**_parameters: object) -> AsyncIterator[GenerationChunk]:
+        if after_delta:
+            yield GenerationChunk(text_delta="partial")
+        raise GenerationCapacityError("scheduler full")
+
+    monkeypatch.setattr(adapter, "generate", refuse)
+
+    response = client.post(
+        "/v1/completions",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "prompt": "x", "stream": True},
+    )
+
+    assert response.status_code == 200, response.text
+    payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+    assert payloads[-1] == "[DONE]"
+    events = [json.loads(payload) for payload in payloads[:-1]]
+    if after_delta:
+        assert events[0]["choices"][0]["text"] == "partial"
+    error_event = events[-1]
+    assert error_event["choices"][0]["finish_reason"] is None
+    assert error_event["error"] == {
+        "message": "scheduler full",
+        "type": "server_error",
+        "param": None,
+        "code": "RESOURCE_EXHAUSTED",
+        "retry_after_s": 12,
+    }
+
+
+def test_completion_rejects_unsupported_streaming_before_load(
+    client: TestClient,
+    registry: MagicMock,
+) -> None:
+    config = _config()
+    assert config.tasks.generate is not None
+    config.tasks.generate.capabilities.streaming = False
+    registry.get_config.return_value = config
+    registry.is_loaded.return_value = False
+
+    response = client.post(
+        "/v1/completions",
+        json={"model": "Qwen/Qwen3-4B-Instruct", "prompt": "x", "stream": True},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == "stream"
+    registry.start_load_async.assert_not_called()
+    registry.get.assert_not_called()
 
 
 @pytest.mark.parametrize("stream", [False, True])

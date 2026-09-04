@@ -149,13 +149,27 @@ def _make_executor() -> tuple[QueueExecutor, MagicMock]:
     reg.loaded_model_names = ["test/model"]
     reg.is_loaded.return_value = True
     reg.is_loading.return_value = False
+    reg._config_version = 0
     config = MagicMock()
     config.sie_id = "test/model"
     config.outputs = ["dense"]
+    config.tasks.generate = object()
+    config.model_dump.return_value = {"sie_id": "test/model", "tasks": {"generate": {}}}
     config.resolve_profile.return_value.runtime = {}
     reg.get_config.return_value = config
     reg.get_configs_snapshot.return_value = {}
     return QueueExecutor(reg), reg
+
+
+def _generation_config(model_id: str, *, revision: str = "v1", generation: bool = True) -> MagicMock:
+    config = MagicMock()
+    config.tasks.generate = object() if generation else None
+    config.model_dump.return_value = {
+        "sie_id": model_id,
+        "revision": revision,
+        "tasks": {"generate": {} if generation else None},
+    }
+    return config
 
 
 @pytest.fixture(autouse=True)
@@ -1758,7 +1772,7 @@ class TestGenerationSidecarIpc:
 
         assert resp["ok"] is True
         assert resp["body"] == {"matched": True}
-        srv._get_streaming_processor.assert_awaited_once_with(prewarm=False)  # type: ignore[attr-defined]
+        srv._get_streaming_processor.assert_awaited_once_with()  # type: ignore[attr-defined]
         processor.signal_cancel.assert_called_once_with("req-123")
 
     @pytest.mark.asyncio
@@ -1780,7 +1794,7 @@ class TestGenerationSidecarIpc:
         processor.signal_cancel.assert_called_once_with("req-123")
 
     @pytest.mark.asyncio
-    async def test_cancel_created_processor_still_prewarms_on_generate(self) -> None:
+    async def test_cancel_created_processor_still_prewarms_requested_model_on_generate(self) -> None:
         executor, _reg = _make_executor()
         processor = MagicMock()
         sock = _short_sock_path()
@@ -1788,12 +1802,262 @@ class TestGenerationSidecarIpc:
         srv._prewarm_generation_grammars = AsyncMock()  # type: ignore[method-assign]
 
         with patch("sie_server.processors.streaming.StreamingProcessor", return_value=processor):
-            cancel_processor = await srv._get_streaming_processor(prewarm=False)
-            generate_processor = await srv._get_streaming_processor()
+            cancel_processor = await srv._get_streaming_processor()
+            generate_processor = await srv._get_streaming_processor(prewarm_model_id="google/madlad400-3b-mt")
 
         assert cancel_processor is processor
         assert generate_processor is processor
-        srv._prewarm_generation_grammars.assert_awaited_once_with(processor)  # type: ignore[attr-defined]
+        srv._prewarm_generation_grammars.assert_awaited_once_with(  # type: ignore[attr-defined]
+            processor,
+            "google/madlad400-3b-mt",
+        )
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_does_not_touch_unrelated_grammar_model(self) -> None:
+        executor, reg = _make_executor()
+        madlad = _generation_config("google/madlad400-3b-mt")
+        qwen = _generation_config("Qwen/Qwen3.5-4B")
+        reg.get_config.return_value = madlad
+        reg.get_configs_snapshot.return_value = {
+            "google/madlad400-3b-mt": madlad,
+            "Qwen/Qwen3.5-4B": qwen,
+        }
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id="google/madlad400-3b-mt")
+
+        processor.prewarm_grammars_for_model.assert_awaited_once_with("google/madlad400-3b-mt")
+        assert all(
+            args != ("Qwen/Qwen3.5-4B",) for args, _kwargs in processor.prewarm_grammars_for_model.await_args_list
+        )
+        assert reg.get_config.call_count == 1
+        assert all(call.args == ("google/madlad400-3b-mt",) for call in reg.get_config.call_args_list)
+        madlad.model_dump.assert_called_once_with(mode="json")
+        reg.get_configs_snapshot.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_runs_once_per_requested_model(self) -> None:
+        executor, reg = _make_executor()
+        config = _generation_config("google/madlad400-3b-mt")
+        reg.get_config.return_value = config
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id="google/madlad400-3b-mt")
+        await srv._get_streaming_processor(prewarm_model_id="google/madlad400-3b-mt")
+
+        processor.prewarm_grammars_for_model.assert_awaited_once_with("google/madlad400-3b-mt")
+        config.model_dump.assert_called_once_with(mode="json")
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_rejects_unknown_model_before_allocating_state(self) -> None:
+        executor, reg = _make_executor()
+        reg.get_config.side_effect = KeyError("attacker/unknown")
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id="attacker/unknown")
+
+        processor.prewarm_grammars_for_model.assert_not_awaited()
+        assert srv._generation_prewarm_locks == {}
+        assert srv._generation_prewarm_completed == {}
+        assert srv._generation_prewarm_authority_cache == {}
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_rejects_non_generation_model_before_allocating_state(self) -> None:
+        executor, reg = _make_executor()
+        reg.get_config.return_value = _generation_config("embed/model", generation=False)
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id="embed/model")
+
+        processor.prewarm_grammars_for_model.assert_not_awaited()
+        assert srv._generation_prewarm_locks == {}
+        assert srv._generation_prewarm_completed == {}
+        assert srv._generation_prewarm_authority_cache == {}
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_different_models_run_concurrently(self) -> None:
+        executor, reg = _make_executor()
+        model_ids = ("google/madlad400-3b-mt", "Qwen/Qwen3.5-4B")
+        configs = {model_id: _generation_config(model_id) for model_id in model_ids}
+        reg.get_config.side_effect = lambda model_id: configs[model_id]
+        started = {model_id: asyncio.Event() for model_id in model_ids}
+        release = asyncio.Event()
+
+        async def prewarm(model_id: str) -> None:
+            started[model_id].set()
+            await release.wait()
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+        tasks: list[asyncio.Task[object]] = []
+        results: list[object] = []
+        try:
+            tasks.append(asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_ids[0])))
+            await asyncio.wait_for(started[model_ids[0]].wait(), timeout=1)
+            tasks.append(asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_ids[1])))
+            await asyncio.wait_for(started[model_ids[1]].wait(), timeout=1)
+        finally:
+            release.set()
+            results = list(await asyncio.gather(*tasks, return_exceptions=True))
+
+        assert processor.prewarm_grammars_for_model.await_count == 2
+        assert results == [processor, processor]
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_same_model_converges_under_concurrency(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        reg.get_config.return_value = _generation_config(model_id)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def prewarm(_model_id: str) -> None:
+            started.set()
+            await release.wait()
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+        first = asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_id))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        second = asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_id))
+        try:
+            await asyncio.sleep(0)
+            assert processor.prewarm_grammars_for_model.await_count == 1
+            assert second.done() is False
+        finally:
+            release.set()
+
+        assert await asyncio.gather(first, second) == [processor, processor]
+        processor.prewarm_grammars_for_model.assert_awaited_once_with(model_id)
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_retries_after_ordinary_failure(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        reg.get_config.return_value = _generation_config(model_id)
+        attempts = 0
+
+        async def prewarm(_model_id: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("compile failed")
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+        assert model_id not in srv._generation_prewarm_completed
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+
+        assert attempts == 2
+        assert srv._generation_prewarm_completed[model_id] == srv._generation_prewarm_authority(model_id)
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_retries_after_cancellation(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        reg.get_config.return_value = _generation_config(model_id)
+        started = asyncio.Event()
+        blocker = asyncio.Event()
+        attempts = 0
+
+        async def prewarm(_model_id: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                started.set()
+                await blocker.wait()
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        first = asyncio.create_task(srv._get_streaming_processor(prewarm_model_id=model_id))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert model_id not in srv._generation_prewarm_completed
+
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+
+        assert attempts == 2
+        assert model_id in srv._generation_prewarm_completed
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_repeats_after_config_hot_reload(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        config_v1 = _generation_config(model_id, revision="v1")
+        config_v2 = _generation_config(model_id, revision="v2")
+        current = [config_v1]
+        reg.get_config.side_effect = lambda _model_id: current[0]
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock()
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+        first_authority = srv._generation_prewarm_completed[model_id]
+        current[0] = config_v2
+        reg._config_version += 1
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+
+        assert processor.prewarm_grammars_for_model.await_count == 2
+        assert srv._generation_prewarm_completed[model_id] != first_authority
+        assert srv._generation_prewarm_completed[model_id] == srv._generation_prewarm_authority(model_id)
+        config_v1.model_dump.assert_called_once_with(mode="json")
+        config_v2.model_dump.assert_called_once_with(mode="json")
+
+    @pytest.mark.asyncio
+    async def test_generation_prewarm_inflight_aba_does_not_publish_false_completion(self) -> None:
+        executor, reg = _make_executor()
+        model_id = "google/madlad400-3b-mt"
+        current = [_generation_config(model_id, revision="A")]
+        reg.get_config.side_effect = lambda _model_id: current[0]
+        attempts = 0
+
+        async def prewarm(_model_id: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                current[0] = _generation_config(model_id, revision="B", generation=False)
+                reg._config_version += 1
+                assert reg.get_config(model_id).tasks.generate is None
+                current[0] = _generation_config(model_id, revision="A")
+                reg._config_version += 1
+
+        processor = MagicMock()
+        processor.prewarm_grammars_for_model = AsyncMock(side_effect=prewarm)
+        srv = IpcServer(_short_sock_path(), executor, worker_id="w")
+        srv._streaming_processor = processor
+
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+
+        assert model_id not in srv._generation_prewarm_completed
+        await srv._get_streaming_processor(prewarm_model_id=model_id)
+        assert attempts == 2
+        assert srv._generation_prewarm_completed[model_id] == srv._generation_prewarm_authority(model_id)
 
     @pytest.mark.asyncio
     async def test_process_generate_sends_progress_before_lazy_processor(self) -> None:
@@ -1805,9 +2069,10 @@ class TestGenerationSidecarIpc:
         writer = _CapturingWriter()
         work_item_msgpack = msgpack.packb({"request_id": "req-1"}, use_bin_type=True)
 
-        async def get_processor() -> MagicMock:
+        async def get_processor(*, prewarm_model_id: str | None = None) -> MagicMock:
             frames = _decode_written_frames(writer)
             assert [frame["body"]["kind"] for frame in frames] == ["in_progress"]
+            assert prewarm_model_id == "test/model"
             return processor
 
         get_processor_mock = AsyncMock(side_effect=get_processor)
@@ -1822,7 +2087,7 @@ class TestGenerationSidecarIpc:
         frames = _decode_written_frames(writer)
         assert [frame["body"]["kind"] for frame in frames] == ["in_progress", "done"]
         assert [frame["request_id"] for frame in frames] == ["ipc-req-1", "ipc-req-1"]
-        get_processor_mock.assert_awaited_once()
+        get_processor_mock.assert_awaited_once_with(prewarm_model_id="test/model")
         processor.process.assert_awaited_once()
 
 

@@ -24,7 +24,7 @@ def _resp_input_too_long(message: str = "Input exceeds capacity (4096 tokens)") 
     resp = MagicMock()
     resp.status_code = 400
     resp.headers = {"content-type": "application/json"}
-    resp.json.return_value = {"detail": {"code": "INPUT_TOO_LONG", "message": message}}
+    resp.json.return_value = {"detail": {"code": "INPUT_TOO_LONG", "message": message, "param": "items[0].text"}}
     return resp
 
 
@@ -58,6 +58,7 @@ class TestSyncInputTooLong:
             assert excinfo.value.model == "gliclass-large"
             assert excinfo.value.code == "INPUT_TOO_LONG"
             assert excinfo.value.status_code == 400
+            assert excinfo.value.param == "items[0].text"
             assert str(excinfo.value) == "Too many tokens"
             # Critical: no retry happened.
             assert mock_client.return_value.post.call_count == 1
@@ -92,7 +93,7 @@ class TestSyncInputTooLong:
 def _aio_input_too_long(message: str = "Input exceeds capacity (4096 tokens)") -> object:
     return _AioResponse(
         400,
-        json.dumps({"detail": {"code": "INPUT_TOO_LONG", "message": message}}).encode(),
+        json.dumps({"detail": {"code": "INPUT_TOO_LONG", "message": message, "param": "items[0].text"}}).encode(),
         {"content-type": "application/json"},
     )
 
@@ -121,6 +122,7 @@ class TestAsyncInputTooLong:
             assert excinfo.value.model == "gliclass-large"
             assert excinfo.value.code == "INPUT_TOO_LONG"
             assert excinfo.value.status_code == 400
+            assert excinfo.value.param == "items[0].text"
             assert client._post.await_count == 1
             mock_sleep.assert_not_called()
             await client.close()
@@ -152,6 +154,7 @@ class TestHandleErrorDispatch:
             handle_error(_resp_input_too_long("Too many tokens"))
         assert excinfo.value.code == "INPUT_TOO_LONG"
         assert excinfo.value.status_code == 400
+        assert excinfo.value.param == "items[0].text"
         assert str(excinfo.value) == "Too many tokens"
 
     def test_dispatch_does_not_classify_other_400(self) -> None:

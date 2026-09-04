@@ -488,9 +488,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chacha20"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -3773,7 +3773,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sie-audio-prep"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "audioadapter-buffers",
  "opusic-sys",
@@ -3787,7 +3787,7 @@ dependencies = [
 
 [[package]]
 name = "sie-gateway"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "arc-swap",
  "async-nats",
@@ -3849,7 +3849,7 @@ dependencies = [
 
 [[package]]
 name = "sie-server-sidecar"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "async-nats",
