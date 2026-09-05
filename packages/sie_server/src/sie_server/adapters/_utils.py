@@ -117,7 +117,11 @@ def extract_texts(
             kwargs: dict[str, str] = {"text": text}
             if "{instruction}" in template:
                 kwargs["instruction"] = instruction or ""
-            text = template.format(**kwargs)
+
+            try:
+                text = template.format(**kwargs)
+            except KeyError as exc:
+                raise ValueError(f"Unsupported template placeholder: {exc.args[0]!r}") from exc
         elif instruction:
             text = f"{instruction} {text}"
 
