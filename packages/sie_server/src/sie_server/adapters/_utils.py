@@ -121,9 +121,7 @@ def extract_texts(
             try:
                 text = template.format(**kwargs)
             except KeyError as exc:
-                raise ValueError(
-                    f"Unsupported template placeholder: {exc.args[0]!r}"
-                ) from exc
+                raise ValueError(f"Unsupported template placeholder: {exc.args[0]!r}") from exc
         elif instruction:
             text = f"{instruction} {text}"
 
