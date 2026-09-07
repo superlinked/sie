@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 from tools.ci import check_public_tree
@@ -54,6 +55,11 @@ def test_bootstrap_uses_root_locks_even_in_ci() -> None:
     assert "XDG_STATE_HOME" not in mise_config
     assert not (REPOSITORY_ROOT / ".npmrc").exists()
     assert not (REPOSITORY_ROOT / "packages/sie_ts_sdk/pnpm-lock.yaml").exists()
+
+
+def test_bootstrap_installs_canonical_rust_components() -> None:
+    mise_config = tomllib.loads((REPOSITORY_ROOT / "mise.toml").read_text())
+    assert mise_config["tools"]["rust"]["components"] == ["rustfmt", "clippy", "llvm-tools"]
 
 
 def test_ci_is_fork_safe_and_actions_are_immutable() -> None:

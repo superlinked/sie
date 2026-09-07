@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-# cargo-llvm-cov needs the `llvm-tools-preview` rustup component, which
+# cargo-llvm-cov needs the canonical `llvm-tools` rustup component, which
 # mise.toml declares alongside the rust toolchain pin so `mise install`
 # provisions it on every dev machine and CI runner.
 #
