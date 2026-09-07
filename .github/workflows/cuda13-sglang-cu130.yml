@@ -6,7 +6,18 @@ on:
       - .github/workflows/cuda13-sglang-cu130.yml
       - .github/workflows/cuda13-bundle-image.yml
       - tools/ci/cuda13_image_smoke.py
+      - Cargo.toml
+      - Cargo.lock
+      - packages/sie_audio_prep/**
+      - packages/sie_gateway/**
+      - packages/sie_server_sidecar/**
+      - packages/sie_telemetry/**
+      - packages/sie_sdk/pyproject.toml
+      - packages/sie_sdk/src/**
       - packages/sie_server/Dockerfile.cuda13
+      - packages/sie_server/src/**
+      - packages/sie_server/bundles/**
+      - packages/sie_server/models/**
       - packages/sie_server/bundles/sglang-cu130.yaml
       - packages/sie_server/models/Qwen__Qwen3.6-27B.yaml
       - packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml

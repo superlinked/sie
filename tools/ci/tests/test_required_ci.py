@@ -134,10 +134,12 @@ def test_contracts_regenerate_both_openapi_documents_before_exact_diff():
 
 def test_helm_renders_each_cloud_overlay():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-    commands = "\n".join(step.get("run", "") for step in workflow["jobs"]["helm"]["steps"])
+    commands = [step.get("run", "") for step in workflow["jobs"]["helm"]["steps"]]
+    assert "mise run helm -- template --set payloadStore.enabled=false >/dev/null" in commands
+    overlay_command = next(command for command in commands if "for values in" in command)
     for overlay in ("values-aws.yaml", "values-gke.yaml", "values-aks.yaml", "values-ack.yaml"):
-        assert commands.count(overlay) == 1
-    assert "--set payloadStore.enabled=false" in commands
+        assert overlay_command.count(overlay) == 1
+    assert "--set payloadStore.enabled=false" in overlay_command
 
 
 def test_cpu_lane_uses_cpu_stack_task():
@@ -165,34 +167,46 @@ def test_rust_audits_both_committed_dependency_graphs():
     ] in commands
 
 
+CUDA13_SHARED_PATHS = {
+    ".github/workflows/cuda13-bundle-image.yml",
+    "tools/ci/cuda13_image_smoke.py",
+    "Cargo.toml",
+    "Cargo.lock",
+    "packages/sie_audio_prep/**",
+    "packages/sie_gateway/**",
+    "packages/sie_server_sidecar/**",
+    "packages/sie_telemetry/**",
+    "packages/sie_sdk/pyproject.toml",
+    "packages/sie_sdk/src/**",
+    "packages/sie_server/Dockerfile.cuda13",
+    "packages/sie_server/src/**",
+    "packages/sie_server/bundles/**",
+    "packages/sie_server/models/**",
+    "packages/sie_server/pyproject.toml",
+}
+
 CUDA_CALLERS = {
     "cuda13-sglang-cu130.yml": {
         "bundle": "sglang-cu130",
         "image-tag": "sie-cuda13-sglang-cu130:pr",
-        "paths": {
+        "paths": CUDA13_SHARED_PATHS
+        | {
             ".github/workflows/cuda13-sglang-cu130.yml",
-            ".github/workflows/cuda13-bundle-image.yml",
-            "tools/ci/cuda13_image_smoke.py",
-            "packages/sie_server/Dockerfile.cuda13",
             "packages/sie_server/bundles/sglang-cu130.yaml",
             "packages/sie_server/models/Qwen__Qwen3.6-27B.yaml",
             "packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml",
             "packages/sie_server/models/google__gemma-4-*.yaml",
             "packages/sie_server/src/sie_server/adapters/sglang/**",
-            "packages/sie_server/pyproject.toml",
         },
     },
     "cuda13-tensorrt-llm.yml": {
         "bundle": "tensorrt-llm",
         "image-tag": "sie-cuda13-tensorrt-llm:pr",
-        "paths": {
+        "paths": CUDA13_SHARED_PATHS
+        | {
             ".github/workflows/cuda13-tensorrt-llm.yml",
-            ".github/workflows/cuda13-bundle-image.yml",
-            "tools/ci/cuda13_image_smoke.py",
-            "packages/sie_server/Dockerfile.cuda13",
             "packages/sie_server/bundles/tensorrt-llm.yaml",
             "packages/sie_server/src/sie_server/adapters/tensorrt_llm/**",
-            "packages/sie_server/pyproject.toml",
         },
     },
 }
