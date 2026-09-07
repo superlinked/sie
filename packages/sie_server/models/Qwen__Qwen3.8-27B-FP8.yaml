@@ -20,6 +20,7 @@ tasks:
     # exact-hardware profiles whose admission and launch shapes are smoke-tested.
     context_length: 8192
     max_output_tokens: 4096
+    grammar_profile: no-spec
     capabilities:
       grammar: ["json_schema", "regex"]
       streaming: true
@@ -79,6 +80,9 @@ profiles:
           presence_penalty: 1.5
         stop_tokens:
           - "<|im_end|>"
+
+  no-spec:
+    extends: default
 
   # H100-80GB: one native-window admission with in-checkpoint MTP. FA3 plus
   # BF16 GDN state is the measured SM90 batch-one winner. Profile-scoped

@@ -42,6 +42,7 @@ def test_qwen38_uses_the_pinned_official_fp8_checkpoint() -> None:
     assert config.tasks.generate.chat_template_kwargs == {"enable_thinking": False}
     assert set(config.profiles) == {
         "default",
+        "no-spec",
         "h100-256k",
         "h100-256k-no-spec",
         "h200-256k",
@@ -54,7 +55,11 @@ def test_qwen38_uses_the_pinned_official_fp8_checkpoint() -> None:
 def test_qwen38_default_is_a_conservative_non_speculative_route() -> None:
     config = load_model_config(_MODEL_PATH)
     default = config.resolve_profile("default")
+    grammar = config.resolve_profile("no-spec")
 
+    assert config.tasks.generate is not None
+    assert config.tasks.generate.grammar_profile == "no-spec"
+    assert grammar == default
     assert default.adapter_path == _ADAPTER
     assert default.max_batch_tokens == 16384
     assert default.kv_budget_tokens == 8192
