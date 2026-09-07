@@ -1,0 +1,80 @@
+name: Notify sie-web (Release published)
+
+# Fires two repository_dispatch events at superlinked/sie-web whenever a
+# GitHub Release is published here, so the docs site regenerates its
+# release-notes page (sync-release-notes.yml) and bumps the SIE version
+# pinned in the deployment guides (sync-deployment-versions.yml).
+#
+# These dispatches used to be steps inside the internal release/sync
+# workflows and were dropped with the publication rework on 2026-08-18; the
+# docs then sat at v0.7.1 while v0.7.2 and v0.7.3 shipped. Keying off the
+# Release event of this repository keeps the notification independent of how
+# the release is produced. sie-web also polls the latest release daily as a
+# fallback, so a missed event self-heals within a day.
+#
+# Same GitHub App as dispatch-docs-sync.yml; repository_dispatch needs
+# contents:write on the target repo. The default GITHUB_TOKEN cannot dispatch
+# events into another repository.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag to announce, e.g. v0.7.3'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    # Pre-releases never reach the docs; sie-web filters them anyway.
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release version
+        id: version
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+        run: |
+          set -euo pipefail
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          VERSION="${TAG#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag '$TAG' is not a release semver tag (vX.Y.Z)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Announcing release $TAG to sie-web"
+
+      - name: Mint token for sie-web (dispatch)
+        id: sw-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: superlinked
+          repositories: sie-web
+          permission-contents: write
+          permission-metadata: read
+
+      - name: Dispatch release-notes-updated to sie-web
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.sw-token.outputs.token }}
+          repository: superlinked/sie-web
+          event-type: release-notes-updated
+          client-payload: '{"tag": "${{ steps.version.outputs.tag }}", "version": "${{ steps.version.outputs.version }}"}'
+
+      - name: Dispatch deployment-versions-updated to sie-web
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.sw-token.outputs.token }}
+          repository: superlinked/sie-web
+          event-type: deployment-versions-updated
+          client-payload: '{"tag": "${{ steps.version.outputs.tag }}", "version": "${{ steps.version.outputs.version }}"}'
