@@ -139,6 +139,11 @@ jobs:
         with:
           cache: false
       - run: mise run sync
+      - run: mise run openapi
+      - run: >-
+          git diff --exit-code --
+          packages/sie_server/openapi.json
+          packages/sie_gateway/openapi.json
       - run: mise exec -- python tools/check_ipc_types_parity.py
       - run: mise exec -- python tools/check_response_chunk_protocol.py
       - run: tests/parity/run_parity.sh
@@ -157,6 +162,11 @@ jobs:
       - run: mise run helm -- dependencies
       - run: mise run helm -- lint --set payloadStore.enabled=false
       - run: mise run helm -- template --set payloadStore.enabled=false >/dev/null
+      - name: Render public cloud overlays
+        run: |
+          for values in values-aws.yaml values-gke.yaml values-aks.yaml values-ack.yaml; do
+            mise run helm -- template -f "deploy/helm/sie-cluster/${values}" --set payloadStore.enabled=false >/dev/null
+          done
       - run: |
           destination="$(mktemp -d)"
           mise exec -- helm package deploy/helm/sie-cluster --destination "$destination"
@@ -201,8 +211,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           cache: false
-      - run: mise run sync
-      - run: mise exec -- uv run --frozen --project . --no-sync python -m tools.ci.cpu_stack_smoke
+      - run: mise run cpu-stack
       - name: Preserve diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

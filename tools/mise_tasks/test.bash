@@ -2,7 +2,7 @@
 #MISE description="Run tests"
 #USAGE flag "-c --coverage" help="Run with coverage report"
 #USAGE flag "-i --integration" help="Run integration tests (requires running server)"
-#USAGE flag "-d --docker" help="Run Docker integration tests (slow, builds Docker image)"
+#USAGE flag "-d --docker" help="Run the full CPU-container stack (slow, requires local Linux Docker)"
 #USAGE flag "-l --collect-only" help="Only collect and list test names, don't run them"
 #USAGE flag "-k --filter <filter>" help="Filter tests by name expression (passed to pytest -k)"
 #USAGE flag "-m --model <model>" help="Run model tests for a model ID (e.g. BAAI/bge-m3) or 'all' for all models"
@@ -11,6 +11,16 @@
 set -euo pipefail
 
 ARGS=()
+
+if [[ "${usage_docker:-}" == "true" ]]; then
+    if [[ "${usage_collect_only:-}" == "true" || "${usage_coverage:-}" == "true" || \
+          "${usage_integration:-}" == "true" || -n "${usage_filter:-}" || \
+          -n "${usage_model:-}" || -n "${usage_path:-}" ]]; then
+        echo "ERROR: --docker delegates to 'mise run cpu-stack' and cannot be combined with pytest selectors." >&2
+        exit 1
+    fi
+    exec mise run cpu-stack
+fi
 
 if [[ "${usage_collect_only:-}" == "true" ]]; then
     ARGS+=("--collect-only" "-q")
@@ -26,9 +36,7 @@ if [[ -n "${usage_filter:-}" ]]; then
     ARGS+=("-k" "${usage_filter}")
 fi
 
-if [[ "${usage_docker:-}" == "true" ]]; then
-    ARGS+=("-m" "docker" "-s" "-o" "log_cli=true" "-o" "log_cli_level=INFO")
-elif [[ "${usage_integration:-}" == "true" ]]; then
+if [[ "${usage_integration:-}" == "true" ]]; then
     ARGS+=("-m" "integration" "-s" "-o" "log_cli=true" "-o" "log_cli_level=INFO")
 fi
 
@@ -51,23 +59,16 @@ echo "## Syncing public workspace"
 mise exec -- uv sync --frozen --project . --all-packages --no-install-package sie-audio-prep
 
 if [[ -n "${usage_model:-}" ]]; then
-    ARGS+=("packages/sie_server/tests/test_all_models.py" "-m" "model")
-    if [[ "${usage_model}" != "all" ]]; then
-        sanitized=$(echo "${usage_model}" | sed 's/[^a-zA-Z0-9]/_/g' | tr '[:upper:]' '[:lower:]')
-        # Test names may not include the full model ID; trim from right until matches exist.
-        all_tests=$(mise exec -- uv run --frozen --project . --no-sync pytest -c pyproject.toml \
-            packages/sie_server/tests/test_all_models.py -m model --collect-only -q 2>/dev/null || true)
-        while [[ -n "$sanitized" ]]; do
-            if echo "$all_tests" | grep -qi "$sanitized"; then
-                break
-            fi
-            sanitized="${sanitized%_*}"
-        done
-        if [[ -n "$sanitized" ]]; then
-            ARGS+=("-k" "${sanitized}")
-        else
-            echo "WARNING: no tests found matching model '${usage_model}'" >&2
-        fi
+    ARGS+=("-m" "model")
+    if [[ "${usage_model}" == "all" ]]; then
+        ARGS+=("packages/sie_server/tests/test_all_models.py")
+    else
+        selected_tests=$(mise exec -- python tools/mise_tasks/model_test_selection.py "${usage_model}")
+        model_node_ids=()
+        while IFS= read -r node_id; do
+            model_node_ids+=("${node_id}")
+        done <<<"${selected_tests}"
+        ARGS+=("${model_node_ids[@]}")
     fi
 fi
 

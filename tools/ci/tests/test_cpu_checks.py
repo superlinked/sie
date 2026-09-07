@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 from tools.ci import cpu_stack_smoke, live_sdk, rust_tests
+
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_rust_fails_without_nats(monkeypatch):
@@ -83,3 +86,13 @@ def test_cpu_builds_all_six_images_without_publish(monkeypatch):
     assert all(command[:4] == ["mise", "run", "docker", "--"] for command in commands)
     assert all("--push" not in command for command in commands)
     assert [command[command.index("--service") + 1] for command in commands[1:]] == list(cpu_stack_smoke.SERVICES)
+
+
+def test_cpu_stack_task_wraps_one_harness_and_docker_flag_delegates():
+    wrapper = (ROOT / "tools/mise_tasks/cpu-stack.bash").read_text()
+    test_task = (ROOT / "tools/mise_tasks/test.bash").read_text()
+    assert "mise run sync" in wrapper
+    assert "python -m tools.ci.cpu_stack_smoke" in wrapper
+    assert "exec mise run cpu-stack" in test_task
+    assert 'ARGS+=("-m" "docker"' not in test_task
+    assert "test_docker_integration.py" not in test_task

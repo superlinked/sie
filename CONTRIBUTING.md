@@ -152,6 +152,28 @@ workflow adds full-workspace harnesses and policy gates described below.
 | HTTP and wire contracts | `mise exec -- python tools/check_ipc_types_parity.py`, `mise exec -- python tools/check_response_chunk_protocol.py`, and `tests/parity/run_parity.sh` |
 | Helm chart | `mise run helm -- dependencies`, `mise run helm -- lint --set payloadStore.enabled=false`, and `mise run helm -- template --set payloadStore.enabled=false` |
 
+### Hosted-CI equivalents
+
+These scoped checks are slower and should be run when the corresponding surface changes.
+
+For the live SDK surface, synchronize all dependencies, build the TypeScript workspace, then run the same live and fake-stack checks as hosted CI:
+
+```bash
+mise run full-sync
+mise run ts -- build
+mise exec -- uv run --frozen --project . --no-sync python tools/ci/live_sdk.py
+mise exec -- uv run --frozen --project . --no-sync pytest -q packages/sie_server/tests/fake_stack/test_sdk_surface.py -m integration
+```
+
+For CPU images and their queue topology, use `mise run cpu-stack`. This requires a local Linux Docker daemon and uses the checked-in fake model, so it does not download model weights.
+
+For Python or npm distribution consumers, build into a fresh temporary output path:
+
+```bash
+mise exec -- uv run --frozen --project . --no-sync python tools/ci/distributions.py build python --directory "$(mktemp -d)/python"
+mise exec -- uv run --frozen --project . --no-sync python tools/ci/distributions.py build npm --directory "$(mktemp -d)/npm"
+```
+
 The standalone Candle worker is outside the root Rust workspace. Validate it
 directly:
 
