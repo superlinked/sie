@@ -25,7 +25,7 @@ dev = [
     # sie-crewai pulls uv in as a runtime dependency. Pin it to the same
     # version mise manages so an all-package sync cannot shadow the task
     # runner's uv executable with a different resolver.
-    "uv==0.5.31",
+    "uv==0.12.10",
 ]
 
 [tool.uv]
