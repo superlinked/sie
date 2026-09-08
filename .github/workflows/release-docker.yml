@@ -31,6 +31,8 @@ jobs:
           ref: ${{ inputs.sha }}
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
       - id: resolve
         name: Validate source closure and coordinated versions
         env:
@@ -60,6 +62,8 @@ jobs:
           ref: ${{ inputs.sha }}
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - id: restore
         name: Reuse an already retained original-run image on retry
@@ -149,6 +153,8 @@ jobs:
           python3 tools/ci/release_guard.py publish --source-ref "$RELEASE_SHA"
           --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -183,6 +189,8 @@ jobs:
           ref: ${{ inputs.sha }}
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - id: restore
         name: Reuse an already retained original-run image on retry
@@ -273,6 +281,8 @@ jobs:
           python3 tools/ci/release_guard.py publish --source-ref "$RELEASE_SHA"
           --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -314,6 +324,8 @@ jobs:
           ref: ${{ inputs.sha }}
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -377,6 +389,8 @@ jobs:
           python3 tools/ci/release_guard.py publish --source-ref "$RELEASE_SHA"
           --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

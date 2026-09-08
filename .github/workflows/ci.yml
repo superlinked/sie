@@ -23,6 +23,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.5.5
           cache: false
       - run: >-
           mise exec -- uv run --frozen --project . pytest -q
@@ -44,6 +45,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.5.5
           cache: false
           install: false
       - run: bash tools/ci/fresh_bootstrap.bash
@@ -58,6 +60,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.5.5
           cache: false
       - run: mise exec -- uv lock --check --project .
       - run: mise run sync
@@ -86,6 +89,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.5.5
           cache: false
       - run: mise exec -- pnpm install --frozen-lockfile
       - run: mise run ts -- build
@@ -103,6 +107,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.5.5
           cache: false
       - run: mise run sync
       - run: mise run rust-fmt -- --check
@@ -137,6 +142,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.5.5
           cache: false
       - run: mise run sync
       - run: mise run openapi
@@ -158,6 +164,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.5.5
           cache: false
       - run: mise run helm -- dependencies
       - run: mise run helm -- lint --set payloadStore.enabled=false
@@ -182,6 +189,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.5.5
           cache: false
       - run: mise run sync
       - run: mise exec -- pnpm install --frozen-lockfile
@@ -210,6 +218,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
+          version: 2026.5.5
           cache: false
       - run: mise run cpu-stack
       - name: Preserve diagnostics

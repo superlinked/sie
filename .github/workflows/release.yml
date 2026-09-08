@@ -81,6 +81,8 @@ jobs:
           manifest-file: .release-please-manifest.json
           skip-github-release: ${{ steps.seed.outputs.at_seed }}
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
         if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
       - name: Refresh coupled locks on the release pull request
         if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'

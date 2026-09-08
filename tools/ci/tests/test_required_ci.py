@@ -78,7 +78,7 @@ def test_bootstrap_is_uncached_and_checks_all_locks():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     bootstrap = workflow["jobs"]["bootstrap"]
     setup = next(step for step in bootstrap["steps"] if step.get("uses", "").startswith("jdx/mise-action@"))
-    assert setup["with"] == {"cache": False, "install": False}
+    assert setup["with"] == {"version": "2026.5.5", "cache": False, "install": False}
     script = (ROOT / "tools/ci/fresh_bootstrap.bash").read_text()
     assert "./tools/init.sh" in script
     assert "test ! -e .venv" in script
@@ -86,6 +86,18 @@ def test_bootstrap_is_uncached_and_checks_all_locks():
     for lock in ("uv.lock", "pnpm-lock.yaml", "Cargo.lock"):
         assert lock in script
     assert "sha256sum --check" in script
+
+
+def test_mise_workflow_setups_pin_concrete_versions():
+    for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+        workflow = yaml.safe_load(path.read_text())
+        for name, job in workflow["jobs"].items():
+            for step in job.get("steps", []):
+                if step.get("uses", "").startswith("jdx/mise-action@"):
+                    version = step.get("with", {}).get("version")
+                    assert re.fullmatch(r"[0-9]{4}\.[0-9]+\.[0-9]+", str(version)), (
+                        f"{path.name}: {name} must pin a concrete mise version"
+                    )
 
 
 @pytest.mark.parametrize(("mutate_lock", "old_venv", "code"), [(False, False, 0), (True, False, 1), (False, True, 1)])
