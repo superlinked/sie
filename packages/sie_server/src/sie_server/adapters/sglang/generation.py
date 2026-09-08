@@ -1138,6 +1138,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # alongside ``return_logprob``. Added to the request bodies below.
         # Merge default sampling from model config (request fields win).
         for k, v in self._default_sampling.items():
+            if grammar is not None and k == "min_new_tokens":
+                continue
             sampling_params.setdefault(k, v)
         # A profile-level minimum is a soft default, while the request's
         # ``max_new_tokens`` is a hard caller limit. Cap the default to that

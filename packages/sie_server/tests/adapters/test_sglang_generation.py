@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import subprocess
 import sys
@@ -1036,6 +1037,112 @@ def test_generate_explicit_min_new_tokens_overrides_profile_default_when_valid(
     sampling_params = client_instance.stream.call_args.kwargs["json"]["sampling_params"]
     assert sampling_params["max_new_tokens"] == 8
     assert sampling_params["min_new_tokens"] == 2
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(GrammarSpec(kind="json_schema", value={"type": "string"}), id="json_schema"),
+        pytest.param(GrammarSpec(kind="regex", value="[a-z]+"), id="regex"),
+        pytest.param(GrammarSpec(kind="ebnf", value='root ::= "ok"'), id="ebnf"),
+    ]
+)
+def grammar_default_sampling_spec(request: pytest.FixtureRequest) -> GrammarSpec:
+    return request.param
+
+
+@pytest.mark.parametrize(
+    ("min_new_tokens", "top_k", "repetition_penalty"),
+    [
+        pytest.param(None, None, None, id="inherited"),
+        pytest.param(0, None, None, id="explicit-zero"),
+        pytest.param(2, 5, 1.2, id="explicit-overrides"),
+    ],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_grammar_default_sampling(
+    mock_async_client: MagicMock,
+    grammar_default_sampling_spec: GrammarSpec,
+    min_new_tokens: int | None,
+    top_k: int | None,
+    repetition_penalty: float | None,
+) -> None:
+    sse_lines = [
+        'data: {"text": "ok", "meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "stop"}}}',
+    ]
+    client_instance = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    mock_async_client.return_value = client_instance
+    default_sampling = {"min_new_tokens": 10, "top_k": 17, "repetition_penalty": 1.1}
+    expected_defaults = default_sampling.copy()
+    adapter = SGLangGenerationAdapter("test-model", default_sampling=default_sampling)
+    adapter._server_url = "http://localhost:30005"
+    grammar = grammar_default_sampling_spec
+
+    asyncio.run(
+        collect_generation(
+            adapter.generate(
+                prompt="Hi",
+                max_new_tokens=3,
+                min_new_tokens=min_new_tokens,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                grammar=grammar,
+            )
+        )
+    )
+
+    sampling_params = client_instance.stream.call_args.kwargs["json"]["sampling_params"]
+    assert sampling_params["max_new_tokens"] == 3
+    if min_new_tokens is None:
+        assert "min_new_tokens" not in sampling_params
+    else:
+        assert sampling_params["min_new_tokens"] == min_new_tokens
+    assert sampling_params["top_k"] == (17 if top_k is None else top_k)
+    assert sampling_params["repetition_penalty"] == pytest.approx(
+        1.1 if repetition_penalty is None else repetition_penalty
+    )
+    expected_grammar = json.dumps(grammar.value) if grammar.kind == "json_schema" else grammar.value
+    assert {key: sampling_params[key] for key in ("json_schema", "regex", "ebnf") if key in sampling_params} == {
+        grammar.kind: expected_grammar
+    }
+    assert adapter._default_sampling == expected_defaults
+    assert default_sampling == expected_defaults
+
+    for max_new_tokens in (1, 64):
+        asyncio.run(collect_generation(adapter.generate(prompt="Hi", max_new_tokens=max_new_tokens)))
+        unconstrained_sampling = client_instance.stream.call_args.kwargs["json"]["sampling_params"]
+        assert unconstrained_sampling["min_new_tokens"] == min(10, max_new_tokens)
+        assert unconstrained_sampling["top_k"] == 17
+        assert unconstrained_sampling["repetition_penalty"] == pytest.approx(1.1)
+        assert not {"json_schema", "regex", "ebnf"}.intersection(unconstrained_sampling)
+
+    assert adapter._default_sampling == expected_defaults
+    assert default_sampling == expected_defaults
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_grammar_default_sampling_rejects_explicit_min_above_max(
+    mock_async_client: MagicMock,
+    grammar_default_sampling_spec: GrammarSpec,
+) -> None:
+    adapter = SGLangGenerationAdapter(
+        "test-model",
+        default_sampling={"min_new_tokens": 10, "top_k": 17, "repetition_penalty": 1.1},
+    )
+    adapter._server_url = "http://localhost:30005"
+
+    with pytest.raises(ValueError, match=r"min_new_tokens \(10\) must not exceed max_new_tokens \(1\)"):
+        asyncio.run(
+            collect_generation(
+                adapter.generate(
+                    prompt="Hi",
+                    max_new_tokens=1,
+                    min_new_tokens=10,
+                    grammar=grammar_default_sampling_spec,
+                )
+            )
+        )
+
+    mock_async_client.assert_not_called()
 
 
 @pytest.mark.parametrize("seed", [-1, 0, 1])
