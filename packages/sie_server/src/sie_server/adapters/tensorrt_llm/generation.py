@@ -47,6 +47,38 @@ _POOL_TIMEOUT_S = 10.0
 _CLIENT_CLOSE_TIMEOUT_S = 2.0
 
 
+def _decode_completion(tokenizer: Any, token_ids: list[int]) -> str:
+    try:
+        text = tokenizer.decode(token_ids, skip_special_tokens=True)
+    except Exception as exc:
+        raise RuntimeError("TensorRT-LLM completion detokenization failed") from exc
+    if not isinstance(text, str):
+        raise RuntimeError("TensorRT-LLM completion detokenization returned a non-string")
+    return text
+
+
+def _trim_textual_stop(tokenizer: Any, token_ids: list[int], stop_reason: str) -> tuple[str, int]:
+    """Trim the exact stop-token suffix retained by TensorRT-LLM rc24."""
+    if not stop_reason:
+        raise RuntimeError("TensorRT-LLM textual stop reason must be non-empty")
+    try:
+        stop_token_ids = tokenizer.encode(stop_reason, add_special_tokens=False)
+    except Exception as exc:
+        raise RuntimeError("TensorRT-LLM textual stop tokenization failed") from exc
+    if (
+        not isinstance(stop_token_ids, list)
+        or not stop_token_ids
+        or any(
+            isinstance(token_id, bool) or not isinstance(token_id, int) or token_id < 0 for token_id in stop_token_ids
+        )
+    ):
+        raise RuntimeError("TensorRT-LLM textual stop tokenization returned invalid token ids")
+    trim_token_count = len(stop_token_ids)
+    if token_ids[-trim_token_count:] != stop_token_ids:
+        raise RuntimeError("TensorRT-LLM textual stop reason does not match the token-id suffix")
+    return _decode_completion(tokenizer, token_ids[:-trim_token_count]), trim_token_count
+
+
 def _positive_int(name: str, value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be an integer > 0")
@@ -633,6 +665,7 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
             "max_tokens": max_new_tokens,
             "temperature": temperature,
             "top_p": top_p,
+            "detokenize": False,
             "stream": True,
             "stream_options": {"include_usage": True},
             "n": 1,
@@ -648,6 +681,8 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
             "logit_bias": logit_bias,
         }
         request.update({name: value for name, value in optional.items() if value is not None})
+        if stop:
+            request["include_stop_str_in_output"] = True
         if logprobs:
             request["logprobs"] = top_logprobs if top_logprobs is not None else 1
 
@@ -686,8 +721,14 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
         client = await self._get_or_create_http_client()
         finish_reason: FinishReason | None = None
         usage_completion_tokens: int | None = None
-        first_text_emitted = False
+        terminal_stop_reason: str | int | None = None
         saw_done = False
+        received_token_ids: list[int] = []
+        received_logprobs: list[dict[str, Any]] = []
+        stop_strings = cast("list[str]", request.get("stop") or [])
+        tokenizer = self._tokenizer
+        if tokenizer is None:
+            raise RuntimeError(ERR_NOT_LOADED)
 
         async with client.stream("POST", f"{server_url}/v1/completions", json=request) as response:
             if response.status_code != 200:
@@ -703,13 +744,40 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
                 if data == "[DONE]":
                     if finish_reason is None or usage_completion_tokens is None:
                         raise RuntimeError("TensorRT-LLM completion ended without finish reason and usage")
+                    if usage_completion_tokens != len(received_token_ids):
+                        raise RuntimeError("TensorRT-LLM completion usage does not match streamed token ids")
+                    trim_token_count = 0
+                    final_text: str | None = None
+                    if isinstance(terminal_stop_reason, str):
+                        final_text, trim_token_count = _trim_textual_stop(
+                            tokenizer, received_token_ids, terminal_stop_reason
+                        )
+                    elif terminal_stop_reason is not None and request.get("include_stop_str_in_output") is True:
+                        if not received_token_ids or received_token_ids[-1] != terminal_stop_reason:
+                            raise RuntimeError("TensorRT-LLM token stop reason does not match the token-id suffix")
+                        trim_token_count = 1
+                    completion_token_ids = (
+                        received_token_ids[:-trim_token_count] if trim_token_count else received_token_ids
+                    )
+                    completion_logprobs = (
+                        received_logprobs[:-trim_token_count] if trim_token_count else received_logprobs
+                    )
+                    if final_text is None:
+                        final_text = _decode_completion(tokenizer, completion_token_ids)
+                    final_logprobs = tuple(completion_logprobs) or None
+                    if final_text or final_logprobs:
+                        yield GenerationChunk(
+                            text_delta=final_text,
+                            is_first=bool(final_text),
+                            logprobs=final_logprobs,
+                        )
                     saw_done = True
                     yield GenerationChunk(
                         text_delta="",
                         done=True,
                         finish_reason=finish_reason,
                         prompt_tokens=prompt_token_count,
-                        completion_tokens=usage_completion_tokens,
+                        completion_tokens=len(completion_token_ids),
                     )
                     break
                 try:
@@ -727,38 +795,74 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
                 if not isinstance(choices, list):
                     raise RuntimeError("TensorRT-LLM completion event is missing choices")
                 if choices:
-                    if len(choices) != 1 or not isinstance(choices[0], Mapping) or choices[0].get("index", 0) != 0:
+                    if finish_reason is not None:
+                        raise RuntimeError("TensorRT-LLM completion emitted a choice after its terminal choice")
+                    if len(choices) != 1 or not isinstance(choices[0], Mapping):
                         raise RuntimeError("TensorRT-LLM completion emitted unsupported multiple choices")
                     choice = choices[0]
-                    text = choice.get("text", "")
-                    if not isinstance(text, str):
-                        raise RuntimeError("TensorRT-LLM completion text must be a string")
-                    event_finish = choice.get("finish_reason")
+                    index = choice.get("index")
+                    if type(index) is not int or index != 0:
+                        raise RuntimeError("TensorRT-LLM completion emitted unsupported multiple choices")
+                    if "text" not in choice or not isinstance(choice["text"], str):
+                        raise RuntimeError("TensorRT-LLM completion text must be an explicit string")
+                    if choice["text"]:
+                        raise RuntimeError("TensorRT-LLM completion text must be empty when detokenization is disabled")
+                    if "token_ids" not in choice:
+                        raise RuntimeError("TensorRT-LLM completion token ids must be explicit arrays")
+                    token_ids = choice["token_ids"]
+                    if not isinstance(token_ids, list) or any(
+                        isinstance(token_id, bool) or not isinstance(token_id, int) or token_id < 0
+                        for token_id in token_ids
+                    ):
+                        raise RuntimeError("TensorRT-LLM completion token ids must be non-negative integer arrays")
+                    if "finish_reason" not in choice:
+                        raise RuntimeError("TensorRT-LLM completion finish reason must be explicit")
+                    event_finish = choice["finish_reason"]
+                    if event_finish is not None and (
+                        not isinstance(event_finish, str) or event_finish not in {"stop", "length"}
+                    ):
+                        raise RuntimeError("TensorRT-LLM completion finish reason is invalid")
+                    if "stop_reason" not in choice:
+                        raise RuntimeError("TensorRT-LLM completion stop reason must be explicit")
+                    event_stop_reason = choice["stop_reason"]
+                    if (
+                        isinstance(event_stop_reason, bool)
+                        or (isinstance(event_stop_reason, int) and event_stop_reason < 0)
+                        or not isinstance(event_stop_reason, str | int | None)
+                    ):
+                        raise RuntimeError("TensorRT-LLM completion stop reason is invalid")
+                    if event_finish in {None, "length"} and event_stop_reason is not None:
+                        raise RuntimeError("TensorRT-LLM completion emitted a stop reason without a stop finish")
+                    if isinstance(event_stop_reason, str) and event_stop_reason not in stop_strings:
+                        raise RuntimeError("TensorRT-LLM completion emitted an unrequested textual stop reason")
                     if event_finish is not None:
                         if event_finish not in {"stop", "length"}:
                             raise RuntimeError(f"unsupported TensorRT-LLM finish reason {event_finish!r}")
                         if finish_reason is not None:
                             raise RuntimeError("TensorRT-LLM completion emitted multiple finish reasons")
                         finish_reason = cast("FinishReason", event_finish)
-                    if text:
-                        if finish_reason is not None and event_finish is None:
-                            raise RuntimeError("TensorRT-LLM emitted text after its terminal choice")
-                        choice_logprobs = _completion_logprobs(choice.get("logprobs"))
-                        if logprobs_requested and choice_logprobs is None:
+                        terminal_stop_reason = event_stop_reason
+                    choice_logprobs = _completion_logprobs(choice.get("logprobs"))
+                    if choice.get("logprobs") is not None and len(choice_logprobs or ()) != len(token_ids):
+                        raise RuntimeError("TensorRT-LLM completion logprobs do not align with token ids")
+                    if logprobs_requested:
+                        if token_ids and choice_logprobs is None:
                             raise RuntimeError("TensorRT-LLM omitted requested completion logprobs")
-                        yield GenerationChunk(
-                            text_delta=text,
-                            is_first=not first_text_emitted,
-                            logprobs=choice_logprobs,
-                        )
-                        first_text_emitted = True
+                    elif choice.get("logprobs") is not None:
+                        raise RuntimeError("TensorRT-LLM emitted unrequested completion logprobs")
+                    received_token_ids.extend(token_ids)
+                    if choice_logprobs:
+                        received_logprobs.extend(choice_logprobs)
 
                 event_usage = event.get("usage")
                 if event_usage is not None:
+                    if choices or finish_reason is None:
+                        raise RuntimeError("TensorRT-LLM completion emitted usage before its terminal choice")
                     if usage_completion_tokens is not None or not isinstance(event_usage, Mapping):
                         raise RuntimeError("TensorRT-LLM completion emitted invalid duplicate usage")
                     child_prompt_tokens = event_usage.get("prompt_tokens")
                     child_completion_tokens = event_usage.get("completion_tokens")
+                    child_total_tokens = event_usage.get("total_tokens")
                     if (
                         isinstance(child_prompt_tokens, bool)
                         or not isinstance(child_prompt_tokens, int)
@@ -766,6 +870,9 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
                         or isinstance(child_completion_tokens, bool)
                         or not isinstance(child_completion_tokens, int)
                         or child_completion_tokens < 0
+                        or isinstance(child_total_tokens, bool)
+                        or not isinstance(child_total_tokens, int)
+                        or child_total_tokens != child_prompt_tokens + child_completion_tokens
                     ):
                         raise RuntimeError("TensorRT-LLM completion usage is invalid")
                     # rc24 reports its internal decoder prefix here for

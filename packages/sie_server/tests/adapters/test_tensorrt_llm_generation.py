@@ -33,6 +33,29 @@ class _FixtureTokenizer:
         self.calls.append((prompt, add_special_tokens))
         return list(range(len(prompt.split()) + int(add_special_tokens)))
 
+    def decode(self, token_ids: list[int], *, skip_special_tokens: bool) -> str:
+        assert skip_special_tokens
+        pieces = {10: " bonjour", 11: " monde", 12: "ok", 13: "x", 14: "late"}
+        return "".join(pieces[token_id] for token_id in token_ids)
+
+
+class _SequenceTokenizer(_FixtureTokenizer):
+    def __init__(self, sequences: dict[tuple[int, ...], str]) -> None:
+        super().__init__()
+        self.sequences = sequences
+        self.decode_calls: list[tuple[tuple[int, ...], bool]] = []
+
+    def encode(self, prompt: str, *, add_special_tokens: bool) -> list[int]:
+        if not add_special_tokens:
+            self.calls.append((prompt, add_special_tokens))
+            assert prompt == "<stop>"
+            return [90, 91]
+        return super().encode(prompt, add_special_tokens=add_special_tokens)
+
+    def decode(self, token_ids: list[int], *, skip_special_tokens: bool) -> str:
+        self.decode_calls.append((tuple(token_ids), skip_special_tokens))
+        return self.sequences[tuple(token_ids)]
+
 
 def _adapter(**kwargs: Any) -> TensorRTLLMGenerationAdapter:
     adapter = TensorRTLLMGenerationAdapter(
@@ -63,6 +86,383 @@ def _sse(*events: object) -> bytes:
     lines = [f"data: {json.dumps(event)}\n\n" for event in events]
     lines.append("data: [DONE]\n\n")
     return "".join(lines).encode()
+
+
+def _choice(token_ids: list[int], **fields: Any) -> dict[str, Any]:
+    return {
+        "choices": [
+            {"index": 0, "text": "", "token_ids": token_ids, "finish_reason": None, "stop_reason": None, **fields}
+        ]
+    }
+
+
+def _usage(completion_tokens: int, *, prompt_tokens: int = 1) -> dict[str, Any]:
+    return {
+        "choices": [],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
+def _token_logprobs(*tokens: str) -> dict[str, Any]:
+    return {"tokens": list(tokens), "token_logprobs": [-0.2] * len(tokens), "top_logprobs": [None] * len(tokens)}
+
+
+@pytest.mark.parametrize(
+    ("token_ids", "sequences", "expected"),
+    [
+        ([10, 11, 12], {(10,): "Hello", (11,): ",", (12,): "world", (10, 11, 12): "Hello, world"}, "Hello, world"),
+        ([70, 71, 70, 71], {(70,): "", (71,): ".", (70, 71, 70, 71): ". ."}, ". ."),
+        (
+            list(range(10, 50)),
+            {(10,): "old prefix", tuple(range(10, 49)): "old prefix continued", tuple(range(10, 50)): "rewritten!"},
+            "rewritten!",
+        ),
+    ],
+)
+def test_preserves_token_stream_whole_sequence_text(
+    token_ids: list[int], sequences: dict[tuple[int, ...], str], expected: str
+) -> None:
+    adapter = _adapter()
+    tokenizer = _SequenceTokenizer(sequences)
+    adapter._tokenizer = tokenizer
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_sse(
+                *(_choice([token_id]) for token_id in token_ids),
+                _choice([], finish_reason="length"),
+                _usage(len(token_ids)),
+            ),
+        )
+
+    adapter._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        chunks = asyncio.run(_collect(adapter.generate("exact  prompt", max_new_tokens=64, stream=True)))
+        assert [chunk.text_delta for chunk in chunks] == [expected, ""]
+        assert chunks[0].is_first is True
+        assert chunks[-1].done is True
+        assert chunks[-1].finish_reason == "length"
+        assert (chunks[-1].prompt_tokens, chunks[-1].completion_tokens) == (3, len(token_ids))
+        assert tokenizer.decode_calls == [(tuple(token_ids), True)]
+        assert captured["prompt"] == "exact  prompt"
+        assert captured["detokenize"] is False
+        assert "include_stop_str_in_output" not in captured
+    finally:
+        asyncio.run(adapter.aclose_client())
+
+
+def test_preserves_token_stream_split_stop_and_logprob_alignment() -> None:
+    adapter = _adapter()
+    tokenizer = _SequenceTokenizer({(10, 90, 91, 11): "earlier <stop> stays"})
+    adapter._tokenizer = tokenizer
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_sse(
+                _choice([10, 90, 91], logprobs=_token_logprobs("earlier", "<", "stop>")),
+                _choice([11, 90], logprobs=_token_logprobs(" stays", "<")),
+                _choice([91], finish_reason="stop", stop_reason="<stop>", logprobs=_token_logprobs("stop>")),
+                _usage(6),
+            ),
+        )
+
+    adapter._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        chunks = asyncio.run(_collect(adapter.generate("prompt", max_new_tokens=8, stop=["<stop>"], logprobs=True)))
+        assert [chunk.text_delta for chunk in chunks] == ["earlier <stop> stays", ""]
+        assert [entry["token"] for entry in chunks[0].logprobs] == ["earlier", "<", "stop>", " stays"]
+        assert (chunks[-1].prompt_tokens, chunks[-1].completion_tokens) == (2, 4)
+        assert tokenizer.decode_calls == [((10, 90, 91, 11), True)]
+        assert tokenizer.calls == [("prompt", True), ("<stop>", False)]
+        assert captured["include_stop_str_in_output"] is True
+    finally:
+        asyncio.run(adapter.aclose_client())
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        (_choice([10], finish_reason="stop"), _usage(2)),
+        (_choice([10], finish_reason="stop"), {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+        (
+            _choice([10], finish_reason="stop"),
+            {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 9}},
+        ),
+        (_usage(1), _choice([10], finish_reason="stop")),
+        (_choice([10], finish_reason="stop"), _choice([]), _usage(1)),
+        ({"choices": [{"text": "", "token_ids": [10], "finish_reason": "stop", "stop_reason": None}]}, _usage(1)),
+        ({"choices": [{"index": 0, "token_ids": [10], "finish_reason": "stop", "stop_reason": None}]}, _usage(1)),
+        ({"choices": [{"index": 0, "text": "", "finish_reason": "stop", "stop_reason": None}]}, _usage(1)),
+        ({"choices": [{"index": 0, "text": "", "token_ids": [10], "finish_reason": "stop"}]}, _usage(1)),
+    ],
+)
+def test_preserves_token_stream_rejects_incomplete_terminal_evidence(events: tuple[object, ...]) -> None:
+    adapter = _adapter()
+    tokenizer = _SequenceTokenizer({(10,): "buffered"})
+    adapter._tokenizer = tokenizer
+    adapter._http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=_sse(*events)))
+    )
+    emitted: list[Any] = []
+
+    async def consume() -> None:
+        async for chunk in adapter.generate("prompt", max_new_tokens=4):
+            emitted.append(chunk)
+
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(consume())
+        assert emitted == []
+        assert tokenizer.decode_calls == []
+        assert adapter._active_generations == 0
+    finally:
+        asyncio.run(adapter.aclose_client())
+
+
+@pytest.mark.parametrize(
+    ("token_ids", "finish_reason", "stop_reason", "stops", "retained_ids", "text"),
+    [
+        ([10, 90, 91], "length", None, ["<stop>"], [10, 90, 91], "hello<stop>"),
+        ([], "stop", None, None, [], ""),
+        ([90, 91], "stop", "<stop>", ["<stop>"], [], ""),
+        ([10, 99], "stop", 99, ["<stop>"], [10], "hello"),
+        ([10], "stop", 99, None, [10], "hello"),
+        ([10], "stop", None, [], [10], "hello"),
+        ([99], "stop", None, None, [99], ""),
+    ],
+)
+def test_stop_suffix_and_empty_completion_accounting(
+    token_ids: list[int],
+    finish_reason: str,
+    stop_reason: str | int | None,
+    stops: list[str] | None,
+    retained_ids: list[int],
+    text: str,
+) -> None:
+    adapter = _adapter()
+    tokenizer = _SequenceTokenizer({tuple(retained_ids): text})
+    adapter._tokenizer = tokenizer
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_sse(
+                _choice(
+                    token_ids,
+                    finish_reason=finish_reason,
+                    stop_reason=stop_reason,
+                    logprobs=_token_logprobs(*(str(token_id) for token_id in token_ids)),
+                ),
+                _usage(len(token_ids)),
+            ),
+        )
+
+    adapter._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        chunks = asyncio.run(_collect(adapter.generate("prompt", max_new_tokens=8, stop=stops, logprobs=True)))
+        assert len(chunks) == (2 if retained_ids else 1)
+        if retained_ids:
+            assert chunks[0].text_delta == text
+            assert chunks[0].is_first is bool(text)
+            assert [entry["token"] for entry in chunks[0].logprobs] == [str(token_id) for token_id in retained_ids]
+        assert chunks[-1].done is True
+        assert chunks[-1].is_first is False
+        assert chunks[-1].finish_reason == finish_reason
+        assert (chunks[-1].prompt_tokens, chunks[-1].completion_tokens) == (2, len(retained_ids))
+        assert tokenizer.decode_calls == [(tuple(retained_ids), True)]
+        assert ("include_stop_str_in_output" in captured) is bool(stops)
+    finally:
+        asyncio.run(adapter.aclose_client())
+
+
+def _assert_buffered_failure(
+    content: bytes, *, tokenizer: Any = None, message: str = "TensorRT-LLM", **parameters: Any
+) -> None:
+    adapter = _adapter()
+    adapter._tokenizer = tokenizer or _SequenceTokenizer({(10,): "buffered"})
+    adapter._http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=content))
+    )
+    emitted: list[Any] = []
+
+    async def consume() -> None:
+        async for chunk in adapter.generate("prompt", max_new_tokens=8, **parameters):
+            emitted.append(chunk)
+
+    try:
+        with pytest.raises(RuntimeError, match=message):
+            asyncio.run(consume())
+        assert emitted == []
+        assert adapter._active_generations == 0
+    finally:
+        asyncio.run(adapter.aclose_client())
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("index", True, "multiple choices"),
+        ("index", 0.0, "multiple choices"),
+        ("index", "0", "multiple choices"),
+        ("text", None, "explicit string"),
+        ("text", "child text", "must be empty"),
+        ("token_ids", None, "integer arrays"),
+        ("token_ids", [True], "integer arrays"),
+        ("token_ids", [-1], "integer arrays"),
+        ("token_ids", [1.5], "integer arrays"),
+        ("token_ids", ["10"], "integer arrays"),
+        ("token_ids", [[10]], "integer arrays"),
+        ("finish_reason", [], "finish reason is invalid"),
+        ("finish_reason", True, "finish reason is invalid"),
+        ("finish_reason", "unsupported", "finish reason is invalid"),
+        ("stop_reason", True, "stop reason is invalid"),
+        ("stop_reason", -1, "stop reason is invalid"),
+        ("stop_reason", 1.5, "stop reason is invalid"),
+        ("stop_reason", {}, "stop reason is invalid"),
+        ("stop_reason", "", "unrequested textual stop"),
+        ("stop_reason", "unrequested", "unrequested textual stop"),
+    ],
+)
+def test_stream_rejects_invalid_token_choice_fields(field: str, value: Any, message: str) -> None:
+    event = _choice([10], finish_reason="stop")
+    event["choices"][0][field] = value
+    _assert_buffered_failure(_sse(event, _usage(1)), message=message)
+
+
+@pytest.mark.parametrize("field", ["index", "text", "token_ids", "finish_reason", "stop_reason"])
+def test_stream_rejects_missing_token_choice_fields(field: str) -> None:
+    event = _choice([10], finish_reason="stop")
+    del event["choices"][0][field]
+    _assert_buffered_failure(_sse(event, _usage(1)))
+
+
+@pytest.mark.parametrize("finish_reason", [None, "length"])
+@pytest.mark.parametrize("stop_reason", [99, "<stop>"])
+def test_stream_rejects_stop_reason_without_stop_finish(finish_reason: str | None, stop_reason: str | int) -> None:
+    _assert_buffered_failure(
+        _sse(_choice([10], finish_reason=finish_reason, stop_reason=stop_reason), _usage(1)),
+        stop=["<stop>"],
+        message="without a stop finish",
+    )
+
+
+def test_stream_rejects_empty_textual_stop_even_if_requested() -> None:
+    _assert_buffered_failure(
+        _sse(_choice([10], finish_reason="stop", stop_reason=""), _usage(1)),
+        stop=[""],
+        message="textual stop reason must be non-empty",
+    )
+
+
+@pytest.mark.parametrize("stop_reason", [99, "<stop>"])
+def test_stream_rejects_stop_suffix_mismatch_even_with_matching_decoded_text(stop_reason: str | int) -> None:
+    _assert_buffered_failure(
+        _sse(_choice([10], finish_reason="stop", stop_reason=stop_reason), _usage(1)),
+        tokenizer=_SequenceTokenizer({(10,): "<stop>"}),
+        stop=["<stop>"],
+        message="does not match the token-id suffix",
+    )
+
+
+@pytest.mark.parametrize("stop_ids", [None, (), [], [True], [-1], ["90"], [90.0], ValueError("bad tokenizer")])
+def test_stream_rejects_invalid_stop_tokenization(stop_ids: Any) -> None:
+    class BrokenStopTokenizer(_SequenceTokenizer):
+        def encode(self, prompt: str, *, add_special_tokens: bool) -> Any:
+            if add_special_tokens:
+                return super().encode(prompt, add_special_tokens=True)
+            if isinstance(stop_ids, Exception):
+                raise stop_ids
+            return stop_ids
+
+    _assert_buffered_failure(
+        _sse(_choice([10, 90, 91], finish_reason="stop", stop_reason="<stop>"), _usage(3)),
+        tokenizer=BrokenStopTokenizer({(10,): "hello"}),
+        stop=["<stop>"],
+        message="textual stop tokenization",
+    )
+
+
+@pytest.mark.parametrize("decoded", [None, 1, [], ValueError("bad tokenizer")])
+def test_stream_rejects_invalid_whole_completion_decode(decoded: Any) -> None:
+    class BrokenDecodeTokenizer(_FixtureTokenizer):
+        def decode(self, token_ids: list[int], *, skip_special_tokens: bool) -> Any:
+            if isinstance(decoded, Exception):
+                raise decoded
+            return decoded
+
+    _assert_buffered_failure(
+        _sse(_choice([10], finish_reason="stop"), _usage(1)),
+        tokenizer=BrokenDecodeTokenizer(),
+        message="completion detokenization",
+    )
+
+
+@pytest.mark.parametrize(
+    ("token_ids", "logprobs", "requested", "message"),
+    [
+        ([10], None, True, "omitted requested"),
+        ([10], _token_logprobs(), True, "do not align"),
+        ([10], _token_logprobs(), False, "do not align"),
+        ([10], _token_logprobs("one", "two"), True, "do not align"),
+        ([10], _token_logprobs("one"), False, "unrequested completion logprobs"),
+        ([], _token_logprobs(), False, "unrequested completion logprobs"),
+        ([], _token_logprobs("one"), True, "do not align"),
+        ([10], {"tokens": ["one"], "token_logprobs": [-0.2], "top_logprobs": [[]]}, True, "token-to-logprob"),
+    ],
+)
+def test_stream_rejects_unaligned_or_unrequested_logprobs(
+    token_ids: list[int], logprobs: Any, requested: bool, message: str
+) -> None:
+    _assert_buffered_failure(
+        _sse(_choice(token_ids, finish_reason="stop", logprobs=logprobs), _usage(len(token_ids))),
+        logprobs=requested,
+        message=message,
+    )
+
+
+@pytest.mark.parametrize("field", ["prompt_tokens", "completion_tokens", "total_tokens"])
+@pytest.mark.parametrize("value", [None, True, -1, 1.5, "1"])
+def test_stream_rejects_invalid_usage_counts(field: str, value: Any) -> None:
+    usage = _usage(1)
+    usage["usage"][field] = value
+    _assert_buffered_failure(_sse(_choice([10], finish_reason="stop"), usage), message="usage is invalid")
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        ([],),
+        ({"choices": None},),
+        ({"choices": [0]},),
+        ({"choices": [{}, {}]},),
+        ({**_choice([10], finish_reason="stop"), "usage": _usage(1)["usage"]},),
+        (_choice([10], finish_reason="stop"),),
+        (_choice([10], finish_reason="stop"), _usage(1), _usage(1)),
+        (_choice([10], finish_reason="stop"), _choice([], finish_reason="stop"), _usage(1)),
+        (_choice([10]), {"error": {"message": "engine failed"}}),
+    ],
+)
+def test_stream_rejects_invalid_event_and_terminal_order_without_output(events: tuple[object, ...]) -> None:
+    _assert_buffered_failure(_sse(*events))
+
+
+def test_stream_requires_done_before_exposing_buffered_output() -> None:
+    _assert_buffered_failure(
+        _sse(_choice([10], finish_reason="stop"), _usage(1)).removesuffix(b"data: [DONE]\n\n"),
+        message=r"before \[DONE\]",
+    )
 
 
 def test_context_length_accounting_is_independent() -> None:
@@ -623,8 +1023,10 @@ def test_generation_maps_completion_controls_text_finish_usage_and_logprobs() ->
                     "choices": [
                         {
                             "index": 0,
-                            "text": " bonjour",
+                            "text": "",
+                            "token_ids": [10],
                             "finish_reason": None,
+                            "stop_reason": None,
                             "logprobs": {
                                 "tokens": [" bonjour"],
                                 "token_logprobs": [-0.2],
@@ -634,7 +1036,7 @@ def test_generation_maps_completion_controls_text_finish_usage_and_logprobs() ->
                         }
                     ]
                 },
-                {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]},
+                _choice([], finish_reason="stop"),
                 {
                     "choices": [],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
@@ -671,10 +1073,12 @@ def test_generation_maps_completion_controls_text_finish_usage_and_logprobs() ->
         "max_tokens": 9,
         "temperature": 0.2,
         "top_p": 0.9,
+        "detokenize": False,
         "stream": True,
         "stream_options": {"include_usage": True},
         "n": 1,
         "stop": ["!"],
+        "include_stop_str_in_output": True,
         "frequency_penalty": 0.1,
         "presence_penalty": 0.2,
         "top_k": 12,
@@ -768,8 +1172,10 @@ def test_stream_completion_normalizes_null_top_alternatives() -> None:
                         "choices": [
                             {
                                 "index": 0,
-                                "text": " bonjour monde",
+                                "text": "",
+                                "token_ids": [10, 11],
                                 "finish_reason": None,
+                                "stop_reason": None,
                                 "logprobs": {
                                     "tokens": [" bonjour", " monde"],
                                     "token_logprobs": [-0.2, -0.3],
@@ -778,10 +1184,10 @@ def test_stream_completion_normalizes_null_top_alternatives() -> None:
                             }
                         ]
                     },
-                    {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]},
+                    _choice([], finish_reason="stop"),
                     {
                         "choices": [],
-                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
                     },
                 ),
             )
@@ -835,11 +1241,11 @@ def test_unload_closes_http_client_before_child_teardown(monkeypatch: pytest.Mon
     ("events", "message"),
     [
         (
-            ({"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},),
-            "ended without finish reason and usage",
+            (_usage(1),),
+            "usage before its terminal choice",
         ),
         (
-            ({"choices": [{"index": 0, "text": "x", "finish_reason": "stop"}]},),
+            (_choice([13], finish_reason="stop"),),
             "ended without finish reason and usage",
         ),
         (({"error": {"message": "engine rejected"}, "choices": []},), "completion error: engine rejected"),
@@ -864,8 +1270,7 @@ def test_stream_fails_when_eof_arrives_without_done() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            content=b'data: {"choices":[{"index":0,"text":"x","finish_reason":"stop"}]}\n\n'
-            b'data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n',
+            content=_sse(_choice([13], finish_reason="stop"), _usage(1)).removesuffix(b"data: [DONE]\n\n"),
         )
 
     adapter._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -911,8 +1316,8 @@ def test_generation_allows_encoder_limit_after_special_token_accounting() -> Non
             lambda _request: httpx.Response(
                 200,
                 content=_sse(
-                    {"choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}]},
-                    {"choices": [], "usage": {"prompt_tokens": 128, "completion_tokens": 1}},
+                    _choice([12], finish_reason="stop"),
+                    _usage(1, prompt_tokens=128),
                 ),
             )
         )
@@ -947,8 +1352,10 @@ def test_generation_rejects_encoder_overflow_before_dispatch_after_special_token
                     "choices": [
                         {
                             "index": 0,
-                            "text": "x",
+                            "text": "",
+                            "token_ids": [13],
                             "finish_reason": None,
+                            "stop_reason": None,
                             "logprobs": {"tokens": ["x"], "token_logprobs": []},
                         }
                     ]
@@ -958,23 +1365,23 @@ def test_generation_rejects_encoder_overflow_before_dispatch_after_special_token
         ),
         (
             (
-                {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]},
-                {"choices": [{"index": 0, "text": "late", "finish_reason": None}]},
+                _choice([], finish_reason="stop"),
+                _choice([14]),
             ),
-            "text after its terminal choice",
+            "choice after its terminal choice",
         ),
         (
             (
-                {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]},
+                _choice([], finish_reason="stop"),
                 {"choices": [], "usage": {"prompt_tokens": True, "completion_tokens": 1}},
             ),
             "usage is invalid",
         ),
         (
             (
-                {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]},
-                {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
-                {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                _choice([], finish_reason="stop"),
+                _usage(0),
+                _usage(0),
             ),
             "duplicate usage",
         ),
@@ -1056,8 +1463,8 @@ def test_preflight_prompt_count_is_reused_by_matching_dispatch() -> None:
                 lambda _request: httpx.Response(
                     200,
                     content=_sse(
-                        {"choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}]},
-                        {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                        _choice([12], finish_reason="stop"),
+                        _usage(1),
                     ),
                 )
             )
@@ -1081,8 +1488,8 @@ def test_preflight_result_is_consumed_once_even_for_an_identical_second_dispatch
                 lambda _request: httpx.Response(
                     200,
                     content=_sse(
-                        {"choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}]},
-                        {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                        _choice([12], finish_reason="stop"),
+                        _usage(1),
                     ),
                 )
             )
@@ -1111,8 +1518,8 @@ def test_abandoned_unstarted_preflight_dispatch_cannot_reuse_prompt_count() -> N
                 lambda _request: httpx.Response(
                     200,
                     content=_sse(
-                        {"choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}]},
-                        {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                        _choice([12], finish_reason="stop"),
+                        _usage(1),
                     ),
                 )
             )
@@ -1143,8 +1550,8 @@ def test_preflight_result_cannot_cross_adapter_ownership() -> None:
                 lambda _request: httpx.Response(
                     200,
                     content=_sse(
-                        {"choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}]},
-                        {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 1}},
+                        _choice([12], finish_reason="stop"),
+                        _usage(1, prompt_tokens=2),
                     ),
                 )
             )
@@ -1184,8 +1591,8 @@ def test_preflight_results_are_request_scoped_across_concurrent_child_tasks() ->
                 lambda _request: httpx.Response(
                     200,
                     content=_sse(
-                        {"choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}]},
-                        {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 1}},
+                        _choice([12], finish_reason="stop"),
+                        _usage(1, prompt_tokens=2),
                     ),
                 )
             )
@@ -1211,9 +1618,11 @@ class _CancellableStream(httpx.AsyncByteStream):
     def __init__(self) -> None:
         self.closed = False
         self.block = asyncio.Event()
+        self.consumed = asyncio.Event()
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        yield b'data: {"choices":[{"index":0,"text":"x","finish_reason":null}]}\n\n'
+        yield _sse(_choice([13])).removesuffix(b"data: [DONE]\n\n")
+        self.consumed.set()
         await self.block.wait()
 
     async def aclose(self) -> None:
@@ -1229,9 +1638,14 @@ def test_closing_generation_closes_incomplete_upstream_response() -> None:
             transport=httpx.MockTransport(lambda _request: httpx.Response(200, stream=stream))
         )
         iterator = adapter.generate("prompt", max_new_tokens=4)
-        first = await anext(iterator)
-        assert first.text_delta == "x"
+        consume = asyncio.ensure_future(anext(iterator))
+        await asyncio.wait_for(stream.consumed.wait(), timeout=2)
+        assert not consume.done()
+        consume.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consume
         await iterator.aclose()
+        assert adapter._active_generations == 0
         await adapter.aclose_client()
         return stream.closed
 
@@ -1247,8 +1661,9 @@ def test_generation_drain_blocks_new_admission_and_waits_for_active_stream() -> 
         parameters = {"prompt": "prompt", "max_new_tokens": 4}
         preflight_result = adapter.preflight_generate(parameters, stream=True)
         iterator = adapter.generate_with_preflight(parameters, preflight_result)
-        first = await anext(iterator)
-        assert first.text_delta == "x"
+        consume = asyncio.ensure_future(anext(iterator))
+        await asyncio.wait_for(stream.consumed.wait(), timeout=2)
+        assert not consume.done()
 
         drain = asyncio.create_task(adapter.drain_generation())
         await asyncio.sleep(0)
@@ -1256,11 +1671,46 @@ def test_generation_drain_blocks_new_admission_and_waits_for_active_stream() -> 
         with pytest.raises(GenerationDrainingError):
             adapter.preflight_generate(parameters, stream=True)
 
+        consume.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consume
         await iterator.aclose()
-        await drain
+        await asyncio.wait_for(drain, timeout=2)
         return stream.closed, client.is_closed, adapter._active_generations
 
     assert asyncio.run(scenario()) == (True, True, 0)
+
+
+def test_timeout_before_visible_output_closes_response_and_releases_generation() -> None:
+    async def scenario() -> None:
+        error = httpx.ReadTimeout("child read timed out")
+
+        class TimeoutStream(httpx.AsyncByteStream):
+            closed = False
+
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                yield _sse(_choice([13])).removesuffix(b"data: [DONE]\n\n")
+                raise error
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        adapter = _adapter()
+        stream = TimeoutStream()
+        adapter._http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, stream=stream))
+        )
+        emitted: list[Any] = []
+        with pytest.raises(httpx.ReadTimeout) as exc_info:
+            async for chunk in adapter.generate("prompt", max_new_tokens=4):
+                emitted.append(chunk)
+        assert exc_info.value is error
+        assert emitted == []
+        assert stream.closed
+        assert adapter._active_generations == 0
+        await asyncio.wait_for(adapter.drain_generation(), timeout=2)
+
+    asyncio.run(scenario())
 
 
 class _BlockingCloseFailureCompletion:
@@ -1367,18 +1817,21 @@ def test_independent_requests_share_client_and_reach_transport_concurrently() ->
         adapter = _adapter()
         active = 0
         peak = 0
+        both_started = asyncio.Event()
 
         async def handler(_request: httpx.Request) -> httpx.Response:
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
-            await asyncio.sleep(0.01)
+            if active == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=2)
             active -= 1
             return httpx.Response(
                 200,
                 content=_sse(
-                    {"choices": [{"index": 0, "text": "x", "finish_reason": "stop"}]},
-                    {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                    _choice([13], finish_reason="stop"),
+                    _usage(1),
                 ),
             )
 

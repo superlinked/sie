@@ -39,6 +39,15 @@ pip install sie-server
 sie-server serve --port 8080 --device cuda:0
 ```
 
+### TensorRT-LLM generation
+
+TensorRT-LLM buffers completion token IDs and emits the final text together only
+after generation finishes and the terminal stream is verified, even with
+`stream=True`. This preserves context-sensitive spacing and punctuation and
+removes matched stop sequences consistently from returned text, completion-token
+usage, and logprobs. Long completions delay the first visible text; existing
+request timeouts still apply. Other adapters are unaffected.
+
 ## Configuration
 
 `sie-server` reads its config from `SIE_*` environment variables (Pydantic
