@@ -1,1521 +1,630 @@
 # Changelog
 
-## v0.7.1
-
-- chore(release): refresh locks and generated sources
-- chore(main): release 0.7.1
-- fix(server): meter executed GLiNER token window
-- test(bench): gate docling OCR on measured English-recogniser floors
-- test(server): scope the OCR smoke floor to what it provably catches
-- test(server): assert the adapter error channel in the OCR smoke test
-- feat(server): serve docling OCR with the English recogniser
-
-## v0.7.0
-
-- chore(release): refresh locks and generated sources
-- chore(main): release 0.7.0
-- fix(release): unpin sidecar path dependency
-- fix(sdk): refresh stale job result refs
-- fix(cloud): align catalog canary model contracts
-- fix(server): normalize Grounding DINO instructions
-- test(server): isolate serve environment fixtures
-- fix(server): validate pinned model selection
-- fix(server): preserve pinned models in serve config
-- fix(clients): address terminal response review
-- fix(cloud): harden generation response handling
-- feat(cloud): bill audio_ms at a 1,150 ms minimum duration
-- fix(server): echo queued extract item ids
-- fix(deps): declare requests and huggingface-hub in the serving distribution
-- fix(deps): provide the dependencies the bundle and the eval already declare
-
-## v0.6.30
-
-- chore(release): refresh locks and generated sources
-- chore(main): release 0.6.30
-- perf(models): accelerate Qwen thinking inference
-
-## v0.6.29
-
-- chore(release): refresh locks and generated sources
-- chore(main): release 0.6.29
-- feat(server): optimize Gemma thinking profiles
-
-## v0.6.28
-
-- chore(release): refresh locks and generated sources
-- chore(main): release 0.6.28
-- fix(server): stage drafts for local models
-- fix(server): pin speculative draft launches
-- feat(server): optimize non-thinking generation profiles
-
-## v0.6.27
-
-- chore(release): refresh locks and generated sources
-- chore(main): release 0.6.27
-- fix(server): constrain SGLang compatibility paths
-- fix(server): preserve LightOn SGLang compatibility
-- fix(server): keep Qwen3-VL reranker batches working on transformers 5.3
-- fix(generation): pair long-context qwen image bounds
-- fix(generation): preserve qwen vision bounds
-- fix(generation): validate high-context thinking profiles
-- test(generation): align grammar backend expectations
-- fix(generation): align direct backend output limits
-- fix(generation): use compatible Qwen 27B grammar backend
-- fix(generation): use compatible Qwen 35B grammar backend
-- feat(generation): add hardware-specific context profiles
-- fix(generation): preserve Gemma reasoning boundaries
-- fix(generation): fit Gemma 256k KV cache on H100
-- fix(sdk): retry pre-execution SSE capacity errors
-- fix(generation): reserve Gemma long-context workspace
-- feat(generation): add 256k profile candidates
-- feat(generation): add strict Responses API parity
-- fix(generation): hide split Gemma thinking boundary
-- fix(generation): reject overflowing runtime numerics
-- fix(generation): handle family-specific reasoning boundaries
-- fix(generation): unblock cold model startup
-- fix(server): align Gemma xgrammar dependency
-- feat(server): complete generative model serving
-- fix(server): enforce Qwen fast image bounds
-- test(server): align vision profile contracts
-- fix(server): bound Qwen visual context
-- fix(server): replace stale root playground with redirect to Swagger docs
-- fix(server): pin docling to its artifact revision and stop OCR gating load
-- fix(colbert): honor transformers-5 rope_parameters when serving on the 4.x bundle
-- fix(cloud): close connector review gaps
-- fix(cloud): close connector review findings
-- fix(clients): send connector repair idempotency header
-- fix(cloud): address connector runtime review findings
-- test(cloud): prove public postgres connector lifecycle
-- feat(clients): expose recovery-bound connector repair
-- feat(cloud): add direct connector inference
-- feat(gateway): expose immutable execution evidence
-- feat(clients): add connector plan controls
-- feat(cloud): add connector plan schema policy
-- feat(cloud): add connector plan guardrails
-- fix(models): complete mLateOn serving recipe
-- fix(server): preprocess native extract images
-- feat(models): onboard lightonai/mLateOn (scaffolded)
-- fix(sidecar): harden local generation cancellation
-- test(server): shorten local ingest socket paths
-- fix(sidecar): reserve cancel request bytes
-- feat(server): add bounded local-ingest generation client
-- fix(sidecar): harden local generation streaming
-- feat(sidecar): stream generation over local ingest
-- feat(models): onboard ibm-granite/granite-embedding-97m-multilingual-r2 (scaffolded)
-
-## v0.6.26
-
-- chore(release): refresh locks and generated sources
-- chore(main): release 0.6.26
-- fix(cloud): keep prod generation warm and scope spans
-- test(sdk): pin one-shot provisioning
-- fix(cloud): make generation smoke single shot
-- refactor(workspace): split public and private Python projects
-- fix(gateway): preserve grammar-safe FP8 profiles
-- feat(model-catalog): add H100 FP8 generation profiles
-- feat(quality-eval): governed first-baseline mode for official_recipe
-
-## v0.6.25
-
-- chore(main): release 0.6.25
-- docs(gateway): regenerate embeddings OpenAPI
-- fix(server): bill SigLIP padded text work
-- fix(gateway): cap embeddings requests at 256 inputs
-- fix(cloud): close metering GA review findings
-- fix(cloud): scope authoritative zero evidence
-- fix(cloud): close final metering review faults
-- test(cloud): lock the wrapper's other forwards and the refuse-before-seal order (#2542)
-- fix(cloud): make the witnessed zero reach the wire and cover both rails (#2538)
-- feat(telemetry): export the sealed cold-start metric remotely and chart it
-- fix(cloud): make the response cap operative, unbilled, and honest (#2617)
-- fix(cloud): bound the sealed resolver cache and cap proxy response bodies (#2617)
-- fix(cloud): close the CodeRabbit round on the integration head
-- fix(cloud): observe the sealed cold-start metric; scope it to the prometheus path
-- docs(cloud): flag the sealed rate correction at activation; close telemetry contract
-- fix(cloud): address the CodeRabbit round on the metering GA integration
-- docs(design): state the fail-closed rule for a missing video frame count
-- fix(cloud): treat an explicitly null video as absent, not as a video
-- docs(design): state when a video rejection actually precedes the hold
-- fix(cloud): address the second CodeRabbit round on /v1/estimate (#2435)
-- fix(cloud): close the second CodeRabbit round on the credit surfaces (#2434)
-- fix(server): bound isolation fan-out and close the NaN decode escapes
-- fix(cloud): claim the hold before releasing it, and fold case like the registry
-- feat(models): onboard Qwen/Qwen3-Embedding-8B (scaffolded)
-- fix(cloud): address CodeRabbit review on the /v1/estimate dry run (#2435)
-- fix(server): address CodeRabbit review on the video meter
-- fix(cloud): address CodeRabbit review on the settled-charge surfaces (#2434)
-- fix(cloud): route expected no-charge stream releases off the fault alerts
-- fix(cloud): close the gate findings on the resolution-seam verdict (#2542)
-- style(server): ruff formatting for the #2538 test block
-- fix(cloud): admit an image-witnessed authoritative zero at settlement (#2538)
-- docs(design): record the §6.5 verdict at the resolution seam (#2542)
-- test(cloud): lock the alias + serving-selector bypasses at the resolution seam (#2542)
-- test(cloud): cover authoritative-zero settlement across the claim boundary (#2538)
-- docs(sdk): note the routability 404 on estimate() in both SDKs (#2435)
-- fix(cloud): close six gate findings on the /v1/estimate dry run (#2435)
-- feat(cloud): move the license exclusion verdict to the registry resolution seam (#2542)
-- feat(cloud): carry an authoritative-dimension claim set on UnitCounts (#2538)
-- feat(sdk): estimate() on both SDKs for the /v1/estimate dry run (#2435)
-- test(cloud): parity, zero-side-effect, fail-closed and abuse tests for /v1/estimate (#2435)
-- fix(catalog): bound GLiNER sequence lengths
-- feat(cloud): POST /v1/estimate dry-run cost endpoint (#2435)
-- fix(cloud): publish a committed charge even when settlement then faults (#2434)
-- fix(cloud): bind the charge-slot backstop to the stream, not the disconnect grace (#2434)
-- fix(gateway): preserve self-host grammar routing
-- fix(gateway): harden governed generation dispatch
-- feat(cloud): unify the settled-charge name across jobs, batches, and SDKs (#2434)
-- feat(gateway): add optional governed generation routing seam
-- test(cloud): pin the realtime and stream credit surfaces (#2434)
-- feat(cloud): carry the settled charge into realtime usage blocks (#2434)
-- fix(cloud): release the hold when the gateway cannot deliver the result
-- fix(cloud): parse the multipart model under the route's real body limit
-- feat(cloud): unfence OpenAI-compat /v1/audio/transcriptions (#2430)
-- feat(gateway): carry output_tokens on the per-item result-units path
-- test(server): pin the batched-path, sampling and isolation invariants
-- fix(cloud): close three adversarial-review findings on metered streaming
-- fix(server): survive the batched encode path and bound video decode
-- feat(cloud): response-final settlement for streaming generation
-- feat(server): bill sampled video frames as images
-- fix(cloud): cold-start rail review fixes — refunds, honest ceiling, quiet 429
-- fix(gateway): surface the cold-start quota refusal as 429
-- chore(cloud): address combined review feedback
-- fix(generation): reconcile profile minimum with request maximum
-- feat(sdk): add files and batches cursor lifecycle
-- fix(gateway): make first-chunk republish capability explicit
-- feat(cloud): gpu_second sealed billing regime (wip: CP class endpoint pending)
-
-## v0.6.24
-
-- chore(main): release 0.6.24
-- test(config): document tokenizer dependency coverage
-- fix(models): declare tokenizer dependencies
-- fix(quality): stabilize scoped PR quality runs
-- perf(server): cache MUVERA projection state
-- feat(server): pinnable LoRA adapter revisions in lora_paths (#2113)
-- fix(quality): restore Mixedbread query expansion
-- fix(models): restore AnswerAI 512-token document length
-- fix(telemetry): enforce the parity guards in CI; sweep the sie_config redaction twin; char-safe mask_token (#2339)
-- chore(rust): scope the workspace to the public crates; managed gateway keeps its own lock (#2339)
-- chore(docker): build the audio-prep wheel stage at the workspace root (#2339)
-- refactor(telemetry): extract shared sie-telemetry crate; migrate gateway, sidecar, worker (#2339)
-- ci(workspace): repoint lock regeneration, caches, coverage, bake and release paths at the root lock/target (#2339)
-- chore(docker): build gateway + sidecar images at the workspace root (#2339)
-- chore(deny): one cargo-deny sweep over the workspace (#2339)
-- chore(rust): introduce a Cargo workspace over gateway, cloud gateway, sidecar, audio-prep (#2339)
-- refactor(sdk): shared redaction helpers; drop the api_key log-field footgun (#2339)
-- refactor(gateway): single-source bearer parsing, token masking, probe paths (#2339)
-- fix(quality): close post-review concurrency gaps
-- test(quality): lock governed MUVERA similarities
-- fix(adapter): prefer emitted NeMo token width
-- fix(quality): restore GTE MUVERA similarity
-- fix(quality): align NeMo ColEmbed token width
-- fix(quality): restore ColBERTv2 document window
-- fix(quality): restore governed ColBERT recipes
-- fix(quality): align ColBERT recipes with checkpoints
-- fix(server): harden ColBERT-family inference
-- fix(quality): use trained ColBERT markers
-- fix(server): enforce profile output capabilities
-- fix(quality): address review and adapter regressions
-- fix(quality): make nightly eval failures actionable
-- fix(vision): restore Marqo retrieval quality
-- fix(retrieval): restore faithful ColBERT recipes
-- fix(serving): enforce profile-aware encode outputs
-- fix(quality): close standing nightly model gaps
-
-## v0.6.23
-
-- chore(main): release 0.6.23
-- fix(grammar): bound pointer index parsing
-- fix(grammar): harden schema normalization
-- fix(gateway): validate schema keywords by context
-- fix(sdk): accept nullable grammar metadata
-- fix(cloud): attest LightOnOCR image compatibility
-- fix(catalog): disable unsafe qwen speculative default
-- test(sdk): assert grammar validation failures precisely
-- fix(sdk): keep grammar types on supported module path
-- fix(generation): close structured grammar review gaps
-- feat(generation): type structured output contracts
-- test(server): assert visual muvera config removal
-- fix(server): hide unsupported visual muvera profiles
-- fix(server): pin launch guardrail policies
-- test(adapters): stdlib imports to file top + comment the skip-tail except (CodeRabbit/Copilot)
-- fix(server): defer LightOn OCR compatibility patch
-- fix(adapters): serialize output_hidden_states forwards to close the #2144 recorder-race class
-- fix(server): meter SigLIP tokens from attention masks
-- perf(vision): reuse siglip preprocessing
-- fix(vision): pad fused detection batches
-- test(sdk): harden Responses capacity contract
-- feat(sdk): add typed Responses client
-- test(api): harden multimodal contract fixtures
-- fix(api): close multimodal parity gaps
-- fix(api): address multimodal contract review
-- fix(server): preserve stream helper compatibility
-- feat(api): accept native multimodal generation
-- fix(cloud): align launch evidence contracts
-- fix(catalog): raise GTE Muvera repetitions
-- fix(catalog): route mxbai edge through native attention
-- fix(catalog): use pinned GTE query length
-- fix(server): serialize remaining tokenizer access
-- fix(server): preserve trusted code revision on fallback
-- fix(server): restore ColBERTv2 retrieval recipe
-- fix(server): apply trained Rotary ColBERT projection
-- fix(server): mask ColBERT expansion keys in flash attention
-- fix(server): restore Jina ColBERT retrieval recipe
-- style(test): D209 docstring closing quotes on own line + re-lock manifests
-- fix(eval): restore colbert recipe and cache integrity
-- docs(test): docstring the trust_remote_code pin invariant (CodeRabbit coverage)
-- fix(security): pin hf_revision on the 10 unpinned trust_remote_code models (#2109)
-- fix(catalog): preserve muvera quality similarity
-- test(ci): strengthen profile and install contracts
-- fix(eval): align governed benchmark identities
-- fix(vision): consolidate detection batch alignment
-- fix(ci): harden scoped quality and rust jobs
-- fix(vision): serialize Qwen processor tokenization
-- fix(sie_server): harden remote-code snapshot registration (review)
-- fix(vision): preserve fused request image alignment
-- fix(eval): preserve profile floor identity
-- fix(eval): scope quality floors to model profiles
-- fix(splade): enforce candle sequence cap
-- test(splade): cover inherited runtime caps
-- fix(retrieval): align GTE ColBERT serving recipe
-- fix(splade): preserve default retrieval recipe
-- test(encode): declare mocked output capabilities
-- style(encode): keep required imports global
-- fix(encode): align profile output contracts
-- fix(profiles): honor routed output capabilities
-- fix(vidore): per-thread processors in ImagePreprocessor instead of a pool-wide lock (#2098)
-- fix(vidore): close the image-path and qwen3_vl gaps in the tokenizer serialization (#2098 review)
-- fix(vidore): serialize Col-family processors and retry eval transport loss under load
-- fix(sie_server): register remote-code snapshot dir on sys.path for ST-Router models
-- fix(release): keep audio prep internal to builds
-- fix(cloud): make wallet balance own admission
-- feat(models): onboard naver/v-splade-quality (#2035)
-- fix(gateway): make sealed-standby schema drift a compile error, not a 5s log line
-- feat(1841): declare the sealed-lane metrics through the closed telemetry contract
-- fix(1841): close the post-merge gaps the real Postgres run found
-- fix(custom-models): a variant-named model's DPA erase no longer wedges forever
-- feat(custom-models): withdraw erased models from the catalog; quote only a real rate
-- feat(custom-models): gateway bundle-less sealed dispatch for org custom models (#1841 W4)
-- feat(gateway): resolve-seam org gate for the OpenAI body routes (#1895)
-- refactor(gateway): gate + list custom models on the RESOLVED id (#1895)
-
-## v0.6.21
-
-- chore(main): release 0.6.21
-- test(colpali): cover all three forward paths in #2144 regression tests (review feedback)
-- test(colpali,worker): regression tests for #2144 fixes (review feedback)
-- fix(colpali): serialize model forwards — transformers output-recorder race (#2144)
-- fix(worker): release OOM tracebacks in the no-recovery branch too (CodeRabbit)
-- fix(colpali): stop GPU memory accumulation on Vidore evals (#2144)
-- test(server): make artifact symlink check deterministic
-- feat(server): bind package artifact identity
-- fix(evidence): harden worker identity boundaries
-- fix(evidence): close worker identity contract gaps
-- feat(evidence): propagate worker execution identity
-- fix: keep audio prep release pin in sync
-- fix(models): restore SPLADE 512-token capacity
-- feat(sdk): preserve terminal request metadata on errors
-- refactor(server): fold visual-SPLADE serving into the transformers5 bundle
-- feat(models): raise qwen36 launch context to 8k
-- test(server): resolve OCR model fixtures by file
-- fix(models): pin hf_revision for gte-Qwen2-7B remote-code load
-- fix(models): serve gte-Qwen2-7B via its own bidirectional forward (#2097)
-- test: harden model-filter, feasibility, and dispatch-order coverage
-- fix(vision): address review edge cases
-- perf(vision): bulk-convert detection outputs
-- feat(vision): harden OSS runtime contracts
-- fix(extract): close review validation gaps
-- fix(extract): filter unconstrained relation endpoints
-- feat(extract): add pinned PII quality gate
-- test(billing): pin vision reranker token contract
-- refactor(billing): scope pair image metering hook
-- feat(billing): meter multimodal catalog units
-- fix(worker): propagate effective sequence caps
-- fix(eval): add faithful Qwen3-VL reference
-- fix(reranking): address exact-head review
-- fix(server): empty bundle model_filter must advertise zero models, not all
-- feat(server): transformers514 bundle + SparseEncoder vision sparse adapter
-- fix(keda): keep gateway coordination under autoscaling
-- fix(keda): verify lean forward upgrade
-- fix(keda): simplify forward OTLP upgrade
-- fix(model): restore SPLADE quality sequence cap
-- fix(cloud): clarify idempotent deletion tests
-- feat(cloud): enforce exact managed catalog authority
-- fix(keda): support forward-only OTLP upgrade
-- fix(bench): capture generation timeout evidence
-- fix(server): remove unused fake adapter import
-- fix(metering): reject invalid score counts
-- fix(cloud): address billing review findings
-- fix(reranking): emit authoritative fake usage
-- refactor(reranking): keep fake adapter outside scope
-- style(core): format compatibility assertions
-- fix(core): preserve unit count wire order
-- feat(sdk): expose terminal billing metadata
-- feat(core): report authoritative score pair usage
-- feat(core): expose authoritative request usage
-- fix(reranking): address exact-head review
-- fix(reranking): reject blank compatibility inputs
-- fix(reranking): emit fake score usage
-- feat(gateway): add strict Cohere rerank compatibility
-- feat(reranking): harden Qwen score runtime
-- feat(candle): add native SPLADE sparse encoding
-- fix(audio): sandbox image builds the audio wheel opportunistically
-- feat(models): onboard Snowflake/snowflake-arctic-embed-s (scaffolded)
-- fix(cloud): pin governed catalog weights
-- fix(inference): harden abandonment cancellation
-- fix(inference): cancel abandoned non-generation work
-- fix(audio): address exact-head review findings
-- fix(audio): harden release integration
-- test(audio): isolate optional compatibility deps
-- fix(audio): harden Whisper compatibility
-- feat(audio): add native Whisper transcription
-- fix(transport): address chunk protocol review
-- test(telemetry): assert canonical worker profile identity
-- refactor(telemetry): expose one gateway metrics facade
-- fix(telemetry): stage safe KEDA rollback migration
-- fix(models): bound Qwen grammar admission
-- fix(models): address Qwen profile review
-- fix(models): promote Qwen3.5 A100 default
-- test(server): tighten queued option assertions
-- feat(transport): harden local binary ingress
-- fix(telemetry): close rollback and audit gaps
-- fix(ocr): distinguish missing document inputs
-- feat(ocr): add document-aware extraction contracts
-- fix(generate): preserve governed streaming overrides
-- feat(generate): govern runtime options and streaming
-- fix(telemetry): preserve delta metrics across backends
-- fix(dashboards): cover result chunk telemetry
-- refactor(transport): harden generic chunk delivery
-- fix(serving): reject unsigned generation seeds
-- fix(api): align seed validation across local clients
-- fix(serving): correct generation seed contract
-- fix(cloud): avoid serving sync for pin checks
-- fix(inference): honor native profile selection
-- fix(serving): normalize direct-route seeds
-- fix(serving): preserve seeded SGLang streams
-- feat(inference): add bounded 8k ColBERT scoring
-- fix(serving): isolate SGLang vision extraction workers
-- feat(retrieval): complete sparse and multivector launch support
-- feat(extract): add GLiNER2 structured and relation support
-- fix(gateway): preserve encode output dtype
-- fix(sidecar): preserve raw encode ids and cap results
-- fix(candle): make multivector profile contract explicit
-- refactor(telemetry): enforce single-emission routing
-- test(gateway): configure fake stack KEDA lane
-- data(bench): re-floor Splade_PP_en_v2 at the vanilla numbers (#1919)
-- feat(telemetry): centralize observability on OTLP
-- perf(candle): enable Arctic XLM-R fp16 fast path
-- perf(sidecar): coalesce saturated scheduler tails
-- feat(sidecar): expose scheduler request latency
-- perf(server): reduce BGE packing synchronization
-- perf(server): batch BGE-M3 tokenization
-- fix(sidecar): avoid double-counting adaptive latency
-- feat(telemetry): cover managed service signals
-- feat(telemetry): codify dashboards and edge signals
-- feat(telemetry): add safe request logs and latency
-- feat(telemetry): add Better Stack OTLP pipeline
-- fix(cloud): close i6pn lifecycle review gaps
-
-## v0.6.22
-
-- chore(main): release 0.6.22
-- feat(server): pin immutable Docling artifacts
-- feat(server): support immutable Docling model artifacts
-
-## v0.6.19
-
-- chore(main): release 0.6.19
-- fix(gateway): bump yanked spin 0.10.0 to 0.10.1 in Cargo.lock
-- fix(server): return 404 instead of 500 for unknown models on inference endpoints
-- fix(server): guard cross_encoder predict tokenization against the concurrent-metering race (class-fix for #1800)
-- fix(server): colbert-small multivector encode returns one vector-set per input, worker-item order (#1800)
-- fix(server): load tokenizer by pinned revision so offline chat-template rendering doesn't need refs/main (#1801)
-- fix(server): terminal Failed readiness state so the sidecar dead-letters permanently-failed model loads
-- chore(models): pin hf_revision for 12 unpinned launch-set models (§6.6)
-- fix(server): Florence-2 processor compat with transformers 4.57
-- docs(mcp): portable uv commands + context-management framing in README
-- fix(cloud): address CodeRabbit review findings on #1782
-- feat(cloud): idempotent catalog-sync converges the config catalog to in-repo model YAMLs (#1771)
-
-## v0.6.18
-
-- chore(main): release 0.6.18
-- chore: upgrade rust toolchain and deps
-- fix(cloud): redact all secret-bearing Config fields in Debug (#1740)
-- fix(cloud): redact ModalProxyToken Debug + cover /gen handshake forwarding (#1740)
-- feat(cloud): opt-in Modal proxy-auth layer for config/lane/OTLP ingress (#1740)
-
-## v0.6.17
-
-- chore(main): release 0.6.17
-- docs(gateway): clarify multi-gpu sidecar routing
-- fix(sidecar): refresh ready slots on cancel fanout failure
-- fix(sidecar): release cancelled scheduler pressure
-- fix(sidecar): wire local ingest through adapter pool
-- fix(req6): align candle chart after rebase
-- fix(server): keep ipc ping alive on gpu health errors
-- refactor(sidecar): name adapter worker pool generically
-- feat(worker): support multi-gpu sidecar children
-- fix(req6): harden multi-gpu worker review fixes
-- fix(req6): harden multi-gpu worker routing
-- fix(req6): resolve main rebase fallout
-- fix(req6): wire pressure-aware multi-gpu routing
-- test(tilt): emulate multi-child sidecar on cpu
-- feat(worker): route by child queue pressure
-- feat(worker): route multi-gpu sidecar children
-- docs: state req6 multi-gpu target directly
-- docs: clarify multi-gpu worker target topology
-- feat(server): support multi-gpu worker placement
-- feat(cloud): CLI WorkOS device-flow auth — retire the shared-token shortcut for customer commands (#1697)
-- chore(deps): bump the uv group across 3 directories with 12 updates
-- feat(oss): OSS amendments from the SIE Cloud build — engine, SDKs, gateway/sidecar seams (#1696)
-- fix(sidecar): bound queue admission through scheduler completion
-- chore(models): correct gte-Qwen2-1.5B compute_precision label to fp32 reality
-- fix(candle): address rope review feedback
-- fix(candle): repair rebase conflict resolution
-- fix(candle): remove rust worker forward coalescing
-- fix(sidecar): bulk enqueue scheduler items
-- fix(sidecar): expose scheduler flush reasons
-- feat(candle): add GTE RoPE embedding kernel
-- test(sdk): golden wire-contract fixture for ModelState + fix TS drift
-- refactor(server): move eviction-candidate decision into residency policy
-- refactor(gateway): unify worker-error retry semantics into one classifier
-- refactor(gateway): collapse header/pool/profile resolution into one seam
-
-## v0.6.16
-
-- chore(main): release 0.6.16
-- fix(adapters): honor caller instruction in use_model_encode without a template
-- feat(adapters): use_model_encode — delegate to checkpoint-native encode()
-- Revert "feat(adapters): opt-in template_as_prompt for ST prompt-length-aware templates"
-- Revert "fix(models): serve NV-Embed-v2 via its native latent-attention ST path"
-- fix(models): serve NV-Embed-v2 via its native latent-attention ST path
-- feat(adapters): opt-in template_as_prompt for ST prompt-length-aware templates
-- chore(models): remove Qwen3-0.6B experimental custom LoRA profile
-- test(keda): cover gpu-agnostic kind smoke demand
-- docs(gateway): clarify legacy empty demand comments
-- fix(adapters): harden splade flash gate + add flash-vs-native parity test
-- fix(gateway): normalize explicit GPU demand labels
-- fix(gateway): fan out gpu-agnostic demand across pool profiles for scale-from-zero
-- fix(bundles): pin flash-attn-4 prerelease so sglang 0.5.10.post1 resolves
-- fix(helm): wake a deterministic owner lane on gpu-agnostic demand for multi-profile bundles
-- fix(colbert): GTE muvera also at simhash 6 - CMedQA/MMarco evals OOM at dim 81920
-- fix(colbert): mxbai muvera at simhash 6 (FDE dim 20480) - runner dies at 81920
-- fix(colbert): retune GTE/mxbai muvera for the Dense-projected representation
-- fix(colbert): serve pylate Dense chains and align fallback with flash
-- fix(models): restore e5 templates on multilingual-e5-large ST profile
-- fix(colbert_modernbert_flash): faithful ModernBERT forward + hardened 1_Dense loading
-- test: cover candle warm model residency
-- fix: align candle workers with catalog lane config
-- refactor(server): dedup flash mean-pooling into _flash_pack
-- fix(colbert_modernbert_flash): address CodeRabbit review on #1591
-- fix(colbert_modernbert_flash): only apply Dense head when out_features==token_dim
-- fix(colbert_modernbert_flash): apply trained ColBERT Dense projection
-- Revert "feat(models): onboard topk-io/Iso-ModernColBERT (ColBERT multivector)"
-- fix(colbert_modernbert_flash): tolerate transformers>=5 tokenizer_class
-- feat(models): onboard topk-io/Iso-ModernColBERT (ColBERT multivector)
-
-## v0.6.15
-
-- chore(main): release 0.6.15
-- fix(playground): keyboard-accessible tabs + associated form labels
-- fix(server): address CI + review comments on the Apple Silicon re-land
-- feat(server): land Apple Silicon as a primary device onto main
-- fix(sidecar): start batch cancel before direct pulls
-- fix(tilt): wait for complete trace before asserting span chain
-- fix(gateway): harden batch direct fallback cancellation
-- fix(gateway): cancel abandoned direct batch fallback work
-- test(tracing): assert run_batch metadata and malformed traceparent
-- fix(gateway): ignore pre-latch stale NAKs after republish
-- fix(docs): drop otel.name from span-attribute table; tighten tracing dashboard test
-- feat(helm): add SIE tracing dashboard and tempo datasource uid
-- docs(gateway): document distributed tracing span chain and enable switch
-- refactor(helm): migrate bundled Tempo to grafana-community chart 2.2.3
-- refactor(helm): gate tempo datasource on grafana
-- fix(gateway): use real RUSTSEC id for second quick-xml advisory
-- feat(helm): add optional bundled Tempo tracing backend
-- fix(gateway): ignore quick-xml <0.41 RustSec advisories in cargo-deny
-- refactor(sie_gateway): clarify publish-seam comment, drop redundant otel.name
-- feat(sie_gateway): emit gateway.publish span on non-streaming queue-publish path (#1596)
-- feat(gateway): count dropped stale NAKs from abandoned attempts
-- test(observability): use single import style in shutdown_tracing test
-- feat(observability): bound tracing shutdown and trim env inputs across all four runtimes
-- fix(models): serve gte-Qwen2-1.5B via sentence_transformer adapter (#1593)
-- feat(observability): gate Rust tracing on SIE_TRACING_ENABLED
-- test: update queue executor batch mocks
-- test: cover queue runtime app wiring
-- fix: complete empty preformed worker requests
-- fix: address sidecar PR review feedback
-- fix: clean stale Python queue ownership drift
-- docs: clarify sidecar queue batching ownership
-- fix: remove Python worker pull-loop path
-- fix(server): serialize hot reload registry mutations
-- fix(server): move load headroom behind adapter contract
-- fix(server): make SGLang load eviction headroom-aware
-- test(config): time-box idempotency mismatch request
-- fix(config): shield idempotency failure cleanup
-- fix(config): defer cancellation after config commit starts
-- fix(config): handle idempotency in-flight races
-- fix(server): cap LoRA drain to snapshot backlog so post-snapshot arrivals don't overshoot
-- fix(gateway): keep signalling SSE incompleteness on lag; only skip cancel when done (#1602)
-- perf(gateway): build the HRW ring from the by_bundle index, not a whole-cluster scan (#1607)
-- fix(gateway): don't report a succeeded SSE generation as inter_chunk_timeout on consumer lag (#1602)
-- fix(gateway): drop stale NAKs from abandoned attempts in handle_nak (#1601)
-- perf(server): vectorize bge_m3_flash CLS gather to drop N per-encode GPU syncs (#1605)
-- fix(server): bound the continuous-batching drain so a busy LoRA can't starve siblings (#1606)
-- fix(server): stop mislabelling uint8 embeddings as "binary" on the queue path (#1603)
-- fix(server): /v1/embeddings maps OOM to 503 RESOURCE_EXHAUSTED, not 500 (#1604)
-- fix(server): unregister model from MemoryManager even if adapter.unload() raises (#1600)
-- fix: select rustls provider at binary startup
-- revert: restore gateway sidecar rustls defaults
-- fix: select rustls provider for rust services
-- fix(gateway): append forwarded embeddings headers to preserve multi-value tracestate
-- fix(gateway): forward traceparent/tracestate through /v1/embeddings rewrite
-- test(gateway): pin RetryAfter aliases to wire literals, not tautologies (#1574)
-- fix(tracing): parent sidecar.dispatch on first valid inbound context
-- refactor(gateway): injectable clock for TokenBucket (#1575, publisher PR 1/n)
-- refactor(gateway): one typed RetryAfter home for cold-load retry hints (#1574)
-- refactor(gateway): normalize rejected-request labels via sanitize_label (#1573)
-- docs(server): ADR-0004 — cost is modality-native, not commensurable (#1571)
-- refactor(server): controller owns its config write-back via apply_step (#1570, BatchPolicy PR 1/n)
-- feat(tracing): emit sidecar.dispatch span from sie_server_sidecar (#1550)
-- refactor(server): typed EvictionResult for evict_lru_excluding (#1569, ResidencyPolicy PR 1/n)
-- fix(gateway): record demand on backpressure so KEDA scales the lane (#1568)
-- refactor(server): single typed definition for the queue-path inference_error code (#1572)
-- fix(gateway): route engine-pin errors through endpoint_error_response (#1567)
-- chore(deps): refresh gateway Rust lockfile
-- docs(gateway): use 'gateway' terminology in resolve_routing pool comment (#1543)
-- refactor(gateway): fold pool + GPU resolution into resolve_routing (#1543, PR 3/3)
-- refactor(gateway): wrap routing decision in resolve_routing (#1543, PR 2/3)
-- refactor(gateway): extract resolve_bundle_for_request from proxy_request (#1543)
-- test(gateway/config/server): shared conformance vectors for bundle_config_hash (#1542)
-- refactor(server): make ModelRegistry.get() a pure read; add touch_lru() (#1541)
-- refactor(tracing): use is_some() borrow check for inbound ctx branch
-- test(tracing): bind a JetStream consumer in the encode propagation IT
-- test(tracing): add NATS-gated integration test for encode trace propagation
-- fix(tracing): attach inbound trace context for non-generation publishes
-- feat(tracing): inject queue trace context for non-generation endpoints
-- fix(adapters): guard empty-document MaxSim batches; strengthen single-doc test (#1539)
-- refactor(preprocessor): extract shared _load_rgb image loader (#1540)
-- refactor(adapters): shared multivector MaxSim scoring helpers (#1539)
-- refactor(adapters): extract shared flash varlen position-id builder (#1538)
-- test(server): add score/extract invalid-item regressions for decode_item seam (#1537)
-- refactor(server): validate queue-path items through one decode_item seam (#1537)
-- fix(candle): keep catalog additions candle-only
-- fix(models): restore per-task MTEB instruction for stella_en_v5 (#1340)
-- docs(helm): document collector suppression + exporterInsecure in chart README
-- fix(helm): make bundled collector downstream OTLP TLS configurable
-- fix(helm): suppress bundled collector when explicit tracing endpoint set
-- fix(helm): set OTEL_EXPORTER_OTLP_PROTOCOL=grpc on traced pods
-- feat(helm): add opt-in OTLP tracing wiring + bundled collector to sie-cluster
-- fix(candle): harden native worker routing
-- fix(tracing): assert items/metadata alignment before zip in scheduler batch
-- feat(tracing): propagate trace context through the non-streaming worker loop
-- fix(muvera): center tokens before SimHash to fix answerai @muvera Blackwell collapse (#1528)
-- fix(candle): harden native worker runtime
-- fix(sdk): raise actionable error on encode result-count desync (#1526)
-- fix(models): load stock tokenizer for gte-Qwen2-7B-instruct (#1483)
-- fix(server): skip EOS on empty input; cover non-default profile on queue path
-- fix(models): serve embeddinggemma-300m via SentenceTransformerDenseAdapter (#1523)
-- fix(server): apply profile runtime options and append EOS on cluster encode path (#1489)
-- fix(candle): publish loaded models in health
-- chore(deps): bump Rust gateway and sidecar dependencies
-- fix: repair candle rebase fallout
-- fix(gateway): separate queue timeouts from model loading
-- fix(candle): run bge-m3 profile in bf16
-- perf(candle): optimize bge-m3 xlm-r runtime path
-- fix(candle): align readiness with loaded model state
-- fix(candle): restore sidecar model readiness
-- fix(sidecar): keep only config hash wiring
-- fix(sidecar): bound scheduler bulk enqueue waves
-- perf(sidecar): bulk enqueue scheduler batches
-- feat: tune candle forward concurrency
-- fix: remove candle replica fallback path
-- feat: improve candle replica concurrency
-- fix: log candle batch failure context
-- fix: restore default candle cuda stream
-- perf: improve candle worker concurrency and build cache
-- fix: improve candle embedding runtime throughput
-- fix: install gateway pool config hashes
-- fix: preserve control-plane bundle hash in sidecar
-- fix: align worker pool config hashes
-- fix: export profile bundle targets
-- fix: repair candle ci routing checks
-- fix: harden candle bge-m3 runtime bring-up
-- feat(candle): add native adapter runtime
-- fix(muvera): drop same-dim count-sketch + retune colbert muvera configs (#1493)
-
-## v0.6.14
-
-- chore(main): release 0.6.14
-- test(encode): cover dual-type muvera filter; harden response_output_types fallback (#1430)
-- fix(encode): preserve postprocessor dense output for muvera profile (#1430)
-- fix(colbert): patch ColBERTRotaryFlashAdapter score_pairs too (#1430)
-- fix(colbert): override score_pairs to ignore encode-time options (#1430)
-
-## v0.6.13
-
-- chore(main): release 0.6.13
-- fix: extend tester structured generation timeouts
-- fix(server): serialize async config registry updates
-- fix(server): preflight profile variant config updates
-- fix(server): drain removed profile variants during config apply
-- fix(sie-mcp): chunk GLiNER extract/redact for large docs; flag the other 4B
-- feat(sie-mcp): per-tool GPU routing and env-overridable GLiNER models
-- docs(sie-mcp): add the Obsidian contract-graph example
-- fix(server): tighten profile variant reconciliation
-- fix(server): preserve profile variants during config reconcile
-- fix(gateway): retry failed payload cleanup deletes
-- fix(gateway): dedupe offloaded payload cleanup keys
-- fix(gateway): track exact offloaded payload keys
-- docs(sie-mcp): use the rendered Excalidraw PNG for the architecture diagram
-- docs(sie-mcp): replace the ASCII architecture sketch with an Excalidraw diagram
-- docs(sie-mcp): accessible README intro; drop the redundant product page
-- fix(sie-mcp): bound text offload inputs
-- feat(sie-mcp): integrate managed plugin skills
-
-## v0.6.12
-
-- chore(main): release 0.6.12
-- fix(gateway): record offload before the store write (PR review)
-- test(gateway): cover payload-store cleanup guard
-- fix(gateway): skip payload-store cleanup DELETEs for inline requests
-- fix(gliclass): guard label-window overflow + defer LEDGAR for v1.0 uni-encoders
-
-## v0.6.11
-
-- chore(main): release 0.6.11
-- fix: handle sidecar progress ack failures
-- fix: harden worker-direct batch fallback
-- fix: align retryable generation review feedback
-- fix: preserve queue delivery budget
-- fix: return retryable model loading for generation
-- test: cover default-backed pinned pool gauge
-- fix: harden logical pool queue routing
-- docs: clarify logical pool backing queues
-- feat: support logical pools backed by queue pools
-- refactor(bench): re-task Florence-2-base to COCO detection (card metric), keep OCR fallback (#1437)
-- fix(ci): raise uv HTTP timeout for the gemma cu130 wheel downloads
-- docs(deploy): note machineProfiles entry for the gemma example pool
-- feat(deploy): fail fast when a bundle is placed on the wrong platform
-- docs(server): accurately scope what the gemma cuda13 CI smoke covers
-- fix(server): correct stale cuda13/gemma platform references
-- refactor(bench): re-task Florence-2-base to OCR, measure on olmOCR-bench not KIE (#1437)
-- feat(server): first-class cuda13 platform for the gemma bundle
-- fix(server): make transformers version bundle-controlled
-- docs(server): correct the gemma cu130 Docker validation comments
-- fix(server): parse --mamba-scheduler-strategy value exactly in spec guard
-- fix(server): route grammar off :mtp for Gemma 4 via grammar_profile
-- test(server): surface errors and non-settling tasks in pinned-load drain helper
-- fix(worker): make pinned models profile-aware and reconcile on config arrival
-- docs(helm): trim staticQueuePools pinnedModels comment to effect-only
-- feat(worker): bridge gateway pinned-model set to the worker at runtime
-- docs(server): mark gemma-4-26B-A4B mtp profile validated (Modal H200)
-- feat(server): extend pinned-model protection to the disk cache
-- fix(server): gemma Docker builder — effective uv cache, skip bytecode, fix comment
-- fix(server): drop FP8 from gemma-4-26B-A4B (BF16 only)
-- feat(server): keep pinned models loaded and exclude them from LRU eviction
-- fix(server): require extra_buffer value in the speculative mamba-scheduler guard
-- fix(server): wire per-bundle CUDA indexes into the cuda12 Docker builder
-- feat(server): add Gemma 4 generation models (E2B, E4B, 26B-A4B)
-
-## v0.6.10
-
-- chore(main): release 0.6.10
-- fix: sync generation visibility api contract
-- fix: improve generation failure observability
-- feat(florence2): fix <OD> bbox conversion, re-task base-ft/large to COCO detection (#1347)
-- feat(bench): floor measure-first dark models, retire donut-rvlcdip (#1347)
-- fix(qwen3_vl_embedding): coalesce whitespace-only instruction to default
-- test(qwen3_vl_embedding): pin empty/None instruction -> default contract
-- fix(bench): align gliner label inputs
-- fix(bench): align gliner v2.5 conll protocol
-- fix(deploy): address payload-store review feedback
-- feat(deploy): provision and enable the payload store by default
-- fix(sie-cluster): address PR review findings on the self-host edge
-- fix(sie-cluster): make AWS self-host turnkey (warm default + edge nits)
-- fix(helm): let the MCP edge ingress drive cert-manager without a global gateway host
-- fix(worker): preserve label order when batching extract requests
-- fix(cluster): propagate --aws-region to terraform + standardize release name on 'sie'
-- docs(sie_mcp): runbook must actively wait through cluster create/destroy
-- docs(sie_mcp): clean-room AWS self-host runbook for a fresh agent
-- refactor(sie_mcp): consolidate the offload skill into one surface-agnostic SKILL.md
-- feat(helm): add sglang worker bundle to the AWS l4 pool
-- docs(sie_mcp): local Cowork verification guide + example MCP client
-- feat(helm): optional MCP-edge component for the sie-cluster chart
-- feat(sie_mcp): containerize the MCP edge
-- fix(qwen3_vl_embedding): pool post-RMSNorm last_hidden_state + normalize instruction (#1385)
-- fix(sie-server): make transformers5 bundle reachable via pip (#826)
-
-## v0.6.9
-
-- chore(main): release 0.6.9
-- chore(gateway): regenerate openapi.json for pinned_models profile docstrings
-- feat(gateway): support profile-qualified ids in per-pool pinned-model set
-- fix(gateway): bound pinned-model metric labels and add handler validation tests
-- feat(gateway): add per-pool pinned-model set to the pool config API
-- fix(server): alias PEFT LoRA adapter names
-- fix: scope worker preload models by lane
-
-## v0.6.8
-
-- chore(main): release 0.6.8
-- fix(server): share score media batch cost
-- fix(server): serialize worker use with unload state
-- fix(server): keep score traffic from idle-evicting rerankers
-- refactor(gateway): consolidate warm floor onto minimum_worker_count; retire admission gate
-- feat(gateway): add per-pool warm floor (min_machines) with KEDA enforcement
-
-## v0.6.7
-
-- chore(main): release 0.6.7
-- fix: guard model ready timeout against liveness budget
-- fix: wire model ready timeout through helm
-- docs: address sidecar guide review feedback
-- fix: address qwen 27b review feedback
-- docs: revise sidecar architecture guide
-- fix: route qwen 27b fp8 cold starts
-- fix: make worker config reconciliation no-op safe
-- style(lighton_ocr): hoist test imports to module top per CodeRabbit review
-- fix: add qwen3.6 27b 32k rtx serving profile
-- fix(generate): label streaming collector/publisher metrics with display model
-- fix(generate): route explicit profile variants through grammar_profile
-- perf(adapters): extract shared vision patch-embed rebind helper (#1151)
-- fix(generate): keep requested model id in /v1/generate grammar gate errors + variant-narrowing tests
-- test(generate): handler-level grammar routing dispatch-vs-display tests
-- fix(generate): split display vs dispatch model for grammar routing + chat gate ordering
-- fix(generate): address review — grammar routing before profile gates + delta refresh
-- fix(generate): route grammar requests to a non-speculative profile
-- test(lighton_ocr): address CodeRabbit review on #1223
-- perf(lighton_ocr): batch generate() across pages to fix #601 L4 throughput
-
-## v0.6.6
-
-- chore(main): release 0.6.6
-- fix(config): clarify missing profile inheritance
-- fix(config): avoid sticky missing bundle hashes
-- fix(config): fail closed on missing bundle metadata
-- fix(config): align pool-scoped bundle hashes
-
-## v0.6.5
-
-- chore(main): release 0.6.5
-- fix(gateway): preserve ref sibling schema semantics
-- fix(gateway): dereference structured output schema refs
-- refactor(sidecar): inline applied bundle hash
-- fix(config): fingerprint model pool ownership
-- chore(worker): address SGLang load review nits
-- fix(gateway): align provisioning contract docs
-- fix(gateway): address provisioning review feedback
-- fix(server): guard readiness for removed configs
-- test(server): fix ipc registry mock snapshot
-- docs: clarify pool capacity semantics
-- fix: align GPU memory pressure defaults
-- fix(server): honor pool-aware model configs
-- fix(gateway): make provisioning non-2xx universally
-- fix(worker): keep SGLang loads off event loop
-- fix(gateway): return retryable OpenAI provisioning errors
-- test(server): cover qwen3 vl reranker document image ordering
-- fix(sdk): normalize score images for wire transport
-- fix(server): render qwen3 vl reranker document images in user prompt
-- fix(gateway): decode native media JSON bytes
-- fix(deps): bump sidecar prometheus for protobuf advisory
-- fix(config): harden replace snapshot IPC
-- fix(config): replace drifted export snapshots
-- fix(config): detect bundle config hash drift
-- fix(sie-cluster): add spot toleration to AKS worker pool
-
-## v0.6.4
-
-- chore(main): release 0.6.4
-- fix(sidecar): preserve msgpack work item payloads
-- fix(gateway): resubscribe stale NATS health stream
-- feat(helm): ship values-aks.yaml AKS overlay with the Azure module
-- fix(helm): render selectorLabels after podLabels in workload templates
-- feat(helm): expose chart-level podLabels for Workload Identity wiring
-- feat(helm): accept abfs:// and abfss:// payloadStore + clusterCache URLs
-
-## v0.6.3
-
-- chore(main): release 0.6.3
-- test: stabilize SDK timeout retry assertion
-- fix: fall back to relay on S3/GCS server-side copy failure
-- feat: add server-side copy fast path for cloud weight sync
-- fix: address final cloud storage review issues
-- fix: harden cloud cache sync paths
-- fix: address azure cache review feedback
-- feat: support azure blob cluster cache
-- feat: add azure blob payload store support
-- fix(generate): reject both-present image-bearing content layouts
-- fix(generate): image-free content_parts field must not shadow layout
-- feat(generate): preserve text/image content-part ordering
-- fix(nemo_colembed): trim left-padding rows from v1 conformant doc embeddings (#1163)
-- perf(nemo_colembed): engage conformant image preprocessing for v1 (#1163)
-- fix: evict stale gateway workers on shutdown
-- fix(generate): address huronat review on vision input (F2-F8)
-- fix(generate): address CodeRabbit review on vision input
-- feat(generate): add vision (image) input to generate()
-- fix(deps): clear HIGH Dependabot alerts (docling, rustls-webpki)
-- fix(bench): address CodeRabbit — accurate classification comment + quote-agnostic test
-- fix: align extraction quality evals with source baselines
-- feat: add m4 extraction model configs
-
-## v0.6.2
-
-- chore(main): release 0.6.2
-- fix(server): consolidate runtime ninja install
-- fix(server): install ninja in cuda runtime
-- fix(helm): scale single-profile bundles on gpu-agnostic demand
-- fix(dev): address KEDA Tilt PR review
-- feat(dev): refresh KEDA Tilt local dev branch
-- fix: accept dense dim in qwen3 vl embedding adapter
-- feat(models): add M4 dense encoders mxbai-embed-large-v1, arctic-embed-l-v2.0, modernbert-embed-base
-
-## v0.6.1
-
-- chore(main): release 0.6.1
-- fix(gateway): fail fast on invalid static pool config
-- fix(gateway): canonicalize static queue pool names
-- feat(gateway): support static queue pools
-
-## v0.6.0
-
-- chore(main): release 0.6.0
-- fix(helm): preserve worker-group queue defaults
-- test(gateway): assert capped lane pending demand
-- docs: align queue lane naming
-- fix(helm): align lane defaults and tilt e2e
-- fix(gateway): harden queue lane admission
-- feat(gateway)!: route work by queue pool lanes
-- feat(helm)!: default SIE_POOL to pool name (not "default")
-- fix(deps): bump vitest 2.1.9 -> 4.1.0 (CVE-2026-47429)
-
-## v0.5.0
-
-- chore(main): release 0.5.0
-- docs(helm): clarify README pool example is illustrative, not tester-specific
-- fix(helm): fail-fast on missing/invalid bundle replica bounds
-- chore(helm): address PR #1205 review feedback
-- fix(helm): preserve gateway metrics scrape labels
-- feat(helm)!: split worker pools into pool × bundles schema
-- fix(gateway): expose unauthenticated metrics scrape port
-- chore(openapi): regenerate spec for code/sql/guard capability fields
-- fix(models): drop unsupported ebnf advertisement + restore guardian a100 guard threshold
-- feat(models): surface code/sql/guard capabilities; resolve job aliases in configs/resolve
-- fix(guard): robust verdict thresholding, logprob hygiene, decoded-token logprobs
-- feat(tester-cluster): add sglang worker pool for generative models
-- fix(sie_server): honor params.instruction in Florence-2 extract (#1053)
-- fix(helm): use sidecar binary for image pre-pull
-- chore: remove agent-jobs runbook, ADR 0001, and m5-planning docs
-- fix(guard): reject multi-candidate sampling + keep logprobs consistent on rewrite
-- feat(guard): P(unsafe) logprob threshold for CHECK POLICY precision (#1187)
-- docs(ops): agent-jobs prod-readiness runbook + opt-in model-alias deploy config
-- fix(review): address #1184 review comments + restore dropped A/B fix
-- bench(sql): grammar A/B + SQLCoder native-template measured on Spider
-- test(gateway): end-to-end precision routing through resolve_model_and_bundle
-- test(gateway): prove a model routes across two precision bundles
-- feat(gateway): job aliases can carry a precision bundle (SQL->BF16 routing)
-- docs(27b): flag FP8 SQL regression on sql cap + clarify targets are documentary
-- feat(27b): measure Qwen3.6-27B on code/SQL/tools; advertise code+sql
-- feat(guard): CHECK POLICY content-moderation model + ToxicChat F1 eval
-- bench(sql): measured Spider execution accuracy + anchored floor; SQLCoder serve-validated
-- feat(code): point model="code" at the measured model; xgrammar-validate SQL grammar
-- feat(sql): onboard SQLCoder (Defog) config + starter SQL grammar artifact
-- feat(bench): add Spider text-to-SQL execution-accuracy eval + model="sql" alias
-- fix(review): address PR feedback on the code-eval
-- feat(server,gateway): advertise code capability + model="code" alias
-
-## v0.4.2
-
-- chore(main): release 0.4.2
-- Scope SGLang CUDA toolkit runtime
-- Enable CUDA toolkit in SGLang worker runtime
-- perf(mineru_vl): O(L) incremental no-repeat-ngram for greedy decode
-- feat(sie_server): add MinerU2.5-Pro-2604-1.2B doc OCR adapter
-- build(deps): upgrade rust toolchain to 1.96
-- feat(models): add Marqo/marqo-fashionSigLIP (SigLIP open_clip, fashion image-text)
-- fix(ci): keep sidecar out of warm cache
-- fix(review): 0.6B ctx test 1024->4096, loader except logs, README gaps resolved
-- fix(ci): avoid nested mise in integration fixture
-- docs: align sidecar naming in active docs
-- fix(deploy): align server sidecar naming
-- fix(deploy): document worker-sidecar metrics wiring
-- fix(deploy): rename sidecar container to worker-sidecar
-- fix(deploy): align server sidecar naming and kind preload smoke
-- fix(deploy): publish server sidecar image
-- feat(model): bump Qwen3-0.6B serving context 1024→4096 for prod simple-task use
-- fix(bench): let via-SIE smoke serve a profile-variant model end-to-end
-- fix(loader): wire profile runtime.default_sampling into the adapter
-- feat(model+bench): RTX-PRO-6000 FP8 profile for Qwen3.6-27B + 6000 validation
-- refactor(glm_ocr): select patch-embed conv strictly by structure (CodeRabbit)
-- perf(glm_ocr): rebind vision Conv3d patch-embed to F.linear
-- chore(adapters,ci): remove Vidore3 throughput diagnosis instrumentation
-- fix(test): restore donut helper call contract
-- fix(ci): address analyzer findings and stale queue test
-- fix(adapters): replace Qwen3-VL vision Conv3d patch-embed with matmul
-- chore(helm): clean sidecar chart observability
-- feat(sidecar): add worker config and pool admission reconciliation
-- TEMP(colqwen3): time vision sub-modules (patch_embed/block/merger)
-- test(tilt): expand sidecar e2e coverage
-- feat(sidecar): wire generation direct dispatch
-- TEMP(colqwen3): split forward timing into vision vs text (revert before merge)
-- fix(adapters): route Qwen3-VL VLMs through flash attention (Vidore3 throughput)
-- TEMP(adapters,ci): timing instrumentation for Vidore3 throughput diag
-- chore(openapi): regenerate gateway spec for min_tokens + chat_template_kwargs
-- fix: address coderabbit + code-quality review on PR #1146
-- feat(bench+model): via-sie 4-task n=300 sweep + NEXTN smaller-draft on 27B
-- fix(worker): SGLang adapter accepts min_new_tokens kwarg + 27B via-sie validated
-- fix: slow sidecar nats consumer reconcile
-- fix: gate sidecar nats reconnect refresh
-- fix: address pr review quality issues
-- fix: harden sidecar config recovery
-- chore: clean sidecar docs and packaging
-- chore: prune sidecar compatibility paths
-- docs(sidecar): clarify worker sidecar source naming
-- fix(ci): refresh gateway openapi contract
-- fix(quality): repair adapter eval harness regressions
-- fix(worker-sidecar): harden queue carveout contracts
-- fix: scope bundle config hash cache per registry
-- chore: standardize worker sidecar packaging
-- feat: reconcile live worker config in sidecar
-- Add worker config reconciliation
-- chore: clean worker sidecar deployment surfaces
-- chore: enable rust sidecar in local tilt
-- fix: require rust sidecar for queue workers
-- docs: clarify worker config apply gap
-- chore: consolidate inference sidecar package
-- fix: preserve worker batch identity and publish image
-- chore: finish rust worker rebase integration
-- chore(helm): land S20+ rust-sidecar production tuning defaults
-- chore: scrub stale sie_candle references and dead candle metric
-- non-adapter carveout: ship sie_prep + wire passthrough end-to-end
-- non-adapter carveout: retire sie_candle, carve out sie_prep, Python passthrough
-- sie_worker_rust + sie_server: queue-depth metrics for IPC+Python loop
-- worker-rust + sie_candle: NATS health heartbeats and BERT cross-encoder
-- rust-worker: retire SIE_RUST_*_MODELS env vars, carve sie_candle out into its own crate (Stage 3 P1)
-- rust-worker: land Stage 1 (tokenise + framing) + Stage 2 (scheduler) + Stage 3 design
-- adding perf-tuning grafana dash fixes and extension
-- obs(helm): perf-tuning Grafana dashboard + ConfigMap
-- perf(rope_flash): vectorize CLS/mean pooling, eliminate per-item .item() sync
-- perf(adaptive): anchor min_batch_cost floor at max_batch_tokens // 4
-- revert: restore adaptive batching defaults to 15/50ms
-- perf(batching): tighten adaptive wait ceiling + revert gte-multilingual 32k
-- perf(gte-multilingual-base): raise max_batch_tokens 16k → 32k to stop IPC-batch shred
-- perf(server): FP16 on GPU, coalesce sized for IPC bursts, starvation self-heal
-- obs(worker+server): audit follow-ups for phase + fragmentation metrics
-- obs(worker+server): surface GPU phase latency + IPC-batch fragmentation
-- feat(worker/rust): IPC connection pool — lift the sidecar's last serialization bottleneck
-- fix(gateway+server): queue is the only mode — kill direct-mode cruft
-- fix(gateway): suppress H9 first-chunk-fallback on single-worker pools
-- worker(rust)+sie_server: post-audit P0 fixes — drain min-deadline, fallback eviction tests, dispatcher outcome binding, encoder UnsupportedModel coverage, model-label cardinality tests
-- worker(rust): finalise pre-Argo audit — native Candle, fallback breaker, full observability, Docker + Helm
-- chore(sie-server): drop dead code left over from sidecar cutover
-- fix(worker): harden payload store + error paths; surface silent success bugs
-- sie-server: commit to sidecar-only queue path; remove Python NATS
-- feat(sie_worker_rust): close parity gaps with Python pull loop + smoke test
-- feat(sie_server): UDS msgpack IPC server for Rust worker sidecar
-- feat(sie_server): carve out QueueExecutor + IPC types for Rust worker POC
-- feat(bench): 0.6B via-sie validated; harness + 27B config gains
-- fix(model): bump Qwen3.6-27B default/h100 mem_fraction_static 0.85 → 0.92
-- feat(gateway+worker): chat surface accepts min_tokens + chat_template_kwargs
-- fix: accept dense_dim in dense adapters
-- test: align structured output metric constants
-- fix(sie_server): clear CUDA cache on uncovered VLM paths + drop private sem _value access
-- chore: remove internal design doc references
-- docs: clean stale design references
-- docs: minimize design architecture docs
-- docs: update design document references
-- docs: remove internal planning references
-- docs: archive obsolete roadmap
-- fix(security): cap vite at ^6 + add Node engines to website
-- feat(gateway): strengthen generation isolation guardrails
-- feat(docling): accept image input + run on OCR-bench quality path
-- fix(security): bump sie_ts_sdk standalone pnpm transitives
-- fix(security): bump root pnpm deps + add overrides for transitives
-- fix(security): bump root Python deps to patched versions
-- fix(security): bump gateway deps to patched versions
-- chore: drop CodeQL rationale comments
-- fix(quality): batch3 of CodeQL findings + bench KIE bug
-- fix(quality): drop redundant inline imports in donut + registry
-- fix(security): use Reflect.construct for WebSocket headers shim
-- fix(quality): close CodeQL quality-tab findings
-- Fix gateway queue trace isolation
-- perf(bench,adapters): parallel VLM sub-batch dispatch + drop redundant empty_cache
-- Keep generation machinery off default queue path
-- docs(test): note `:` -> `__` replacement in test_model_yaml_filenames docstring
-- fix(models): rename ColQwen3 YAML to match sie_id casing (TomoroAI)
-
-## v0.4.1
-
-- chore(main): release 0.4.1
-- fix(security): resolve 18 open CodeQL alerts
-- Revert "Fix pool queue batching coalescing"
-- Fix pool queue batching coalescing
-- refactor(release-docker): remove sie-deps prebake; build deps in-band
-- fix: refresh generation pool fallback on hot add
-- fix: isolate generation direct dispatch
-- feat(server): add Qwen3.6-27B model + migrate to CUDA 12.9
-
-## v0.4.0
-
-- chore(main): release 0.4.0
-- chore(release-docker): scrub overcommenting and internal-naming leaks
-- fix(gateway): add NATS config trusted producers helm override
-- ci(release-docker): pre-bake sie-deps base images keyed on lockhash
-- chore(release): drop cuda11 from docker build matrix
-- fix(helm/sie-cluster): guard validateTls probe against deployments with nil labels
-- feat(openapi): add tool_calls support to chat completion schema
-- style: format code to comply with line length limits
-- fix(gateway): document ModelCapabilities in OpenAPI + refresh on profile delta-update
-- fix(gateway): scope LoRA adapter capabilities per profile (M10)
-- fix(generation): cancel tombstone prevents first-chunk fallback double-execution (H9)
-- feat(gateway): /v1/generate accepts seed/logprobs/logit_bias/n/best_of/lora_adapter (M8)
-- docs(openapi): rewrite schema to match implemented chat/completions/responses surface (M2)
-- fix(helm/sie-cluster): probe cert-manager controllers cluster-wide
-- fix(helm/sie-cluster): include cert-manager mode in presence-check gate
-- fix(helm/sie-cluster): label-based cert-manager detection + bidirectional runtime check
-- fix(helm/sie-cluster): one-step bundled cert-manager install with self-signed TLS
-- docs(generation): A100 Outlines smoke closes H10 release gate
-- fix(streaming): no-silent-drop on chunk-queue backpressure (H6)
-- feat(gateway+worker): per-choice OpenAI streaming for n>1 (H4, H5, M4)
-- docs(product): commit generation as 4th supported primitive (M3, M9)
-- feat(gateway): add routing salt + byte-preserving key mode (M11)
-- fix(gateway): tighten chat sampler/token-cap + tool-history validation (M1, M13)
-- feat(worker): SGLang owns grammar; worker preflight opt-in only (H8, ADR-0002)
-- fix: centralize worker_id subject normalization (M5)
-- docs(generation): reconcile Qwen3.5 grammar-backend evidence (H10)
-- fix(gateway): strict allow-list + 400 contract on /v1/responses (H2)
-- fix(gateway): strict allow-list + 400 contract on /v1/completions (H3)
-- feat(python-sdk): expose typed params for chat n/logprobs/lora_adapter/etc (M7)
-- feat(ts-sdk): handle 202 provisioning in chatCompletions + expose missing fields (H1+M6)
-- fix(gateway): generation timeouts bypass legacy request-timeout ceiling (H7)
-- fix(generation): tighten lossy tool-control flags (M14)
-- chore(lora): rename "LoRA-on-generation exclusion" to "legacy scalar lora_id"
-- Fix async pool create delete races
-- Await in-flight async pool creation
-- Address pool admission review comments
-- Fix pool admission cap semantics
-- Fix pool cap admission semantics
-- fix(ci): copy assets/ into the gateway Docker build (redoc bundle)
-- feat(gateway): /v1/completions streaming (text_completion SSE)
-- feat(gateway): /v1/responses structured array input (conversation history)
-- feat(generation): streaming n>1 — per-candidate SSE interleave
-- feat(gateway): accept OpenAI multimodal content-parts; reject images (no VL model)
-- feat(gateway): /v1/responses (OpenAI Responses API, MVP)
-- feat(gateway): advertise lora_adapters on /v1/models + pre-validate unknown names
-- feat(generation): best_of — over-generate + rank by logprob, return top n
-- feat(gateway): /v1/completions (legacy OpenAI Completions, raw-prompt)
-- feat(worker): wire mixed-pool fairness scheduler into the pull-loop (opt-in)
-- Revert "feat(gateway)!: fail-closed authentication (default-deny)"
-- Revert "fix(dev): set explicit auth opt-in for local gateway launchers (post fail-closed)"
-- Enable cloud log observability overlays
-- fix(generation): LoRA lora_path is a top-level /generate field, not a sampling param
-- feat(generation): multi-LoRA serving (one base, N adapters, per-request) (roadmap 6.2)
-- Disable cloud log observability by default
-- Sync Helm dependency lock
-- feat(generation): multi-candidate n>1 (non-streaming) end-to-end (roadmap 1.5)
-- Enable cloud Loki Alloy overlays
-- Add Loki Alloy log observability
-- fix(dev): set explicit auth opt-in for local gateway launchers (post fail-closed)
-- feat(gateway): register /v1/moderations as explicit 501 (roadmap 1.8, phase 3)
-- feat(gateway): meaningful system_fingerprint on chat responses (roadmap 1.3/§5)
-- feat(worker): WorkClassScheduler core for mixed-pool fairness (roadmap §6.1)
-- fix(chart): pin image-prepull DaemonSets to GPU nodes
-- feat(routing): cache-aware (prefix-hash) routing (roadmap §6.3)
-- feat(gateway)!: fail-closed authentication (default-deny)
-- feat(chat): regex/EBNF response_format + developer role (roadmap 1.7)
-- docs: reconcile structured-output backend + fix chat-param docstring drift
-- feat(gateway): serve a rendered API reference at /docs (Redoc)
-- feat(gateway): unify /v1/embeddings on the OpenAI error envelope (roadmap 1.4)
-- chore(openapi): regenerate server spec for GPU-aware health probes
-- fix(server,gateway): add GPU-aware health probes to detect and recover from wedged CUDA contexts
-- fix(sie_server): install cv2 system libs for docling extract
-- fix(sie_server): enforce media bytes contract at every consumer (#1026)
-- fix(sie_server): base64-decode JSON image inputs (#1026)
-- feat(gateway,sdk,server): add OpenAI-compatible chat completions with streaming and sampling extensions
-- fix(grammar): resolve tokenizer adapter for Outlines processor factories and remove anchors from regex patterns
-- test(metrics): update api_key masking assertion and add clarifying comment
-- fix(gateway,sdk,server): validate numeric fields and improve error handling
-- refactor(gateway,sdk,server): harden request routing, dedup, and resource cleanup
-- fix(gateway,sdk,server): prevent metric cardinality DoS and fix non-idempotent retry logic
-- refactor(gateway,server): improve OpenAI compatibility and fix Docker build caching
-- feat(gateway,server): add multi-turn tool-use support with OpenAI-compatible message format
-- fix(helm/sie-cluster): regenerate Chart.lock with synced digest
-- fix(helm/sie-cluster): make self-signed root-CA namespace configurable
-- feat(helm/sie-cluster): bundle cert-manager + trust-manager (opt-in) with self-signed TLS mode
-- chore(helm): decouple worker image bundle from logical bundle configuration
-- fix(helm): trim and drop empty entries in ingress.hosts
-- refactor(sdk,server,observability): simplify sampling parameter handling and fix concurrent HTTP client initialization
-- fix(gateway,sdk,server): add wire-level validation, improve resource cleanup, and enhance observability across request lifecycle
-- fix(gateway,sdk,server): strengthen validation and eliminate silent failures across request lifecycle
-- feat(gateway,sdk,server): add native generate endpoint with improved admission control and validation
-- feat(gateway): refactor streaming and routing with improved error handling and metrics
-- build(gateway): add BSL-1.0 to allowed licenses in deny configuration
-- chore: regenerate OpenAPI spec
-- feat(generation): complete M4 req2 generation primitive with streaming, structured outputs, and routing
-- Support configurable ingress.hosts in sie-cluster chart
-- refactor(observability): add grammar label to TTFT/TPOT metrics and extend dashboard instrumentation
-- feat(gateway,server): add HRW direct-dispatch routing with saturation-aware admission control
-- refactor(routing): implement slice 05 HRW direct-dispatch with saturation-aware worker selection
-- feat(gateway): implement slice 04 structured-output grammar validation and compilation
-- feat: generate slice 03 chat completions + OpenAI error envelope
-- feat(observability): implement generation POC metrics and dashboard (slice 07)
-- feat: generate slice 08 gated validation trench
-- fix(pytorch_embedding): accept and forward revision kwarg (#876)
-- feat: generate slice 02 streaming async iterator
-- feat: generate slice 01 walking skeleton
-
-## v0.3.4
-
-- chore(main): release 0.3.4
-- fix(sdk): widen sie-sdk requires-python to >=3.12
-- extend: GCP bucket provisioning, custom IAM roles, fix path mismatch
-- fix(gateway): tolerate config conflicts in bootstrap, gate on sie-config ready
-- feat(infra): default payload store to model-cache bucket /payloads
-- fix(deps): pin opencv-python-headless to drop X11 runtime deps
-- fix(chart): default workers to shared queue pool
-- feat(ts-sdk): add ExtractOptions.adapterOptions for adapter knobs
-- test(sdks): cover handle_error dispatch and tighten InputTooLongError tests
-- feat(sdks): add typed InputTooLongError for extract 400 INPUT_TOO_LONG
-
-## v0.3.3
-
-- chore(main): release 0.3.3
-- fix(docker): install libspatialindex-c6 in worker images
-- refactor(gliclass): tighten IndexError discriminator with regex
-- fix(gliclass): catch IndexError empty-tensor crash as InputTooLongError
-- test(gliclass): cover _apply_overflow_policy per policy
-- fix(gliclass): raise InputTooLongError from argmax-empty backstop
-- chore(openapi): update openapi spec
-- Fix gateway routing and autoscaling regressions
-- Address Tilt PR review feedback
-- Optimize gateway msgpack success responses
-- Add kind Tilt gateway SDK E2E loop
-- refactor(server): give overflow_policy a typed home
-- test(adaptive-batching): add absolute tolerance to floating-point assertions
-- docs(gliclass): document token accounting in _apply_overflow_policy
-- chore(gliclass): refactoring
-- chore(gliclass): remove redundant docstring _extract_text
-- chore(gliclass): remove redundant "loaded" checks
-- feat(server): enforce overflow_policy in gliclass adapter
-- feat(server): validate overflow_policy in resolve_runtime_options
-- docs(server): surface overflow_policy in extract OpenAPI schema
-- feat(server): route INPUT_TOO_LONG to HTTP 400 in extract API
-- feat(server): add new INPUT_TOO_LONG ErrorCode
-- feat(model-loader): add post-download load timeout with stall-based download bounds
-- fix(ci): peft-adapter base size + ocr force-heavy + drop hf_hub cap
-- fix(bundles): cap huggingface-hub <0.32 in transformers5 bundle
-- fix(ci): drop runner_class from public model YAMLs; route via HF size
-- feat(ci): two GPU lanes (L4 + g7e) with model-driven routing
-- fix(sglang): make startup timeout env-driven; bump default 300 -> 900
-- fix(adapters): preserve encode order/boundaries (colqwen3) + lock v1 to_dict patch (nemo_colembed)
-- fix(nemo_colembed): strip zero-padded rows from v2 batched embeddings
-- fix(nemo_colembed): broaden AutoModel-failure catch for v1 fallback
-- feat(adapters): add ColQwen3 and Nemotron ColEmbed v2 visual document retrieval
-
-## v0.3.2
-
-- chore(main): release 0.3.2
-- test(fixtures): configure deployment environment for test containers and clusters
-- ci(telemetry): add deployment environment tagging across internal infrastructure
-- docs(gateway): document embeddings partial-success contract
-- fix(docker): stub bundles/ and models/ in deps stage
-- docs(gateway): clarify OpenAPI contracts
-- fix(sie-server): include model and bundle directories in wheel distribution
-- feat(sie_server): per-stage timing markers in lifespan for engine_boot attribution
-- feat(sie_server): split adapter.warmup() out of load() with cold-start log markers
-- feat(helm): wire probe templates to values trees
-- feat(helm): expose probes value trees for worker/gateway/config
-- fix(gateway): preserve scale-from-zero request path
-- fix(gateway): preserve embeddings timing headers
-- fix(gateway): address latest coderabbit contract notes
-- docs(gateway): document service unavailable variants
-- fix(gateway): close remaining review contract gaps
-- docs(gateway): align embeddings encoding docs
-- fix(gateway): reject unsupported embeddings token arrays
-- fix(paddleocr_vl): pass use_cache=True to generate to enable KV-cache
-- fix(gateway): address probe and SDK review findings
-- feat(gateway): unify API errors and align probe contracts
-- fix(docling): mark adapter unloaded in unload()
-- fix(docling): cache DocumentConverter per (device, ocr_enabled)
-- fix(chart): pass --cluster-cache to sie-server and correct populate command in docs
-- docs(infra): drop mise wrappers from public-facing model-cache docs (#791)
-- feat(infra): opt-in S3 cluster model cache (#791)
-- docs(helm): correct Let's Encrypt rate-limit wording in README
-- fix(helm): validate ACME server and privateKeySecretRef in validateTls
-- docs(helm): address local reviewer suggestions on TLS work
-- feat(helm): TLS termination via cert-manager + BYO matrix docs
-- fix(gateway): address PR review for NATS health mode
-- fix(gateway): align CreatePoolRequest OpenAPI with runtime validation
-- fix(gateway): clarify experimental NATS health mode
-- feat(gateway): expose OpenAPI contract
-- feat(docling): add ocr profile defaulting do_ocr=true
-- fix(docling): thread device through PdfPipelineOptions accelerator_options
-- fix(review): tighten score_pairs options handling and query text validation
-- refactor(eval): consolidate colbert model lists and improve query validation
-- feat(adapters): default score_pairs() in BaseAdapter + baseline reranking targets
-- refactor(colbert): hoist score-pair grouping helper to _utils
-- feat(server): emit INFO log on invalid SIE_TORCH_NUM_THREADS fallback
-- feat(server): cap torch CPU threads at worker startup
-
-## v0.3.1
-
-- chore(main): release 0.3.1
-- fix(bge-m3): tighten score_mode validation, drop module docstring
-- docs(sdk,server): clarify MODEL_LOAD_FAILED covers transient cooldowns
-- fix(bge-m3): extend score support to bge_m3 and bge_m3_flag adapters
-- fix(sdk,server): address CodeRabbit review on terminal load failures
-- fix(siglip): cast pixel_values to model dtype on open_clip path
-- chore(server): regenerate openapi.json with state and last_error fields
-- feat(siglip): add Marqo/marqo-ecommerce-embeddings-B via open_clip backend
-- fix(server): add terminal failed state to model registry (sie-test#85)
-- feat(bge-m3): support /v1/score with dense/sparse/colbert/hybrid modes
-
-## v0.3.0
-
-- chore(main): release 0.3.0
-- review: label-aware merging in stablebridge pruner spans
-- fix(adapters): validate runtime max_seq_length overrides before clamp
-- review: fail fast on missing PruningHead keys
-- review: tighten profile validation, encoding, fixture paths
-- fix(gateway): align /v1/models error and list shapes
-- fix(adapters): clamp runtime max_seq_length overrides in score_pairs
-- feat: upstream Stablebridge pruner adapter + sie_bench evals
-- fix(gateway): add GET /v1/models/{model} detail route
-- fix(adapters): clamp flash adapter max_seq_length to model positional capacity
-- fix(gliclass): return all label scores and bound input length
-- fix(client): retry only transient connection errors under wait_for_capacity
-- feat(oom): improve error semantics and budget exhaustion detection
-- fix(sdk): retry on connection errors and generic 503s
-- refactor(oom): extract SDK retry logic and refine server NAK semantics
-- feat(oom): implement defensive exception fan-out and improve recovery metrics
-- test(api): add coverage for lora load failure in encode endpoint
-- test(docling): drop module-level docstring (CodeRabbit)
-- fix(docling): per-task converter, hf_revision guard, callable typing (CodeRabbit)
-- test(api): add regression tests for lora routing in encode handler
-- feat(server): add reactive OOM recovery and proactive idle eviction
-- feat(extract): add Docling adapter for PDF/DOCX/HTML parsing
-- fix(sdk): has_children filters folder-marker objects (Refs #732, #654)
-- fix(sdk): cluster cache prefix probe uses list, not head (Refs #732, #654)
-- test: hoist non-optional imports to module top (CodeRabbit)
-- feat(extract): plumb document items and structured `data` results
-- fix(sdk): preserve caller-supplied document format over inferred (CodeRabbit)
-- chore(openapi): regenerate spec after adding document modality
-- feat(types): add `document` input modality across SDKs, server, and metadata
-- test(adapters): mock get_embedding_dimension in sentence_transformer fixtures
-- fix(types): adapt to ty 0.0.32 stricter ignore handling
-- build(deps): add litellm>=1.83.7 to sie_dspy dependencies
-- Re-seed ACTIVE_LEASE_GPUS sentinel after pool reset
-- fix(gateway): pre-instantiate request/demand metric families on startup
-- chore(gateway): address PR #721 review — pin deny config + drop no-op cov flag
-- chore(gateway): bump Rust to 1.95.0, add cargo-deny audit + llvm-cov coverage
-- chore(sdk): trim retry-comment verbosity, drop debug-context refs
-- fix(sdk): retry mid-flight transport disconnects, not just timeouts
-- fix(gateway): keep record_request async to match main's call shape
-- fix(gateway): drop double-counted REQUEST_COUNT / REQUEST_LATENCY emit
-- fix(gateway): address PR #716 review feedback
-- docs(gateway): strip dangling PRD / improvements-doc section refs
-- docs(gateway): scrub ghost references left over from the perf audit
-- perf(gateway): cache SDK version parse, integer audit latency, UUIDv7
-- perf(gateway): tighten cold-pool backpressure + cheaper QPS counter
-- perf(gateway): move score-endpoint unwrap instead of cloning
-- perf(gateway): fuse msgpack_numpy decode into the response path
-- perf(gateway): publish work items concurrently + borrow shared fields
-- perf(gateway): pass msgpack items through as rmpv::Value
-- perf(gateway): trim per-request work on the inference hot path
-- fix(observability): address PR review blockers on metrics PR
-- feat(observability): add Prometheus metrics to sie-config and expand sie-gateway coverage
-- docs(sdk): drop LORA_LOADING references from score/extract docstrings
-- docs(sdk): correct wait_for_capacity docstrings to reflect actual retry matrix
-- fix(gateway): emit X-SIE-Error-Code header on model-loading 503
-- chore(gateway): drop dead AppError::UpstreamTimeout variant
-- fix(gateway,sdk): map upstream timeouts to 503+MODEL_LOADING for SDK retry
-- test(bundle-coverage): fail loudly on empty dirs and duplicate bundle names
-- test(bundle-coverage): drop over-strict duplicate-adapter assertion and module docstring
-- fix(config): surface mixed-profile unrouteable models and keep snapshot consistent on writes
-- fix(config,cluster): surface unrouteable models loudly and helm-repo-add on pristine hosts
-- fix(bundles): declare Qwen3-VL adapters in default bundle
-- fix(gateway): prioritize epoch-rewind branch; harden no-thrash test; correct arch-guide on ephemeral restart
-- docs: align config-management-api, design.md §10.10, and arch-guide with sie-config cutover
-- test(gateway): lock in backwards-epoch recovery in config_poller
-- chore(gateway,docs): address PR #702 review feedback
-- chore(gateway,helm): drop deprecated SIE_CLUSTER_ROUTING surface on the gateway
-- fix(helm): fail fast when gateway has no bundle source
-- fix(gateway): make sie-config single source of truth for bundles with live resync
-- perf(docker): add --link + move ARG BUNDLE to eliminate cross-bundle layer noise
-- fix(kind-smoke): add --no-pool-isolation for static clusters + contract-drift fixes
-- perf(docker): reorder stages for maximum BuildKit cache reuse
-- perf(docker): normalize mtimes so shared venv layer is dedupable
-- fix(kind-smoke): address bot review feedback
-- fix(kind-smoke): wire sie-config image and helm overrides into kind cluster fixture
-- perf(docker): split worker venv into shared + bundle-specific layers
-- fix(docs): Update packages/sie_server/Dockerfile.cuda11
-- fix(adapters): add input validation guards for empty/failed visual inputs
-- slim worker Dockerfiles: smaller final image, faster first-request
-- chore: integrate sie-config across release plumbing, helm, terraform, tests
-- fix: address follow-up PR review nits
-- fix(sie_config): address PR review feedback
-- fix(tests): restore docker gateway smoke test after router rename
-- fix(helm): enable NATS + JetStream by default to match queue clusterRouting
-- chore(gateway): sync crate version with cluster release (0.2.0)
-- fix(helm): default clusterRouting to "queue" on import-sie-router-rust
-- chore(gateway): make gateway-fmt auto-fix by default
-- fix(gateway,config): address PR review -- 404 for unknown models, 202 on default routing, full YAML propagation
-- ci: publish sie-gateway image to GHCR on release
-- fix(gateway,config): harden auth, trusted NATS producers, and recovery path; drop gateway HA default
-- fix(gateway): normalize model ids in NATS work subjects + docs/tooling/ha cleanup
-- chore: consolidate architecture doc and prune stale infra + docs
-- fix(gateway,config,sdk): resiliency, concurrency, and cross-service hash parity
-- chore(gateway,config): finish split audit — offload fs I/O, drop dead NATS accessors, align docs
-- test(gateway,config): expand coverage; drop dead idempotency cache; rewrite split docs
-- refactor(gateway): split sie-config into its own service; gateway is now consumer-only
-- docs(gateway): reflect current sie-config state and lock infra decisions
-- fix(config): emit identical NATS payload to bundle and _all subjects
-- refactor: rename sie-router service to sie-gateway
-- chore(sie-config): bump version to 0.1.10
-- refactor: replace sie-router package with sie-config service
-- Add PaddleOCR-VL-1.5 adapter (#659)
-- fix(adapters): clarify video placeholder, validate token IDs, fix torch_dtype key
-- fix(adapters): address review findings for Qwen3-VL adapters
-- feat(adapters): add Qwen3-VL-Embedding-2B and Qwen3-VL-Reranker-2B multimodal adapters
-- fix: guard score() and score_pairs() against empty input lists
-- fix: address review findings — negative truncation guard, score() options, constant dedup
-- feat: add Qwen3-Reranker-0.6B and 4B causal LM reranker support
-- feat: add GLiNER2 and GLiNER-bi adapters (#632)
-- fix(docker): propagate failure when all add-apt-repository retries exhausted
-- fix(docker): add retry logic for deadsnakes PPA to handle Launchpad outages
-- feat: add SigLIP 2 base-patch16-224 vision-language encoder
-- feat(openapi): add static spec export and validation
-- feat(adapters): add GLM-OCR adapter
-- revert: test_async.py — belongs to a separate PR, not this epic
-- fix: address CodeRabbit review comments on PR #615
-- fix(docker): cache apt lists alongside apt cache to prevent stale index
-- fix(cluster): emit base image tag in helm guidance; correct misleading docs (#609)
-
-## v0.2.0
-
-- chore(main): release 0.2.0
-- docs: add telemetry documentation and clarify deployment guidelines
-- refactor(observability): update tmp_path type hints from str to Path
-- test(observability): fix telemetry test type hints
-- fix(haystack): rename namespace alias to sie
-- feat(observability): add anonymous usage telemetry
-- feat(haystack): add haystack_integrations namespace aliases
-- feat(deps): migrate from pynvml to nvidia-ml-py package
-- feat(benchmarks): add MTEB NFCorpus evaluation results for ModernBERT-based embedders
-- fix: install uv via curl instead of COPY --from ghcr.io
-- feat(sdk): add max_concurrency param to SIEAsyncClient to prevent connection pool exhaustion
-- fix(build): downgrade dockerfile syntax version to 1 for broader compatibility
-- refactor(deployment): add model preloading configuration to Terraform and CLI validation
-- feat(adapters): add ModernBERT flash dense embedding support with fallback mechanism
-- fix(router): harden affinity spill with bounds check, clamp, and debug log
-- feat(workers): implement model preloading at startup to reduce first-request latency
-- fix(router): add overflow spill to break model affinity deadlock
-- fix(router): make rejected requests visible to KEDA scaling metrics
-- fix(adapters): remove redundant tokenizer validation and unused template parameter
-- refactor(adapters): simplify template application logic and add chat token caching
-- fix: address PR review — panel title, namespace variable
-- fix(dashboard): queue routing dashboard accuracy and usability
-- fix(release): add LanceDB integrations to release-please config
-- refactor(adapters): consolidate adapter infrastructure with declarative specs
-- perf(server): use sdpa attention for LightOnOCR (6x faster, no OOM)
-- fix(server): harden LightOnOCR adapter and rename next bundle
-- fix(server): add collate() and fix prepare() signature on LightOnOCRPreprocessor
-- refactor(adapters): consolidate adapter infrastructure with declarative specs
-- refactor(adapters): improve flash attention device handling and resource cleanup
-- refactor(adapters): extract common flash adapter logic into reusable base and utilities
-- fix(server): trim next bundle to only verified transformers 5.x adapters
-- fix: restore accidentally deleted test file
-- fix(server): remove accidental data symlink, default to bfloat16
-- Delete packages/sie_server/tests/adapters/test_lighton_ocr.py
-- feat(server): add next bundle and fix LightOnOCR for transformers 5.x
-- feat(server): add lightonai/LightOnOCR-2-1B OCR adapter
-
-## v0.1.10
-
-- chore(main): release 0.1.10
-- feat: add async, chunking, and streaming to Weaviate document enricher
-- perf(lancedb): decouple scanner and SIE batch sizes in enrich_table
-- fix(helm): use generic updater for both Chart.yaml version fields
-- fix: handle BytesIO images in LlamaIndex and validate Weaviate classify config
-- perf(lancedb): stream enrich_table batch-by-batch instead of full materialization
-- perf(lancedb): use Lance scanner for column projection in enrich_table
-- fix(observability): queue routing dashboard PromQL for NATS wait
-- feat(observability): queue routing dashboard, NATS prom exporter, router image tag
-- fix: update adapter tests and address code review feedback
-- fix(integrations): address CodeRabbit review findings for LanceDB PR
-- fix(helm): use generic release-please updater for appVersion
-- test(router): add queue-mode score response key regression tests
-- fix(router): use "scores" key in queue-mode score responses
-- fix(helm): restore Chart.yaml deps from main, keep appVersion v-prefix
-- feat(terraform): add evaluation cluster setup for AWS with multi-GPU support and updated configurations
-- make sure extraction uses not just the entity response type but the other response types also, including integrations
-- remove the code that made it seem as if we were passing topk param to server from typescript - this optimization doesn't make that much sense as the request is anyway much larger than response
-- PY<>TS parity in terms of integration depth  for langchain and llamaindex
-- multivector support update in integrations
-- deduplicate integration logic into ts/py sdk package that the integrations already depend on
-- feat(sdk): add get_model() and configure LanceDB release workflows
-- feat(integrations): add LanceDB integration (Python + TypeScript)
-- haystack and llamaindex get multi-modal integration
-- weaviate integration improvements
-- test(queue): add NATS server fixture and improve integration test reliability
-- feat(dlq,pull-loop): improve DLQ routing and score response handling
-- fix(config,queue,nats): correct cluster routing condition, stream max_age units, and reconnect state ordering
-- fix(queue-routing): score response format and DLQ fallback routing key
-- fix(queue-routing): configurable NATS fetch budget, Helm-wired queue params
-- perf(router): bypass FastAPI for hot proxy paths via raw ASGI middleware
-- perf(sdk+router): lazy msgpack_numpy.patch and pure ASGI middleware
-- perf(router): remove msgpack_numpy global patch and BaseHTTPMiddleware
-- perf(router): replace stdlib json with orjson for 3-10x faster serialization
-- perf(router): reduce thread pool pressure by inlining small deserialization
-- refactor(router): remove lock-free synchronization and batch work item serialization
-- fix(helm): add recreate strategy for router deployment when nats config restore is enabled
-- test(cluster): fix kind cluster tests for config API and port-forward restart support
-- fix(queue-routing): resolve 5 bugs blocking NATS pull-based worker routing
-- feat(worker): improve batch cost bounds and fix template logic
-- fix: address review findings — error handling, validation, public APIs, tests
-- fix(server): update tests to use max_seq_length instead of max_length
-- test(adaptive-batching): replace time.sleep with mocked monotonic for deterministic integral accumulation test
-- feat(adaptive-batching): add auto-calibration and PI controller with per-model profile overrides
-- refactor(batcher): implement proportional coalesce scaling and adaptive batch wait precision
-- feat: add pull-based worker queue routing and adaptive batching
-- feat(config-api): implement idempotency and auth separation with profile conflict detection
-- docs(config): clarify write auth token precedence and filter updates
-- fix(server): align cross-encoder max_seq_length parameter with loader
-- chore: review items
-- chore: review items
-- chore: review items
-- chore: fix review items
-- chore: remove git sync
-- feat: implement Config Management API with NATS-based distribution and review fixes Add runtime model config additions via REST API (POST /v1/configs/models), with NATS pub/sub distribution to workers and S3/GCS/local persistence using epoch-based CAS. Workers track config convergence via SHA-256 bundle_config_hash reported through WebSocket status. Key components: - config_api.py: REST endpoints (list/get/add models, resolve, bundles) - config_store.py: Epoch CAS persistence (local/S3/GCS backends) - nats_manager.py: Router-side NATS publish + cross-router sync - nats_subscriber.py: Worker-side NATS subscribe + config apply - Helm/Terraform: NATS sub-chart, config store env vars, restore flow Also addresses 25 code review findings: M2/M12 medium fixes, L1-L16 low-severity fixes, T3-T10 test coverage gaps, D1-D7 doc/feature discrepancies, and H13 S3 conditional writes documentation.
-
-## v0.1.9
-
-- chore(main): release 0.1.9
-- fix(helm): revert pool names to machine profile names
-- fix: increase docker smoke test timeouts and add retry
-- fix(helm): include $platform in worker image tag format
-
-## v0.1.8
-
-- chore(main): release 0.1.8
-- fix(helm): correct image.tag comment to reflect actual format
-- fix(helm): remove duplicate platform suffix from worker image tag
-- fix: add sie-qdrant and sie-weaviate to release-please config
-- fix: update README example to use new pool naming convention
-- fix: correct worker image tag format to {version}-{platform}-{bundle}
-
-## v0.1.7
-
-- chore(main): release 0.1.7
-- fix(readme): correct helm chart path
-- fix(chart): update home URL and Helm install command in README
-- fix: pool error types, add pool/progress test coverage
-- fix(router): use effective_pool instead of pool_name for default pool GPU extraction
-- fix: address PR #478 review feedback
-- perf(florence2): switch OCR configs from beam search to greedy decoding
-- fix(sdk): defer aiohttp session creation to fix "no running event loop" in SIEAsyncClient
-- sdk: switch SIEAsyncClient from httpx to aiohttp
-- feat(helm): default router to image-embedded model configs
-- feat(helm): enable image pre-pull DaemonSet by default
+## v0.7.3 (2026-09-03)
 
+### Highlights
+
+This release adds MADLAD translation and improves how generation requests finish, fail, and cancel.
+
+### Features
+
+- Translate text with `google/madlad400-3b-mt`, served through CTranslate2 with native request batching. The initial profile uses FP32 and supports up to 512 input and 512 output tokens.
+- An opt-in TensorRT-LLM bundle provides an encoder-decoder adapter on CUDA 13. It is not the default backend for the model catalog.
+- The Rust/Candle worker implementation is now included, covering native embeddings and ColBERT scoring.
+- Converted serving artifacts can be pinned and verified before loading, then reused from the local cache for offline serving.
+
+### Bug fixes
+
+- Cancelled generation streams now close their upstream requests, and model unloading drains active generation before releasing the runtime.
+- Model-load failures and generation errors remain errors through streaming and buffered responses. Python and TypeScript clients retain useful error codes, invalid-parameter details, and validated retry hints without exposing raw backend diagnostics.
+- Streaming support is reported in model capabilities. Unsupported streaming requests are rejected before execution.
+- Encoder-decoder models enforce separate input and output limits instead of incorrectly treating them as one shared context window.
+
+## v0.7.2 (2026-08-27)
+
+### Highlights
+
+Qwen3.8 joins the model catalog, Alibaba Cloud deployments gain native object-storage support, and a broad set of fixes improves SDK errors, batching, and self-hosted reliability.
+
+### Features
+
+- Added `Qwen/Qwen3.8-27B-FP8` for text and image generation, with tool calling and structured output. Alongside the conservative default profile, explicit H100, H200, and RTX PRO 6000 profiles support a 256K context window. These profiles return answers without a separate thinking mode.
+- Added native Alibaba Object Storage Service support for queued payloads and SDK storage access, plus ACK Helm settings and RRSA workload identity.
+- Self-hosted clusters can configure file-backed and replicated NATS work queues instead of relying only on the default in-memory, single-replica queue.
+
+### Bug fixes
+
+- Python and TypeScript SDKs detect incomplete batch responses instead of silently pairing results with the wrong inputs. Mixed text-and-image batches retain their input ordering, and multimodal embedding models batch text-only inputs correctly.
+- Generation failures, including empty output and model-loading errors, are surfaced consistently. Retry handling better distinguishes a model still loading from a permanent failure, and stream errors retain their request identifiers.
+- The OpenAI-compatible embeddings endpoint rejects unsupported `dimensions` values instead of silently returning a different vector width. Cold loads return a retryable response rather than holding the request open throughout model loading.
+- Invalid image data receives a useful input error, unknown model identifiers include nearby matches, and non-finite reranker scores are rejected.
+- Model eviction no longer leaves queued requests waiting indefinitely or blocks unrelated requests while a worker shuts down. Failed engine starts release their ports and report the underlying crash instead of a misleading timeout.
+- Helm deployments gain gateway disruption protection and shutdown budgets, ingress timeouts aligned with model loading, and fixes for KEDA scale-to-zero checks and ACK storage permissions.
+- ColPali and ColQwen checkpoint revisions are pinned correctly for repeatable loading.
+
+### Performance improvements
+
+- SGLang compiler caches can persist across worker restarts, with separate cache entries for incompatible GPU and runtime combinations.
+- Qwen3.8 hardware profiles tune speculative decoding and scheduling.
+
+### Upgrade notes
+
+- The CUDA 13 `gemma` bundle is renamed to `sglang-cu130`. Update explicit bundle selections and image references from `cuda13-gemma` to `cuda13-sglang-cu130`.
+- The TypeScript SDK adds the explicit `timeoutMs` option. The older `timeout` option remains a millisecond-based alias.
+- File-backed queues are opt-in. Changing the setting does not convert existing NATS streams; existing streams need a planned drain and recreation. Replication also requires a NATS cluster.
+
+## v0.7.1 (2026-08-09)
+
+Docling OCR now explicitly uses the English recognizer, fixing English words being joined together. GLiNER rejects blank documents and label prompts that leave no room for document text before running extraction.
+
+## v0.7.0 (2026-08-08)
+
+### Bug fixes
+
+- Python and TypeScript clients handle malformed generation responses and unexpected redirects as clear errors, without copying response bodies into diagnostics.
+- Queued extraction results retain the input item identifier, so callers can associate results with their documents.
+- Grounding DINO normalizes free-form detection prompts to the format expected by the model.
+- Models selected through `SIE_PINNED_MODELS` remain resident when starting the server. Inconsistent pinned-model and model-filter settings are rejected at startup.
+
+## v0.6.30 (2026-08-07)
+
+Qwen3.6 thinking profiles enable CUDA graphs and overlapping scheduling while retaining non-speculative decoding for reasoning and structured-output compatibility.
+
+## v0.6.29 (2026-08-07)
+
+Gemma 4 thinking profiles gain speculative decoding with the matching assistant model. Separate non-speculative profiles remain available for structured output, preserving the selected context window and thinking mode.
+
+## v0.6.28 (2026-08-07)
+
+### Features
+
+- Qwen3.6 and Gemma 4 non-thinking profiles gain tuned speculative-decoding configurations for long-context generation.
+- Structured-output routing can select a profile-specific, non-speculative counterpart that preserves the requested context window and thinking mode.
+
+### Bug fixes
+
+- Speculative draft models use pinned revisions and are prepared alongside locally cached main models. An unrelated cached revision no longer satisfies an explicitly requested model revision.
+
+## v0.6.27 (2026-08-06)
+
+### Highlights
+
+Generation gained a direct-server Responses endpoint and more reliable handling of model-specific reasoning, while the retrieval catalog expanded with multilingual dense and late-interaction models.
+
+### Features
+
+- Added `lightonai/mLateOn` for multivector embeddings and scoring, and `ibm-granite/granite-embedding-97m-multilingual-r2` for dense embeddings.
+- Added stateless, non-streaming text requests at the direct server's `/v1/responses` endpoint, with explicit errors for unsupported options.
+- Added hardware-specific long-context and thinking profiles for selected Qwen and Gemma models. Context and output limits remained profile-specific; the default model settings were not expanded globally.
+- Enabled generation streams over the local worker-ingest connection, including request cancellation.
+
+### Bug fixes
+
+- Prevented Qwen and Gemma reasoning blocks from appearing in visible answers when thinking is disabled, including delimiters split across streamed chunks.
+- Enabled Python clients to retry capacity failures received before generation starts, including failures delivered inside an SSE stream.
+- Kept Docling's normal document parsing available when optional OCR assets fail to initialize.
+- Corrected native extraction image preprocessing and preserved Qwen3-VL reranker batching with newer Transformers versions.
+- Redirected the server's outdated root playground to its interactive API documentation.
+
+## v0.6.26 (2026-08-02)
+
+Added H100 FP8 generation profiles for `Qwen/Qwen3.6-27B`, `Qwen/Qwen3.6-35B-A3B`, and `google/gemma-4-31B-it`. The newly added 35B Qwen and 31B Gemma configurations initially exposed an 8K context window, rather than their checkpoints' full native context.
+
+## v0.6.25 (2026-07-30)
+
+### Features
+
+- Added `Qwen/Qwen3-Embedding-8B` for text embeddings.
+
+### Bug fixes
+
+- Added early validation of OpenAI-compatible embedding requests containing more than 256 inputs to prevent oversized result payloads.
+- Applied supported sequence-length limits to GLiNER and NuNER model configurations.
+- Bounded recovery work when an invalid input affects a shared encoding batch, preventing repeated decoding failures from triggering unbounded retries of smaller batches.
+
+## v0.6.24 (2026-07-26)
+
+### Features
+
+- Added exact adapter-revision pinning to LoRA entries in model configuration for reproducible loading.
+
+### Bug fixes
+
+- Included missing tokenizer dependencies in the affected model configurations.
+
+### Performance improvements
+
+- Cached MUVERA projection state across requests, avoiding reconstruction of the same random projection structures for every encoding operation.
+
+## v0.6.23 (2026-07-24)
+
+### Highlights
+
+The direct server's `/v1/generate` endpoint gained image-input and structured-output support. Python and TypeScript SDKs also gained helpers for image inputs, grammars, and Responses; the Responses helpers covered stateless, non-streaming text requests.
+
+### Features
+
+- Added `naver/v-splade-quality` for sparse text and image embeddings.
+
+### Bug fixes
+
+- Corrected context-sensitive structured-output schema validation and made malformed grammar errors consistent.
+- Restored trained ColBERT projections and query-expansion behavior, including the ColBERTv2 and Jina ColBERT retrieval recipes.
+- Serialized concurrent tokenizer and hidden-state operations that could otherwise interfere with one another.
+- Preserved pinned revisions when loading trusted model code, including fallback paths.
+- Removed unsupported visual MUVERA profiles from the advertised catalog.
+
+## v0.6.22 (2026-07-22)
+
+Docling gained support for verified, immutable model artifacts. Staged file-inventory and hash checks made missing or mismatched assets explicit instead of silently using a different artifact set.
+
+## v0.6.21 (2026-07-21)
+
+### Highlights
+
+This release added a text-reranking compatibility API and expanded the embedding and transcription catalog, alongside fixes to retrieval and vision-model execution.
+
+### Features
+
+- Added Cohere-compatible text-only reranking at `/v1/rerank` and `/v2/rerank`, with strict validation of supported request fields and complete-result handling.
+- Added `Snowflake/snowflake-arctic-embed-s` for text embeddings and `openai/whisper-large-v3-turbo` for audio transcription.
+
+### Bug fixes
+
+- Corrected `Alibaba-NLP/gte-Qwen2-7B-instruct` serving to use its checkpoint's bidirectional embedding implementation rather than a causal generation implementation.
+- Restored the 512-token capacity of `prithivida/Splade_PP_en_v2` while keeping its retrieval-specific query and document limits separate.
+- Prevented concurrent ColPali forwards from interfering with Transformers' output recording and stopped temporary tensors from accumulating between requests.
+- Corrected model discovery for an explicitly empty selection, which previously advertised every model in the bundle.
+- Added validation for blank reranking inputs and filtered relation results whose endpoints were not selected by the extraction request.
+
+## v0.6.20 (2026-07-18)
+
+### Highlights
+
+The model catalog expanded with compact multilingual retrieval and text-classification options. Generative OCR models gained a shared SGLang serving path with continuous batching.
+
+### Features
+
+- Added `intfloat/multilingual-e5-small`, `tencent/R3-embedding-0.6b`, and `tencent/R3-rerank-0.6b`.
+- Added `fastino/gliguard-LLMGuardrails-300M` for text classification.
+- Enabled LightOnOCR, PaddleOCR-VL, and GLM-OCR serving through the generative OCR adapter.
+
+### Bug fixes
+
+- Corrected classification-threshold and multi-label handling in GLiNER2-based classification.
+- Corrected GLiREL entity offsets and relation text when mapping tokenized inputs back to the original text.
+
+## v0.6.19 (2026-07-14)
+
+### Bug fixes
+
+- Corrected unknown-model responses to return `404` instead of `500`.
+- Marked permanently failed model loads as terminal failures, preventing queued requests from waiting for a model that cannot become ready.
+- Preserved one multivector result per input, in input order, when encoding with the ColBERT adapter.
+- Restored Florence-2 processor compatibility and pinned offline chat-template rendering to the configured tokenizer revision.
+- Protected cross-encoder tokenization from concurrent access during inference and token counting.
+
+## v0.6.18 (2026-07-12)
+
+Gateway configuration diagnostics were updated to redact API bearer tokens, administrator tokens, and configuration-service credentials instead of including their values in debug output.
+
+## v0.6.17 (2026-07-09)
+
+### Features
+
+- Added support for multiple GPU worker children behind one sidecar, distributing work according to each child's readiness and queue pressure.
+- Added `vidore/colSmol-256M` for text and image multivector embeddings, with an optional MUVERA representation.
+
+### Bug fixes
+
+- Kept worker IPC health checks responsive when GPU health inspection fails.
+- Released cancelled scheduler reservations and bounded queue admission through completion, preventing cancelled work from leaving a worker appearing permanently busy.
+
+## v0.6.16 (2026-07-07)
+
+### Bug fixes
+
+- Restored NV-Embed-v2's native encoding recipe, including its instruction-aware latent-attention pooling, instead of generic embedding pooling.
+- Applied trained PyLate Dense projection chains in ColBERT adapters and aligned the ModernBERT implementation with the checkpoint's forward pass.
+- Restored query and document prefixes on the SentenceTransformer profile for `intfloat/multilingual-e5-large`.
+- Fixed scale-from-zero handling for GPU-agnostic requests in multi-profile pools and normalized explicit GPU demand labels consistently.
+
+## v0.6.15 (2026-07-03)
+
+### Highlights
+
+Apple Silicon gained an MLX generation backend for configured models, including Qwen3.5-4B. Self-hosted Helm deployments gained opt-in distributed tracing with a bundled OpenTelemetry collector and optional Tempo backend.
+
+### Bug fixes
+
+- Restored the checkpoint-specific embedding recipes for EmbeddingGemma, GTE-Qwen2, and Stella models, including their tokenizer and query-instruction handling.
+- Applied profile runtime options consistently on queued encoding requests and preserved the distinction between unsigned-byte and binary embeddings.
+- Corrected out-of-memory errors on the OpenAI-compatible embeddings endpoint to return `503 RESOURCE_EXHAUSTED`.
+- Bounded continuous-batch draining so a busy LoRA adapter cannot indefinitely delay other adapters.
+- Improved cleanup during model unload and serialized hot-reload changes to the model registry.
+- Preserved trace context through embedding rewrites and queue dispatch.
+- Prevented late replies from abandoned generation attempts from replacing the active result.
+
+## v0.6.14 (2026-06-26)
+
+Fixed ColBERT query–document pair scoring, including the ModernBERT and rotary variants, so retrieval results can be reranked without server errors. MUVERA encoding now returns the requested dense vectors instead of dropping them from the response.
+
+## v0.6.13 (2026-06-25)
+
+Live model-configuration updates now preserve profile-qualified variants, validate changes before applying them, and unload removed variants safely. Cleanup of large request payloads now tracks the exact stored objects and retries failed deletions.
+
+MCP tools now support document summarization, entity extraction, and masking detected PII. Large-text extraction uses bounded overlapping chunks, and operators can choose models and GPU routing separately for different tools.
+
+## v0.6.12 (2026-06-24)
+
+GLiClass now returns an actionable input-too-long error when the combined label and text input exceeds its context window. The gateway also avoids unnecessary storage deletions for requests that were never offloaded to object storage.
+
+## v0.6.11 (2026-06-23)
+
+### Highlights
+
+This release expands text generation with Gemma 4 and makes self-hosted capacity easier to keep ready for requests.
+
+### Features
+
+- Added Gemma 4 E2B, E4B, and 26B-A4B model configurations in a dedicated `gemma` bundle using CUDA 13.
+- Pinned models are now loaded on assigned workers and protected from idle and memory-pressure eviction.
+- Logical resource pools can use existing worker capacity through a configurable backing queue pool, with Python and TypeScript SDK support.
+
+### Bug fixes
+
+- Generation requests made while a model is loading receive a retryable response. Queue retries preserve their delivery limits, and worker fallback routing respects the requested pool.
+- Helm reports incompatible bundle/platform selections before deploying workers with an unavailable image.
+
+## v0.6.10 (2026-06-22)
+
+### Highlights
+
+This release corrects embedding and object-detection outputs and makes pending generation work visible in the model and cluster-status APIs.
+
+### Features
+
+- Added a self-hostable MCP server for document conversion, image descriptions, document question answering, and structured output. It uses SIE's public inference APIs and requires a configured SIE endpoint, the appropriate models, and authentication settings. Question answering works on the documents supplied to each call, without a persistent index.
+
+### Bug fixes
+
+- Qwen3-VL embeddings now use the model's final normalized hidden state and consistent instruction formatting, including a default for blank instructions.
+- Florence-2 detection results now return pixel-space `[x, y, width, height]` bounding boxes.
+- Python installations can resolve the `transformers5` bundle without conflicting with the server's dependency constraints.
+
+### Breaking changes
+
+- The bundled Florence-2 base-ft and large configurations now default to object detection instead of OCR. Set the extraction task explicitly if you need OCR.
+- Removed the bundled `naver-clova-ix/donut-base-finetuned-rvlcdip` model configuration.
+- GLiNER v2.5 default entity thresholds changed to `0.60` for small, `0.55` for medium, and `0.75` for large. Set an explicit threshold to preserve previous extraction behavior.
+
+## v0.6.9 (2026-06-19)
+
+Added per-pool pinned-model settings to the pool API and Python SDK, including profile-qualified model IDs. Helm model preloading now respects each worker's pool, hardware profile, and bundle. LoRA adapters also receive compatible adapter names when their model IDs contain characters that PEFT cannot use directly.
+
+## v0.6.8 (2026-06-16)
+
+Self-hosted pools can now enforce a minimum number of warm workers through KEDA. Active rerankers are no longer mistaken for idle models, model unloading is coordinated with in-flight work, and multimodal scoring accounts for media when sizing batches.
+
+## v0.6.7 (2026-06-16)
+
+### Features
+
+- Added a 32K-token serving profile for Qwen3.6-27B on RTX PRO 6000. The base model configuration retains its 4K context window.
+
+### Bug fixes
+
+- Grammar-constrained Qwen3.5-4B requests use a non-speculative profile so structured-output constraints are enforced.
+- Long model startups now use consistent readiness timeouts across the gateway, workers, and Helm configuration. Reapplying unchanged model configuration no longer needlessly unloads models.
+
+### Performance improvements
+
+- LightOnOCR processes multiple pages in bounded batches, preserving page order and handling different image sizes.
+
+## v0.6.6 (2026-06-14)
+
+Fixed false configuration mismatches between the configuration service and workers when models inherit profiles or belong to specific pools and bundles. Configuration checks also recover when previously missing bundle metadata becomes available.
+
+## v0.6.5 (2026-06-13)
+
+### Bug fixes
+
+- Image-based reranking now transports Python SDK image inputs correctly and includes document images in the Qwen3-VL reranker's prompt.
+- Structured generation correctly resolves JSON Schema references without discarding constraints beside a reference.
+- SGLang model loading no longer blocks the server event loop, allowing health checks and other requests to remain responsive during startup.
+- Configuration updates correctly account for pool ownership, replace stale snapshots, and stop advertising removed model configurations as ready.
+
+### Breaking changes
+
+- Provisioning responses now use HTTP `503` with retry information instead of HTTP `202`. The Python and TypeScript SDKs understand the updated response; direct API clients should handle the new status when waiting for capacity.
+
+## v0.6.4 (2026-06-11)
+
+Added an AKS Helm overlay with Azure Workload Identity support. Self-hosted clusters also recover worker health subscriptions after a stale NATS connection, and binary request data is preserved when passed from the sidecar to the inference worker.
+
+## v0.6.3 (2026-06-10)
+
+### Highlights
+
+Chat requests can now combine text and images, while the model catalog gains more classification, extraction, and object-detection options.
+
+### Features
+
+- The gateway's OpenAI-compatible chat endpoint now accepts inline image data for vision-capable models while preserving text/image ordering.
+- Added ModernBERT-base-zeroshot-v2.0 and BART-large-MNLI classification configurations, GLiNER2-large-v1 extraction, and OWLv2-large-patch14-ensemble object detection.
+- Added Azure Blob support for model caching and large request payloads.
+
+### Bug fixes
+
+- Corrected image preprocessing and removed padding from document embeddings for `nvidia/llama-nemoretriever-colembed-3b-v1`.
+- Workers are removed promptly from gateway discovery when they shut down, reducing routing to stale workers.
+
+## v0.6.2 (2026-06-08)
+
+Added three dense text-embedding models: `mixedbread-ai/mxbai-embed-large-v1`, `Snowflake/snowflake-arctic-embed-l-v2.0`, and `nomic-ai/modernbert-embed-base`.
+
+Self-hosted startup is more reliable: the configuration service can serve health checks while NATS connects, single-profile bundles can scale from zero for requests without an explicit GPU selection, and CUDA images include the build tool needed for SGLang's first-use kernels. Qwen3-VL embedding models also accept and validate their configured output dimension.
+
+## v0.6.1 (2026-06-07)
+
+Added static, non-expiring queue pools in Helm, with startup validation for invalid pool settings. The default worker queue is again shared as `default`, so SDK requests that specify only a hardware profile route correctly; dedicated pools remain explicitly configurable.
+
+## v0.6.0 (2026-06-07)
+
+Queue routing and autoscaling now distinguish each pool, hardware profile, and model bundle, keeping work assigned to the intended worker group.
+
+### Breaking changes
+
+- Queue subjects now use `sie.work.{pool}.{machine_profile}.{bundle}.{model}`. Upgrade the gateway, sidecar, and Helm chart together; the previous subject format is not supported.
+- Helm workers now default to their worker-group name as the queue pool. Set `workers.common.queuePool: "default"` explicitly to retain a shared queue.
+
+## v0.5.0 (2026-06-04)
+
+### Highlights
+
+Self-hosted worker pools can now serve multiple bundles with separate replica limits, making it possible to scale embedding and generation workloads independently on the same machine profile.
+
+### Features
+
+- Added Granite Guardian 3.0 2B for content-safety verdicts, with a configurable verdict threshold. Added SQLCoder-7B-2 for completion-based SQL generation using its native prompt format.
+- Added configurable `code`, `sql`, and `guard` model aliases and exposed matching capabilities in model metadata. The default `sql` alias uses Qwen3-4B-Instruct-2507, not SQLCoder.
+- Added a separate gateway metrics listener for Prometheus scraping without opening inference endpoints to unauthenticated access.
+
+### Bug fixes
+
+- Florence-2 extraction now honors the supplied instruction.
+- Guard-model verdict handling now keeps returned log probabilities consistent and rejects unsupported multi-candidate sampling.
+- Helm rejects missing or invalid per-bundle replica limits during rendering.
+
+### Breaking changes
+
+- Move each pool's `bundle`, `minReplicas`, `maxReplicas`, `extraEnv`, and `imageBundle` settings into `workers.pools.<pool>.bundles.<bundle>`. The bundle name becomes the map key; `workers.common.bundle` is removed.
+- Worker resource names change from `worker-<pool>` to `worker-<pool>-<bundle>`. Upgrades must explicitly remove obsolete StatefulSets, ScaledObjects, PodDisruptionBudgets, and image-prepull DaemonSets so old resources do not interfere with scaling or node drains.
+
+## v0.4.2 (2026-06-03)
+
+### Highlights
+
+This release introduces the Rust worker sidecar for queued inference and expands document extraction and image-text model support.
+
+### Features
+
+- Added MinerU2.5-Pro-2604-1.2B for document OCR and Marqo fashionSigLIP for image-text embeddings. Docling now also accepts image inputs.
+- Chat completions accept `min_tokens` and `chat_template_kwargs`; model profiles can supply default sampling settings.
+- Added an FP8 serving profile for Qwen3.6-27B on RTX PRO 6000 and increased Qwen3-0.6B's configured context window to 4,096 tokens.
+- Workers reconcile configuration changes after missed updates or reconnects.
+
+### Bug fixes
+
+- Kept generation dispatch separate from embedding, scoring, and extraction queues.
+- Fixed `dense_dim` handling in CLIP and PyTorch embedding adapters and CUDA-cache cleanup in visual-document adapters.
+
+### Breaking changes
+
+- Cluster inference is now queue-only. Queue workers require the Rust worker sidecar and NATS JetStream; the Helm chart enables the sidecar by default. Custom deployments must include the sidecar alongside the Python inference worker.
+
+## v0.4.1 (2026-05-28)
+
+Added Qwen3.6-27B model support and updated the Linux GPU dependency stack to CUDA 12.9. Generation requests are now dispatched separately from shared inference queues.
+
+## v0.4.0 (2026-05-27)
+
+### Highlights
+
+SIE now serves text generation alongside embeddings, reranking, and extraction, including streaming responses and structured output.
+
+### Features
+
+- Added Qwen3-0.6B, Qwen3-4B-Instruct-2507, and Qwen3.5-4B generation models through SGLang.
+- Added a native generation API, OpenAI-compatible chat and legacy completions endpoints, and an initial gateway Responses API implementation. The Python and TypeScript SDKs expose generation options and streaming.
+- Added multi-turn tool calls, multiple response candidates, log probabilities, seeded sampling, and per-request LoRA selection. JSON-schema, regex, and grammar-constrained output are available where supported by the selected model and backend.
+- Added a browsable API reference at `/docs` and optional bundled certificate management with self-signed TLS for self-hosted clusters.
+
+### Bug fixes
+
+- Streaming now surfaces backpressure failures instead of silently dropping output chunks, and cancellation prevents duplicate generation attempts.
+- Fixed decoding of base64 image inputs and included the system libraries needed by Docling in worker images.
+- GPU-aware health checks detect unusable CUDA contexts so unhealthy workers can be taken out of service.
+
+## v0.3.4 (2026-05-14)
+
+### Features
+
+- Python and TypeScript clients now expose `InputTooLongError` for extraction inputs that exceed model limits.
+- Helm can use the model-cache bucket's `payloads` prefix for large inference payloads.
+
+### Bug fixes
+
+- Fixed gateway startup during concurrent configuration changes and made shared queue routing the default for workers.
+- Relaxed the Python SDK's installation requirement to Python 3.12 or later, and removed unnecessary X11 dependencies from image-processing installations.
+
+## v0.3.3 (2026-05-13)
+
+### Highlights
+
+Added ColQwen3 and Nemotron ColEmbed v2 for visual-document retrieval, with clearer failures for oversized extraction inputs and stalled model loading.
+
+### Bug fixes
+
+- GLiClass now enforces the configured overflow policy and returns `INPUT_TOO_LONG` with HTTP 400 instead of crashing on oversized inputs.
+- Model loading now distinguishes stalled downloads from time spent loading downloaded weights and applies separate timeout bounds.
+- Worker images now include the spatial-index library required by document extraction dependencies.
+
+## v0.3.2 (2026-05-08)
+
+### Features
+
+- Enabled pairwise scoring for the supported ColBERT model variants.
+- Added a Docling OCR profile, gateway OpenAPI discovery, configurable Kubernetes probe timing, cert-manager TLS support, and an optional S3-backed cluster model cache.
+
+### Bug fixes
+
+- Standardized gateway errors and health responses, preserved embedding timing headers, and fixed the scale-from-zero request path.
+- Docling now reuses its converter and honors the selected device. PaddleOCR-VL generation now enables its key/value cache.
+- Server wheels now include model and bundle configuration files, so installed packages can find their bundled defaults.
+
+## v0.3.1 (2026-04-29)
+
+Added BGE-M3 scoring with dense, sparse, ColBERT, and hybrid modes, plus Marqo e-commerce image-text embeddings. Failed model loads now enter an explicit failed state rather than remaining indefinitely in a loading state.
+
+## v0.3.0 (2026-04-29)
+
+### Highlights
+
+Document extraction and multimodal retrieval expand substantially, while self-hosted clusters move to a Rust gateway with a dedicated configuration service.
+
+### Features
+
+- Added document inputs and structured extraction results across the server and SDKs, including Docling processing for PDF, DOCX, and HTML.
+- Added GLM-OCR and PaddleOCR-VL-1.5; Qwen3-VL-Embedding-2B and Qwen3-VL-Reranker-2B; Qwen3-Reranker-0.6B and 4B; and SigLIP 2 image-text embeddings.
+- Added GLiNER2, GLiNER-bi and Modern GLiNER-bi, Stablebridge token pruning and highlighting, and a ModernBERT-base embedding configuration.
+- Added automatic GPU out-of-memory recovery and idle-model eviction, together with gateway and configuration-service metrics.
+
+### Bug fixes
+
+- Clients retry transient disconnects and capacity-related service errors without treating permanent connection failures as retryable.
+- Improved propagation of model configuration changes and reporting of unknown or unroutable models.
+
+### Breaking changes
+
+- Self-hosted Helm configuration moves from `router` to `gateway` settings and adds a separate `config` service. Configuration writes belong to that service, not the inference gateway; review custom values and configuration clients when upgrading. The chart enables NATS JetStream queue routing by default.
+
+## v0.2.0 (2026-04-17)
+
+### Highlights
+
+Added ModernBERT-based embedding models and LightOnOCR, along with startup model preloading and explicit concurrency control in the asynchronous Python client.
+
+### Features
+
+- Added GTE-ModernBERT-base, Snowflake Arctic Embed M v2.0, and IBM Granite English R2 embedding models, including the small variant.
+- Added LightOnOCR-2-1B for OCR in the `transformers5` bundle.
+- Added `max_concurrency` to `SIEAsyncClient` and Haystack-convention import aliases under `haystack_integrations`.
+- Added anonymous usage telemetry, with opt-out through `SIE_TELEMETRY_DISABLED=true` or `DO_NOT_TRACK=1`.
+
+### Bug fixes
+
+- Model-affinity routing can spill requests to other workers instead of becoming stuck, and rejected requests now contribute to autoscaling demand.
+
+### Breaking changes
+
+- Worker startup no longer accepts `--model` to select models. Use `--preload` or `SIE_PRELOAD_MODELS` to load models at startup; otherwise models load on demand.
+
+## v0.1.10 (2026-04-09)
+
+### Highlights
+
+Added LanceDB integrations for Python and TypeScript and a configuration-management API that distributes model changes to workers.
+
+### Features
+
+- Weaviate document enrichment now supports asynchronous processing, chunking, and streaming. LanceDB table enrichment processes batches incrementally without materializing the entire table.
+- Added `get_model()` to the Python SDK and exposed queue-routing controls through Helm.
+
+### Bug fixes
+
+- Fixed queued score-response formatting, dead-letter routing, and reconnect handling.
+- LlamaIndex embedding now handles `BytesIO` images, and Weaviate classification enrichment validates its configuration.
+
+## v0.1.9 (2026-04-02)
+
+Fixed Helm worker image tags to include the target platform and restored worker pool names to match machine profiles.
+
+## v0.1.8 (2026-04-01)
+
+Fixed duplicated platform suffixes in Helm worker image tags.
+
+## v0.1.7 (2026-04-01)
+
+### Highlights
+
+Added Qdrant and Weaviate integrations and made self-hosted installation more complete through the Helm chart.
+
+### Features
+
+- Qdrant integration supports native sparse vectors; Weaviate integration supports the v4 client.
+- ColBERT supports configurable document-length limits and custom prefix tokens.
+- Pool creation accepts minimum worker counts and bundle selection. SDK/server version negotiation reports incompatible versions, and the Python SDK waits for capacity by default with a 900-second timeout.
+- Helm now manages service accounts and model-access secrets, offers bundled autoscaling and monitoring components, and can pre-pull worker images onto GPU nodes.
+
+### Bug fixes
+
+- Corrected Qwen3 embedding attention behavior and LoRA-layer handling that could affect embedding results.
+- Fixed asynchronous-client initialization outside a running event loop and extended pool leases to tolerate rolling upgrades.
+
+### Breaking changes
+
+- AWS and GCP Terraform deployments now separate cluster infrastructure from SIE application installation. Use Helm for the SIE application and review resource ownership before upgrading existing Terraform-managed installations.
+
+## v0.1.6 (2026-03-12)
+
+### Features
+
+- Added Matryoshka embedding truncation for ColBERT.
+
+### Bug fixes
+
+- Fixed loading and configuration for NV-Embed-v2, Stella, BGE-M3, and instruction-based embedding models.
+- Fixed ColBERT encoding on non-CUDA devices by selecting the native execution path.
+- Aligned synchronous and asynchronous `encode()` and `score()` behavior. Malformed inference inputs now receive validation errors instead of server errors.
+- Fixed spot-GPU resolution for autoscaling and increased default CPU-worker memory limits for the expanded bundle.
+
+### Breaking changes
+
+- The standalone `florence2` and `gliner` bundles are removed. Use the `default` bundle, which now includes Florence-2, GLiNER, GLiREL, and GLiClass dependencies.
+
+## v0.1.5 (2026-02-27)
+
+Added GLiNER v2.5 small, medium, and large models, GLiClass large models, and DeBERTa-based NLI classification. The gateway now streams request and response bodies, with corrected response headers for streaming.
+
+## v0.1.4 (2026-02-27)
+
+No user-facing changes.
+
+## v0.1.3 (2026-02-26)
+
+No user-facing changes.
+
+## v0.1.2 (2026-02-26)
+
+No user-facing changes.
+
+## v0.1.1 (2026-02-26)
+
+No user-facing changes.
+
+## v0.1.0 (2026-02-26)
+
+### Features
+
+- Added structured gateway request logs and an `X-SIE-Worker` response header to identify the serving worker.
+
+### Bug fixes
+
+- Removed ColBERT's blanket CUDA-only model-loading restriction.
+- GLiClass and NLI classification now populate `classifications` results correctly, and entity extraction handles typed dictionary results consistently.
+- Corrected model-name resolution and bundle registration for classification models.
+
+### Breaking changes
+
+- Model configurations no longer accept per-model `dependencies`; adapter dependencies are defined by bundles. The `DEPENDENCY_CONFLICT` error and its HTTP 409 responses are removed. This does not remove HTTP 409 responses for incompatible bundle selections.
