@@ -79,17 +79,65 @@ export async function toImageBytes(input: ImageInput): Promise<Uint8Array> {
 
   // Base64 string or data URL
   if (typeof input === "string") {
-    // Check if it's a data URL
-    const dataUrlMatch = input.match(/^data:[^;]+;base64,(.+)$/);
-    if (dataUrlMatch?.[1]) {
-      return base64ToBytes(dataUrlMatch[1]);
-    }
-
-    // Assume it's raw base64
-    return base64ToBytes(input);
+    // A `data:` URL is parsed structurally by parseBase64DataUrl; a plain
+    // base64 string (which can never begin with "data:", since ":" is not a
+    // base64 character) is decoded as-is.
+    const payload = parseBase64DataUrl(input);
+    return base64ToBytes(payload ?? input);
   }
 
   throw new Error(`Unsupported image input type: ${typeof input}`);
+}
+
+/**
+ * Extract the base64 payload from a `data:` URL.
+ *
+ * Rather than encoding the RFC 2397 grammar in a regex, this walks the URL
+ * structurally: everything before the first comma is the header, and the
+ * `;`-delimited metadata's final segment must be the `base64` marker. The
+ * scheme and marker are matched case-insensitively, and the payload is
+ * percent-decoded (so escaped characters such as `%3D` padding are restored)
+ * before it reaches the base64 decoder.
+ *
+ * @returns the base64 payload, or `undefined` when `input` is not a `data:` URL
+ *   at all — in which case the caller treats it as a raw base64 string.
+ * @throws if `input` is a `data:` URL that is malformed (no payload delimiter,
+ *   an empty payload, or invalid percent-encoding) or is not base64-encoded, so
+ *   such inputs fail loudly instead of silently corrupting in the base64 decoder.
+ */
+function parseBase64DataUrl(input: string): string | undefined {
+  if (!/^data:/i.test(input)) {
+    return undefined;
+  }
+
+  const comma = input.indexOf(",");
+  if (comma === -1) {
+    throw new Error("Malformed data URL: missing ',' delimiter between metadata and payload");
+  }
+
+  const metadata = input.slice("data:".length, comma);
+  const params = metadata.split(";");
+  // split(";") always yields at least one element, but the compiler can't prove
+  // it under noUncheckedIndexedAccess; optional chaining keeps this type-safe and
+  // still treats a missing marker as "not base64".
+  const marker = params.at(-1);
+  if (marker?.toLowerCase() !== "base64") {
+    throw new Error("Unsupported data URL: only base64-encoded payloads are supported");
+  }
+
+  const payload = input.slice(comma + 1);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(payload);
+  } catch {
+    throw new Error("Malformed data URL: payload has invalid percent-encoding");
+  }
+  if (decoded === "") {
+    // A zero-byte payload decodes to an empty image that only fails deep in the
+    // server, far from the mistake; reject it at the SDK boundary instead.
+    throw new Error("Malformed data URL: empty base64 payload");
+  }
+  return decoded;
 }
 
 /**
