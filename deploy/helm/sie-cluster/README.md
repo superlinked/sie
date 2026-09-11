@@ -385,6 +385,20 @@ Kubernetes operation/hook; it exceeds the longest default 15-minute Job. With
 a custom `pollingInterval` above 30 seconds, also make the timeout exceed the
 KEDA health deadline of `3 * pollingInterval + 240` seconds.
 
+Size `keda-apply`, `keda-cleanup`, and the KEDA ScaledObject/HPA gate with
+`hooks.resources`. The default memory limit is 1Gi. Requests stay at 128Mi.
+
+```yaml
+hooks:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "1Gi"
+```
+
 ### Scale-from-Zero Trigger
 
 The gateway emits `sie.gateway.pending_demand` over OTLP when requests arrive
