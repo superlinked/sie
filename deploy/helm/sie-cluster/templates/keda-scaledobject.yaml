@@ -479,12 +479,7 @@ spec:
               fi
               echo "SUCCESS: ScaledObjects applied and obsolete release objects pruned"
           resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 200m
-              memory: 256Mi
+            {{- include "sie-cluster.hooks.resources" . | nindent 12 }}
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
