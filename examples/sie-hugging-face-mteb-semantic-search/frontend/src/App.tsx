@@ -383,7 +383,7 @@ const GenerateModal: React.FC<GenerateModalProps> = ({
 
           <div className="modal-field">
             <label className="detail-label" htmlFor="or-model">
-              OpenRouter AI model
+              LLM model
             </label>
             <input
               id="or-model"
@@ -660,7 +660,7 @@ const SearchView: React.FC = () => {
       <p className="subtitle">
         Describe what the model should do and find the best matching embedding
         models by semantic similarity. Use storage <code>{DEMO_STORAGE_ID}</code> to
-        try the bundled local demo without SIE or OpenRouter credentials.
+        try the bundled local demo without SIE or LLM credentials.
       </p>
 
       <form onSubmit={handleSearch} className="form">
@@ -872,7 +872,7 @@ const SearchWithRerankingView: React.FC = () => {
         First we find candidates by short-description similarity, then rerank
         them by long-description similarity for higher-quality results. Use storage{" "}
         <code>{DEMO_STORAGE_ID}</code> to try the bundled local demo without SIE or
-        OpenRouter credentials.
+        LLM credentials.
       </p>
 
       <form onSubmit={handleSearch} className="form">

@@ -26,7 +26,7 @@ The following UI elements are there
 - text area 2K description
 - text area 200 description
 ##### Functionality Button Generate 6K Description
-The prompt text area has already variables replaced. So if the button is pressed, an openrouter model is called with the prompt and the results are filled into the 6K description. This field is not saved.
+The prompt text area has already variables replaced. So if the button is pressed, the configured LLM provider model is called with the prompt and the results are filled into the 6K description. This field is not saved.
 ##### Functionality Button Generate 2K Description
 Based on the 6K description a 2K description is generated and filled into the corresponding text area. It is not yet saved.
 The corresponding prompt is used for this (find good prompt even change prompt if needed)

@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from app.db import models as db_models
 from app.db.session import get_db
 from app.prompts import load_prompt
-from app.services.openrouter import generate_text
 from app.services.chroma import upsert_embedding
+from app.services.llm import generate_text
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def render_prompt(payload: RenderRequest, db: Session = Depends(get_db)):
 class GenerateDetailedRequest(BaseModel):
     prompt_text: str = Field(..., description="The (possibly edited) detailed prompt")
     model: Optional[str] = Field(
-        None, description="OpenRouter model name (uses default from config if omitted)"
+        None, description="LLM model name (uses the provider default from config if omitted)"
     )
 
 
@@ -150,7 +150,7 @@ class GenerateFromDetailedRequest(BaseModel):
         ..., description="The 6K detailed description output"
     )
     model: Optional[str] = Field(
-        None, description="OpenRouter model name (uses default from config if omitted)"
+        None, description="LLM model name (uses the provider default from config if omitted)"
     )
 
 
