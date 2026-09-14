@@ -873,6 +873,7 @@ class ModelLoader:
     def shutdown(self) -> None:
         """Shutdown the loader's thread pool."""
         self._load_executor.shutdown(wait=False)
+        self._download_executor.shutdown(wait=False)
 
 
 def _run_load_with_markers(name: str, device: str, adapter: ModelAdapter) -> None:

@@ -1025,3 +1025,35 @@ async def test_concurrent_loads_of_one_model_fetch_once(patch_ensure_model_cache
         assert adapters[0] is adapters[1]
         slow_fetches = [c for c in patch_ensure_model_cached.call_args_list if c.args and c.args[0] == "org/slow"]
         assert len(slow_fetches) == 1
+
+
+async def test_config_replaced_during_download_is_not_registered(
+    patch_ensure_model_cached: MagicMock, tmp_path: Path
+) -> None:
+    """A config swapped out under a parked download never gets an adapter registered from the old one."""
+    download = _BlockingDownload("org/slow")
+    patch_ensure_model_cached.side_effect = download
+    registry = _two_model_registry()
+    with patch("sie_server.core.model_loader.load_adapter", side_effect=_adapter_factory()):
+        slow = asyncio.create_task(registry.load_async("slow", "cpu"))
+        await asyncio.to_thread(download.entered.wait, 5)
+
+        # Same name, different config: what hot reload does under the load lock.
+        await registry.replace_configs_async(
+            [_make_config(name="slow", hf_id="org/slow", max_sequence_length=4096)],
+            model_dir=tmp_path,
+        )
+        download.release.set()
+        with pytest.raises(RuntimeError, match="changed"):
+            await asyncio.wait_for(slow, timeout=5)
+        assert not registry.is_loaded("slow")
+        assert not registry.is_loading("slow")
+
+
+def test_loader_shutdown_closes_the_download_executor() -> None:
+    from sie_server.core.model_loader import ModelLoader
+
+    loader = ModelLoader(preprocessor_registry=MagicMock(), postprocessor_registry=MagicMock(), all_configs={})
+    loader.shutdown()
+    with pytest.raises(RuntimeError):
+        loader._download_executor.submit(lambda: None)

@@ -1087,8 +1087,6 @@ class ModelRegistry:
             load_stage = "total"
 
             try:
-                model_dir = self._model_dirs.get(name, Path())
-
                 # The download holds neither lock. It is intentionally unbounded
                 # by the post-download timeout in ``ModelLoader`` — slow user
                 # networks are supported via ``HF_HUB_DOWNLOAD_TIMEOUT`` stall
@@ -1106,6 +1104,19 @@ class ModelRegistry:
                     if name in self._unloading:
                         msg = f"Model '{name}' is currently being unloaded"
                         raise RuntimeError(msg)
+                    # Config mutation only takes the registry lock, so the
+                    # config this load started from may have been removed or
+                    # replaced while the weights were fetched. Never register
+                    # an adapter built from a config the registry no longer
+                    # serves; a changed one is retried by the caller.
+                    current_config = self._configs.get(name)
+                    if current_config is None:
+                        msg = f"Model '{name}' config was removed while its weights were being fetched"
+                        raise RuntimeError(msg)
+                    if current_config != config:
+                        msg = f"Model '{name}' config changed while its weights were being fetched; retry"
+                        raise RuntimeError(msg)
+                    model_dir = self._model_dirs.get(name, Path())
 
                     load_device = self._resolve_load_device(device)
                     memory_manager = self._memory_manager_for_device(load_device)
