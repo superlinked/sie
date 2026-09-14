@@ -25,12 +25,11 @@
 #   testing mount a socket path and set SIE_IPC_SOCKET_PATH accordingly.
 
 ARG FEATURES=cloud-storage
-ARG RUST_VERSION=1.98.1
 
 # =============================================================================
 # Dependency planner: capture the Cargo graph only.
 # =============================================================================
-FROM rust:${RUST_VERSION}-slim-bookworm@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS chef
+FROM rust:1.98.1-slim-bookworm@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS chef
 RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
