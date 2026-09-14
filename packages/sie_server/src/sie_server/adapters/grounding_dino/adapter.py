@@ -28,6 +28,7 @@ See: https://huggingface.co/docs/transformers/model_doc/grounding-dino
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -51,6 +52,34 @@ logger = logging.getLogger(__name__)
 
 _ERR_NO_PROMPT = "GroundingDINOAdapter requires labels or an instruction for object detection"
 _ERR_ENCODE_NOT_SUPPORTED = "GroundingDINOAdapter does not support encode(). Use extract() instead."
+
+
+_WORD_RE = re.compile(r"\w+")
+
+
+def _canonical_label(phrase: str, labels: list[str] | None) -> str:
+    """The caller's label a grounded phrase came from, or the phrase itself.
+
+    Scores each label by the share of its words the phrase contains, then by
+    how many of the phrase's words it explains ("red handbag" beats "handbag"
+    for the phrase "red handbag"); the earlier label breaks a full tie. The
+    phrase is kept verbatim only when no label shares a word with it, which
+    is the ``instruction`` prompt case (no labels) or a decode the caller
+    never asked for.
+    """
+    if not labels:
+        return phrase
+    phrase_words = set(_WORD_RE.findall(phrase.lower()))
+    best_label, best_key = phrase, (0.0, 0)
+    for label in labels:
+        words = _WORD_RE.findall(label.lower())
+        if not words:
+            continue
+        matched = sum(1 for word in words if word in phrase_words)
+        key = (matched / len(words), matched)
+        if key > best_key:
+            best_label, best_key = label, key
+    return best_label
 
 
 class GroundingDINOAdapter(BaseAdapter):
@@ -225,6 +254,7 @@ class GroundingDINOAdapter(BaseAdapter):
                 pixel_values=pixel_values,
                 pixel_mask=pixel_mask,
                 original_sizes=original_sizes,
+                labels=labels,
             )
         else:
             # Fallback: decode images inline
@@ -246,6 +276,7 @@ class GroundingDINOAdapter(BaseAdapter):
                 box_threshold=box_threshold,
                 text_threshold=text_threshold,
                 images=images,
+                labels=labels,
             )
 
         # Map results back to original item positions
@@ -265,6 +296,7 @@ class GroundingDINOAdapter(BaseAdapter):
         pixel_mask: torch.Tensor | None = None,
         original_sizes: list[tuple[int, int]] | None = None,
         images: list[Image] | None = None,
+        labels: list[str] | None = None,
     ) -> list[list[DetectedObject]]:
         """Run batched detection on multiple images.
 
@@ -279,6 +311,8 @@ class GroundingDINOAdapter(BaseAdapter):
             pixel_values: Preprocessed image tensor [B, C, H, W] (optional).
             original_sizes: List of (width, height) tuples for bbox denormalization.
             images: List of PIL Images (fallback if pixel_values not provided).
+            labels: The caller's labels, verbatim, when the prompt was built from
+                them; every detection's label is mapped back onto one of these.
 
         Returns:
             List of detected object lists, one per input image.
@@ -345,10 +379,19 @@ class GroundingDINOAdapter(BaseAdapter):
         )
 
         # Convert results to DetectedObject format
-        return [self._results_to_objects(result) for result in results]
+        return [self._results_to_objects(result, labels) for result in results]
 
-    def _results_to_objects(self, result: dict[str, Any]) -> list[DetectedObject]:
-        """Convert post-processed detection result to DetectedObject list."""
+    def _results_to_objects(self, result: dict[str, Any], labels: list[str] | None = None) -> list[DetectedObject]:
+        """Convert post-processed detection result to DetectedObject list.
+
+        The post-processor decodes, per box, the prompt tokens above
+        ``text_threshold``, so a caller's label comes back lowercased and
+        possibly as a fragment or a span merged across two labels ("leather
+        handbag" for "Red Leather Handbag"). Callers match detections against
+        the labels they sent, so each phrase is mapped back onto the caller's
+        label it overlaps most; a free-text ``instruction`` prompt has no
+        labels and keeps the phrase.
+        """
         boxes = result["boxes"]
         scores = result["scores"]
         result_labels = result.get("text_labels", result.get("labels", []))
@@ -364,7 +407,7 @@ class GroundingDINOAdapter(BaseAdapter):
         for i in range(n_detections):
             x1, y1, x2, y2 = boxes_list[i]
             score = scores_list[i]
-            label_text = result_labels[i]
+            label_text = _canonical_label(result_labels[i], labels)
 
             objects.append(
                 DetectedObject(
