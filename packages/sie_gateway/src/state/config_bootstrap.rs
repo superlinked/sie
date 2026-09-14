@@ -5,16 +5,16 @@
 //! authoritative state in two phases:
 //!
 //! 1. `GET /v1/configs/bundles` (+ per-bundle `GET /v1/configs/bundles/{id}`)
-//!    — fetches the bundle/adapter surface and installs it via
-//!    `ModelRegistry::install_bundles`. This MUST happen before the model
-//!    fetch because `add_model_config` rejects any adapter not in a known
-//!    bundle. Historically the gateway image baked these bundles in, which
-//!    drifted from `sie-config`'s view and made every published model fail
-//!    validation with `Adapter(s) not in any known bundle`. Pulling them
-//!    over HTTP makes `sie-config` the single source of truth.
+//!    — fetches the bundle/adapter surface. Historically the gateway image
+//!    baked these bundles in, which drifted from `sie-config`'s view and made
+//!    every published model fail validation with `Adapter(s) not in any
+//!    known bundle`. Pulling them over HTTP makes `sie-config` the single
+//!    source of truth.
 //! 2. `GET /v1/configs/export` (admin-auth) — fetches every persisted model
-//!    config and replaces the registry's model set so the gateway's served
-//!    view matches `sie-config`'s view, including removals.
+//!    config. Both halves are then installed as ONE snapshot via
+//!    `ModelRegistry::replace_authoritative_surface`, which validates each
+//!    model's adapters against the bundles it was exported with and replaces
+//!    the served view, including removals.
 //!
 //! Live updates after bootstrap arrive via NATS deltas
 //! (`sie.config.models.*`), which the `NatsManager` feeds into
@@ -488,9 +488,10 @@ impl BootstrapClient {
         Ok(out)
     }
 
-    /// Fetch bundles + the model snapshot, install both into `registry`.
-    /// Bundles MUST be installed first so the model-apply loop can validate
-    /// each profile's `adapter_path` against the freshly-fetched adapter set.
+    /// Fetch bundles + the model snapshot and install both into `registry`
+    /// as one matched snapshot, so every profile's `adapter_path` is
+    /// validated against the bundle set it was exported with and neither half
+    /// can land without the other.
     pub async fn bootstrap(
         &self,
         registry: &ModelRegistry,
@@ -502,7 +503,6 @@ impl BootstrapClient {
         // caught up on a stale registry.
         let pre_bootstrap = self.fetch_epoch().await?;
         let bundles = self.fetch_bundles().await?;
-        registry.install_bundles(bundles);
 
         let url = format!("{}/v1/configs/export", self.base_url.trim_end_matches('/'));
         let req = self.apply_auth(self.http.get(&url));
@@ -550,7 +550,7 @@ impl BootstrapClient {
 
         let mut applied = 0usize;
         if failed == 0 {
-            match registry.replace_model_configs_authoritative(configs) {
+            match registry.replace_authoritative_surface(bundles, configs) {
                 Ok(count) => {
                     applied = count;
                     registry.install_bundle_config_hashes(snapshot.bundle_config_hashes);

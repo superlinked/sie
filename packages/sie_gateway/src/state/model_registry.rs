@@ -183,6 +183,10 @@ fn min_retained_ratio() -> f64 {
     })
 }
 
+/// Expanded model entries plus their lower-cased name index, as one
+/// authoritative export produces them.
+type AuthoritativeModels = (HashMap<String, ModelEntry>, HashMap<String, String>);
+
 pub struct ModelRegistryGeneration {
     snapshot: Arc<RegistrySnapshot>,
 }
@@ -2140,14 +2144,98 @@ impl ModelRegistry {
         &self,
         configs: Vec<ModelConfig>,
     ) -> Result<usize, String> {
+        self.apply_authoritative(None, configs)
+    }
+
+    /// Install a matched bundle set and model export as ONE snapshot.
+    ///
+    /// The bootstrap fetches both from the control plane; validating the
+    /// models against the bundles they were exported with, and judging
+    /// retention on the combined result, means a bundle change that only
+    /// makes sense together with its model change can never be half-applied
+    /// or refused on the strength of the half already installed.
+    pub fn replace_authoritative_surface(
+        &self,
+        bundles: Vec<BundleInfo>,
+        configs: Vec<ModelConfig>,
+    ) -> Result<usize, String> {
+        self.apply_authoritative(Some(bundles), configs)
+    }
+
+    fn apply_authoritative(
+        &self,
+        bundles: Option<Vec<BundleInfo>>,
+        configs: Vec<ModelConfig>,
+    ) -> Result<usize, String> {
         let _write = self
             .write_lock
             .lock()
             .expect("ModelRegistry write_lock poisoned");
         let old_snap = self.snapshot.load();
+        let new_bundles: HashMap<String, BundleInfo> = match bundles {
+            Some(bundles) => bundles.into_iter().map(|b| (b.name.clone(), b)).collect(),
+            None => old_snap.bundles.clone(),
+        };
+        let applied = configs.len();
+        let (new_models, new_model_names_lower) =
+            Self::build_authoritative_models(configs, &new_bundles)?;
+
+        let bundle_config_hashes = Self::rebuild_bundle_config_hashes(&new_bundles, &new_models);
+        let bundle_pool_config_hashes =
+            Self::rebuild_bundle_pool_config_hashes(&new_bundles, &new_models);
+
+        if self.authoritative_surface.load(Ordering::Acquire) {
+            let served = old_snap
+                .models
+                .values()
+                .filter(|entry| !entry.bundles.is_empty())
+                .count();
+            let retained = old_snap
+                .models
+                .iter()
+                .filter(|(id, entry)| {
+                    !entry.bundles.is_empty()
+                        && new_models
+                            .get(id.as_str())
+                            .is_some_and(|candidate| !candidate.bundles.is_empty())
+                })
+                .count();
+            if let Some(refusal) = Self::shrink_refusal(served, retained, min_retained_ratio()) {
+                return Err(refusal);
+            }
+        }
+
+        info!(
+            old_models = old_snap.models.len(),
+            models = new_models.len(),
+            bundles = new_bundles.len(),
+            "replaced model configs from authoritative export"
+        );
+
+        self.snapshot.store(Arc::new(RegistrySnapshot {
+            bundles: new_bundles,
+            models: new_models,
+            model_names_lower: new_model_names_lower,
+            bundle_config_hashes,
+            bundle_pool_config_hashes,
+        }));
+        self.authoritative_surface.store(true, Ordering::Release);
+
+        Ok(applied)
+    }
+
+    /// Validate and expand an exported model set against the bundle set it
+    /// will be served with.
+    fn build_authoritative_models(
+        configs: Vec<ModelConfig>,
+        bundles: &HashMap<String, BundleInfo>,
+    ) -> Result<AuthoritativeModels, String> {
         let mut new_models: HashMap<String, ModelEntry> = HashMap::new();
         let mut new_model_names_lower: HashMap<String, String> = HashMap::new();
-        let applied = configs.len();
+        let all_bundle_adapters: HashSet<String> = bundles
+            .values()
+            .flat_map(|b| b.adapters.iter().cloned())
+            .collect();
 
         for config in configs {
             let sie_id = &config.name;
@@ -2177,11 +2265,6 @@ impl ModelRegistry {
                 }
             }
 
-            let all_bundle_adapters: HashSet<String> = old_snap
-                .bundles
-                .values()
-                .flat_map(|b| b.adapters.iter().cloned())
-                .collect();
             let unroutable: Vec<&String> = adapter_modules
                 .iter()
                 .filter(|a| !all_bundle_adapters.contains(a.as_str()))
@@ -2198,47 +2281,12 @@ impl ModelRegistry {
             }
 
             for mut entry in Self::expand_model_config_into_profile_variants(&config)? {
-                Self::assign_bundles(&mut entry, &old_snap.bundles);
+                Self::assign_bundles(&mut entry, bundles);
                 new_model_names_lower.insert(entry.name.to_lowercase(), entry.name.clone());
                 new_models.insert(entry.name.clone(), entry);
             }
         }
-
-        let bundle_config_hashes =
-            Self::rebuild_bundle_config_hashes(&old_snap.bundles, &new_models);
-        let bundle_pool_config_hashes =
-            Self::rebuild_bundle_pool_config_hashes(&old_snap.bundles, &new_models);
-
-        if self.authoritative_surface.load(Ordering::Acquire) {
-            let retained = old_snap
-                .models
-                .keys()
-                .filter(|id| new_models.contains_key(id.as_str()))
-                .count();
-            if let Some(refusal) =
-                Self::shrink_refusal(old_snap.models.len(), retained, min_retained_ratio())
-            {
-                return Err(refusal);
-            }
-        }
-
-        info!(
-            old_models = old_snap.models.len(),
-            models = new_models.len(),
-            bundles = old_snap.bundles.len(),
-            "replaced model configs from authoritative export"
-        );
-
-        self.snapshot.store(Arc::new(RegistrySnapshot {
-            bundles: old_snap.bundles.clone(),
-            models: new_models,
-            model_names_lower: new_model_names_lower,
-            bundle_config_hashes,
-            bundle_pool_config_hashes,
-        }));
-        self.authoritative_surface.store(true, Ordering::Release);
-
-        Ok(applied)
+        Ok((new_models, new_model_names_lower))
     }
 
     fn add_model_config_inner(
@@ -4962,6 +5010,89 @@ adapters:
             served.len(),
             "the served surface must survive a refused snapshot"
         );
+    }
+
+    #[test]
+    fn test_matched_bundle_and_model_change_applies_as_one_snapshot() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        registry
+            .replace_authoritative_surface(
+                registry
+                    .list_bundles()
+                    .into_iter()
+                    .map(|name| BundleInfo {
+                        name,
+                        priority: 10,
+                        adapters: vec!["sie_server.adapters.sentence_transformer".to_string()],
+                        engine: DEFAULT_ENGINE.to_string(),
+                    })
+                    .collect(),
+                vec![named_cfg_for_test("test/model-0")],
+            )
+            .expect("seed the authoritative surface");
+
+        // The authority moves the served model onto a new adapter and ships
+        // the bundle that routes it in the same export. Installing the bundle
+        // alone would strand the model; applied together it stays routable.
+        let moved = ModelConfig {
+            profiles: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "default".to_string(),
+                    crate::types::model::ProfileConfig {
+                        adapter_path: Some(
+                            "sie_server.adapters.pytorch_embedding:PyTorchEmbeddingAdapter"
+                                .to_string(),
+                        ),
+                        max_batch_tokens: Some(4096),
+                        kv_budget_tokens: None,
+                        max_output_tokens: None,
+                        grammar_profile: None,
+                        chat_template_kwargs: None,
+                        compute_precision: None,
+                        adapter_options: None,
+                        extends: None,
+                    },
+                );
+                m
+            },
+            ..named_cfg_for_test("test/model-0")
+        };
+        let new_bundles = vec![BundleInfo {
+            name: "torch".to_string(),
+            priority: 10,
+            adapters: vec!["sie_server.adapters.pytorch_embedding".to_string()],
+            engine: DEFAULT_ENGINE.to_string(),
+        }];
+        registry
+            .replace_authoritative_surface(new_bundles, vec![moved])
+            .expect("a matched bundle+model change is one ordinary apply");
+        assert_eq!(registry.list_bundles(), vec!["torch".to_string()]);
+        assert!(registry.list_models().iter().any(|n| n == "test/model-0"));
+
+        // And the guard still holds on the joint result: a matched export that
+        // strands the served models is refused as a whole.
+        let stranding = vec![BundleInfo {
+            name: "other".to_string(),
+            priority: 10,
+            adapters: vec!["sie_server.adapters.nothing_served_uses".to_string()],
+            engine: DEFAULT_ENGINE.to_string(),
+        }];
+        registry
+            .replace_authoritative_surface(stranding, vec![named_cfg_for_test("other/model")])
+            .expect_err("a matched export retaining none of the served models must be refused");
+        assert_eq!(registry.list_bundles(), vec!["torch".to_string()]);
     }
 
     #[test]
