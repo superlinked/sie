@@ -135,6 +135,9 @@
           "404": {
             "description": "Model not found"
           },
+          "413": {
+            "description": "Request body exceeds the configured size limit"
+          },
           "502": {
             "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry."
           },
@@ -237,6 +240,9 @@
           },
           "404": {
             "description": "Model not found"
+          },
+          "413": {
+            "description": "Request body exceeds the configured size limit"
           },
           "502": {
             "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry."
@@ -447,6 +453,9 @@
           },
           "404": {
             "description": "Model not found"
+          },
+          "413": {
+            "description": "Request body exceeds the configured size limit"
           },
           "502": {
             "description": "Terminal model-load failure (MODEL_LOAD_FAILED). Carried in the ``detail`` envelope: ``{code, message, error_class, permanent, attempts}``. No ``Retry-After`` header \u2014 clients MUST NOT auto-retry."

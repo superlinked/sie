@@ -198,6 +198,7 @@ def _build_response_items(
         },
         400: {"description": "Invalid request"},
         404: {"description": "Model not found"},
+        413: {"description": "Request body exceeds the configured size limit"},
         502: {
             "description": (
                 "Terminal model-load failure (MODEL_LOAD_FAILED). "

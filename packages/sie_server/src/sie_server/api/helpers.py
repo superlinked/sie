@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
@@ -37,6 +38,13 @@ _OOM_DEFAULT_RETRY_AFTER_S = 5
 # or two — much faster than a model load, hence smaller than the
 # MODEL_LOADING/OOM values.
 _QUEUE_FULL_RETRY_AFTER_S = 1
+
+# Ceiling on a native encode/score/extract request body. Defaults to the
+# largest native ingress ceiling the OSS gateway enforces (34 MiB, its extract
+# body bound), so a server behind that gateway never refuses a body the
+# gateway already admitted, while a server exposed directly cannot be made
+# to buffer an unbounded body before admission runs.
+MAX_REQUEST_BODY_BYTES = int(os.environ.get("SIE_MAX_REQUEST_BODY_BYTES", str(34 * 1024 * 1024)))
 
 # Retry-After (seconds) for a request that was still queued when its model
 # was evicted (``WorkerDrainedError``). Matches the ``MODEL_LOADING``
@@ -152,6 +160,38 @@ class ContentNegotiator:
         return MSGPACK_CONTENT_TYPE in content_type_lower or "application/x-msgpack" in content_type_lower
 
 
+def payload_too_large(message: str) -> HTTPException:
+    """413 with the server's standard error detail."""
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail={"code": ErrorCode.INPUT_TOO_LONG.value, "message": message},
+    )
+
+
+async def read_bounded_request_body(request: Request, limit: int) -> bytes:
+    """Read an ASGI request without aggregating more than ``limit`` bytes.
+
+    A declared ``Content-Length`` above the limit is refused before the first
+    byte is read; a chunked or misdeclared body is refused the moment the
+    aggregate would cross it.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = -1
+        if declared_length > limit:
+            raise payload_too_large(f"request body exceeds the limit of {limit} bytes")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > limit - len(body):
+            raise payload_too_large(f"request body exceeds the limit of {limit} bytes")
+        body.extend(chunk)
+    return bytes(body)
+
+
 class RequestParser:
     """Parses and validates HTTP request bodies via msgspec."""
 
@@ -174,7 +214,7 @@ class RequestParser:
         """
         check_sdk_version(http_request)
         content_type = http_request.headers.get("content-type")
-        body = await http_request.body()
+        body = await read_bounded_request_body(http_request, MAX_REQUEST_BODY_BYTES)
 
         try:
             if ContentNegotiator.is_msgpack_request(content_type):
