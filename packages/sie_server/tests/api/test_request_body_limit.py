@@ -105,3 +105,11 @@ def test_body_within_the_limit_reaches_the_handler(small_limit: int) -> None:
 def test_default_limit_matches_the_gateway_native_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SIE_MAX_REQUEST_BODY_BYTES", raising=False)
     assert helpers.MAX_REQUEST_BODY_BYTES == 34 * 1024 * 1024
+
+
+def test_negative_limit_is_rejected_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_MAX_REQUEST_BODY_BYTES", "-1")
+    with pytest.raises(ValueError, match="non-negative"):
+        helpers._request_body_limit_from_env()
+    monkeypatch.setenv("SIE_MAX_REQUEST_BODY_BYTES", "0")
+    assert helpers._request_body_limit_from_env() == 0

@@ -44,7 +44,21 @@ _QUEUE_FULL_RETRY_AFTER_S = 1
 # body bound), so a server behind that gateway never refuses a body the
 # gateway already admitted, while a server exposed directly cannot be made
 # to buffer an unbounded body before admission runs.
-MAX_REQUEST_BODY_BYTES = int(os.environ.get("SIE_MAX_REQUEST_BODY_BYTES", str(34 * 1024 * 1024)))
+_DEFAULT_MAX_REQUEST_BODY_BYTES = 34 * 1024 * 1024
+
+
+def _request_body_limit_from_env() -> int:
+    raw = os.environ.get("SIE_MAX_REQUEST_BODY_BYTES")
+    if raw is None:
+        return _DEFAULT_MAX_REQUEST_BODY_BYTES
+    limit = int(raw)
+    if limit < 0:
+        msg = "SIE_MAX_REQUEST_BODY_BYTES must be non-negative"
+        raise ValueError(msg)
+    return limit
+
+
+MAX_REQUEST_BODY_BYTES = _request_body_limit_from_env()
 
 # Retry-After (seconds) for a request that was still queued when its model
 # was evicted (``WorkerDrainedError``). Matches the ``MODEL_LOADING``
