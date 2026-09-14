@@ -1474,15 +1474,6 @@ impl ModelRegistry {
             .lock()
             .expect("ModelRegistry write_lock poisoned");
         let old_snap = self.snapshot.load();
-        if let Some(refusal) =
-            Self::shrink_refusal(old_snap.bundles.len(), bundles.len(), min_retained_ratio())
-        {
-            // Wiping the bundle map is the same outage as wiping the models:
-            // every adapter becomes unroutable. `install_bundles` has no error
-            // channel, so the refusal is a warn and the existing bundles stand.
-            warn!(reason = %refusal, "refused authoritative bundle install");
-            return;
-        }
         let mut snap = (**old_snap).clone();
 
         let mut new_bundles: HashMap<String, BundleInfo> = HashMap::new();
@@ -1518,6 +1509,33 @@ impl ModelRegistry {
             // would shuffle between replicas and between process restarts.
             matching.sort_by(|(pa, na), (pb, nb)| pa.cmp(pb).then_with(|| na.cmp(nb)));
             model_entry.bundles = matching.into_iter().map(|(_, name)| name).collect();
+        }
+
+        // A bundle set that strands the served models is the same outage as
+        // an empty model export: every affected adapter becomes unroutable.
+        // Judged on routability after the rebuild rather than on bundle
+        // counts, so an equal-sized set of incompatible bundles is caught.
+        // `install_bundles` has no error channel, so a refusal is a warn and
+        // the existing bundles stand.
+        let served = old_snap
+            .models
+            .values()
+            .filter(|entry| !entry.bundles.is_empty())
+            .count();
+        let retained = old_snap
+            .models
+            .iter()
+            .filter(|(id, entry)| {
+                !entry.bundles.is_empty()
+                    && snap
+                        .models
+                        .get(id.as_str())
+                        .is_some_and(|rebuilt| !rebuilt.bundles.is_empty())
+            })
+            .count();
+        if let Some(refusal) = Self::shrink_refusal(served, retained, min_retained_ratio()) {
+            warn!(reason = %refusal, "refused authoritative bundle install");
+            return;
         }
 
         let bundle_config_hashes = Self::rebuild_bundle_config_hashes(&new_bundles, &snap.models);
@@ -2074,8 +2092,8 @@ impl ModelRegistry {
     /// profile variants that disappeared from `sie-config` instead of overlaying
     /// exported rows onto the existing snapshot. Use this only for
     /// `/v1/configs/export`, never for live NATS deltas.
-    /// Refuse an authoritative snapshot that would drop the served surface
-    /// below `min_retained_ratio` of what is served now.
+    /// Refuse an authoritative snapshot that retains fewer than
+    /// `min_retained_ratio` of the identities currently served.
     ///
     /// The control plane is authoritative for WHICH models exist, not for
     /// whether it is itself healthy. A well-formed empty or near-empty export
@@ -2086,19 +2104,24 @@ impl ModelRegistry {
     /// Refusing keeps the last good surface and leaves the caller's retry loop
     /// to apply the real snapshot once the control plane serves one.
     ///
-    /// `old == 0` never refuses: the first bootstrap has nothing to protect.
-    fn shrink_refusal(old: usize, new: usize, min_retained_ratio: f64) -> Option<String> {
-        if old == 0 || min_retained_ratio <= 0.0 || new >= old {
+    /// `retained` counts identities served both before and after the
+    /// replacement, so an equal-sized snapshot naming entirely different
+    /// models (the wrong environment's export) is caught, not just a smaller
+    /// one. `served == 0` never refuses: the first bootstrap has nothing to
+    /// protect.
+    fn shrink_refusal(served: usize, retained: usize, min_retained_ratio: f64) -> Option<String> {
+        if served == 0 || min_retained_ratio <= 0.0 {
             return None;
         }
-        let floor = ((old as f64) * min_retained_ratio).ceil() as usize;
-        if new >= floor {
+        let floor = ((served as f64) * min_retained_ratio).ceil() as usize;
+        if retained >= floor {
             return None;
         }
         Some(format!(
-            "authoritative snapshot would cut the served surface from {old} to {new}, below the \
-             floor of {floor} ({MIN_RETAINED_RATIO_ENV}={min_retained_ratio}); keeping the current \
-             surface. Set {MIN_RETAINED_RATIO_ENV}=0 to apply a deliberate bulk removal."
+            "authoritative snapshot would retain only {retained} of the {served} identities \
+             served now, below the floor of {floor} ({MIN_RETAINED_RATIO_ENV}={min_retained_ratio}); \
+             keeping the current surface. Set {MIN_RETAINED_RATIO_ENV}=0 to apply a deliberate \
+             bulk removal."
         ))
     }
 
@@ -2175,11 +2198,14 @@ impl ModelRegistry {
         let bundle_pool_config_hashes =
             Self::rebuild_bundle_pool_config_hashes(&old_snap.bundles, &new_models);
 
-        if let Some(refusal) = Self::shrink_refusal(
-            old_snap.models.len(),
-            new_models.len(),
-            min_retained_ratio(),
-        ) {
+        let retained = old_snap
+            .models
+            .keys()
+            .filter(|id| new_models.contains_key(id.as_str()))
+            .count();
+        if let Some(refusal) =
+            Self::shrink_refusal(old_snap.models.len(), retained, min_retained_ratio())
+        {
             return Err(refusal);
         }
 
@@ -4869,18 +4895,17 @@ adapters:
         let half = 0.5;
         // Nothing to protect on the first bootstrap.
         assert!(ModelRegistry::shrink_refusal(0, 0, half).is_none());
-        assert!(ModelRegistry::shrink_refusal(0, 12, half).is_none());
-        // Growth and steady state are never a shrink.
+        // Full retention and exactly-at-floor retention are allowed.
         assert!(ModelRegistry::shrink_refusal(10, 10, half).is_none());
-        assert!(ModelRegistry::shrink_refusal(10, 40, half).is_none());
-        // Exactly at the floor is allowed; one below is not.
         assert!(ModelRegistry::shrink_refusal(10, 5, half).is_none());
+        // One identity below the floor is not.
         assert!(ModelRegistry::shrink_refusal(10, 4, half).is_some());
-        // The whole point: a well-formed empty export.
+        // The whole point: nothing retained (an empty export, or an export
+        // naming entirely different models).
         assert!(ModelRegistry::shrink_refusal(40, 0, half).is_some());
         // Ratio 0 is the documented escape hatch for a deliberate bulk removal.
         assert!(ModelRegistry::shrink_refusal(40, 0, 0.0).is_none());
-        // A single-model estate can still be emptied only through the hatch:
+        // A single served model can be dropped only through the hatch:
         // ceil(1 * 0.5) == 1.
         assert!(ModelRegistry::shrink_refusal(1, 0, half).is_some());
     }
@@ -4926,7 +4951,7 @@ adapters:
     }
 
     #[test]
-    fn test_empty_bundle_install_keeps_the_current_bundles() {
+    fn test_equal_sized_export_naming_different_models_is_refused() {
         let (_dir, bundles_dir, models_dir) = create_test_dirs();
         fs::write(
             bundles_dir.join("default.yaml"),
@@ -4939,15 +4964,106 @@ adapters:
         )
         .unwrap();
         let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let seed: Vec<ModelConfig> = (0..4)
+            .map(|i| named_cfg_for_test(&format!("test/model-{i}")))
+            .collect();
+        registry
+            .replace_model_configs_authoritative(seed)
+            .expect("seed apply");
+        let served = registry.list_models();
+
+        // Same cardinality, disjoint identities: another environment's export.
+        let strangers: Vec<ModelConfig> = (0..4)
+            .map(|i| named_cfg_for_test(&format!("other/model-{i}")))
+            .collect();
+        registry
+            .replace_model_configs_authoritative(strangers)
+            .expect_err("an export retaining none of the served models must be refused");
+        assert_eq!(registry.list_models(), served);
+    }
+
+    #[test]
+    fn test_export_retaining_the_floor_is_applied() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let seed: Vec<ModelConfig> = (0..4)
+            .map(|i| named_cfg_for_test(&format!("test/model-{i}")))
+            .collect();
+        registry
+            .replace_model_configs_authoritative(seed)
+            .expect("seed apply");
+
+        // Two of four retained meets ceil(4 * 0.5); two are genuinely replaced.
+        let rotated: Vec<ModelConfig> = [
+            "test/model-0",
+            "test/model-1",
+            "test/model-9",
+            "test/model-8",
+        ]
+        .into_iter()
+        .map(named_cfg_for_test)
+        .collect();
+        registry
+            .replace_model_configs_authoritative(rotated)
+            .expect("retaining the floor is an ordinary apply");
+        let names = registry.list_models();
+        assert!(names.iter().any(|n| n == "test/model-9"));
+        assert!(!names.iter().any(|n| n == "test/model-3"));
+    }
+
+    #[test]
+    fn test_bundle_install_that_strands_the_served_models_is_refused() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        registry
+            .replace_model_configs_authoritative(vec![named_cfg_for_test("test/model-0")])
+            .expect("seed apply");
         let before = registry.list_bundles();
         assert!(!before.is_empty(), "fixture must seed a bundle");
 
-        registry.install_bundles(Vec::new());
-
+        // Same bundle count, but nothing that routes the served adapter.
+        let incompatible = registry
+            .list_bundles()
+            .into_iter()
+            .map(|_| BundleInfo {
+                name: "unrelated".to_string(),
+                priority: 10,
+                adapters: vec!["sie_server.adapters.nothing_served_uses".to_string()],
+                engine: DEFAULT_ENGINE.to_string(),
+            })
+            .collect();
+        registry.install_bundles(incompatible);
         assert_eq!(
             registry.list_bundles(),
             before,
-            "an empty bundle install would make every adapter unroutable"
+            "a bundle set that strands every served model must be refused"
+        );
+
+        registry.install_bundles(Vec::new());
+        assert_eq!(
+            registry.list_bundles(),
+            before,
+            "an empty bundle install must be refused"
         );
     }
 
