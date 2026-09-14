@@ -239,9 +239,9 @@ def test_native_audio_builder_installs_exact_rust_and_never_clobbers() -> None:
     uploader = (contract.ROOT / "tools/ci/upload_native_release_asset.bash").read_text()
     assert contract.AUDIO_MANYLINUX_IMAGE in workflow
     assert "version: 2026.7.11" in workflow
-    assert "mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0" in workflow
-    assert "rust@1.97.0 -- rustc --version" in workflow
-    assert "rust@1.97.0 -- cargo --version" in workflow
+    assert "mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1" in workflow
+    assert "rust@1.98.1 -- rustc --version" in workflow
+    assert "rust@1.98.1 -- cargo --version" in workflow
     assert "--clobber" not in workflow
     assert "--clobber" not in uploader
     assert "sha256sum" in uploader

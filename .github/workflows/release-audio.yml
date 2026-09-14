@@ -42,10 +42,10 @@ jobs:
           cache: false
       - name: Install pinned native build tools
         run: |
-          mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0
-          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- rustc --version | cut -d' ' -f2)" = 1.97.0
-          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- cargo --version | cut -d' ' -f2)" = 1.97.0
-          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- zig version)" = 0.13.0
+          mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 -- rustc --version | cut -d' ' -f2)" = 1.98.1
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 -- cargo --version | cut -d' ' -f2)" = 1.98.1
+          test "$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 -- zig version)" = 0.13.0
       - id: contract
         name: Validate exact release identity and asset filename
         env:
@@ -56,12 +56,12 @@ jobs:
           set -euo pipefail
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-          filename="$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 -- python -c 'import runpy; print(runpy.run_path("packages/sie_audio_prep/build_wheel.py")["AUDIO_WHEEL_FILENAME"])')"
+          filename="$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 -- python -c 'import runpy; print(runpy.run_path("packages/sie_audio_prep/build_wheel.py")["AUDIO_WHEEL_FILENAME"])')"
           test "$filename" = "sie_audio_prep-$RELEASE_VERSION-cp312-abi3-manylinux_2_28_x86_64.whl"
           echo "filename=$filename" >> "$GITHUB_OUTPUT"
       - name: Build and validate exact Linux wheel
         run: >-
-          mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0 --
+          mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 --
           python tools/ci/build_audio_prep_release_asset.py --out dist
       - name: Record exact tested wheel and original run provenance
         run: >-
