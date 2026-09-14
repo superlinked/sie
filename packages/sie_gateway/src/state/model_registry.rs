@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use arc_swap::ArcSwap;
@@ -206,6 +207,12 @@ pub struct ModelRegistry {
     /// Ordinary readers remain lock-free and see one consistent snapshot per
     /// access.
     write_lock: Mutex<()>,
+    /// Whether the served surface was installed by the control plane. A
+    /// filesystem seed is a bootstrap convenience the first authoritative
+    /// export may replace wholesale; only a surface the authority itself
+    /// installed is protected by the retention guard, so a config service
+    /// that later restarts empty cannot take it down.
+    authoritative_surface: AtomicBool,
 }
 
 impl ModelRegistry {
@@ -219,6 +226,7 @@ impl ModelRegistry {
             models_dir: models_dir.as_ref().to_path_buf(),
             snapshot: ArcSwap::from_pointee(RegistrySnapshot::default()),
             write_lock: Mutex::new(()),
+            authoritative_surface: AtomicBool::new(false),
         };
         if auto_load {
             registry.reload();
@@ -388,6 +396,7 @@ impl ModelRegistry {
             bundle_pool_config_hashes,
         };
         self.snapshot.store(Arc::new(snap));
+        self.authoritative_surface.store(false, Ordering::Release);
     }
 
     fn load_bundle_file(path: &Path) -> Result<BundleInfo, Box<dyn std::error::Error>> {
@@ -1533,9 +1542,11 @@ impl ModelRegistry {
                         .is_some_and(|rebuilt| !rebuilt.bundles.is_empty())
             })
             .count();
-        if let Some(refusal) = Self::shrink_refusal(served, retained, min_retained_ratio()) {
-            warn!(reason = %refusal, "refused authoritative bundle install");
-            return;
+        if self.authoritative_surface.load(Ordering::Acquire) {
+            if let Some(refusal) = Self::shrink_refusal(served, retained, min_retained_ratio()) {
+                warn!(reason = %refusal, "refused authoritative bundle install");
+                return;
+            }
         }
 
         let bundle_config_hashes = Self::rebuild_bundle_config_hashes(&new_bundles, &snap.models);
@@ -2198,15 +2209,17 @@ impl ModelRegistry {
         let bundle_pool_config_hashes =
             Self::rebuild_bundle_pool_config_hashes(&old_snap.bundles, &new_models);
 
-        let retained = old_snap
-            .models
-            .keys()
-            .filter(|id| new_models.contains_key(id.as_str()))
-            .count();
-        if let Some(refusal) =
-            Self::shrink_refusal(old_snap.models.len(), retained, min_retained_ratio())
-        {
-            return Err(refusal);
+        if self.authoritative_surface.load(Ordering::Acquire) {
+            let retained = old_snap
+                .models
+                .keys()
+                .filter(|id| new_models.contains_key(id.as_str()))
+                .count();
+            if let Some(refusal) =
+                Self::shrink_refusal(old_snap.models.len(), retained, min_retained_ratio())
+            {
+                return Err(refusal);
+            }
         }
 
         info!(
@@ -2223,6 +2236,7 @@ impl ModelRegistry {
             bundle_config_hashes,
             bundle_pool_config_hashes,
         }));
+        self.authoritative_surface.store(true, Ordering::Release);
 
         Ok(applied)
     }
@@ -4948,6 +4962,40 @@ adapters:
             served.len(),
             "the served surface must survive a refused snapshot"
         );
+    }
+
+    #[test]
+    fn test_first_authoritative_export_replaces_a_local_seed_freely() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            r#"
+name: default
+priority: 10
+adapters:
+  - sie_server.adapters.sentence_transformer
+"#,
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        registry
+            .add_model_config(named_cfg_for_test("stale/model"))
+            .expect("seed a gateway-local model");
+
+        // The seed is a convenience, not the authority: the first export may
+        // drop every seeded model, exactly as bootstrap relies on.
+        registry
+            .replace_model_configs_authoritative(vec![named_cfg_for_test("kept/model")])
+            .expect("the first authoritative export replaces a local seed");
+        let names = registry.list_models();
+        assert!(names.iter().any(|n| n == "kept/model"));
+        assert!(!names.iter().any(|n| n == "stale/model"));
+
+        // From here the surface is the authority's own, and the guard applies.
+        registry
+            .replace_model_configs_authoritative(Vec::new())
+            .expect_err("a later empty export must be refused");
+        assert!(registry.list_models().iter().any(|n| n == "kept/model"));
     }
 
     #[test]
