@@ -72,10 +72,10 @@ def _canonical_label(phrase: str, labels: list[str] | None) -> str:
     phrase_words = set(_WORD_RE.findall(phrase.lower()))
     best_label, best_key = phrase, (0.0, 0)
     for label in labels:
-        words = _WORD_RE.findall(label.lower())
+        words = set(_WORD_RE.findall(label.lower()))
         if not words:
             continue
-        matched = sum(1 for word in words if word in phrase_words)
+        matched = len(words & phrase_words)
         key = (matched / len(words), matched)
         if key > best_key:
             best_label, best_key = label, key

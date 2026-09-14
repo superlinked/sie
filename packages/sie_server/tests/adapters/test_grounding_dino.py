@@ -350,6 +350,8 @@ class TestGroundingDINOAdapter:
         assert _canonical_label("handbag", labels) == "handbag"
         assert _canonical_label("red handbag", labels) == "red handbag"
         assert _canonical_label("backpack.", labels) == "backpack"
+        # A repeated word counts once, so it cannot outscore the earlier label.
+        assert _canonical_label("red car", ["red car", "red red car"]) == "red car"
         # No labels (an instruction prompt) or no overlap: the phrase stands.
         assert _canonical_label("dog", None) == "dog"
         assert _canonical_label("dog", labels) == "dog"
