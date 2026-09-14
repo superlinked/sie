@@ -106,8 +106,8 @@ fi
 if [[ -s "$REQS_FILE" ]]; then
     echo "Syncing adapter dependencies..."
     mise exec -- uv run --frozen --project . --package sie-server \
-        "${UV_BUNDLE_ARGS[@]}" \
-        --with-requirements "$REQS_FILE" python -m sie_server.cli serve "${SERVER_ARGS[@]}"
+        ${UV_BUNDLE_ARGS[@]+"${UV_BUNDLE_ARGS[@]}"} \
+        --with-requirements "$REQS_FILE" python -m sie_server.cli serve ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"}
 else
-    mise exec -- uv run --frozen --project . --package sie-server python -m sie_server.cli serve "${SERVER_ARGS[@]}"
+    mise exec -- uv run --frozen --project . --package sie-server python -m sie_server.cli serve ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"}
 fi

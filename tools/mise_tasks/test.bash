@@ -68,7 +68,7 @@ if [[ -n "${usage_model:-}" ]]; then
         while IFS= read -r node_id; do
             model_node_ids+=("${node_id}")
         done <<<"${selected_tests}"
-        ARGS+=("${model_node_ids[@]}")
+        ARGS+=(${model_node_ids[@]+"${model_node_ids[@]}"})
     fi
 fi
 
@@ -76,5 +76,5 @@ echo "## Running public workspace tests"
 if [[ ${#ARGS[@]} -eq 0 ]]; then
     mise exec -- uv run --frozen --project . --no-sync pytest -c pyproject.toml
 else
-    mise exec -- uv run --frozen --project . --no-sync pytest -c pyproject.toml "${ARGS[@]}"
+    mise exec -- uv run --frozen --project . --no-sync pytest -c pyproject.toml ${ARGS[@]+"${ARGS[@]}"}
 fi
