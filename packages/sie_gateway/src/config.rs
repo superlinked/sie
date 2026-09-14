@@ -816,10 +816,19 @@ impl Config {
             ));
         }
 
-        if !is_enabled && (has_tokens || has_admin) {
+        // `admin_token` alone is not dead configuration: `Config::load` also
+        // presents it to `sie-config` as the bootstrap credential
+        // (`config_service_token`), so a gateway with inbound auth off still
+        // legitimately carries it. Only the inbound tokens prove intent.
+        if !is_enabled && has_tokens {
             issues.push((
                 AuditLevel::Error,
-                "SIE_AUTH_TOKEN(S) or SIE_ADMIN_TOKEN is set but SIE_AUTH_MODE is not 'static'/'token'. Auth is DISABLED; the tokens are dead configuration. Set SIE_AUTH_MODE=token to enforce auth.".to_string(),
+                "SIE_AUTH_TOKEN(S) is set but SIE_AUTH_MODE is not 'static'/'token'. Auth is DISABLED; the tokens are dead configuration. Set SIE_AUTH_MODE=token to enforce auth.".to_string(),
+            ));
+        } else if !is_enabled && has_admin {
+            issues.push((
+                AuditLevel::Warn,
+                "SIE_ADMIN_TOKEN is set but SIE_AUTH_MODE is not 'static'/'token': admin routes are not gated inbound (auth is disabled); the token is still presented to sie-config as the bootstrap credential.".to_string(),
             ));
         }
 
@@ -1800,6 +1809,22 @@ mod tests {
             "expected error about tokens + disabled auth, got {:?}",
             issues
         );
+    }
+
+    /// The admin token doubles as the `sie-config` bootstrap credential
+    /// (`config_service_token`), so a gateway running with inbound auth off
+    /// still carries it legitimately. That must never audit as an error, or
+    /// the fail-closed middleware would refuse every request on such a deploy.
+    #[test]
+    fn test_audit_auth_none_with_only_admin_token_is_not_an_error() {
+        let cfg = cfg_with_auth("none", vec![], "admin", false);
+        let issues = cfg.audit_auth();
+        assert!(
+            issues.iter().all(|(lvl, _)| *lvl != AuditLevel::Error),
+            "admin token alone must not be an error: {:?}",
+            issues
+        );
+        assert!(cfg.auth_config_error().is_none());
     }
 
     #[test]

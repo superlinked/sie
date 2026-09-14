@@ -50,7 +50,13 @@ pub struct AuthLayer {
 
 impl AuthLayer {
     pub fn new(config: Arc<Config>) -> Self {
-        let misconfigured = config.auth_config_error().map(Arc::from);
+        let misconfigured: Option<Arc<str>> = config.auth_config_error().map(Arc::from);
+        if let Some(reason) = misconfigured.as_deref() {
+            tracing::error!(
+                audit = "auth",
+                "{reason} Refusing every non-probe request until it is corrected."
+            );
+        }
         Self {
             config,
             misconfigured,
@@ -111,13 +117,13 @@ where
             // "auth off" is the strictly worse reading: an unrecognised
             // `SIE_AUTH_MODE`, or tokens supplied against a disabled mode, both
             // describe an operator who intended auth and did not get it. The
-            // reason is logged, never echoed, because it quotes operator input.
-            // This gate is deliberately above the operational exemption: an
-            // auth config that cannot be read cannot be read as consent to
-            // publish worker URLs, queue depth and GPU inventory either.
-            if let Some(reason) = misconfigured.as_deref() {
+            // reason was logged once at layer construction and is never
+            // echoed, because it quotes operator input. This gate is
+            // deliberately above the operational exemption: an auth config
+            // that cannot be read cannot be read as consent to publish worker
+            // URLs, queue depth and GPU inventory either.
+            if misconfigured.is_some() {
                 record_admission_rejection(&req, AdmissionOutcome::AuthMisconfigured);
-                tracing::error!(audit = "auth", path = %path, "{}", reason);
                 return Ok(error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     err_code::GATEWAY_AUTH_MISCONFIGURED,
@@ -731,6 +737,18 @@ mod tests {
         assert_eq!(
             send(r, Method::POST, "/v1/encode/any", Some("user")).await,
             StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn middleware_admin_token_alone_with_disabled_mode_passes_through() {
+        // `SIE_ADMIN_TOKEN` is also the sie-config bootstrap credential, so
+        // "auth off + admin token present" is an ordinary deployment shape.
+        let cfg = cfg_for_middleware("none", vec![], "admin", false);
+        let r = test_router(cfg);
+        assert_eq!(
+            send(r, Method::POST, "/v1/encode/any", None).await,
+            StatusCode::OK
         );
     }
 
