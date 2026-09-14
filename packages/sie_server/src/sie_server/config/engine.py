@@ -321,8 +321,17 @@ class EngineConfig(BaseSettings):
     # Memory
     memory_pressure_threshold_percent: Annotated[
         int,
-        Field(ge=50, le=99, description="VRAM usage percent that triggers LRU eviction"),
-    ] = 95
+        Field(
+            ge=50,
+            le=99,
+            description=(
+                "Device memory usage percent that triggers LRU eviction, both before a "
+                "load and from the background monitor. Allocator fragmentation makes "
+                "the last tenth of device memory unreliable for a fresh allocation, "
+                "so the default keeps that margin free."
+            ),
+        ),
+    ] = 85
     idle_evict_s: Annotated[
         int | None,
         Field(

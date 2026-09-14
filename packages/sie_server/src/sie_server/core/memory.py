@@ -299,7 +299,7 @@ class MemoryConfig:
 
     # Memory pressure threshold (0.0 to 1.0)
     # Evict LRU model when usage exceeds this ratio
-    pressure_threshold: float = 0.95
+    pressure_threshold: float = 0.85
 
     # Minimum free memory to maintain (in bytes)
     # Alternative to ratio-based threshold

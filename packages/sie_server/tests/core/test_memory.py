@@ -140,7 +140,7 @@ class TestMemoryConfig:
         """Test default configuration values."""
         config = MemoryConfig()
 
-        assert config.pressure_threshold == 0.95
+        assert config.pressure_threshold == 0.85
         assert config.min_free_bytes is None
 
     def test_custom_values(self) -> None:

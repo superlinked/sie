@@ -32,7 +32,7 @@ class TestEngineConfig:
         assert config.coalesce_ms == 15.0
         assert config.coalesce_ratio == 0.5
         assert config.max_concurrent_requests == 512
-        assert config.memory_pressure_threshold_percent == 95
+        assert config.memory_pressure_threshold_percent == 85
         assert config.max_loras_per_model == 10
         assert config.preprocessor_workers == 4
         assert config.attention_backend == "auto"
