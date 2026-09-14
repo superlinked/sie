@@ -847,6 +847,17 @@ impl Config {
         issues
     }
 
+    /// The first `AuditLevel::Error` from [`Self::audit_auth`], if any.
+    ///
+    /// An auth configuration that audits as an error has no valid reading, so
+    /// the request path treats it as a refusal instead of picking a default.
+    /// Callers may resolve this once: `Config` does not change after load.
+    pub fn auth_config_error(&self) -> Option<String> {
+        self.audit_auth()
+            .into_iter()
+            .find_map(|(level, message)| matches!(level, AuditLevel::Error).then_some(message))
+    }
+
     /// Report NATS config-delta producer-trust soundness. Mirrors the
     /// pattern of `audit_auth` but scoped to the
     /// `SIE_NATS_CONFIG_TRUST_ANY_PRODUCER` /

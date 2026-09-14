@@ -40,11 +40,21 @@ const EXEMPT_OPERATIONAL_PATHS: &[&str] = &["/", "/health"];
 #[derive(Clone)]
 pub struct AuthLayer {
     config: Arc<Config>,
+    /// First `AuditLevel::Error` from [`Config::audit_auth`], resolved once at
+    /// layer construction because `Config` is immutable after load and the
+    /// audit allocates. `Some` means the auth configuration has no valid
+    /// interpretation, which this middleware serves as a refusal rather than
+    /// as "auth off" — see [`AuthMiddleware::call`].
+    misconfigured: Option<Arc<str>>,
 }
 
 impl AuthLayer {
     pub fn new(config: Arc<Config>) -> Self {
-        Self { config }
+        let misconfigured = config.auth_config_error().map(Arc::from);
+        Self {
+            config,
+            misconfigured,
+        }
     }
 }
 
@@ -55,6 +65,7 @@ impl<S> Layer<S> for AuthLayer {
         AuthMiddleware {
             inner,
             config: Arc::clone(&self.config),
+            misconfigured: self.misconfigured.clone(),
         }
     }
 }
@@ -63,6 +74,7 @@ impl<S> Layer<S> for AuthLayer {
 pub struct AuthMiddleware<S> {
     inner: S,
     config: Arc<Config>,
+    misconfigured: Option<Arc<str>>,
 }
 
 impl<S> Service<Request<Body>> for AuthMiddleware<S>
@@ -80,16 +92,40 @@ where
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let config = Arc::clone(&self.config);
+        let misconfigured = self.misconfigured.clone();
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
-            if !is_auth_enabled(&config.auth_mode) {
+            let path = req.uri().path();
+
+            // Probes and the read-only API description stay reachable in every
+            // configuration, including the broken ones below: gating them would
+            // take the pod out of rotation and hide the very misconfiguration
+            // the operator needs to see.
+            if PROBE_PATHS.contains(&path) || EXEMPT_DOC_PATHS.contains(&path) {
                 return inner.call(req).await;
             }
 
-            let path = req.uri().path();
+            // A configuration `audit_auth` classifies as an error has no valid
+            // interpretation, so it is served as a refusal. Treating it as
+            // "auth off" is the strictly worse reading: an unrecognised
+            // `SIE_AUTH_MODE`, or tokens supplied against a disabled mode, both
+            // describe an operator who intended auth and did not get it. The
+            // reason is logged, never echoed, because it quotes operator input.
+            // This gate is deliberately above the operational exemption: an
+            // auth config that cannot be read cannot be read as consent to
+            // publish worker URLs, queue depth and GPU inventory either.
+            if let Some(reason) = misconfigured.as_deref() {
+                record_admission_rejection(&req, AdmissionOutcome::AuthMisconfigured);
+                tracing::error!(audit = "auth", path = %path, "{}", reason);
+                return Ok(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    err_code::GATEWAY_AUTH_MISCONFIGURED,
+                    "Gateway auth is misconfigured; refusing the request",
+                ));
+            }
 
-            if PROBE_PATHS.contains(&path) || EXEMPT_DOC_PATHS.contains(&path) {
+            if !is_auth_enabled(&config.auth_mode) {
                 return inner.call(req).await;
             }
 
@@ -97,15 +133,6 @@ where
                 && (EXEMPT_OPERATIONAL_PATHS.contains(&path) || path.starts_with("/ws/"))
             {
                 return inner.call(req).await;
-            }
-
-            if config.auth_tokens.is_empty() {
-                record_admission_rejection(&req, AdmissionOutcome::AuthMisconfigured);
-                return Ok(error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    err_code::GATEWAY_AUTH_MISCONFIGURED,
-                    "Gateway auth enabled but no tokens configured",
-                ));
             }
 
             let token = match extract_bearer_token(req.headers()) {
@@ -375,12 +402,11 @@ mod tests {
         assert!(!is_auth_enabled("none"));
         assert!(!is_auth_enabled(""));
         assert!(!is_auth_enabled("disabled"));
-        // Typos and unknown modes fail-closed-to-bypass by design: the
-        // pair (auth_mode, auth_tokens) is validated at startup in
-        // `Config::load`, which logs a warning when tokens are configured
-        // but the mode is disabled. This prevents a typo in auth_mode
-        // from becoming a silent auth enforcement while still allowing
-        // the legacy "turn off auth" workflow.
+        // This predicate answers "should tokens be checked", and an
+        // unrecognised mode is not a mode whose tokens can be checked. It is
+        // NOT the bypass decision: the middleware refuses an unrecognised mode
+        // outright via `Config::auth_config_error`, so reaching this `false`
+        // for a typo is unreachable in the request path.
         assert!(!is_auth_enabled("staitc"));
     }
 
@@ -403,7 +429,8 @@ mod tests {
     // dummy handler) and cover what the helper-only tests cannot:
     //   - which paths actually reach the handler vs return 401/403
     //   - admin vs user token routing on admin-gated prefixes
-    //   - fail-open behavior when auth is disabled / unknown
+    //   - pass-through when auth is deliberately disabled, and refusal when
+    //     the auth configuration is an error
     //   - the `SIE_AUTH_EXEMPT_OPERATIONAL` toggle
 
     use axum::routing::{get, post};
@@ -682,15 +709,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn middleware_unknown_auth_mode_is_fail_open() {
-        // Typos in SIE_AUTH_MODE must NOT silently enforce auth (that
-        // would lock every pod out of every non-probe request). The
-        // `audit_auth()` warning covers operator visibility.
+    async fn middleware_unknown_auth_mode_refuses() {
+        // A typo in SIE_AUTH_MODE used to disable auth for every route while
+        // `audit_auth()` logged an error nobody read. An unrecognised mode has
+        // no valid reading, so it is refused rather than served unauthenticated.
         let cfg = cfg_for_middleware("staitc", vec!["user"], "admin", false);
         let r = test_router(cfg);
         assert_eq!(
             send(r, Method::POST, "/v1/encode/any", None).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn middleware_tokens_without_enabled_mode_refuses() {
+        // The likelier operator mistake: tokens supplied, mode left disabled.
+        // `audit_auth()` already calls this dead configuration; serving it as
+        // "auth off" hands an operator who configured a token an open gateway.
+        let cfg = cfg_for_middleware("none", vec!["user"], "admin", false);
+        let r = test_router(cfg);
+        assert_eq!(
+            send(r, Method::POST, "/v1/encode/any", Some("user")).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn middleware_deliberately_disabled_auth_still_passes_through() {
+        let cfg = cfg_for_middleware("none", vec![], "", false);
+        let r = test_router(cfg);
+        assert_eq!(
+            send(r, Method::POST, "/v1/encode/any", None).await,
             StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn middleware_probes_survive_a_misconfigured_auth_mode() {
+        // The refusal must not take the pod out of rotation: a crashlooping or
+        // unready gateway hides the misconfiguration instead of surfacing it.
+        for path in ["/healthz", "/readyz", "/openapi.json"] {
+            let cfg = cfg_for_middleware("staitc", vec!["user"], "admin", false);
+            let r = test_router(cfg);
+            assert_eq!(
+                send(r, Method::GET, path, None).await,
+                StatusCode::OK,
+                "{path} must stay reachable while auth config is broken"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_misconfigured_auth_overrides_the_operational_exemption() {
+        let cfg = cfg_for_middleware("staitc", vec!["user"], "admin", true);
+        let r = test_router(cfg);
+        assert_eq!(
+            send(r, Method::GET, "/health", None).await,
+            StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 }
