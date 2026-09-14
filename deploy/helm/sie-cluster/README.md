@@ -640,6 +640,24 @@ For emergency or legacy static namespaces that are not backed by either
 gate. Prefer declaring static pools instead, so capped/dynamic pools keep their
 fail-closed isolation behavior.
 
+### High availability in one file
+
+`values-ha.yaml` is the tested composition of the durability knobs below with
+a replicated broker and a second gateway: two gateway replicas, a three-member
+NATS cluster with a JetStream file store per member, and file-backed work-queue
+streams replicated across all three. Layer it under a provider overlay:
+
+```bash
+helm install sie deploy/helm/sie-cluster \
+  -f deploy/helm/sie-cluster/values-aws.yaml \
+  -f deploy/helm/sie-cluster/values-ha.yaml
+```
+
+It does not make `sie-config` redundant; that service stays at one replica by
+template design until the chart provides leader election. And because a live
+stream's storage type cannot be changed, apply it to a fresh install or convert
+the streams during a maintenance window as described below.
+
 ### Work-queue durability (memory vs file storage)
 
 The work queues ship **memory-backed and single-replica**, which is the only

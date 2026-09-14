@@ -171,7 +171,7 @@ jobs:
       - run: mise run helm -- template --set payloadStore.enabled=false >/dev/null
       - name: Render public cloud overlays
         run: |
-          for values in values-aws.yaml values-gke.yaml values-aks.yaml values-ack.yaml; do
+          for values in values-aws.yaml values-gke.yaml values-aks.yaml values-ack.yaml values-ha.yaml; do
             mise run helm -- template -f "deploy/helm/sie-cluster/${values}" --set payloadStore.enabled=false >/dev/null
           done
       - run: |

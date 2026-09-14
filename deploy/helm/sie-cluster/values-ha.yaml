@@ -1,0 +1,47 @@
+# High-availability composition for sie-cluster.
+#
+# The chart's defaults are a single-node topology: one gateway, one NATS
+# server, and memory-backed, single-replica work-queue streams. That serves a
+# demo well and loses every queued item when the NATS pod restarts. This file
+# turns on the pieces the chart already supports for a replicated queue, in
+# the combination the gateway-deployment template validates together:
+#
+#   * two gateway replicas (autoscaling can raise this further);
+#   * a three-member NATS cluster with a JetStream file store on each member;
+#   * work-queue streams created file-backed and replicated across all three,
+#     so a broker restart or a single-member loss keeps queued and in-flight
+#     work.
+#
+# Layer it under a provider overlay:
+#
+#   helm install sie deploy/helm/sie-cluster \
+#     -f deploy/helm/sie-cluster/values-aws.yaml \
+#     -f deploy/helm/sie-cluster/values-ha.yaml
+#
+# Two things it deliberately does not do. The sie-config service stays at one
+# replica: the config-deployment template pins that count because a second
+# writer needs leader election and a single-writer epoch file, which the chart
+# does not provide yet. And `queueRouting.streamStorage` cannot be changed on
+# an existing stream: apply this file to a fresh install, or drain the pools
+# and delete the work-queue streams during a maintenance window first (see the
+# README's "Work-queue durability" section).
+
+gateway:
+  replicas: 2
+
+nats:
+  config:
+    cluster:
+      enabled: true
+      replicas: 3
+    jetstream:
+      enabled: true
+      fileStore:
+        enabled: true
+        pvc:
+          enabled: true
+          size: 10Gi
+
+queueRouting:
+  streamStorage: file
+  streamReplicas: 3
