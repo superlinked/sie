@@ -206,12 +206,20 @@ pub enum BootstrapError {
         failed: usize,
         total: usize,
     },
+    /// The bundle surface changed between the reads that make up one
+    /// bootstrap, so the bundles and the model export may come from different
+    /// `sie-config` generations. Nothing was installed; the next attempt
+    /// re-reads both.
+    #[error("torn read: bundles hash moved from {before} to {after} during bootstrap")]
+    TornRead { before: String, after: String },
 }
 
 pub(crate) fn telemetry_outcome(error: &BootstrapError) -> ConfigOutcome {
     match error {
         BootstrapError::PartialApply { .. } => ConfigOutcome::PartialApply,
-        BootstrapError::Http(_) | BootstrapError::BadStatus { .. } => ConfigOutcome::FetchError,
+        BootstrapError::Http(_)
+        | BootstrapError::BadStatus { .. }
+        | BootstrapError::TornRead { .. } => ConfigOutcome::FetchError,
     }
 }
 
@@ -546,6 +554,20 @@ impl BootstrapClient {
                     failed += 1;
                 }
             }
+        }
+
+        // The bundles and the export are separate reads, and `sie-config`
+        // serves them from different structures: the export from its locked
+        // internal snapshot, the bundles from files that change on redeploy.
+        // Re-read the epoch and refuse the pair if the bundle surface moved in
+        // between, so the two halves installed together always belong to one
+        // generation; the retry loop simply reads both again.
+        let post_bootstrap = self.fetch_epoch().await?;
+        if post_bootstrap.bundles_hash != pre_bootstrap.bundles_hash {
+            return Err(BootstrapError::TornRead {
+                before: pre_bootstrap.bundles_hash,
+                after: post_bootstrap.bundles_hash,
+            });
         }
 
         let mut applied = 0usize;
@@ -954,6 +976,59 @@ mod tests {
         assert_eq!(
             registry.get_model_profile_names("test/model"),
             vec!["default".to_string()],
+        );
+    }
+
+    /// A bundle redeploy landing between the bundle read and the export read
+    /// would pair one generation's bundles with another's models. The
+    /// post-read epoch check refuses the pair and installs nothing.
+    #[tokio::test]
+    async fn bootstrap_refuses_a_bundle_surface_that_moved_during_the_reads() {
+        let server = MockServer::start().await;
+        let (registry, _tmp) = make_registry();
+        mount_default_bundles(&server).await;
+        // First epoch read sees "before"; every later read sees "after".
+        Mock::given(method("GET"))
+            .and(path("/v1/configs/epoch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "epoch": 0,
+                "bundles_hash": "before",
+                "bundle_config_hashes_hash": "bundle_config_hashes_hash",
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_default_epoch(&server, 0, "after").await;
+
+        let body = serde_json::json!({
+            "snapshot_version": 1,
+            "epoch": 7,
+            "generated_at": "2026-04-17T00:00:00Z",
+            "bundle_config_hashes": {"default": "control-plane-hash"},
+            "models": [{
+                "model_id": "kept/model",
+                "raw_yaml": "sie_id: kept/model\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.sentence_transformer:Adapter\n",
+                "affected_bundles": ["default"],
+            }],
+        });
+        Mock::given(method("GET"))
+            .and(path("/v1/configs/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let client = BootstrapClient::new(server.uri(), None).unwrap();
+        let err = client
+            .bootstrap(registry.as_ref())
+            .await
+            .expect_err("a moved bundle surface must refuse the pair");
+        assert!(
+            matches!(err, BootstrapError::TornRead { .. }),
+            "expected TornRead, got {err:?}"
+        );
+        assert!(
+            registry.get_model_info("kept/model").is_none(),
+            "nothing may be installed from a torn read"
         );
     }
 
