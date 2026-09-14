@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -178,6 +179,12 @@ class ModelLoader:
         self._oom_recovery = oom_recovery or OomRecoveryConfig()
         self._registry_callbacks = registry_callbacks
         self._load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-load")
+        # Weight downloads run apart from instantiation so a slow fetch of one
+        # model never queues another model's instantiate behind it. The disk
+        # cache manager is not thread-safe, so its accounting calls are
+        # serialized here while the downloads themselves proceed concurrently.
+        self._download_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="model-download")
+        self._disk_cache_lock = threading.Lock()
         # Loader-owned admission results. Catalog data can identify a derived
         # artifact but can never inject a filesystem root into an adapter.
         self._verified_serving_artifacts: dict[str, VerifiedServingArtifact] = {}
@@ -271,7 +278,7 @@ class ModelLoader:
                 raise ValueError("derived serving artifacts require an immutable HF source identity")
             derived_id = serving_artifact.repo_id
             if self._disk_cache is not None:
-                evicted = self._disk_cache.ensure_space_before_download(derived_id)
+                evicted = self._ensure_disk_space_locked(derived_id)
                 if evicted:
                     logger.info(
                         "Pre-download disk eviction: freed %d model(s): %s",
@@ -292,7 +299,7 @@ class ModelLoader:
             )
             self._verified_serving_artifacts[config.sie_id] = verified
             if self._disk_cache is not None:
-                self._disk_cache.touch(derived_id)
+                self._touch_disk_locked(derived_id)
             logger.debug(
                 "Derived serving artifact %s@%s materialized at %s",
                 derived_id,
@@ -301,7 +308,7 @@ class ModelLoader:
             )
         elif model_id is not None:
             if self._disk_cache is not None:
-                evicted = self._disk_cache.ensure_space_before_download(model_id)
+                evicted = self._ensure_disk_space_locked(model_id)
                 if evicted:
                     logger.info(
                         "Pre-download disk eviction: freed %d model(s): %s",
@@ -311,7 +318,7 @@ class ModelLoader:
 
             cached_path = ensure_model_cached(model_id, cache_config, revision=config.hf_revision)
             if self._disk_cache is not None:
-                self._disk_cache.touch(model_id)
+                self._touch_disk_locked(model_id)
             logger.debug("Model %s available at %s", model_id, cached_path)
 
         # External speculative assistants are separate checkpoints. Stage each
@@ -319,7 +326,7 @@ class ModelLoader:
         # engine-owned, moving-branch download during launch.
         for draft_model, revision in config.speculative_draft_revisions().items():
             if self._disk_cache is not None:
-                evicted = self._disk_cache.ensure_space_before_download(draft_model)
+                evicted = self._ensure_disk_space_locked(draft_model)
                 if evicted:
                     logger.info(
                         "Pre-download disk eviction for speculative draft: freed %d model(s): %s",
@@ -328,7 +335,7 @@ class ModelLoader:
                     )
             draft_path = ensure_model_cached(draft_model, cache_config, revision=revision)
             if self._disk_cache is not None:
-                self._disk_cache.touch(draft_model)
+                self._touch_disk_locked(draft_model)
             logger.debug(
                 "Speculative draft %s@%s available at %s",
                 draft_model,
@@ -336,11 +343,22 @@ class ModelLoader:
                 draft_path,
             )
 
+    def _ensure_disk_space_locked(self, model_id: str) -> list[str]:
+        assert self._disk_cache is not None
+        with self._disk_cache_lock:
+            return self._disk_cache.ensure_space_before_download(model_id)
+
+    def _touch_disk_locked(self, model_id: str) -> None:
+        assert self._disk_cache is not None
+        with self._disk_cache_lock:
+            self._disk_cache.touch(model_id)
+
     async def ensure_weights_cached_async(self, name: str, config: ModelConfig) -> None:
         """Async version of :meth:`ensure_weights_cached`.
 
-        Runs the (potentially long) download on the load executor so it
-        doesn't block the event loop. Intentionally NOT wrapped in
+        Runs the (potentially long) download on the download executor, apart
+        from the single-threaded load executor, so it blocks neither the event
+        loop nor another model's instantiation. Intentionally NOT wrapped in
         ``asyncio.wait_for`` — slow networks are allowed; stalls are
         detected by ``HF_HUB_DOWNLOAD_TIMEOUT`` inside ``huggingface_hub``.
 
@@ -350,7 +368,7 @@ class ModelLoader:
         """
         logger.debug("Ensuring weights cached for '%s'", name)
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._load_executor, self.ensure_weights_cached, config)
+        await loop.run_in_executor(self._download_executor, self.ensure_weights_cached, config)
 
     async def instantiate_adapter_async(
         self,

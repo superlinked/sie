@@ -262,6 +262,7 @@ class ModelRegistry:
 
         # Concurrency-safe loading
         self._load_lock: asyncio.Lock | None = None  # Created lazily on first use
+        self._model_load_locks: dict[str, asyncio.Lock] = {}
         self._config_update_lock: asyncio.Lock | None = None
         # Async lifecycle state is owned by one long-lived server event loop.
         # Legacy synchronous callers are serialized independently until that
@@ -799,6 +800,14 @@ class ModelRegistry:
             self._load_lock = asyncio.Lock()
         return self._load_lock
 
+    def _get_model_load_lock(self, name: str) -> asyncio.Lock:
+        """Per-model load serialization, created on the registry lifecycle loop."""
+        self._bind_lifecycle_loop()
+        lock = self._model_load_locks.get(name)
+        if lock is None:
+            lock = self._model_load_locks[name] = asyncio.Lock()
+        return lock
+
     def _get_config_update_lock(self) -> asyncio.Lock:
         """Serialize async config mutations across IPC/hot-reload entrypoints."""
         self._bind_lifecycle_loop()
@@ -1056,24 +1065,23 @@ class ModelRegistry:
         self._check_model_loadable(name)
 
         lock = self._get_load_lock()
-        async with lock:
-            # Double-check after acquiring lock (another request may have loaded it)
-            if name in self._loaded:
-                self._memory_manager_for_model(name).touch(name)
-                return self._loaded[name].adapter
+        async with self._get_model_load_lock(name):
+            async with lock:
+                # Double-check after acquiring lock (another request may have loaded it)
+                if name in self._loaded:
+                    self._memory_manager_for_model(name).touch(name)
+                    return self._loaded[name].adapter
 
-            load_device = self._resolve_load_device(device)
-            memory_manager = self._memory_manager_for_device(load_device)
+                # Check if model is being unloaded - caller should retry
+                if name in self._unloading:
+                    msg = f"Model '{name}' is currently being unloaded"
+                    raise RuntimeError(msg)
 
-            # Check if model is being unloaded - caller should retry
-            if name in self._unloading:
-                msg = f"Model '{name}' is currently being unloaded"
-                raise RuntimeError(msg)
+                config = self._configs[name]
 
-            config = self._configs[name]
+                # Mark as loading before starting (visible to WebSocket status)
+                self._loading.add(name)
 
-            # Mark as loading before starting (visible to WebSocket status)
-            self._loading.add(name)
             load_start = time.monotonic()
             load_outcome = "error"
             load_stage = "total"
@@ -1081,97 +1089,111 @@ class ModelRegistry:
             try:
                 model_dir = self._model_dirs.get(name, Path())
 
-                # Ensure weights are cached BEFORE instantiation. This
-                # phase is intentionally unbounded by the post-download
-                # timeout in ``ModelLoader`` — slow user networks are
-                # supported via ``HF_HUB_DOWNLOAD_TIMEOUT`` stall
-                # detection inside ``huggingface_hub`` only.
+                # The download holds neither lock. It is intentionally unbounded
+                # by the post-download timeout in ``ModelLoader`` — slow user
+                # networks are supported via ``HF_HUB_DOWNLOAD_TIMEOUT`` stall
+                # detection inside ``huggingface_hub`` only — and the registry
+                # lock must stay free for every other model's load, unload and
+                # eviction meanwhile. The per-model lock keeps two loads of the
+                # same model from fetching twice.
                 await self._loader.ensure_weights_cached_async(name, config)
 
-                # Instantiate adapter (in thread pool, post-download timeout applies)
-                adapter = await self._loader.instantiate_adapter_async(name, config, model_dir, load_device)
+                async with lock:
+                    if name in self._loaded:
+                        self._memory_manager_for_model(name).touch(name)
+                        load_outcome = "success"
+                        return self._loaded[name].adapter
+                    if name in self._unloading:
+                        msg = f"Model '{name}' is currently being unloaded"
+                        raise RuntimeError(msg)
 
-                required_load_bytes = _adapter_load_required_bytes(adapter, memory_manager)
+                    load_device = self._resolve_load_device(device)
+                    memory_manager = self._memory_manager_for_device(load_device)
 
-                # Pre-load eviction: evict LRU non-pinned models until current pressure
-                # and any adapter-provided load headroom requirement are satisfied.
-                while memory_manager.should_evict_for_load(required_load_bytes):
-                    lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-                    if lru_model is None:
-                        break  # No non-pinned models to evict, proceed with load attempt
+                    # Instantiate adapter (in thread pool, post-download timeout applies)
+                    adapter = await self._loader.instantiate_adapter_async(name, config, model_dir, load_device)
 
-                    if lru_model not in self._loaded:
-                        # Belt-and-braces: a MemoryManager entry with no matching
-                        # ``_loaded`` model is a ghost (see #1600). ``_do_unload``
-                        # would no-op on it, so drop the stale accounting entry and
-                        # re-evaluate rather than spin. The ``_do_unload`` finally
-                        # normally prevents ghosts; this guards any other source.
+                    required_load_bytes = _adapter_load_required_bytes(adapter, memory_manager)
+
+                    # Pre-load eviction: evict LRU non-pinned models until current pressure
+                    # and any adapter-provided load headroom requirement are satisfied.
+                    while memory_manager.should_evict_for_load(required_load_bytes):
+                        lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                        if lru_model is None:
+                            break  # No non-pinned models to evict, proceed with load attempt
+
+                        if lru_model not in self._loaded:
+                            # Belt-and-braces: a MemoryManager entry with no matching
+                            # ``_loaded`` model is a ghost (see #1600). ``_do_unload``
+                            # would no-op on it, so drop the stale accounting entry and
+                            # re-evaluate rather than spin. The ``_do_unload`` finally
+                            # normally prevents ghosts; this guards any other source.
+                            logger.warning(
+                                "Evictor found ghost '%s' (in memory manager, not loaded); dropping stale entry",
+                                lru_model,
+                            )
+                            memory_manager.unregister_model(lru_model)
+                            continue
+
+                        stats = memory_manager.get_stats()
+                        logger.info(
+                            "Pre-load eviction: %s %.2f GB free, %.2f GB required, %.1f%% used "
+                            "(threshold %.1f%%); evicting '%s' before loading '%s'",
+                            load_device,
+                            stats.available_gb,
+                            (required_load_bytes or 0) / (1024**3),
+                            stats.usage_ratio * 100,
+                            memory_manager.pressure_threshold_pct,
+                            lru_model,
+                            name,
+                        )
+                        await self._do_unload(lru_model, reason="preload_pressure")
+
+                    try:
+                        # Load onto device (loader handles main thread vs executor)
+                        loaded = await self._loader.load_and_register_async(name, load_device, adapter, config)
+                    except RuntimeError as e:
+                        if not self._is_oom_error(e):
+                            raise
+
+                        # OOM despite pre-load eviction: evict LRU non-pinned model and retry once
+                        lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                        if lru_model is None:
+                            logger.error("OOM loading '%s' but no non-pinned models to evict", name)
+                            raise
+
                         logger.warning(
-                            "Evictor found ghost '%s' (in memory manager, not loaded); dropping stale entry",
+                            "OOM loading '%s' despite pre-eviction, evicting '%s' and retrying",
+                            name,
                             lru_model,
                         )
-                        memory_manager.unregister_model(lru_model)
-                        continue
+                        await self._do_unload(lru_model, reason="load_oom")
 
-                    stats = memory_manager.get_stats()
-                    logger.info(
-                        "Pre-load eviction: %s %.2f GB free, %.2f GB required, %.1f%% used "
-                        "(threshold %.1f%%); evicting '%s' before loading '%s'",
-                        load_device,
-                        stats.available_gb,
-                        (required_load_bytes or 0) / (1024**3),
-                        stats.usage_ratio * 100,
-                        memory_manager.pressure_threshold_pct,
-                        lru_model,
+                        # Retry once after eviction. Weights are still cached
+                        # on disk so we skip ``ensure_weights_cached_async``.
+                        adapter = await self._loader.instantiate_adapter_async(name, config, model_dir, load_device)
+                        loaded = await self._loader.load_and_register_async(name, load_device, adapter, config)
+
+                    # Track loaded state
+                    self._loaded[name] = loaded
+
+                    # Register with memory manager for LRU tracking
+                    self._memory_manager_for_device(loaded.device).register_model(
                         name,
-                    )
-                    await self._do_unload(lru_model, reason="preload_pressure")
-
-                try:
-                    # Load onto device (loader handles main thread vs executor)
-                    loaded = await self._loader.load_and_register_async(name, load_device, adapter, config)
-                except RuntimeError as e:
-                    if not self._is_oom_error(e):
-                        raise
-
-                    # OOM despite pre-load eviction: evict LRU non-pinned model and retry once
-                    lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-                    if lru_model is None:
-                        logger.error("OOM loading '%s' but no non-pinned models to evict", name)
-                        raise
-
-                    logger.warning(
-                        "OOM loading '%s' despite pre-eviction, evicting '%s' and retrying",
-                        name,
-                        lru_model,
-                    )
-                    await self._do_unload(lru_model, reason="load_oom")
-
-                    # Retry once after eviction. Weights are still cached
-                    # on disk so we skip ``ensure_weights_cached_async``.
-                    adapter = await self._loader.instantiate_adapter_async(name, config, model_dir, load_device)
-                    loaded = await self._loader.load_and_register_async(name, load_device, adapter, config)
-
-                # Track loaded state
-                self._loaded[name] = loaded
-
-                # Register with memory manager for LRU tracking
-                self._memory_manager_for_device(loaded.device).register_model(
-                    name,
-                    estimated_bytes=loaded.memory_bytes,
-                )
-
-                load_duration = time.monotonic() - load_start
-                if load_duration > 300:
-                    logger.warning(
-                        "Model '%s' took %.0fs to load (>300s) — may indicate a gated model "
-                        "missing HF_TOKEN or network issues",
-                        name,
-                        load_duration,
+                        estimated_bytes=loaded.memory_bytes,
                     )
 
-                load_outcome = "success"
-                return loaded.adapter
+                    load_duration = time.monotonic() - load_start
+                    if load_duration > 300:
+                        logger.warning(
+                            "Model '%s' took %.0fs to load (>300s) — may indicate a gated model "
+                            "missing HF_TOKEN or network issues",
+                            name,
+                            load_duration,
+                        )
+
+                    load_outcome = "success"
+                    return loaded.adapter
             except ModelLoadTimeoutError as exc:
                 load_outcome = "timeout"
                 load_stage = exc.stage

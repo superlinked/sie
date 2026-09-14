@@ -938,3 +938,90 @@ class TestSetPinnedModels:
             return mock
 
         return make_mock
+
+
+# ---- weight downloads run outside the registry load lock ---------------------
+
+
+class _BlockingDownload:
+    """``ensure_model_cached`` stand-in that parks one repo until released."""
+
+    def __init__(self, slow_repo: str) -> None:
+        import threading
+
+        self.slow_repo = slow_repo
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, model_id: str, *_args: object, **_kwargs: object) -> Path:
+        if model_id == self.slow_repo:
+            self.entered.set()
+            assert self.release.wait(timeout=10), "download was never released"
+        return Path(f"/fake/cache/models--{model_id.replace('/', '--')}")
+
+
+def _two_model_registry() -> ModelRegistry:
+    registry = ModelRegistry()
+    registry.add_config(_make_config(name="slow", hf_id="org/slow"))
+    registry.add_config(_make_config(name="fast", hf_id="org/fast"))
+    return registry
+
+
+def _adapter_factory() -> Callable[..., MagicMock]:
+    def make(*_args: object, **_kwargs: object) -> MagicMock:
+        adapter = MagicMock()
+        adapter.memory_footprint.return_value = 1000
+        return adapter
+
+    return make
+
+
+async def test_download_of_one_model_does_not_block_another_load(patch_ensure_model_cached: MagicMock) -> None:
+    """A cold model's fetch must not serialize a model whose weights are on disk."""
+    download = _BlockingDownload("org/slow")
+    patch_ensure_model_cached.side_effect = download
+    registry = _two_model_registry()
+    with patch("sie_server.core.model_loader.load_adapter", side_effect=_adapter_factory()):
+        slow = asyncio.create_task(registry.load_async("slow", "cpu"))
+        await asyncio.to_thread(download.entered.wait, 5)
+        assert registry.is_loading("slow")
+
+        # With the fetch holding the registry lock this would wait on ``slow``.
+        await asyncio.wait_for(registry.load_async("fast", "cpu"), timeout=5)
+        assert registry.is_loaded("fast")
+        assert not registry.is_loaded("slow")
+
+        download.release.set()
+        await asyncio.wait_for(slow, timeout=5)
+        assert registry.is_loaded("slow")
+
+
+async def test_download_does_not_block_unload_or_eviction(patch_ensure_model_cached: MagicMock) -> None:
+    download = _BlockingDownload("org/slow")
+    patch_ensure_model_cached.side_effect = download
+    registry = _two_model_registry()
+    with patch("sie_server.core.model_loader.load_adapter", side_effect=_adapter_factory()):
+        await registry.load_async("fast", "cpu")
+        slow = asyncio.create_task(registry.load_async("slow", "cpu"))
+        await asyncio.to_thread(download.entered.wait, 5)
+
+        await asyncio.wait_for(registry.unload_async("fast"), timeout=5)
+        assert not registry.is_loaded("fast")
+
+        download.release.set()
+        await asyncio.wait_for(slow, timeout=5)
+
+
+async def test_concurrent_loads_of_one_model_fetch_once(patch_ensure_model_cached: MagicMock) -> None:
+    download = _BlockingDownload("org/slow")
+    patch_ensure_model_cached.side_effect = download
+    registry = _two_model_registry()
+    with patch("sie_server.core.model_loader.load_adapter", side_effect=_adapter_factory()):
+        first = asyncio.create_task(registry.load_async("slow", "cpu"))
+        second = asyncio.create_task(registry.load_async("slow", "cpu"))
+        await asyncio.to_thread(download.entered.wait, 5)
+        download.release.set()
+        adapters = await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+        assert adapters[0] is adapters[1]
+        slow_fetches = [c for c in patch_ensure_model_cached.call_args_list if c.args and c.args[0] == "org/slow"]
+        assert len(slow_fetches) == 1
