@@ -1481,6 +1481,12 @@ impl ModelRegistry {
     /// (every subsequent `add_model_config` will then reject every adapter as
     /// unknown — that's the correct behavior when `sie-config` is unreachable
     /// and we have no seed).
+    /// `dead_code`-allowed because the `sie-gateway` BINARY compiles this
+    /// module tree independently of the library (see the note in `lib.rs`):
+    /// the bootstrap now installs bundles and models together through
+    /// [`Self::replace_authoritative_surface`], and this standalone path is
+    /// kept for the library's downstream consumers.
+    #[allow(dead_code)]
     pub fn install_bundles(&self, bundles: Vec<BundleInfo>) {
         let _write = self
             .write_lock
@@ -2140,6 +2146,9 @@ impl ModelRegistry {
         ))
     }
 
+    /// `dead_code`-allowed for the same reason as [`Self::install_bundles`]:
+    /// the binary no longer calls it, the downstream composition crate does.
+    #[allow(dead_code)]
     pub fn replace_model_configs_authoritative(
         &self,
         configs: Vec<ModelConfig>,
