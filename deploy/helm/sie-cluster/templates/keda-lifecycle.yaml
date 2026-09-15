@@ -118,9 +118,4 @@ spec:
               done
               echo "Release-owned KEDA ScaledObjects removed"
           resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 100m
-              memory: 128Mi
+            {{- include "sie-cluster.hooks.resources" . | nindent 12 }}

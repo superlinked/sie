@@ -383,12 +383,7 @@ spec:
               echo "FAILED: ScaledObjects and controller-reconciled HPAs did not become current, Ready, and trigger-healthy after a complete KEDA failure window"
               exit 1
           resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              cpu: 100m
-              memory: 256Mi
+            {{- include "sie-cluster.hooks.resources" . | nindent 12 }}
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists

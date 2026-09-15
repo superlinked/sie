@@ -627,6 +627,10 @@ Args (dict): base, suffix.
 alpine/k8s:1.29.10@sha256:a1f03afdc59b1acde5e740ed855079c7361505d6fed9d9c6069c8c3307264348
 {{- end }}
 
+{{- define "sie-cluster.hooks.resources" -}}
+{{- toYaml .Values.hooks.resources -}}
+{{- end }}
+
 {{/* Explicit kubectl credentials for hook containers. */}}
 {{- define "sie-cluster.kubernetes.inClusterKubeconfig" -}}
 KUBE_SERVICE_ACCOUNT_DIR=/var/run/secrets/kubernetes.io/serviceaccount
