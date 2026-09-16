@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0",
+  "run_id": "cloud-20260916",
+  "run_at": "2026-09-16T06:45:40.613076+00:00",
+  "run_started_at": "2026-09-16T06:45:11.080664+00:00",
+  "model": "docling",
+  "profile": "default",
+  "model_revisions": [
+    "10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff"
+  ],
+  "endpoint": "https://api.superlinked.com",
+  "calls": {
+    "file": "calls.json",
+    "sha256": "d5fed5389a1fc6c01ed288f56ca59d097559601a2e9fb9e975859f314cc0f857",
+    "call_count": 4,
+    "entries": {
+      "nvidia-cfo-commentary": "8208fb6f4d685e5bdab684f8c448bc8a47f05e707e170416b5b101027b63835d",
+      "siriuspoint-investor-deck": "1fdc78ba4f19c8a1582be8e1f9f10eae7c88ff70892b8464e96b8c7c072be2e7",
+      "docling-paper": "885204b53d8886dfda2de7344be51d348fcc061cb2fa310a2d98118e93f7b3a5",
+      "fema-proof-of-loss": "7e0f3c7812ed48ca445021dbe6a38edbcafe32eb9cc0b8fb43f1c378246278ad"
+    }
+  },
+  "scored_markdown_transform": "response.data.markdown.rstrip() + '\\n'  (convert.py)",
+  "documents": [
+    {
+      "slug": "nvidia-cfo-commentary",
+      "source_file": "pdfs/nvidia-q4-fy2025-cfo-commentary.pdf",
+      "source_url": "https://investor.nvidia.com/files/doc_financials/2025/Q425/Q4FY25-CFO-Commentary.pdf",
+      "source_sha256": "842a50961f0466d50584f8017200ab72c5a86c7438f0560cefb0506442149ce7",
+      "model": "docling",
+      "model_revision": "10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff",
+      "profile": "default",
+      "endpoint": "https://api.superlinked.com",
+      "duration_ms": 9172.3,
+      "markdown_characters": 35725,
+      "markdown_output": "markdown/nvidia-cfo-commentary.md"
+    },
+    {
+      "slug": "siriuspoint-investor-deck",
+      "source_file": "pdfs/siriuspoint-q1-2025-investor-presentation.pdf",
+      "source_url": "https://s27.q4cdn.com/660241321/files/doc_financials/2025/q1/Q1-2025-SPNT-Investor-Presentation_vFinal.pdf",
+      "source_sha256": "aab5e5c3cd2de163ca39dba485d0d2d753254854ae543d9c265a91babc32b34f",
+      "model": "docling",
+      "model_revision": "10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff",
+      "profile": "default",
+      "endpoint": "https://api.superlinked.com",
+      "duration_ms": 12166.3,
+      "markdown_characters": 32570,
+      "markdown_output": "markdown/siriuspoint-investor-deck.md"
+    },
+    {
+      "slug": "docling-paper",
+      "source_file": "pdfs/docling-technical-report.pdf",
+      "source_url": "https://arxiv.org/pdf/2408.09869",
+      "source_sha256": "82dd470712ce8389f19f20eb9330475e2166a281f8c7990a9f1d0763d73b4d22",
+      "model": "docling",
+      "model_revision": "10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff",
+      "profile": "default",
+      "endpoint": "https://api.superlinked.com",
+      "duration_ms": 6689.5,
+      "markdown_characters": 29376,
+      "markdown_output": "markdown/docling-paper.md"
+    },
+    {
+      "slug": "fema-proof-of-loss",
+      "source_file": "pdfs/fema-proof-of-loss-form.pdf",
+      "source_url": "https://www.fema.gov/sites/default/files/documents/fema_hpcc-proof-of-loss-form-english-exp-11.30.2026.pdf",
+      "source_sha256": "74ae94102750dcbabf784f2d9d69c2190c8fe287811c9ae9cf195e0902e05715",
+      "model": "docling",
+      "model_revision": "10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff",
+      "profile": "default",
+      "endpoint": "https://api.superlinked.com",
+      "duration_ms": 1264.2,
+      "markdown_characters": 8344,
+      "markdown_output": "markdown/fema-proof-of-loss.md"
+    }
+  ],
+  "manifest_sha256": "25ccb86068e071251adc539aad02315754d4f6bc2f8b943f1de61795147335a1"
+}

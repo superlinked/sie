@@ -1,0 +1,4295 @@
+{
+  "body": {
+    "children": [
+      {
+        "$ref": "#/texts/0"
+      },
+      {
+        "$ref": "#/texts/1"
+      },
+      {
+        "$ref": "#/texts/2"
+      },
+      {
+        "$ref": "#/groups/0"
+      },
+      {
+        "$ref": "#/groups/1"
+      },
+      {
+        "$ref": "#/texts/61"
+      },
+      {
+        "$ref": "#/texts/62"
+      },
+      {
+        "$ref": "#/groups/2"
+      },
+      {
+        "$ref": "#/texts/91"
+      },
+      {
+        "$ref": "#/texts/92"
+      },
+      {
+        "$ref": "#/texts/93"
+      },
+      {
+        "$ref": "#/texts/94"
+      },
+      {
+        "$ref": "#/groups/3"
+      },
+      {
+        "$ref": "#/texts/118"
+      },
+      {
+        "$ref": "#/texts/119"
+      },
+      {
+        "$ref": "#/texts/120"
+      },
+      {
+        "$ref": "#/texts/121"
+      },
+      {
+        "$ref": "#/texts/122"
+      },
+      {
+        "$ref": "#/groups/11"
+      },
+      {
+        "$ref": "#/texts/129"
+      },
+      {
+        "$ref": "#/texts/130"
+      },
+      {
+        "$ref": "#/texts/131"
+      },
+      {
+        "$ref": "#/texts/132"
+      },
+      {
+        "$ref": "#/texts/133"
+      }
+    ],
+    "content_layer": "body",
+    "label": "unspecified",
+    "name": "_root_",
+    "self_ref": "#/body"
+  },
+  "form_items": [],
+  "furniture": {
+    "children": [],
+    "content_layer": "furniture",
+    "label": "unspecified",
+    "name": "_root_",
+    "self_ref": "#/furniture"
+  },
+  "groups": [
+    {
+      "children": [
+        {
+          "$ref": "#/texts/3"
+        },
+        {
+          "$ref": "#/texts/4"
+        },
+        {
+          "$ref": "#/texts/5"
+        },
+        {
+          "$ref": "#/texts/6"
+        },
+        {
+          "$ref": "#/texts/7"
+        },
+        {
+          "$ref": "#/texts/8"
+        },
+        {
+          "$ref": "#/texts/9"
+        },
+        {
+          "$ref": "#/texts/10"
+        },
+        {
+          "$ref": "#/texts/11"
+        },
+        {
+          "$ref": "#/texts/12"
+        },
+        {
+          "$ref": "#/texts/13"
+        },
+        {
+          "$ref": "#/texts/14"
+        },
+        {
+          "$ref": "#/texts/15"
+        },
+        {
+          "$ref": "#/texts/16"
+        },
+        {
+          "$ref": "#/texts/17"
+        },
+        {
+          "$ref": "#/texts/18"
+        },
+        {
+          "$ref": "#/texts/19"
+        },
+        {
+          "$ref": "#/texts/20"
+        },
+        {
+          "$ref": "#/texts/21"
+        },
+        {
+          "$ref": "#/texts/22"
+        },
+        {
+          "$ref": "#/texts/23"
+        },
+        {
+          "$ref": "#/texts/24"
+        },
+        {
+          "$ref": "#/texts/25"
+        },
+        {
+          "$ref": "#/texts/26"
+        },
+        {
+          "$ref": "#/texts/27"
+        },
+        {
+          "$ref": "#/texts/28"
+        },
+        {
+          "$ref": "#/texts/29"
+        },
+        {
+          "$ref": "#/texts/30"
+        },
+        {
+          "$ref": "#/texts/31"
+        },
+        {
+          "$ref": "#/texts/32"
+        },
+        {
+          "$ref": "#/texts/33"
+        },
+        {
+          "$ref": "#/texts/34"
+        },
+        {
+          "$ref": "#/texts/35"
+        },
+        {
+          "$ref": "#/texts/36"
+        },
+        {
+          "$ref": "#/texts/37"
+        },
+        {
+          "$ref": "#/texts/38"
+        },
+        {
+          "$ref": "#/texts/39"
+        },
+        {
+          "$ref": "#/texts/40"
+        },
+        {
+          "$ref": "#/texts/41"
+        },
+        {
+          "$ref": "#/texts/42"
+        },
+        {
+          "$ref": "#/texts/43"
+        },
+        {
+          "$ref": "#/texts/44"
+        },
+        {
+          "$ref": "#/texts/45"
+        },
+        {
+          "$ref": "#/texts/46"
+        },
+        {
+          "$ref": "#/texts/47"
+        },
+        {
+          "$ref": "#/texts/48"
+        },
+        {
+          "$ref": "#/texts/49"
+        },
+        {
+          "$ref": "#/texts/50"
+        },
+        {
+          "$ref": "#/texts/51"
+        },
+        {
+          "$ref": "#/texts/52"
+        },
+        {
+          "$ref": "#/texts/53"
+        },
+        {
+          "$ref": "#/texts/54"
+        },
+        {
+          "$ref": "#/texts/55"
+        },
+        {
+          "$ref": "#/texts/56"
+        },
+        {
+          "$ref": "#/texts/57"
+        },
+        {
+          "$ref": "#/texts/58"
+        }
+      ],
+      "content_layer": "body",
+      "label": "form_area",
+      "name": "group",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "self_ref": "#/groups/0"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/59"
+        },
+        {
+          "$ref": "#/texts/60"
+        }
+      ],
+      "content_layer": "body",
+      "label": "key_value_area",
+      "name": "group",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "self_ref": "#/groups/1"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/63"
+        },
+        {
+          "$ref": "#/texts/64"
+        },
+        {
+          "$ref": "#/texts/65"
+        },
+        {
+          "$ref": "#/texts/66"
+        },
+        {
+          "$ref": "#/texts/67"
+        },
+        {
+          "$ref": "#/texts/68"
+        },
+        {
+          "$ref": "#/texts/69"
+        },
+        {
+          "$ref": "#/texts/70"
+        },
+        {
+          "$ref": "#/texts/71"
+        },
+        {
+          "$ref": "#/texts/72"
+        },
+        {
+          "$ref": "#/texts/73"
+        },
+        {
+          "$ref": "#/texts/74"
+        },
+        {
+          "$ref": "#/texts/75"
+        },
+        {
+          "$ref": "#/texts/76"
+        },
+        {
+          "$ref": "#/texts/77"
+        },
+        {
+          "$ref": "#/texts/78"
+        },
+        {
+          "$ref": "#/texts/79"
+        },
+        {
+          "$ref": "#/texts/80"
+        },
+        {
+          "$ref": "#/texts/81"
+        },
+        {
+          "$ref": "#/texts/82"
+        },
+        {
+          "$ref": "#/texts/83"
+        },
+        {
+          "$ref": "#/texts/84"
+        },
+        {
+          "$ref": "#/texts/85"
+        },
+        {
+          "$ref": "#/texts/86"
+        },
+        {
+          "$ref": "#/texts/87"
+        },
+        {
+          "$ref": "#/texts/88"
+        },
+        {
+          "$ref": "#/texts/89"
+        },
+        {
+          "$ref": "#/texts/90"
+        }
+      ],
+      "content_layer": "body",
+      "label": "form_area",
+      "name": "group",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "self_ref": "#/groups/2"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/95"
+        },
+        {
+          "$ref": "#/groups/4"
+        },
+        {
+          "$ref": "#/texts/97"
+        },
+        {
+          "$ref": "#/groups/5"
+        },
+        {
+          "$ref": "#/groups/6"
+        },
+        {
+          "$ref": "#/groups/7"
+        },
+        {
+          "$ref": "#/texts/101"
+        },
+        {
+          "$ref": "#/texts/102"
+        },
+        {
+          "$ref": "#/texts/103"
+        },
+        {
+          "$ref": "#/texts/104"
+        },
+        {
+          "$ref": "#/groups/8"
+        },
+        {
+          "$ref": "#/texts/106"
+        },
+        {
+          "$ref": "#/texts/107"
+        },
+        {
+          "$ref": "#/texts/108"
+        },
+        {
+          "$ref": "#/texts/109"
+        },
+        {
+          "$ref": "#/groups/9"
+        },
+        {
+          "$ref": "#/texts/111"
+        },
+        {
+          "$ref": "#/texts/112"
+        },
+        {
+          "$ref": "#/texts/113"
+        },
+        {
+          "$ref": "#/texts/114"
+        },
+        {
+          "$ref": "#/texts/115"
+        },
+        {
+          "$ref": "#/groups/10"
+        },
+        {
+          "$ref": "#/texts/117"
+        }
+      ],
+      "content_layer": "body",
+      "label": "form_area",
+      "name": "group",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "self_ref": "#/groups/3"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/96"
+        }
+      ],
+      "content_layer": "body",
+      "label": "list",
+      "name": "group",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "self_ref": "#/groups/4"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/98"
+        }
+      ],
+      "content_layer": "body",
+      "label": "list",
+      "name": "group",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "self_ref": "#/groups/5"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/99"
+        }
+      ],
+      "content_layer": "body",
+      "label": "list",
+      "name": "group",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "self_ref": "#/groups/6"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/100"
+        }
+      ],
+      "content_layer": "body",
+      "label": "list",
+      "name": "group",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "self_ref": "#/groups/7"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/105"
+        }
+      ],
+      "content_layer": "body",
+      "label": "list",
+      "name": "group",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "self_ref": "#/groups/8"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/110"
+        }
+      ],
+      "content_layer": "body",
+      "label": "list",
+      "name": "group",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "self_ref": "#/groups/9"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/116"
+        }
+      ],
+      "content_layer": "body",
+      "label": "list",
+      "name": "group",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "self_ref": "#/groups/10"
+    },
+    {
+      "children": [
+        {
+          "$ref": "#/texts/123"
+        },
+        {
+          "$ref": "#/texts/124"
+        },
+        {
+          "$ref": "#/texts/125"
+        },
+        {
+          "$ref": "#/texts/126"
+        },
+        {
+          "$ref": "#/texts/127"
+        },
+        {
+          "$ref": "#/texts/128"
+        }
+      ],
+      "content_layer": "body",
+      "label": "list",
+      "name": "list",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "self_ref": "#/groups/11"
+    }
+  ],
+  "key_value_items": [],
+  "name": "document",
+  "origin": {
+    "binary_hash": 14923062233064822549,
+    "filename": "document.pdf",
+    "mimetype": "application/pdf"
+  },
+  "pages": {
+    "1": {
+      "page_no": 1,
+      "size": {
+        "height": 792.0,
+        "width": 612.0
+      }
+    },
+    "2": {
+      "page_no": 2,
+      "size": {
+        "height": 792.0,
+        "width": 612.0
+      }
+    },
+    "3": {
+      "page_no": 3,
+      "size": {
+        "height": 792.0,
+        "width": 612.0
+      }
+    },
+    "4": {
+      "page_no": 4,
+      "size": {
+        "height": 792.0,
+        "width": 612.0
+      }
+    }
+  },
+  "pictures": [],
+  "schema_name": "DoclingDocument",
+  "tables": [],
+  "texts": [
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "DEPARTMENT OF HOMELAND SECURITY Federal Emergency Management Agency",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 746.541,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 195.275,
+            "r": 420.03500000000037,
+            "t": 769.9649999999999
+          },
+          "charspan": [
+            0,
+            67
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/0",
+      "text": "DEPARTMENT OF HOMELAND SECURITY Federal Emergency Management Agency"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Hermit's Peak/Calf Canyon Claims Office",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 734.1675,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 215.019,
+            "r": 399.74899999999997,
+            "t": 743.5649999999999
+          },
+          "charspan": [
+            0,
+            39
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/1",
+      "text": "Hermit's Peak/Calf Canyon Claims Office"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "PROOF OF LOSS",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 710.7667272727273,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 256.664,
+            "r": 355.3520000000001,
+            "t": 722.418
+          },
+          "charspan": [
+            0,
+            13
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/2",
+      "text": "PROOF OF LOSS"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "TYPE OF PROOF OF LOSS",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 435.55460606060603,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 242.106,
+            "r": 369.9159999999999,
+            "t": 445.264
+          },
+          "charspan": [
+            0,
+            21
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/3",
+      "text": "TYPE OF PROOF OF LOSS"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "AMOUNTS CLAIMED",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 297.552606060606,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 256.559,
+            "r": 355.43900000000014,
+            "t": 307.262
+          },
+          "charspan": [
+            0,
+            15
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/4",
+      "text": "AMOUNTS CLAIMED"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "CLAIMANT CONTACT INFORMATION",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 687.5546060606061,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 217.401,
+            "r": 394.6010000000001,
+            "t": 697.264
+          },
+          "charspan": [
+            0,
+            28
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/5",
+      "text": "CLAIMANT CONTACT INFORMATION"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Claim Number:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 559.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 312.001,
+            "r": 372.0040000000001,
+            "t": 567.838
+          },
+          "charspan": [
+            0,
+            13
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/6",
+      "text": "Claim Number:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "For verification purposes, please provide one or more of the following:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 541.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.000999999999976,
+            "r": 320.1190000000001,
+            "t": 549.838
+          },
+          "charspan": [
+            0,
+            71
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/7",
+      "text": "For verification purposes, please provide one or more of the following:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Tax Identification Number",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 523.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 60.000999999999976,
+            "r": 162.53799999999995,
+            "t": 531.838
+          },
+          "charspan": [
+            0,
+            25
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/8",
+      "text": "Tax Identification Number"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Business Identification Number",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 505.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 60.000999999999976,
+            "r": 184.04799999999994,
+            "t": 513.838
+          },
+          "charspan": [
+            0,
+            30
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/9",
+      "text": "Business Identification Number"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Other form of identification (Driver's license, Student ID, etc.)",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 487.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 60.000999999999976,
+            "r": 301.8040000000001,
+            "t": 495.838
+          },
+          "charspan": [
+            0,
+            65
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/10",
+      "text": "Other form of identification (Driver's license, Student ID, etc.)"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Compensation under the Hermit's Peak/Calf Canyon Fire Assistance Act is available to all injured persons, regardless of the citizenship or alien status of the individual.",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 457.97724999999997,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.000999999999976,
+            "r": 537.6940000000003,
+            "t": 477.235
+          },
+          "charspan": [
+            0,
+            170
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/11",
+      "text": "Compensation under the Hermit's Peak/Calf Canyon Fire Assistance Act is available to all injured persons, regardless of the citizenship or alien status of the individual."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "What type of claim does this Proof of Loss cover? (Check only one option)",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 403.37424999999996,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.000999999999976,
+            "r": 337.12900000000025,
+            "t": 411.832
+          },
+          "charspan": [
+            0,
+            73
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/12",
+      "text": "What type of claim does this Proof of Loss cover? (Check only one option)"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "The following are the amounts claimed, by category, by the Claimant:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 277.37424999999996,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.000999999999976,
+            "r": 317.61700000000013,
+            "t": 285.832
+          },
+          "charspan": [
+            0,
+            68
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/13",
+      "text": "The following are the amounts claimed, by category, by the Claimant:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "Medical Expenses",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 259.10054545454545,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 119.53600000000002,
+            "t": 267.83899999999994
+          },
+          "charspan": [
+            0,
+            16
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/14",
+      "text": "Medical Expenses"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Medical Expenses",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 241.38125000000002,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.995,
+            "r": 141.52300000000005,
+            "t": 249.83899999999994
+          },
+          "charspan": [
+            0,
+            16
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/15",
+      "text": "Medical Expenses"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Lost Personal Income",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 229.38424999999995,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.995,
+            "r": 153.03400000000002,
+            "t": 237.84199999999998
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/16",
+      "text": "Lost Personal Income"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "Real Property",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 211.0985454545455,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 100.519,
+            "t": 219.837
+          },
+          "charspan": [
+            0,
+            13
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/17",
+      "text": "Real Property"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Repair",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 193.37924999999996,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.995,
+            "r": 95.00200000000002,
+            "t": 201.837
+          },
+          "charspan": [
+            0,
+            6
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/18",
+      "text": "Repair"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "and is submitted pursuant to the Hermit's Peak/Calf Canyon Fire Assistance Act for injuries resulting from the Hermit's Peak/Calf Canyon Fire. This Proof of Loss relates to the Notice of Loss acknowledged by the Claims Office on",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 319.88325,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.000999999999976,
+            "r": 538.8820000000004,
+            "t": 339.141
+          },
+          "charspan": [
+            0,
+            228
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/19",
+      "text": "and is submitted pursuant to the Hermit's Peak/Calf Canyon Fire Assistance Act for injuries resulting from the Hermit's Peak/Calf Canyon Fire. This Proof of Loss relates to the Notice of Loss acknowledged by the Claims Office on"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Name:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 667.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 68.50599999999999,
+            "t": 675.838
+          },
+          "charspan": [
+            0,
+            5
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/20",
+      "text": "Name:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Current Address:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 649.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 110.023,
+            "t": 657.838
+          },
+          "charspan": [
+            0,
+            16
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/21",
+      "text": "Current Address:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "City, State, Zip:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 631.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 103.52499999999999,
+            "t": 639.838
+          },
+          "charspan": [
+            0,
+            17
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/22",
+      "text": "City, State, Zip:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Damaged Property Address:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 613.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 155.54500000000002,
+            "t": 621.838
+          },
+          "charspan": [
+            0,
+            25
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/23",
+      "text": "Damaged Property Address:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "City, State, Zip:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 595.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 103.52499999999999,
+            "t": 603.838
+          },
+          "charspan": [
+            0,
+            17
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/24",
+      "text": "City, State, Zip:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Phone Number:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 577.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 105.028,
+            "t": 585.838
+          },
+          "charspan": [
+            0,
+            13
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/25",
+      "text": "Phone Number:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Fax No.:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 577.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 234.0,
+            "r": 268.011,
+            "t": 585.838
+          },
+          "charspan": [
+            0,
+            8
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/26",
+      "text": "Fax No.:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "E-mail Address:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 559.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 105.51400000000001,
+            "t": 567.838
+          },
+          "charspan": [
+            0,
+            15
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/27",
+      "text": "E-mail Address:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "checkbox_unselected",
+      "orig": "Individual or Household",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 385.37825,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 72.0,
+            "r": 166.04099999999997,
+            "t": 393.836
+          },
+          "charspan": [
+            0,
+            23
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/28",
+      "text": "Individual or Household"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "checkbox_unselected",
+      "orig": "Business",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 367.37825,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 72.0,
+            "r": 108.51300000000002,
+            "t": 375.836
+          },
+          "charspan": [
+            0,
+            8
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/29",
+      "text": "Business"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "checkbox_unselected",
+      "orig": "Government",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 367.37825,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 240.001,
+            "r": 289.5190000000001,
+            "t": 375.836
+          },
+          "charspan": [
+            0,
+            10
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/30",
+      "text": "Government"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "checkbox_unselected",
+      "orig": "Tribal Nation/Tribal Government",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 349.37825,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 72.0,
+            "r": 200.034,
+            "t": 357.836
+          },
+          "charspan": [
+            0,
+            31
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/31",
+      "text": "Tribal Nation/Tribal Government"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "checkbox_unselected",
+      "orig": "Not-for-Profit",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 385.37825,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 240.001,
+            "r": 291.5080000000001,
+            "t": 393.836
+          },
+          "charspan": [
+            0,
+            14
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/32",
+      "text": "Not-for-Profit"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "checkbox_unselected",
+      "orig": "Other:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 349.37825,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 240.001,
+            "r": 265.01200000000006,
+            "t": 357.836
+          },
+          "charspan": [
+            0,
+            6
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/33",
+      "text": "Other:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 241.38125000000002,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 249.83899999999994
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/34",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 193.37924999999996,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 201.837
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/35",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 169.38125000000002,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 177.83899999999994
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/36",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 145.38324999999998,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 153.841
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/37",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 157.38225,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 165.83999999999992
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/38",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 181.38025000000005,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 189.83799999999997
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/39",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 229.38225,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 237.83999999999992
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/40",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Replacement",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 181.37725,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.999,
+            "r": 119.01800000000003,
+            "t": 189.83500000000004
+          },
+          "charspan": [
+            0,
+            11
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/41",
+      "text": "Replacement"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Decreased Value",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 169.38025000000005,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.999,
+            "r": 135.02900000000002,
+            "t": 177.83799999999997
+          },
+          "charspan": [
+            0,
+            15
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/42",
+      "text": "Decreased Value"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Reforestation and/or Revegetation",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 157.38324999999998,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.999,
+            "r": 203.06899999999996,
+            "t": 165.841
+          },
+          "charspan": [
+            0,
+            33
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/43",
+      "text": "Reforestation and/or Revegetation"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Debris Removal and Other Clean-Up Costs",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 145.38625000000002,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.999,
+            "r": 238.54699999999997,
+            "t": 153.84399999999994
+          },
+          "charspan": [
+            0,
+            39
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/44",
+      "text": "Debris Removal and Other Clean-Up Costs"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "Personal Property",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 103.10154545454543,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 119.52699999999999,
+            "t": 111.84000000000003
+          },
+          "charspan": [
+            0,
+            17
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/45",
+      "text": "Personal Property"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Address:",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 211.38225,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 137.995,
+            "r": 173.509,
+            "t": 219.84000000000003
+          },
+          "charspan": [
+            0,
+            8
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/46",
+      "text": "Address:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "checkbox_unselected",
+      "orig": "Partial Payment Proof of Loss",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 421.0745454545455,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 198.0,
+            "r": 326.0340000000002,
+            "t": 429.81300000000005
+          },
+          "charspan": [
+            0,
+            29
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/47",
+      "text": "Partial Payment Proof of Loss"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "checkbox_unselected",
+      "orig": "Final Proof of Loss",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 421.0745454545455,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 353.999,
+            "r": 435.5120000000003,
+            "t": 429.81300000000005
+          },
+          "charspan": [
+            0,
+            19
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/48",
+      "text": "Final Proof of Loss"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Vehicles/Equipment",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 85.37625000000003,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.99900000000002,
+            "r": 145.53200000000004,
+            "t": 93.83399999999995
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/49",
+      "text": "Vehicles/Equipment"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 85.37625000000003,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.49700000000007,
+            "r": 284.5010000000001,
+            "t": 93.83399999999995
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/50",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 61.38424999999995,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 69.84199999999998
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/51",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 73.38324999999998,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 81.84100000000001
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/52",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Contents",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 73.37824999999998,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.999,
+            "r": 102.01700000000001,
+            "t": 81.83600000000001
+          },
+          "charspan": [
+            0,
+            8
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/53",
+      "text": "Contents"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Other",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 61.38125000000002,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.999,
+            "r": 88.508,
+            "t": 69.83899999999994
+          },
+          "charspan": [
+            0,
+            5
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/54",
+      "text": "Other"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 121.38225,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 129.84000000000003
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/55",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 133.38125000000002,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 141.83899999999994
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/56",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "NRCS Plan Estimates",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 133.38125000000002,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 66.001,
+            "r": 154.02100000000002,
+            "t": 141.83899999999994
+          },
+          "charspan": [
+            0,
+            19
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/57",
+      "text": "NRCS Plan Estimates"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Decreased Value",
+      "parent": {
+        "$ref": "#/groups/0"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 121.38425000000007,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 66.001,
+            "r": 135.03100000000003,
+            "t": 129.84199999999998
+          },
+          "charspan": [
+            0,
+            15
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/58",
+      "text": "Decreased Value"
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_header",
+      "orig": "OMB Control No. 1660-0159",
+      "parent": {
+        "$ref": "#/groups/1"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 765.60675,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 479.999,
+            "r": 570.6490000000007,
+            "t": 772.185
+          },
+          "charspan": [
+            0,
+            25
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/59",
+      "text": "OMB Control No. 1660-0159"
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_header",
+      "orig": "Expiration Date: 11/30/2026",
+      "parent": {
+        "$ref": "#/groups/1"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 757.20675,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 479.999,
+            "r": 566.7710000000006,
+            "t": 763.785
+          },
+          "charspan": [
+            0,
+            27
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/60",
+      "text": "Expiration Date: 11/30/2026"
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "orig": "FEMA Form FF-104-FY-22-231 (12/23)",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 19.380250000000046,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 36.0,
+            "r": 192.537,
+            "t": 27.837999999999965
+          },
+          "charspan": [
+            0,
+            34
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/61",
+      "text": "FEMA Form FF-104-FY-22-231 (12/23)"
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "orig": "Page 1 of 4",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 19.380250000000046,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 529.9649999999999,
+            "r": 575.9999999999999,
+            "t": 27.837999999999965
+          },
+          "charspan": [
+            0,
+            11
+          ],
+          "page_no": 1
+        }
+      ],
+      "self_ref": "#/texts/62",
+      "text": "Page 1 of 4"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "Insurance Deductible",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 691.1005454545455,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 133.027,
+            "t": 699.8389999999999
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/63",
+      "text": "Insurance Deductible"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Other (Brief Description)",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 475.10054545454545,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 147.01300000000003,
+            "t": 483.839
+          },
+          "charspan": [
+            0,
+            25
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/64",
+      "text": "Other (Brief Description)"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Individual Household Risk Reduction Community Scale Risk Reduction",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 493.38325,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.995,
+            "r": 212.55099999999996,
+            "t": 513.836
+          },
+          "charspan": [
+            0,
+            66
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/65",
+      "text": "Individual Household Risk Reduction Community Scale Risk Reduction"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "Risk Reduction",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 523.0995454545455,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 107.51199999999999,
+            "t": 531.838
+          },
+          "charspan": [
+            0,
+            14
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/66",
+      "text": "Risk Reduction"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "SBA Loan Repayment",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 559.0995454545455,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 138.51700000000002,
+            "t": 567.838
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/67",
+      "text": "SBA Loan Repayment"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "Business Interruption Expenses",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 541.0995454545455,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 179.53899999999996,
+            "t": 549.838
+          },
+          "charspan": [
+            0,
+            30
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/68",
+      "text": "Business Interruption Expenses"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 673.38325,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.502,
+            "r": 284.50600000000003,
+            "t": 681.8409999999999
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/69",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 649.3832500000001,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 657.841
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/70",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 637.38125,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 645.8389999999999
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/71",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 661.38225,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 669.8399999999999
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/72",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 493.38124999999997,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 501.839
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/73",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 541.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 549.838
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/74",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 559.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 567.838
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/75",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 505.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 513.838
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/76",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Total Amount Claimed",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 457.09754545454547,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 137.509,
+            "t": 465.836
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/77",
+      "text": "Total Amount Claimed"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 457.37825,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.502,
+            "r": 284.50600000000003,
+            "t": 465.836
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/78",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Write a statement describing the nature and extent of each injury for which you are requesting compensation. If you have any questions about the information to include with this Proof of Loss, please coordinate with your Navigator. Ensure that you write your name and claim number on all documents submitted with this form. If you are working with a Navigator, you may state that you have provided this documentation to them. Additionally, retain copies of all original documents and keep a copy of this Proof of Loss form for your records.",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 393.78124999999994,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 569.2210000000005,
+            "t": 445.439
+          },
+          "charspan": [
+            0,
+            540
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/79",
+      "text": "Write a statement describing the nature and extent of each injury for which you are requesting compensation. If you have any questions about the information to include with this Proof of Loss, please coordinate with your Navigator. Ensure that you write your name and claim number on all documents submitted with this form. If you are working with a Navigator, you may state that you have provided this documentation to them. Additionally, retain copies of all original documents and keep a copy of this Proof of Loss form for your records."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "YOU MUST SIGN THE CERTIFICATION ON PAGE 3 BEFORE SUBMITTING THIS PROOF OF LOSS",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 55.09954545454548,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 98.991,
+            "r": 513.0450000000002,
+            "t": 63.837999999999965
+          },
+          "charspan": [
+            0,
+            78
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/80",
+      "text": "YOU MUST SIGN THE CERTIFICATION ON PAGE 3 BEFORE SUBMITTING THIS PROOF OF LOSS"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Vehicle Insurance Personal Property Insurance Flood Insurance Homeowner Insurance",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 637.3832500000001,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.997,
+            "r": 180.04500000000004,
+            "t": 681.832
+          },
+          "charspan": [
+            0,
+            81
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/81",
+      "text": "Vehicle Insurance Personal Property Insurance Flood Insurance Homeowner Insurance"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Flood Policy Reimbursement NFIP Policy Request",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 709.37225,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.997,
+            "r": 181.02599999999995,
+            "t": 729.829
+          },
+          "charspan": [
+            0,
+            46
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/82",
+      "text": "Flood Policy Reimbursement NFIP Policy Request"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 709.38125,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 717.8389999999999
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/83",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 721.37825,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 729.8359999999999
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/84",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "Flood Insurance",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 739.0995454545455,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 111.51700000000001,
+            "t": 747.838
+          },
+          "charspan": [
+            0,
+            15
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/85",
+      "text": "Flood Insurance"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "Evacuation/Relocation",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 619.1005454545455,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 138.52599999999998,
+            "t": 627.8389999999999
+          },
+          "charspan": [
+            0,
+            21
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/86",
+      "text": "Evacuation/Relocation"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 601.38125,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.502,
+            "r": 284.50600000000003,
+            "t": 609.8389999999999
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/87",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 577.3832500000001,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 585.841
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/88",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "$",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 589.38225,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 279.499,
+            "r": 284.50300000000004,
+            "t": 597.8399999999999
+          },
+          "charspan": [
+            0,
+            1
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/89",
+      "text": "$"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Temporary Housing/Relocation Expenses Moving and Storage Expenses Evacuation Expenses",
+      "parent": {
+        "$ref": "#/groups/2"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 577.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 65.999,
+            "r": 232.05799999999988,
+            "t": 609.832
+          },
+          "charspan": [
+            0,
+            85
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/90",
+      "text": "Temporary Housing/Relocation Expenses Moving and Storage Expenses Evacuation Expenses"
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "orig": "FEMA Form FF-104-FY-22-231 (12/23)",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 19.380250000000046,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 36.00400000000002,
+            "r": 192.54100000000003,
+            "t": 27.837999999999965
+          },
+          "charspan": [
+            0,
+            34
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/91",
+      "text": "FEMA Form FF-104-FY-22-231 (12/23)"
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "orig": "Page 2 of 4",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 19.380250000000046,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 529.969,
+            "r": 576.004,
+            "t": 27.837999999999965
+          },
+          "charspan": [
+            0,
+            11
+          ],
+          "page_no": 2
+        }
+      ],
+      "self_ref": "#/texts/92",
+      "text": "Page 2 of 4"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "CERTIFICATION",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 741.5546060606061,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 267.392,
+            "r": 344.6120000000001,
+            "t": 751.264
+          },
+          "charspan": [
+            0,
+            13
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/93",
+      "text": "CERTIFICATION"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "This Proof of Loss consists of this form and the attached or previously submitted documents supporting the claim(s). The undersigned Claimant (or legal representative of the Claimant if a business or individual) declares under penalty of perjury under the laws of the United States that all the information on this form is true and correct. The undersigned Claimant (or legal representative of the Claimant if a business or individual) further certifies under penalty of perjury that no amount claimed in this Proof of Loss has been paid or will be paid by insurance, other assistance programs, or any other source.",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 675.7792500000003,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 569.7250000000006,
+            "t": 727.437
+          },
+          "charspan": [
+            0,
+            615
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/94",
+      "text": "This Proof of Loss consists of this form and the attached or previously submitted documents supporting the claim(s). The undersigned Claimant (or legal representative of the Claimant if a business or individual) declares under penalty of perjury under the laws of the United States that all the information on this form is true and correct. The undersigned Claimant (or legal representative of the Claimant if a business or individual) further certifies under penalty of perjury that no amount claimed in this Proof of Loss has been paid or will be paid by insurance, other assistance programs, or any other source."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "Individual and Household Claimants Sign Below:",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 649.1015454545457,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 251.04399999999998,
+            "t": 657.8400000000001
+          },
+          "charspan": [
+            0,
+            46
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/95",
+      "text": "Individual and Household Claimants Sign Below:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "1.",
+      "orig": "1. Name of Claimant:",
+      "parent": {
+        "$ref": "#/groups/4"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 631.3822500000002,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 129.031,
+            "t": 639.8400000000001
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/96",
+      "text": "Name of Claimant:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Claimant Signature",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 583.3852500000003,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 41.974,
+            "r": 118.50100000000002,
+            "t": 591.8430000000002
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/97",
+      "text": "Claimant Signature"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "3.",
+      "orig": "3. Name of Claimant:",
+      "parent": {
+        "$ref": "#/groups/5"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 475.38124999999997,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 129.031,
+            "t": 483.839
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/98",
+      "text": "Name of Claimant:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "5.",
+      "orig": "5. Name of Claimant:",
+      "parent": {
+        "$ref": "#/groups/6"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 319.37924999999996,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 129.031,
+            "t": 327.837
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/99",
+      "text": "Name of Claimant:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "7.",
+      "orig": "7. Name of Claimant:",
+      "parent": {
+        "$ref": "#/groups/7"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 163.38324999999998,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 129.031,
+            "t": 171.841
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/100",
+      "text": "Name of Claimant:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Claimant Signature",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 115.38625000000002,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 118.528,
+            "t": 123.84400000000005
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/101",
+      "text": "Claimant Signature"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Date",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 115.38725,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 317.999,
+            "r": 337.00700000000006,
+            "t": 123.84500000000003
+          },
+          "charspan": [
+            0,
+            4
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/102",
+      "text": "Date"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Date",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 193.38525000000004,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 317.999,
+            "r": 337.00700000000006,
+            "t": 201.84299999999996
+          },
+          "charspan": [
+            0,
+            4
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/103",
+      "text": "Date"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Claimant Signature",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 193.38525000000004,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 118.528,
+            "t": 201.84299999999996
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/104",
+      "text": "Claimant Signature"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "6.",
+      "orig": "6. Name of Claimant:",
+      "parent": {
+        "$ref": "#/groups/8"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 241.38225,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 129.031,
+            "t": 249.84000000000003
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/105",
+      "text": "Name of Claimant:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Claimant Signature",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 271.38824999999997,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 118.528,
+            "t": 279.846
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/106",
+      "text": "Claimant Signature"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Date",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 271.38325,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 317.999,
+            "r": 337.00700000000006,
+            "t": 279.841
+          },
+          "charspan": [
+            0,
+            4
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/107",
+      "text": "Date"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Date",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 349.38425,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 317.999,
+            "r": 337.00700000000006,
+            "t": 357.84200000000004
+          },
+          "charspan": [
+            0,
+            4
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/108",
+      "text": "Date"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Claimant Signature",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 349.38425,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 118.528,
+            "t": 357.84200000000004
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/109",
+      "text": "Claimant Signature"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "4.",
+      "orig": "4. Name of Claimant:",
+      "parent": {
+        "$ref": "#/groups/9"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 397.38125,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 129.031,
+            "t": 405.83900000000006
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/110",
+      "text": "Name of Claimant:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Claimant Signature",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 427.38725000000005,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 118.528,
+            "t": 435.8450000000001
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/111",
+      "text": "Claimant Signature"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Date",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 427.38525,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 317.999,
+            "r": 337.00700000000006,
+            "t": 435.843
+          },
+          "charspan": [
+            0,
+            4
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/112",
+      "text": "Date"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Date",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 505.38624999999996,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 317.999,
+            "r": 337.00700000000006,
+            "t": 513.8439999999999
+          },
+          "charspan": [
+            0,
+            4
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/113",
+      "text": "Date"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Claimant Signature",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 505.38624999999996,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 118.528,
+            "t": 513.8439999999999
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/114",
+      "text": "Claimant Signature"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Date",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 583.38025,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 317.995,
+            "r": 337.00300000000004,
+            "t": 591.838
+          },
+          "charspan": [
+            0,
+            4
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/115",
+      "text": "Date"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "2.",
+      "orig": "2. Name of Claimant:",
+      "parent": {
+        "$ref": "#/groups/10"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 553.3832500000001,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.000999999999976,
+            "r": 129.031,
+            "t": 561.841
+          },
+          "charspan": [
+            0,
+            20
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/116",
+      "text": "Name of Claimant:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Please include additional signatures on another page if needed.",
+      "parent": {
+        "$ref": "#/groups/3"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 94.09654545454543,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 169.72199999999992,
+            "r": 444.8070000000006,
+            "t": 102.83500000000004
+          },
+          "charspan": [
+            0,
+            63
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/117",
+      "text": "Please include additional signatures on another page if needed."
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "orig": "FEMA Form FF-104-FY-22-231 (12/23)",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 19.380250000000046,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 36.0,
+            "r": 192.537,
+            "t": 27.837999999999965
+          },
+          "charspan": [
+            0,
+            34
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/118",
+      "text": "FEMA Form FF-104-FY-22-231 (12/23)"
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "orig": "Page 3 of 4",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 19.380250000000046,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 529.9649999999999,
+            "r": 575.9999999999999,
+            "t": 27.837999999999965
+          },
+          "charspan": [
+            0,
+            11
+          ],
+          "page_no": 3
+        }
+      ],
+      "self_ref": "#/texts/119",
+      "text": "Page 3 of 4"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "PRIVACY ACT NOTICE",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 741.5546060606061,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 251.83,
+            "r": 360.17000000000013,
+            "t": 751.264
+          },
+          "charspan": [
+            0,
+            18
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/120",
+      "text": "PRIVACY ACT NOTICE"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "This Notice is provided in accordance with the Privacy Act, 5 U.S.C. 552a(e)(3), and concerns the information requested in the Notice of Loss form to which this Notice is attached. The authority for the collection of this information is Hermit's Peak/Calf Canyon Fire Assistance Act, Public Law 117-180. The information you provide will be used to verify your identity, to verify your eligibility, and to verify any previous compensation made in connection with the Hermit's Peak/Calf Canyon Fire. Some or all of the information you provide may be released to federal, state, and local government agencies or private organizations for the purpose of confirming your identity, your eligibility and any previous compensation or payments made in connection with the Hermit's Peak/Calf Canyon Fire. The information may also be released when otherwise authorized by statute or regulation. Disclosure of the information by you is required in order for you to make a claim under the Act. It will not be possible to process your claim without the information.",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 655.2939999999999,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 570.6649999999994,
+            "t": 730.012
+          },
+          "charspan": [
+            0,
+            1051
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/121",
+      "text": "This Notice is provided in accordance with the Privacy Act, 5 U.S.C. 552a(e)(3), and concerns the information requested in the Notice of Loss form to which this Notice is attached. The authority for the collection of this information is Hermit's Peak/Calf Canyon Fire Assistance Act, Public Law 117-180. The information you provide will be used to verify your identity, to verify your eligibility, and to verify any previous compensation made in connection with the Hermit's Peak/Calf Canyon Fire. Some or all of the information you provide may be released to federal, state, and local government agencies or private organizations for the purpose of confirming your identity, your eligibility and any previous compensation or payments made in connection with the Hermit's Peak/Calf Canyon Fire. The information may also be released when otherwise authorized by statute or regulation. Disclosure of the information by you is required in order for you to make a claim under the Act. It will not be possible to process your claim without the information."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Routine Uses: The Privacy Act permits us to disclose information about individuals without their consent for a routine use, i.e., when the information will be used for a purpose that is compatible with the purpose for which we collected the information. The routine uses of this system are:",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 627.0939999999998,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.001,
+            "r": 568.4329999999992,
+            "t": 644.2119999999998
+          },
+          "charspan": [
+            0,
+            290
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/122",
+      "text": "Routine Uses: The Privacy Act permits us to disclose information about individuals without their consent for a routine use, i.e., when the information will be used for a purpose that is compatible with the purpose for which we collected the information. The routine uses of this system are:"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "a)",
+      "orig": "a)  Disclosure may be made to agency contractors who have been engaged to assist the agency in the performance of a contract service related to this system of records and who need to have access to the records in order to perform the activity. Recipients shall be required to comply with the requirements of the Privacy Act of 1974, as amended, 5 U.S.C.552a.",
+      "parent": {
+        "$ref": "#/groups/11"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 589.2939999999998,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 54.001,
+            "r": 566.6889999999989,
+            "t": 616.0119999999997
+          },
+          "charspan": [
+            0,
+            358
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/123",
+      "text": " Disclosure may be made to agency contractors who have been engaged to assist the agency in the performance of a contract service related to this system of records and who need to have access to the records in order to perform the activity. Recipients shall be required to comply with the requirements of the Privacy Act of 1974, as amended, 5 U.S.C.552a."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "b)",
+      "orig": "b)  Disclosure may be made to a member of Congress or to a Congressional staff member in response to an inquiry of the Congressional office made at the written request of the constituent about whom the record is maintained.",
+      "parent": {
+        "$ref": "#/groups/11"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 561.0939999999997,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 54.001000000000005,
+            "r": 561.7609999999991,
+            "t": 578.2119999999996
+          },
+          "charspan": [
+            0,
+            223
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/124",
+      "text": " Disclosure may be made to a member of Congress or to a Congressional staff member in response to an inquiry of the Congressional office made at the written request of the constituent about whom the record is maintained."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "c)",
+      "orig": "c)  Disclosure may be made to other Federal agencies who provided assistance to claimants related to the Hermit's Peak/Calf Canyon Fire, in order to ensure that benefits are not duplicated.",
+      "parent": {
+        "$ref": "#/groups/11"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 531.0939999999997,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 54.001000000000005,
+            "r": 556.6089999999995,
+            "t": 548.2119999999996
+          },
+          "charspan": [
+            0,
+            189
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/125",
+      "text": " Disclosure may be made to other Federal agencies who provided assistance to claimants related to the Hermit's Peak/Calf Canyon Fire, in order to ensure that benefits are not duplicated."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "d)",
+      "orig": "d)  Disclosure of information submitted by an individual claimant may be made to an insurance company or other third party which has submitted a subrogation claim relating to such claimant when it is necessary in FEMA's opinion to ensure that benefits are not duplicated and to efficiently coordinate the processing of claims brought by individuals and subrogees.",
+      "parent": {
+        "$ref": "#/groups/11"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 493.2939999999996,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 54.001000000000005,
+            "r": 566.6489999999992,
+            "t": 520.0119999999996
+          },
+          "charspan": [
+            0,
+            363
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/126",
+      "text": " Disclosure of information submitted by an individual claimant may be made to an insurance company or other third party which has submitted a subrogation claim relating to such claimant when it is necessary in FEMA's opinion to ensure that benefits are not duplicated and to efficiently coordinate the processing of claims brought by individuals and subrogees."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "e)",
+      "orig": "e)  When a record, either independently or in conjunction with other records, suggests a violation or potential violation of the law--whether civil, criminal, or regulatory in nature, and whether arising under general statute, a particular program statute, or through a regulation, rule, or order issued pursuant thereto--disclosure may occur to the appropriate agency. This agency may be Federal, foreign, state, local, or another public authority responsible for enforcing, investigating, or prosecuting the violation. Additionally, disclosure may extend to entities charged with enforcing or implementing the relevant statute, rule, regulation, or order. The disclosed information is relevant to the enforcement, regulatory, investigative, or prospective responsibilities of the receiving entity.",
+      "parent": {
+        "$ref": "#/groups/11"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 427.89399999999944,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 54.001000000000005,
+            "r": 568.0009999999991,
+            "t": 483.4119999999996
+          },
+          "charspan": [
+            0,
+            799
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/127",
+      "text": " When a record, either independently or in conjunction with other records, suggests a violation or potential violation of the law--whether civil, criminal, or regulatory in nature, and whether arising under general statute, a particular program statute, or through a regulation, rule, or order issued pursuant thereto--disclosure may occur to the appropriate agency. This agency may be Federal, foreign, state, local, or another public authority responsible for enforcing, investigating, or prosecuting the violation. Additionally, disclosure may extend to entities charged with enforcing or implementing the relevant statute, rule, regulation, or order. The disclosed information is relevant to the enforcement, regulatory, investigative, or prospective responsibilities of the receiving entity."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "enumerated": true,
+      "label": "list_item",
+      "marker": "f)",
+      "orig": "f)  Disclosure may be made to the National Archives and Records Administration for the purpose of conducting records management studies under the authority of 44 U.S.C. 2904 and 2906.",
+      "parent": {
+        "$ref": "#/groups/11"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 399.09399999999954,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 54.001000000000005,
+            "r": 551.9849999999992,
+            "t": 416.2119999999996
+          },
+          "charspan": [
+            0,
+            183
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/128",
+      "text": " Disclosure may be made to the National Archives and Records Administration for the purpose of conducting records management studies under the authority of 44 U.S.C. 2904 and 2906."
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Effect of Failure to Respond: Disclosure is voluntary. However, failure to supply the requested information or to execute the form may render your claim 'invalid.'",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 369.0939999999994,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 42.00099999999999,
+            "r": 565.7209999999991,
+            "t": 386.2119999999995
+          },
+          "charspan": [
+            0,
+            163
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/129",
+      "text": "Effect of Failure to Respond: Disclosure is voluntary. However, failure to supply the requested information or to execute the form may render your claim 'invalid.'"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "level": 1,
+      "orig": "PAPERWORK BURDEN DISCLOSURE NOTICE",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 345.55460606060603,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 195.717,
+            "r": 416.2770000000002,
+            "t": 355.264
+          },
+          "charspan": [
+            0,
+            34
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/130",
+      "text": "PAPERWORK BURDEN DISCLOSURE NOTICE"
+    },
+    {
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "orig": "Public reporting burden for this data collection is estimated to average 45 minutes per response. The burden estimate includes the time for reviewing instructions, searching existing data sources, gathering and maintaining the data needed, and completing and submitting this form. You are not required to respond to this collection of information unless a valid OMB control number is displayed on this form. Send comments regarding the accuracy of the burden estimate and any suggestions for reducing the burden to: Information Collections Management, Department of Homeland Security, Federal Emergency Management Agency, 500 C Street. SW, Washington, DC 20472-3100, Paperwork Reduction Project (1660-0155) NOTE: Do not send your completed form to this address.",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 277.6434848484847,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 43.418,
+            "r": 564.9699999999993,
+            "t": 333.411
+          },
+          "charspan": [
+            0,
+            761
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/131",
+      "text": "Public reporting burden for this data collection is estimated to average 45 minutes per response. The burden estimate includes the time for reviewing instructions, searching existing data sources, gathering and maintaining the data needed, and completing and submitting this form. You are not required to respond to this collection of information unless a valid OMB control number is displayed on this form. Send comments regarding the accuracy of the burden estimate and any suggestions for reducing the burden to: Information Collections Management, Department of Homeland Security, Federal Emergency Management Agency, 500 C Street. SW, Washington, DC 20472-3100, Paperwork Reduction Project (1660-0155) NOTE: Do not send your completed form to this address."
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "orig": "FEMA Form FF-104-FY-22-231 (12/23)",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 19.380250000000046,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 36.0,
+            "r": 192.537,
+            "t": 27.837999999999965
+          },
+          "charspan": [
+            0,
+            34
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/132",
+      "text": "FEMA Form FF-104-FY-22-231 (12/23)"
+    },
+    {
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "orig": "Page 4 of 4",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "prov": [
+        {
+          "bbox": {
+            "b": 19.380250000000046,
+            "coord_origin": "BOTTOMLEFT",
+            "l": 529.9649999999999,
+            "r": 575.9999999999999,
+            "t": 27.837999999999965
+          },
+          "charspan": [
+            0,
+            11
+          ],
+          "page_no": 4
+        }
+      ],
+      "self_ref": "#/texts/133",
+      "text": "Page 4 of 4"
+    }
+  ],
+  "version": "1.10.0"
+}

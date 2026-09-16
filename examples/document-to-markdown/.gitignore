@@ -1,6 +1,18 @@
 .env
 .venv/
+
+# The source PDFs stay fetch-only. Two of the four are investor documents whose
+# rights notes in config.yaml say not to redistribute the complete PDF, and the
+# Docling paper is left fetch-only in deference to the same note even though it
+# is CC BY 4.0. data/manifest.json below pins every URL, digest and byte length,
+# which is what a reader needs to confirm they fetched the same bytes.
 data/pdfs/
-data/manifest.json
-runs/*
-!runs/.gitkeep
+
+# data/manifest.json and runs/ are deliberately NOT ignored.
+#
+# This example was built to commit nothing: it fetched at run time and excluded
+# every artifact it produced, so its published result -- "all 25 checks passed"
+# -- had no record behind it that anyone could check. That was the defect, not
+# an oversight, and un-ignoring these is the fix. Committing artifacts is
+# already house style here; examples/threat-report-attck-mapper commits its
+# dataset under data/cache/.

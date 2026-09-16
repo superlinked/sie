@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Two earlier complete runs of the same four documents against the same endpoint, kept so the byte-identical claim in README.md can be checked rather than taken on trust.",
+  "endpoint": "https://api.superlinked.com",
+  "model": "docling",
+  "scope": "Only timings and the SHA-256 of each converted Markdown file are kept for these two runs. The converted text itself is committed once, for the recorded run, so the corpus is redistributed a single time rather than three; hash runs/cloud-20260916/markdown/<slug>.md and compare with markdown_sha256 below to check the byte-identical claim. These runs predate convert.py recording per-call model revisions, so they carry no calls.json and verify-run cannot check them.",
+  "runs": {
+    "run-1": {
+      "note": "First run of the session. The model was not resident, so this call sequence paid provisioning.",
+      "latency_ms": {
+        "nvidia-cfo-commentary": 24700.1,
+        "siriuspoint-investor-deck": 12936.4,
+        "docling-paper": 7287.7,
+        "fema-proof-of-loss": 1389.2
+      },
+      "markdown_sha256": {
+        "nvidia-cfo-commentary": "2c64f61d65417edfbf42d2f0ddbecdb11e0e6aa1ccec765a28ceb69ebafb3042",
+        "siriuspoint-investor-deck": "153064274f4e3bfcd7babb0e7b969741f8d0899f1c441c19fd1370d691772489",
+        "docling-paper": "47b058fe6676cbea33039d8baa3d94a115c8c399bfafdc61c6fe5ca905c30ea0",
+        "fema-proof-of-loss": "75520494bf872ebb19edeb6585e82700a48bf95d67cb9503f4a6b85309df4b8e"
+      }
+    },
+    "run-2": {
+      "note": "Second run, same four documents, same endpoint.",
+      "latency_ms": {
+        "nvidia-cfo-commentary": 9837.6,
+        "siriuspoint-investor-deck": 11693.4,
+        "docling-paper": 7218.7,
+        "fema-proof-of-loss": 1315.8
+      },
+      "markdown_sha256": {
+        "nvidia-cfo-commentary": "2c64f61d65417edfbf42d2f0ddbecdb11e0e6aa1ccec765a28ceb69ebafb3042",
+        "siriuspoint-investor-deck": "153064274f4e3bfcd7babb0e7b969741f8d0899f1c441c19fd1370d691772489",
+        "docling-paper": "47b058fe6676cbea33039d8baa3d94a115c8c399bfafdc61c6fe5ca905c30ea0",
+        "fema-proof-of-loss": "75520494bf872ebb19edeb6585e82700a48bf95d67cb9503f4a6b85309df4b8e"
+      }
+    }
+  },
+  "recorded_run": {
+    "run_id": "cloud-20260916",
+    "markdown_sha256": {
+      "nvidia-cfo-commentary": "2c64f61d65417edfbf42d2f0ddbecdb11e0e6aa1ccec765a28ceb69ebafb3042",
+      "siriuspoint-investor-deck": "153064274f4e3bfcd7babb0e7b969741f8d0899f1c441c19fd1370d691772489",
+      "docling-paper": "47b058fe6676cbea33039d8baa3d94a115c8c399bfafdc61c6fe5ca905c30ea0",
+      "fema-proof-of-loss": "75520494bf872ebb19edeb6585e82700a48bf95d67cb9503f4a6b85309df4b8e"
+    }
+  },
+  "all_three_runs_identical": true
+}

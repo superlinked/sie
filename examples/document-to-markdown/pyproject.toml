@@ -15,6 +15,7 @@ dependencies = [
 fetch-documents = "document_to_markdown.fetch:main"
 convert-documents = "document_to_markdown.convert:main"
 eval-documents = "document_to_markdown.evaluate:main"
+verify-run = "document_to_markdown.verify:main"
 
 [dependency-groups]
 dev = [

@@ -1,0 +1,24 @@
+{
+  "whole_float": 1.0,
+  "recorded_score": 0.0023956298828125,
+  "negative_score": -0.008386863945257427,
+  "zero": 0.0,
+  "negative_zero": -0.0,
+  "small_exponent": 1e-07,
+  "large_exponent": 1e+21,
+  "integer": 159,
+  "non_ascii": "caf\u00e9 \u2014 na\u00efve \u2615",
+  "escapes": "quote \" backslash \\ tab \t newline \n unit-sep \u001f",
+  "empty_object": {},
+  "empty_array": [],
+  "nested": {
+    "b": [
+      1.0,
+      2.5,
+      {}
+    ],
+    "a": null,
+    "Z": true,
+    "\u00e4": false
+  }
+}
