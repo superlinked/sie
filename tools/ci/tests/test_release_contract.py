@@ -168,6 +168,44 @@ def test_release_pr_stamp_fails_closed_in_isolated_python(stamp) -> None:
     assert contract.release_openapi_errors(weakened, contracts, stamped)
 
 
+def line_index(lines: list[str], text: str) -> int:
+    return next(index for index, line in enumerate(lines) if text in line)
+
+
+def duplicate_diff_check(lines: list[str]) -> None:
+    start = line_index(lines, "git diff --quiet --")
+    lines[start:start] = lines[start : start + 3]
+
+
+def duplicate_staging(lines: list[str]) -> None:
+    stage = line_index(lines, "git add ")
+    lines.insert(stage, lines[stage])
+
+
+def move_before(lines: list[str], moved: str, anchor: str) -> None:
+    line = lines.pop(line_index(lines, moved))
+    lines.insert(line_index(lines, anchor), line)
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        duplicate_diff_check,
+        duplicate_staging,
+        lambda lines: move_before(lines, "git add ", "git diff --quiet --"),
+        lambda lines: move_before(lines, "git commit ", "git add "),
+        lambda lines: move_before(lines, "git push origin ", "git commit "),
+    ],
+    ids=["duplicate-diff", "duplicate-add", "add-before-diff", "commit-before-add", "push-before-commit"],
+)
+def test_release_pr_refresh_diffs_adds_commits_and_pushes_once_in_order(rewrite) -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    lines = refresh.splitlines()
+    rewrite(lines)
+    assert lines != refresh.splitlines()
+    assert contract.release_openapi_errors("\n".join(lines), contracts, stamped)
+
+
 @pytest.mark.parametrize("document", sorted(contract.OPENAPI_VERSION_PATHS))
 def test_release_please_must_not_rewrite_generated_openapi(monkeypatch, document) -> None:
     real_load_json = contract.load_json

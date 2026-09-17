@@ -356,17 +356,25 @@ def release_openapi_errors(refresh: str, contracts: str, stamped: set[str]) -> l
     if documents(contracts) != OPENAPI_VERSION_PATHS:
         errors.append("CI / Contracts OpenAPI regeneration differs from the release version stamping")
     lines = [line.strip() for line in refresh.splitlines()]
-    checkouts = [index for index, line in enumerate(lines) if line == 'git checkout -B "$branch" FETCH_HEAD']
-    stamps = [index for index, line in enumerate(lines) if line == OPENAPI_STAMP_COMMAND]
-    commits = [index for index, line in enumerate(lines) if "git diff --quiet --" in line or "git add " in line]
+    steps = [
+        [index for index, line in enumerate(lines) if matches(line)]
+        for matches in (
+            lambda line: line == 'git checkout -B "$branch" FETCH_HEAD',
+            lambda line: line == OPENAPI_STAMP_COMMAND,
+            lambda line: "git diff --quiet --" in line,
+            lambda line: line.startswith("git add "),
+            lambda line: line.startswith("git commit "),
+            lambda line: line.startswith("git push origin "),
+        )
+    ]
     if (
-        len(checkouts) != 1
-        or len(stamps) != 1
-        or len(commits) != 2
-        or not checkouts[0] < stamps[0] < commits[0]
-        or any(documents(lines[index]) != OPENAPI_VERSION_PATHS for index in commits)
+        any(len(step) != 1 for step in steps)
+        or [step[0] for step in steps] != sorted(step[0] for step in steps)
+        or any(documents(lines[step[0]]) != OPENAPI_VERSION_PATHS for step in steps[2:4])
     ):
-        errors.append("release PR refresh must stamp every OpenAPI version after checkout and before committing it")
+        errors.append(
+            "release PR refresh must run checkout, OpenAPI stamp, diff, add, commit, and push once each, in order"
+        )
     return errors
 
 
