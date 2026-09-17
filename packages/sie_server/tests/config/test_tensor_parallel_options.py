@@ -3,7 +3,10 @@
 Each rule exists because the failure it prevents is silent. A placement flag
 passed straight to the engine serves on devices the registry never reserved,
 and a mistyped width is dropped rather than rejected, so the model serves on
-one card while the profile declares several.
+one card while the profile declares several. A flag that moves a listener is
+the same class: the passthrough is appended after the flags the adapter builds
+and the engine keeps the last spelling, so the engine ends up somewhere other
+than where SIE reserved and expects it.
 """
 
 from __future__ import annotations
@@ -11,7 +14,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from sie_server.config.model import AdapterOptions
+from sie_server.config.model import (
+    AdapterOptions,
+    EmbeddingDim,
+    EncodeTask,
+    ModelConfig,
+    ProfileConfig,
+    Tasks,
+)
 
 
 def _options(**loadtime: Any) -> AdapterOptions:
@@ -88,3 +98,62 @@ class TestPlacementIsNotSmuggled:
         )
 
         assert options.loadtime["extra_launch_args"] == ["--mamba-scheduler-strategy", "extra_buffer"]
+
+
+class TestListenersAreNotSmuggled:
+    @pytest.mark.parametrize("flag", ["--nccl-port", "--host", "--port"])
+    def test_a_listener_flag_in_the_raw_passthrough_is_refused(self, flag: str) -> None:
+        with pytest.raises(ValueError, match="listener flag"):
+            _options(extra_launch_args=[flag, "30411"])
+
+    @pytest.mark.parametrize(
+        ("spelling", "flag"),
+        [
+            ("--nccl-po", "--nccl-port"),
+            ("--nccl-port=30411", "--nccl-port"),
+            ("--po", "--port"),
+            ("--port=8000", "--port"),
+            ("--ho", "--host"),
+            ("--host=0.0.0.0", "--host"),
+        ],
+    )
+    def test_an_abbreviated_or_inline_listener_flag_is_refused(self, spelling: str, flag: str) -> None:
+        with pytest.raises(ValueError, match=flag):
+            _options(extra_launch_args=[spelling])
+
+    def test_the_rendezvous_refusal_names_the_sanctioned_option(self) -> None:
+        with pytest.raises(ValueError, match=r"loadtime\.nccl_port"):
+            _options(extra_launch_args=["--nccl-port", "30411"])
+
+    @pytest.mark.parametrize("flag", ["--host", "--port"])
+    def test_the_http_refusal_names_the_engine_listener(self, flag: str) -> None:
+        """The refused flags are the engine's, not the worker container's own."""
+        with pytest.raises(ValueError, match="engine's HTTP listener"):
+            _options(extra_launch_args=[flag, "8000"])
+
+    @pytest.mark.parametrize("flag", ["--page-size", "--hicache-ratio", "--num-continuous-decode-steps"])
+    def test_a_flag_that_only_shares_a_prefix_region_still_passes(self, flag: str) -> None:
+        """Only an abbreviation of a refused flag is refused, not a neighbour of one."""
+        assert _options(extra_launch_args=[flag, "1"]).loadtime["extra_launch_args"] == [flag, "1"]
+
+    def test_the_sanctioned_rendezvous_option_still_loads(self) -> None:
+        options = _options(tensor_parallel_size=2, nccl_port=30411)
+
+        assert options.loadtime["nccl_port"] == 30411
+
+    def test_a_profile_declaring_the_sanctioned_option_still_loads(self) -> None:
+        config = ModelConfig(
+            sie_id="tp-embedding",
+            hf_id="org/model",
+            tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=768))),
+            profiles={
+                "default": ProfileConfig(
+                    adapter_path="sie_server.adapters.sglang.embedding:SGLangEmbeddingAdapter",
+                    max_batch_tokens=8192,
+                    adapter_options=AdapterOptions(loadtime={"tensor_parallel_size": 2, "nccl_port": 30411}),
+                )
+            },
+        )
+
+        loadtime = config.profiles["default"].adapter_options.loadtime
+        assert (loadtime["tensor_parallel_size"], loadtime["nccl_port"]) == (2, 30411)

@@ -667,7 +667,12 @@ workers:
   zero is refused when the model loads rather than replaced by a default.
 - Width and placement are declared only through `tensor_parallel_size`. Engine
   placement flags in `extra_launch_args` (including abbreviations such as
-  `--tp`) and device-visibility variables in `extra_env` are refused.
+  `--tp`) and device-visibility variables in `extra_env` are refused. So are the
+  flags that decide where the engine listens: `--nccl-port`, which has the
+  `loadtime.nccl_port` option instead, and `--host` and `--port`, which the
+  server passes for the engine's own HTTP listener and then talks to. They are
+  not this pod's `--host`/`--port`, which the chart sets on the worker
+  container.
 - `gpu.deviceGroup` requires `gpu.count >= 2`. `SIE_GPU_COUNT` and the cluster
   health `gpu_count` count serving slots, so a device-group pod reports one
   slot however many GPUs it holds.

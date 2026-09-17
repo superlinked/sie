@@ -319,8 +319,23 @@ would serve on devices nothing reserved.
 """
 
 
-def _refused_placement_flag(token: object) -> str | None:
-    """The placement flag a launch-argument token spells, abbreviations included.
+_LISTENER_LAUNCH_FLAGS = frozenset({"--host", "--nccl-port", "--port"})
+"""Launch flags that decide where the engine listens.
+
+Each one is refused inside ``extra_launch_args`` because the server owns both
+listeners: the adapter passes the HTTP host and port it then talks to, and it
+reserves the tensor-parallel rendezvous port before passing ``--nccl-port``.
+The passthrough is appended after the flags the adapter builds and the engine's
+parser keeps the last spelling of a flag, so one set here would move the HTTP
+listener away from the one the adapter reaches, or rendezvous a group on a port
+nothing reserved.
+"""
+
+_REFUSED_LAUNCH_FLAGS = _PLACEMENT_LAUNCH_FLAGS | _LISTENER_LAUNCH_FLAGS
+
+
+def _refused_launch_flag(token: object) -> str | None:
+    """The refused flag a launch-argument token spells, abbreviations included.
 
     SGLang's parser accepts any unambiguous prefix of a long option, so
     ``--tensor-parallel 4`` reaches ``--tensor-parallel-size`` exactly as the
@@ -329,7 +344,7 @@ def _refused_placement_flag(token: object) -> str | None:
     flag = str(token).split("=", 1)[0].strip()
     if not flag.startswith("--") or len(flag) <= len("--"):
         return None
-    for refused in sorted(_PLACEMENT_LAUNCH_FLAGS):
+    for refused in sorted(_REFUSED_LAUNCH_FLAGS):
         if refused.startswith(flag):
             return refused
     return None
@@ -430,6 +445,10 @@ class AdapterOptions(BaseModel):
         because the launcher writes the device mask last, so a mask set there
         would be silently discarded rather than honoured.
 
+        Where the engine listens is reserved the same way, so the flags that
+        move a listener are refused too: the rendezvous port has an option of
+        its own, and the HTTP listener belongs to the adapter that talks to it.
+
         Requirements that belong to one engine, such as a read cap for a
         group, are enforced by that engine's adapter, since a width is valid
         for any adapter that accepts one.
@@ -443,14 +462,24 @@ class AdapterOptions(BaseModel):
         raw_args = self.loadtime.get("extra_launch_args") or []
         if isinstance(raw_args, list):
             for entry in raw_args:
-                refused = _refused_placement_flag(entry)
-                if refused is not None:
+                refused = _refused_launch_flag(entry)
+                if refused is None:
+                    continue
+                spelled = str(entry).split("=", 1)[0].strip()
+                if refused in _LISTENER_LAUNCH_FLAGS:
+                    remedy = (
+                        "Declare loadtime.nccl_port instead, so the group rendezvouses on the port SIE reserved."
+                        if refused == "--nccl-port"
+                        else "The server passes the host and port of the engine's HTTP listener and talks to it."
+                    )
+                    msg = f"extra_launch_args carries {spelled!r}, which sets the listener flag {refused!r}. {remedy}"
+                else:
                     msg = (
-                        f"extra_launch_args carries {str(entry).split('=', 1)[0].strip()!r}, which sets the "
+                        f"extra_launch_args carries {spelled!r}, which sets the "
                         f"placement flag {refused!r}. Declare the width as "
                         "loadtime.tensor_parallel_size instead, so the registry can reserve the devices."
                     )
-                    raise ValueError(msg)
+                raise ValueError(msg)
 
         raw_env = self.loadtime.get("extra_env") or {}
         if isinstance(raw_env, dict):

@@ -1020,6 +1020,23 @@ class TestProfilePlacement:
         with pytest.raises(ValueError, match="placement flag"):
             model_registry._validate_profile_placement(self._profiles(extra_launch_args=args))
 
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["--nccl-port", "30411"],
+            ["--nccl-port=30411"],
+            ["--nccl-po", "30411"],
+            ["--host", "127.0.0.1"],
+            ["--port=8000"],
+        ],
+    )
+    def test_a_listener_flag_is_refused_however_it_is_spelled(self, args: list[str]) -> None:
+        with pytest.raises(ValueError, match="listener flag"):
+            model_registry._validate_profile_placement(self._profiles(extra_launch_args=args))
+
+    def test_the_sanctioned_rendezvous_option_still_passes(self) -> None:
+        model_registry._validate_profile_placement(self._profiles(tensor_parallel_size=2, nccl_port=30411))
+
     def test_a_device_visibility_variable_is_refused(self) -> None:
         with pytest.raises(ValueError, match="CUDA_VISIBLE_DEVICES"):
             model_registry._validate_profile_placement(self._profiles(extra_env={"CUDA_VISIBLE_DEVICES": "0"}))
@@ -1034,5 +1051,7 @@ class TestProfilePlacement:
         groups = pytest.importorskip("sie_server.config.device_groups")
 
         assert model_registry._PLACEMENT_LAUNCH_FLAGS == server._PLACEMENT_LAUNCH_FLAGS
+        assert model_registry._LISTENER_LAUNCH_FLAGS == server._LISTENER_LAUNCH_FLAGS
+        assert model_registry._REFUSED_LAUNCH_FLAGS == server._REFUSED_LAUNCH_FLAGS
         assert model_registry._PLACEMENT_ENV_VARS == server._PLACEMENT_ENV_VARS
         assert model_registry._MAX_TENSOR_PARALLEL_SIZE == groups.MAX_TENSOR_PARALLEL_SIZE

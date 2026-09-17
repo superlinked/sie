@@ -147,9 +147,9 @@ def _validate_profile_name(profile_name: str) -> None:
 _IMMUTABLE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
-# Mirror of sie_server's placement rules (config/model.py). A worker refuses a
-# snapshot containing a profile that breaks them, so the config service refuses
-# the write that would put one there.
+# Mirror of sie_server's placement and listener rules (config/model.py). A
+# worker refuses a snapshot containing a profile that breaks them, so the config
+# service refuses the write that would put one there.
 _MAX_TENSOR_PARALLEL_SIZE = 8
 _PLACEMENT_LAUNCH_FLAGS = frozenset(
     {
@@ -170,6 +170,8 @@ _PLACEMENT_LAUNCH_FLAGS = frozenset(
         "--gpu-id-step",
     }
 )
+_LISTENER_LAUNCH_FLAGS = frozenset({"--host", "--nccl-port", "--port"})
+_REFUSED_LAUNCH_FLAGS = _PLACEMENT_LAUNCH_FLAGS | _LISTENER_LAUNCH_FLAGS
 _PLACEMENT_ENV_VARS = frozenset({"CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
 
 
@@ -196,13 +198,25 @@ def _validate_profile_placement(profiles: dict) -> None:
                 flag = str(entry).split("=", 1)[0].strip()
                 if not flag.startswith("--") or len(flag) <= len("--"):
                     continue
-                refused = next((f for f in sorted(_PLACEMENT_LAUNCH_FLAGS) if f.startswith(flag)), None)
-                if refused is not None:
+                refused = next((f for f in sorted(_REFUSED_LAUNCH_FLAGS) if f.startswith(flag)), None)
+                if refused is None:
+                    continue
+                if refused in _LISTENER_LAUNCH_FLAGS:
+                    remedy = (
+                        "Declare loadtime.nccl_port instead."
+                        if refused == "--nccl-port"
+                        else "The worker passes the host and port of the engine's HTTP listener and talks to it."
+                    )
+                    msg = (
+                        f"Profile '{profile_name}': extra_launch_args carries {flag!r}, which sets the "
+                        f"listener flag {refused!r}. {remedy}"
+                    )
+                else:
                     msg = (
                         f"Profile '{profile_name}': extra_launch_args carries {flag!r}, which sets the "
                         f"placement flag {refused!r}. Declare loadtime.tensor_parallel_size instead."
                     )
-                    raise ValueError(msg)
+                raise ValueError(msg)
         raw_env = loadtime.get("extra_env") or {}
         if isinstance(raw_env, dict):
             for key in raw_env:
