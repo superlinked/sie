@@ -99,6 +99,41 @@ def _resolve_read_timeout() -> float | None:
 _GENERATE_READ_TIMEOUT_S: float | None = _resolve_read_timeout()
 
 
+def _resolve_profile_read_timeout(declared: float | None, *, tensor_parallel_size: int) -> float | None:
+    """Return the streaming read cap for one adapter instance.
+
+    Args:
+        declared: The profile's own value, or None to inherit the module
+            default.
+        tensor_parallel_size: Declared width. Above one a finite cap is
+            required rather than optional.
+
+    Raises:
+        ValueError: If the declared value is not a positive finite number, or
+            if a width above one is left without a cap. A stalled collective
+            emits no bytes and raises nothing, so an unbounded read on a
+            multi-accelerator load is a request that never ends and a group of
+            accelerators that is never freed.
+    """
+    if declared is not None:
+        if isinstance(declared, bool) or not isinstance(declared, (int, float)):
+            msg = f"request_read_timeout_s must be a number, got {declared!r}"
+            raise ValueError(msg)
+        if not math.isfinite(declared) or declared <= 0:
+            msg = f"request_read_timeout_s must be a finite number greater than zero, got {declared!r}"
+            raise ValueError(msg)
+        return float(declared)
+    effective = _GENERATE_READ_TIMEOUT_S
+    if tensor_parallel_size > 1 and effective is None:
+        msg = (
+            f"a profile declaring tensor_parallel_size={tensor_parallel_size} must also declare a finite "
+            "request_read_timeout_s. A stalled collective produces no bytes and no error, so an "
+            "unbounded read would hold the request and its accelerators open indefinitely."
+        )
+        raise ValueError(msg)
+    return effective
+
+
 def _mamba_scheduler_strategy_value(extra_launch_args: list[str]) -> str | None:
     """Return the value passed to ``--mamba-scheduler-strategy``, or ``None``.
 
@@ -348,12 +383,55 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # adapters in one batch (SGLang ``--max-loras-per-batch``).
         lora_paths: dict[str, str] | None = None,
         max_loras_per_batch: int = 4,
+        # Tensor-parallel width. One is every existing profile and keeps the
+        # launch argv byte-identical. Above one, this adapter owns that many
+        # whole accelerators for the life of the load, which is an exclusive
+        # claim the registry accounts for rather than a placement hint.
+        tensor_parallel_size: int = 1,
+        # Wall-clock cap on the gap between streamed bytes. None keeps the
+        # module default, which is unbounded so the worker's own admission and
+        # cancel layer owns request lifetime. A width above one must set it:
+        # a stalled collective produces no bytes and no error, so an unbounded
+        # read would hold the request open indefinitely. The cap fails the
+        # request; it does not unload or restart the engine.
+        request_read_timeout_s: float | None = None,
+        # Seconds a single forward batch may take before the engine crashes
+        # itself. None keeps the engine's own default. A crashed engine fails
+        # every later request; the adapter does not unload or restart it.
+        watchdog_timeout_s: float | None = None,
+        # Collective rendezvous port. None lets SIE reserve one beside the HTTP
+        # port, which is the point: the engine's own default is a random port,
+        # and two groups starting together can collide on it.
+        nccl_port: int | None = None,
+        # SGLang enables a piecewise CUDA-graph capture path by default. It is
+        # measured to hang indefinitely at width two and to exhaust memory at
+        # width four, on a card and memory fraction where width one serves
+        # normally, so any width above one disables it unless a profile opts
+        # back in explicitly. None means "decide from the width".
+        disable_piecewise_cuda_graph: bool | None = None,
         **kwargs: Any,  # accept extra args from loader for compatibility
     ) -> None:
         _ = kwargs
         self._model_name_or_path = str(model_name_or_path)
         self._max_seq_length = max_seq_length
         self._mem_fraction_static = mem_fraction_static
+        self._tensor_parallel_size = _server.validate_tensor_parallel_size(tensor_parallel_size)
+        self._watchdog_timeout_s = _server.validate_optional_positive(watchdog_timeout_s, field="watchdog_timeout_s")
+        self._declared_nccl_port = _server.validate_optional_port(nccl_port)
+        if self._declared_nccl_port is not None and self._tensor_parallel_size == 1:
+            msg = "nccl_port applies only above tensor_parallel_size=1; a single rank has no rendezvous"
+            raise ValueError(msg)
+        self._nccl_port: int | None = None
+        # Declared or chosen, the rendezvous port is reserved in the shared set,
+        # so teardown hands back exactly what this adapter holds.
+        self._reserved_nccl_port: int | None = None
+        self._request_read_timeout_s = _resolve_profile_read_timeout(
+            request_read_timeout_s,
+            tensor_parallel_size=self._tensor_parallel_size,
+        )
+        self._disable_piecewise_cuda_graph = (
+            self._tensor_parallel_size > 1 if disable_piecewise_cuda_graph is None else disable_piecewise_cuda_graph
+        )
         self._compute_precision = compute_precision
         self._trust_remote_code = trust_remote_code
         self._revision = revision
@@ -515,6 +593,17 @@ class SGLangGenerationAdapter(GenerationAdapter):
     def load(self, device: str) -> None:
         self._device = device
         device_index = _server.parse_device_index(device)
+        # Derived from the anchor and the declared width by the one shared
+        # rule, so this adapter claims exactly the cards the registry reserved.
+        device_indices = _server.resolve_device_group(device_index, self._tensor_parallel_size)
+        # Before any accelerator is claimed: a width the model's own head counts
+        # cannot be divided by fails here rather than minutes into the engine's
+        # own assertion, with the whole group held in the meantime.
+        _server.validate_width_against_model_config(
+            self._tensor_parallel_size,
+            model_name_or_path=self._model_name_or_path,
+            revision=self._revision,
+        )
         port = _server.find_free_port()
         self._port = port
         self._server_url = f"http://localhost:{port}"
@@ -523,24 +612,35 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # the reservation above onward, so every raise below hands them back
         # rather than leaking one slot of the 100-port span per attempt: a full
         # /tmp in open_output_log, a failed exec, the pre-launch speculative
-        # validation, or a cancelled load included.
+        # validation, an exhausted rendezvous span, or a cancelled load
+        # included.
         try:
-            self._start_server(port=port, device_index=device_index, server_url=self._server_url)
+            # Only a group rendezvouses, so width one reserves nothing and its
+            # launch argv is unchanged.
+            if self._tensor_parallel_size > 1:
+                if self._declared_nccl_port is not None:
+                    _server.reserve_port(self._declared_nccl_port)
+                    self._reserved_nccl_port = self._declared_nccl_port
+                else:
+                    self._reserved_nccl_port = _server.find_free_port(_server.NCCL_BASE_PORT)
+                self._nccl_port = self._reserved_nccl_port
+            self._start_server(port=port, device_indices=device_indices, server_url=self._server_url)
         except BaseException:
             self._abort_failed_load()
             raise
 
-    def _start_server(self, *, port: int, device_index: int, server_url: str) -> None:
+    def _start_server(self, *, port: int, device_indices: list[int], server_url: str) -> None:
         """Launch the SGLang child and block until it serves the model.
 
         Always called under ``load``'s abort-on-failure guard, so it raises
         without cleaning up the port or log itself.
         """
         logger.info(
-            "Starting SGLang generation server for %s on device=%s (gpu_id=%d) at port %d",
+            "Starting SGLang generation server for %s on device=%s (gpu_ids=%s, tp=%d) at port %d",
             self._model_name_or_path,
             self._device,
-            device_index,
+            ",".join(str(index) for index in device_indices),
+            self._tensor_parallel_size,
             port,
         )
 
@@ -559,8 +659,12 @@ class SGLangGenerationAdapter(GenerationAdapter):
             str(self._max_seq_length),
             "--mem-fraction-static",
             str(self._mem_fraction_static),
-            "--tp",
-            "1",
+            # Full flag name, not the "--tp" abbreviation. Nothing upstream
+            # disables abbreviation matching, so a future upstream flag sharing
+            # that prefix would break every SIE launch with an ambiguous-option
+            # error rather than a clear one.
+            "--tensor-parallel-size",
+            str(self._tensor_parallel_size),
             "--log-level",
             "warning",
             "--served-model-name",
@@ -572,6 +676,18 @@ class SGLangGenerationAdapter(GenerationAdapter):
             cmd.extend(["--revision", self._revision])
         if self._disable_cuda_graph:
             cmd.append("--disable-cuda-graph")
+        # Distinct from --disable-cuda-graph, which turns off graph replay
+        # entirely. This disables only the piecewise capture path, so width
+        # above one keeps ordinary graph replay and its throughput.
+        if self._disable_piecewise_cuda_graph and not self._disable_cuda_graph:
+            cmd.append("--disable-piecewise-cuda-graph")
+        # A forward batch that exceeds this crashes the engine rather than
+        # hanging, so requests fail instead of waiting on a rank that will not
+        # answer.
+        if self._watchdog_timeout_s is not None:
+            cmd.extend(["--watchdog-timeout", str(self._watchdog_timeout_s)])
+        if self._nccl_port is not None:
+            cmd.extend(["--nccl-port", str(self._nccl_port)])
         if self._attention_backend:
             cmd.extend(["--attention-backend", self._attention_backend])
         if self._grammar_backend:
@@ -640,7 +756,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         )
         self._process = _server.launch_sglang_server(
             cmd,
-            device_index=device_index,
+            device_indices=device_indices,
             output_file=self._output_file,
             extra_env=extra_env or None,
         )
@@ -691,6 +807,12 @@ class SGLangGenerationAdapter(GenerationAdapter):
         _server.terminate_process(self._process)
         self._process = None
         _server.release_port(self._port)
+        # Guarded rather than unconditional: width one never reserves a
+        # collective port, and its teardown must stay exactly as it was.
+        if self._reserved_nccl_port is not None:
+            _server.release_port(self._reserved_nccl_port)
+            self._reserved_nccl_port = None
+        self._nccl_port = None
         self._port = None
         self._server_url = None
         self._device = None
@@ -1014,6 +1136,12 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # Release only after the child is down so a concurrent load can't be
         # handed a port the dying child still holds bound.
         _server.release_port(self._port)
+        # Guarded rather than unconditional: width one never reserves a
+        # collective port, and its teardown must stay exactly as it was.
+        if self._reserved_nccl_port is not None:
+            _server.release_port(self._reserved_nccl_port)
+            self._reserved_nccl_port = None
+        self._nccl_port = None
         self._port = None
         self._server_url = None
         self._device = None
@@ -1050,6 +1178,39 @@ class SGLangGenerationAdapter(GenerationAdapter):
     def _check_loaded(self) -> None:
         if self._server_url is None:
             raise RuntimeError(ERR_NOT_LOADED)
+        self._check_engine_alive()
+
+    def _check_engine_alive(self) -> None:
+        """Fail a request whose engine child has already exited.
+
+        Without this the adapter never notices. Every request goes on to open a
+        connection to a port nobody is listening on, waits out the connect
+        timeout and returns a transport error, forever, with no reload and no
+        readiness change. On one accelerator that is a wasteful way to say
+        "dead". On four it strands four accelerators behind a queue of requests
+        that cannot succeed.
+
+        Measured on a four-rank group: a killed rank makes the engine
+        refuse health in about 5 seconds, but its process tree takes about 67
+        seconds to exit. This check is what turns the rest of that window, and
+        everything after it, into one terminal answer rather than a timeout per
+        request.
+
+        Raises:
+            RuntimeError: Naming the exit code, so a crash is distinguishable
+                from an orderly unload in a log.
+        """
+        process = self._process
+        if process is None:
+            return
+        exit_code = process.poll()
+        if exit_code is None:
+            return
+        msg = (
+            f"SGLang engine for {self._served_model_name!r} is not running "
+            f"(process exited with code {exit_code}). The model must be reloaded."
+        )
+        raise RuntimeError(msg)
 
     async def _get_or_create_http_client(self) -> httpx.AsyncClient:
         """Return the shared client, opening it if this is the first call.
@@ -1092,7 +1253,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 self._http_client = httpx.AsyncClient(
                     timeout=httpx.Timeout(
                         connect=_GENERATE_CONNECT_TIMEOUT_S,
-                        read=_GENERATE_READ_TIMEOUT_S,
+                        read=self._request_read_timeout_s,
                         write=_GENERATE_WRITE_TIMEOUT_S,
                         pool=_GENERATE_POOL_TIMEOUT_S,
                     ),

@@ -16,9 +16,9 @@ class LoadErrorClass(StrEnum):
 
     Permanent classes (``GATED``, ``NOT_FOUND``, ``DEPENDENCY``) should not
     be retried automatically because re-attempting them produces the same
-    error every time and burns request budget. ``OOM`` and ``NETWORK`` are
-    transient — the registry holds a cooldown to avoid hot retry loops
-    but eventually allows another attempt. ``UNKNOWN`` is treated as
+    error every time and burns request budget. ``OOM``, ``NETWORK`` and
+    ``PLACEMENT`` are transient — the registry holds a cooldown to avoid hot
+    retry loops but eventually allows another attempt. ``UNKNOWN`` is treated as
     permanent for safety; operators should inspect the underlying error
     and either fix it or restart the server to clear the failure.
     """
@@ -29,6 +29,7 @@ class LoadErrorClass(StrEnum):
     NETWORK = "NETWORK"
     DEPENDENCY = "DEPENDENCY"
     TIMEOUT = "TIMEOUT"
+    PLACEMENT = "PLACEMENT"
     UNKNOWN = "UNKNOWN"
 
 
@@ -45,7 +46,17 @@ _COOLDOWN_BY_CLASS: dict[LoadErrorClass, float | None] = {
     LoadErrorClass.OOM: 60.0,
     LoadErrorClass.NETWORK: 30.0,
     LoadErrorClass.TIMEOUT: 30.0,
+    LoadErrorClass.PLACEMENT: 30.0,
 }
+
+
+class DevicePlacementError(RuntimeError):
+    """No device, or no block of devices, can take this load right now.
+
+    Another model loading or unloading changes the answer, so the failure is
+    retried after a cooldown and cleared on unload rather than staying sticky
+    the way an unclassified error does.
+    """
 
 
 class ModelLoadTimeoutError(TimeoutError):
@@ -107,6 +118,13 @@ def classify_load_error(exc: BaseException) -> LoadFailureClassification:
         return LoadFailureClassification(
             error_class=LoadErrorClass.TIMEOUT,
             cooldown_s=_COOLDOWN_BY_CLASS[LoadErrorClass.TIMEOUT],
+        )
+
+    # Checked before OOM because both are RuntimeErrors.
+    if isinstance(exc, DevicePlacementError):
+        return LoadFailureClassification(
+            error_class=LoadErrorClass.PLACEMENT,
+            cooldown_s=_COOLDOWN_BY_CLASS[LoadErrorClass.PLACEMENT],
         )
 
     # Gated repo (HF auth) — permanent until operator fixes HF_TOKEN.

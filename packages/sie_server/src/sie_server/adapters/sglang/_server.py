@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import json
 import logging
 import math
 import os
@@ -25,11 +26,26 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import requests
 
+from sie_server.config.device_groups import (
+    MAX_TENSOR_PARALLEL_SIZE,
+    format_device_mask,
+    resolve_device_group,
+    validate_tensor_parallel_size,
+)
 from sie_server.core.oom import is_oom_error
+
+__all__ = [
+    "MAX_TENSOR_PARALLEL_SIZE",
+    "format_device_mask",
+    "resolve_device_group",
+    "validate_tensor_parallel_size",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +77,12 @@ KERNEL_CACHE_ROOT_ENV_VAR = "SIE_SGLANG_KERNEL_CACHE_ROOT"
 STARTUP_TIMEOUT_S = DEFAULT_STARTUP_TIMEOUT_S
 HEALTH_CHECK_INTERVAL_S = 2.0
 BASE_PORT = 30000  # Starting port for SGLang servers
+# Collective rendezvous ports for multi-rank groups. The engine otherwise picks
+# a random port, so two groups starting together on one host can pick the same
+# one and one of them hangs in rendezvous rather than failing. Kept clear of the
+# SGLang HTTP span above and of 30200-30299, which the MLX and TensorRT-LLM
+# adapters hand out from reservation sets of their own.
+NCCL_BASE_PORT = 30400
 
 ERR_SERVER_STARTUP = "SGLang server failed to start within timeout"
 ERR_SERVER_CRASH = "SGLang server process exited during startup"
@@ -107,7 +129,13 @@ def _installed_jit_abi_key() -> str:
     return hashlib.sha256("\n".join(components).encode()).hexdigest()[:20]
 
 
-def _gpu_cache_key(device_index: int) -> str | None:
+def _gpu_cache_key(device_indices: Sequence[int]) -> str | None:
+    """Return one cache key for the whole device group, or None to disable the cache.
+
+    Every member of a tensor-parallel group must be the same product. A mixed
+    group is refused rather than cached under one member's name, because the
+    artifacts compiled for it are not valid for the others.
+    """
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],  # noqa: S607
@@ -117,18 +145,27 @@ def _gpu_cache_key(device_index: int) -> str | None:
             timeout=5,
         )
         device_names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        device_name = device_names[device_index]
+        group_names = [device_names[index] for index in device_indices]
     except (FileNotFoundError, IndexError, OSError, subprocess.SubprocessError) as exc:
         logger.warning(
-            "SGLang kernel cache disabled: could not identify cuda:%d without CUDA init: %s", device_index, exc
+            "SGLang kernel cache disabled: could not identify %s without CUDA init: %s",
+            ", ".join(f"cuda:{index}" for index in device_indices),
+            exc,
         )
         return None
 
-    device_digest = hashlib.sha256(device_name.encode()).hexdigest()[:12]
+    if len(set(group_names)) > 1:
+        logger.warning(
+            "SGLang kernel cache disabled: device group spans more than one product: %s",
+            ", ".join(sorted(set(group_names))),
+        )
+        return None
+
+    device_digest = hashlib.sha256(group_names[0].encode()).hexdigest()[:12]
     return f"gpu-{device_digest}"
 
 
-def _kernel_cache_env(env: dict[str, str], *, device_index: int) -> dict[str, str]:
+def _kernel_cache_env(env: dict[str, str], *, device_indices: Sequence[int]) -> dict[str, str]:
     """Return missing upstream cache variables for one persistent cache root.
 
     Cache namespaces include the installed JIT ABI and exact GPU product name. This
@@ -146,11 +183,14 @@ def _kernel_cache_env(env: dict[str, str], *, device_index: int) -> dict[str, st
         logger.warning("SGLang kernel cache disabled: %s must be an absolute path", KERNEL_CACHE_ROOT_ENV_VAR)
         return {}
 
-    gpu_key = _gpu_cache_key(device_index)
+    gpu_key = _gpu_cache_key(device_indices)
     if gpu_key is None:
         return {}
 
-    namespace = root / _KERNEL_CACHE_LAYOUT_VERSION / _installed_jit_abi_key() / gpu_key / f"device-{device_index}"
+    # The group, not the anchor, names the namespace. Artifacts compiled for a
+    # four-rank launch are not interchangeable with single-device artifacts.
+    group_key = "device-" + "_".join(str(index) for index in device_indices)
+    namespace = root / _KERNEL_CACHE_LAYOUT_VERSION / _installed_jit_abi_key() / gpu_key / group_key
     defaults = {name: str(namespace / suffix) for name, suffix in _KERNEL_CACHE_DIRS.items() if not env.get(name)}
     if not defaults:
         return {}
@@ -260,6 +300,28 @@ def find_free_port(start_port: int = BASE_PORT) -> int:
     raise RuntimeError(msg)
 
 
+def reserve_port(port: int) -> None:
+    """Reserve one specific port, as :func:`find_free_port` reserves the one it picks.
+
+    For a port a profile declares. Release it with :func:`release_port`.
+
+    Raises:
+        RuntimeError: If another model in this process has it reserved, or
+            something already has it bound.
+    """
+    with _RESERVED_PORTS_LOCK:
+        if port in _RESERVED_PORTS:
+            msg = f"port {port} is already reserved by another model in this process"
+            raise RuntimeError(msg)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("localhost", port))
+            except OSError as error:
+                msg = f"port {port} is already in use: {error}"
+                raise RuntimeError(msg) from error
+        _RESERVED_PORTS.add(port)
+
+
 def release_port(port: int | None) -> None:
     """Return a port handed out by :func:`find_free_port` to the pool.
 
@@ -283,6 +345,130 @@ def parse_device_index(device: str) -> int:
     return 0
 
 
+def _read_cached_model_config(model_name_or_path: str, revision: str | None) -> dict[str, Any] | None:
+    """Return a model's ``config.json`` if it can be read without a download.
+
+    Best effort by design. A model served from a local directory, a cached
+    repository or neither are all ordinary, so an unreadable config disables
+    the checks that depend on it rather than failing a load that would
+    otherwise work.
+    """
+    local = Path(model_name_or_path)
+    candidate: Path | None = None
+    if local.is_dir():
+        candidate = local / "config.json"
+    else:
+        try:
+            from huggingface_hub import try_to_load_from_cache
+
+            # HFValidationError subclasses ValueError, so a malformed repo id
+            # is covered without importing the hub's error module here.
+            cached = try_to_load_from_cache(model_name_or_path, "config.json", revision=revision)
+        except (ImportError, OSError, ValueError):
+            return None
+        if isinstance(cached, str):
+            candidate = Path(cached)
+    if candidate is None or not candidate.is_file():
+        return None
+    try:
+        parsed = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def validate_width_against_model_config(
+    width: int,
+    *,
+    model_name_or_path: str,
+    revision: str | None = None,
+) -> None:
+    """Refuse a width the model's own shape cannot be divided by.
+
+    The engine asserts these itself, but only after loading weights, which on a
+    multi-accelerator load means several cards are held for minutes before the
+    launch fails, and a supervisor that restarts the worker repeats that on every restart.
+
+    Only heads the config actually reports are checked, and an unreadable
+    config checks nothing, so this can only turn a later crash into an earlier
+    and clearer error, never reject a shape that would have worked.
+
+    Raises:
+        ValueError: Naming the attribute, its value and the width.
+    """
+    if width < 2:
+        return
+    config = _read_cached_model_config(model_name_or_path, revision)
+    if config is None:
+        return
+    # A multimodal config's top-level head counts can describe the vision
+    # tower, which is not the stack the engine shards.
+    text_config = config.get("text_config")
+    if isinstance(text_config, dict):
+        config = text_config
+
+    attention_heads = _positive_int(config.get("num_attention_heads"))
+    if attention_heads is not None and attention_heads % width:
+        msg = (
+            f"tensor_parallel_size={width} does not divide num_attention_heads={attention_heads} "
+            f"for {model_name_or_path!r}. The engine shards query heads across ranks and "
+            "requires an exact division."
+        )
+        raise ValueError(msg)
+
+    # Key/value heads are replicated rather than split when a model publishes
+    # fewer of them than the width, so the engine requires divisibility in
+    # whichever direction applies and a grouped-query shape narrower than the
+    # group is legal.
+    kv_heads = _positive_int(config.get("num_key_value_heads"))
+    if kv_heads is not None and kv_heads % width and width % kv_heads:
+        msg = (
+            f"tensor_parallel_size={width} is neither a multiple nor a divisor of "
+            f"num_key_value_heads={kv_heads} for {model_name_or_path!r}. The engine splits "
+            "key/value heads across ranks when there are at least as many as the width and "
+            "replicates them otherwise, and neither is possible at this width."
+        )
+        raise ValueError(msg)
+
+
+def _positive_int(value: object) -> int | None:
+    """A config attribute usable as a head count, or None when it is not one."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def validate_optional_positive(value: float | None, *, field: str) -> float | None:
+    """Return a positive finite float, or None.
+
+    Raises:
+        ValueError: If the value is present but not a positive finite number.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        msg = f"{field} must be a number, got {value!r}"
+        raise ValueError(msg)
+    if not math.isfinite(value) or value <= 0:
+        msg = f"{field} must be a finite number greater than zero, got {value!r}"
+        raise ValueError(msg)
+    return float(value)
+
+
+def validate_optional_port(value: int | None) -> int | None:
+    """Return a usable TCP port, or None to let SIE reserve one.
+
+    Raises:
+        ValueError: If the value is present but not a port number.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 1024 <= value <= 65535:
+        msg = f"nccl_port must be an integer between 1024 and 65535, got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
 def open_output_log(prefix: str = "sglang_") -> tempfile._TemporaryFileWrapper:
     """Open a named temp file for capturing subprocess stdout/stderr."""
     return tempfile.NamedTemporaryFile(
@@ -296,16 +482,18 @@ def open_output_log(prefix: str = "sglang_") -> tempfile._TemporaryFileWrapper:
 def launch_sglang_server(
     cmd: list[str],
     *,
-    device_index: int,
+    device_indices: Sequence[int],
     output_file: tempfile._TemporaryFileWrapper,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.Popen[bytes]:
-    """Launch an SGLang HTTP server subprocess.
+    """Launch an SGLang HTTP server subprocess over an ordered device group.
 
     Args:
         cmd: Full argv (must already include ``python -m sglang.launch_server``
             plus all flags).
-        device_index: CUDA device index for ``CUDA_VISIBLE_DEVICES``.
+        device_indices: Ordered CUDA device indices the child may see. A
+            single-element sequence is the ordinary one-GPU case. The order is
+            preserved, because rank N binds the Nth entry of the mask.
         output_file: Temp file open for write — subprocess stdout/stderr is
             redirected here for debugging.
         extra_env: Additional environment variables to set on the subprocess.
@@ -317,12 +505,22 @@ def launch_sglang_server(
         The ``Popen`` handle. Subprocess is started in a new process group
         (``start_new_session=True``) so the entire group can be signalled on
         shutdown without affecting the parent.
+
+    Raises:
+        ValueError: If no device is supplied, or a device repeats. A repeated
+            index would give two ranks the same card and deadlock the group.
     """
+    mask = format_device_mask(device_indices)
+
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(device_index)
     if extra_env:
         env.update(extra_env)
-    for name, value in _kernel_cache_env(env, device_index=device_index).items():
+    # The device mask is written after the profile environment, never before.
+    # It is the registry's placement decision, and a profile that also set
+    # CUDA_VISIBLE_DEVICES would otherwise silently move or widen the claim
+    # the registry is accounting for.
+    env["CUDA_VISIBLE_DEVICES"] = mask
+    for name, value in _kernel_cache_env(env, device_indices=device_indices).items():
         env.setdefault(name, value)
     logger.info("SGLang subprocess output will be logged to: %s", output_file.name)
     return subprocess.Popen(  # noqa: S603 — intentional subprocess call

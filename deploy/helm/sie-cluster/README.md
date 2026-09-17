@@ -580,8 +580,8 @@ routing and metrics only; GPU pools must use `gpu.count` for real capacity.
 
 This is the Req6 one-child-at-a-time model placement topology. It distributes
 different models from one runtime bundle across the pod's GPU slots. A child can
-own multiple models, but one model is not spread across children, replicated for
-throughput, or tensor/model-parallelized for an oversized model.
+own multiple models, but one model is not spread across children or replicated
+for throughput. A model too large for one GPU needs a device group instead.
 
 Each worker pod serves exactly one runtime bundle. Different bundles render as
 different worker StatefulSets and therefore different worker identities.
@@ -603,6 +603,51 @@ workers:
           minReplicas: 0
           maxReplicas: 3
 ```
+
+### Tensor-Parallel Device Groups
+
+To serve one model across several GPUs, set `gpu.deviceGroup: true` alongside
+`gpu.count`. The pod then runs a single worker child that owns every GPU in the
+pod (`SIE_DEVICES=cuda:0,...,cuda:N-1`) instead of one child per GPU, and the
+model profile declares how many of them it uses:
+
+```yaml
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime:
+        tensor_parallel_size: 4
+        request_read_timeout_s: 600
+```
+
+```yaml
+workers:
+  pools:
+    l4-4x-group:
+      enabled: true
+      machineProfile: l4-4x
+      gpu:
+        count: 4
+        deviceGroup: true
+```
+
+- The worker claims a contiguous block of `tensor_parallel_size` devices for
+  the model exclusively, evicting unpinned models to free a block when it has
+  to, and releases the block when the model unloads. Loading a single-GPU model
+  while every device is held evicts the least recently used unpinned group.
+- The SGLang generation and embedding adapters accept a width. The generation
+  adapter also requires `request_read_timeout_s` above width one, because a
+  stalled collective produces no bytes and no error.
+- Width and placement are declared only through `tensor_parallel_size`. Engine
+  placement flags in `extra_launch_args` (including abbreviations such as
+  `--tp`) and device-visibility variables in `extra_env` are refused.
+- `gpu.deviceGroup` requires `gpu.count >= 2`. `SIE_GPU_COUNT` and the cluster
+  health `gpu_count` count serving slots, so a device-group pod reports one
+  slot however many GPUs it holds.
+- Splitting a model across GPUs on a node without a fast GPU interconnect adds
+  communication overhead. For a model that fits one GPU, fan-out children
+  serving replicas usually deliver more throughput for the same GPUs.
 
 ### Queue Pool Patterns
 

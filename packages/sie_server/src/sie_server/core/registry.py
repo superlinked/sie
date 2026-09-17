@@ -27,17 +27,19 @@ from sie_sdk.storage import is_cloud_path
 
 from sie_server.adapters._generation_base import GenerationAdapter
 from sie_server.adapters.base import ModelAdapter
+from sie_server.config.device_groups import resolve_device_group, validate_tensor_parallel_size
 from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig
 from sie_server.core.disk_cache import DiskCacheConfig, ModelDiskCacheManager
 from sie_server.core.hot_reload import HotReloader
 from sie_server.core.load_errors import (
+    DevicePlacementError,
     LoadErrorClass,
     LoadFailure,
     ModelLoadTimeoutError,
     classify_load_error,
 )
-from sie_server.core.loader import expand_profile_variants, load_model_configs
+from sie_server.core.loader import expand_profile_variants, load_model_configs, validate_loadtime_options
 from sie_server.core.memory import MemoryConfig, MemoryManager
 from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, ModelLoader
 from sie_server.core.oom import is_oom_error
@@ -155,6 +157,26 @@ def _device_family(device: str) -> str:
     return device.split(":", 1)[0].lower()
 
 
+def declared_tensor_parallel_size(config: ModelConfig) -> int:
+    """Return the width a config declares, defaulting to one.
+
+    Read from the same resolved profile the loader builds adapter kwargs from,
+    so the registry reserves exactly the devices the adapter will claim. A
+    malformed value is reported as a load failure rather than silently treated
+    as one, because a width that reads as one would serve on a single card
+    while the operator believes several are in use.
+
+    A config with no resolvable default profile raises here rather than
+    defaulting, for the same reason: the loader would fail on it moments later
+    anyway, and a width guessed from an unreadable profile is the one answer
+    that fails quietly.
+    """
+    declared = config.resolve_profile("default").loadtime.get("tensor_parallel_size")
+    if declared is None:
+        return 1
+    return validate_tensor_parallel_size(declared)
+
+
 class ModelRegistry:
     """Registry for managing model configs and loaded models.
 
@@ -226,6 +248,11 @@ class ModelRegistry:
         self._configs: dict[str, ModelConfig] = {}
         self._model_dirs: dict[str, Path] = {}
         self._loaded: dict[str, LoadedModel] = {}
+        # Devices held exclusively by a multi-device load: device name -> model.
+        # Only a width above one populates this, so a deployment of ordinary
+        # single-device models never consults a non-empty map and behaves
+        # exactly as it did before widths existed.
+        self._device_claims: dict[str, str] = {}
         preprocessor_workers = engine_config.preprocessor_workers if engine_config else None
         self._preprocessor_registry = PreprocessorRegistry(max_workers=preprocessor_workers)
         # Share CPU pool between preprocessor and postprocessor registries
@@ -643,8 +670,22 @@ class ModelRegistry:
 
     def _select_device_for_model(self, requested_family: str | None = None) -> str:
         candidates = [
-            device for device in self._devices if requested_family is None or _device_family(device) == requested_family
+            device
+            for device in self._devices
+            if (requested_family is None or _device_family(device) == requested_family)
+            and device not in self._device_claims
         ]
+        if not candidates:
+            # Every eligible device is exclusively held by a multi-device model.
+            # Falling back to the unfiltered list would place this model onto a
+            # group member, which is the corruption the claim exists to prevent:
+            # the group sized its cache against the whole card.
+            held = sorted(self._device_claims)
+            msg = (
+                f"No device is available for placement. Every eligible device is exclusively "
+                f"held by a multi-device model ({held}). Unload one of those models first."
+            )
+            raise DevicePlacementError(msg)
 
         def score(device: str) -> tuple[bool, int, int]:
             manager = self._memory_manager_for_device(device)
@@ -680,6 +721,315 @@ class ModelRegistry:
         if requested_family in device_families:
             return self._select_device_for_model(requested_family)
         return requested_device
+
+    def _device_index(self, device: str) -> int | None:
+        """Return the concrete CUDA index of ``device``, or None if it has none."""
+        _, _, suffix = device.partition(":")
+        if not suffix.isdigit():
+            return None
+        return int(suffix)
+
+    def _group_members(self, anchor_device: str, width: int) -> list[str] | None:
+        """Return the device names a width-``width`` load anchored here would claim.
+
+        None when the block runs off the end of this worker's device list, or
+        when the anchor carries no concrete index (``cuda`` rather than
+        ``cuda:0``), which is a single-device shape by construction.
+        """
+        anchor_index = self._device_index(anchor_device)
+        if anchor_index is None:
+            return [anchor_device] if width == 1 else None
+        family = _device_family(anchor_device)
+        try:
+            indices = resolve_device_group(anchor_index, width)
+        except ValueError:
+            return None
+        members = [f"{family}:{index}" for index in indices]
+        if any(member not in self._devices for member in members):
+            return None
+        return members
+
+    def _is_group_free(self, members: Iterable[str], *, for_model: str) -> bool:
+        """True when every member is unclaimed and hosts no other model.
+
+        A group member cannot be shared. The engine reserves the large majority
+        of each card it is given, so a co-resident model would have almost no
+        room, and the headroom it would compete for is what graph capture needs
+        for the group to start at all.
+        """
+        for member in members:
+            holder = self._device_claims.get(member)
+            if holder is not None and holder != for_model:
+                return False
+            manager = self._memory_managers.get(member)
+            if manager is None:
+                return False
+            residents = {
+                loaded_name
+                for loaded_name, loaded in self._loaded.items()
+                if loaded.device == member and loaded_name != for_model
+            }
+            if residents:
+                return False
+        return True
+
+    def _group_candidates(self, width: int, requested_device: str) -> list[tuple[str, list[str]]]:
+        """Every block of ``width`` devices on this worker, a named anchor first.
+
+        Built from the device list rather than the single-device resolver,
+        which refuses outright once every device is claimed: a resident group
+        would then be impossible to displace.
+        """
+        anchors = list(self._devices)
+        if requested_device in anchors:
+            anchors.remove(requested_device)
+            anchors.insert(0, requested_device)
+        candidates: list[tuple[str, list[str]]] = []
+        for anchor in anchors:
+            members = self._group_members(anchor, width)
+            if members is not None:
+                candidates.append((anchor, members))
+        return candidates
+
+    def _group_blockers(self, members: Iterable[str], *, for_model: str) -> set[str] | None:
+        """Models occupying ``members``, or None when no eviction can free the block.
+
+        A member this worker does not account for is not a device the group can
+        ever use, which is a different answer from a member something is merely
+        sitting on.
+        """
+        blockers: set[str] = set()
+        for member in members:
+            if self._memory_managers.get(member) is None:
+                return None
+            holder = self._device_claims.get(member)
+            if holder is not None and holder != for_model:
+                blockers.add(holder)
+            blockers.update(
+                loaded_name
+                for loaded_name, loaded in self._loaded.items()
+                if loaded.device == member and loaded_name != for_model
+            )
+        return blockers
+
+    def _resolve_group_placement(self, name: str, width: int, requested_device: str) -> tuple[str, list[str]]:
+        """Return the anchor device and the full group for a width-``width`` load.
+
+        Prefers the placement the ordinary resolver chose, then walks the
+        worker's device list for the first block that is entirely free.
+
+        Raises:
+            DevicePlacementError: When no block of that width is free. A
+                multi-device load must say so rather than silently serve on
+                fewer cards than it declared.
+        """
+        for anchor, members in self._group_candidates(width, requested_device):
+            if self._is_group_free(members, for_model=name):
+                return anchor, members
+        msg = (
+            f"Model '{name}' declares tensor_parallel_size={width} but no block of {width} "
+            f"free device(s) is available on this worker (devices={self._devices}, "
+            f"claims={sorted(self._device_claims)})"
+        )
+        raise DevicePlacementError(msg)
+
+    async def _resolve_group_placement_evicting(
+        self, name: str, width: int, requested_device: str
+    ) -> tuple[str, list[str]]:
+        """Return a group for ``name``, evicting unpinned residents when needed.
+
+        This registry is lazy-load with LRU eviction, so an occupied block is
+        not an unavailable one. Refusing to evict would let a single idle
+        neighbour keep a declared width from ever loading again, and nothing
+        would unload that neighbour afterwards: the failure would persist until
+        an operator intervened.
+
+        A block holding a pinned model is skipped rather than emptied, and the
+        block needing the fewest evictions wins.
+
+        Raises:
+            DevicePlacementError: When no block of that width can be freed.
+        """
+        candidates = self._group_candidates(width, requested_device)
+        fewest: tuple[str, list[str], set[str]] | None = None
+        for anchor, members in candidates:
+            blockers = self._group_blockers(members, for_model=name)
+            if blockers is None:
+                continue
+            if not blockers:
+                return anchor, members
+            if any(self._is_pinned(blocker) for blocker in blockers):
+                continue
+            if fewest is None or len(blockers) < len(fewest[2]):
+                fewest = (anchor, members, blockers)
+
+        if fewest is None:
+            msg = (
+                f"Model '{name}' declares tensor_parallel_size={width} but no block of {width} "
+                f"device(s) on this worker can be freed for it (devices={self._devices}, "
+                f"claims={sorted(self._device_claims)}, pinned={sorted(self._pinned_models)})"
+            )
+            raise DevicePlacementError(msg)
+
+        anchor, members, blockers = fewest
+        for blocker in sorted(blockers):
+            if blocker not in self._loaded:
+                continue
+            logger.info(
+                "Group placement: evicting '%s' to free %s for '%s' (tensor_parallel_size=%d)",
+                blocker,
+                members,
+                name,
+                width,
+            )
+            await self._do_unload(blocker, reason="group_placement")
+
+        if not self._is_group_free(members, for_model=name):
+            msg = (
+                f"Model '{name}' declares tensor_parallel_size={width} but {members} did not come "
+                f"free after evicting {sorted(blockers)}"
+            )
+            raise DevicePlacementError(msg)
+        return anchor, members
+
+    def _group_holder_to_evict(self, requested_device: str) -> str | None:
+        """The unpinned multi-device model a single-device load should displace.
+
+        A concrete request displaces the group holding that device. A family
+        request displaces the least recently used group holding a device of
+        that family. None when every candidate is pinned or already unloading.
+        """
+        family = _device_family(requested_device)
+        holders: set[str] = set()
+        for device, holder in self._device_claims.items():
+            if requested_device in self._devices:
+                if device != requested_device:
+                    continue
+            elif _device_family(device) != family:
+                continue
+            if holder in self._loaded and holder not in self._unloading and not self._is_pinned(holder):
+                holders.add(holder)
+        if not holders:
+            return None
+
+        def last_used(holder: str) -> float:
+            info = self._memory_manager_for_model(holder).get_model_info(holder)
+            return info.last_used_at if info is not None else 0.0
+
+        return min(sorted(holders), key=last_used)
+
+    async def _resolve_single_device_evicting(self, name: str, requested_device: str) -> str:
+        """Resolve one device for a single-device load, displacing a group if it must.
+
+        Groups hold every card they claim, so once they hold every eligible
+        device a single-device load has nowhere to go. Nothing else would ever
+        unload such a group, so without this one wide model would keep every
+        other model on the worker from loading.
+
+        Raises:
+            DevicePlacementError: When no device is free and no group can be displaced.
+        """
+        for _ in range(len(self._devices) + 1):
+            try:
+                load_device = self._resolve_load_device(requested_device)
+                self._reject_claimed_device(name, load_device)
+            except DevicePlacementError:
+                holder = self._group_holder_to_evict(requested_device)
+                if holder is None:
+                    raise
+                logger.info("Placement: evicting multi-device model '%s' to place '%s'", holder, name)
+                await self._do_unload(holder, reason="group_placement")
+                continue
+            return load_device
+        msg = f"Model '{name}' found no device after displacing every eligible multi-device model"
+        raise DevicePlacementError(msg)
+
+    def _reject_claimed_device(self, name: str, device: str) -> None:
+        """Refuse to place ``name`` on a device another model holds exclusively.
+
+        Placement by family already skips claimed devices. A request that names
+        a device outright bypasses that, and would otherwise put a second model
+        onto a card a tensor-parallel group has already sized its cache
+        against.
+
+        Raises:
+            DevicePlacementError: Naming the holder, so the conflict is actionable.
+        """
+        holder = self._device_claims.get(device)
+        if holder is None or holder == name:
+            return
+        msg = (
+            f"Cannot load '{name}' onto {device}: it is held exclusively by multi-device "
+            f"model '{holder}'. Unload '{holder}' first, or let the registry choose a device."
+        )
+        raise DevicePlacementError(msg)
+
+    def _claim_device_group(self, name: str, members: Iterable[str]) -> None:
+        for member in members:
+            self._device_claims[member] = name
+        logger.info("Model '%s' claimed devices %s exclusively", name, sorted(self._device_claims))
+
+    def _reject_unservable_width(self, name: str, width: int) -> None:
+        """Refuse a width this worker could never satisfy, whatever is free.
+
+        Distinct from "no free block right now", which is a transient placement
+        failure worth retrying. A worker with two devices can never serve a
+        width of four, so saying so plainly beats waiting for a block that
+        cannot exist.
+
+        Raises:
+            RuntimeError: Naming the declared width and the visible devices.
+        """
+        if width <= len(self._devices):
+            return
+        msg = (
+            f"Model '{name}' declares tensor_parallel_size={width} but this worker sees "
+            f"{len(self._devices)} device(s) ({self._devices}). The declared width and the "
+            "visible devices must agree."
+        )
+        raise RuntimeError(msg)
+
+    def _claimed_members(self, name: str) -> list[str]:
+        """Devices this model holds exclusively, anchor first, or empty."""
+        members = [device for device, holder in self._device_claims.items() if holder == name]
+        return sorted(members, key=lambda device: self._device_order.get(device, 0))
+
+    def _register_across_group(self, name: str, loaded: LoadedModel) -> None:
+        """Account for a load on every device it actually occupies.
+
+        A width-N load reserves memory on N cards. Registering only the anchor
+        leaves the other members looking free, so a later placement sizes itself
+        against memory this model already holds, and the eviction that would
+        have prevented the collision never fires.
+
+        The estimate is divided across members because sharding divides the
+        weights, so the total across the group is the figure a single-device
+        load of the same model would have registered, to within the truncation
+        of an integer division.
+
+        For the engine this work exists for that figure is zero by design: the
+        SGLang adapter reports no footprint because its child allocates in a
+        subprocess, and the registry reads the device instead. So the division
+        matters only for adapters that do report one. What matters on every
+        adapter is the registration itself, which is what placement scoring,
+        the eviction order and the group-free check all read.
+        """
+        members = self._claimed_members(name) or [loaded.device]
+        share = loaded.memory_bytes // len(members) if loaded.memory_bytes else 0
+        for device in members:
+            self._memory_manager_for_device(device).register_model(name, estimated_bytes=share)
+
+    def _unregister_across_group(self, name: str, anchor_device: str) -> None:
+        """Drop this model from every device manager that was accounting for it."""
+        for device in self._claimed_members(name) or [anchor_device]:
+            self._memory_manager_for_device(device).unregister_model(name)
+
+    def _release_device_claims(self, name: str) -> None:
+        released = [device for device, holder in self._device_claims.items() if holder == name]
+        for device in released:
+            del self._device_claims[device]
+        if released:
+            logger.info("Model '%s' released devices %s", name, released)
 
     def has_model(self, name: str) -> bool:
         """Check if a model config exists in the registry."""
@@ -954,7 +1304,14 @@ class ModelRegistry:
             msg = _ERR_MODEL_ALREADY_LOADED.format(name=name)
             raise ValueError(msg)
 
-        load_device = self._resolve_load_device(device)
+        width = declared_tensor_parallel_size(config)
+        self._reject_unservable_width(name, width)
+        if width > 1:
+            load_device, group_members = self._resolve_group_placement(name, width, device)
+            self._claim_device_group(name, group_members)
+        else:
+            load_device = self._resolve_load_device(device)
+            self._reject_claimed_device(name, load_device)
         memory_manager = self._memory_manager_for_device(load_device)
         load_start = time.monotonic()
         load_outcome = "error"
@@ -1017,10 +1374,7 @@ class ModelRegistry:
 
             # Track loaded state and register it for LRU accounting.
             self._loaded[name] = loaded
-            self._memory_manager_for_device(loaded.device).register_model(
-                name,
-                estimated_bytes=loaded.memory_bytes,
-            )
+            self._register_across_group(name, loaded)
 
             # Clear any stale failure record from a prior attempt.
             self._failed.pop(name, None)
@@ -1031,6 +1385,11 @@ class ModelRegistry:
             load_stage = exc.stage
             raise
         finally:
+            # A claim outlives only a load that succeeded. Anything else hands
+            # the devices back, or a failed multi-device attempt would strand
+            # every card it reserved for the life of the process.
+            if load_outcome != "success":
+                self._release_device_claims(name)
             worker_telemetry().model_load_completed(
                 model=name,
                 duration_s=time.monotonic() - load_start,
@@ -1094,6 +1453,8 @@ class ModelRegistry:
                 # lock must stay free for every other model's load, unload and
                 # eviction meanwhile. The per-model lock keeps two loads of the
                 # same model from fetching twice.
+                width = declared_tensor_parallel_size(config)
+                self._reject_unservable_width(name, width)
                 await self._loader.ensure_weights_cached_async(name, config)
 
                 async with lock:
@@ -1118,7 +1479,14 @@ class ModelRegistry:
                         raise RuntimeError(msg)
                     model_dir = self._model_dirs.get(name, Path())
 
-                    load_device = self._resolve_load_device(device)
+                    if width > 1:
+                        # Refuse a profile the adapter would reject before evicting
+                        # or claiming anything for it.
+                        await asyncio.to_thread(validate_loadtime_options, config, model_dir)
+                        load_device, group_members = await self._resolve_group_placement_evicting(name, width, device)
+                        self._claim_device_group(name, group_members)
+                    else:
+                        load_device = await self._resolve_single_device_evicting(name, device)
                     memory_manager = self._memory_manager_for_device(load_device)
 
                     # Instantiate adapter (in thread pool, post-download timeout applies)
@@ -1189,10 +1557,7 @@ class ModelRegistry:
                     self._loaded[name] = loaded
 
                     # Register with memory manager for LRU tracking
-                    self._memory_manager_for_device(loaded.device).register_model(
-                        name,
-                        estimated_bytes=loaded.memory_bytes,
-                    )
+                    self._register_across_group(name, loaded)
 
                     load_duration = time.monotonic() - load_start
                     if load_duration > 300:
@@ -1210,6 +1575,11 @@ class ModelRegistry:
                 load_stage = exc.stage
                 raise
             finally:
+                # A claim outlives only a load that succeeded. Anything else
+                # hands the devices back, or a failed multi-device attempt
+                # would strand every card it reserved.
+                if load_outcome != "success":
+                    self._release_device_claims(name)
                 worker_telemetry().model_load_completed(
                     model=name,
                     duration_s=time.monotonic() - load_start,
@@ -1382,7 +1752,7 @@ class ModelRegistry:
         an owning lifecycle loop. A sync-only registry fails closed instead of
         inventing a temporary event loop for that teardown.
         """
-        if name not in self._configs:
+        if name not in self._configs and name not in self._loaded:
             msg = _ERR_MODEL_NOT_FOUND.format(name=name)
             raise KeyError(msg)
 
@@ -1400,14 +1770,19 @@ class ModelRegistry:
         device = loaded.device
         worker_telemetry().model_evicted(model=name, reason=reason)
 
-        # Adapter.unload() handles gc.collect + empty_cache
-        loaded.adapter.unload()
+        try:
+            # Adapter.unload() handles gc.collect + empty_cache
+            loaded.adapter.unload()
 
-        # Unregister tokenizer, preprocessor, and clear metrics
-        self._loader.unregister(name, device)
-
-        # Unregister from memory manager
-        self._memory_manager_for_device(device).unregister_model(name)
+            # Unregister tokenizer, preprocessor, and clear metrics
+            self._loader.unregister(name, device)
+        finally:
+            # The model has already left ``_loaded``, so no later unload can
+            # reach it: accounting and device claims must be handed back even
+            # when teardown raises, or the group stays held for the life of
+            # the process.
+            self._unregister_across_group(name, device)
+            self._release_device_claims(name)
 
         logger.info("Model '%s' unloaded", name)
 
@@ -1595,13 +1970,18 @@ class ModelRegistry:
                     self._loader.unregister(name, device)
                 except Exception:  # noqa: BLE001 - best-effort; must not skip below
                     logger.warning("loader.unregister failed during unload of '%s'", name, exc_info=True)
-                # Unregister from memory manager (a plain dict-pop; never raises)
-                self._memory_manager_for_device(device).unregister_model(name)
+                # Unregister from every manager that accounted for it (plain
+                # dict-pops; never raise). Ordered before the claim release,
+                # because the claim is what names the group's members.
+                self._unregister_across_group(name, device)
+                # Hand back any exclusively held devices. A no-op for the
+                # single-device models that are every profile today.
+                self._release_device_claims(name)
 
             # Freeing memory makes any prior OOM-class load failure on a
             # *sibling* model retryable; clear those records so the next
             # request can re-attempt without waiting out the cooldown.
-            cleared = self._clear_transient_failures()
+            cleared = self._clear_transient_failures((LoadErrorClass.OOM, LoadErrorClass.PLACEMENT))
             if cleared:
                 logger.debug(
                     "Cleared %d transient failure record(s) after unloading '%s'",
@@ -1626,7 +2006,11 @@ class ModelRegistry:
         Raises:
             KeyError: If model not found or not loaded.
         """
-        if name not in self._configs:
+        # A config update can drop an entry whose model is still resident, and
+        # that model still holds its memory and its whole device group. Gating
+        # on the config alone would make it unloadable for the life of the
+        # process.
+        if name not in self._configs and name not in self._loaded:
             msg = _ERR_MODEL_NOT_FOUND.format(name=name)
             raise KeyError(msg)
 

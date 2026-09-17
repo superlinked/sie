@@ -15,6 +15,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,7 @@ from sie_server.adapters._generation_base import (
     collect_generation,
     suppress_thinking_blocks,
 )
+from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.adapters.sglang import _server
 from sie_server.adapters.sglang.cuda13 import SGLangStrictThinkingAdapter
 from sie_server.adapters.sglang.generation import (
@@ -2873,3 +2875,411 @@ async def test_duplicate_event_keys_raise_typed_error_before_output(adapter, n, 
                 raise AssertionError("duplicate keys must not yield text or usage")
     assert error.value.code == "inference_error"
     assert "secret" not in str(error.value)
+
+
+def _tp_adapter(**overrides: Any) -> SGLangGenerationAdapter:
+    kwargs: dict[str, Any] = {
+        "model_name_or_path": "Qwen/Qwen3-4B-Instruct",
+        "max_seq_length": 32768,
+        "mem_fraction_static": 0.85,
+        "served_model_name": "Qwen/Qwen3-4B-Instruct",
+    }
+    # A width above one requires a finite streaming read cap, so supply one by
+    # default here and let the tests that are about that rule set it explicitly.
+    declared = overrides.get("tensor_parallel_size", 1)
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared > 1:
+        kwargs["request_read_timeout_s"] = 120.0
+    kwargs.update(overrides)
+    return SGLangGenerationAdapter(**kwargs)
+
+
+def _launch(adapter: SGLangGenerationAdapter, mock_popen: MagicMock, device: str = "cuda:0") -> tuple[list[str], dict]:
+    adapter.load(device)
+    return mock_popen.call_args[0][0], mock_popen.call_args.kwargs["env"]
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_default_width_is_one_and_leaves_the_launch_unchanged(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """Every profile that does not ask for a width must launch exactly as before."""
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, env = _launch(_tp_adapter(), mock_popen)
+
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "1"
+    assert "--disable-piecewise-cuda-graph" not in cmd
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_declared_width_masks_the_whole_group_and_disables_piecewise_capture(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """Width four claims four ordered devices and turns off the capture path.
+
+    SGLang's default piecewise capture is measured to hang at width two and to
+    exhaust memory at width four on a memory fraction that serves at width one.
+    """
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, env = _launch(_tp_adapter(tensor_parallel_size=4), mock_popen)
+
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "4"
+    assert "--disable-piecewise-cuda-graph" in cmd
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_group_is_anchored_on_the_placement_device(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    _cmd, env = _launch(_tp_adapter(tensor_parallel_size=2), mock_popen, device="cuda:2")
+
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_profile_environment_cannot_move_or_widen_the_device_claim(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """The mask is the registry's decision, not the profile's.
+
+    Before the width was typed, a profile could set CUDA_VISIBLE_DEVICES in
+    ``extra_env`` and silently serve on devices the registry had not reserved
+    and was not accounting for. The mask is now written last.
+    """
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    adapter = _tp_adapter(
+        tensor_parallel_size=2,
+        extra_env={"CUDA_VISIBLE_DEVICES": "4,5,6,7", "SIE_UNRELATED": "kept"},
+    )
+    _cmd, env = _launch(adapter, mock_popen)
+
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert env["SIE_UNRELATED"] == "kept"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_capture_path_can_be_re_enabled_explicitly(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """A profile that has measured its own engine build may opt back in."""
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, _env = _launch(
+        _tp_adapter(tensor_parallel_size=4, disable_piecewise_cuda_graph=False),
+        mock_popen,
+    )
+
+    assert "--disable-piecewise-cuda-graph" not in cmd
+
+
+@pytest.mark.parametrize("bad", [0, -1, 9, 2.0, "4", True, None])
+def test_invalid_width_is_refused_at_construction(bad: Any) -> None:
+    """A bad width fails where it is declared, not as an engine crash later."""
+    with pytest.raises(ValueError, match="tensor_parallel_size"):
+        _tp_adapter(tensor_parallel_size=bad)
+
+
+def test_width_one_is_the_only_width_that_needs_no_extra_devices() -> None:
+    assert _server.resolve_device_group(0, 1) == [0]
+    assert _server.resolve_device_group(3, 1) == [3]
+
+
+def test_launcher_refuses_a_repeated_device() -> None:
+    """Two ranks on one card deadlock rather than fail, so refuse it early."""
+    with pytest.raises(ValueError, match="distinct"):
+        _server.launch_sglang_server(["true"], device_indices=[0, 0], output_file=MagicMock())
+
+
+def test_launcher_refuses_an_empty_group() -> None:
+    with pytest.raises(ValueError, match="at least one device"):
+        _server.launch_sglang_server(["true"], device_indices=[], output_file=MagicMock())
+
+
+def test_width_above_one_requires_a_finite_streaming_read_cap() -> None:
+    """A stalled collective emits no bytes and raises nothing.
+
+    An unbounded read would hold the request open forever, and with it every
+    accelerator in the group.
+    """
+    with pytest.raises(ValueError, match="request_read_timeout_s"):
+        SGLangGenerationAdapter(
+            model_name_or_path="Qwen/Qwen3-4B-Instruct",
+            served_model_name="Qwen/Qwen3-4B-Instruct",
+            tensor_parallel_size=4,
+        )
+
+
+def test_width_one_keeps_the_unbounded_default() -> None:
+    """Single-device serving is unchanged: the worker owns request lifetime."""
+    adapter = _tp_adapter()
+
+    assert adapter._request_read_timeout_s is None
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), float("nan"), True, "30"])
+def test_invalid_read_cap_is_refused(bad: Any) -> None:
+    with pytest.raises(ValueError, match="request_read_timeout_s"):
+        _tp_adapter(request_read_timeout_s=bad)
+
+
+def test_declared_read_cap_reaches_the_http_client() -> None:
+    adapter = _tp_adapter(tensor_parallel_size=2, request_read_timeout_s=45.5)
+
+    assert adapter._request_read_timeout_s == 45.5
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_a_dead_engine_fails_immediately_instead_of_timing_out_per_request(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """A crashed engine is a terminal answer, not a connection error forever.
+
+    Measured on a four-rank group: a killed rank refused health in about 5 seconds while its
+    process tree took about 67 seconds to exit. Before this check the adapter
+    never noticed either, and kept accepting requests it could not serve.
+    """
+    mock_find_port.return_value = 30005
+    process = MagicMock()
+    process.poll.return_value = None
+    mock_popen.return_value = process
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    adapter = _tp_adapter(tensor_parallel_size=2)
+    adapter.load("cuda:0")
+    adapter._check_loaded()  # alive: no raise
+
+    process.poll.return_value = -9
+
+    with pytest.raises(RuntimeError, match="exited with code -9"):
+        adapter._check_loaded()
+
+
+def test_an_unloaded_adapter_still_reports_not_loaded_first() -> None:
+    """The dead-engine check must not mask the ordinary not-loaded error."""
+    adapter = _tp_adapter()
+
+    with pytest.raises(RuntimeError, match=re.escape(ERR_NOT_LOADED)):
+        adapter._check_loaded()
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_width_one_reserves_no_collective_port(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """Single-device serving does not rendezvous, so nothing extra is taken."""
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    adapter = _tp_adapter()
+    cmd, _env = _launch(adapter, mock_popen)
+
+    assert adapter._nccl_port is None
+    assert "--nccl-port" not in cmd
+    assert "--watchdog-timeout" not in cmd
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_a_group_reserves_its_own_collective_port(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """The engine otherwise picks a random port and two groups can collide.
+
+    A collision does not fail, it hangs in rendezvous, which is the failure
+    shape hardest to attribute.
+    """
+    mock_find_port.side_effect = [30005, 30207]
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    adapter = _tp_adapter(tensor_parallel_size=2)
+    cmd, _env = _launch(adapter, mock_popen)
+
+    assert adapter._nccl_port == 30207
+    assert cmd[cmd.index("--nccl-port") + 1] == "30207"
+    # Reserved from a span kept clear of the HTTP ports.
+    assert mock_find_port.call_args_list[-1].args[0] == _server.NCCL_BASE_PORT
+
+
+@patch("sie_server.adapters.sglang._server.os.getpgid")
+@patch("sie_server.adapters.sglang._server.os.killpg")
+def test_unload_returns_the_collective_port(
+    mock_killpg: MagicMock,
+    mock_getpgid: MagicMock,
+) -> None:
+    """Both spans exhaust under reload churn if either is leaked."""
+    mock_process = MagicMock()
+    mock_process.pid = 12345
+    mock_process.wait.return_value = None
+    mock_getpgid.return_value = 12345
+
+    adapter = _tp_adapter(tensor_parallel_size=2)
+    adapter._process = mock_process
+    adapter._server_url = "http://localhost:30005"
+    adapter._device = "cuda:0"
+    adapter._port = 30005
+    # What ``load`` sets when it takes the rendezvous port from the span.
+    adapter._nccl_port = 30207
+    adapter._reserved_nccl_port = 30207
+    adapter._output_file = _server.open_output_log(prefix="sie_test_sglang_")
+
+    with patch("sie_server.adapters.sglang._server.release_port") as mock_release:
+        adapter.unload()
+
+    released = [call.args[0] for call in mock_release.call_args_list]
+    assert released == [30005, 30207]
+    assert adapter._nccl_port is None
+    assert adapter._reserved_nccl_port is None
+
+
+_DECLARED_NCCL_PORT = 30499
+
+
+def _reserving_http_port(port: int = 30005) -> Any:
+    """A ``find_free_port`` that reserves what it hands out, as the real one does."""
+
+    def reserve(start_port: int = _server.BASE_PORT) -> int:
+        _server._RESERVED_PORTS.add(port)
+        return port
+
+    return reserve
+
+
+@patch("sie_server.adapters.sglang._server.os.getpgid", return_value=12345)
+@patch("sie_server.adapters.sglang._server.os.killpg")
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+def test_a_declared_collective_port_is_reserved_while_loaded_and_returned_on_unload(
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    mock_killpg: MagicMock,
+    mock_getpgid: MagicMock,
+) -> None:
+    mock_popen.return_value = MagicMock(pid=12345, poll=MagicMock(return_value=None), wait=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+    adapter = _tp_adapter(tensor_parallel_size=2, nccl_port=_DECLARED_NCCL_PORT)
+
+    try:
+        with patch("sie_server.adapters.sglang._server.find_free_port", side_effect=_reserving_http_port()):
+            cmd, _env = _launch(adapter, mock_popen)
+
+        assert cmd[cmd.index("--nccl-port") + 1] == str(_DECLARED_NCCL_PORT)
+        assert _DECLARED_NCCL_PORT in _server._RESERVED_PORTS
+
+        adapter.unload()
+
+        assert _DECLARED_NCCL_PORT not in _server._RESERVED_PORTS
+        assert 30005 not in _server._RESERVED_PORTS
+    finally:
+        _server.release_port(_DECLARED_NCCL_PORT)
+        _server.release_port(30005)
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+def test_a_declared_port_another_model_holds_is_refused_without_leaking(
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """Two groups sharing a rendezvous port hang rather than fail."""
+    mock_requests_get.return_value = MagicMock(status_code=200)
+    adapter = _tp_adapter(tensor_parallel_size=2, nccl_port=_DECLARED_NCCL_PORT)
+    _server._RESERVED_PORTS.add(_DECLARED_NCCL_PORT)
+
+    try:
+        with (
+            patch("sie_server.adapters.sglang._server.find_free_port", side_effect=_reserving_http_port()),
+            pytest.raises(RuntimeError, match="already reserved by another model"),
+        ):
+            adapter.load("cuda:0")
+
+        mock_popen.assert_not_called()
+        assert 30005 not in _server._RESERVED_PORTS
+        assert _DECLARED_NCCL_PORT in _server._RESERVED_PORTS, "the other model's reservation must survive"
+    finally:
+        _server.release_port(_DECLARED_NCCL_PORT)
+        _server.release_port(30005)
+
+
+def test_a_declared_collective_port_at_width_one_is_refused() -> None:
+    """A single rank never rendezvouses, so the port would be silently ignored."""
+    with pytest.raises(ValueError, match="nccl_port applies only above"):
+        _tp_adapter(nccl_port=_DECLARED_NCCL_PORT)
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_a_declared_watchdog_bound_reaches_the_engine(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """A wedged forward batch must crash the engine inside a budget SIE owns."""
+    mock_find_port.side_effect = [30005, 30207]
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, _env = _launch(_tp_adapter(tensor_parallel_size=2, watchdog_timeout_s=90.0), mock_popen)
+
+    assert cmd[cmd.index("--watchdog-timeout") + 1] == "90.0"
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), True, "90"])
+def test_an_invalid_watchdog_bound_is_refused(bad: Any) -> None:
+    with pytest.raises(ValueError, match="watchdog_timeout_s"):
+        _tp_adapter(watchdog_timeout_s=bad)
+
+
+@pytest.mark.parametrize("bad", [0, 80, 70000, True, "30207"])
+def test_an_invalid_collective_port_is_refused(bad: Any) -> None:
+    with pytest.raises(ValueError, match="nccl_port"):
+        _tp_adapter(nccl_port=bad)

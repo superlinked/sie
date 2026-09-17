@@ -803,7 +803,19 @@ workers:
   #                    worker process env var.
   #   gpu.count:       int. 0 disables nvidia.com/gpu request on the pod.
   #                    Values >1 render one adapter child container per GPU
-  #                    plus one sidecar routing across child IPC sockets.
+  #                    plus one sidecar routing across child IPC sockets,
+  #                    unless gpu.deviceGroup is set.
+  #   gpu.deviceGroup: bool, default false. Inverts what gpu.count means. One
+  #                    adapter child owns every GPU in the pod instead of one
+  #                    child per GPU, which is what a model too large for a
+  #                    single accelerator needs. The child sees the full
+  #                    device list in SIE_DEVICES and requests every GPU, and
+  #                    the model profile declares the matching
+  #                    adapter_options.loadtime.tensor_parallel_size. Requires
+  #                    gpu.count >= 2. The pod, the lane tuple and the
+  #                    autoscaling unit are otherwise unchanged. SIE_GPU_COUNT
+  #                    advertises serving slots rather than cards, so a device
+  #                    group publishes one however many accelerators it holds.
   #   sidecar.emulatedChildCount:
   #                    int. CPU-only local/dev fanout for exercising the same
   #                    sidecar child routing without GPU resources. GPU pools

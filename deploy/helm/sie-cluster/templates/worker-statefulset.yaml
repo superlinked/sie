@@ -134,8 +134,12 @@ fast at render time.
 {{- if and (gt $emulatedChildCount 0) (gt $gpuCount 0) }}
 {{- fail (printf "workers.pools.%s.sidecar.emulatedChildCount is CPU-only; GPU pools use gpu.count for child fanout." $poolName) }}
 {{- end }}
+{{- $deviceGroup := dig "deviceGroup" false $pool.gpu }}
+{{- if and $deviceGroup (lt $gpuCount 2) }}
+{{- fail (printf "workers.pools.%s.gpu.deviceGroup requires gpu.count >= 2; a single accelerator is the ordinary pool shape." $poolName) }}
+{{- end }}
 {{- $workerChildCount := 1 }}
-{{- if gt $gpuCount 1 }}
+{{- if and (gt $gpuCount 1) (not $deviceGroup) }}
 {{- $workerChildCount = $gpuCount }}
 {{- else if gt $emulatedChildCount 1 }}
 {{- $workerChildCount = $emulatedChildCount }}
@@ -634,8 +638,11 @@ spec:
               value: {{ $machineProfile | quote }}
             {{- if $pool.gpu }}
             {{- if $pool.gpu.count }}
+            # Serving slots, not cards: a device-group pod runs one engine that
+            # owns every accelerator, so the sidecar must not advertise the
+            # card count as capacity.
             - name: SIE_GPU_COUNT
-              value: {{ $pool.gpu.count | quote }}
+              value: {{ $workerChildCount | quote }}
             {{- end }}
             {{- end }}
             {{- if $payloadStoreUrl }}

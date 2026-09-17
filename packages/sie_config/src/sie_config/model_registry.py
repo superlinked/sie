@@ -147,6 +147,73 @@ def _validate_profile_name(profile_name: str) -> None:
 _IMMUTABLE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
+# Mirror of sie_server's placement rules (config/model.py). A worker refuses a
+# snapshot containing a profile that breaks them, so the config service refuses
+# the write that would put one there.
+_MAX_TENSOR_PARALLEL_SIZE = 8
+_PLACEMENT_LAUNCH_FLAGS = frozenset(
+    {
+        "--tp",
+        "--tp-size",
+        "--tensor-parallel-size",
+        "--dp",
+        "--dp-size",
+        "--data-parallel-size",
+        "--ep-size",
+        "--expert-parallel-size",
+        "--pp-size",
+        "--pipeline-parallel-size",
+        "--nnodes",
+        "--node-rank",
+        "--dist-init-addr",
+        "--base-gpu-id",
+        "--gpu-id-step",
+    }
+)
+_PLACEMENT_ENV_VARS = frozenset({"CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
+
+
+def _validate_profile_placement(profiles: dict) -> None:
+    """Mirror sie_server's tensor-parallel width and placement rules on raw dicts."""
+    for profile_name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        options = profile.get("adapter_options")
+        loadtime = options.get("loadtime") if isinstance(options, dict) else None
+        if not isinstance(loadtime, dict):
+            continue
+        if "tensor_parallel_size" in loadtime:
+            width = loadtime["tensor_parallel_size"]
+            if isinstance(width, bool) or not isinstance(width, int) or not 1 <= width <= _MAX_TENSOR_PARALLEL_SIZE:
+                msg = (
+                    f"Profile '{profile_name}': tensor_parallel_size must be an integer between 1 and "
+                    f"{_MAX_TENSOR_PARALLEL_SIZE}, got {width!r}"
+                )
+                raise ValueError(msg)
+        raw_args = loadtime.get("extra_launch_args") or []
+        if isinstance(raw_args, list):
+            for entry in raw_args:
+                flag = str(entry).split("=", 1)[0].strip()
+                if not flag.startswith("--") or len(flag) <= len("--"):
+                    continue
+                refused = next((f for f in sorted(_PLACEMENT_LAUNCH_FLAGS) if f.startswith(flag)), None)
+                if refused is not None:
+                    msg = (
+                        f"Profile '{profile_name}': extra_launch_args carries {flag!r}, which sets the "
+                        f"placement flag {refused!r}. Declare loadtime.tensor_parallel_size instead."
+                    )
+                    raise ValueError(msg)
+        raw_env = loadtime.get("extra_env") or {}
+        if isinstance(raw_env, dict):
+            for key in raw_env:
+                if str(key).strip().upper() in _PLACEMENT_ENV_VARS:
+                    msg = (
+                        f"Profile '{profile_name}': extra_env sets {key!r}, which the worker overwrites "
+                        "with its device mask. Declare loadtime.tensor_parallel_size instead."
+                    )
+                    raise ValueError(msg)
+
+
 def _validate_profile_lora_pins(profiles: dict) -> None:
     """Mirror sie_server's pinned-LoRA spelling rules (#2113) on raw dicts.
 
@@ -1036,6 +1103,7 @@ class ModelRegistry:
             raise ValueError(msg)
 
         _validate_profile_lora_pins(profiles)
+        _validate_profile_placement(profiles)
 
         for profile_name, profile in profiles.items():
             _validate_profile_name(str(profile_name))
@@ -1335,6 +1403,7 @@ class ModelRegistry:
             raise ValueError(msg)
 
         _validate_profile_lora_pins(profiles)
+        _validate_profile_placement(profiles)
 
         for profile_name, profile in profiles.items():
             _validate_profile_name(str(profile_name))

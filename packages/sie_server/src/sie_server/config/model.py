@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from sie_server.config.device_groups import validate_tensor_parallel_size
 from sie_server.config.engine import ComputePrecision
 from sie_server.config.package_artifacts import (
     PackageArtifactDeclaration,
@@ -291,6 +292,52 @@ class Tasks(BaseModel):
     generate: GenerateTask | None = None
 
 
+_PLACEMENT_LAUNCH_FLAGS = frozenset(
+    {
+        "--tp",
+        "--tp-size",
+        "--tensor-parallel-size",
+        "--dp",
+        "--dp-size",
+        "--data-parallel-size",
+        "--ep-size",
+        "--expert-parallel-size",
+        "--pp-size",
+        "--pipeline-parallel-size",
+        "--nnodes",
+        "--node-rank",
+        "--dist-init-addr",
+        "--base-gpu-id",
+        "--gpu-id-step",
+    }
+)
+"""Launch flags that decide how many accelerators a model takes, or which.
+
+Each one is refused inside ``extra_launch_args`` because the registry reserves
+devices from the declared width, and a width passed straight to the engine
+would serve on devices nothing reserved.
+"""
+
+
+def _refused_placement_flag(token: object) -> str | None:
+    """The placement flag a launch-argument token spells, abbreviations included.
+
+    SGLang's parser accepts any unambiguous prefix of a long option, so
+    ``--tensor-parallel 4`` reaches ``--tensor-parallel-size`` exactly as the
+    full spelling does.
+    """
+    flag = str(token).split("=", 1)[0].strip()
+    if not flag.startswith("--") or len(flag) <= len("--"):
+        return None
+    for refused in sorted(_PLACEMENT_LAUNCH_FLAGS):
+        if refused.startswith(flag):
+            return refused
+    return None
+
+
+_PLACEMENT_ENV_VARS = frozenset({"CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
+
+
 class AdapterOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -370,6 +417,50 @@ class AdapterOptions(BaseModel):
         # Source identity lives on ModelConfig, so only parse the closed nested
         # declaration and reject loader-owned injection fields at this layer.
         parse_serving_artifact_declaration(self.loadtime)
+        return self
+
+    @model_validator(mode="after")
+    def validate_placement_is_not_smuggled(self) -> "AdapterOptions":
+        """Refuse placement facts hidden in the raw passthroughs.
+
+        How many accelerators a model takes has to be visible to the registry
+        that reserves them. A width reaching the engine through
+        ``extra_launch_args`` is not, so the model would serve on a group
+        nothing reserved. ``extra_env`` is refused for the same reason, and
+        because the launcher writes the device mask last, so a mask set there
+        would be silently discarded rather than honoured.
+
+        Requirements that belong to one engine, such as a read cap for a
+        group, are enforced by that engine's adapter, since a width is valid
+        for any adapter that accepts one.
+        """
+        # Key presence, not value: an explicit null is a mistake rather than a
+        # request for the default, and the adapter rejects it either way.
+        # Catching it here keeps the two layers from disagreeing.
+        if "tensor_parallel_size" in self.loadtime:
+            validate_tensor_parallel_size(self.loadtime.get("tensor_parallel_size"))
+
+        raw_args = self.loadtime.get("extra_launch_args") or []
+        if isinstance(raw_args, list):
+            for entry in raw_args:
+                refused = _refused_placement_flag(entry)
+                if refused is not None:
+                    msg = (
+                        f"extra_launch_args carries {str(entry).split('=', 1)[0].strip()!r}, which sets the "
+                        f"placement flag {refused!r}. Declare the width as "
+                        "loadtime.tensor_parallel_size instead, so the registry can reserve the devices."
+                    )
+                    raise ValueError(msg)
+
+        raw_env = self.loadtime.get("extra_env") or {}
+        if isinstance(raw_env, dict):
+            for key in raw_env:
+                if str(key).strip().upper() in _PLACEMENT_ENV_VARS:
+                    msg = (
+                        f"extra_env sets {key!r}, which the launcher overwrites with the "
+                        "registry's device mask. Declare loadtime.tensor_parallel_size instead."
+                    )
+                    raise ValueError(msg)
         return self
 
 

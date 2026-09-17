@@ -1,5 +1,6 @@
 """Tests for SGLang embedding adapter (HTTP server mode)."""
 
+import json
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -807,14 +808,14 @@ class TestPortReservation:
 
 class TestKernelCacheEnvironment:
     def test_disabled_without_root(self) -> None:
-        assert _server._kernel_cache_env({}, device_index=0) == {}
+        assert _server._kernel_cache_env({}, device_indices=[0]) == {}
 
     @patch("sie_server.adapters.sglang._server.subprocess.run")
     def test_gpu_key_uses_driver_inventory_without_initializing_cuda(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(stdout="NVIDIA H100 80GB HBM3\nNVIDIA H200\n")
 
-        first_key = _server._gpu_cache_key(0)
-        second_key = _server._gpu_cache_key(1)
+        first_key = _server._gpu_cache_key([0])
+        second_key = _server._gpu_cache_key([1])
 
         assert first_key is not None
         assert first_key.startswith("gpu-")
@@ -827,12 +828,29 @@ class TestKernelCacheEnvironment:
             "--format=csv,noheader",
         ]
 
+    @patch("sie_server.adapters.sglang._server.subprocess.run")
+    def test_gpu_key_is_shared_by_a_uniform_group(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = MagicMock(stdout="NVIDIA L4\nNVIDIA L4\nNVIDIA L4\nNVIDIA L4\n")
+
+        assert _server._gpu_cache_key([0, 1, 2, 3]) == _server._gpu_cache_key([0])
+
+    @patch("sie_server.adapters.sglang._server.subprocess.run")
+    def test_gpu_key_refuses_a_mixed_group(self, mock_run: MagicMock) -> None:
+        """A mixed group must not reuse either member's artifacts.
+
+        Kernels compiled for one product are not valid for the other, and a
+        cache hit would serve them silently.
+        """
+        mock_run.return_value = MagicMock(stdout="NVIDIA L4\nNVIDIA H100 80GB HBM3\n")
+
+        assert _server._gpu_cache_key([0, 1]) is None
+
     def test_scopes_upstream_caches_by_abi_and_gpu(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
-        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_index: "sm120-gpu123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm120-gpu123")
 
         env = {_server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path)}
-        cache_env = _server._kernel_cache_env(env, device_index=0)
+        cache_env = _server._kernel_cache_env(env, device_indices=[0])
 
         namespace = tmp_path / "v1" / "abi123" / "sm120-gpu123" / "device-0"
         assert cache_env["SGLANG_DG_CACHE_DIR"] == str(namespace / "deep-gemm")
@@ -841,16 +859,35 @@ class TestKernelCacheEnvironment:
         assert cache_env["TRITON_CACHE_DIR"] == str(namespace / "triton")
         assert all(Path(path).is_dir() for path in cache_env.values())
 
+    def test_group_namespace_is_distinct_from_single_device(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Width-four artifacts must not be served to a width-one load.
+
+        The namespace carries the whole group, so the same card at a different
+        width reads a different directory.
+        """
+        monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm120-gpu123")
+        env = {_server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path)}
+
+        single = _server._kernel_cache_env(dict(env), device_indices=[0])
+        group = _server._kernel_cache_env(dict(env), device_indices=[0, 1, 2, 3])
+
+        assert single["TRITON_CACHE_DIR"].endswith("/device-0/triton")
+        assert group["TRITON_CACHE_DIR"].endswith("/device-0_1_2_3/triton")
+        assert single["TRITON_CACHE_DIR"] != group["TRITON_CACHE_DIR"]
+
     def test_explicit_upstream_path_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
-        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_index: "sm90-gpu123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm90-gpu123")
         explicit = tmp_path / "operator-deep-gemm"
         env = {
             _server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path / "managed"),
             "SGLANG_DG_CACHE_DIR": str(explicit),
         }
 
-        cache_env = _server._kernel_cache_env(env, device_index=0)
+        cache_env = _server._kernel_cache_env(env, device_indices=[0])
 
         assert "SGLANG_DG_CACHE_DIR" not in cache_env
         assert not explicit.exists()
@@ -858,12 +895,12 @@ class TestKernelCacheEnvironment:
 
     def test_invalid_or_unwritable_root_falls_back(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
-        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_index: "sm90-gpu123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm90-gpu123")
         blocker = tmp_path / "not-a-directory"
         blocker.write_text("x")
 
-        assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: "relative"}, device_index=0) == {}
-        assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(blocker)}, device_index=0) == {}
+        assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: "relative"}, device_indices=[0]) == {}
+        assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(blocker)}, device_indices=[0]) == {}
 
         with patch(
             "sie_server.adapters.sglang._server.tempfile.NamedTemporaryFile",
@@ -872,7 +909,7 @@ class TestKernelCacheEnvironment:
             assert (
                 _server._kernel_cache_env(
                     {_server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path / "read-only")},
-                    device_index=0,
+                    device_indices=[0],
                 )
                 == {}
             )
@@ -889,3 +926,184 @@ def test_startup_failure_error_distinguishes_crash_from_timeout() -> None:
     crash_error = _server.startup_failure_error(None, crash_exit_code=-9)
     assert "process exited during startup (exit code -9)" in str(crash_error)
     assert "failed to start within timeout" not in str(crash_error)
+
+
+class TestWidthAgainstModelShape:
+    """A width must divide the dimensions the engine shards across ranks.
+
+    The engine asserts this itself, but only after loading weights, which on a
+    multi-accelerator load holds every card in the group for minutes before the
+    launch fails, and a supervisor that restarts the worker repeats that.
+    """
+
+    @staticmethod
+    def _model_dir(tmp_path: Path, **config: object) -> str:
+        (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        return str(tmp_path)
+
+    @pytest.mark.parametrize("width", [1, 2, 4])
+    def test_a_dividing_width_is_accepted(self, tmp_path: Path, width: int) -> None:
+        path = self._model_dir(tmp_path, num_attention_heads=28, num_key_value_heads=4)
+
+        _server.validate_width_against_model_config(width, model_name_or_path=path)
+
+    def test_a_width_that_splits_attention_heads_unevenly_is_refused(self, tmp_path: Path) -> None:
+        path = self._model_dir(tmp_path, num_attention_heads=28, num_key_value_heads=28)
+
+        with pytest.raises(ValueError, match="num_attention_heads=28"):
+            _server.validate_width_against_model_config(8, model_name_or_path=path)
+
+    def test_a_width_that_splits_key_value_heads_unevenly_is_refused(self, tmp_path: Path) -> None:
+        """Neither a multiple nor a divisor: the heads can be neither split nor replicated."""
+        path = self._model_dir(tmp_path, num_attention_heads=24, num_key_value_heads=6)
+
+        with pytest.raises(ValueError, match="num_key_value_heads=6"):
+            _server.validate_width_against_model_config(4, model_name_or_path=path)
+
+    def test_fewer_key_value_heads_than_the_width_are_replicated(self, tmp_path: Path) -> None:
+        """A width above the group count is legal: the engine replicates the heads.
+
+        Refusing it would reject a shape that serves, which this check exists
+        never to do.
+        """
+        path = self._model_dir(tmp_path, num_attention_heads=32, num_key_value_heads=4)
+
+        _server.validate_width_against_model_config(8, model_name_or_path=path)
+
+    def test_a_multimodal_config_is_checked_against_its_text_stack(self, tmp_path: Path) -> None:
+        """Top-level head counts can describe the vision tower, which is not sharded."""
+        path = self._model_dir(
+            tmp_path,
+            num_attention_heads=12,
+            text_config={"num_attention_heads": 32, "num_key_value_heads": 8},
+        )
+
+        _server.validate_width_against_model_config(8, model_name_or_path=path)
+
+    def test_width_one_is_never_checked(self, tmp_path: Path) -> None:
+        """Single-device serving shards nothing, so no division has to hold."""
+        path = self._model_dir(tmp_path, num_attention_heads=7, num_key_value_heads=7)
+
+        _server.validate_width_against_model_config(1, model_name_or_path=path)
+
+    def test_an_unreadable_config_checks_nothing(self, tmp_path: Path) -> None:
+        """Best effort: this may only turn a later crash into an earlier error.
+
+        It must never reject a shape that would have worked, so a model whose
+        config cannot be read without a download is left to the engine.
+        """
+        _server.validate_width_against_model_config(4, model_name_or_path=str(tmp_path / "absent"))
+        _server.validate_width_against_model_config(4, model_name_or_path="org/not-in-any-cache")
+
+    def test_a_malformed_config_checks_nothing(self, tmp_path: Path) -> None:
+        (tmp_path / "config.json").write_text("{not json", encoding="utf-8")
+
+        _server.validate_width_against_model_config(4, model_name_or_path=str(tmp_path))
+
+    def test_missing_or_nonsense_head_counts_are_skipped(self, tmp_path: Path) -> None:
+        path = self._model_dir(tmp_path, num_attention_heads=0, num_key_value_heads="many")
+
+        _server.validate_width_against_model_config(4, model_name_or_path=path)
+
+
+class TestEmbeddingEngineLiveness:
+    """The embedding adapter must notice its engine dying, like generation does."""
+
+    @staticmethod
+    def _adapter() -> object:
+        from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
+
+        return SGLangEmbeddingAdapter(model_name_or_path="org/embed", dense_dim=768)
+
+    def test_an_unloaded_adapter_reports_not_loaded(self) -> None:
+        adapter = self._adapter()
+
+        with pytest.raises(RuntimeError, match="not loaded"):
+            adapter._check_loaded()
+
+    def test_a_live_engine_passes(self) -> None:
+        adapter = self._adapter()
+        adapter._server_url = "http://localhost:30005"
+        adapter._process = MagicMock(poll=MagicMock(return_value=None))
+
+        adapter._check_loaded()
+
+    def test_a_dead_engine_is_a_terminal_error_not_a_timeout(self) -> None:
+        adapter = self._adapter()
+        adapter._server_url = "http://localhost:30005"
+        adapter._process = MagicMock(poll=MagicMock(return_value=-9))
+
+        with pytest.raises(RuntimeError, match="exited with code -9"):
+            adapter._check_loaded()
+
+    def test_the_removed_pooling_option_is_no_longer_accepted(self) -> None:
+        """Neither pinned engine declares a pooling flag, so the option was dead.
+
+        It is better refused by the loader's unknown-option check than emitted
+        and rejected by the engine at startup.
+        """
+        from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
+        from sie_server.core.loader import reject_unknown_loadtime_options
+
+        with pytest.raises(ValueError, match="pooling_method"):
+            reject_unknown_loadtime_options(SGLangEmbeddingAdapter, {"pooling_method": "mean"}, model_name="demo")
+
+
+class TestEmbeddingGroupLaunch:
+    """An embedding profile that declares a width, through the real ``load``."""
+
+    @staticmethod
+    def _reserving(port: int) -> object:
+        def reserve(start_port: int = _server.BASE_PORT) -> int:
+            _server._RESERVED_PORTS.add(port)
+            return port
+
+        return reserve
+
+    @patch("sie_server.adapters.sglang._server.os.getpgid", return_value=12345)
+    @patch("sie_server.adapters.sglang._server.os.killpg")
+    @patch("sie_server.adapters.sglang._server.subprocess.Popen")
+    @patch("sie_server.adapters.sglang._server.requests.get")
+    def test_a_width_launches_the_whole_group_and_hands_every_port_back(
+        self,
+        mock_requests_get: MagicMock,
+        mock_popen: MagicMock,
+        mock_killpg: MagicMock,
+        mock_getpgid: MagicMock,
+    ) -> None:
+        mock_popen.return_value = MagicMock(
+            pid=12345, poll=MagicMock(return_value=None), wait=MagicMock(return_value=None)
+        )
+        mock_requests_get.return_value = MagicMock(status_code=200)
+        ports = iter([30011, 30411])
+        adapter = SGLangEmbeddingAdapter(
+            model_name_or_path="Qwen/Qwen3-Embedding-8B",
+            tensor_parallel_size=2,
+            watchdog_timeout_s=90.0,
+        )
+
+        try:
+            with patch(
+                "sie_server.adapters.sglang._server.find_free_port",
+                side_effect=lambda start_port=_server.BASE_PORT: self._reserving(next(ports))(start_port),
+            ):
+                adapter.load("cuda:2")
+
+            cmd = mock_popen.call_args[0][0]
+            env = mock_popen.call_args.kwargs["env"]
+            assert cmd[cmd.index("--tensor-parallel-size") + 1] == "2"
+            assert cmd[cmd.index("--nccl-port") + 1] == "30411"
+            assert cmd[cmd.index("--watchdog-timeout") + 1] == "90.0"
+            assert "--disable-piecewise-cuda-graph" in cmd
+            assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+
+            adapter.unload()
+
+            assert {30011, 30411}.isdisjoint(_server._RESERVED_PORTS)
+        finally:
+            _server.release_port(30011)
+            _server.release_port(30411)
+
+    def test_a_declared_collective_port_at_width_one_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="nccl_port applies only above"):
+            SGLangEmbeddingAdapter(model_name_or_path="Qwen/Qwen3-Embedding-8B", nccl_port=30499)
