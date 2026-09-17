@@ -109,6 +109,24 @@ class TestExclusiveClaim:
         assert registry._loaded["wide"].device == "cuda:0"
 
     @patch("sie_server.core.model_loader.load_adapter")
+    async def test_the_claim_log_names_only_the_loading_models_devices(
+        self, mock_load_adapter: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """With two groups resident, the second claim must not report the first group's cards."""
+        registry = _registry(["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
+        registry.add_config(_make_config("first", width=2))
+        registry.add_config(_make_config("second", width=2))
+        mock_load_adapter.return_value = _adapter()
+        await registry.load_async("first", "cuda:0")
+        caplog.clear()
+
+        with caplog.at_level("INFO", logger="sie_server.core.registry"):
+            await registry.load_async("second", "cuda:2")
+
+        claims = [record.getMessage() for record in caplog.records if "claimed devices" in record.getMessage()]
+        assert claims == ["Model 'second' claimed devices ['cuda:2', 'cuda:3'] exclusively"]
+
+    @patch("sie_server.core.model_loader.load_adapter")
     async def test_a_single_device_model_never_claims_anything(self, mock_load_adapter: MagicMock) -> None:
         """The path every existing profile takes must be untouched."""
         registry = _registry(["cuda:0", "cuda:1"])

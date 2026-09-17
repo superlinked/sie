@@ -965,9 +965,10 @@ class ModelRegistry:
         raise DevicePlacementError(msg)
 
     def _claim_device_group(self, name: str, members: Iterable[str]) -> None:
-        for member in members:
+        claimed = list(members)
+        for member in claimed:
             self._device_claims[member] = name
-        logger.info("Model '%s' claimed devices %s exclusively", name, sorted(self._device_claims))
+        logger.info("Model '%s' claimed devices %s exclusively", name, claimed)
 
     def _reject_unservable_width(self, name: str, width: int) -> None:
         """Refuse a width this worker could never satisfy, whatever is free.
