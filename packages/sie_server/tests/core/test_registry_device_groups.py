@@ -12,6 +12,7 @@ parts a multi-device one depends on.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -456,6 +457,37 @@ class TestGroupPlacementEvicts:
         claimed = sorted(registry._device_claims)
         assert len(claimed) == 2
         assert "cuda:0" not in claimed
+
+    @pytest.mark.parametrize(
+        ("idle", "busy", "freed"),
+        [("first", "second", ["cuda:0", "cuda:1"]), ("second", "first", ["cuda:2", "cuda:3"])],
+    )
+    @patch("sie_server.core.model_loader.load_adapter")
+    async def test_between_equal_blocks_the_least_recently_used_group_is_evicted(
+        self, mock_load_adapter: MagicMock, idle: str, busy: str, freed: list[str]
+    ) -> None:
+        """Device order must not decide which of two resident groups goes.
+
+        Evicting the busy one would leave the idle group holding its cards while
+        the busy model and the newcomer take turns evicting each other.
+        """
+        registry = _registry(["cuda:0", "cuda:1", "cuda:2", "cuda:3"])
+        for name in ("first", "second", "third"):
+            registry.add_config(_make_config(name, width=2))
+        mock_load_adapter.side_effect = [_adapter(), _adapter(), _adapter()]
+
+        await registry.load_async("first", "cuda")
+        await registry.load_async("second", "cuda")
+        assert registry._device_claims == {"cuda:0": "first", "cuda:1": "first", "cuda:2": "second", "cuda:3": "second"}
+        idle_info = registry._memory_manager_for_model(idle).get_model_info(idle)
+        assert idle_info is not None
+        idle_info.last_used_at = time.monotonic() - 100.0
+
+        await registry.load_async("third", "cuda")
+
+        assert idle not in registry._loaded
+        assert busy in registry._loaded
+        assert sorted(device for device, holder in registry._device_claims.items() if holder == "third") == freed
 
     @patch("sie_server.core.model_loader.load_adapter")
     async def test_a_pinned_neighbour_is_never_evicted(self, mock_load_adapter: MagicMock) -> None:

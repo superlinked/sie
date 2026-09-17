@@ -845,13 +845,15 @@ class ModelRegistry:
         an operator intervened.
 
         A block holding a pinned model is skipped rather than emptied, and the
-        block needing the fewest evictions wins.
+        block needing the fewest evictions wins. Between blocks needing as many,
+        the one whose most recently used resident was used longest ago wins, so
+        device order never evicts a busy group while an idle one keeps its cards.
 
         Raises:
             DevicePlacementError: When no block of that width can be freed.
         """
         candidates = self._group_candidates(width, requested_device)
-        fewest: tuple[str, list[str], set[str]] | None = None
+        cheapest: tuple[tuple[int, float], str, list[str], set[str]] | None = None
         for anchor, members in candidates:
             blockers = self._group_blockers(members, for_model=name)
             if blockers is None:
@@ -860,10 +862,11 @@ class ModelRegistry:
                 return anchor, members
             if any(self._is_pinned(blocker) for blocker in blockers):
                 continue
-            if fewest is None or len(blockers) < len(fewest[2]):
-                fewest = (anchor, members, blockers)
+            cost = (len(blockers), max(self._last_used_at(blocker) for blocker in blockers))
+            if cheapest is None or cost < cheapest[0]:
+                cheapest = (cost, anchor, members, blockers)
 
-        if fewest is None:
+        if cheapest is None:
             msg = (
                 f"Model '{name}' declares tensor_parallel_size={width} but no block of {width} "
                 f"device(s) on this worker can be freed for it (devices={self._devices}, "
@@ -871,7 +874,7 @@ class ModelRegistry:
             )
             raise DevicePlacementError(msg)
 
-        anchor, members, blockers = fewest
+        _, anchor, members, blockers = cheapest
         for blocker in sorted(blockers):
             if blocker not in self._loaded:
                 continue
@@ -911,12 +914,12 @@ class ModelRegistry:
                 holders.add(holder)
         if not holders:
             return None
+        return min(sorted(holders), key=self._last_used_at)
 
-        def last_used(holder: str) -> float:
-            info = self._memory_manager_for_model(holder).get_model_info(holder)
-            return info.last_used_at if info is not None else 0.0
-
-        return min(sorted(holders), key=last_used)
+    def _last_used_at(self, name: str) -> float:
+        """When ``name`` was last used on its memory manager's clock, 0.0 when untracked."""
+        info = self._memory_manager_for_model(name).get_model_info(name)
+        return info.last_used_at if info is not None else 0.0
 
     async def _resolve_single_device_evicting(self, name: str, requested_device: str) -> str:
         """Resolve one device for a single-device load, displacing a group if it must.
