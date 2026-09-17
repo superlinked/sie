@@ -1,0 +1,2593 @@
+{
+	"inputs_sha256": "fbb045fffe75ff5300af1eac01dab67847bfa72c891b3f902507b5c284debb4e",
+	"documents_registered": 6,
+	"documents_displayed": 3,
+	"stage1": {
+		"model": "lightonai/LightOnOCR-2-1B",
+		"registered_tokens": 86,
+		"tokens_in_text": 81
+	},
+	"stage2_totals": {
+		"primary": {
+			"model": "Qwen/Qwen3.8-27B-FP8",
+			"calls": 7,
+			"json_parsed": 7,
+			"schema_valid": 7,
+			"registered_fields": 89,
+			"matched": 78,
+			"verdicts": {
+				"match": 78,
+				"stage2_error": 9,
+				"stage1_lost": 1,
+				"stage1_error": 1
+			}
+		},
+		"secondary": {
+			"model": "Qwen/Qwen3.5-4B",
+			"calls": 7,
+			"json_parsed": 7,
+			"schema_valid": 2,
+			"registered_fields": 89,
+			"matched": 27,
+			"verdicts": {
+				"stage2_error": 16,
+				"match": 27,
+				"stage2_unusable": 46
+			}
+		}
+	},
+	"predictions": [
+		{
+			"index": 0,
+			"text": "At least one of NVIDIA's parenthesised rows comes back with the wrong sign, scored stage2_error.",
+			"short": "A parenthesised row comes back with the wrong sign",
+			"held": false,
+			"evidence": "All 12 parenthesised values came back negative, from -6386 to -257."
+		},
+		{
+			"index": 1,
+			"text": "NVIDIA's `Taiwan (2)` carries its footnote marker into the location field, scored stage2_error.",
+			"short": "A footnote marker rides into a field",
+			"held": false,
+			"evidence": "The page prints Taiwan (2); the field came back Taiwan."
+		},
+		{
+			"index": 2,
+			"text": "The label's best_before comes back 2023-12-02, a US reading of 12/02/2024, against the barcode's 2024-02-12.",
+			"short": "An ambiguous date is read the American way",
+			"held": false,
+			"evidence": "It came back 2024-02-12, taken from the GS1 element string the OCR kept. Scored against both 2023-12-02 as registered and 2024-12-02, which is what a US reading of 12/02/2024 actually gives."
+		},
+		{
+			"index": 3,
+			"text": "Stage 1 loses the blurred receipt header, and stage 2 invents a merchant name or a transaction date rather than returning null.",
+			"short": "An unreadable header comes back as an invented value",
+			"held": false,
+			"evidence": "Stage 1 did lose the header, as predicted. Stage 2 returned null for both fields rather than filling them, and invented nothing anywhere in the set."
+		},
+		{
+			"index": 4,
+			"text": "Across the whole registered set, most fields match.",
+			"short": "Most fields match",
+			"held": true,
+			"evidence": "78 of 89 fields match the printed page."
+		}
+	],
+	"documents": [
+		{
+			"document": "nvidia-annual-report-p78",
+			"kind": "clean born-digital page",
+			"displayed": true,
+			"image": "nvidia-annual-report-page-166.png",
+			"image_sha256": "19ea06de9cdbd0c643fac69fbae1b53a8d94c769ec9700878b2fd733fadb5ba7",
+			"stage1": {
+				"markdown_chars": 4755,
+				"registered_tokens": 42,
+				"tokens_in_text": 42,
+				"tokens_missing": []
+			},
+			"calls": [
+				{
+					"document": "nvidia-annual-report-p78",
+					"call": "segment-reconciliation",
+					"schema": "nvidia_segment",
+					"model_key": "primary",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": true,
+					"schema_errors": [],
+					"fields": [
+						{
+							"path": "unit",
+							"printed": "(In millions)",
+							"rule": "contains",
+							"expected": "In millions",
+							"path_resolved": true,
+							"returned": "In millions",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Segment operating income].fy2026",
+							"printed": "139,297",
+							"rule": "integer",
+							"expected": 139297,
+							"path_resolved": true,
+							"returned": 139297,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Segment operating income].fy2025",
+							"printed": "87,960",
+							"rule": "integer",
+							"expected": 87960,
+							"path_resolved": true,
+							"returned": 87960,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Segment operating income].fy2024",
+							"printed": "37,862",
+							"rule": "integer",
+							"expected": 37862,
+							"path_resolved": true,
+							"returned": 37862,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Stock-based compensation expense].fy2026",
+							"printed": "(6,386)",
+							"rule": "signed_parenthesis",
+							"expected": -6386,
+							"path_resolved": true,
+							"returned": -6386,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Stock-based compensation expense].fy2025",
+							"printed": "(4,737)",
+							"rule": "signed_parenthesis",
+							"expected": -4737,
+							"path_resolved": true,
+							"returned": -4737,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Stock-based compensation expense].fy2024",
+							"printed": "(3,549)",
+							"rule": "signed_parenthesis",
+							"expected": -3549,
+							"path_resolved": true,
+							"returned": -3549,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Unallocated operating expenses].fy2026",
+							"printed": "(1,997)",
+							"rule": "signed_parenthesis",
+							"expected": -1997,
+							"path_resolved": true,
+							"returned": -1997,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Unallocated operating expenses].fy2025",
+							"printed": "(1,171)",
+							"rule": "signed_parenthesis",
+							"expected": -1171,
+							"path_resolved": true,
+							"returned": -1171,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Unallocated operating expenses].fy2024",
+							"printed": "(728)",
+							"rule": "signed_parenthesis",
+							"expected": -728,
+							"path_resolved": true,
+							"returned": -728,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Acquisition-related and other costs].fy2026",
+							"printed": "(527)",
+							"rule": "signed_parenthesis",
+							"expected": -527,
+							"path_resolved": true,
+							"returned": -527,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Acquisition-related and other costs].fy2025",
+							"printed": "(599)",
+							"rule": "signed_parenthesis",
+							"expected": -599,
+							"path_resolved": true,
+							"returned": -599,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Acquisition-related and other costs].fy2024",
+							"printed": "(613)",
+							"rule": "signed_parenthesis",
+							"expected": -613,
+							"path_resolved": true,
+							"returned": -613,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest income].fy2026",
+							"printed": "2,300",
+							"rule": "integer",
+							"expected": 2300,
+							"path_resolved": true,
+							"returned": 2300,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest income].fy2025",
+							"printed": "1,786",
+							"rule": "integer",
+							"expected": 1786,
+							"path_resolved": true,
+							"returned": 1786,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest income].fy2024",
+							"printed": "866",
+							"rule": "integer",
+							"expected": 866,
+							"path_resolved": true,
+							"returned": 866,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest expense].fy2026",
+							"printed": "(259)",
+							"rule": "signed_parenthesis",
+							"expected": -259,
+							"path_resolved": true,
+							"returned": -259,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest expense].fy2025",
+							"printed": "(247)",
+							"rule": "signed_parenthesis",
+							"expected": -247,
+							"path_resolved": true,
+							"returned": -247,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest expense].fy2024",
+							"printed": "(257)",
+							"rule": "signed_parenthesis",
+							"expected": -257,
+							"path_resolved": true,
+							"returned": -257,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Other income, net].fy2026",
+							"printed": "9,022",
+							"rule": "integer",
+							"expected": 9022,
+							"path_resolved": true,
+							"returned": 9022,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Other income, net].fy2025",
+							"printed": "1,034",
+							"rule": "integer",
+							"expected": 1034,
+							"path_resolved": true,
+							"returned": 1034,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Other income, net].fy2024",
+							"printed": "237",
+							"rule": "integer",
+							"expected": 237,
+							"path_resolved": true,
+							"returned": 237,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Consolidated income before income tax].fy2026",
+							"printed": "141,450",
+							"rule": "integer",
+							"expected": 141450,
+							"path_resolved": true,
+							"returned": 141450,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Consolidated income before income tax].fy2025",
+							"printed": "84,026",
+							"rule": "integer",
+							"expected": 84026,
+							"path_resolved": true,
+							"returned": 84026,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Consolidated income before income tax].fy2024",
+							"printed": "33,818",
+							"rule": "integer",
+							"expected": 33818,
+							"path_resolved": true,
+							"returned": 33818,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						}
+					],
+					"counts": {
+						"match": 25
+					},
+					"registered_fields": 25,
+					"matched": 25
+				},
+				{
+					"document": "nvidia-annual-report-p78",
+					"call": "segment-reconciliation",
+					"schema": "nvidia_segment",
+					"model_key": "secondary",
+					"model": "Qwen/Qwen3.5-4B",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": true,
+					"schema_errors": [],
+					"fields": [
+						{
+							"path": "unit",
+							"printed": "(In millions)",
+							"rule": "contains",
+							"expected": "In millions",
+							"path_resolved": true,
+							"returned": "millions",
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[line_item=Segment operating income].fy2026",
+							"printed": "139,297",
+							"rule": "integer",
+							"expected": 139297,
+							"path_resolved": true,
+							"returned": 139297,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Segment operating income].fy2025",
+							"printed": "87,960",
+							"rule": "integer",
+							"expected": 87960,
+							"path_resolved": true,
+							"returned": 87960,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Segment operating income].fy2024",
+							"printed": "37,862",
+							"rule": "integer",
+							"expected": 37862,
+							"path_resolved": true,
+							"returned": 37862,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Stock-based compensation expense].fy2026",
+							"printed": "(6,386)",
+							"rule": "signed_parenthesis",
+							"expected": -6386,
+							"path_resolved": true,
+							"returned": -6386,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Stock-based compensation expense].fy2025",
+							"printed": "(4,737)",
+							"rule": "signed_parenthesis",
+							"expected": -4737,
+							"path_resolved": true,
+							"returned": -4737,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Stock-based compensation expense].fy2024",
+							"printed": "(3,549)",
+							"rule": "signed_parenthesis",
+							"expected": -3549,
+							"path_resolved": true,
+							"returned": -3549,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Unallocated operating expenses].fy2026",
+							"printed": "(1,997)",
+							"rule": "signed_parenthesis",
+							"expected": -1997,
+							"path_resolved": true,
+							"returned": -1997,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Unallocated operating expenses].fy2025",
+							"printed": "(1,171)",
+							"rule": "signed_parenthesis",
+							"expected": -1171,
+							"path_resolved": true,
+							"returned": -1171,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Unallocated operating expenses].fy2024",
+							"printed": "(728)",
+							"rule": "signed_parenthesis",
+							"expected": -728,
+							"path_resolved": true,
+							"returned": -728,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Acquisition-related and other costs].fy2026",
+							"printed": "(527)",
+							"rule": "signed_parenthesis",
+							"expected": -527,
+							"path_resolved": true,
+							"returned": -527,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Acquisition-related and other costs].fy2025",
+							"printed": "(599)",
+							"rule": "signed_parenthesis",
+							"expected": -599,
+							"path_resolved": true,
+							"returned": -599,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Acquisition-related and other costs].fy2024",
+							"printed": "(613)",
+							"rule": "signed_parenthesis",
+							"expected": -613,
+							"path_resolved": true,
+							"returned": -613,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest income].fy2026",
+							"printed": "2,300",
+							"rule": "integer",
+							"expected": 2300,
+							"path_resolved": true,
+							"returned": 2300,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest income].fy2025",
+							"printed": "1,786",
+							"rule": "integer",
+							"expected": 1786,
+							"path_resolved": true,
+							"returned": 1786,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest income].fy2024",
+							"printed": "866",
+							"rule": "integer",
+							"expected": 866,
+							"path_resolved": true,
+							"returned": 866,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest expense].fy2026",
+							"printed": "(259)",
+							"rule": "signed_parenthesis",
+							"expected": -259,
+							"path_resolved": true,
+							"returned": -259,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest expense].fy2025",
+							"printed": "(247)",
+							"rule": "signed_parenthesis",
+							"expected": -247,
+							"path_resolved": true,
+							"returned": -247,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Interest expense].fy2024",
+							"printed": "(257)",
+							"rule": "signed_parenthesis",
+							"expected": -257,
+							"path_resolved": true,
+							"returned": -257,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Other income, net].fy2026",
+							"printed": "9,022",
+							"rule": "integer",
+							"expected": 9022,
+							"path_resolved": true,
+							"returned": 9022,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Other income, net].fy2025",
+							"printed": "1,034",
+							"rule": "integer",
+							"expected": 1034,
+							"path_resolved": true,
+							"returned": 1034,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Other income, net].fy2024",
+							"printed": "237",
+							"rule": "integer",
+							"expected": 237,
+							"path_resolved": true,
+							"returned": 237,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Consolidated income before income tax].fy2026",
+							"printed": "141,450",
+							"rule": "integer",
+							"expected": 141450,
+							"path_resolved": true,
+							"returned": 141450,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Consolidated income before income tax].fy2025",
+							"printed": "84,026",
+							"rule": "integer",
+							"expected": 84026,
+							"path_resolved": true,
+							"returned": 84026,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[line_item=Consolidated income before income tax].fy2024",
+							"printed": "33,818",
+							"rule": "integer",
+							"expected": 33818,
+							"path_resolved": true,
+							"returned": 33818,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						}
+					],
+					"counts": {
+						"stage2_error": 1,
+						"match": 24
+					},
+					"registered_fields": 25,
+					"matched": 24
+				},
+				{
+					"document": "nvidia-annual-report-p78",
+					"call": "geographic-revenue",
+					"schema": "nvidia_geographic",
+					"model_key": "primary",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": true,
+					"schema_errors": [],
+					"fields": [
+						{
+							"path": "unit",
+							"printed": "(In millions)",
+							"rule": "contains",
+							"expected": "In millions",
+							"path_resolved": true,
+							"returned": "In millions",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "basis",
+							"printed": "Revenue by geographic area is based upon the location of the customers' headquarters.",
+							"rule": "contains",
+							"expected": "headquarters",
+							"path_resolved": true,
+							"returned": "NVIDIA Corporation and Subsidiaries Notes to the Consolidated Financial Statements",
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=United States].fy2026",
+							"printed": "149,617",
+							"rule": "integer",
+							"expected": 149617,
+							"path_resolved": true,
+							"returned": 139297,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=United States].fy2025",
+							"printed": "77,482",
+							"rule": "integer",
+							"expected": 77482,
+							"path_resolved": true,
+							"returned": 87960,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=United States].fy2024",
+							"printed": "31,533",
+							"rule": "integer",
+							"expected": 31533,
+							"path_resolved": true,
+							"returned": 37862,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=Taiwan].location",
+							"printed": "Taiwan (2)",
+							"rule": "strip_footnote_marker",
+							"expected": "Taiwan",
+							"path_resolved": true,
+							"returned": "Taiwan",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[location=Taiwan].fy2026",
+							"printed": "42,345",
+							"rule": "integer",
+							"expected": 42345,
+							"path_resolved": true,
+							"returned": 42345,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[location=Taiwan].fy2025",
+							"printed": "23,600",
+							"rule": "integer",
+							"expected": 23600,
+							"path_resolved": true,
+							"returned": 23600,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[location=Taiwan].fy2024",
+							"printed": "14,912",
+							"rule": "integer",
+							"expected": 14912,
+							"path_resolved": true,
+							"returned": 14912,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[location=China (including Hong Kong)].fy2026",
+							"printed": "19,677",
+							"rule": "integer",
+							"expected": 19677,
+							"path_resolved": true,
+							"returned": 19677,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[location=China (including Hong Kong)].fy2025",
+							"printed": "25,048",
+							"rule": "integer",
+							"expected": 25048,
+							"path_resolved": true,
+							"returned": 25048,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[location=China (including Hong Kong)].fy2024",
+							"printed": "12,330",
+							"rule": "integer",
+							"expected": 12330,
+							"path_resolved": true,
+							"returned": 12330,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[location=Other].fy2026",
+							"printed": "4,299",
+							"rule": "integer",
+							"expected": 4299,
+							"path_resolved": true,
+							"returned": 4299,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[location=Other].fy2025",
+							"printed": "4,367",
+							"rule": "integer",
+							"expected": 4367,
+							"path_resolved": true,
+							"returned": 4367,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "rows[location=Other].fy2024",
+							"printed": "2,147",
+							"rule": "integer",
+							"expected": 2147,
+							"path_resolved": true,
+							"returned": 2147,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "total_revenue.fy2026",
+							"printed": "215,938",
+							"rule": "integer",
+							"expected": 215938,
+							"path_resolved": true,
+							"returned": 215938,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "total_revenue.fy2025",
+							"printed": "130,497",
+							"rule": "integer",
+							"expected": 130497,
+							"path_resolved": true,
+							"returned": 130497,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "total_revenue.fy2024",
+							"printed": "60,922",
+							"rule": "integer",
+							"expected": 60922,
+							"path_resolved": true,
+							"returned": 60922,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						}
+					],
+					"counts": {
+						"match": 14,
+						"stage2_error": 4
+					},
+					"registered_fields": 18,
+					"matched": 14
+				},
+				{
+					"document": "nvidia-annual-report-p78",
+					"call": "geographic-revenue",
+					"schema": "nvidia_geographic",
+					"model_key": "secondary",
+					"model": "Qwen/Qwen3.5-4B",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": true,
+					"schema_errors": [],
+					"fields": [
+						{
+							"path": "unit",
+							"printed": "(In millions)",
+							"rule": "contains",
+							"expected": "In millions",
+							"path_resolved": true,
+							"returned": "millions",
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "basis",
+							"printed": "Revenue by geographic area is based upon the location of the customers' headquarters.",
+							"rule": "contains",
+							"expected": "headquarters",
+							"path_resolved": true,
+							"returned": "NVIDIA Corporation and Subsidiaries",
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=United States].fy2026",
+							"printed": "149,617",
+							"rule": "integer",
+							"expected": 149617,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=United States].fy2025",
+							"printed": "77,482",
+							"rule": "integer",
+							"expected": 77482,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=United States].fy2024",
+							"printed": "31,533",
+							"rule": "integer",
+							"expected": 31533,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=Taiwan].location",
+							"printed": "Taiwan (2)",
+							"rule": "strip_footnote_marker",
+							"expected": "Taiwan",
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=Taiwan].fy2026",
+							"printed": "42,345",
+							"rule": "integer",
+							"expected": 42345,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=Taiwan].fy2025",
+							"printed": "23,600",
+							"rule": "integer",
+							"expected": 23600,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=Taiwan].fy2024",
+							"printed": "14,912",
+							"rule": "integer",
+							"expected": 14912,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=China (including Hong Kong)].fy2026",
+							"printed": "19,677",
+							"rule": "integer",
+							"expected": 19677,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=China (including Hong Kong)].fy2025",
+							"printed": "25,048",
+							"rule": "integer",
+							"expected": 25048,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=China (including Hong Kong)].fy2024",
+							"printed": "12,330",
+							"rule": "integer",
+							"expected": 12330,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=Other].fy2026",
+							"printed": "4,299",
+							"rule": "integer",
+							"expected": 4299,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=Other].fy2025",
+							"printed": "4,367",
+							"rule": "integer",
+							"expected": 4367,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "rows[location=Other].fy2024",
+							"printed": "2,147",
+							"rule": "integer",
+							"expected": 2147,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "total_revenue.fy2026",
+							"printed": "215,938",
+							"rule": "integer",
+							"expected": 215938,
+							"path_resolved": true,
+							"returned": 215938,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "total_revenue.fy2025",
+							"printed": "130,497",
+							"rule": "integer",
+							"expected": 130497,
+							"path_resolved": true,
+							"returned": 130497,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "total_revenue.fy2024",
+							"printed": "60,922",
+							"rule": "integer",
+							"expected": 60922,
+							"path_resolved": true,
+							"returned": 60922,
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						}
+					],
+					"counts": {
+						"stage2_error": 15,
+						"match": 3
+					},
+					"registered_fields": 18,
+					"matched": 3
+				}
+			]
+		},
+		{
+			"document": "receipt-cord-0007",
+			"kind": "degraded thermal receipt",
+			"displayed": true,
+			"image": "receipt-cord-0007.jpg",
+			"image_sha256": "15494cb391bd72c057e2ca8eea9ddc4942ce0df001b1d7d3acea51053e2ce052",
+			"stage1": {
+				"markdown_chars": 114,
+				"registered_tokens": 8,
+				"tokens_in_text": 7,
+				"tokens_missing": [
+					"Rp.111,000"
+				]
+			},
+			"calls": [
+				{
+					"document": "receipt-cord-0007",
+					"call": "receipt",
+					"schema": "receipt",
+					"model_key": "primary",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": true,
+					"schema_errors": [],
+					"fields": [
+						{
+							"path": "merchant_name",
+							"printed": null,
+							"rule": "absent",
+							"expected": null,
+							"path_resolved": true,
+							"returned": null,
+							"printed_token_in_stage1_text": false,
+							"verdict": "match"
+						},
+						{
+							"path": "transaction_date",
+							"printed": null,
+							"rule": "absent",
+							"expected": null,
+							"path_resolved": true,
+							"returned": null,
+							"printed_token_in_stage1_text": false,
+							"verdict": "match"
+						},
+						{
+							"path": "line_items[description=Kupon 15].amount",
+							"printed": "100,000",
+							"rule": "any_of",
+							"expected": [
+								"100,000",
+								"100000"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "line_items[description=ADD CHICKEN BOX].amount",
+							"printed": "909",
+							"rule": "any_of",
+							"expected": [
+								"909"
+							],
+							"path_resolved": true,
+							"returned": "909",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "subtotal",
+							"printed": "100,909",
+							"rule": "any_of",
+							"expected": [
+								"100,909",
+								"100909"
+							],
+							"path_resolved": true,
+							"returned": "100,909",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "tax",
+							"printed": "10,091",
+							"rule": "any_of",
+							"expected": [
+								"10,091",
+								"10091"
+							],
+							"path_resolved": true,
+							"returned": "10,091",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "total",
+							"printed": "111,000",
+							"rule": "any_of",
+							"expected": [
+								"111,000",
+								"111000"
+							],
+							"path_resolved": true,
+							"returned": "111,000",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "amount_paid",
+							"printed": "Rp.111,000",
+							"rule": "any_of",
+							"expected": [
+								"111,000",
+								"111000",
+								"Rp.111,000",
+								"Rp. 111,000",
+								"Rp 111,000"
+							],
+							"path_resolved": true,
+							"returned": "111,000",
+							"printed_token_in_stage1_text": false,
+							"verdict": "match"
+						},
+						{
+							"path": "payment_method",
+							"printed": "Cash",
+							"rule": "any_of",
+							"expected": [
+								"Cash",
+								"cash"
+							],
+							"path_resolved": true,
+							"returned": "Cash",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "currency",
+							"printed": "Rp.",
+							"rule": "any_of",
+							"expected": [
+								"IDR",
+								"Rp",
+								"Rp.",
+								"Indonesian rupiah"
+							],
+							"path_resolved": true,
+							"returned": "Rp.",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						}
+					],
+					"counts": {
+						"match": 9,
+						"stage2_error": 1
+					},
+					"registered_fields": 10,
+					"matched": 9
+				},
+				{
+					"document": "receipt-cord-0007",
+					"call": "receipt",
+					"schema": "receipt",
+					"model_key": "secondary",
+					"model": "Qwen/Qwen3.5-4B",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": false,
+					"schema_errors": [
+						"$: expected object, got list"
+					],
+					"fields": [
+						{
+							"path": "merchant_name",
+							"printed": null,
+							"rule": "absent",
+							"expected": null,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": false,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "transaction_date",
+							"printed": null,
+							"rule": "absent",
+							"expected": null,
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": false,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "line_items[description=Kupon 15].amount",
+							"printed": "100,000",
+							"rule": "any_of",
+							"expected": [
+								"100,000",
+								"100000"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "line_items[description=ADD CHICKEN BOX].amount",
+							"printed": "909",
+							"rule": "any_of",
+							"expected": [
+								"909"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "subtotal",
+							"printed": "100,909",
+							"rule": "any_of",
+							"expected": [
+								"100,909",
+								"100909"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "tax",
+							"printed": "10,091",
+							"rule": "any_of",
+							"expected": [
+								"10,091",
+								"10091"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "total",
+							"printed": "111,000",
+							"rule": "any_of",
+							"expected": [
+								"111,000",
+								"111000"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "amount_paid",
+							"printed": "Rp.111,000",
+							"rule": "any_of",
+							"expected": [
+								"111,000",
+								"111000",
+								"Rp.111,000",
+								"Rp. 111,000",
+								"Rp 111,000"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": false,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "payment_method",
+							"printed": "Cash",
+							"rule": "any_of",
+							"expected": [
+								"Cash",
+								"cash"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "currency",
+							"printed": "Rp.",
+							"rule": "any_of",
+							"expected": [
+								"IDR",
+								"Rp",
+								"Rp.",
+								"Indonesian rupiah"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						}
+					],
+					"counts": {
+						"stage2_unusable": 10
+					},
+					"registered_fields": 10,
+					"matched": 0
+				}
+			]
+		},
+		{
+			"document": "product-gs1-128-label",
+			"kind": "photographed printed label",
+			"displayed": true,
+			"image": "product-gs1-128-barcode.jpg",
+			"image_sha256": "1412e09c45718f67c50cff437cb831262b30eedfc7df611492c768bd8c007f24",
+			"stage1": {
+				"markdown_chars": 625,
+				"registered_tokens": 7,
+				"tokens_in_text": 7,
+				"tokens_missing": []
+			},
+			"calls": [
+				{
+					"document": "product-gs1-128-label",
+					"call": "label",
+					"schema": "product_label",
+					"model_key": "primary",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": true,
+					"schema_errors": [],
+					"fields": [
+						{
+							"path": "product",
+							"printed": "Oatly Oat Drink Barista Edition 1,0",
+							"rule": "verbatim",
+							"expected": "Oatly Oat Drink Barista Edition 1,0",
+							"path_resolved": true,
+							"returned": "Oatly Oat Drink Barista Edition 1,0",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "pack",
+							"printed": "6 x 1,0 Lit",
+							"rule": "any_of",
+							"expected": [
+								"6 x 1,0 Lit",
+								"6 x 1,0 L",
+								"6 x 1,0 Lit."
+							],
+							"path_resolved": true,
+							"returned": "6 x 1,0 Lit",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "gtin",
+							"printed": "27394376616222",
+							"rule": "verbatim",
+							"expected": "27394376616222",
+							"path_resolved": true,
+							"returned": "27394376616222",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "printed_best_before",
+							"printed": "12/02/2024",
+							"rule": "verbatim",
+							"expected": "12/02/2024",
+							"path_resolved": true,
+							"returned": "12/02/2024",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "best_before",
+							"printed": "240212",
+							"rule": "gs1_element_string",
+							"expected": "2024-02-12",
+							"path_resolved": true,
+							"returned": "2024-02-12",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "batch",
+							"printed": "3043AAG",
+							"rule": "verbatim",
+							"expected": "3043AAG",
+							"path_resolved": true,
+							"returned": "3043AAG",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "internal_code",
+							"printed": "61622",
+							"rule": "verbatim",
+							"expected": "61622",
+							"path_resolved": true,
+							"returned": "61622",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						}
+					],
+					"counts": {
+						"match": 7
+					},
+					"registered_fields": 7,
+					"matched": 7
+				},
+				{
+					"document": "product-gs1-128-label",
+					"call": "label",
+					"schema": "product_label",
+					"model_key": "secondary",
+					"model": "Qwen/Qwen3.5-4B",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": false,
+					"schema_errors": [
+						"$: expected object, got list"
+					],
+					"fields": [
+						{
+							"path": "product",
+							"printed": "Oatly Oat Drink Barista Edition 1,0",
+							"rule": "verbatim",
+							"expected": "Oatly Oat Drink Barista Edition 1,0",
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "pack",
+							"printed": "6 x 1,0 Lit",
+							"rule": "any_of",
+							"expected": [
+								"6 x 1,0 Lit",
+								"6 x 1,0 L",
+								"6 x 1,0 Lit."
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "gtin",
+							"printed": "27394376616222",
+							"rule": "verbatim",
+							"expected": "27394376616222",
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "printed_best_before",
+							"printed": "12/02/2024",
+							"rule": "verbatim",
+							"expected": "12/02/2024",
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "best_before",
+							"printed": "240212",
+							"rule": "gs1_element_string",
+							"expected": "2024-02-12",
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "batch",
+							"printed": "3043AAG",
+							"rule": "verbatim",
+							"expected": "3043AAG",
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "internal_code",
+							"printed": "61622",
+							"rule": "verbatim",
+							"expected": "61622",
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						}
+					],
+					"counts": {
+						"stage2_unusable": 7
+					},
+					"registered_fields": 7,
+					"matched": 0
+				}
+			]
+		},
+		{
+			"document": "shipping-container",
+			"kind": "photographed container in a yard",
+			"displayed": false,
+			"image": "shipping-container-cclu-714026-4.jpg",
+			"image_sha256": "5f77054ff6e07381ed4535e8642a94e26d9b63f03e4093919f5f7f64d47abdf0",
+			"stage1": {
+				"markdown_chars": 1753,
+				"registered_tokens": 3,
+				"tokens_in_text": 1,
+				"tokens_missing": [
+					"CCLU 71 40 26 4",
+					"CHINA SHIPPING"
+				]
+			},
+			"calls": [
+				{
+					"document": "shipping-container",
+					"call": "container",
+					"schema": "container_markings",
+					"model_key": "primary",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": true,
+					"schema_errors": [],
+					"fields": [
+						{
+							"path": "containers[*].container_id",
+							"printed": "CCLU 71 40 26 4",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CCLU7140264"
+							],
+							"path_resolved": true,
+							"returned": [
+								"CCLU 7140264"
+							],
+							"printed_token_in_stage1_text": false,
+							"verdict": "match"
+						},
+						{
+							"path": "containers[*].iso_type",
+							"printed": "45G1",
+							"rule": "any_of_in_list",
+							"expected": [
+								"45G1"
+							],
+							"path_resolved": true,
+							"returned": [
+								"45G1"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "containers[*].operator",
+							"printed": "CHINA SHIPPING",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CHINA SHIPPING",
+								"China Shipping"
+							],
+							"path_resolved": true,
+							"returned": [
+								null
+							],
+							"printed_token_in_stage1_text": false,
+							"verdict": "stage1_lost"
+						}
+					],
+					"counts": {
+						"match": 2,
+						"stage1_lost": 1
+					},
+					"registered_fields": 3,
+					"matched": 2
+				},
+				{
+					"document": "shipping-container",
+					"call": "container",
+					"schema": "container_markings",
+					"model_key": "secondary",
+					"model": "Qwen/Qwen3.5-4B",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": false,
+					"schema_errors": [
+						"$: expected object, got list"
+					],
+					"fields": [
+						{
+							"path": "containers[*].container_id",
+							"printed": "CCLU 71 40 26 4",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CCLU7140264"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": false,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "containers[*].iso_type",
+							"printed": "45G1",
+							"rule": "any_of_in_list",
+							"expected": [
+								"45G1"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "containers[*].operator",
+							"printed": "CHINA SHIPPING",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CHINA SHIPPING",
+								"China Shipping"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": false,
+							"verdict": "stage2_unusable"
+						}
+					],
+					"counts": {
+						"stage2_unusable": 3
+					},
+					"registered_fields": 3,
+					"matched": 0
+				}
+			]
+		},
+		{
+			"document": "milk-factory-control-panel",
+			"kind": "photographed industrial control panel",
+			"displayed": false,
+			"image": "milk-factory-control-panel.jpg",
+			"image_sha256": "45b70a17a302e72cb37f1bf4cb2505cd9f7a940e77885750a537d998f6bce3ac",
+			"stage1": {
+				"markdown_chars": 5372,
+				"registered_tokens": 13,
+				"tokens_in_text": 11,
+				"tokens_missing": [
+					"BOWL UP/DOWN",
+					"CAPPER UP/DOWN"
+				]
+			},
+			"calls": [
+				{
+					"document": "milk-factory-control-panel",
+					"call": "panel",
+					"schema": "control_panel",
+					"model_key": "primary",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": true,
+					"schema_errors": [],
+					"fields": [
+						{
+							"path": "manufacturer",
+							"printed": "FOGG",
+							"rule": "any_of",
+							"expected": [
+								"FOGG"
+							],
+							"path_resolved": true,
+							"returned": "FOGG",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "E-STOP RESET",
+							"rule": "any_of_in_list",
+							"expected": [
+								"E-STOP RESET"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "CONVEYORS ON/OFF",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CONVEYORS ON/OFF",
+								"CONVEYORS"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "NO CAP DETECTOR",
+							"rule": "any_of_in_list",
+							"expected": [
+								"NO CAP DETECTOR"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "NO CAP",
+							"rule": "any_of_in_list",
+							"expected": [
+								"NO CAP"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "BACKLOG EYE",
+							"rule": "any_of_in_list",
+							"expected": [
+								"BACKLOG EYE"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "CAP FEEDER START",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CAP FEEDER START"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "FILLER START",
+							"rule": "any_of_in_list",
+							"expected": [
+								"FILLER START"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "FILLER SPEED",
+							"rule": "any_of_in_list",
+							"expected": [
+								"FILLER SPEED"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "CAPPER UP/DOWN",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CAPPER UP/DOWN",
+								"CAPPER UP DOWN",
+								"UP CAPPER DOWN"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": false,
+							"verdict": "stage1_error"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "FILLER JOG",
+							"rule": "any_of_in_list",
+							"expected": [
+								"FILLER JOG"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "BOWL UP/DOWN",
+							"rule": "any_of_in_list",
+							"expected": [
+								"BOWL UP/DOWN",
+								"BOWL UP DOWN",
+								"UP BOWL DOWN"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": false,
+							"verdict": "match"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "SPEED",
+							"rule": "any_of_in_list",
+							"expected": [
+								"SPEED"
+							],
+							"path_resolved": true,
+							"returned": [
+								"E-STOP RESET",
+								"CONVEYORS ON/OFF",
+								"NO CAP DETECTOR OFF",
+								"NO CAP OFF",
+								"BACKLOG EYE ON",
+								"CAP FEEDER START",
+								"FILLER START",
+								"FILLER SPEED",
+								"UP CLIPPER DOWN",
+								"FILLER JOG",
+								"BOWL UP DOWN"
+							],
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_error"
+						}
+					],
+					"counts": {
+						"match": 8,
+						"stage2_error": 4,
+						"stage1_error": 1
+					},
+					"registered_fields": 13,
+					"matched": 8
+				},
+				{
+					"document": "milk-factory-control-panel",
+					"call": "panel",
+					"schema": "control_panel",
+					"model_key": "secondary",
+					"model": "Qwen/Qwen3.5-4B",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": false,
+					"schema_errors": [
+						"$: expected object, got list"
+					],
+					"fields": [
+						{
+							"path": "manufacturer",
+							"printed": "FOGG",
+							"rule": "any_of",
+							"expected": [
+								"FOGG"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "E-STOP RESET",
+							"rule": "any_of_in_list",
+							"expected": [
+								"E-STOP RESET"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "CONVEYORS ON/OFF",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CONVEYORS ON/OFF",
+								"CONVEYORS"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "NO CAP DETECTOR",
+							"rule": "any_of_in_list",
+							"expected": [
+								"NO CAP DETECTOR"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "NO CAP",
+							"rule": "any_of_in_list",
+							"expected": [
+								"NO CAP"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "BACKLOG EYE",
+							"rule": "any_of_in_list",
+							"expected": [
+								"BACKLOG EYE"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "CAP FEEDER START",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CAP FEEDER START"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "FILLER START",
+							"rule": "any_of_in_list",
+							"expected": [
+								"FILLER START"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "FILLER SPEED",
+							"rule": "any_of_in_list",
+							"expected": [
+								"FILLER SPEED"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "CAPPER UP/DOWN",
+							"rule": "any_of_in_list",
+							"expected": [
+								"CAPPER UP/DOWN",
+								"CAPPER UP DOWN",
+								"UP CAPPER DOWN"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": false,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "FILLER JOG",
+							"rule": "any_of_in_list",
+							"expected": [
+								"FILLER JOG"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "BOWL UP/DOWN",
+							"rule": "any_of_in_list",
+							"expected": [
+								"BOWL UP/DOWN",
+								"BOWL UP DOWN",
+								"UP BOWL DOWN"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": false,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "controls[*].label",
+							"printed": "SPEED",
+							"rule": "any_of_in_list",
+							"expected": [
+								"SPEED"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						}
+					],
+					"counts": {
+						"stage2_unusable": 13
+					},
+					"registered_fields": 13,
+					"matched": 0
+				}
+			]
+		},
+		{
+			"document": "invoice-mit-sample",
+			"kind": "born-digital invoice",
+			"displayed": false,
+			"image": "invoice-mit-sample-page-1.png",
+			"image_sha256": "17322de73e201e8a96ef6c0f6810614806ba89b155f7003eee09da29d5358d8b",
+			"stage1": {
+				"markdown_chars": 1161,
+				"registered_tokens": 13,
+				"tokens_in_text": 13,
+				"tokens_missing": []
+			},
+			"calls": [
+				{
+					"document": "invoice-mit-sample",
+					"call": "invoice",
+					"schema": "invoice",
+					"model_key": "primary",
+					"model": "Qwen/Qwen3.8-27B-FP8",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": true,
+					"schema_errors": [],
+					"fields": [
+						{
+							"path": "invoice_no",
+							"printed": "Invoice #: 123",
+							"rule": "any_of",
+							"expected": [
+								"123"
+							],
+							"path_resolved": true,
+							"returned": "123",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "created",
+							"printed": "January 1, 2023",
+							"rule": "any_of",
+							"expected": [
+								"January 1, 2023",
+								"2023-01-01"
+							],
+							"path_resolved": true,
+							"returned": "January 1, 2023",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "due",
+							"printed": "February 1, 2023",
+							"rule": "any_of",
+							"expected": [
+								"February 1, 2023",
+								"2023-02-01"
+							],
+							"path_resolved": true,
+							"returned": "February 1, 2023",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "vendor",
+							"printed": "Sparksuite, Inc.",
+							"rule": "any_of",
+							"expected": [
+								"Sparksuite, Inc.",
+								"Sparksuite Inc.",
+								"SPARKSUITE"
+							],
+							"path_resolved": true,
+							"returned": "Sparksuite, Inc.",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "customer",
+							"printed": "Acme Corp.",
+							"rule": "any_of",
+							"expected": [
+								"Acme Corp.",
+								"Acme Corp"
+							],
+							"path_resolved": true,
+							"returned": "Acme Corp.",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "contact_email",
+							"printed": "john@example.com",
+							"rule": "verbatim",
+							"expected": "john@example.com",
+							"path_resolved": true,
+							"returned": "john@example.com",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "payment_method",
+							"printed": "Check",
+							"rule": "any_of",
+							"expected": [
+								"Check",
+								"check"
+							],
+							"path_resolved": true,
+							"returned": "Check",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "check_number",
+							"printed": "1000",
+							"rule": "any_of",
+							"expected": [
+								"1000"
+							],
+							"path_resolved": true,
+							"returned": "1000",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "line_items[description=Website design].amount",
+							"printed": "$300.00",
+							"rule": "any_of",
+							"expected": [
+								"$300.00",
+								"300.00",
+								"300"
+							],
+							"path_resolved": true,
+							"returned": "$300.00",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "line_items[description=Hosting (3 months)].amount",
+							"printed": "$75.00",
+							"rule": "any_of",
+							"expected": [
+								"$75.00",
+								"75.00",
+								"75"
+							],
+							"path_resolved": true,
+							"returned": "$75.00",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "line_items[description=Domain name (1 year)].amount",
+							"printed": "$10.00",
+							"rule": "any_of",
+							"expected": [
+								"$10.00",
+								"10.00",
+								"10"
+							],
+							"path_resolved": true,
+							"returned": "$10.00",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "total",
+							"printed": "Total: $385.00",
+							"rule": "any_of",
+							"expected": [
+								"$385.00",
+								"385.00",
+								"385"
+							],
+							"path_resolved": true,
+							"returned": "$385.00",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						},
+						{
+							"path": "currency",
+							"printed": "$",
+							"rule": "any_of",
+							"expected": [
+								"USD",
+								"$"
+							],
+							"path_resolved": true,
+							"returned": "USD",
+							"printed_token_in_stage1_text": true,
+							"verdict": "match"
+						}
+					],
+					"counts": {
+						"match": 13
+					},
+					"registered_fields": 13,
+					"matched": 13
+				},
+				{
+					"document": "invoice-mit-sample",
+					"call": "invoice",
+					"schema": "invoice",
+					"model_key": "secondary",
+					"model": "Qwen/Qwen3.5-4B",
+					"json_parsed": true,
+					"parse_error": null,
+					"schema_valid": false,
+					"schema_errors": [
+						"$: expected object, got list"
+					],
+					"fields": [
+						{
+							"path": "invoice_no",
+							"printed": "Invoice #: 123",
+							"rule": "any_of",
+							"expected": [
+								"123"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "created",
+							"printed": "January 1, 2023",
+							"rule": "any_of",
+							"expected": [
+								"January 1, 2023",
+								"2023-01-01"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "due",
+							"printed": "February 1, 2023",
+							"rule": "any_of",
+							"expected": [
+								"February 1, 2023",
+								"2023-02-01"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "vendor",
+							"printed": "Sparksuite, Inc.",
+							"rule": "any_of",
+							"expected": [
+								"Sparksuite, Inc.",
+								"Sparksuite Inc.",
+								"SPARKSUITE"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "customer",
+							"printed": "Acme Corp.",
+							"rule": "any_of",
+							"expected": [
+								"Acme Corp.",
+								"Acme Corp"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "contact_email",
+							"printed": "john@example.com",
+							"rule": "verbatim",
+							"expected": "john@example.com",
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "payment_method",
+							"printed": "Check",
+							"rule": "any_of",
+							"expected": [
+								"Check",
+								"check"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "check_number",
+							"printed": "1000",
+							"rule": "any_of",
+							"expected": [
+								"1000"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "line_items[description=Website design].amount",
+							"printed": "$300.00",
+							"rule": "any_of",
+							"expected": [
+								"$300.00",
+								"300.00",
+								"300"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "line_items[description=Hosting (3 months)].amount",
+							"printed": "$75.00",
+							"rule": "any_of",
+							"expected": [
+								"$75.00",
+								"75.00",
+								"75"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "line_items[description=Domain name (1 year)].amount",
+							"printed": "$10.00",
+							"rule": "any_of",
+							"expected": [
+								"$10.00",
+								"10.00",
+								"10"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "total",
+							"printed": "Total: $385.00",
+							"rule": "any_of",
+							"expected": [
+								"$385.00",
+								"385.00",
+								"385"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						},
+						{
+							"path": "currency",
+							"printed": "$",
+							"rule": "any_of",
+							"expected": [
+								"USD",
+								"$"
+							],
+							"path_resolved": false,
+							"returned": null,
+							"printed_token_in_stage1_text": true,
+							"verdict": "stage2_unusable"
+						}
+					],
+					"counts": {
+						"stage2_unusable": 13
+					},
+					"registered_fields": 13,
+					"matched": 0
+				}
+			]
+		}
+	]
+}

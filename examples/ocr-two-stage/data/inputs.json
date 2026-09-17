@@ -1,0 +1,1317 @@
+{
+  "registered_utc": "2026-09-15",
+  "note": "Pre-registration for the /ocr two-stage page. Committed before any model call. Documents, schemas, expected values, scoring rules and predictions are fixed here; nothing in this file changes after the first call. The document set is closed at 6 documents and 7 stage-2 calls per stage-2 model.",
+  "stage1": {
+    "role": "page pixels to Markdown",
+    "model": "lightonai/LightOnOCR-2-1B",
+    "endpoint": "https://api.superlinked.com",
+    "path": "/v1/extract/lightonai__LightOnOCR-2-1B",
+    "body_shape": "{\"items\": [{\"images\": [{\"data\": \"<base64>\", \"format\": \"<png|jpeg>\"}]}]}",
+    "read_result_at": "entities[0].text",
+    "note": "Byte-identical in shape to the snippet packages/tasks/src/codegen.ts generates for the ocr task with the quality model. Replaces the earlier Modal run in lightonocr-run.json so both stages of the page run against the same production API."
+  },
+  "stage2": {
+    "role": "Markdown to typed fields under a fixed JSON schema",
+    "input": "stage 1's recorded Markdown, verbatim. The page image is never sent to stage 2.",
+    "models": {
+      "primary": "Qwen/Qwen3.8-27B-FP8",
+      "secondary": "Qwen/Qwen3.5-4B"
+    },
+    "endpoint": "https://api.superlinked.com",
+    "path": "/v1/chat/completions",
+    "temperature": 0,
+    "max_tokens": 2048,
+    "response_format_shape": "{\"type\": \"json_schema\", \"json_schema\": {\"name\": \"<schema id>\", \"strict\": true, \"schema\": <schema>}}",
+    "instruction_template": "Fill the schema from this OCR text of a {document_type}. Use only what the text states. Use null when the text does not state a value.\n\n---\n{markdown}",
+    "note": "Chat completions rather than /v1/generate because this is a text-only prompt on a Qwen model; sie-internal#4370 covers /v1/generate skipping the chat template for plain text. Both stage-2 models get byte-identical messages and schemas."
+  },
+  "scoring": {
+    "note": "evaluate.py assigns every registered field exactly one verdict. No verdict is hand-authored. The stage-1 test asks whether the field's registered `printed` token survives into stage 1's Markdown; that is what separates an error stage 2 inherited from one stage 2 made on text it could read.",
+    "normalization": "Unicode NFKC, collapse runs of whitespace to one space, trim. Applied to both the returned value and the registered expectation before comparison, and to the Markdown before the token search.",
+    "verdicts": {
+      "match": "returned value satisfies the field's rule",
+      "stage1_lost": "printed token absent from stage 1's Markdown AND stage 2 returned null",
+      "stage1_error": "printed token absent or garbled in stage 1's Markdown AND stage 2 returned a wrong non-null value",
+      "stage2_error": "printed token present verbatim in stage 1's Markdown AND stage 2 returned a wrong non-null value",
+      "stage2_dropped": "printed token present verbatim in stage 1's Markdown AND stage 2 returned null"
+    },
+    "rules": {
+      "verbatim": "normalized returned string equals expect",
+      "integer": "returned value is an integer equal to expect",
+      "signed_parenthesis": "returned integer equals expect; the page prints the magnitude in parentheses, so stage 2 has to supply the sign",
+      "strip_footnote_marker": "normalized returned string equals expect; the page prints a trailing footnote marker stage 2 has to drop",
+      "gs1_element_string": "normalized returned string equals expect; ground truth is the GS1 application identifier printed under the barcode, not a reading of the human-readable date",
+      "any_of": "normalized returned string is one of expect",
+      "contains": "lowercased returned string contains lowercased expect",
+      "absent": "expect is null because the value is not legible on the source page"
+    },
+    "also_recorded": [
+      "schema validity of every stage-2 reply, checked against the registered schema (required keys, types, enum members)",
+      "stage-1 token recall per document: how many registered printed tokens appear in the Markdown",
+      "HTTP status, latency, finish reason and token counts per call"
+    ]
+  },
+  "predictions": {
+    "note": "Written before any call, published beside the outcome in SOURCES.md whether or not they hold. A prediction that misses is reported as a miss.",
+    "items": [
+      "At least one of NVIDIA's parenthesised rows comes back with the wrong sign, scored stage2_error.",
+      "NVIDIA's `Taiwan (2)` carries its footnote marker into the location field, scored stage2_error.",
+      "The label's best_before comes back 2023-12-02, a US reading of 12/02/2024, against the barcode's 2024-02-12.",
+      "Stage 1 loses the blurred receipt header, and stage 2 invents a merchant name or a transaction date rather than returning null.",
+      "Across the whole registered set, most fields match."
+    ]
+  },
+  "display": {
+    "note": "Three documents are displayed, chosen before the run to differ in kind. Every registered document is counted in the page's totals whatever it does; none is dropped for looking bad.",
+    "documents": [
+      "nvidia-annual-report-p78",
+      "receipt-cord-0007",
+      "product-gs1-128-label"
+    ]
+  },
+  "documents": [
+    {
+      "id": "nvidia-annual-report-p78",
+      "kind": "clean born-digital page",
+      "document_type": "page from an annual report",
+      "image": "nvidia-annual-report-page-166.png",
+      "format": "png",
+      "image_sha256": "19ea06de9cdbd0c643fac69fbae1b53a8d94c769ec9700878b2fd733fadb5ba7",
+      "displayed": true,
+      "calls": [
+        {
+          "id": "segment-reconciliation",
+          "schema": "nvidia_segment",
+          "match_rows_by": "line_item",
+          "expected": [
+            {
+              "path": "unit",
+              "printed": "(In millions)",
+              "expect": "In millions",
+              "rule": "contains"
+            },
+            {
+              "path": "rows[line_item=Segment operating income].fy2026",
+              "printed": "139,297",
+              "expect": 139297,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Segment operating income].fy2025",
+              "printed": "87,960",
+              "expect": 87960,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Segment operating income].fy2024",
+              "printed": "37,862",
+              "expect": 37862,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Stock-based compensation expense].fy2026",
+              "printed": "(6,386)",
+              "expect": -6386,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Stock-based compensation expense].fy2025",
+              "printed": "(4,737)",
+              "expect": -4737,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Stock-based compensation expense].fy2024",
+              "printed": "(3,549)",
+              "expect": -3549,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Unallocated operating expenses].fy2026",
+              "printed": "(1,997)",
+              "expect": -1997,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Unallocated operating expenses].fy2025",
+              "printed": "(1,171)",
+              "expect": -1171,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Unallocated operating expenses].fy2024",
+              "printed": "(728)",
+              "expect": -728,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Acquisition-related and other costs].fy2026",
+              "printed": "(527)",
+              "expect": -527,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Acquisition-related and other costs].fy2025",
+              "printed": "(599)",
+              "expect": -599,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Acquisition-related and other costs].fy2024",
+              "printed": "(613)",
+              "expect": -613,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Interest income].fy2026",
+              "printed": "2,300",
+              "expect": 2300,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Interest income].fy2025",
+              "printed": "1,786",
+              "expect": 1786,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Interest income].fy2024",
+              "printed": "866",
+              "expect": 866,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Interest expense].fy2026",
+              "printed": "(259)",
+              "expect": -259,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Interest expense].fy2025",
+              "printed": "(247)",
+              "expect": -247,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Interest expense].fy2024",
+              "printed": "(257)",
+              "expect": -257,
+              "rule": "signed_parenthesis"
+            },
+            {
+              "path": "rows[line_item=Other income, net].fy2026",
+              "printed": "9,022",
+              "expect": 9022,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Other income, net].fy2025",
+              "printed": "1,034",
+              "expect": 1034,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Other income, net].fy2024",
+              "printed": "237",
+              "expect": 237,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Consolidated income before income tax].fy2026",
+              "printed": "141,450",
+              "expect": 141450,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Consolidated income before income tax].fy2025",
+              "printed": "84,026",
+              "expect": 84026,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[line_item=Consolidated income before income tax].fy2024",
+              "printed": "33,818",
+              "expect": 33818,
+              "rule": "integer"
+            }
+          ]
+        },
+        {
+          "id": "geographic-revenue",
+          "schema": "nvidia_geographic",
+          "match_rows_by": "location",
+          "expected": [
+            {
+              "path": "unit",
+              "printed": "(In millions)",
+              "expect": "In millions",
+              "rule": "contains"
+            },
+            {
+              "path": "basis",
+              "printed": "Revenue by geographic area is based upon the location of the customers' headquarters.",
+              "expect": "headquarters",
+              "rule": "contains"
+            },
+            {
+              "path": "rows[location=United States].fy2026",
+              "printed": "149,617",
+              "expect": 149617,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=United States].fy2025",
+              "printed": "77,482",
+              "expect": 77482,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=United States].fy2024",
+              "printed": "31,533",
+              "expect": 31533,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=Taiwan].location",
+              "printed": "Taiwan (2)",
+              "expect": "Taiwan",
+              "rule": "strip_footnote_marker"
+            },
+            {
+              "path": "rows[location=Taiwan].fy2026",
+              "printed": "42,345",
+              "expect": 42345,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=Taiwan].fy2025",
+              "printed": "23,600",
+              "expect": 23600,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=Taiwan].fy2024",
+              "printed": "14,912",
+              "expect": 14912,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=China (including Hong Kong)].fy2026",
+              "printed": "19,677",
+              "expect": 19677,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=China (including Hong Kong)].fy2025",
+              "printed": "25,048",
+              "expect": 25048,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=China (including Hong Kong)].fy2024",
+              "printed": "12,330",
+              "expect": 12330,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=Other].fy2026",
+              "printed": "4,299",
+              "expect": 4299,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=Other].fy2025",
+              "printed": "4,367",
+              "expect": 4367,
+              "rule": "integer"
+            },
+            {
+              "path": "rows[location=Other].fy2024",
+              "printed": "2,147",
+              "expect": 2147,
+              "rule": "integer"
+            },
+            {
+              "path": "total_revenue.fy2026",
+              "printed": "215,938",
+              "expect": 215938,
+              "rule": "integer"
+            },
+            {
+              "path": "total_revenue.fy2025",
+              "printed": "130,497",
+              "expect": 130497,
+              "rule": "integer"
+            },
+            {
+              "path": "total_revenue.fy2024",
+              "printed": "60,922",
+              "expect": 60922,
+              "rule": "integer"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://superlinked.com/reference/ocr-review/nvidia-annual-report-page-166.png",
+        "bytes": 269475,
+        "upstream": "https://s201.q4cdn.com/141608511/files/doc_financials/2026/ar/2026-Annual-Report-Web.pdf",
+        "licence": "public investor document. NVIDIA retains copyright. The page uses a short attributed excerpt for commentary.",
+        "derivation": "the PDF page containing printed page 78 rendered as a PNG.",
+        "sha256": "19ea06de9cdbd0c643fac69fbae1b53a8d94c769ec9700878b2fd733fadb5ba7"
+      }
+    },
+    {
+      "id": "receipt-cord-0007",
+      "kind": "degraded thermal receipt",
+      "document_type": "till receipt",
+      "image": "receipt-cord-0007.jpg",
+      "format": "jpeg",
+      "image_sha256": "15494cb391bd72c057e2ca8eea9ddc4942ce0df001b1d7d3acea51053e2ce052",
+      "displayed": true,
+      "note": "The top third of the source photo is blurred by the dataset, so the merchant block and the date are not legible on the page. Both register as absent, which is what makes an invented value detectable.",
+      "calls": [
+        {
+          "id": "receipt",
+          "schema": "receipt",
+          "match_rows_by": "description",
+          "expected": [
+            {
+              "path": "merchant_name",
+              "printed": null,
+              "expect": null,
+              "rule": "absent"
+            },
+            {
+              "path": "transaction_date",
+              "printed": null,
+              "expect": null,
+              "rule": "absent"
+            },
+            {
+              "path": "line_items[description=Kupon 15].amount",
+              "printed": "100,000",
+              "expect": [
+                "100,000",
+                "100000"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "line_items[description=ADD CHICKEN BOX].amount",
+              "printed": "909",
+              "expect": [
+                "909"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "subtotal",
+              "printed": "100,909",
+              "expect": [
+                "100,909",
+                "100909"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "tax",
+              "printed": "10,091",
+              "expect": [
+                "10,091",
+                "10091"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "total",
+              "printed": "111,000",
+              "expect": [
+                "111,000",
+                "111000"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "amount_paid",
+              "printed": "Rp.111,000",
+              "expect": [
+                "111,000",
+                "111000",
+                "Rp.111,000",
+                "Rp. 111,000",
+                "Rp 111,000"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "payment_method",
+              "printed": "Cash",
+              "expect": [
+                "Cash",
+                "cash"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "currency",
+              "printed": "Rp.",
+              "expect": [
+                "IDR",
+                "Rp",
+                "Rp.",
+                "Indonesian rupiah"
+              ],
+              "rule": "any_of"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://superlinked.com/reference/ocr-review/receipt-cord-0007.jpg",
+        "bytes": 137082,
+        "upstream": "https://github.com/clovaai/cord",
+        "licence": "CC BY 4.0, https://creativecommons.org/licenses/by/4.0/",
+        "derivation": null,
+        "sha256": "15494cb391bd72c057e2ca8eea9ddc4942ce0df001b1d7d3acea51053e2ce052"
+      }
+    },
+    {
+      "id": "product-gs1-128-label",
+      "kind": "photographed printed label",
+      "document_type": "product label",
+      "image": "product-gs1-128-barcode.jpg",
+      "format": "jpeg",
+      "image_sha256": "1412e09c45718f67c50cff437cb831262b30eedfc7df611492c768bd8c007f24",
+      "displayed": true,
+      "note": "The label prints BEST BEFORE: 12/02/2024 in human-readable form and the same date as GS1 application identifier (15) 240212 under the barcode. The element string fixes the calendar date at 2024-02-12 independently of anyone's reading of the slashed date, so the ISO field has ground truth printed on the artifact itself.",
+      "calls": [
+        {
+          "id": "label",
+          "schema": "product_label",
+          "expected": [
+            {
+              "path": "product",
+              "printed": "Oatly Oat Drink Barista Edition 1,0",
+              "expect": "Oatly Oat Drink Barista Edition 1,0",
+              "rule": "verbatim"
+            },
+            {
+              "path": "pack",
+              "printed": "6 x 1,0 Lit",
+              "expect": [
+                "6 x 1,0 Lit",
+                "6 x 1,0 L",
+                "6 x 1,0 Lit."
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "gtin",
+              "printed": "27394376616222",
+              "expect": "27394376616222",
+              "rule": "verbatim"
+            },
+            {
+              "path": "printed_best_before",
+              "printed": "12/02/2024",
+              "expect": "12/02/2024",
+              "rule": "verbatim"
+            },
+            {
+              "path": "best_before",
+              "printed": "240212",
+              "expect": "2024-02-12",
+              "rule": "gs1_element_string"
+            },
+            {
+              "path": "batch",
+              "printed": "3043AAG",
+              "expect": "3043AAG",
+              "rule": "verbatim"
+            },
+            {
+              "path": "internal_code",
+              "printed": "61622",
+              "expect": "61622",
+              "rule": "verbatim"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://superlinked.com/reference/ocr-review/product-gs1-128-barcode.jpg",
+        "bytes": 496341,
+        "upstream": "https://commons.wikimedia.org/wiki/File:GS1-128_product_barcode.jpg",
+        "licence": "public-domain dedication on the source page.",
+        "derivation": null,
+        "sha256": "1412e09c45718f67c50cff437cb831262b30eedfc7df611492c768bd8c007f24"
+      }
+    },
+    {
+      "id": "shipping-container",
+      "kind": "photographed container in a yard",
+      "document_type": "photo of shipping container markings",
+      "image": "shipping-container-cclu-714026-4.jpg",
+      "format": "jpeg",
+      "image_sha256": "5f77054ff6e07381ed4535e8642a94e26d9b63f03e4093919f5f7f64d47abdf0",
+      "displayed": false,
+      "note": "Two containers are in frame. Stage 2 sees text only and has no way to tell which markings belong to which unit, so the schema asks for a list and only the fully legible CHINA SHIPPING unit is scored. Container ids compare with spaces removed.",
+      "calls": [
+        {
+          "id": "container",
+          "schema": "container_markings",
+          "expected": [
+            {
+              "path": "containers[*].container_id",
+              "printed": "CCLU 71 40 26 4",
+              "expect": [
+                "CCLU7140264"
+              ],
+              "rule": "any_of_in_list",
+              "compare": "strip_spaces"
+            },
+            {
+              "path": "containers[*].iso_type",
+              "printed": "45G1",
+              "expect": [
+                "45G1"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "containers[*].operator",
+              "printed": "CHINA SHIPPING",
+              "expect": [
+                "CHINA SHIPPING",
+                "China Shipping"
+              ],
+              "rule": "any_of_in_list"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://superlinked.com/reference/ocr-review/shipping-container-cclu-714026-4.jpg",
+        "bytes": 762876,
+        "upstream": "https://commons.wikimedia.org/wiki/File:China_45G1_CCLU_714026_4.jpg",
+        "licence": "CC BY-SA 3.0, https://creativecommons.org/licenses/by-sa/3.0/",
+        "derivation": null,
+        "sha256": "5f77054ff6e07381ed4535e8642a94e26d9b63f03e4093919f5f7f64d47abdf0"
+      }
+    },
+    {
+      "id": "milk-factory-control-panel",
+      "kind": "photographed industrial control panel",
+      "document_type": "photo of a machine control panel",
+      "image": "milk-factory-control-panel.jpg",
+      "format": "jpeg",
+      "image_sha256": "45b70a17a302e72cb37f1bf4cb2505cd9f7a940e77885750a537d998f6bce3ac",
+      "displayed": false,
+      "note": "Control kind is not scored: stage 2 sees text and cannot tell a dial from a lamp. Labels are scored as recall over the registered set, compared uppercased with whitespace collapsed.",
+      "calls": [
+        {
+          "id": "panel",
+          "schema": "control_panel",
+          "expected": [
+            {
+              "path": "manufacturer",
+              "printed": "FOGG",
+              "expect": [
+                "FOGG"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "E-STOP RESET",
+              "expect": [
+                "E-STOP RESET"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "CONVEYORS ON/OFF",
+              "expect": [
+                "CONVEYORS ON/OFF",
+                "CONVEYORS"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "NO CAP DETECTOR",
+              "expect": [
+                "NO CAP DETECTOR"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "NO CAP",
+              "expect": [
+                "NO CAP"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "BACKLOG EYE",
+              "expect": [
+                "BACKLOG EYE"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "CAP FEEDER START",
+              "expect": [
+                "CAP FEEDER START"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "FILLER START",
+              "expect": [
+                "FILLER START"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "FILLER SPEED",
+              "expect": [
+                "FILLER SPEED"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "CAPPER UP/DOWN",
+              "expect": [
+                "CAPPER UP/DOWN",
+                "CAPPER UP DOWN",
+                "UP CAPPER DOWN"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "FILLER JOG",
+              "expect": [
+                "FILLER JOG"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "BOWL UP/DOWN",
+              "expect": [
+                "BOWL UP/DOWN",
+                "BOWL UP DOWN",
+                "UP BOWL DOWN"
+              ],
+              "rule": "any_of_in_list"
+            },
+            {
+              "path": "controls[*].label",
+              "printed": "SPEED",
+              "expect": [
+                "SPEED"
+              ],
+              "rule": "any_of_in_list"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://superlinked.com/reference/ocr-review/milk-factory-control-panel.jpg",
+        "bytes": 637649,
+        "upstream": "https://commons.wikimedia.org/wiki/File:Milk_Factory_(Brisbane)_-_Control_Panel.jpg",
+        "licence": "CC BY 2.0, https://creativecommons.org/licenses/by/2.0/",
+        "derivation": null,
+        "sha256": "45b70a17a302e72cb37f1bf4cb2505cd9f7a940e77885750a537d998f6bce3ac"
+      }
+    },
+    {
+      "id": "invoice-mit-sample",
+      "kind": "born-digital invoice",
+      "document_type": "invoice",
+      "image": "invoice-mit-sample-page-1.png",
+      "format": "png",
+      "image_sha256": "17322de73e201e8a96ef6c0f6810614806ba89b155f7003eee09da29d5358d8b",
+      "displayed": false,
+      "note": "The rendered demo page of an MIT-licensed HTML invoice template. The invoice sits inside a page that also carries the template's own title and licence line, so it doubles as a test of whether stage 2 keeps surrounding page text out of the record.",
+      "calls": [
+        {
+          "id": "invoice",
+          "schema": "invoice",
+          "match_rows_by": "description",
+          "expected": [
+            {
+              "path": "invoice_no",
+              "printed": "Invoice #: 123",
+              "expect": [
+                "123"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "created",
+              "printed": "January 1, 2023",
+              "expect": [
+                "January 1, 2023",
+                "2023-01-01"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "due",
+              "printed": "February 1, 2023",
+              "expect": [
+                "February 1, 2023",
+                "2023-02-01"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "vendor",
+              "printed": "Sparksuite, Inc.",
+              "expect": [
+                "Sparksuite, Inc.",
+                "Sparksuite Inc.",
+                "SPARKSUITE"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "customer",
+              "printed": "Acme Corp.",
+              "expect": [
+                "Acme Corp.",
+                "Acme Corp"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "contact_email",
+              "printed": "john@example.com",
+              "expect": "john@example.com",
+              "rule": "verbatim"
+            },
+            {
+              "path": "payment_method",
+              "printed": "Check",
+              "expect": [
+                "Check",
+                "check"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "check_number",
+              "printed": "1000",
+              "expect": [
+                "1000"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "line_items[description=Website design].amount",
+              "printed": "$300.00",
+              "expect": [
+                "$300.00",
+                "300.00",
+                "300"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "line_items[description=Hosting (3 months)].amount",
+              "printed": "$75.00",
+              "expect": [
+                "$75.00",
+                "75.00",
+                "75"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "line_items[description=Domain name (1 year)].amount",
+              "printed": "$10.00",
+              "expect": [
+                "$10.00",
+                "10.00",
+                "10"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "total",
+              "printed": "Total: $385.00",
+              "expect": [
+                "$385.00",
+                "385.00",
+                "385"
+              ],
+              "rule": "any_of"
+            },
+            {
+              "path": "currency",
+              "printed": "$",
+              "expect": [
+                "USD",
+                "$"
+              ],
+              "rule": "any_of"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "url": "https://superlinked.com/reference/ocr-review/invoice-mit-sample-page-1.png",
+        "bytes": 91118,
+        "upstream": null,
+        "licence": "MIT, https://opensource.org/licenses/MIT",
+        "derivation": "the one-page PDF rendered at 1,224 by 1,584 pixels. The rendered page carries the template's own title and licence line around the invoice.",
+        "sha256": "17322de73e201e8a96ef6c0f6810614806ba89b155f7003eee09da29d5358d8b"
+      }
+    }
+  ],
+  "schemas": {
+    "nvidia_segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "type": "string"
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "line_item": {
+                "type": "string"
+              },
+              "fy2026": {
+                "type": "integer"
+              },
+              "fy2025": {
+                "type": "integer"
+              },
+              "fy2024": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "line_item",
+              "fy2026",
+              "fy2025",
+              "fy2024"
+            ]
+          }
+        }
+      },
+      "required": [
+        "unit",
+        "rows"
+      ]
+    },
+    "nvidia_geographic": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "type": "string"
+        },
+        "basis": {
+          "type": "string"
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "location": {
+                "type": "string"
+              },
+              "fy2026": {
+                "type": "integer"
+              },
+              "fy2025": {
+                "type": "integer"
+              },
+              "fy2024": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "location",
+              "fy2026",
+              "fy2025",
+              "fy2024"
+            ]
+          }
+        },
+        "total_revenue": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "fy2026": {
+              "type": "integer"
+            },
+            "fy2025": {
+              "type": "integer"
+            },
+            "fy2024": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "fy2026",
+            "fy2025",
+            "fy2024"
+          ]
+        }
+      },
+      "required": [
+        "unit",
+        "basis",
+        "rows",
+        "total_revenue"
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "merchant_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transaction_date": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line_items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "amount": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "description",
+              "amount"
+            ]
+          }
+        },
+        "subtotal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tax": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "amount_paid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payment_method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currency": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "merchant_name",
+        "transaction_date",
+        "line_items",
+        "subtotal",
+        "tax",
+        "total",
+        "amount_paid",
+        "payment_method",
+        "currency"
+      ]
+    },
+    "product_label": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "product": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pack": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gtin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "printed_best_before": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the best-before date exactly as printed in human-readable text"
+        },
+        "best_before": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the best-before date as an ISO 8601 calendar date, YYYY-MM-DD"
+        },
+        "batch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "internal_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "product",
+        "pack",
+        "gtin",
+        "printed_best_before",
+        "best_before",
+        "batch",
+        "internal_code"
+      ]
+    },
+    "container_markings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "containers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "container_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "iso_type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "operator": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "container_id",
+              "iso_type",
+              "operator"
+            ]
+          }
+        }
+      },
+      "required": [
+        "containers"
+      ]
+    },
+    "control_panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "manufacturer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "controls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "button",
+                  "switch",
+                  "dial",
+                  "indicator",
+                  "display",
+                  "plate",
+                  "unknown"
+                ]
+              }
+            },
+            "required": [
+              "label",
+              "kind"
+            ]
+          }
+        }
+      },
+      "required": [
+        "manufacturer",
+        "controls"
+      ]
+    },
+    "invoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "invoice_no": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "due": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vendor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "customer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contact_email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payment_method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "check_number": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line_items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "amount": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "description",
+              "amount"
+            ]
+          }
+        },
+        "total": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currency": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "invoice_no",
+        "created",
+        "due",
+        "vendor",
+        "customer",
+        "contact_email",
+        "payment_method",
+        "check_number",
+        "line_items",
+        "total",
+        "currency"
+      ]
+    }
+  },
+  "about": "Pinned inputs for the ocr-two-stage example. Registrations were written before the run. Images are not committed: each carries the URL of the exact bytes that were sent, their length and SHA-256, the upstream original and the licence."
+}
