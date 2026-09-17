@@ -36,7 +36,7 @@ def artifact_names(family: str, version: str) -> set[str]:
             for platform in ("cpu", "cuda12")
             for bundle in ("default", "ctranslate2", "sglang", "transformers5")
         ]
-        pairs += [("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")]
+        pairs += [("cuda12", "sglang-vision-extract"), ("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")]
         return {f"docker-server-{platform}-{bundle}-{version}" for platform, bundle in pairs} | {
             f"docker-service-{service}-{version}"
             for service in ("sie-gateway", "sie-config", "sie-mcp", "sie-server-sidecar", "sie-server-rust")

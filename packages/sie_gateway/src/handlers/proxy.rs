@@ -12084,7 +12084,9 @@ fn decode_dtype_values(dtype: &str, data: &[u8]) -> Option<Vec<serde_json::Value
                 return None;
             }
             Some(
-                data.chunks_exact(4)
+                data.as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|chunk| {
                         let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         serde_json::Value::from(val as f64)
@@ -12097,7 +12099,9 @@ fn decode_dtype_values(dtype: &str, data: &[u8]) -> Option<Vec<serde_json::Value
                 return None;
             }
             Some(
-                data.chunks_exact(8)
+                data.as_chunks::<8>()
+                    .0
+                    .iter()
                     .map(|chunk| {
                         let val = f64::from_le_bytes([
                             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
@@ -12113,7 +12117,9 @@ fn decode_dtype_values(dtype: &str, data: &[u8]) -> Option<Vec<serde_json::Value
                 return None;
             }
             Some(
-                data.chunks_exact(2)
+                data.as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|chunk| {
                         let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
                         let val = f16_to_f32(bits);
@@ -12127,7 +12133,9 @@ fn decode_dtype_values(dtype: &str, data: &[u8]) -> Option<Vec<serde_json::Value
                 return None;
             }
             Some(
-                data.chunks_exact(4)
+                data.as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|chunk| {
                         let val = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         serde_json::Value::from(val as i64)
@@ -12140,7 +12148,9 @@ fn decode_dtype_values(dtype: &str, data: &[u8]) -> Option<Vec<serde_json::Value
                 return None;
             }
             Some(
-                data.chunks_exact(8)
+                data.as_chunks::<8>()
+                    .0
+                    .iter()
                     .map(|chunk| {
                         let val = i64::from_le_bytes([
                             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
@@ -12156,7 +12166,9 @@ fn decode_dtype_values(dtype: &str, data: &[u8]) -> Option<Vec<serde_json::Value
                 return None;
             }
             Some(
-                data.chunks_exact(2)
+                data.as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|chunk| {
                         let val = i16::from_le_bytes([chunk[0], chunk[1]]);
                         serde_json::Value::from(val as i64)
@@ -12169,7 +12181,9 @@ fn decode_dtype_values(dtype: &str, data: &[u8]) -> Option<Vec<serde_json::Value
                 return None;
             }
             Some(
-                data.chunks_exact(4)
+                data.as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|chunk| {
                         let val = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         serde_json::Value::from(val as u64)
@@ -12182,7 +12196,9 @@ fn decode_dtype_values(dtype: &str, data: &[u8]) -> Option<Vec<serde_json::Value
                 return None;
             }
             Some(
-                data.chunks_exact(8)
+                data.as_chunks::<8>()
+                    .0
+                    .iter()
                     .map(|chunk| {
                         let val = u64::from_le_bytes([
                             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],

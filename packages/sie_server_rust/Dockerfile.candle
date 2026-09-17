@@ -10,7 +10,7 @@
 # by the sidecar for engine=candle pools.
 
 ARG CUDA_VERSION=12.4.1
-ARG RUST_VERSION=1.97.0
+ARG RUST_VERSION=1.98.1
 # Candle CUDA kernels cannot detect compute capability during Docker builds.
 # Local builds default to the currently supported L4 target, and releases publish
 # sie-server-rust:<version>-cuda12-sm89. Override for ad-hoc target GPUs when

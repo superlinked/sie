@@ -9,7 +9,7 @@
 # contract to the worker-sidecar. Native engines such as Candle run inside this
 # process rather than through a sibling Python adapter process.
 
-ARG RUST_VERSION=1.97.0
+ARG RUST_VERSION=1.98.1
 ARG CARGO_FEATURES=""
 
 FROM rust:${RUST_VERSION}-slim-bookworm AS chef

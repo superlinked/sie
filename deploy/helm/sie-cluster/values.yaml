@@ -1262,6 +1262,17 @@ healthGates:
   # This cannot disable the mandatory autoscaling control-path gates.
   enabled: false
 
+# -- Resource requests/limits for kubectl-based KEDA hook Jobs
+# (keda-apply, keda-cleanup, and the KEDA ScaledObject/HPA gate).
+hooks:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "1Gi"
+
 # -- HuggingFace token secret (optional)
 # Create via Helm instead of kubectl for fully declarative deploys.
 # Pass token at install time: --set hfToken.create=true --set hfToken.value=<token>

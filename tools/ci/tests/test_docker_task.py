@@ -20,7 +20,15 @@ MATRIX = docker_task.DEFAULT_MATRIX
 def complete_source(tmp_path: Path, monkeypatch):
     bundles = tmp_path / "packages/sie_server/bundles"
     bundles.mkdir(parents=True)
-    for name in ("default", "ctranslate2", "sglang", "transformers5", "sglang-cu130", "tensorrt-llm"):
+    for name in (
+        "default",
+        "ctranslate2",
+        "sglang",
+        "transformers5",
+        "sglang-vision-extract",
+        "sglang-cu130",
+        "tensorrt-llm",
+    ):
         platform = "cuda13" if name in {"sglang-cu130", "tensorrt-llm"} else "cuda12"
         (bundles / f"{name}.yaml").write_text(f"name: {name}\nplatform: {platform}\n")
     monkeypatch.setattr(docker_task, "ROOT", tmp_path)
@@ -44,13 +52,13 @@ def archive(tmp_path: Path, image: str = IMAGE):
     )
 
 
-def test_release_matrix_resolves_exact_ten_pairs(complete_source):
+def test_release_matrix_resolves_exact_eleven_pairs(complete_source):
     assert {(target.platform, target.bundle) for target in complete_source} == {
         (platform, bundle)
         for platform in ("cuda12", "cpu")
         for bundle in ("default", "ctranslate2", "sglang", "transformers5")
-    } | {("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
-    assert len(complete_source) == 10
+    } | {("cuda12", "sglang-vision-extract"), ("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
+    assert len(complete_source) == 11
 
 
 def test_release_matrix_fails_closed_for_absent_bundle(complete_source, tmp_path):
@@ -137,9 +145,9 @@ def test_complete_set_verified_before_alias_commands(complete_source, monkeypatc
     assert commands == []
 
 
-def test_expected_release_set_has_fifteen_tags_and_six_names(complete_source):
+def test_expected_release_set_has_sixteen_tags_and_six_names(complete_source):
     images = docker_task.expected_versioned_images("ghcr.io/superlinked", VERSION, complete_source)
-    assert len(images) == len(set(images)) == 15
+    assert len(images) == len(set(images)) == 16
     assert len({image.split(":")[0] for image in images}) == 6
     assert f"ghcr.io/superlinked/sie-server-rust:v{VERSION}-cuda12-sm89" in images
 
@@ -285,7 +293,7 @@ def test_failed_old_alias_retry_never_rolls_back_newer_success(complete_source, 
         run_id="1235",
     )
     newer_writes = writes[1:].copy()
-    assert len(newer_writes) == 15
+    assert len(newer_writes) == 16
     assert all(":v0.7.5" in command[-1] for command in newer_writes)
     docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
     assert writes[1:] == newer_writes
@@ -298,7 +306,7 @@ def test_same_release_alias_retry_is_idempotent(complete_source, public_releases
     docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
     first = writes.copy()
     docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
-    assert len(first) == 15
+    assert len(first) == 16
     assert writes == first + first
 
 

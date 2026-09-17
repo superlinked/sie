@@ -504,16 +504,16 @@ def audio_release_errors() -> list[str]:
     if mise_tools.get("zig") != "0.13.0":
         errors.append("native audio release must pin Zig 0.13.0")
     rust = mise_tools.get("rust", {})
-    if not isinstance(rust, dict) or rust.get("version") != "1.97.0":
-        errors.append("native audio release must use the repository Rust 1.97.0 pin")
+    if not isinstance(rust, dict) or rust.get("version") != "1.98.1":
+        errors.append("native audio release must use the repository Rust 1.98.1 pin")
     workflow = (ROOT / ".github/workflows/release-audio.yml").read_text()
     required = (
         "ref: ${{ inputs.sha }}",
         AUDIO_MANYLINUX_IMAGE,
         "version: 2026.7.11",
-        "mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.97.0",
-        "rust@1.97.0 -- rustc --version",
-        "rust@1.97.0 -- cargo --version",
+        "mise --no-config install python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1",
+        "rust@1.98.1 -- rustc --version",
+        "rust@1.98.1 -- cargo --version",
         "python tools/ci/build_audio_prep_release_asset.py --out dist",
         expected_filename.replace(version, "$RELEASE_VERSION"),
         "tools/ci/upload_audio_prep_release_asset.bash",
@@ -672,7 +672,7 @@ def docker_release_errors() -> list[str]:
         (platform, bundle)
         for platform in ("cuda12", "cpu")
         for bundle in ("default", "ctranslate2", "sglang", "transformers5")
-    } | {("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
+    } | {("cuda12", "sglang-vision-extract"), ("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
     if pairs != expected_pairs:
         errors.append("Docker release matrix differs from the supported server pairs")
 

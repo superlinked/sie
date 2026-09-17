@@ -295,7 +295,7 @@ def smoke_image(image: str, *, bundle: str | None = None) -> None:
         imports = "import sie_server, sie_sdk, sie_audio_prep, torch, transformers; "
         if bundle == "ctranslate2":
             imports += "import ctranslate2; "
-        elif bundle in {"sglang", "sglang-cu130"}:
+        elif bundle in {"sglang", "sglang-vision-extract", "sglang-cu130"}:
             imports += "import sglang; "
         elif bundle == "tensorrt-llm":
             imports += "import tensorrt_llm; "
