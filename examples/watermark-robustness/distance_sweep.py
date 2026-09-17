@@ -5,9 +5,11 @@ range, via the cloud LLM translator. For each pivot: mean detector z, detected
 count, chrF++ (surface retention), and the retained/novel bigram green split.
 """
 
+import argparse
 import json
 import os
 import statistics
+from pathlib import Path
 
 import torch
 from sacrebleu.metrics import CHRF
@@ -35,6 +37,14 @@ chrf = CHRF(word_order=2)
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, default=HERE / "distance-sweep-results.json")
+    args = parser.parse_args()
+    if args.output.exists():
+        raise SystemExit(
+            f"{args.output} already exists; choose a new --output so recorded "
+            "sweep evidence is never replaced."
+        )
     payload = json.loads(SAMPLES_PATH.read_text())
     params = payload["watermark_params"]
     tok = AutoTokenizer.from_pretrained(payload["wm_model_id"])
@@ -98,8 +108,15 @@ def main() -> None:
               f"{sum(1 for z in zs if z > 3.0):2d}/{len(zs):<2d} "
               f"{statistics.mean(chrfs):5.1f} {100*ret_c/total:5.1f} "
               f"{ret_g/max(ret_c,1):6.3f} {nov_g/max(nov_c,1):6.3f}")
-    (HERE / "distance-sweep-results.json").write_text(
-        json.dumps(all_rows, indent=2, ensure_ascii=False))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with args.output.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(all_rows, indent=2, ensure_ascii=False))
+    except FileExistsError:
+        raise SystemExit(
+            f"{args.output} already exists; choose a new --output so recorded "
+            "sweep evidence is never replaced."
+        )
 
 
 if __name__ == "__main__":

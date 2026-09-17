@@ -24,7 +24,9 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, Waterm
 from wm_common import HERE, WATERMARK_PARAMS, WM_MODEL_ID
 from wm_detector import WatermarkDetector
 
-OUT = HERE / "fresh-translation-2026-09-13"
+PUBLISHED = HERE / "fresh-translation-2026-09-13"
+OUT = PUBLISHED   # write directory; __main__ forbids writing into PUBLISHED
+DATA = PUBLISHED  # read directory; equals OUT except in the report phase
 LOCAL_ONLY = True
 TRANSLATION_REPO = "superlinked/madlad400-3b-mt-ctranslate2-float32"
 TRANSLATION_REVISION = "2cac811471ffb01ea6502ab4d317d5a7e9cb6f7d"
@@ -67,7 +69,7 @@ def save(name, data):
 
 
 def read(name, default):
-    path = OUT / name
+    path = DATA / name
     return json.loads(path.read_text()) if path.exists() else default
 
 
@@ -103,13 +105,30 @@ def generate(limit_batches=None):
         "torch": torch.__version__, "transformers": transformers.__version__,
         "python": platform.python_version(), "device": "cpu", "dtype": "float32",
         "threads": torch.get_num_threads(), "keys": KEYS, "biases": BIASES,
+        # Immutable base watermark settings. params_for() overrides bias and
+        # hashing_key per run; each source row records those effective values.
+        "watermark_params": {k: v for k, v in WATERMARK_PARAMS.items()
+                             if k not in {"bias", "hashing_key"}},
         "generation_settings": {"max_new_tokens": 224, "do_sample": True, "temperature": 0.8,
                                 "top_k": 20, "top_p": 0.95, "repetition_penalty": 1.1},
         "model_generation_defaults": model.generation_config.to_dict(),
         "prompts": PROMPTS,
         "translation_artifact": TRANSLATION_REPO, "translation_revision": TRANSLATION_REVISION,
     }
-    save("manifest.json", metadata)
+    existing_manifest = read("manifest.json", None)
+    if existing_manifest is None:
+        save("manifest.json", metadata)
+    else:
+        immutable = ["design", "planned_scored_records", "source_generations",
+                     "model", "keys", "biases", "generation_settings", "prompts",
+                     "watermark_params", "translation_artifact", "translation_revision"]
+        changed = [k for k in immutable if existing_manifest.get(k) != metadata[k]]
+        if changed:
+            raise SystemExit(
+                "manifest.json in the output directory records different settings "
+                f"({', '.join(changed)}). Resume with the original configuration or "
+                "choose a new --out-dir; the original provenance is not replaced."
+            )
     batches_done = 0
     for group, key in enumerate(KEYS):
         indices = list(range(group * 7, group * 7 + 7))
@@ -250,12 +269,12 @@ def report():
         cosine = float(embeddings[0] @ embeddings[1])
         embedding_ids = embedder.tokenizer([original["text"], transformed["text"]], truncation=False, verbose=False)["input_ids"]
         embedding_truncation = any(len(ids) > embedder.max_seq_length for ids in embedding_ids)
-        length_ratio = after["tokens"] / before["tokens"]
+        length_ratio = after["tokens"] / before["tokens"] if before["tokens"] else None
         pairs.append({**common, "before": before, "after": after, "cosine": cosine,
                       "length_ratio": length_ratio, "source_finish_reason": original["finish_reason"],
                       "embedding_truncation_flag": embedding_truncation,
                       "translation_cap_flag": any(s["finish_reason"] != "eos" for s in transformed["forward_segments"] + transformed["backward_segments"]),
-                      "length_review_flag": length_ratio < 0.7 or length_ratio > 1.4})
+                      "length_review_flag": length_ratio is None or length_ratio < 0.7 or length_ratio > 1.4})
     summary = []
     for bias in BIASES:
         group = [r for r in pairs if r["bias"] == bias]
@@ -268,7 +287,10 @@ def report():
                         "detected_before": sum(r["before"]["z"] > 3 for r in valid),
                         "detected_after": sum(r["after"]["z"] > 3 for r in valid),
                         "mean_cosine": statistics.mean(r["cosine"] for r in group),
-                        "mean_length_ratio": statistics.mean(r["length_ratio"] for r in group),
+                        "mean_length_ratio": (statistics.mean(ratios)
+                                              if (ratios := [r["length_ratio"] for r in group
+                                                             if r["length_ratio"] is not None])
+                                              else None),
                         "length_flags": sum(r["length_review_flag"] for r in group),
                         "source_cap_flags": sum(r["source_finish_reason"] != "eos" for r in group),
                         "embedding_truncation_flags": sum(r["embedding_truncation_flag"] for r in group),
@@ -298,9 +320,10 @@ def report():
     for row in summary:
         n = row["paired_n"]
         label = "0 (unwatermarked)" if not row["bias"] else f"{row['bias']:g}"
+        ratio_text = "n/a" if row["mean_length_ratio"] is None else f"{row['mean_length_ratio']:.2f}"
         lines.append(f"| {label} | {n} | {row['mean_z_before']:.2f} | {row['mean_z_after']:.2f} | "
                      f"{row['detected_before']}/{n} | {row['detected_after']}/{n} | "
-                     f"{row['mean_length_ratio']:.2f} | {row['mean_cosine']:.3f} |")
+                     f"{ratio_text} | {row['mean_cosine']:.3f} |")
     lines += ["", "All pairs are included; no results are removed for producing an inconvenient score.", "",
               f"Source token-cap flags: {sum(r['source_cap_flags'] for r in summary)}/84. "
               f"Translation stop flags: {sum(r['translation_cap_flags'] for r in summary)}/84. "
@@ -336,14 +359,17 @@ if __name__ == "__main__":
     parser.add_argument("phase", choices=["generate", "translate", "report"])
     parser.add_argument("--limit", type=int)
     parser.add_argument("--out-dir", type=Path, default=HERE / "runs/fresh-translation")
+    parser.add_argument("--dataset-dir", type=Path, default=PUBLISHED,
+                        help="report phase: dataset to read (default: the published dataset).")
     parser.add_argument("--allow-downloads", action="store_true",
                         help="Allow missing model/tokenizer assets to download from Hugging Face.")
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive.")
-    if args.out_dir.resolve() == OUT.resolve() and args.phase != "report":
-        parser.error("The published dataset is read-only. Choose a new --out-dir.")
+    if args.out_dir.resolve() == PUBLISHED.resolve():
+        parser.error("The published dataset is read-only for every phase. Choose a new --out-dir.")
     OUT = args.out_dir
+    DATA = args.dataset_dir if args.phase == "report" else args.out_dir
     LOCAL_ONLY = not args.allow_downloads
     torch.set_num_threads(6)
     if args.phase == "generate":

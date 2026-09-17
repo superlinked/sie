@@ -6,8 +6,9 @@ z-score is retention-driven, retained bigrams should be green at roughly the
 original watermarked rate and novel bigrams at the 25% null.
 """
 
+import argparse
 import json
-import sys
+from pathlib import Path
 
 import torch
 from transformers import AutoConfig, AutoTokenizer
@@ -15,11 +16,11 @@ from transformers.generation.logits_process import WatermarkLogitsProcessor
 
 from wm_common import HERE, SAMPLES_PATH
 
-payload = json.loads(SAMPLES_PATH.read_text())
-params = payload["watermark_params"]
-tok = AutoTokenizer.from_pretrained(payload["wm_model_id"])
-config = AutoConfig.from_pretrained(payload["wm_model_id"])
-proc = WatermarkLogitsProcessor(vocab_size=config.vocab_size, device="cpu", **params)
+# Loaded in main() from the --samples payload, so the analyzer always compares
+# result rows against the source file that actually produced them.
+payload = None
+tok = None
+proc = None
 
 
 def ids_of(text):
@@ -86,6 +87,24 @@ def identity_check():
     print(f"sanity: green fraction on watermarked identity = {green/total:.3f} (expect ~0.6)")
 
 
-identity_check()
-for f in sys.argv[1:] or ["results.json"]:
-    analyze(f)
+def main():
+    global payload, tok, proc
+    parser = argparse.ArgumentParser()
+    parser.add_argument("results", nargs="*", default=["results.json"],
+                        help="Result files to decompose (relative to this folder).")
+    parser.add_argument("--samples", type=Path, default=SAMPLES_PATH,
+                        help="Source file that produced the result rows; supplies "
+                             "the model, watermark parameters, and original texts.")
+    args = parser.parse_args()
+    payload = json.loads(args.samples.read_text())
+    params = payload["watermark_params"]
+    tok = AutoTokenizer.from_pretrained(payload["wm_model_id"])
+    config = AutoConfig.from_pretrained(payload["wm_model_id"])
+    proc = WatermarkLogitsProcessor(vocab_size=config.vocab_size, device="cpu", **params)
+    identity_check()
+    for f in args.results:
+        analyze(f)
+
+
+if __name__ == "__main__":
+    main()

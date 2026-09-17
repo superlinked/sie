@@ -78,12 +78,16 @@ def main() -> None:
         raise ValueError(arm)
 
     rows = []
+    failures = 0
     for sample in payload["samples"]:
         sample_arms = arm_names if sample["kind"] == "watermarked" else ["identity"]
         for arm in sample_arms:
             try:
                 attacked, extra = transform(arm, sample["text"])
             except Exception as exc:
+                failures += 1
+                rows.append({"id": sample["id"], "kind": sample["kind"],
+                             "arm": arm, "error": str(exc)})
                 print(f"{sample['id']:6s} {arm:10s} FAILED: {exc}")
                 continue
             row = {"id": sample["id"], "kind": sample["kind"], "arm": arm, **extra}
@@ -97,7 +101,20 @@ def main() -> None:
             print(f"{sample['id']:6s} {arm:10s} z={row['z']:6.2f} p={row['p']:.2e}"
                   + (f" chrf={row['chrf']:.1f} cos={row['cosine']:.2f}" if arm != "identity" else ""))
 
-    results_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False))
+    try:
+        with results_path.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(rows, indent=2, ensure_ascii=False))
+    except FileExistsError:
+        raise SystemExit(
+            f"{results_path} already exists; pass a new --suffix so recorded "
+            "evidence is never replaced."
+        )
+    if failures:
+        raise SystemExit(
+            f"{failures} sample-arm(s) failed; wrote {results_path} with explicit "
+            "failure records and skipped the report. This partial run is not a "
+            "replacement for the published results."
+        )
     write_report(rows, payload, arm_names, report_path, args.translator)
     print(f"wrote {results_path} and {report_path}")
 
