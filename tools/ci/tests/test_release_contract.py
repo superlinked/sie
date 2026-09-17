@@ -228,6 +228,7 @@ REFRESH_RUN = "        run: |\n          set -euo pipefail\n          branch="
         ("refresh", "OpenAPI versions'\n", "OpenAPI versions' || true\n"),
         ("refresh", '"HEAD:refs/heads/$branch"\n', '"HEAD:refs/heads/$branch" || true\n'),
         ("refresh", f"{contract.OPENAPI_STAMP_COMMAND}\n", f"set +e\n          {contract.OPENAPI_STAMP_COMMAND}\n"),
+        ("refresh", f"{contract.OPENAPI_STAMP_COMMAND}\n", f"exit 0\n          {contract.OPENAPI_STAMP_COMMAND}\n"),
         ("refresh", REFRESH_RUN, f"        continue-on-error: true\n{REFRESH_RUN}"),
         ("refresh", REFRESH_RUN, f"        shell: bash {{0}}\n{REFRESH_RUN}"),
     ],
@@ -244,6 +245,7 @@ REFRESH_RUN = "        run: |\n          set -euo pipefail\n          branch="
         "commit-or-true",
         "push-or-true",
         "set-plus-e",
+        "early-exit",
         "refresh-continue-on-error",
         "refresh-shell-without-errexit",
     ],
@@ -254,6 +256,30 @@ def test_release_openapi_contract_rejects_inactive_or_suppressed_commands(surfac
     assert surfaces[surface].count(old) == 1
     surfaces[surface] = surfaces[surface].replace(old, new)
     assert contract.release_openapi_errors(surfaces["refresh"], surfaces["contracts"], stamped)
+
+
+@pytest.mark.parametrize(
+    ("opened", "closed"),
+    [("if false; then", "fi"), ("while false; do", "done")],
+    ids=["if-false", "while-false"],
+)
+def test_release_pr_refresh_rejects_inactive_shell_wrappers(opened, closed) -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    opening = f"        run: |\n          set -euo pipefail\n          {opened}\n          branch="
+    wrapped = refresh.replace(REFRESH_RUN, opening).replace(
+        '"HEAD:refs/heads/$branch"\n', f'"HEAD:refs/heads/$branch"\n          {closed}\n'
+    )
+    assert wrapped != refresh
+    assert contract.release_openapi_errors(wrapped, contracts, stamped)
+
+
+def test_release_pr_refresh_rejects_commands_moved_into_another_step() -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    lines = refresh.splitlines()
+    lines.insert(line_index(lines, 'pr_number="$(jq'), lines.pop(line_index(lines, "git push origin")))
+    moved = "\n".join(lines)
+    assert moved != refresh
+    assert contract.release_openapi_errors(moved, contracts, stamped)
 
 
 @pytest.mark.parametrize("document", sorted(contract.OPENAPI_VERSION_PATHS))
