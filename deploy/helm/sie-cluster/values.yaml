@@ -2076,7 +2076,8 @@ mcpEdge:
   existingSecretName: ""
   # SIE_MCP_PUBLIC_URL — the externally reachable https origin (e.g.
   # https://mcp.example.com) advertised as the OAuth issuer and endpoints.
-  # Empty => derived from mcpEdge.ingress.host when the edge ingress is enabled.
+  # Empty => https://<mcpEdge.ingress.host> when the edge ingress is enabled
+  # (https even with chart TLS off, which implies upstream TLS termination).
   # Set it explicitly for any other exposure (LoadBalancer, external proxy):
   # unpinned, the edge refuses OAuth metadata for non-loopback hosts.
   publicUrl: ""
