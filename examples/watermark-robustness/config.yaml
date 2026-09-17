@@ -1,0 +1,48 @@
+# Descriptive reference for the watermark-robustness example.
+# This YAML is not loaded by the scripts. Runtime settings come from Python
+# constants, SIE_GENERATOR_MODEL, CLI arguments and saved source metadata.
+# The exact watermark settings are also persisted inside samples.json, which
+# detection always reads back, so the source and detector cannot drift.
+
+watermark:
+  scheme: kgw-greenlist          # transformers WatermarkLogitsProcessor
+  greenlist_ratio: 0.25
+  bias: 4.0                       # the strength sweep also runs 0, 2, 3
+  hashing_key: 15485863
+  seeding_scheme: lefthash
+  context_width: 1
+
+detector:
+  module: wm_detector            # corrects transformers' identity-based n-gram counting
+  ignore_repeated_ngrams: true
+  flag_threshold_z: 3.0          # nominal one-sided p ~= 1.35e-3, not an empirical guarantee
+
+models:
+  # Watermarked source text is generated locally, on CPU (the green-list RNG is
+  # device-dependent, so generation and detection must share a device).
+  source_generator:
+    id: Qwen/Qwen2.5-1.5B-Instruct
+    revision: null               # legacy samples.json lacks revision/seed/token-ID metadata
+
+  # Hosted translation and paraphrase go through the SIE /v1/chat/completions route.
+  # The cluster catalog serves this model; its revision is set by the catalog.
+  hosted_generator:
+    id: Qwen/Qwen3.8-27B-FP8      # archived cloud results used Qwen/Qwen3.6-27B
+    sie_primitive: chat_completions
+
+  # Local translation path. MADLAD is served from a CTranslate2 float32 artifact.
+  local_translator:
+    id: google/madlad400-3b-mt
+    hf_revision: fa184c675da0b5c9e1c8694fccd4e12e2d422094
+    serving_artifact: superlinked/madlad400-3b-mt-ctranslate2-float32
+    serving_revision: 2cac811471ffb01ea6502ab4d317d5a7e9cb6f7d
+
+  # Optional entity-protected round trip (run_eval.py, ner_rt_ar arm).
+  ner:
+    id: urchade/gliner_multi-v2.1
+    hf_revision: 443d26d654e0324125a96bebd8e796c14ff2efe6
+    sie_primitive: extract
+
+endpoints:
+  # run_paraphrase.py supports SIE_BASE_URL and --sie-url; SIE_API_KEY carries the key.
+  default_base_url: https://api.superlinked.com
