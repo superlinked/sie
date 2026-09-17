@@ -99,7 +99,7 @@ jobs:
           mise exec -- uv lock --project .
           mise exec -- pnpm install --lockfile-only
           mise exec -- cargo metadata --format-version 1 > /dev/null
-          mise exec -- python tools/ci/release_openapi.py
+          mise exec -- python -I tools/ci/release_openapi.py
           if git diff --quiet -- uv.lock pnpm-lock.yaml Cargo.lock packages/sie_server/openapi.json packages/sie_gateway/openapi.json; then
             exit 0
           fi

@@ -77,6 +77,7 @@ OPENAPI_VERSION_PATHS = {
     "packages/sie_server/openapi.json",
     "packages/sie_gateway/openapi.json",
 }
+OPENAPI_STAMP_COMMAND = "mise exec -- python -I tools/ci/release_openapi.py"
 ACTION_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 JOB_FIELD_INDENT = 4
 ARTIFACT_RETENTION_DAYS = 30
@@ -354,13 +355,18 @@ def release_openapi_errors(refresh: str, contracts: str, stamped: set[str]) -> l
         errors.append("release OpenAPI version stamping differs from the public contract")
     if documents(contracts) != OPENAPI_VERSION_PATHS:
         errors.append("CI / Contracts OpenAPI regeneration differs from the release version stamping")
-    commits = [line for line in refresh.splitlines() if "git diff --quiet --" in line or "git add " in line]
+    lines = [line.strip() for line in refresh.splitlines()]
+    checkouts = [index for index, line in enumerate(lines) if line == 'git checkout -B "$branch" FETCH_HEAD']
+    stamps = [index for index, line in enumerate(lines) if line == OPENAPI_STAMP_COMMAND]
+    commits = [index for index, line in enumerate(lines) if "git diff --quiet --" in line or "git add " in line]
     if (
-        "mise exec -- python tools/ci/release_openapi.py" not in refresh
+        len(checkouts) != 1
+        or len(stamps) != 1
         or len(commits) != 2
-        or any(documents(line) != OPENAPI_VERSION_PATHS for line in commits)
+        or not checkouts[0] < stamps[0] < commits[0]
+        or any(documents(lines[index]) != OPENAPI_VERSION_PATHS for index in commits)
     ):
-        errors.append("release PR refresh must stamp and commit every OpenAPI version")
+        errors.append("release PR refresh must stamp every OpenAPI version after checkout and before committing it")
     return errors
 
 

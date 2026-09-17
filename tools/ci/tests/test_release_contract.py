@@ -113,11 +113,15 @@ def test_release_please_rejects_any_other_bootstrap_boundary(monkeypatch, bootst
     assert "release-please bootstrap-sha must be the exact public v0.7.3 commit" in contract.release_config_errors()
 
 
-@pytest.mark.parametrize("document", sorted(contract.OPENAPI_VERSION_PATHS))
-def test_release_pr_stamps_every_openapi_version_ci_regenerates(document) -> None:
+def openapi_surfaces() -> tuple[str, str, set[str]]:
     refresh = contract.workflow_job_blocks(".github/workflows/release.yml")["release-please"]
     contracts = contract.workflow_job_blocks(".github/workflows/ci.yml")["contracts"]
-    stamped = set(release_openapi.OPENAPI_VERSION_SOURCES)
+    return refresh, contracts, set(release_openapi.OPENAPI_VERSION_SOURCES)
+
+
+@pytest.mark.parametrize("document", sorted(contract.OPENAPI_VERSION_PATHS))
+def test_release_pr_stamps_every_openapi_version_ci_regenerates(document) -> None:
+    refresh, contracts, stamped = openapi_surfaces()
     assert contract.release_openapi_errors(refresh, contracts, stamped) == []
 
     assert contract.release_openapi_errors(refresh, contracts, stamped - {document})
@@ -126,8 +130,42 @@ def test_release_pr_stamps_every_openapi_version_ci_regenerates(document) -> Non
         unstaged = re.sub(rf"({re.escape(command)} .*) {re.escape(document)}", r"\1", refresh)
         assert unstaged != refresh
         assert contract.release_openapi_errors(unstaged, contracts, stamped)
-    unstamped = refresh.replace("mise exec -- python tools/ci/release_openapi.py", "")
+    unstamped = refresh.replace(contract.OPENAPI_STAMP_COMMAND, "")
     assert contract.release_openapi_errors(unstamped, contracts, stamped)
+
+
+@pytest.mark.parametrize(
+    ("anchor", "offset", "valid"),
+    [
+        ('git checkout -B "$branch" FETCH_HEAD', 1, True),
+        ("mise exec -- cargo metadata", 1, True),
+        ('git checkout -B "$branch" FETCH_HEAD', 0, False),
+        ("git diff --quiet --", 1, False),
+        ("git add ", 1, False),
+    ],
+)
+def test_release_pr_stamps_openapi_versions_after_checkout_and_before_commit(anchor, offset, valid) -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    lines = refresh.splitlines()
+    stamp = next(line for line in lines if line.strip() == contract.OPENAPI_STAMP_COMMAND)
+    lines.remove(stamp)
+    lines.insert(next(index for index, line in enumerate(lines) if anchor in line) + offset, stamp)
+    assert (contract.release_openapi_errors("\n".join(lines), contracts, stamped) == []) is valid
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        f"{contract.OPENAPI_STAMP_COMMAND} || true",
+        f"# {contract.OPENAPI_STAMP_COMMAND}",
+        contract.OPENAPI_STAMP_COMMAND.replace(" -I ", " "),
+    ],
+)
+def test_release_pr_stamp_fails_closed_in_isolated_python(stamp) -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    weakened = refresh.replace(contract.OPENAPI_STAMP_COMMAND, stamp)
+    assert weakened != refresh
+    assert contract.release_openapi_errors(weakened, contracts, stamped)
 
 
 @pytest.mark.parametrize("document", sorted(contract.OPENAPI_VERSION_PATHS))
