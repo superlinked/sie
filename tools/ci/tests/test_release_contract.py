@@ -206,6 +206,56 @@ def test_release_pr_refresh_diffs_adds_commits_and_pushes_once_in_order(rewrite)
     assert contract.release_openapi_errors("\n".join(lines), contracts, stamped)
 
 
+REFRESH_RUN = "        run: |\n          set -euo pipefail\n          branch="
+
+
+@pytest.mark.parametrize(
+    ("surface", "old", "new"),
+    [
+        ("contracts", "- run: mise run openapi\n", "# - run: mise run openapi\n"),
+        ("contracts", "- run: mise run openapi\n", "- run: echo mise run openapi\n"),
+        ("contracts", "- run: mise run openapi\n", "- run: mise run openapi\n        if: false\n"),
+        ("contracts", "packages/sie_gateway/openapi.json\n", "packages/sie_gateway/openapi.json\n          || true\n"),
+        (
+            "contracts",
+            "packages/sie_gateway/openapi.json\n",
+            "packages/sie_gateway/openapi.json\n        continue-on-error: true\n",
+        ),
+        ("contracts", "    timeout-minutes: 25\n", "    timeout-minutes: 25\n    continue-on-error: true\n"),
+        ("refresh", "if git diff --quiet --", "if echo git diff --quiet --"),
+        ("refresh", "git add uv.lock", "git add --dry-run uv.lock"),
+        ("refresh", "packages/sie_gateway/openapi.json\n", "packages/sie_gateway/openapi.json || true\n"),
+        ("refresh", "OpenAPI versions'\n", "OpenAPI versions' || true\n"),
+        ("refresh", '"HEAD:refs/heads/$branch"\n', '"HEAD:refs/heads/$branch" || true\n'),
+        ("refresh", f"{contract.OPENAPI_STAMP_COMMAND}\n", f"set +e\n          {contract.OPENAPI_STAMP_COMMAND}\n"),
+        ("refresh", REFRESH_RUN, f"        continue-on-error: true\n{REFRESH_RUN}"),
+        ("refresh", REFRESH_RUN, f"        shell: bash {{0}}\n{REFRESH_RUN}"),
+    ],
+    ids=[
+        "commented-regeneration",
+        "echoed-regeneration",
+        "skipped-regeneration",
+        "diff-or-true",
+        "diff-continue-on-error",
+        "contracts-job-continue-on-error",
+        "echoed-refresh-diff",
+        "dry-run-add",
+        "add-or-true",
+        "commit-or-true",
+        "push-or-true",
+        "set-plus-e",
+        "refresh-continue-on-error",
+        "refresh-shell-without-errexit",
+    ],
+)
+def test_release_openapi_contract_rejects_inactive_or_suppressed_commands(surface, old, new) -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    surfaces = {"refresh": refresh, "contracts": contracts}
+    assert surfaces[surface].count(old) == 1
+    surfaces[surface] = surfaces[surface].replace(old, new)
+    assert contract.release_openapi_errors(surfaces["refresh"], surfaces["contracts"], stamped)
+
+
 @pytest.mark.parametrize("document", sorted(contract.OPENAPI_VERSION_PATHS))
 def test_release_please_must_not_rewrite_generated_openapi(monkeypatch, document) -> None:
     real_load_json = contract.load_json

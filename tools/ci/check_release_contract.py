@@ -78,6 +78,19 @@ OPENAPI_VERSION_PATHS = {
     "packages/sie_gateway/openapi.json",
 }
 OPENAPI_STAMP_COMMAND = "mise exec -- python -I tools/ci/release_openapi.py"
+PLAIN_PATHS = r"((?:[\w.][\w./-]* )*[\w.][\w./-]*)"
+CONTRACTS_OPENAPI_COMMANDS = (
+    ("mise run openapi", re.escape("- run: mise run openapi")),
+    ("git diff", rf"- run: git diff --exit-code -- {PLAIN_PATHS}"),
+)
+REFRESH_OPENAPI_COMMANDS = (
+    ("git checkout", re.escape('git checkout -B "$branch" FETCH_HEAD')),
+    ("tools/ci/release_openapi.py", re.escape(OPENAPI_STAMP_COMMAND)),
+    ("git diff", rf"if git diff --quiet -- {PLAIN_PATHS}; then"),
+    ("git add", rf"git add {PLAIN_PATHS}"),
+    ("git commit", r"git commit -m '[^'\\]*'"),
+    ("git push", re.escape('git push origin "HEAD:refs/heads/$branch"')),
+)
 ACTION_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 JOB_FIELD_INDENT = 4
 ARTIFACT_RETENTION_DAYS = 30
@@ -346,34 +359,65 @@ def release_config_errors() -> list[str]:
     return errors
 
 
+def step_lines(block: str) -> list[str]:
+    """Strip workflow lines, joining each folded `>-` scalar onto its key line."""
+    lines: list[str] = []
+    continuation: int | None = None
+    for raw in block.splitlines():
+        indent = len(raw) - len(raw.lstrip())
+        if continuation is not None and raw.strip() and indent >= continuation:
+            lines[-1] = f"{lines[-1]} {raw.strip()}"
+            continue
+        continuation = None
+        line = raw.strip()
+        if line.endswith(": >-"):
+            continuation = indent + (4 if line.startswith("- ") else 2)
+            line = line.removesuffix(" >-")
+        lines.append(line)
+    return lines
+
+
+def exact_commands(lines: list[str], commands: tuple[tuple[str, str], ...]) -> list[tuple[int, re.Match[str]]] | None:
+    """Match each command on the only line that mentions it, requiring the commands in order."""
+    found: list[tuple[int, re.Match[str]]] = []
+    for marker, command in commands:
+        indexes = [index for index, line in enumerate(lines) if marker in line]
+        match = re.fullmatch(command, lines[indexes[0]]) if len(indexes) == 1 else None
+        if match is None or (found and indexes[0] <= found[-1][0]):
+            return None
+        found.append((indexes[0], match))
+    return found
+
+
 def release_openapi_errors(refresh: str, contracts: str, stamped: set[str]) -> list[str]:
-    def documents(text: str) -> set[str]:
-        return set(re.findall(r"[\w/]+/openapi\.json", text))
+    def documents(match: re.Match[str]) -> set[str]:
+        return set(re.findall(r"[\w/]+/openapi\.json", match.group(1)))
+
+    def ends_step(lines: list[str], index: int) -> bool:
+        return index + 1 == len(lines) or not lines[index + 1] or lines[index + 1].startswith("- ")
 
     errors: list[str] = []
     if stamped != OPENAPI_VERSION_PATHS:
         errors.append("release OpenAPI version stamping differs from the public contract")
-    if documents(contracts) != OPENAPI_VERSION_PATHS:
-        errors.append("CI / Contracts OpenAPI regeneration differs from the release version stamping")
-    lines = [line.strip() for line in refresh.splitlines()]
-    steps = [
-        [index for index, line in enumerate(lines) if matches(line)]
-        for matches in (
-            lambda line: line == 'git checkout -B "$branch" FETCH_HEAD',
-            lambda line: line == OPENAPI_STAMP_COMMAND,
-            lambda line: "git diff --quiet --" in line,
-            lambda line: line.startswith("git add "),
-            lambda line: line.startswith("git commit "),
-            lambda line: line.startswith("git push origin "),
-        )
-    ]
+    contract_lines = step_lines(contracts)
+    regenerated = exact_commands(contract_lines, CONTRACTS_OPENAPI_COMMANDS)
     if (
-        any(len(step) != 1 for step in steps)
-        or [step[0] for step in steps] != sorted(step[0] for step in steps)
-        or any(documents(lines[step[0]]) != OPENAPI_VERSION_PATHS for step in steps[2:4])
+        regenerated is None
+        or documents(regenerated[-1][1]) != OPENAPI_VERSION_PATHS
+        or not all(ends_step(contract_lines, index) for index, _ in regenerated)
+        or any(line.startswith("continue-on-error") for line in contract_lines)
+    ):
+        errors.append("CI / Contracts must regenerate and then diff exactly the stamped OpenAPI documents")
+    refresh_lines = step_lines(refresh)
+    refreshed = exact_commands(refresh_lines, REFRESH_OPENAPI_COMMANDS)
+    if (
+        refreshed is None
+        or any(documents(match) != OPENAPI_VERSION_PATHS for _, match in refreshed[2:4])
+        or any(line.startswith(("set +", "shell:", "continue-on-error")) for line in refresh_lines)
     ):
         errors.append(
-            "release PR refresh must run checkout, OpenAPI stamp, diff, add, commit, and push once each, in order"
+            "release PR refresh must run checkout, OpenAPI stamp, diff, add, commit, and push once each, "
+            "in order, as exact commands without failure suppression"
         )
     return errors
 
