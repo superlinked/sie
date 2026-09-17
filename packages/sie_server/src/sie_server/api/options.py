@@ -53,7 +53,9 @@ def resolve_runtime_options_with_profile(
         ) from e
 
     overflow_policy = merged.get("overflow_policy")
-    if overflow_policy is not None and overflow_policy not in VALID_OVERFLOW_POLICIES:
+    if overflow_policy is not None and (
+        not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES
+    ):
         span.set_attribute("error", "invalid_overflow_policy")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
