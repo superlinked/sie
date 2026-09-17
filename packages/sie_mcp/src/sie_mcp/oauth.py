@@ -229,13 +229,23 @@ def _parse_form(body: bytes) -> dict[str, str]:
     return {key: values[0] for key, values in parse_qs(decoded).items() if values}
 
 
+_ORIGIN_UNAVAILABLE = {
+    "error": "server_error",
+    "error_description": "OAuth origin is not configured; set SIE_MCP_PUBLIC_URL or SIE_MCP_ALLOWED_HOSTS.",
+}
+
+
 async def _protected_resource(request: Request, config: MCPConfig) -> JSONResponse:
     origin = base_url(config, scheme=request.url.scheme, headers=request.headers)
+    if origin is None:
+        return JSONResponse(_ORIGIN_UNAVAILABLE, status_code=503)
     return JSONResponse(protected_resource_metadata(origin))
 
 
 async def _authorization_server(request: Request, config: MCPConfig) -> JSONResponse:
     origin = base_url(config, scheme=request.url.scheme, headers=request.headers)
+    if origin is None:
+        return JSONResponse(_ORIGIN_UNAVAILABLE, status_code=503)
     return JSONResponse(authorization_server_metadata(origin))
 
 

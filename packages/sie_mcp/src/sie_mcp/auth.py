@@ -33,18 +33,40 @@ _EXEMPT_PATHS = frozenset(
 )
 
 
-def base_url(config: MCPConfig, *, scheme: str, headers: Headers) -> str:
+_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "[::1]"})
+
+
+def _hostname(host: str) -> str:
+    if host.startswith("["):
+        return host[: host.find("]") + 1]
+    return host.rsplit(":", 1)[0]
+
+
+def _host_trusted(config: MCPConfig, host: str) -> bool:
+    if _hostname(host) in _LOOPBACK_HOSTNAMES:
+        return True
+    for allowed in config.allowed_hosts:
+        if host == allowed or (allowed.endswith(":*") and host.startswith(allowed[:-1])):
+            return True
+    return False
+
+
+def base_url(config: MCPConfig, *, scheme: str, headers: Headers) -> str | None:
     """Resolve the externally reachable origin for OAuth metadata URLs.
 
-    Prefers the pinned ``SIE_MCP_PUBLIC_URL``; otherwise uses the request's own
-    scheme and ``Host``. ``X-Forwarded-*`` headers are never read here: any caller
-    can set them, and this origin names the authorization server clients trust.
-    A scheme set by a proxy is honoured only through uvicorn's
+    Prefers the pinned ``SIE_MCP_PUBLIC_URL``. Unpinned, the request's own scheme and
+    ``Host`` are used only when the host is loopback or listed in
+    ``SIE_MCP_ALLOWED_HOSTS``; otherwise ``None``. This origin names the authorization
+    server clients trust, so caller-controlled ``Host`` and ``X-Forwarded-*`` values are
+    never advertised. A proxy-set scheme is honoured only through uvicorn's
     ``FORWARDED_ALLOW_IPS`` trust list, which rewrites ``scheme`` upstream.
     """
     if config.public_base_url:
         return config.public_base_url
-    return f"{scheme}://{headers.get('host') or ''}"
+    host = headers.get("host") or ""
+    if not host or not _host_trusted(config, host):
+        return None
+    return f"{scheme}://{host}"
 
 
 def bearer_token(authorization: str | None) -> str | None:
@@ -108,5 +130,7 @@ class ConnectorSecretAuthMiddleware:
         if not self._config.oauth_enabled:
             return {}
         origin = base_url(self._config, scheme=scope.get("scheme", "http"), headers=headers)
+        if origin is None:
+            return {}
         metadata = f"{origin}/.well-known/oauth-protected-resource"
         return {"WWW-Authenticate": f'Bearer resource_metadata="{metadata}"'}

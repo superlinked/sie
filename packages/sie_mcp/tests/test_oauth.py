@@ -219,15 +219,15 @@ def test_metadata_documents_use_origin() -> None:
     assert server["code_challenge_methods_supported"] == ["S256"]
 
 
-def _client(cfg: MCPConfig) -> TestClient:
+def _client(cfg: MCPConfig, *, base_url: str = "https://mcp.example.com") -> TestClient:
     app = Starlette(routes=build_oauth_routes(cfg))
-    return TestClient(app, base_url="https://mcp.example.com")
+    return TestClient(app, base_url=base_url)
 
 
 @pytest.mark.parametrize("path", ["/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource"])
 def test_metadata_origin_ignores_forwarded_headers(path: str) -> None:
     body = (
-        _client(_cfg())
+        _client(_cfg(allowed_hosts=["mcp.example.com"]))
         .get(path, headers={"X-Forwarded-Host": "evil.attacker.example", "X-Forwarded-Proto": "http"})
         .json()
     )
@@ -238,6 +238,23 @@ def test_metadata_origin_ignores_forwarded_headers(path: str) -> None:
         assert body["token_endpoint"] == "https://mcp.example.com/token"  # noqa: S105
     else:
         assert body["authorization_servers"] == ["https://mcp.example.com"]
+
+
+@pytest.mark.parametrize("path", ["/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource"])
+def test_metadata_refused_for_untrusted_host_when_unpinned(path: str) -> None:
+    resp = _client(_cfg()).get(path)
+    assert resp.status_code == 503
+    assert "mcp.example.com" not in resp.text
+
+
+def test_metadata_served_for_loopback_host_when_unpinned() -> None:
+    body = _client(_cfg(), base_url="http://localhost:8088").get("/.well-known/oauth-authorization-server").json()
+    assert body["issuer"] == "http://localhost:8088"
+
+
+def test_metadata_uses_pinned_public_url_for_any_host() -> None:
+    client = _client(_cfg(public_base_url="https://mcp.example.com"), base_url="https://evil.attacker.example")
+    assert client.get("/.well-known/oauth-authorization-server").json()["issuer"] == "https://mcp.example.com"
 
 
 def _authorize_params(verifier: str) -> dict[str, str]:
@@ -260,7 +277,7 @@ def _obtain_code(client: TestClient, verifier: str) -> str:
 
 
 def test_metadata_endpoints_use_request_origin() -> None:
-    client = _client(_cfg())
+    client = _client(_cfg(allowed_hosts=["mcp.example.com"]))
     resource = client.get("/.well-known/oauth-protected-resource").json()
     assert resource["resource"] == "https://mcp.example.com/mcp"
     server = client.get("/.well-known/oauth-authorization-server").json()
@@ -392,7 +409,7 @@ def test_token_rejects_client_id_mismatch_over_http() -> None:
 
 def test_protected_resource_metadata_path_suffixed() -> None:
     # RFC 9728 path-suffixed variant resolves the same metadata.
-    client = _client(_cfg())
+    client = _client(_cfg(allowed_hosts=["mcp.example.com"]))
     resp = client.get("/.well-known/oauth-protected-resource/mcp")
     assert resp.status_code == 200
     assert resp.json()["resource"] == "https://mcp.example.com/mcp"

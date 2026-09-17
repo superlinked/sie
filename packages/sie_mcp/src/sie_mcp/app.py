@@ -27,8 +27,8 @@ def build_app() -> Starlette:
     if config.oauth_enabled:
         if not config.public_base_url:
             logger.warning(
-                "SIE_MCP_PUBLIC_URL is unset: OAuth metadata will advertise the per-request Host header as the "
-                "authorization server. Pin SIE_MCP_PUBLIC_URL to the public https origin for any exposed deployment."
+                "SIE_MCP_PUBLIC_URL is unset: OAuth metadata is served only for loopback or SIE_MCP_ALLOWED_HOSTS "
+                "Host headers. Pin SIE_MCP_PUBLIC_URL to the public https origin for any exposed deployment."
             )
         # The OAuth bridge lets claude.ai connectors authenticate via the connector
         # secret; the gate below exempts these bootstrap endpoints.

@@ -398,5 +398,6 @@ export SIE_MCP_PUBLIC_URL='https://mcp.example.com'
 ```
 
 The OAuth metadata advertises this origin as the authorization server, so pin it
-on every exposed deployment. Unpinned, the edge falls back to the request's `Host`
-header and ignores `X-Forwarded-Host`.
+on every exposed deployment. Unpinned, the edge serves OAuth metadata only when the
+request `Host` is loopback or listed in `SIE_MCP_ALLOWED_HOSTS`, and ignores
+`X-Forwarded-Host`.

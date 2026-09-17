@@ -2078,7 +2078,7 @@ mcpEdge:
   # https://mcp.example.com) advertised as the OAuth issuer and endpoints.
   # Empty => derived from mcpEdge.ingress.host when the edge ingress is enabled.
   # Set it explicitly for any other exposure (LoadBalancer, external proxy):
-  # unpinned, the edge falls back to the per-request Host header.
+  # unpinned, the edge refuses OAuth metadata for non-loopback hosts.
   publicUrl: ""
   # OAuth bridge for claude.ai / desktop connectors (#1312). Disable for
   # connector-secret-only (e.g. Cowork header) deployments.
