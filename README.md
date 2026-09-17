@@ -29,7 +29,7 @@
 
 ## About
 
-SIE is an open-source inference engine that runs the models behind every agent task through one API: search and retrieval, document-to-markdown conversion, structured output, content safety, and the agent loop itself. It replaces the patchwork of a separate model server per task with one system that serves 100+ models, loading each on demand.
+SIE is an open-source inference engine that runs the models behind every agent task through one API: search and retrieval, document-to-markdown conversion, structured output, content safety, the agent loop itself, and the translation, transcription, and vision calls around it. It replaces the patchwork of a separate model server per task with one system that serves 100+ models, loading each on demand.
 
 - OpenAI-compatible API for drop-in migration: `/v1/embeddings`, `/v1/chat/completions`, `/v1/completions`, `/v1/responses`
 - Pre-configured model catalog: Stella, SPLADE, Qwen3, GLiNER, SigLIP, and more; embedding and retrieval models benchmarked on MTEB
@@ -37,53 +37,24 @@ SIE is an open-source inference engine that runs the models behind every agent t
 - Ships Kubernetes and Helm deployment configs for the load-balancing gateway, KEDA autoscaling, and Grafana dashboards
 - Integrates with LangChain, LlamaIndex, Haystack, DSPy, CrewAI, Chroma, Qdrant, Weaviate, and LanceDB
 
-## Development
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for the complete development
-workflow and [AGENTS.md](AGENTS.md) for repository automation boundaries.
-
-Install [mise](https://mise.jdx.dev/getting-started.html), then bootstrap the
-versioned Python, Rust, Node.js, and Helm toolchains from the repository root:
-
-```bash
-./tools/init.sh
-```
-
-The common development checks and local server are available as mise tasks:
-
-```bash
-mise run test
-mise run lint
-mise run typecheck
-mise run serve
-mise run rust-check
-mise run rust-test
-mise run gateway-test
-mise run server-sidecar-test
-mise run helm -- dependencies
-mise run helm -- lint --set payloadStore.enabled=false
-mise run helm -- template --set payloadStore.enabled=false
-```
-
-The Python workspace uses the committed root lock. Package membership is
-explicit in `pyproject.toml`; a package joins the workspace only in the same
-change that adds its complete source. Native audio is always an opt-in build:
-install cmake, then run
-`mise exec -- uv sync --frozen --project . --all-packages --all-extras`.
-
 ## Tasks
 
-One SIE cluster runs the inference behind a whole agent. Each task is a handful of swappable models; browse [`packages/sie_server/models/`](https://github.com/superlinked/sie/tree/main/packages/sie_server/models) for the full set.
+One SIE cluster runs the inference behind a whole agent. Each task is a handful of swappable models; every name below links to its config, and the config's `sie_id` (its Hugging Face ID) is what you pass to the SDK. Browse [`packages/sie_server/models/`](https://github.com/superlinked/sie/tree/main/packages/sie_server/models) for the full set.
 
 | Task | What it does | Models |
 |---|---|---|
-| **Search** | Embed, match, and rerank to retrieve the right context. | `bge-m3`, `splade-v3`, `colbertv2`, `qwen3-reranker` |
-| **Document to markdown** | PDFs, Office files, and scans become clean markdown. | `lightonocr`, `glm-ocr`, `mineru`, `paddleocr-vl`, `docling` |
-| **Structured output** | Schema-valid JSON, extracted or generated. | `gliner2`, `nuner-zero`, `qwen3.6-27b` |
-| **Guard content** | A safety verdict with a probability you threshold. | `granite-guardian-2b` |
-| **Run the agent loop** | Plan steps and call tools with an open LLM, streaming included. | `qwen3.6-27b` |
+| **Search** | Embed, match, and rerank to retrieve the right context. | [`bge-m3`](packages/sie_server/models/BAAI__bge-m3.yaml), [`splade-v3`](packages/sie_server/models/naver__splade-v3.yaml), [`colbertv2`](packages/sie_server/models/colbert-ir__colbertv2.0.yaml), [`qwen3-reranker`](packages/sie_server/models/Qwen__Qwen3-Reranker-4B.yaml) |
+| **Document to markdown** | PDFs, Office files, and scans become clean markdown. | [`lightonocr`](packages/sie_server/models/lightonai__LightOnOCR-2-1B.yaml), [`glm-ocr`](packages/sie_server/models/zai-org__GLM-OCR.yaml), [`mineru`](packages/sie_server/models/opendatalab__MinerU2.5-Pro-2604-1.2B.yaml), [`paddleocr-vl`](packages/sie_server/models/PaddlePaddle__PaddleOCR-VL-1.5.yaml), [`docling`](packages/sie_server/models/docling.yaml) |
+| **Structured output** | Schema-valid JSON, extracted or generated. | [`gliner2`](packages/sie_server/models/fastino__gliner2-large-v1.yaml), [`nuner-zero`](packages/sie_server/models/numind__NuNER_Zero.yaml), [`qwen3.8-27b`](packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml), [`qwen3.6-27b`](packages/sie_server/models/Qwen__Qwen3.6-27B.yaml) |
+| **Guard content** | A safety verdict with a probability you threshold. | [`granite-guardian-2b`](packages/sie_server/models/ibm-granite__granite-guardian-3.0-2b.yaml) |
+| **Run the agent loop** | Plan steps and call tools with an open LLM, streaming included. | [`qwen3.8-27b`](packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml), [`qwen3.6-27b`](packages/sie_server/models/Qwen__Qwen3.6-27B.yaml) |
+| **Translate** | Text between 400+ languages. | [`madlad400-3b-mt`](packages/sie_server/models/google__madlad400-3b-mt.yaml) |
+| **See images** | Caption, detect objects, and answer questions about images. | [`florence-2`](packages/sie_server/models/microsoft__Florence-2-large.yaml), [`owlv2`](packages/sie_server/models/google__owlv2-base-patch16-ensemble.yaml), [`grounding-dino`](packages/sie_server/models/IDEA-Research__grounding-dino-base.yaml) |
+| **Transcribe audio** | Speech to text. | [`whisper-large-v3-turbo`](packages/sie_server/models/openai__whisper-large-v3-turbo.yaml) |
 
 ## Quickstart
+
+The quickstart uses the smallest model in each family so the first run is fast on a laptop. Swap in any model from the table above for production quality.
 
 **1. Start the server**
 
@@ -96,7 +67,7 @@ docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cuda12-default
 
-# Linux, NVIDIA GPU — Transformers 5 OCR models (LightOnOCR and GLM-OCR)
+# Linux, NVIDIA GPU: Transformers 5 OCR models (LightOnOCR and GLM-OCR)
 docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cuda12-transformers5
@@ -193,7 +164,7 @@ The same code works against a production cluster. SIE ships a load-balancing gat
 
 ```bash
 # pick one values overlay: values-ack.yaml / values-aws.yaml / values-aks.yaml / values-gke.yaml
-# (pin a chart version for reproducible installs, e.g. --version 0.6.18)
+# (pin a chart version for reproducible installs, e.g. --version 0.7.3)
 helm upgrade --install sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
   --namespace sie --create-namespace \
   --set hfToken.create=true \
@@ -215,9 +186,46 @@ See the [deployment guide](https://superlinked.com/docs/deployment/).
 
 [**Examples**](examples/): An end-to-end project gallery.
 
-[**MCP edge**](packages/sie_mcp/): offload document work from Claude and other MCP clients to your cluster and save agent tokens.
+[**MCP edge**](packages/sie_mcp/): offload document, image, and structured-output work from Claude and other MCP clients to your cluster and save agent tokens.
 
 [**Why we built SIE**](https://www.youtube.com/watch?v=qdh_x-uRs9g): The motivation, told at AI Engineer Europe 2026.
+
+---
+
+## Development
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the complete development
+workflow and [AGENTS.md](AGENTS.md) for repository automation boundaries.
+
+Install [mise](https://mise.jdx.dev/getting-started.html), then bootstrap the
+versioned Python, Rust, Node.js, and Helm toolchains from the repository root:
+
+```bash
+./tools/init.sh
+```
+
+The common development checks and local server are available as mise tasks
+(`mise tasks` lists them all):
+
+```bash
+mise run test
+mise run lint
+mise run typecheck
+mise run serve
+mise run rust-check
+mise run rust-test
+mise run gateway-test
+mise run server-sidecar-test
+mise run helm -- dependencies
+mise run helm -- lint --set payloadStore.enabled=false
+mise run helm -- template --set payloadStore.enabled=false
+```
+
+The Python workspace uses the committed root lock. Package membership is
+explicit in `pyproject.toml`; a package joins the workspace only in the same
+change that adds its complete source. Native audio is always an opt-in build:
+install cmake, then run
+`mise exec -- uv sync --frozen --project . --all-packages --all-extras`.
 
 ---
 
