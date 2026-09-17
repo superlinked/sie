@@ -19,11 +19,13 @@ render with an explicit non-secret payload-store choice:
 mise run helm -- dependencies
 mise run helm -- lint --set payloadStore.enabled=false
 mise run helm -- template --set payloadStore.enabled=false
+mise exec -- uv run --frozen --project . pytest -q tools/ci/tests/test_helm_render.py
 ```
 
 The task temporarily stages the public model and bundle YAML files into the
 chart and removes them after each render. Helm's generated `charts/` directory
-is ignored and must not be committed.
+is ignored and must not be committed. The render tests need that directory, so
+run them after `dependencies`.
 
 ## Architecture
 
@@ -621,15 +623,32 @@ profiles:
         request_read_timeout_s: 600
 ```
 
+A complete device-group pool follows. Its CPU, memory, and shared-memory sizes
+are placeholders. Size them for the model and the node:
+
 ```yaml
 workers:
   pools:
     l4-4x-group:
       enabled: true
       machineProfile: l4-4x
+      gpuType: nvidia-l4
       gpu:
         count: 4
+        product: NVIDIA-L4
         deviceGroup: true
+      shmSize: 32Gi
+      resources:
+        requests:
+          cpu: "16"
+          memory: "64Gi"
+        limits:
+          cpu: "32"
+          memory: "128Gi"
+      bundles:
+        sglang:
+          minReplicas: 0
+          maxReplicas: 1
 ```
 
 - The worker claims a contiguous block of `tensor_parallel_size` devices for
@@ -645,6 +664,13 @@ workers:
 - `gpu.deviceGroup` requires `gpu.count >= 2`. `SIE_GPU_COUNT` and the cluster
   health `gpu_count` count serving slots, so a device-group pod reports one
   slot however many GPUs it holds.
+- Every worker pod mounts `/dev/shm` as an in-memory `emptyDir` whose size limit
+  is the pool's `shmSize`, or `workers.common.shmSize` (default `8Gi`) when the
+  pool sets none. Whatever the worker writes there counts against its container
+  memory limit. A tensor-parallel engine runs one process per GPU, and those
+  processes can exchange data through shared memory, so a device-group pool may
+  need a larger `shmSize`. Raise `resources.limits.memory` with it so the limit
+  covers both the engine processes and their shared memory.
 - Splitting a model across GPUs on a node without a fast GPU interconnect adds
   communication overhead. For a model that fits one GPU, fan-out children
   serving replicas usually deliver more throughput for the same GPUs.

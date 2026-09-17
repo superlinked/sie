@@ -79,7 +79,7 @@ jobs:
           mise exec -- uv run --frozen --project . --no-sync ruff format --check tools/ci
           mise exec -- uv run --frozen --project . --no-sync ruff check --select E,F,I,UP,B tools/ci
           mise exec -- uv run --frozen --project . --no-sync ruff check --select E9,F63,F7,F82 tools/mise_tasks
-          mise exec -- uv run --frozen --project . --no-sync pytest -q tools/ci/tests --ignore tools/ci/tests/test_required_ci.py --ignore tools/ci/tests/test_public_tree.py
+          mise exec -- uv run --frozen --project . --no-sync pytest -q tools/ci/tests --ignore tools/ci/tests/test_required_ci.py --ignore tools/ci/tests/test_public_tree.py --ignore tools/ci/tests/test_helm_render.py
 
   typescript:
     name: CI / TypeScript
@@ -186,6 +186,8 @@ jobs:
           -f deploy/helm/sie-cluster/values-aws.yaml
           -f deploy/helm/sie-cluster/values-ha.yaml
           --set payloadStore.enabled=false >/dev/null
+      - name: Chart render tests
+        run: mise exec -- uv run --frozen --project . pytest -q tools/ci/tests/test_helm_render.py
       - run: |
           destination="$(mktemp -d)"
           mise exec -- helm package deploy/helm/sie-cluster --destination "$destination"

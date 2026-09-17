@@ -47,6 +47,10 @@ fast at render time.
 {{- fail (printf "workers.pools.%s: missing required `bundles:` map. Define at least one bundle under the pool (e.g. `bundles: { default: { minReplicas: 0, maxReplicas: 1 } }`)." $poolName) }}
 {{- end }}
 {{- $platform := default $root.Values.workers.common.platform $pool.platform }}
+{{- $shmSize := default (dig "shmSize" "" $root.Values.workers.common) (dig "shmSize" "" $pool) | toString | trim }}
+{{- if eq $shmSize "" }}
+{{- fail (printf "workers.pools.%s: the /dev/shm size is empty. Set workers.pools.%s.shmSize or workers.common.shmSize to a Kubernetes quantity (e.g. 8Gi)." $poolName $poolName) }}
+{{- end }}
 {{- $payloadStoreUrl := include "sie-cluster.payloadStoreUrl" $root }}
 {{- range $bundleName, $bundleCfg := $pool.bundles }}
 {{- if dig "enabled" true $bundleCfg }}
@@ -752,7 +756,7 @@ spec:
         - name: shm
           emptyDir:
             medium: Memory
-            sizeLimit: 8Gi
+            sizeLimit: {{ $shmSize }}
         # Model cache (emptyDir - ephemeral, no zone-lock issues)
         - name: model-cache
           emptyDir:

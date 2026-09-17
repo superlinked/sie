@@ -196,6 +196,15 @@ def test_helm_renders_each_cloud_overlay():
     assert "--set payloadStore.enabled=false" in overlay_command
 
 
+def test_helm_render_tests_run_after_chart_dependencies():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    helm_commands = [step.get("run", "") for step in workflow["jobs"]["helm"]["steps"]]
+    render_tests = "mise exec -- uv run --frozen --project . pytest -q tools/ci/tests/test_helm_render.py"
+    assert helm_commands.index("mise run helm -- dependencies") < helm_commands.index(render_tests)
+    python_commands = [step.get("run", "") for step in workflow["jobs"]["python"]["steps"]]
+    assert any("--ignore tools/ci/tests/test_helm_render.py" in command for command in python_commands)
+
+
 def test_cpu_lane_uses_cpu_stack_task():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     commands = [step.get("run") for step in workflow["jobs"]["cpu-stack"]["steps"] if "run" in step]

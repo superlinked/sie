@@ -506,6 +506,14 @@ workers:
     # pressure mid-inference, long before this sizeLimit ever engages.
     cacheStorageSize: 300Gi
 
+    # -- Size limit of the in-memory `/dev/shm` volume (an emptyDir with
+    # `medium: Memory`) mounted into worker containers. It caps the volume
+    # without reserving memory, but whatever a worker writes there counts
+    # against that container's memory limit, so raise a pool's
+    # `resources.limits.memory` together with it. Override per pool with
+    # `workers.pools.<name>.shmSize`. The resolved value must be non-empty.
+    shmSize: 8Gi
+
     # -- Optional persistent cache for SGLang/FlashInfer/DeepGEMM/Triton
     # compiled kernels. Disabled by default: workers remain cacheless-capable
     # and no PVC is required for a normal install. When enabled, every worker
@@ -844,6 +852,12 @@ workers:
   #                    Optional per-pool Rust Candle CUDA compute capability
   #                    override. If omitted, the chart resolves it from
   #                    workers.common.rust.image.computeCapabilityByMachineProfile.
+  #   shmSize:         Optional override of common.shmSize, the size limit of
+  #                    the in-memory /dev/shm volume. Writes there count against
+  #                    the worker container's memory limit. A gpu.deviceGroup
+  #                    engine runs one process per GPU, and those processes can
+  #                    exchange data through /dev/shm, so such a pool may need
+  #                    a larger size and a matching resources.limits.memory.
   #   tolerations:     extra tolerations on top of the chart defaults.
   #
   # bundles: map keyed by bundle name (matches a bundle in sie_config;
