@@ -44,9 +44,14 @@ spec:
                   name: {{ include "sie-cluster.mcpEdge.secretName" . }}
                   key: connector-secrets
             {{- end }}
-            {{- if .Values.mcpEdge.publicUrl }}
+            {{- $publicUrl := trim (default "" .Values.mcpEdge.publicUrl) }}
+            {{- if and (not $publicUrl) .Values.mcpEdge.ingress.enabled }}
+            {{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml }}
+            {{- $publicUrl = printf "%s://%s" (ternary "https" "http" (eq (toString $tls.enabled) "true")) (trim (default "" .Values.mcpEdge.ingress.host)) }}
+            {{- end }}
+            {{- if $publicUrl }}
             - name: SIE_MCP_PUBLIC_URL
-              value: {{ .Values.mcpEdge.publicUrl | quote }}
+              value: {{ $publicUrl | quote }}
             {{- end }}
             {{- if not .Values.mcpEdge.oauthEnabled }}
             - name: SIE_MCP_OAUTH_ENABLED

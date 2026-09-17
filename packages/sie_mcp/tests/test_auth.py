@@ -119,10 +119,18 @@ def test_base_url_prefers_pinned_public_url() -> None:
     assert base_url(cfg, scheme="http", headers=headers) == "https://mcp.example.com"
 
 
-def test_base_url_derives_from_forwarded_headers() -> None:
+def test_base_url_derives_from_request_scheme_and_host() -> None:
     cfg = _cfg(public_base_url=None)
-    headers = Headers({"host": "internal:8088", "x-forwarded-proto": "https", "x-forwarded-host": "mcp.example.com"})
-    assert base_url(cfg, scheme="http", headers=headers) == "https://mcp.example.com"
+    headers = Headers({"host": "mcp.example.com"})
+    assert base_url(cfg, scheme="https", headers=headers) == "https://mcp.example.com"
+
+
+def test_base_url_ignores_forwarded_headers() -> None:
+    cfg = _cfg(public_base_url=None)
+    headers = Headers(
+        {"host": "mcp.example.com", "x-forwarded-proto": "http", "x-forwarded-host": "evil.attacker.example"}
+    )
+    assert base_url(cfg, scheme="https", headers=headers) == "https://mcp.example.com"
 
 
 async def test_unauthorized_returns_www_authenticate_challenge() -> None:
@@ -130,6 +138,14 @@ async def test_unauthorized_returns_www_authenticate_challenge() -> None:
     reached, start = await _run_middleware(cfg, path="/mcp", headers=[(b"host", b"mcp.example.com")])
     assert reached["app"] is False
     assert start["status"] == 401
+    challenge = Headers(raw=start["headers"])["www-authenticate"]
+    assert 'resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"' in challenge
+
+
+async def test_unauthorized_challenge_ignores_forwarded_host() -> None:
+    cfg = _cfg(connector_secrets={"s3cret": "user-1"})
+    headers = [(b"host", b"mcp.example.com"), (b"x-forwarded-host", b"evil.attacker.example")]
+    _reached, start = await _run_middleware(cfg, path="/mcp", headers=headers)
     challenge = Headers(raw=start["headers"])["www-authenticate"]
     assert 'resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"' in challenge
 

@@ -201,7 +201,7 @@ class MCPConfig:
     # claude.ai connectors are OAuth-only (no pasteable Bearer); the edge bridges
     # the OAuth handshake onto the connector-secret shim. `public_base_url`
     # pins the externally reachable origin used to build OAuth metadata URLs; when
-    # unset it is derived per-request from forwarded host/proto headers.
+    # unset it is derived per-request from the request scheme and Host header.
     oauth_enabled: bool
     public_base_url: str | None
     oauth_redirect_uris: tuple[str, ...]

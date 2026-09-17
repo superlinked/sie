@@ -224,6 +224,22 @@ def _client(cfg: MCPConfig) -> TestClient:
     return TestClient(app, base_url="https://mcp.example.com")
 
 
+@pytest.mark.parametrize("path", ["/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource"])
+def test_metadata_origin_ignores_forwarded_headers(path: str) -> None:
+    body = (
+        _client(_cfg())
+        .get(path, headers={"X-Forwarded-Host": "evil.attacker.example", "X-Forwarded-Proto": "http"})
+        .json()
+    )
+    assert "evil.attacker.example" not in str(body)
+    assert "http://" not in str(body)
+    if "issuer" in body:
+        assert body["issuer"] == "https://mcp.example.com"
+        assert body["token_endpoint"] == "https://mcp.example.com/token"  # noqa: S105
+    else:
+        assert body["authorization_servers"] == ["https://mcp.example.com"]
+
+
 def _authorize_params(verifier: str) -> dict[str, str]:
     return {
         "response_type": "code",

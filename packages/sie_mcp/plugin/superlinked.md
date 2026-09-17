@@ -90,8 +90,10 @@ as on Cowork).
 
 ### Operator notes
 
-- Pin `SIE_MCP_PUBLIC_URL` to the externally reachable origin so the OAuth metadata URLs
-  are stable (otherwise they are derived per-request from forwarded host/proto headers).
+- Pin `SIE_MCP_PUBLIC_URL` to the externally reachable origin. It is advertised as the
+  OAuth issuer and authorize/token endpoints, which is where users type their connector
+  secret. Unpinned, the edge falls back to the request's `Host` header and never trusts
+  `X-Forwarded-Host`. The Helm chart derives it from `mcpEdge.ingress.host`.
 - Run the edge as a **single worker** (the default `mise run mcp-serve`): the OAuth
   authorization-code store is in-process, so a code issued on one worker cannot be
   redeemed on another.

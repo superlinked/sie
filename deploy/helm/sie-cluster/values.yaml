@@ -2075,7 +2075,10 @@ mcpEdge:
   connectorSecrets: ""
   existingSecretName: ""
   # SIE_MCP_PUBLIC_URL — the externally reachable https origin (e.g.
-  # https://mcp.example.com). Pin it so OAuth metadata URLs are stable.
+  # https://mcp.example.com) advertised as the OAuth issuer and endpoints.
+  # Empty => derived from mcpEdge.ingress.host when the edge ingress is enabled.
+  # Set it explicitly for any other exposure (LoadBalancer, external proxy):
+  # unpinned, the edge falls back to the per-request Host header.
   publicUrl: ""
   # OAuth bridge for claude.ai / desktop connectors (#1312). Disable for
   # connector-secret-only (e.g. Cowork header) deployments.

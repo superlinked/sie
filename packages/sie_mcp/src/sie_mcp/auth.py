@@ -36,14 +36,15 @@ _EXEMPT_PATHS = frozenset(
 def base_url(config: MCPConfig, *, scheme: str, headers: Headers) -> str:
     """Resolve the externally reachable origin for OAuth metadata URLs.
 
-    Prefers the pinned ``SIE_MCP_PUBLIC_URL``; otherwise derives it from forwarded
-    proxy headers (falling back to the request's own scheme/host).
+    Prefers the pinned ``SIE_MCP_PUBLIC_URL``; otherwise uses the request's own
+    scheme and ``Host``. ``X-Forwarded-*`` headers are never read here: any caller
+    can set them, and this origin names the authorization server clients trust.
+    A scheme set by a proxy is honoured only through uvicorn's
+    ``FORWARDED_ALLOW_IPS`` trust list, which rewrites ``scheme`` upstream.
     """
     if config.public_base_url:
         return config.public_base_url
-    proto = headers.get("x-forwarded-proto") or scheme
-    host = headers.get("x-forwarded-host") or headers.get("host") or ""
-    return f"{proto}://{host}"
+    return f"{scheme}://{headers.get('host') or ''}"
 
 
 def bearer_token(authorization: str | None) -> str | None:
