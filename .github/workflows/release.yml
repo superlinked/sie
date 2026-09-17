@@ -85,7 +85,7 @@ jobs:
           version: 2026.5.5
           install_args: --jobs=1
         if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
-      - name: Refresh coupled locks on the release pull request
+      - name: Refresh coupled locks and OpenAPI versions on the release pull request
         if: steps.release.outputs.prs != '' && steps.release.outputs.prs != '[]'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -99,13 +99,14 @@ jobs:
           mise exec -- uv lock --project .
           mise exec -- pnpm install --lockfile-only
           mise exec -- cargo metadata --format-version 1 > /dev/null
-          if git diff --quiet -- uv.lock pnpm-lock.yaml Cargo.lock; then
+          mise exec -- python tools/ci/release_openapi.py
+          if git diff --quiet -- uv.lock pnpm-lock.yaml Cargo.lock packages/sie_server/openapi.json packages/sie_gateway/openapi.json; then
             exit 0
           fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add uv.lock pnpm-lock.yaml Cargo.lock
-          git commit -m 'chore: refresh release locks'
+          git add uv.lock pnpm-lock.yaml Cargo.lock packages/sie_server/openapi.json packages/sie_gateway/openapi.json
+          git commit -m 'chore: refresh release locks and OpenAPI versions'
           git push origin "HEAD:refs/heads/$branch"
       - id: release-pr-head
         name: Verify the release PR final head after the App-authored push

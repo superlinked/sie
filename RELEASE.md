@@ -20,10 +20,14 @@ commits generate `CHANGELOG.md`. No old changelog sections are rewritten.
 
 The release PR updates the coordinated Python/npm package versions, gateway,
 sidecar and audio release fields, TypeScript runtime version, and Helm metadata.
-It also refreshes the coupled public locks. Config and MCP join this train for
-their first PyPI publication. Independently versioned implementation crates are
-not silently renumbered: a Rust worker image follows the release image tag even
-where its crate has an independent version.
+It also refreshes the coupled public locks and stamps the new version into the
+committed server and gateway OpenAPI documents. CI regenerates those documents
+and requires identical bytes, so they are not release-please extra files: its
+JSON rewrite changes number formatting and precision, string escapes, and key
+order. Config and MCP join this train for their first PyPI publication.
+Independently versioned implementation crates are not silently renumbered: a
+Rust worker image follows the release image tag even where its crate has an
+independent version.
 
 Release PRs receive the same mandatory CI checks as other PRs. Release-please
 and its lock refresh use a repository-scoped GitHub App so their PR updates

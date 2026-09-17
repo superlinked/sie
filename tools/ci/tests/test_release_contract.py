@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tools.ci import check_release_contract as contract
+from tools.ci import release_openapi
 
 
 def run_audio_uploader(
@@ -110,6 +111,42 @@ def test_release_please_rejects_any_other_bootstrap_boundary(monkeypatch, bootst
 
     monkeypatch.setattr(contract, "load_json", load_json)
     assert "release-please bootstrap-sha must be the exact public v0.7.3 commit" in contract.release_config_errors()
+
+
+@pytest.mark.parametrize("document", sorted(contract.OPENAPI_VERSION_PATHS))
+def test_release_pr_stamps_every_openapi_version_ci_regenerates(document) -> None:
+    refresh = contract.workflow_job_blocks(".github/workflows/release.yml")["release-please"]
+    contracts = contract.workflow_job_blocks(".github/workflows/ci.yml")["contracts"]
+    stamped = set(release_openapi.OPENAPI_VERSION_SOURCES)
+    assert contract.release_openapi_errors(refresh, contracts, stamped) == []
+
+    assert contract.release_openapi_errors(refresh, contracts, stamped - {document})
+    assert contract.release_openapi_errors(refresh, contracts.replace(document, ""), stamped)
+    for command in ("git diff --quiet --", "git add"):
+        unstaged = re.sub(rf"({re.escape(command)} .*) {re.escape(document)}", r"\1", refresh)
+        assert unstaged != refresh
+        assert contract.release_openapi_errors(unstaged, contracts, stamped)
+    unstamped = refresh.replace("mise exec -- python tools/ci/release_openapi.py", "")
+    assert contract.release_openapi_errors(unstamped, contracts, stamped)
+
+
+@pytest.mark.parametrize("document", sorted(contract.OPENAPI_VERSION_PATHS))
+def test_release_please_must_not_rewrite_generated_openapi(monkeypatch, document) -> None:
+    real_load_json = contract.load_json
+
+    def load_json(path):
+        loaded = real_load_json(path)
+        if path == "release-please-config.json":
+            loaded = deepcopy(loaded)
+            extra_file = {"type": "json", "path": document, "jsonpath": "$.info.version"}
+            loaded["packages"]["."]["extra-files"].append(extra_file)
+        return loaded
+
+    monkeypatch.setattr(contract, "load_json", load_json)
+    monkeypatch.setattr(contract, "EXTRA_VERSION_PATHS", contract.EXTRA_VERSION_PATHS | {document})
+    assert contract.release_config_errors() == [
+        "generated OpenAPI documents must be stamped, not rewritten by release-please"
+    ]
 
 
 def test_option_ext_mpl_exception_is_exact_and_cannot_broaden() -> None:

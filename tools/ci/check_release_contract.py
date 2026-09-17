@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from tools.ci import distributions
+from tools.ci import distributions, release_openapi
 from tools.ci.release_guard import SEED_VERSION, stable_version
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -72,6 +72,10 @@ EXTRA_VERSION_PATHS = {
     "packages/sie_audio_prep/pyproject.toml",
     "packages/sie_audio_prep/build_wheel.py",
     "deploy/helm/sie-cluster/Chart.yaml",
+}
+OPENAPI_VERSION_PATHS = {
+    "packages/sie_server/openapi.json",
+    "packages/sie_gateway/openapi.json",
 }
 ACTION_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 JOB_FIELD_INDENT = 4
@@ -329,6 +333,34 @@ def release_config_errors() -> list[str]:
     for path in extra_paths:
         if not (ROOT / path).is_file():
             errors.append(f"release-please extra file does not exist: {path}")
+    if extra_paths & OPENAPI_VERSION_PATHS:
+        errors.append("generated OpenAPI documents must be stamped, not rewritten by release-please")
+    errors.extend(
+        release_openapi_errors(
+            workflow_job_blocks(".github/workflows/release.yml").get("release-please", ""),
+            workflow_job_blocks(".github/workflows/ci.yml").get("contracts", ""),
+            set(release_openapi.OPENAPI_VERSION_SOURCES),
+        )
+    )
+    return errors
+
+
+def release_openapi_errors(refresh: str, contracts: str, stamped: set[str]) -> list[str]:
+    def documents(text: str) -> set[str]:
+        return set(re.findall(r"[\w/]+/openapi\.json", text))
+
+    errors: list[str] = []
+    if stamped != OPENAPI_VERSION_PATHS:
+        errors.append("release OpenAPI version stamping differs from the public contract")
+    if documents(contracts) != OPENAPI_VERSION_PATHS:
+        errors.append("CI / Contracts OpenAPI regeneration differs from the release version stamping")
+    commits = [line for line in refresh.splitlines() if "git diff --quiet --" in line or "git add " in line]
+    if (
+        "mise exec -- python tools/ci/release_openapi.py" not in refresh
+        or len(commits) != 2
+        or any(documents(line) != OPENAPI_VERSION_PATHS for line in commits)
+    ):
+        errors.append("release PR refresh must stamp and commit every OpenAPI version")
     return errors
 
 
