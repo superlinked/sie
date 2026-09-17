@@ -159,6 +159,16 @@ rights notes say not to redistribute the complete file. `data/manifest.json` is
 committed instead, pinning each URL, byte length and SHA-256, which is what a
 reader needs to confirm they fetched the same bytes this run scored.
 
+One of the four may refuse you. `fema.gov` answers a request carrying a Chrome
+user-agent with `403` and serves plain `curl` the PDF — backwards from what
+anyone debugging that 403 would guess, and the reason `fetch.py` retries with
+`curl` before falling back to the bundled copy. Tested from one network only,
+so it says nothing about what a browser on a home connection sees. The
+`retrieval` field in `data/manifest.json` records which path a fetch took;
+`publisher-after-403-via-curl` means the fallback was used. The run committed
+here predates that finer-grained value and records `publisher` for all four,
+which is true of every one of them — FEMA's arrived through the `curl` retry.
+
 One call is one entry in `calls.json` rather than a file of its own. Members
 that nothing scores move to `payloads/` and are referenced by digest — for
 Docling that is `data.document`, between 85 and 98 percent of every response.
@@ -222,22 +232,48 @@ multi-row cells into space-joined values — `4 16`, `177 s 167 s` — while a
 second table flattens an entire per-class accuracy table into two cells, one
 holding every label and one holding every value.
 
+**A form loses its labels entirely.** On the FEMA proof-of-loss form, 26 of the
+124 non-blank lines are a bare `$` and nothing else. Every amount field comes
+back as a naked dollar sign with its label stripped, and no line in the file
+carries a currency amount attached to a label:
+
+```text
+- [ ] Other:
+
+$
+
+$
+
+$
+```
+
+This is the plainest thing in the corpus. A table with a repeated header still
+reads as a table, so it is possible to talk yourself out of caring; a column of
+26 dollar signs is not. And it is a form — the category where the relationship
+between a label and its field is purely spatial, and so the hardest for any
+converter.
+
 **Three smaller behaviours.** Fenced code blocks are flattened onto one line,
 so the four-statement Python example in the converted Docling paper would not
 run as printed. Line-break hyphens are closed up, so `MIT-licensed` returns as
-`MITlicensed`. And on the FEMA form every section heading is emitted together
-near the top while its fields appear much later — `TYPE OF PROOF OF LOSS` at
-line 7, its six choices from line 57. The content survives; the grouping does
-not.
+`MITlicensed`. And on the same FEMA form every section heading is emitted
+together near the top while its fields appear much later — `TYPE OF PROOF OF
+LOSS` at line 7, its six choices from line 57. The content survives; the
+grouping does not.
 
 **Why the checks pass anyway, and what that says about the checks.** They test
 exact facts, section order, and that tables are present — not that a table is
 the right shape. `_table_count` counts contiguous pipe blocks, so the four
 welded NVIDIA tables count as one, and `7 found, 4 required` passes honestly
-while saying nothing about structure. That is a limitation of this evaluation,
-not a detail about the model, and it is worth knowing before you copy the
-approach: a conversion harness that checks facts and order will not tell you
-your tables are wrong.
+while saying nothing about structure. `contains:` checks have the same shape:
+`contains:AMOUNTS CLAIMED` passes because that heading survives at line 9, and
+says nothing about the 26 unlabelled `$` fields beneath it.
+
+That is a limitation of this evaluation, not a detail about the model, and it is
+worth knowing before you copy the approach: a conversion harness that checks
+facts and order will not tell you your tables are wrong, and one that checks a
+heading is present will not tell you the fields under it are gone. Each check
+answers a narrower question than the claim it is used to back.
 
 ## Honest scope
 
