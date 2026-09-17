@@ -43,9 +43,10 @@ def _hostname(host: str) -> str:
 
 
 def _host_trusted(config: MCPConfig, host: str) -> bool:
+    host = host.lower()
     if _hostname(host) in _LOOPBACK_HOSTNAMES:
         return True
-    for allowed in config.allowed_hosts:
+    for allowed in (entry.lower() for entry in config.allowed_hosts):
         if host == allowed or (allowed.endswith(":*") and host.startswith(allowed[:-1])):
             return True
     return False

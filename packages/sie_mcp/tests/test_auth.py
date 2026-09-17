@@ -145,11 +145,14 @@ def test_base_url_refuses_untrusted_host(host: str) -> None:
         ("localhost:8088", "http://localhost:8088"),
         ("127.0.0.1:8088", "http://127.0.0.1:8088"),
         ("[::1]:8088", "http://[::1]:8088"),
+        ("LOCALHOST:8088", "http://LOCALHOST:8088"),
         ("edge.example.com:8443", "http://edge.example.com:8443"),
+        ("Edge.Example.com:8443", "http://Edge.Example.com:8443"),
+        ("mcp.example.com", "http://mcp.example.com"),
     ],
 )
 def test_base_url_trusts_loopback_and_wildcard_port_hosts(host: str, expected: str) -> None:
-    cfg = _cfg(public_base_url=None, allowed_hosts=["edge.example.com:*"])
+    cfg = _cfg(public_base_url=None, allowed_hosts=["EDGE.example.com:*", "MCP.Example.com"])
     assert base_url(cfg, scheme="http", headers=Headers({"host": host})) == expected
 
 
