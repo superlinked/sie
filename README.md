@@ -39,14 +39,14 @@ SIE is an open-source inference engine that runs the models behind every agent t
 
 ## Tasks
 
-One SIE cluster runs the inference behind a whole agent. Each task is a handful of swappable models; every name below links to its config, and the config's `sie_id` (its Hugging Face ID) is what you pass to the SDK. Browse [`packages/sie_server/models/`](https://github.com/superlinked/sie/tree/main/packages/sie_server/models) for the full set.
+One SIE cluster runs the inference behind a whole agent. Each task is a handful of swappable models; every name below links to its config, whose `sie_id` is the model name you pass to the SDK (`hf_id` is the Hugging Face repository the weights load from; the two usually match). Browse [`packages/sie_server/models/`](https://github.com/superlinked/sie/tree/main/packages/sie_server/models) for the full set.
 
 | Task | What it does | Models |
 |---|---|---|
 | **Search** | Embed, match, and rerank to retrieve the right context. | [`bge-m3`](packages/sie_server/models/BAAI__bge-m3.yaml), [`splade-v3`](packages/sie_server/models/naver__splade-v3.yaml), [`colbertv2`](packages/sie_server/models/colbert-ir__colbertv2.0.yaml), [`qwen3-reranker`](packages/sie_server/models/Qwen__Qwen3-Reranker-4B.yaml) |
 | **Document to markdown** | PDFs, Office files, and scans become clean markdown. | [`lightonocr`](packages/sie_server/models/lightonai__LightOnOCR-2-1B.yaml), [`glm-ocr`](packages/sie_server/models/zai-org__GLM-OCR.yaml), [`mineru`](packages/sie_server/models/opendatalab__MinerU2.5-Pro-2604-1.2B.yaml), [`paddleocr-vl`](packages/sie_server/models/PaddlePaddle__PaddleOCR-VL-1.5.yaml), [`docling`](packages/sie_server/models/docling.yaml) |
 | **Structured output** | Schema-valid JSON, extracted or generated. | [`gliner2`](packages/sie_server/models/fastino__gliner2-large-v1.yaml), [`nuner-zero`](packages/sie_server/models/numind__NuNER_Zero.yaml), [`qwen3.8-27b`](packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml), [`qwen3.6-27b`](packages/sie_server/models/Qwen__Qwen3.6-27B.yaml) |
-| **Guard content** | A safety verdict with a probability you threshold. | [`granite-guardian-2b`](packages/sie_server/models/ibm-granite__granite-guardian-3.0-2b.yaml) |
+| **Guard content** | A Yes/No safety verdict, with the decision threshold tunable in the model config. | [`granite-guardian-2b`](packages/sie_server/models/ibm-granite__granite-guardian-3.0-2b.yaml) |
 | **Run the agent loop** | Plan steps and call tools with an open LLM, streaming included. | [`qwen3.8-27b`](packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml), [`qwen3.6-27b`](packages/sie_server/models/Qwen__Qwen3.6-27B.yaml) |
 | **Translate** | Text between 400+ languages. | [`madlad400-3b-mt`](packages/sie_server/models/google__madlad400-3b-mt.yaml) |
 | **See images** | Caption, detect objects, and answer questions about images. | [`florence-2`](packages/sie_server/models/microsoft__Florence-2-large.yaml), [`owlv2`](packages/sie_server/models/google__owlv2-base-patch16-ensemble.yaml), [`grounding-dino`](packages/sie_server/models/IDEA-Research__grounding-dino-base.yaml) |
@@ -186,7 +186,7 @@ See the [deployment guide](https://superlinked.com/docs/deployment/).
 
 ### Explore
 
-[**Model catalog**](https://superlinked.com/models): every model is a config in [`packages/sie_server/models/`](https://github.com/superlinked/sie/tree/main/packages/sie_server/models); pass its Hugging Face ID to the SDK.
+[**Model catalog**](https://superlinked.com/models): every model is a config in [`packages/sie_server/models/`](https://github.com/superlinked/sie/tree/main/packages/sie_server/models); pass its `sie_id` to the SDK.
 
 [**Integrations**](https://superlinked.com/docs/integrations/): setup guides for all nine framework and vector-store integrations, in Python and TypeScript.
 
