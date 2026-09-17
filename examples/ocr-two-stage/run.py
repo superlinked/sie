@@ -8,12 +8,12 @@ rather than two independent demos.
 
 Usage (from the repository root):
 
-    python3 apps/site/tests/fixtures/reference/ocr/run.py --probe
-    python3 apps/site/tests/fixtures/reference/ocr/run.py --stage 1
-    python3 apps/site/tests/fixtures/reference/ocr/run.py --stage 2
-    python3 apps/site/tests/fixtures/reference/ocr/run.py              # both
-    python3 apps/site/tests/fixtures/reference/ocr/run.py --doc ID
-    python3 apps/site/tests/fixtures/reference/ocr/run.py --verify-inputs
+    python3 examples/ocr-two-stage/run.py --probe
+    python3 examples/ocr-two-stage/run.py --stage 1
+    python3 examples/ocr-two-stage/run.py --stage 2
+    python3 examples/ocr-two-stage/run.py                 # both stages
+    python3 examples/ocr-two-stage/run.py --doc ID
+    python3 examples/ocr-two-stage/run.py --verify-inputs # fetch + digests only
 
 Stage 1 sends the shape packages/tasks/src/codegen.ts generates for the `ocr`
 task: POST /v1/extract/<model with / as __> with one base64 image. Stage 2
@@ -60,6 +60,8 @@ WORK_DIR = RUN_DIR / ".work"
 REQUESTS_DIR = WORK_DIR / "requests"
 RESPONSES_DIR = WORK_DIR / "responses"
 MANIFEST_PATH = WORK_DIR / "manifest.json"
+# Diagnostics for --probe, kept out of the committed run.
+PROBE_DIR = WORK_DIR / "probe"
 
 DEFAULT_ENDPOINT = "https://api.superlinked.com"
 DEFAULT_KEY_FILE = Path.home() / ".secrets" / "sie_api_key_sep"
@@ -509,8 +511,9 @@ def consolidate() -> None:
         {
             "about": (
                 "Every call the run made, request and response, in recorded "
-                "order. A reader can check the published numbers from this "
-                "file alone, with no API key: evaluate.py reads nothing else."
+                "order. With data/inputs.json and data/predictions.json, "
+                "which carry the pre-registered expectations, this is "
+                "everything evaluate.py needs: no API key, no network."
             ),
             "recorded_utc": manifest.get("last_run_started_utc"),
             "endpoint": manifest["endpoints"][0] if manifest.get("endpoints") else None,

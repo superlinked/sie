@@ -23,7 +23,7 @@
     "max_tokens": 2048,
     "response_format_shape": "{\"type\": \"json_schema\", \"json_schema\": {\"name\": \"<schema id>\", \"strict\": true, \"schema\": <schema>}}",
     "instruction_template": "Fill the schema from this OCR text of a {document_type}. Use only what the text states. Use null when the text does not state a value.\n\n---\n{markdown}",
-    "note": "Chat completions rather than /v1/generate because this is a text-only prompt on a Qwen model; sie-internal#4370 covers /v1/generate skipping the chat template for plain text. Both stage-2 models get byte-identical messages and schemas."
+    "note": "Chat completions rather than /v1/generate because this is a text-only prompt on a Qwen model: the plain-text generate path skipped the chat template, so the model reasoned instead of answering. Both stage-2 models get byte-identical messages and schemas."
   },
   "scoring": {
     "note": "evaluate.py assigns every registered field exactly one verdict. No verdict is hand-authored. The stage-1 test asks whether the field's registered `printed` token survives into stage 1's Markdown; that is what separates an error stage 2 inherited from one stage 2 made on text it could read.",

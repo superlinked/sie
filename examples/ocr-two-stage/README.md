@@ -30,7 +30,10 @@ Checking the numbers needs no API key and no network:
 python3 evaluate.py
 ```
 
-It reads `data/inputs.json` and `verified-run/calls.json` and nothing else.
+It reads exactly three committed files and nothing else:
+`verified-run/calls.json` for what came back, `data/inputs.json` for what was
+registered before the run, and `data/predictions.json` for the predictions it
+scores. No key, no network, no fourth file.
 
 Re-recording the run needs a key in `SIE_API_KEY`:
 
