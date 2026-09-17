@@ -33,6 +33,7 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.adapters.sglang import _server
+from sie_server.adapters.sglang import generation as generation_module
 from sie_server.adapters.sglang.cuda13 import SGLangStrictThinkingAdapter
 from sie_server.adapters.sglang.generation import (
     SGLangGenerationAdapter,
@@ -3058,6 +3059,19 @@ def test_invalid_read_cap_is_refused(bad: Any) -> None:
         _tp_adapter(request_read_timeout_s=bad)
 
 
+@pytest.mark.parametrize("raw", ["inf", "+inf", "Infinity", "nan"])
+def test_a_non_finite_inherited_read_cap_leaves_a_wide_profile_without_one(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """An infinite cap from the environment is no cap, so width two must still refuse it."""
+    monkeypatch.setenv("SIE_SGLANG_GENERATE_READ_TIMEOUT_S", raw)
+    monkeypatch.setattr(generation_module, "_GENERATE_READ_TIMEOUT_S", generation_module._resolve_read_timeout())
+
+    assert generation_module._GENERATE_READ_TIMEOUT_S is None
+    with pytest.raises(ValueError, match="must also declare a finite"):
+        _tp_adapter(tensor_parallel_size=2, request_read_timeout_s=None)
+
+
 def test_declared_read_cap_reaches_the_http_client() -> None:
     adapter = _tp_adapter(tensor_parallel_size=2, request_read_timeout_s=45.5)
 
@@ -3281,5 +3295,5 @@ def test_an_invalid_watchdog_bound_is_refused(bad: Any) -> None:
 
 @pytest.mark.parametrize("bad", [0, 80, 70000, True, "30207"])
 def test_an_invalid_collective_port_is_refused(bad: Any) -> None:
-    with pytest.raises(ValueError, match="nccl_port"):
-        _tp_adapter(nccl_port=bad)
+    with pytest.raises(ValueError, match="nccl_port must be"):
+        _tp_adapter(tensor_parallel_size=2, nccl_port=bad)

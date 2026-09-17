@@ -93,7 +93,7 @@ def _resolve_read_timeout() -> float | None:
         value = float(raw)
     except ValueError:
         return None
-    return value if value > 0 else None
+    return value if math.isfinite(value) and value > 0 else None
 
 
 _GENERATE_READ_TIMEOUT_S: float | None = _resolve_read_timeout()

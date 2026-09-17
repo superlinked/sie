@@ -81,12 +81,12 @@ _KNOWN_UNDECLARED: frozenset[str] = frozenset()
 _FLAG_LITERAL = re.compile(r'"(--[a-z0-9][a-z0-9-]*)"')
 
 
-def _emitted_flags() -> dict[str, set[str]]:
-    """Return every ``--flag`` literal in the adapter sources, by file."""
-    found: dict[str, set[str]] = {}
+def _emitted_flags() -> dict[str, set[Path]]:
+    """Return every ``--flag`` literal in the adapter sources, by source path."""
+    found: dict[str, set[Path]] = {}
     for source in sorted(_ADAPTER_DIR.rglob("*.py")):
         for match in _FLAG_LITERAL.finditer(source.read_text(encoding="utf-8")):
-            found.setdefault(match.group(1), set()).add(source.name)
+            found.setdefault(match.group(1), set()).add(source)
     return found
 
 
@@ -95,7 +95,11 @@ def test_no_emitted_flag_is_outside_the_verified_contract() -> None:
     known = _DECLARED_IN_PINNED_ENGINE | _NEWER_ENGINE_ONLY | _KNOWN_UNDECLARED
     emitted = _emitted_flags()
     # "--tp" survives as comment text explaining why it is not emitted.
-    unexpected = {flag: sorted(files) for flag, files in emitted.items() if flag not in known and flag != "--tp"}
+    unexpected = {
+        flag: sorted(str(path.relative_to(_ADAPTER_DIR)) for path in paths)
+        for flag, paths in emitted.items()
+        if flag not in known and flag != "--tp"
+    }
 
     assert not unexpected, (
         f"adapter sources carry engine flag literal(s) not recorded in this module: {unexpected}. "
@@ -110,28 +114,25 @@ def test_the_width_flag_is_spelled_in_full() -> None:
 
     assert "--tensor-parallel-size" in emitted
     for flag in ("--tp", "--tp-size"):
-        files = emitted.get(flag, set())
-        for name in files:
-            source = (_ADAPTER_DIR / name).read_text(encoding="utf-8")
-            for line in source.splitlines():
+        for path in sorted(emitted.get(flag, set())):
+            for line in path.read_text(encoding="utf-8").splitlines():
                 if f'"{flag}"' in line:
                     assert line.lstrip().startswith("#"), (
-                        f"{name} emits the abbreviated {flag!r}. Emit --tensor-parallel-size: "
-                        "the short form is not a declared option and survives only by prefix matching."
+                        f"{path.relative_to(_ADAPTER_DIR)} emits the abbreviated {flag!r}. Emit "
+                        "--tensor-parallel-size: the short form is not a declared option and survives only by "
+                        "prefix matching."
                     )
 
 
 @pytest.mark.parametrize("abbreviation", ["--tp", "--dp", "--pp", "--ep"])
 def test_no_parallelism_abbreviation_is_emitted(abbreviation: str) -> None:
     """The whole class, not just the one instance that was found."""
-    for flag, files in _emitted_flags().items():
-        if flag != abbreviation:
-            continue
-        for name in sorted(files):
-            source = (_ADAPTER_DIR / name).read_text(encoding="utf-8")
-            emitting = [
-                line
-                for line in source.splitlines()
-                if f'"{abbreviation}"' in line and not line.lstrip().startswith("#")
-            ]
-            assert not emitting, f"{name} emits the abbreviated parallelism flag {abbreviation!r}: {emitting}"
+    for path in sorted(_emitted_flags().get(abbreviation, set())):
+        emitting = [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if f'"{abbreviation}"' in line and not line.lstrip().startswith("#")
+        ]
+        assert not emitting, (
+            f"{path.relative_to(_ADAPTER_DIR)} emits the abbreviated parallelism flag {abbreviation!r}: {emitting}"
+        )
