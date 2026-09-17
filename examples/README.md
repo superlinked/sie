@@ -9,7 +9,8 @@ New to SIE? Start with the **[quickstart notebook](./quickstart.ipynb)** [![Open
 Use this table to pick the right starting point. "Runnable" means the
 example has code, sample data or data-fetch instructions, and a documented
 local path. "Advanced" examples may require a custom SIE image or third-party
-service keys.
+service keys. "External project guide" means docs-only onboarding that deep-links
+to a separately maintained repository (clone and run there).
 
 | Example | Best for | SIE primitives | Setup | Status |
 |---|---|---|---|---|
@@ -34,6 +35,8 @@ service keys.
 | [Make a shelf gap auditable](./retail-shelf-audit) | Detecting one empty facing, deriving its notice and shelf-label crops by geometry, then preserving OCR evidence | `extract` | GPU SIE deployment; standalone `uv` project; CC0 supermarket shelf image and recorded direct-checkpoint evidence included | Runnable evaluation example |
 | [Turn threat reports into cited ATT&CK mapping suggestions](./threat-report-attck-mapper) | Mapping full reports against active ATT&CK 19.2, with a separate pinned AnnoCTR linking benchmark and analyst review for every suggestion | `generate`, `extract`, `encode`, `score` | GPU SIE deployment; standalone `uv` project; pinned MITRE ATT&CK and AnnoCTR sources | Runnable agent benchmark |
 | [A behavioural gate that catches hijacked AI agents by their actions, not their credentials](./agent-action-monitor) | Judging a proposed AI agent action against that agent's own learned baseline in real time, before it reaches a downstream system | `encode`, `score`, `extract` | Docker Compose (gate + self-hosted SIE + n8n + mock downstream), no API key required | Runnable demo |
+| [Find the best RAG config before you build](./rag-params-finder) | Sweeping embeddings × chunking × retrieval on your data before building a RAG app | `encode`, `score` (optional rerank) | External repo; MongoDB local or Atlas/Postgres; SIE gateway or Docker | External project guide |
+| [Scan AI skills and MCP servers, then triage with SIE](./tripwire) | Discovering and scanning AI skills/MCP servers, then optionally routing findings with Superlinked SIE | `generate` | External repo; Mock demo local; Live needs Supabase + Modal; routing needs `SIE_*` + Model Studio keys | External project guide |
 
 For docs publishing, lead with the quickest runnable demos, then use the
 benchmark and evaluation examples for deeper technical users.
