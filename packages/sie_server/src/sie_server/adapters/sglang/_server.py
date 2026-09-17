@@ -239,15 +239,15 @@ def resolve_startup_timeout(timeout_s: float | None = None) -> float:
     1. Explicit adapter/profile value (``adapter_options.loadtime.startup_timeout_s``).
     2. Environment variables in ``STARTUP_TIMEOUT_ENV_VARS`` order.
     3. ``DEFAULT_STARTUP_TIMEOUT_S``.
+
+    Raises:
+        ValueError: If an explicit value is not a finite number greater than
+            zero, or the resolved timeout is not below the worker liveness
+            budget.
     """
-    if timeout_s is not None:
-        try:
-            value = float(timeout_s)
-        except (TypeError, ValueError):
-            value = 0.0
-        if math.isfinite(value) and value > 0:
-            return _validate_liveness_budget(value)
-        logger.warning("Ignoring invalid SGLang startup timeout override: %r (must be finite > 0)", timeout_s)
+    declared = validate_optional_positive(timeout_s, field="startup_timeout_s")
+    if declared is not None:
+        return _validate_liveness_budget(declared)
 
     for name in STARTUP_TIMEOUT_ENV_VARS:
         raw = os.environ.get(name)

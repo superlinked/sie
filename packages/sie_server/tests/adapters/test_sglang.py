@@ -64,13 +64,26 @@ class TestSGLangEmbeddingAdapter:
 
         assert _server.resolve_startup_timeout() == 1234
 
-    def test_startup_timeout_rejects_non_finite_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_startup_timeout_skips_non_finite_environment_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for name in _server.STARTUP_TIMEOUT_ENV_VARS:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("SIE_MODEL_READY_TIMEOUT_S", "inf")
         monkeypatch.setenv("SIE_SERVER_STARTUP_TIMEOUT_S", "1200")
 
-        assert _server.resolve_startup_timeout(float("inf")) == 1200
+        assert _server.resolve_startup_timeout() == 1200
+
+    @pytest.mark.parametrize("bad", [0, -1, float("inf"), float("nan"), True, "900"])
+    def test_startup_timeout_refuses_an_invalid_profile_value(self, monkeypatch: pytest.MonkeyPatch, bad) -> None:
+        """A declared budget is used exactly or refused, never replaced by a fallback."""
+        for name in _server.STARTUP_TIMEOUT_ENV_VARS:
+            monkeypatch.setenv(name, "1200")
+
+        with pytest.raises(ValueError, match="startup_timeout_s"):
+            _server.resolve_startup_timeout(bad)
+
+    def test_embedding_adapter_refuses_an_invalid_profile_startup_timeout(self) -> None:
+        with pytest.raises(ValueError, match="startup_timeout_s"):
+            SGLangEmbeddingAdapter("test-model", startup_timeout_s=0)
 
     def test_startup_timeout_rejects_liveness_budget_mismatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for name in _server.STARTUP_TIMEOUT_ENV_VARS:

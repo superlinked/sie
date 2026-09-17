@@ -2885,11 +2885,13 @@ def _tp_adapter(**overrides: Any) -> SGLangGenerationAdapter:
         "mem_fraction_static": 0.85,
         "served_model_name": "Qwen/Qwen3-4B-Instruct",
     }
-    # A width above one requires a finite streaming read cap, so supply one by
-    # default here and let the tests that are about that rule set it explicitly.
+    # A width above one requires a finite streaming read cap and a declared
+    # startup budget, so supply both by default here and let the tests that are
+    # about those rules set them explicitly.
     declared = overrides.get("tensor_parallel_size", 1)
     if isinstance(declared, int) and not isinstance(declared, bool) and declared > 1:
         kwargs["request_read_timeout_s"] = 120.0
+        kwargs["startup_timeout_s"] = 600.0
     kwargs.update(overrides)
     return SGLangGenerationAdapter(**kwargs)
 
@@ -3076,6 +3078,69 @@ def test_declared_read_cap_reaches_the_http_client() -> None:
     adapter = _tp_adapter(tensor_parallel_size=2, request_read_timeout_s=45.5)
 
     assert adapter._request_read_timeout_s == 45.5
+
+
+def _clear_startup_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (*_server.STARTUP_TIMEOUT_ENV_VARS, _server.LIVENESS_BUDGET_ENV_VAR):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_width_above_one_requires_a_declared_startup_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup at a width is graph work per rank, so no inherited default describes it."""
+    _clear_startup_environment(monkeypatch)
+
+    with pytest.raises(ValueError, match="must also declare startup_timeout_s"):
+        _tp_adapter(tensor_parallel_size=2, startup_timeout_s=None)
+
+
+def test_an_environment_startup_budget_does_not_satisfy_a_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A process-wide default is set for every model a worker loads, not for this profile."""
+    _clear_startup_environment(monkeypatch)
+    for name in _server.STARTUP_TIMEOUT_ENV_VARS:
+        monkeypatch.setenv(name, "1200")
+
+    with pytest.raises(ValueError, match="must also declare startup_timeout_s"):
+        _tp_adapter(tensor_parallel_size=4, startup_timeout_s=None)
+
+
+def test_width_one_keeps_inheriting_the_startup_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("SIE_SGLANG_STARTUP_TIMEOUT_S", "1234")
+
+    assert _tp_adapter()._startup_timeout_s == 1234
+    assert _tp_adapter(tensor_parallel_size=1)._startup_timeout_s == 1234
+
+
+@pytest.mark.parametrize("width", [1, 2])
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), float("nan"), True, "900"])
+def test_invalid_startup_budget_is_refused_at_construction(
+    monkeypatch: pytest.MonkeyPatch, width: int, bad: Any
+) -> None:
+    """An unusable declared budget fails where it is declared instead of being replaced by a fallback."""
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("SIE_SGLANG_STARTUP_TIMEOUT_S", "1200")
+
+    with pytest.raises(ValueError, match="startup_timeout_s"):
+        _tp_adapter(tensor_parallel_size=width, startup_timeout_s=bad)
+
+
+@patch("sie_server.adapters.sglang._server.wait_for_server", return_value=True)
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_declared_startup_budget_bounds_a_group_launch(
+    mock_find_port: MagicMock,
+    mock_popen: MagicMock,
+    mock_wait_for_server: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_startup_environment(monkeypatch)
+    monkeypatch.setenv("SIE_MODEL_READY_TIMEOUT_S", "300")
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+
+    _launch(_tp_adapter(tensor_parallel_size=2, startup_timeout_s=1500), mock_popen)
+
+    assert mock_wait_for_server.call_args.kwargs["timeout_s"] == 1500
 
 
 @patch("sie_server.adapters.sglang._server.subprocess.Popen")

@@ -134,6 +134,33 @@ def _resolve_profile_read_timeout(declared: float | None, *, tensor_parallel_siz
     return effective
 
 
+def _resolve_profile_startup_timeout(declared: float | None, *, tensor_parallel_size: int) -> float:
+    """Return the engine startup budget for one adapter instance.
+
+    Args:
+        declared: The profile's own value, or None to inherit the environment
+            or module default.
+        tensor_parallel_size: Declared width. Above one the profile must
+            declare its own budget rather than inherit one.
+
+    Raises:
+        ValueError: If the declared value is not a positive finite number, or
+            if a width above one declares none. A group's startup is dominated
+            by per-rank graph compilation and capture rather than by weights,
+            so a process-wide default says nothing about how long this profile
+            needs, and a capture that stalls never fails on its own.
+    """
+    if declared is None and tensor_parallel_size > 1:
+        msg = (
+            f"a profile declaring tensor_parallel_size={tensor_parallel_size} must also declare "
+            "startup_timeout_s. Startup at a width above one is dominated by per-rank graph compilation "
+            "and capture rather than by weights, so no environment or default budget fits it, and a "
+            "capture that stalls never fails on its own."
+        )
+        raise ValueError(msg)
+    return _server.resolve_startup_timeout(declared)
+
+
 def _mamba_scheduler_strategy_value(extra_launch_args: list[str]) -> str | None:
     """Return the value passed to ``--mamba-scheduler-strategy``, or ``None``.
 
@@ -479,7 +506,10 @@ class SGLangGenerationAdapter(GenerationAdapter):
         self._speculative_needs_extra_buffer = speculative_needs_extra_buffer
         self._extra_launch_args = list(extra_launch_args or [])
         self._extra_env = dict(extra_env or {})
-        self._startup_timeout_s = _server.resolve_startup_timeout(startup_timeout_s)
+        self._startup_timeout_s = _resolve_profile_startup_timeout(
+            startup_timeout_s,
+            tensor_parallel_size=self._tensor_parallel_size,
+        )
         self._lora_paths = dict(lora_paths or {})
         self._max_loras_per_batch = max_loras_per_batch
 

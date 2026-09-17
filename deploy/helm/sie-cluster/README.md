@@ -619,6 +619,7 @@ profiles:
       loadtime:
         tensor_parallel_size: 4
         request_read_timeout_s: 600
+        startup_timeout_s: 900
 ```
 
 ```yaml
@@ -638,7 +639,13 @@ workers:
   while every device is held evicts the least recently used unpinned group.
 - The SGLang generation and embedding adapters accept a width. The generation
   adapter also requires `request_read_timeout_s` above width one, because a
-  stalled collective produces no bytes and no error.
+  stalled collective produces no bytes and no error, and its own
+  `startup_timeout_s`, because startup at a width is dominated by per-rank graph
+  compilation and capture, so neither `workers.common.modelReadyTimeoutSec` nor
+  the built-in default describes it. Keep the declared budget within
+  `workers.common.modelReadyTimeoutSec` and below the liveness probe budget.
+- A declared `startup_timeout_s` that is not a finite number of seconds above
+  zero is refused when the model loads rather than replaced by a default.
 - Width and placement are declared only through `tensor_parallel_size`. Engine
   placement flags in `extra_launch_args` (including abbreviations such as
   `--tp`) and device-visibility variables in `extra_env` are refused.
