@@ -1,0 +1,40 @@
+sie_id: "google/translategemma-4b-it"
+hf_id: "google/translategemma-4b-it"
+hf_revision: 10042cb0e6e7fdce748996a71dc3dc432a4e0c89
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: null
+  generate:
+    context_length: 2560
+    max_output_tokens: 512
+    capabilities:
+      grammar: []
+      streaming: true
+      tools: false
+    chat_template_kwargs: {}
+max_sequence_length: 2560
+profiles:
+  default:
+    max_batch_tokens: 8192
+    kv_budget_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime:
+        served_model_name: google/translategemma-4b-it
+        mem_fraction_static: 0.85
+        grammar_backend: xgrammar
+        attention_backend: triton
+        trust_remote_code: false
+      runtime:
+        first_chunk_timeout_s: 180
+        inter_chunk_timeout_s: 10
+        overall_timeout_s: 600
+        stop_tokens:
+          - <end_of_turn>
