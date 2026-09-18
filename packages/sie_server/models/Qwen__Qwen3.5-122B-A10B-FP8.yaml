@@ -1,0 +1,72 @@
+sie_id: Qwen/Qwen3.5-122B-A10B-FP8
+hf_id: Qwen/Qwen3.5-122B-A10B-FP8
+hf_revision: a099dee70ccfcd8d5dda56aaa0b60cb8ecadabc9
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: null
+  generate:
+    context_length: 32768
+    max_output_tokens: 4096
+    capabilities:
+      grammar:
+      - json_schema
+      - regex
+      streaming: true
+      tools: true
+    chat_template_kwargs:
+      enable_thinking: false
+max_sequence_length: 32768
+profiles:
+  default:
+    max_batch_tokens: 32768
+    kv_budget_tokens: 32768
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime:
+        tensor_parallel_size: 2
+        startup_timeout_s: 1500
+        request_read_timeout_s: 90
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.5-122B-A10B-FP8
+        trust_remote_code: false
+        disable_cuda_graph: false
+        disable_piecewise_cuda_graph: true
+        attention_backend: triton
+        grammar_backend: xgrammar
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+        speculative:
+          enabled: false
+        extra_env:
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: '1'
+        extra_launch_args:
+        - --kv-cache-dtype
+        - bfloat16
+        - --mamba-ssm-dtype
+        - float32
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          min_p: 0.0
+          presence_penalty: 1.5
+          repetition_penalty: 1.0
+        stop_tokens:
+        - <|im_end|>
+        - <|endoftext|>
+  rtx-pro-6000x2:
+    extends: default
+    grammar_profile: rtx-pro-6000x2-grammar
+  rtx-pro-6000x2-grammar:
+    extends: default
