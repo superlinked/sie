@@ -44,10 +44,6 @@ def normalize_answer(text: str) -> str:
     return " ".join(word for word in folded.split() if word not in _ARTICLES)
 
 
-def collapse_whitespace(text: str) -> str:
-    return " ".join(text.split())
-
-
 def answer_text(response: Any) -> str:
     if not isinstance(response, dict):
         return ""
@@ -62,7 +58,10 @@ def answer_text(response: Any) -> str:
 
 
 def parse_reply(text: str) -> dict[str, Any]:
-    lines = [line for line in text.strip().split("\n") if line.strip()]
+    # Blank lines are kept. Filtering them here let a reply of "Answer: ...",
+    # a blank line and "Quote: ..." satisfy the documented "exactly two lines",
+    # so the format check was looser than the sentence describing it.
+    lines = text.strip().split("\n")
     answer = ""
     quote = ""
     for line in lines:
@@ -84,8 +83,10 @@ def evaluate(cases_doc: dict[str, Any], case: dict[str, Any], question: dict[str
 
     format_ok = len(lines) == 2 and lines[0].startswith("Answer: ") and lines[1].startswith("Quote: ")
     abstained = answer == abstention
-    passage = collapse_whitespace(case["context"])
-    quote_ok = quote == "none" if abstained else bool(quote) and collapse_whitespace(quote) in passage
+    # Exact containment. Collapsing whitespace on both sides would let a quote
+    # that differs in spaces, tabs or line breaks pass a check the page
+    # describes as "character for character".
+    quote_ok = quote == "none" if abstained else bool(quote) and quote in case["context"]
 
     if question["kind"] == "unanswerable":
         reference_ok = abstained
@@ -183,8 +184,15 @@ def score() -> dict[str, Any]:
         raise InputError(f"manifest names revision {unused[0]}, which no recorded call used")
 
     counted = [result for result in results if result["scored"]]
+    # `quote` passes on an abstention, where the recorded quote is `none` and
+    # nothing was cited. Reporting that as "24 of 24 quoted the passage" would
+    # count nine answers that quoted nothing, so the two are separated here and
+    # in the printed summary.
+    cited = [result for result in counted if result["details"]["quote"] != "none"]
     return {
         "questions_scored": len(counted),
+        "cited": len(cited),
+        "declined": len(counted) - len(cited),
         "passing_all_checks": sum(all(result["checks"].values()) for result in counted),
         "check_passes": {name: sum(result["checks"][name] for result in counted) for name in CHECK_NAMES},
         "results": results,
@@ -211,12 +219,14 @@ def main() -> int:
     for name in CHECK_NAMES:
         print(f"{name:<24} {summary['check_passes'][name]}/{total}")
     print()
-    print(f"{summary['check_passes']['quote']} of {total} answers quoted a sentence that is in the passage")
+    print(f"{summary['cited']} of {total} answers cited a sentence, and every one of those is in its passage")
+    print(f"{summary['declined']} of {total} declined and cited nothing")
     print(f"{passing} of {total} answers passed all four checks")
 
-    # The published headline is the quote figure, so that is what this exits
-    # on. The reference figure is printed above and is not 24 of 24; four
-    # answers miss it, and README.md says which and why.
+    # The published headline is that no answer quoted text absent from its
+    # passage, so that is what this exits on. The reference figure is printed
+    # above and is not 24 of 24; four answers miss it, and README.md says which
+    # and why.
     if summary["check_passes"]["quote"] != total:
         print("FAILED: an answer quoted text that is not in its passage")
         return 1

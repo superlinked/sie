@@ -69,9 +69,16 @@ quote                    24/24
 reference                20/24
 length                   24/24
 
-24 of 24 answers quoted a sentence that is in the passage
+15 of 24 answers cited a sentence, and every one of those is in its passage
+9 of 24 declined and cited nothing
 20 of 24 answers passed all four checks
 ```
+
+The `quote` check reads 24/24 because it also passes on an abstention, where
+the recorded quote is the literal `none`. Fifteen answers cited a sentence and
+all fifteen are in their passage character for character; the other nine quoted
+nothing, which is what the passage not answering the question is supposed to
+look like.
 
 Those are the figures the task page publishes. The page displays four of the
 twelve passages, one in the hero and three in the proof grid; all twelve are in
@@ -81,8 +88,8 @@ page's playground call. It is fetched and rescored with the rest, printed with
 
 ### The four answers that miss the reference
 
-`score.py` exits non-zero only if the `quote` figure slips, because that is the
-figure the page headlines. `reference` is 20 of 24, and here is every miss, so
+`score.py` exits non-zero only if an answer quotes text that is not in its
+passage, because that is what the page headlines. `reference` is 20 of 24, and here is every miss, so
 nobody has to take a summary's word for what they are.
 
 One is a model error:

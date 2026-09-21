@@ -26,11 +26,14 @@ CHECK_NAMES = ("format", "window", "length", "no_internal_identifiers")
 LINE_LABELS = ("Status", "Impact", "Window", "Cause")
 WINDOW_LINE = re.compile(r"^Window: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) to (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) UTC$")
 MAX_WORDS = 25
+# Case-insensitive, like the responder-name check beside them. Written
+# lowercase-only, these let `Gerrit1003` and `t393034` through a check whose
+# whole job is that no such identifier reaches a status page.
 LEAK_PATTERNS = {
-    "hostname": re.compile(r"\b[a-z][a-z-]*\d{3,4}(?:\.[a-z0-9-]+)*\b"),
-    "numbered instance": re.compile(r"\b[a-z]+(?:-[a-z]+)*-\d{1,2}\b"),
-    "internal domain": re.compile(r"\.(?:wmnet|wikimedia\.cloud)\b"),
-    "Phabricator task": re.compile(r"\bT\d{5,6}\b"),
+    "hostname": re.compile(r"\b[a-z][a-z-]*\d{3,4}(?:\.[a-z0-9-]+)*\b", re.IGNORECASE),
+    "numbered instance": re.compile(r"\b[a-z]+(?:-[a-z]+)*-\d{1,2}\b", re.IGNORECASE),
+    "internal domain": re.compile(r"\.(?:wmnet|wikimedia\.cloud)\b", re.IGNORECASE),
+    "Phabricator task": re.compile(r"\bT\d{5,6}\b", re.IGNORECASE),
 }
 NAME_STOPWORDS = {"round", "oncallers", "wmf", "wmde", "user", "n/a", "unknown"}
 

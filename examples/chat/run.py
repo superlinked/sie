@@ -51,6 +51,15 @@ def record(client: Any, case: dict[str, Any], question: dict[str, Any], body: di
     # The SDK attaches request-scoped metadata to the dict it returns. Drop it,
     # so `response` stays the server's own envelope and nothing else.
     envelope = {key: value for key, value in response.items() if key != "request"}
+    # Stop at the question that broke rather than at the end. score.py rejects
+    # an answerless entry or a missing revision later, but by then the
+    # remaining calls have already been paid for.
+    choices = envelope.get("choices") or []
+    content = choices[0].get("message", {}).get("content") if choices and isinstance(choices[0], dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise SystemExit(f"{prompt.question_slug(case, question)}: the response carried no answer text")
+    if not client.last_model_revision:
+        raise SystemExit(f"{prompt.question_slug(case, question)}: no served model revision reported")
     return {
         "slug": prompt.question_slug(case, question),
         "case": case["slug"],
@@ -85,9 +94,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     import json
 
-    # Deferred so --show and the offline paths run on a bare python3.
-    from sie_sdk import SIEClient
-
     args = parse_args()
     cases_doc = prompt.load_cases()
     cases = {case["slug"]: case for case in cases_doc["cases"]}
@@ -100,6 +106,10 @@ def main() -> int:
             raise SystemExit(f"Unknown question: {args.show}. Known: {', '.join(sorted(by_slug))}")
         print(json.dumps(prompt.request_body(cases_doc, *pair), indent=2, ensure_ascii=False))
         return 0
+
+    # Imported only on the path that calls the API, so `--show` and every
+    # offline path run on a bare python3 with nothing installed.
+    from sie_sdk import SIEClient
 
     selected = args.case or list(cases)
     unknown = [slug for slug in selected if slug not in cases]

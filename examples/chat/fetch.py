@@ -16,7 +16,9 @@ change what this example scores.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -54,23 +56,37 @@ def listing() -> list[dict]:
 
 def main() -> int:
     print(f"{DATASET} at {REVISION}")
-    total = 0
-    written: set[str] = set()
-    for entry in sorted(listing(), key=lambda item: item["path"]):
-        remote = entry["path"]
-        relative = remote[len(TASK) + 1 :]
-        target = EVIDENCE / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        body = get(f"{FILES}/{remote}")
-        if entry.get("size") is not None and len(body) != entry["size"]:
-            raise SystemExit(f"{remote}: downloaded {len(body)} bytes, the dataset lists {entry['size']}")
-        target.write_bytes(body)
-        written.add(relative)
-        total += len(body)
-        print(f"  {relative} ({len(body)} bytes)")
-    missing = [name for name in REQUIRED if name not in written]
-    if missing:
-        raise SystemExit(f"{DATASET} revision {REVISION} is missing {', '.join(missing)} under {TASK}/")
+    # Download into a staging directory and swap it in only once every required
+    # file has arrived. Writing straight into evidence/ meant a listing missing
+    # a file raised AFTER overwriting some of them, leaving a mixed set from two
+    # revisions that score.py can accept whenever it happens to be internally
+    # consistent.
+    staging = Path(tempfile.mkdtemp(prefix="sie-evidence-", dir=HERE))
+    try:
+        total = 0
+        written: set[str] = set()
+        for entry in sorted(listing(), key=lambda item: item["path"]):
+            remote = entry["path"]
+            relative = remote[len(TASK) + 1 :]
+            target = staging / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            body = get(f"{FILES}/{remote}")
+            if entry.get("size") is not None and len(body) != entry["size"]:
+                raise SystemExit(f"{remote}: downloaded {len(body)} bytes, the dataset lists {entry['size']}")
+            target.write_bytes(body)
+            written.add(relative)
+            total += len(body)
+            print(f"  {relative} ({len(body)} bytes)")
+        missing = [name for name in REQUIRED if name not in written]
+        if missing:
+            raise SystemExit(f"{DATASET} revision {REVISION} is missing {', '.join(missing)} under {TASK}/")
+        if EVIDENCE.exists():
+            shutil.rmtree(EVIDENCE)
+        staging.rename(EVIDENCE)
+    finally:
+        # A failure leaves the previous evidence/ untouched and removes the
+        # half-downloaded staging directory rather than leaving it to be found.
+        shutil.rmtree(staging, ignore_errors=True)
     print(f"Wrote {total} bytes to {EVIDENCE}")
     print("Now run: python3 score.py")
     return 0

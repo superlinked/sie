@@ -33,14 +33,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sie_sdk import SIEClient
-
 import prompt
 
 HERE = Path(__file__).resolve().parent
 
 
-def record(client: SIEClient, case: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+def record(client: Any, case: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
     """Send one case and return its calls.json entry."""
     requested_at = datetime.now(UTC).isoformat(timespec="seconds")
     started = time.monotonic()
@@ -53,6 +51,15 @@ def record(client: SIEClient, case: dict[str, Any], body: dict[str, Any]) -> dic
     # The SDK attaches request-scoped metadata to the dict it returns. Drop it,
     # so `response` stays the server's own envelope and nothing else.
     envelope = {key: value for key, value in response.items() if key != "request"}
+    # Stop at the case that broke rather than at the end. score.py rejects an
+    # answerless entry or a missing revision later, but by then the remaining
+    # calls have already been paid for.
+    choices = envelope.get("choices") or []
+    content = choices[0].get("message", {}).get("content") if choices and isinstance(choices[0], dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise SystemExit(f"{case['slug']}: the response carried no answer text")
+    if not client.last_model_revision:
+        raise SystemExit(f"{case['slug']}: the response reported no served model revision")
     return {
         "slug": case["slug"],
         "requested_at": requested_at,
@@ -95,6 +102,10 @@ def main() -> int:
         body = prompt.request_body(cases_doc, prompt.wikitext(case), case)
         print(json.dumps(body, indent=2, ensure_ascii=False))
         return 0
+
+    # Imported only on the path that calls the API, so `--show` runs on a bare
+    # python3 with nothing installed.
+    from sie_sdk import SIEClient
 
     selected = args.case or list(cases)
     unknown = [slug for slug in selected if slug not in cases]
