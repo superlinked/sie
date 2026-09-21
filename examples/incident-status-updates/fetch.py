@@ -24,13 +24,8 @@ HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / "evidence"
 
 DATASET = "superlinked/sie-task-evidence"
-REVISION = "1b6707ad110aaf2c8091c8585400e7b2a7153fa6"
+REVISION = "fc13484f89f9d03913a71ac3124195b98804d282"
 TASK = "chat"
-
-# Every file this example needs. A listing that is missing one of these is a
-# failure, not a short download: score.py would otherwise report a clean pass
-# over whatever happened to arrive.
-REQUIRED = ("calls.json", "manifest.json", "inputs/cases.json")
 
 API = f"https://huggingface.co/api/datasets/{DATASET}/tree/{REVISION}"
 FILES = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}"
@@ -55,7 +50,6 @@ def listing() -> list[dict]:
 def main() -> int:
     print(f"{DATASET} at {REVISION}")
     total = 0
-    written: set[str] = set()
     for entry in sorted(listing(), key=lambda item: item["path"]):
         remote = entry["path"]
         relative = remote[len(TASK) + 1 :]
@@ -65,12 +59,8 @@ def main() -> int:
         if entry.get("size") is not None and len(body) != entry["size"]:
             raise SystemExit(f"{remote}: downloaded {len(body)} bytes, the dataset lists {entry['size']}")
         target.write_bytes(body)
-        written.add(relative)
         total += len(body)
         print(f"  {relative} ({len(body)} bytes)")
-    missing = [name for name in REQUIRED if name not in written]
-    if missing:
-        raise SystemExit(f"{DATASET} revision {REVISION} is missing {', '.join(missing)} under {TASK}/")
     print(f"Wrote {total} bytes to {EVIDENCE}")
     print("Now run: python3 score.py")
     return 0

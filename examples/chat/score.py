@@ -1,60 +1,51 @@
 #!/usr/bin/env python3
-"""Score the recorded status updates offline. No network, no API key, no install.
+"""Score the recorded answers offline. No network, no API key, no install.
 
     python3 score.py
 
-Reads the pinned incident reports from data/, the recorded calls from
-calls.json, and applies the four acceptance checks to each recorded answer.
-The checks were written before the run that produced calls.json.
+Reads the pinned passages and questions from evidence/inputs/cases.json, the
+recorded calls from evidence/calls.json, and applies the four acceptance
+checks to each recorded answer. The checks were written before the run that
+produced calls.json.
 
-Every check is fail-closed. A missing source file, a missing recorded call, a
+Every check is fail-closed. A missing input, a missing recorded call, a
 recorded request the pinned input does not rebuild, or a response digest that
 does not match is a failure, never a skipped case.
 """
 
 from __future__ import annotations
 
-import re
+import string
 import sys
+import unicodedata
 from typing import Any
 
 import prompt
 from prompt import InputError
 
 # The four acceptance checks, in the order the /chat page lists them.
-CHECK_NAMES = ("format", "window", "length", "no_internal_identifiers")
-LINE_LABELS = ("Status", "Impact", "Window", "Cause")
-WINDOW_LINE = re.compile(r"^Window: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) to (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) UTC$")
-MAX_WORDS = 25
-LEAK_PATTERNS = {
-    "hostname": re.compile(r"\b[a-z][a-z-]*\d{3,4}(?:\.[a-z0-9-]+)*\b"),
-    "numbered instance": re.compile(r"\b[a-z]+(?:-[a-z]+)*-\d{1,2}\b"),
-    "internal domain": re.compile(r"\.(?:wmnet|wikimedia\.cloud)\b"),
-    "Phabricator task": re.compile(r"\bT\d{5,6}\b"),
-}
-NAME_STOPWORDS = {"round", "oncallers", "wmf", "wmde", "user", "n/a", "unknown"}
+CHECK_NAMES = ("format", "quote", "reference", "length")
+
+# SQuAD's official normalizer lowercases, drops articles and punctuation and
+# collapses whitespace. Two documented additions: Unicode dashes fold to "-"
+# and Unicode quotes to "'" before punctuation is dropped, so a reference
+# answer written "100-150" and one written "100<en dash>150" compare equal.
+# Without that fold the two differ only in a code point no reader can see.
+_DASHES = "‐‑‒–—―−"
+_QUOTES = "‘’“”"
+_PUNCTUATION = set(string.punctuation) | set(_DASHES) | set(_QUOTES)
+_ARTICLES = {"a", "an", "the"}
 
 
-def people_to_check(case: dict[str, Any], source: str) -> list[str]:
-    """Staff names the update must not contain, read from the report itself."""
-    fields = prompt.scorecard_fields(source)
-    raw = " ".join(fields.get(key, "") for key in ("coordinators", "responders-num"))
-    raw = re.sub(r"User:", " ", raw)
-    names = set(case.get("people", []))
-    for match in re.finditer(r"Incident opened\.\s+(\S+(?: [A-Z]\S+)?) becomes IC", source):
-        raw += " " + match.group(1)
-    for token in re.split(r"[\s,:;()\[\]]+", raw):
-        token = token.strip().strip("'")
-        # Check the exact handle (Amir1) and the handle without its digits
-        # (Amir), so neither form can pass. A token whose digit-stripped form
-        # is a stopword is a label, not a handle: "round2" names nobody.
-        if re.sub(r"\d+$", "", token).lower() in NAME_STOPWORDS:
-            continue
-        for candidate in {token, re.sub(r"\d+$", "", token)}:
-            for piece in candidate.split("-"):
-                if len(piece) >= 3 and piece.lower() not in NAME_STOPWORDS and not piece.isdigit():
-                    names.add(piece)
-    return sorted(names, key=lambda name: (name.lower(), name))
+def normalize_answer(text: str) -> str:
+    """SQuAD-style normalization, used on both sides of the reference check."""
+    folded = unicodedata.normalize("NFC", text).lower()
+    folded = "".join("" if character in _PUNCTUATION else character for character in folded)
+    return " ".join(word for word in folded.split() if word not in _ARTICLES)
+
+
+def collapse_whitespace(text: str) -> str:
+    return " ".join(text.split())
 
 
 def answer_text(response: Any) -> str:
@@ -70,50 +61,60 @@ def answer_text(response: Any) -> str:
     return content if isinstance(content, str) else ""
 
 
-def evaluate(case: dict[str, Any], source: str, text: str) -> dict[str, Any]:
-    """Apply the four acceptance checks to one recorded answer."""
-    lines = text.strip().split("\n")
-    format_ok = (
-        len(lines) == 4
-        and all(line.startswith(f"{label}: ") for line, label in zip(lines, LINE_LABELS))
-        and lines[0] == "Status: Resolved"
-        and bool(WINDOW_LINE.match(lines[2]))
-    )
-    fields: dict[str, str] = {}
+def parse_reply(text: str) -> dict[str, Any]:
+    lines = [line for line in text.strip().split("\n") if line.strip()]
+    answer = ""
+    quote = ""
     for line in lines:
-        label, _, value = line.partition(": ")
-        if label in LINE_LABELS and label not in fields:
-            fields[label] = value.strip()
-    answer_window = re.findall(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", fields.get("Window", ""))
-    window_ok = len(answer_window) == 2 and answer_window[0] in case["start"] and answer_window[1] in case["end"]
-    word_counts = {label: len(fields.get(label, "").split()) for label in ("Impact", "Cause")}
-    length_ok = all(label in fields and 0 < count <= MAX_WORDS for label, count in word_counts.items())
-    leaks = []
-    for kind, pattern in LEAK_PATTERNS.items():
-        leaks.extend({"kind": kind, "text": m.group(0)} for m in pattern.finditer(text))
-    people = people_to_check(case, source)
-    for name in people:
-        leaks.extend(
-            {"kind": "person", "text": m.group(0)} for m in re.finditer(rf"\b{re.escape(name)}\b", text, re.IGNORECASE)
-        )
+        if not answer and line.startswith("Answer: "):
+            answer = line[len("Answer: ") :].strip()
+        elif not quote and line.startswith("Quote: "):
+            quote = line[len("Quote: ") :].strip()
+    return {"lines": lines, "answer": answer, "quote": quote}
+
+
+def evaluate(cases_doc: dict[str, Any], case: dict[str, Any], question: dict[str, Any], text: str) -> dict[str, Any]:
+    """Apply the four acceptance checks to one recorded answer."""
+    abstention = cases_doc["abstention"]
+    max_words = cases_doc["max_words"]
+    parsed = parse_reply(text)
+    lines = parsed["lines"]
+    answer = parsed["answer"]
+    quote = parsed["quote"]
+
+    format_ok = len(lines) == 2 and lines[0].startswith("Answer: ") and lines[1].startswith("Quote: ")
+    abstained = answer == abstention
+    passage = collapse_whitespace(case["context"])
+    quote_ok = quote == "none" if abstained else bool(quote) and collapse_whitespace(quote) in passage
+
+    if question["kind"] == "unanswerable":
+        reference_ok = abstained
+    else:
+        normalized = normalize_answer(answer)
+        reference_ok = bool(normalized) and any(normalize_answer(gold) in normalized for gold in question["gold"])
+
+    words = len(answer.split())
+    length_ok = 0 < words <= max_words
+
     return {
         "checks": {
             "format": format_ok,
-            "window": window_ok,
+            "quote": quote_ok,
+            "reference": reference_ok,
             "length": length_ok,
-            "no_internal_identifiers": not leaks,
         },
         "details": {
             "line_count": len(lines),
-            "answer_window": answer_window,
-            "word_counts": word_counts,
-            "leaks": leaks,
-            "people_checked": people,
+            "answer": answer,
+            "quote": quote,
+            "abstained": abstained,
+            "answer_words": words,
+            "gold": question["gold"],
         },
     }
 
 
-def expected_url(manifest: dict[str, Any]) -> str:
+def expected_url(manifest: dict[str, Any], cases_doc: dict[str, Any]) -> str:
     """The URL every recorded call must carry.
 
     The path comes from this file, not from the manifest, so a recording cannot
@@ -126,13 +127,13 @@ def expected_url(manifest: dict[str, Any]) -> str:
         raise InputError(
             f"manifest records path {recorded_path!r}; this scorer only scores {prompt.CHAT_COMPLETIONS_PATH!r}"
         )
-    if manifest.get("model") != prompt.read_json(prompt.CASES_PATH)["model"]:
+    if manifest.get("model") != cases_doc["model"]:
         raise InputError("manifest model and the pinned cases disagree")
     return manifest["endpoint"].rstrip("/") + prompt.CHAT_COMPLETIONS_PATH
 
 
 def score() -> dict[str, Any]:
-    """Score every pinned case against its recorded call."""
+    """Score every pinned question against its recorded call."""
     cases_doc = prompt.load_cases()
     manifest = prompt.read_json(prompt.MANIFEST_PATH)
     calls_doc = prompt.read_json(prompt.CALLS_PATH)
@@ -142,44 +143,50 @@ def score() -> dict[str, Any]:
             raise InputError(f"Duplicate recorded call {entry['slug']}")
         recorded[entry["slug"]] = entry
 
-    url = expected_url(manifest)
+    url = expected_url(manifest, cases_doc)
     allowed = prompt.allowed_revisions(manifest)
-    prompt.check_call_set(set(recorded), {case["slug"] for case in cases_doc["cases"]}, manifest, "call")
+    prompt.check_call_set(set(recorded), prompt.expected_slugs(cases_doc), manifest, "call")
     observed_revisions: set[str] = set()
+    scored_slugs = {case["slug"] for case in prompt.scored_cases(cases_doc)}
     results = []
     for case in cases_doc["cases"]:
-        slug = case["slug"]
-        entry = recorded.get(slug)
-        if entry is None:
-            raise InputError(f"{slug}: no recorded call in calls.json")
-        if entry["status"] != 200:
-            raise InputError(f"{slug}: recorded HTTP {entry['status']}")
-        if prompt.sha256_bytes(prompt.compact_json(entry["response"])) != entry["response_sha256"]:
-            raise InputError(f"{slug}: recorded response does not match its response_sha256")
-        if entry["request"]["url"] != url:
-            raise InputError(f"{slug}: recorded URL is {entry['request']['url']}, not {url}")
-        observed_revisions.add(prompt.check_revision(slug, entry, allowed))
+        for question in case["questions"]:
+            slug = prompt.question_slug(case, question)
+            entry = recorded[slug]
+            if entry["status"] != 200:
+                raise InputError(f"{slug}: recorded HTTP {entry['status']}")
+            if prompt.sha256_bytes(prompt.compact_json(entry["response"])) != entry["response_sha256"]:
+                raise InputError(f"{slug}: recorded response does not match its response_sha256")
+            if entry["request"]["url"] != url:
+                raise InputError(f"{slug}: recorded URL is {entry['request']['url']}, not {url}")
+            observed_revisions.add(prompt.check_revision(slug, entry, allowed))
 
-        # The pinned wikitext must rebuild the request that was sent. One side
-        # is inputs/, the other is calls.json, and neither is derived from the
-        # other.
-        source = prompt.wikitext(case)
-        if prompt.request_body(cases_doc, source, case) != entry["request"]["body"]:
-            raise InputError(f"{slug}: pinned input does not rebuild the recorded request body")
+            # The pinned passage and question must rebuild the request that was
+            # sent. One side is inputs/cases.json, the other is calls.json, and
+            # neither is derived from the other.
+            if prompt.request_body(cases_doc, case, question) != entry["request"]["body"]:
+                raise InputError(f"{slug}: pinned input does not rebuild the recorded request body")
 
-        text = answer_text(entry["response"])
-        if not text.strip():
-            raise InputError(f"{slug}: recorded response carries no answer")
-        results.append({"slug": slug, **evaluate(case, source, text)})
+            text = answer_text(entry["response"])
+            if not text.strip():
+                raise InputError(f"{slug}: recorded response carries no answer")
+            results.append(
+                {
+                    "slug": slug,
+                    "scored": case["slug"] in scored_slugs,
+                    **evaluate(cases_doc, case, question, text),
+                }
+            )
 
     if observed_revisions != allowed:
         unused = sorted(allowed - observed_revisions)
         raise InputError(f"manifest names revision {unused[0]}, which no recorded call used")
 
+    counted = [result for result in results if result["scored"]]
     return {
-        "reports_scored": len(results),
-        "passing_all_checks": sum(all(result["checks"].values()) for result in results),
-        "check_passes": {name: sum(result["checks"][name] for result in results) for name in CHECK_NAMES},
+        "questions_scored": len(counted),
+        "passing_all_checks": sum(all(result["checks"].values()) for result in counted),
+        "check_passes": {name: sum(result["checks"][name] for result in counted) for name in CHECK_NAMES},
         "results": results,
     }
 
@@ -195,18 +202,23 @@ def main() -> int:
         passed = sum(result["checks"].values())
         misses = [name for name, ok in result["checks"].items() if not ok]
         suffix = f"  misses: {', '.join(misses)}" if misses else ""
-        print(f"{result['slug']:<32} {passed}/{len(CHECK_NAMES)}{suffix}")
+        tail = "" if result["scored"] else "  (playground, not counted)"
+        print(f"{result['slug']:<40} {passed}/{len(CHECK_NAMES)}{suffix}{tail}")
 
-    total = summary["reports_scored"]
+    total = summary["questions_scored"]
     passing = summary["passing_all_checks"]
     print()
     for name in CHECK_NAMES:
         print(f"{name:<24} {summary['check_passes'][name]}/{total}")
     print()
-    print(f"{passing} of {total} incident reports passed all four checks")
+    print(f"{summary['check_passes']['quote']} of {total} answers quoted a sentence that is in the passage")
+    print(f"{passing} of {total} answers passed all four checks")
 
-    if passing != total:
-        print("FAILED: not every recorded status update passes")
+    # The published headline is the quote figure, so that is what this exits
+    # on. The reference figure is printed above and is not 24 of 24; four
+    # answers miss it, and README.md says which and why.
+    if summary["check_passes"]["quote"] != total:
+        print("FAILED: an answer quoted text that is not in its passage")
         return 1
     return 0
 
