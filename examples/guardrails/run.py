@@ -196,7 +196,14 @@ def check(data_dir: Path) -> int:
     for call_id in sorted(set(expected) & set(recorded)):
         call = recorded[call_id]
         spec = expected[call_id]
-        if spec["body"] != call["request"]["body"]:
+        case_id, call_name = call_id.split("__", 1)
+        if call["case"] != case_id:
+            mismatched.append(f"{call_id}: case {call['case']} differs from {case_id}")
+        elif call["call"] != call_name:
+            mismatched.append(f"{call_id}: call {call['call']} differs from {call_name}")
+        elif call["model"] != spec["model"]:
+            mismatched.append(f"{call_id}: model {call['model']} differs from {spec['model']}")
+        elif spec["body"] != call["request"]["body"]:
             mismatched.append(f"{call_id}: rebuilt body differs from the recorded body")
         elif spec["path"] != call["path"]:
             mismatched.append(f"{call_id}: path {call['path']} differs from {spec['path']}")

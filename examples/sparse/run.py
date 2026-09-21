@@ -126,7 +126,9 @@ def check(data_dir: Path) -> int:
     for call_id in sorted(set(expected) & set(recorded)):
         call = recorded[call_id]
         model, item = expected[call_id]
-        if call["model"] != model:
+        if call["case"] != item["id"]:
+            mismatched.append(f"{call_id}: case {call['case']} differs from {item['id']}")
+        elif call["model"] != model:
             mismatched.append(f"{call_id}: model {call['model']} differs from {model}")
         elif build_body(item["id"], item["text"]) != call["request"]["body"]:
             mismatched.append(f"{call_id}: rebuilt body differs from the recorded body")

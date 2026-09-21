@@ -153,7 +153,9 @@ def check(data_dir: Path) -> int:
     for call_id in sorted(set(expected) & set(recorded)):
         call = recorded[call_id]
         case, labels = expected[call_id]
-        if build_body(case["text"], labels) != call["request"]["body"]:
+        if call["case"] != case["slug"]:
+            mismatched.append(f"{call_id}: case {call['case']} differs from {case['slug']}")
+        elif build_body(case["text"], labels) != call["request"]["body"]:
             mismatched.append(f"{call_id}: rebuilt body differs from the recorded body")
         elif urllib.parse.unquote(call["path"]) != PATH:
             mismatched.append(f"{call_id}: path {call['path']} is not {PATH}")

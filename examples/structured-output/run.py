@@ -115,7 +115,9 @@ def check(data_dir: Path) -> int:
     cases = {case["id"]: case for case in load(data_dir / "inputs/cases.json")["cases"]}
     calls = load(data_dir / "calls.json")["calls"]
 
-    expected = {f"page/{case_id}" for case_id in cases}
+    # Keyed by call id, so the case a call is checked against comes from the
+    # id it was recorded under, never from a field inside the call itself.
+    expected = {f"page/{case_id}": case for case_id, case in cases.items()}
 
     recorded: dict[str, dict[str, Any]] = {}
     duplicates: list[str] = []
@@ -129,15 +131,17 @@ def check(data_dir: Path) -> int:
             continue
         recorded[call["id"]] = call
 
-    missing = sorted(expected - set(recorded))
-    unexpected = sorted(set(recorded) - expected)
+    missing = sorted(set(expected) - set(recorded))
+    unexpected = sorted(set(recorded) - set(expected))
 
     rebuilt = 0
     mismatched: list[str] = []
-    for call_id in sorted(expected & set(recorded)):
+    for call_id in sorted(set(expected) & set(recorded)):
         call = recorded[call_id]
-        case = cases[call["case"]]
-        if build_body(case) != call["request"]["body"]:
+        case = expected[call_id]
+        if call["case"] != case["id"]:
+            mismatched.append(f"{call_id}: case {call['case']} differs from {case['id']}")
+        elif build_body(case) != call["request"]["body"]:
             mismatched.append(f"{call_id}: rebuilt body differs from the recorded body")
         elif call["path"] != PATH:
             mismatched.append(f"{call_id}: path {call['path']} differs from {PATH}")
