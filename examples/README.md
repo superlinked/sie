@@ -17,6 +17,10 @@ service keys.
 | [Find the best retrieval strategy for your RAG](./retrieval-ablation) | Picking a production RAG retrieval pipeline by evals on real financial documents | `encode`, `score` | SIE endpoint, Turbopuffer key, optional SIE API key for auth-enabled clusters | Runnable benchmark |
 | [Rank exact primary-source passages](./rerank) | Testing a reranker on verbatim SEC, CMS, NTSB, and Supreme Court excerpts | `score` | SIE endpoint with Qwen3 Reranker; standalone `uv` project | Runnable verified example |
 | [Extract custom entities from primary sources](./named-entity-extraction) | Changing zero-shot labels across financial, healthcare, rail-safety, and legal text | `extract` | SIE endpoint with GLiNER; standalone `uv` project | Runnable verified example |
+| [Write public status updates from internal incident reports](./chat) | Checking a generated status update for leaked hosts, tickets, staff names and the wrong outage window | `chat/completions` | SIE Cloud with Qwen3.8 27B; `fetch.py` pulls the recorded run, `score.py` reproduces the number with no key | Runnable recorded example |
+| [Build a citable graph from filing text](./knowledge-graph) | Turning SEC, NHTSA and FDA paragraphs into entities and relations with offsets, and seeing where the relations go wrong | `extract` | SIE Cloud with GLiNER2; `fetch.py` pulls the recorded run, `score.py` reproduces the counts with no key | Runnable recorded example |
+| [Find the passage that answers a question](./search) | Ranking 253 regulation and documentation passages full of near misses, with query-side encoding | `encode` | SIE Cloud with Arctic Embed L v2.0; `fetch.py` pulls the recorded vectors, `score.py` ranks them with no key | Runnable recorded example |
+| [Pick the passage that meets every condition](./multi-vector) | Separating same-page near-duplicates with ColBERT late interaction, scored token by token | `encode` | SIE Cloud with GTE-ModernColBERT-v1; `fetch.py` pulls the recorded token vectors, `score.py` scores them with no key | Runnable recorded example |
 | [Fill a JSON Schema from a messy document](./structured-output) | Reading NHTSA complaints, SEC officer filings and GSA listings into schema-valid JSON, with the two wrong fields left visible | `chat/completions` | SIE Cloud with Qwen3.8 27B; `fetch.py` pulls the recorded run, `score.py` reproduces the number with no key | Runnable recorded example |
 | [Route a request to the action it asks for](./classify) | Scoring held-out SNIPS requests against seven action labels, and showing what happens when the labels overlap | `extract` | SIE Cloud with GLiClass; `fetch.py` pulls the recorded run, `score.py` reproduces the number with no key | Runnable recorded example |
 | [Check text for a planted instruction](./guardrails) | Gating an agent on one label over twelve inputs from BIPIA, InjecAgent, LLMail-Inject, AgentDojo and XSTest, misses included | `extract` | SIE Cloud with GLiGuard; `fetch.py` pulls the recorded run, `score.py` reproduces the number with no key | Runnable recorded example |
@@ -54,6 +58,18 @@ We welcome contributions. To add your project to the gallery:
    - Which SIE features it uses (encode, score, extract, cluster, etc.)
 3. **Keep it self-contained** - include a `requirements.txt` or `package.json`, a docker-compose if needed, and sample data or instructions to fetch it
 4. **Open a PR** against `main`
+
+### Recorded evidence
+
+Examples that reproduce a number published on a task page keep their code here
+and their evidence in the public HuggingFace dataset
+[superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence),
+one folder per task holding `inputs/`, `calls.json` and `manifest.json`. Each
+example's `fetch.py` downloads that folder at a pinned dataset revision, never
+`main`, so a later upload cannot change what the example scores.
+
+The trade is deliberate: a reader cannot verify by cloning alone, and in return
+nobody needs an API key or any inference spend to re-derive a published number.
 
 ### Review workflow
 
