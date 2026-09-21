@@ -105,8 +105,8 @@ handbag all exit non-zero.
 
 `evidence/inputs/images.json` holds the six photographs with the subject,
 author, source URL, licence and SHA-256 of each. `score.py` checks every digest
-before ranking anything. The files are public-domain or Creative Commons works
-from Wikimedia Commons, StockSnap and Flickr.
+before ranking anything. The files come from Wikimedia Commons, Unsplash and
+Flickr under public-domain, Creative Commons or Unsplash terms.
 
 `evidence/inputs/query.json` holds the one query.
 
