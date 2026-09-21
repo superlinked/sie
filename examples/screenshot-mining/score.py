@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Reproduce the /screenshot-mining figure from the recorded calls. No API key,
+no network, no inference spend.
+
+    python3 fetch.py
+    python3 score.py
+
+Prints "328 of 335 values matched the screen", the figure the page publishes,
+and the per-screen lines it shows beside four of the screenshots.
+
+`expected` in inputs.json was read off each screenshot at full resolution and
+committed before any model run. This compares each recorded reply with it using
+the rules inputs.json records under "scoring". It never edits an expected value.
+
+Standard library only.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import sys
+import unicodedata
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent
+EVIDENCE = ROOT / "evidence"
+PAGE_FIGURE = (328, 335)
+PAGE_SCREENS = 12
+# The per-screen lines the page prints beside four of the screenshots.
+PAGE_PER_SCREEN = {
+    "superset-slack-dashboard": (28, 32),
+    "kubernetes-dashboard-node": (26, 26),
+    "gitlab-pipeline-list": (17, 19),
+    "gitlab-ci-grafana-dashboard": (51, 52),
+}
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def canonical_sha256(value: Any) -> str:
+    """The digest the runner recorded: sorted keys, compact separators."""
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return sha256_bytes(text.encode("utf-8"))
+
+
+def load(name: str) -> Any:
+    path = EVIDENCE / name
+    if not path.is_file():
+        raise SystemExit(f"Missing {path}. Run: python3 fetch.py")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def norm_text(value: str) -> str:
+    text = unicodedata.normalize("NFKC", value)
+    text = text.replace("−", "-").replace("–", "-").replace("…", "...")
+    return "".join(text.split()).casefold()
+
+
+def leaf_equal(expected: Any, actual: Any) -> bool:
+    if expected is None:
+        return actual is None
+    if isinstance(expected, bool):
+        return actual is expected
+    if isinstance(expected, (int, float)):
+        return (
+            isinstance(actual, (int, float))
+            and not isinstance(actual, bool)
+            and math.isclose(float(expected), float(actual), rel_tol=0, abs_tol=1e-9)
+        )
+    if isinstance(expected, str):
+        return isinstance(actual, str) and norm_text(expected) == norm_text(actual)
+    raise TypeError(f"Unsupported expected leaf {expected!r}")
+
+
+def compare(
+    expected: Any,
+    actual: Any,
+    path: str,
+    rules: dict[str, Any],
+    out: list[dict[str, Any]],
+    missing: bool = False,
+) -> None:
+    """Record one check per expected leaf. Lists compare by position unless a
+    rule names them a set (matched by key) or an unordered list of strings.
+
+    `missing` marks everything under a row the response never returned: per the
+    registered rules a missing row fails every leaf in it, so an expected null
+    is not allowed to "match" a field that is simply absent."""
+    if isinstance(expected, dict):
+        source = actual if isinstance(actual, dict) else {}
+        absent = missing or not isinstance(actual, dict)
+        for key, value in expected.items():
+            compare(value, source.get(key), f"{path}.{key}", rules, out, absent)
+        return
+    if isinstance(expected, list):
+        rule = rules.get(path, {})
+        items = actual if isinstance(actual, list) else []
+        absent = missing or not isinstance(actual, list)
+        if rule.get("match") == "string-set":
+            got = sorted(norm_text(v) for v in items if isinstance(v, str))
+            want = sorted(norm_text(v) for v in expected)
+            out.append({"path": path, "expected": expected, "actual": actual, "ok": not absent and got == want})
+            return
+        if rule.get("match") == "by-key":
+            key = rule["key"]
+            used: set[int] = set()
+            for row in expected:
+                found = None
+                for candidate_index, candidate in enumerate(items):
+                    if candidate_index in used or not isinstance(candidate, dict):
+                        continue
+                    if leaf_equal(row[key], candidate.get(key)):
+                        found = candidate_index
+                        break
+                if found is not None:
+                    used.add(found)
+                compare(
+                    row,
+                    items[found] if found is not None else None,
+                    f"{path}[{row[key]}]",
+                    rules,
+                    out,
+                    absent or found is None,
+                )
+            extras = [items[i] for i in range(len(items)) if i not in used]
+        else:
+            for index, row in enumerate(expected):
+                compare(
+                    row,
+                    items[index] if index < len(items) else None,
+                    f"{path}[{index}]",
+                    rules,
+                    out,
+                    absent or index >= len(items),
+                )
+            extras = items[len(expected) :]
+        if extras:
+            out.append(
+                {"path": f"{path}+extra", "expected": None, "actual": extras, "ok": False, "extra_rows": len(extras)}
+            )
+        return
+    out.append(
+        {"path": path, "expected": expected, "actual": actual, "ok": not missing and leaf_equal(expected, actual)}
+    )
+
+
+def parse_generation(value: Any) -> tuple[Any, str | None]:
+    """Parse the model's JSON out of a recorded response value."""
+    if not isinstance(value, dict):
+        return None, "no JSON body"
+    text = value.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None, "empty text"
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError as error:
+        return None, f"invalid JSON: {error}"
+
+
+def verify_evidence(manifest: dict[str, Any], calls: dict[str, Any]) -> list[str]:
+    """Check the bytes before scoring them. Anything unreadable is a failure.
+
+    Three checks, and one that is deliberately not run. `inputs.json` is hashed
+    against the digest the run recorded. Every response record is re-digested
+    the way the run digested it. Every stored image is hashed against the
+    `$payload.sha256` of the request that sent it, which is the check the
+    recorded `$payload` note asks a reader to perform.
+
+    Not checked here: `entry_sha256`, the RFC 8785 canonical digest over each
+    whole entry. That needs a JSON canonicalizer; the implementation lives in
+    superlinked/sie-web beside the fixture and in
+    examples/document-to-markdown in this repository, and is not duplicated
+    into this example.
+    """
+    problems: list[str] = []
+
+    inputs_sha = sha256_bytes((EVIDENCE / "inputs" / "inputs.json").read_bytes())
+    if inputs_sha != manifest["inputs_sha256"]:
+        problems.append(
+            f"inputs.json hashes to {inputs_sha}, but the run was recorded against {manifest['inputs_sha256']}"
+        )
+
+    for entry in calls["calls"]:
+        response = entry["response"]
+        # The digest the run recorded covers the response record as it was
+        # written: status, headers and body.
+        rebuilt = {"status": entry["http_status"], "headers": response["http_headers"], "body": response["value"]}
+        if canonical_sha256(rebuilt) != response["recorded_sha256"]:
+            problems.append(f"{entry['slug']}: the response record does not match its recorded digest")
+        for image in entry["request"]["body"].get("images") or []:
+            payload = image.get("$payload")
+            if not payload:
+                continue
+            path = EVIDENCE / "inputs" / "images" / payload["file_name"]
+            if not path.is_file():
+                problems.append(f"{entry['slug']}: inputs/images/{payload['file_name']} was not downloaded")
+                continue
+            data = path.read_bytes()
+            if sha256_bytes(data) != payload["sha256"] or len(data) != payload["bytes"]:
+                problems.append(
+                    f"{entry['slug']}: inputs/images/{payload['file_name']} is not the image this call was sent"
+                )
+    return problems
+
+
+def main() -> int:
+    inputs = load("inputs/inputs.json")
+    manifest = load("manifest.json")
+    calls = load("calls.json")
+
+    problems = verify_evidence(manifest, calls)
+    if problems:
+        print("The evidence did not verify, so nothing was scored:", file=sys.stderr)
+        for line in problems:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+
+    recorded = {entry["slug"]: entry for entry in calls["calls"]}
+    missing: list[str] = []
+    per_screen: dict[str, tuple[int, int]] = {}
+    proof_passed = proof_total = 0
+    other_passed = other_total = 0
+    screens = 0
+
+    for case in inputs["cases"]:
+        for call in case["calls"]:
+            if call["kind"] != "qwen-schema":
+                continue
+            entry = recorded.get(f"{case['id']}__{call['call']}")
+            if entry is None:
+                # Counted and named, never passed over: a scorer that quietly
+                # skips what it cannot read prints a clean ratio over a set it
+                # did not score.
+                missing.append(f"{case['id']}__{call['call']}")
+                continue
+            parsed, error = parse_generation(entry["response"]["value"])
+            checks: list[dict[str, Any]] = []
+            compare(call["expected"], parsed, "$", call.get("rules", {}), checks)
+            ok = sum(1 for check in checks if check["ok"])
+            if case.get("role") == "proof":
+                proof_passed += ok
+                proof_total += len(checks)
+                per_screen[case["id"]] = (ok, len(checks))
+                screens += 1
+            else:
+                other_passed += ok
+                other_total += len(checks)
+            note = f"  ({error})" if error else ""
+            print(f"  {case['id']}/{call['call']}: {ok} of {len(checks)}{note}")
+
+    if missing:
+        print(f"{len(missing)} call(s) NOT SCORED, so no figure below covers the recorded run:", file=sys.stderr)
+        for slug in missing:
+            print(f"  missing {slug}", file=sys.stderr)
+        return 1
+
+    print(
+        f"\nAcross all {screens} recorded screens, {proof_passed} of {proof_total} values matched the screen "
+        f"and {proof_total - proof_passed} did not"
+    )
+    print(
+        f"The playground call adds {other_passed} of {other_total}, for "
+        f"{proof_passed + other_passed} of {proof_total + other_total} over every recorded call"
+    )
+
+    want_passed, want_total = PAGE_FIGURE
+    failures: list[str] = []
+    if (proof_passed, proof_total, screens) != (want_passed, want_total, PAGE_SCREENS):
+        failures.append(
+            f"headline: got {proof_passed} of {proof_total} over {screens} screens, "
+            f"page publishes {want_passed} of {want_total} over {PAGE_SCREENS}"
+        )
+    for slug, figure in PAGE_PER_SCREEN.items():
+        got = per_screen.get(slug)
+        if got != figure:
+            failures.append(f"{slug}: got {got}, page publishes {figure[0]} of {figure[1]}")
+    if failures:
+        print(
+            f"\nThis does NOT reproduce what {manifest['page']} publishes. "
+            "Report it rather than adjusting either number.",
+            file=sys.stderr,
+        )
+        for line in failures:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+    print(f"Matches the {want_passed} of {want_total}, and the four per-screen lines, published on {manifest['page']}.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

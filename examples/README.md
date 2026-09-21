@@ -17,6 +17,9 @@ service keys.
 | [Find the best retrieval strategy for your RAG](./retrieval-ablation) | Picking a production RAG retrieval pipeline by evals on real financial documents | `encode`, `score` | SIE endpoint, Turbopuffer key, optional SIE API key for auth-enabled clusters | Runnable benchmark |
 | [Rank exact primary-source passages](./rerank) | Testing a reranker on verbatim SEC, CMS, NTSB, and Supreme Court excerpts | `score` | SIE endpoint with Qwen3 Reranker; standalone `uv` project | Runnable verified example |
 | [Extract custom entities from primary sources](./named-entity-extraction) | Changing zero-shot labels across financial, healthcare, rail-safety, and legal text | `extract` | SIE endpoint with GLiNER; standalone `uv` project | Runnable verified example |
+| [Read the numbers off a dashboard that has no API](./screenshot-mining) | Reading twelve Superset, Argo CD, Airflow, Kubernetes, GitLab and Jaeger screens into schema-valid JSON | `generate` | SIE Cloud with Qwen3.8 27B; `fetch.py` pulls the recorded run and the screenshots, `score.py` reproduces 328 of 335 with no key | Runnable recorded example |
+| [Read a scanned form into typed fields](./doc-field-extraction) | Extracting typed fields from FAA, OSHA, NIST, USPS and invoice pages under a strict JSON schema | `generate` | SIE Cloud with Qwen3.8 27B; `fetch.py` pulls the recorded run and the page images, `score.py` reproduces 180 of 223 with no key | Runnable recorded example |
+| [Ask a question about an image](./caption-vqa) | Putting one specific question to equipment photographs, hazmat placards, wiring drawings and analogue dials | `generate` | SIE Cloud with Qwen3.8 27B; `fetch.py` pulls the recorded run and the images, `score.py` reproduces 10 of 12 with no key | Runnable recorded example |
 | [Search licensed images with text](./multimodal-search) | Recomputing a six-image hard-negative ranking from full SigLIP vectors | `encode` | SIE endpoint with SigLIP; standalone `uv` project | Runnable verified example |
 | [Find SOTA embedding models by MTEB task](./sie-hugging-face-mteb-semantic-search) | Searching ~14K HF embedding models ranked by task-specific MTEB scores | `encode`, `score` | Backend seed script plus Vite frontend; falls back without a live SIE endpoint | Runnable |
 | [Private fine-tuned compliance RAG](./regulatory-rag) | Hot-loading a domain LoRA encoder and a custom token-pruning adapter on SIE | `encode`, `score`, `extract` | Custom SIE Docker image, GPU recommended | Advanced runnable example |
@@ -49,6 +52,18 @@ We welcome contributions. To add your project to the gallery:
    - Which SIE features it uses (encode, score, extract, cluster, etc.)
 3. **Keep it self-contained** - include a `requirements.txt` or `package.json`, a docker-compose if needed, and sample data or instructions to fetch it
 4. **Open a PR** against `main`
+
+### Recorded evidence
+
+Examples that reproduce a number published on a task page keep their code here
+and their evidence in the public HuggingFace dataset
+[superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence),
+one folder per task holding `inputs/`, `calls.json` and `manifest.json`. Each
+example's `fetch.py` downloads that folder at a pinned dataset revision, never
+`main`, so a later upload cannot change what the example scores.
+
+The trade is deliberate: a reader cannot verify by cloning alone, and in return
+nobody needs an API key or any inference spend to re-derive a published number.
 
 ### Review workflow
 
