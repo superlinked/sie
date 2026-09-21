@@ -132,7 +132,12 @@ def run_conversion(slugs: list[str], run_id: str | None = None) -> Path:
         "documents": rows,
     }
     manifest["manifest_sha256"] = canonical_sha256(manifest)
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # run-manifest.json, the name verify-run reads. A run bundle fetched from
+    # the dataset keeps manifest.json for the dataset's own digests, so the two
+    # cannot share a name without one shadowing the other.
+    (run_dir / "run-manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
     table = Table("Document", "Latency", "Markdown", "Model revision")
     for row in rows:

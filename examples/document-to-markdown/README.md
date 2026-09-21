@@ -135,8 +135,14 @@ uv sync
 
 uv run fetch-documents                 # the four source PDFs, into pdfs/
 uv run convert-documents --run-id local
-uv run eval-documents runs/local
+uv run eval-documents runs/local       # writes runs/local/evaluation.json
+uv run verify-run runs/local           # the same 61 checks, over your own run
 ```
+
+`convert-documents`, `eval-documents` and `verify-run` share one run-bundle
+layout, so a run you make yourself verifies exactly like the recorded one:
+`run-manifest.json`, `calls.json`, `payloads/`, `markdown/` and
+`evaluation.json`, with the source provenance in `pdfs/manifest.json`.
 
 Checking the recorded run instead needs no key and no endpoint:
 
@@ -145,6 +151,13 @@ python3 fetch.py                       # the recorded run, into data/
 uv run verify-run data                 # digests and relations
 uv run eval-documents data             # the 25 checks, against the recorded Markdown
 ```
+
+A fetched bundle carries the `.sie-evidence` marker `fetch.py` writes, and
+`eval-documents` sends its output to `run-output/evaluation.json` when it sees
+that marker. The recorded `data/evaluation.json` is pinned by a digest the
+fetch checked, so overwriting it would leave the bytes disagreeing with the
+manifest; keeping both lets you diff them. `eval-documents` prints how many
+documents score the same as the recorded file.
 
 The default `.env` points at a local SIE server:
 
@@ -189,9 +202,16 @@ data/inputs/repeat-runs.json      earlier complete runs, kept for the
 data/inputs/fema-proof-of-loss-form.pdf   the one PDF that is redistributed
 ```
 
-Written by the commands you run: `pdfs/` by `fetch-documents`, `runs/<run-id>/`
-by `convert-documents`, `run-output/` by `eval-documents`. All four directories
-are ignored by git.
+Written by the commands you run, and all ignored by git:
+
+```text
+pdfs/                             the source PDFs, by `fetch-documents`
+pdfs/manifest.json                their URLs, rights, byte lengths and SHA-256
+runs/<run-id>/                    a run bundle, by `convert-documents`, in the
+                                  same layout as the fetched one above
+run-output/evaluation.json        by `eval-documents`, when the run bundle it
+                                  scored was fetched rather than made locally
+```
 
 The source PDFs stay fetch-only: two of the four are investor documents whose
 rights notes say not to redistribute the complete file. `data/inputs/sources.json`

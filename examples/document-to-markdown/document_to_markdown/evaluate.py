@@ -103,11 +103,14 @@ def evaluate_run(run_dir: Path, slugs: list[str], out_path: Path | None = None) 
         "passed": passed_all,
         "documents": rows,
     }
-    # Written beside the run by default rather than into it. A fetched run
-    # directory holds an evaluation.json the manifest pins by digest, and
-    # overwriting it would leave the bytes on disk disagreeing with the
-    # digest that was checked at download time.
-    destination = out_path or (run_dir / "evaluation.json")
+    # Into the run bundle, because verify-run requires an evaluation.json
+    # there and a local run that cannot be verified is worse than useless.
+    # The exception is a bundle written by `python3 fetch.py`, which carries
+    # the marker below: its evaluation.json is pinned by a digest the fetch
+    # checked, and overwriting it would leave the bytes disagreeing with the
+    # manifest. Those go to run-output/ so both copies survive to be compared.
+    fetched = (run_dir / ".sie-evidence").is_file()
+    destination = out_path or (Path("run-output/evaluation.json") if fetched else run_dir / "evaluation.json")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     table = Table("Document", "Checks", "Result")
@@ -134,7 +137,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run deterministic checks against a saved conversion")
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("slugs", nargs="*", default=["all"])
-    parser.add_argument("--out", type=Path, default=Path("run-output/evaluation.json"))
+    parser.add_argument(
+        "--out",
+        type=Path,
+        help="where to write evaluation.json (default: into the run bundle, or run-output/ for a fetched one)",
+    )
     args = parser.parse_args()
     if not evaluate_run(args.run_dir, args.slugs, args.out):
         raise SystemExit(1)

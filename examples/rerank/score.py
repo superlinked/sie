@@ -40,6 +40,9 @@ from typing import Any
 
 HTTP_OK = 200
 MODEL = "Qwen/Qwen3-Reranker-4B"
+# The page prints a pair per case, so a case with nothing to compare against
+# cannot produce the figure. Refused rather than indexed into.
+MIN_CANDIDATES = 2
 
 # What the page prints, at the page's own three decimals: the winner and the
 # closest other candidate for each case. Typed out from the rendered page, not
@@ -180,6 +183,8 @@ def main() -> int:
     for case_id, case in cases["cases"].items():
         rows = ranked(case_id, case, calls[case_id]["response"]["body"])
         candidates_scored += len(rows)
+        if len(rows) < MIN_CANDIDATES:
+            raise SystemExit(f"{case_id}: {len(rows)} candidates, so there is no closest other candidate to report")
         top, runner_up = rows[0], rows[1]
         expected_top = case["expected_top_candidate_id"]
         if top["item_id"] == expected_top:

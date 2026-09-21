@@ -363,7 +363,16 @@ def main() -> int:
         if doc is None:
             raise SystemExit(f"Unknown document: {args.show}. Known: {', '.join(by_id)}")
         calls = load(data_dir / "calls.json")["calls"]
-        markdown = stage1_markdown(next(c for c in calls if c["slug"] == f"{doc['id']}__stage1")["response"]["body"])
+        # A run whose stage 1 failed records no entry for it, and an entry that
+        # came back without text yields None, which would format into the
+        # stage-2 prompt as the literal "None". Both stop here instead.
+        slug = f"{doc['id']}__stage1"
+        recorded = next((call for call in calls if call["slug"] == slug), None)
+        if recorded is None:
+            raise SystemExit(f"no recorded stage-1 call for {slug}; stage 2 has nothing to be built from")
+        markdown = stage1_markdown(recorded["response"]["body"])
+        if markdown is None:
+            raise SystemExit(f"{slug}: the recorded response carries no Markdown to feed stage 2")
         shown = [{"stage": 1, "path": inputs["stage1"]["path"], "body": stage1_stored_body(doc)}]
         for call in doc["calls"]:
             for model_key, model in inputs["stage2"]["models"].items():

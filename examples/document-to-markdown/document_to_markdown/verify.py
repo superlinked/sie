@@ -33,7 +33,7 @@ from typing import Any
 from rich.console import Console
 
 from document_to_markdown.canonical import canonical_sha256
-from document_to_markdown.config import PDF_DIR, SOURCES_PATH
+from document_to_markdown.config import PDF_DIR, ROOT
 
 console = Console()
 
@@ -53,6 +53,33 @@ def _read_json(path: Path) -> Any:
 
 def _check(results: list[tuple[bool, str]], ok: bool, message: str) -> None:
     results.append((ok, message))
+
+
+def _relative(path: Path) -> str:
+    """The path as the README names it, for a check message."""
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def sources_manifest_for(run_dir: Path) -> Path:
+    """Where the provenance for THIS run's source PDFs lives.
+
+    A bundle fetched from the dataset carries its own under
+    ``inputs/sources.json``, describing the PDFs that run actually read. A
+    bundle produced locally by ``convert-documents`` carries none, so the
+    manifest ``fetch-documents`` wrote beside the PDFs is the one that
+    describes what it read.
+
+    A fixed path would check a local run against somebody else's provenance,
+    which is the same shape as the duplicate-slug problem below: two checks
+    reading rows that were never about the same file. When neither exists the
+    fallback is returned and its presence check fails, so a missing manifest is
+    a failure rather than a skipped check.
+    """
+    bundled = run_dir / "inputs" / "sources.json"
+    return bundled if bundled.is_file() else PDF_DIR / "manifest.json"
 
 
 def _resolve_payloads(value: Any, run_dir: Path, results: list[tuple[bool, str]]) -> Any:
@@ -233,12 +260,13 @@ def verify_run(run_dir: Path) -> tuple[list[tuple[bool, str]], list[str]]:
         )
         console.print(f"[bold]Recomputed from the check arrays: {passed} of {total} checks passed[/]")
 
-    sources_path = SOURCES_PATH
+    sources_path = sources_manifest_for(run_dir)
+    sources_label = _relative(sources_path)
     # Required, and every scored document must appear in it. Treating either as
     # optional let a missing file or a missing row skip the provenance check
     # while the run still reported success -- the third time that shape has
     # appeared in this module, and the second time I wrote it myself.
-    _check(results, sources_path.exists(), "data/inputs/sources.json is present")
+    _check(results, sources_path.exists(), f"{sources_label} is present")
     if sources_path.exists():
         sources = _read_json(sources_path)
         # Fourth member of the same class, and the finding did not name it:
@@ -251,14 +279,14 @@ def verify_run(run_dir: Path) -> tuple[list[tuple[bool, str]], list[str]]:
         _check(
             results,
             len(source_slugs) == len(set(source_slugs)),
-            "no data/inputs/sources.json slug appears twice",
+            f"no {sources_label} slug appears twice",
         )
         listed = set(source_slugs)
         for row in manifest["documents"]:
             _check(
                 results,
                 row["slug"] in listed,
-                f"{row['slug']}: the scored document appears in data/inputs/sources.json",
+                f"{row['slug']}: the scored document appears in {sources_label}",
             )
         skipped = []
         # Join the two halves of the provenance chain. Without this, one check
