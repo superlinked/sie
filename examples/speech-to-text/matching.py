@@ -1,12 +1,25 @@
 """The key-term matching rule, in one place.
 
-`run.py` scores with it and `derive_display.py` places the highlights with it,
-so the two can never drift: a term counted as found is always a term the page
-can point at in the transcript.
+`score.py` is the only thing in this example that uses it: it imports
+`find_term` to decide whether a transcript spells a registered key term. The
+rule lives in a module of its own because in superlinked/sie-web the same file
+also places the highlights the page draws over each transcript, so a term
+counted as found is always a term the page can point at. That second consumer
+does not ship here.
 
-A term counts as found when the transcript spells its content. Content is the
-words and the digits. These are not content, and the rule drops them from both
-sides before comparing:
+**This file does not normalize anything.** The tokens it compares have already
+been through OpenAI's Whisper English text normalizer, the standard-library
+port in `whisper_normalizer.py`, loaded with the spelling map the run recorded.
+That is where "twelve fifty" becomes "1250" and "a hundred percent" becomes
+"a 100%"; nothing below spells a number, folds case or drops a filler word.
+Both published figures, the 56 of 61 key terms and the pooled 8.1% word error
+rate, are counted after that normalization, so reproducing either one means
+using the same normalizer and the same map. A different normalizer gives
+different figures from the same transcripts.
+
+Against already-normalized tokens, a term counts as found when the transcript
+spells its content. Content is the words and the digits. These are not content,
+and the rule drops them from both sides before comparing:
 
 - the decimal point inside a number, so "twelve fifty" (normalized 1250) can
   meet "€12.50";
@@ -15,9 +28,12 @@ sides before comparing:
 - a leading article, so "a hundred percent" (normalized "a 100%") can meet
   "100%".
 
-The amount itself is never dropped, so "twelve fifty Euros" still fails against
-"€1250": that is a different number, and `scoring_amendment.json` keeps it a
-miss.
+What this rule cannot do is separate a spoken "twelve fifty Euros" from a
+written "€1250". The normalizer writes the first as "€1250" as well, so both
+join to "1250" and `find_term` returns a match for them. No string rule can
+tell them apart, which is exactly why `scoring_amendment.json` registers the
+amount that was actually spoken and `score.py` rejects the hit by comparing
+it. That miss is the amendment's doing, not this file's.
 
 Standard library only.
 """

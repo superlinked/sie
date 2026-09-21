@@ -5,11 +5,24 @@ Transformers 4.57.6, which copies OpenAI Whisper's `whisper/normalizers`
 (MIT License, Copyright (c) 2022 OpenAI) and is distributed under the
 Apache License 2.0 (Copyright 2022 The OpenAI team and The HuggingFace Team).
 
-The only change from the source is that `BasicTextNormalizer(split_letters=True)`
-is not ported, which removes the third-party `regex` import. The word-error-rate
-calculation uses `EnglishTextNormalizer` only, with the British-to-American
-spelling map `normalizer.json` from openai/whisper-large-v3-turbo at revision
-41f01f3fe87f28c78e2fbf8b568835947dd65ed9.
+The normalization is the source's, unchanged. Three things differ from it, none
+of them in the algorithm:
+
+- `BasicTextNormalizer(split_letters=True)` is not ported, which removes the
+  third-party `regex` import. Nothing here uses it; every figure comes from
+  `EnglishTextNormalizer`.
+- `SPELLING_MAP_PATH` points into `evidence/`, because the spelling map is
+  evidence rather than code and travels with the recorded run instead of
+  sitting beside this file.
+- `load_english_normalizer` takes that path and fails on a map that is missing
+  or empty, rather than returning a normalizer that would still run and still
+  produce numbers, just not the published ones.
+
+The map is the British-to-American `normalizer.json` from
+openai/whisper-large-v3-turbo at revision
+41f01f3fe87f28c78e2fbf8b568835947dd65ed9. Both published figures, the 56 of 61
+key terms and the pooled 8.1% word error rate, are computed after this
+normalization and depend on this map.
 """
 
 from __future__ import annotations

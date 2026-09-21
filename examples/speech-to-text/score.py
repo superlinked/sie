@@ -5,15 +5,24 @@ network, no inference spend.
     python3 fetch.py
     python3 score.py
 
-Prints "56 of 61 key terms found" and a pooled word error rate of 8.1% over 594
-human-transcribed words, the figures the page publishes, plus the per-clip WER
-it shows beside three of the recordings.
+Prints one line per clip, then the two figures the page publishes:
 
-Both counts depend on OpenAI's Whisper English text normalizer. It drops filler
-words, strips transcriber tags and writes spoken numbers as digits, so a
-different normalizer gives different figures from the same transcripts. The
-port in `whisper_normalizer.py` is used as committed, with the spelling map the
-run recorded, fetched alongside the calls.
+    Across all 12 recorded clips a search finds 56 of 61 key terms, and 5 came back wrong
+    Pooled word error rate 8.1% over 594 human-transcribed words
+
+It checks the per-clip figures on the four clips the page prints a word error
+rate beside, three proof cards and the hero, and that the playground's clip is
+in the scored set. All twelve are scored either way.
+
+Both counts depend on OpenAI's Whisper English text normalizer, which drops
+filler words, strips transcriber tags and writes spoken numbers as digits, so
+"twenty seven percent" is counted as "27%" and a different normalizer gives
+different figures from the same transcripts. `whisper_normalizer.py` is a
+standard-library port whose normalization is unmodified from Hugging Face
+Transformers 4.57.6; it is loaded with the spelling map the run recorded, which
+`fetch.py` downloads alongside the calls and `verify_evidence` hashes before
+anything is scored. `matching.py` holds the key-term rule and normalizes
+nothing itself.
 
 Standard library only.
 """
@@ -317,8 +326,9 @@ def main() -> int:
 
     print(
         f"\nMatches the {PAGE_KEY_TERMS[0]} of {PAGE_KEY_TERMS[1]}, the pooled {PAGE_POOLED_WER} over "
-        f"{PAGE_REFERENCE_WORDS} words, and the per-clip figures on all {PAGE_DISPLAYED_CLIPS} displayed "
-        f"clips, published on {manifest['page']}."
+        f"{PAGE_REFERENCE_WORDS} words, and the per-clip figures on the {len(PAGE_PER_CLIP)} clips the page "
+        f"prints one beside, published on {manifest['page']}. The playground's clip is scored too, and the "
+        f"page prints no per-clip figure for it."
     )
     return 0
 

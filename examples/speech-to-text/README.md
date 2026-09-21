@@ -54,8 +54,11 @@ Across all 12 recorded clips a search finds 56 of 61 key terms, and 5 came back 
 Pooled word error rate 8.1% over 594 human-transcribed words
 ```
 
-`score.py` also checks the per-clip figures on all five clips the page plays,
-and exits non-zero if any of them, or either headline, is not what it computes.
+`score.py` also checks the per-clip figures on the four clips the page prints a
+word error rate beside, three proof cards and the hero, and that the fifth clip
+the page plays, the playground's, is in the scored set. It exits non-zero if any
+of those, or either headline, is not what it computes. All twelve are scored
+either way.
 
 Look at a request without sending it, and check that this runner is the one
 that sent them:
@@ -83,17 +86,21 @@ normalizer. It lowercases, removes filler words and transcriber tags, expands
 contractions, applies a British-to-American spelling map and writes spoken
 numbers as digits. Run the same transcripts through a different normalizer and
 you will get different figures, so `whisper_normalizer.py` here is a standard
-library port of the Transformers 4.57.6 implementation, used as committed, with
-the spelling map the run recorded. `score.py` hashes that map before it scores,
-and a missing one is a failure rather than a silent fall back to an empty map,
-which would still produce numbers.
+library port of the Transformers 4.57.6 implementation, whose normalization is
+unmodified from it. Its docstring names the three things that do differ, none of
+them in the algorithm. It is loaded with the spelling map the run recorded, which
+`fetch.py` downloads alongside the calls. `score.py` hashes that map before it
+scores, and a missing one is a failure rather than a silent fall back to an empty
+map, which would still produce numbers.
 
 Word error rate is `(substitutions + deletions + insertions) / reference words`
 by word-level Levenshtein, pooled by summing edits and reference words over all
 twelve clips rather than averaging per-clip rates.
 
 A key term is found when some contiguous run of normalized transcript words
-spells its content. `matching.py` holds that rule in one place. Two amendments,
+spells its content. `matching.py` holds that rule in one place, and normalizes
+nothing itself: it compares tokens the normalizer has already rewritten. Two
+amendments,
 recorded in `scoring_amendment.json` and applied after the run to every term,
 clip and call: one can only remove a hit, requiring a money term to write the
 amount actually spoken, and one can only add a hit, dropping a currency symbol,
@@ -132,7 +139,8 @@ provenance record as the starting point for that, not as a clearance.
   through a different served revision.
 - The page plays five of the twelve clips: three proof cards, the hero and the
   playground, and it shows two of the five wrong terms. The other three wrong
-  terms are counted in the 56 of 61 and displayed nowhere. All twelve clips and
+  terms are among the 61, excluded from the 56, and displayed nowhere. All
+  twelve clips and
   all 61 terms are scored here.
 - The control call, sent with no instruction, is recorded and scored. It finds
   the same 56 of 61 at a pooled 8.75%, and it is in no published figure.
