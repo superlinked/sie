@@ -168,7 +168,7 @@ def main() -> int:
         for kind in ("wrong-colour", "wrong-material", "wrong-category"):
             if kinds.get(kind, 0) < 1:
                 raise SystemExit(f"{query['id']}: the catalogue holds no {kind} near miss")
-        if by_id[query["target"]] is None:
+        if query["target"] not in by_id:
             raise SystemExit(f"{query['id']}: target {query['target']} is not in the catalogue")
         if catalogue.competitor_kind(by_id[query["target"]], query) != "full":
             raise SystemExit(f"{query['id']}: target {query['target']} does not match all three attributes")

@@ -83,10 +83,13 @@ def main_with(data_dir: Path, emit: str | None = None) -> int:
     """Score one fetched evidence directory. Returns the process exit status."""
     payload = load(data_dir / "inputs/cases.json")
     recording = load(data_dir / "calls.json")
-    manifest_path = data_dir / "manifest.json"
-    manifest = load(manifest_path) if manifest_path.exists() else {}
+    # Required, not optional. This used to read `if manifest_path.exists() else {}`,
+    # which made the revision check below vanish when the manifest was absent, so
+    # deleting one file was enough to have a recording from other weights scored.
+    # Missing evidence is a failure, never a licence to skip the check over it.
+    manifest = load(data_dir / "manifest.json")
 
-    if manifest and manifest.get("model_revision") != MODEL_REVISION:
+    if manifest.get("model_revision") != MODEL_REVISION:
         raise SystemExit(
             f"This recording was made against model revision {manifest.get('model_revision')!r}, "
             f"and this example publishes figures for {MODEL_REVISION!r}. Different weights produce "
@@ -112,6 +115,20 @@ def main_with(data_dir: Path, emit: str | None = None) -> int:
                 continue
             if call["model"] != MODEL:
                 failures.append(f"{identifier}: recorded against {call['model']}, not {MODEL}")
+                continue
+            # Per call, not just once per run: the manifest states one deployment
+            # and every call has to have come from it. Compared against the
+            # manifest's `deployment_revision` and NOT against MODEL_REVISION,
+            # because the SDK's `last_model_revision` is the SIE deployment
+            # digest that models served together share, not the HuggingFace
+            # revision of these weights. Checking it against MODEL_REVISION
+            # would reject all 120 of this example's own calls.
+            served = (call.get("recorded") or {}).get("model_revision")
+            if served != manifest.get("deployment_revision"):
+                failures.append(
+                    f"{identifier}: served by deployment {served!r}, and the manifest "
+                    f"records {manifest.get('deployment_revision')!r}"
+                )
                 continue
             scored = {entry["item_id"] for entry in call["response"]["body"]["scores"]}
             if scored != set(roles):

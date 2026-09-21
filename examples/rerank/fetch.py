@@ -78,6 +78,11 @@ def marker_bytes() -> bytes:
     ).encode("utf-8")
 
 
+def backup_path(dest: Path) -> Path:
+    """Where `dest` is moved aside to while the new tree is renamed into place."""
+    return dest.with_name(f"{dest.name}.previous-{os.getpid()}")
+
+
 def refuse_reason(dest: Path) -> str | None:
     """Why `dest` must not be replaced, or None when replacing it is safe.
 
@@ -95,6 +100,17 @@ def refuse_reason(dest: Path) -> str | None:
         return f"{resolved} contains the current working directory"
     if resolved == Path.home().resolve():
         return f"{resolved} is your home directory"
+
+    # The backup path is one this script names, which is not the same as one it
+    # owns. If something else already sits there, moving `dest` onto it destroys
+    # that something. Checked here so the refusal is reported by the same path
+    # as every other refusal, before anything is downloaded.
+    backup = backup_path(dest)
+    if backup.exists():
+        return (
+            f"{backup} already exists, and this script would move {dest} onto it. "
+            f"Move {backup} aside, or pass --dest somewhere else."
+        )
 
     if dest.is_symlink():
         return f"{dest} is a symlink"
@@ -127,9 +143,12 @@ def swap_into_place(staging: Path, dest: Path) -> None:
     """
     previous = None
     if dest.exists():
-        previous = dest.with_name(f"{dest.name}.previous-{os.getpid()}")
+        previous = backup_path(dest)
         if previous.exists():
-            shutil.rmtree(previous)
+            # refuse_reason checks this twice before we get here. Reaching it
+            # anyway means something appeared in between, and deleting it is
+            # never the right answer.
+            raise RuntimeError(f"refusing to replace {dest}: backup path {previous} already exists")
         dest.replace(previous)
     try:
         staging.replace(dest)

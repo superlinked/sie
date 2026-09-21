@@ -10,10 +10,12 @@ Endpoint  https://api.superlinked.com
 Model     Qwen/Qwen3-Reranker-4B
 Path      /v1/score/Qwen/Qwen3-Reranker-4B
 
-Each case is sent three times against the same four candidates: once with no
-instruction, once with the "in force" rule and once with the "proposed" rule.
-The query names the subject and never the status, so only the instruction can
-separate a regulation already adopted from a proposal on the same subject.
+Each case is sent once per arm against the same four candidates: with no
+instruction, and then under each relevance rule in `inputs/cases.json`. There
+are four of those, so five calls per case and 120 for the 24 cases. The page
+publishes two of the rules and the recording keeps all four. The query names
+the subject and never the status, so only the instruction can separate a
+regulation already adopted from a proposal on the same subject.
 
 Calls go through `sie_sdk.SIEClient`, per AGENTS.md. The import is deferred into
 main() so `--check` and `--show` run on a bare `python3` with nothing installed.
@@ -80,7 +82,7 @@ def to_jsonable(value: Any) -> Any:
 
 
 def arms(payload: dict[str, Any]) -> dict[str, str | None]:
-    """The three arms every case is sent under, baseline first."""
+    """Every arm a case is sent under: the baseline first, then each rule."""
     return {BASELINE: None, **payload["rules"]}
 
 

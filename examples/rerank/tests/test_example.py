@@ -144,6 +144,57 @@ class RerankExampleTests(unittest.TestCase):
         with _temp_calls(payload) as data_dir:
             self.assertEqual(score.main_with(data_dir), 1)
 
+    def test_a_missing_manifest_fails_rather_than_skipping_its_own_check(self) -> None:
+        """The revision check must not vanish with the file it reads.
+
+        score.py used to load the manifest only `if manifest_path.exists()`,
+        so deleting one file removed the check that the recording came from the
+        published weights, and a recording from any other checkpoint scored
+        clean. Missing evidence is a failure, not a licence to skip the check
+        over it.
+        """
+        with _temp_calls(self.calls) as data_dir:
+            (data_dir / "manifest.json").unlink()
+            with self.assertRaisesRegex(SystemExit, "manifest.json is missing"):
+                score.main_with(data_dir)
+
+    def test_a_call_from_another_deployment_fails_closed(self) -> None:
+        """Every call has to come from the deployment the manifest names.
+
+        Checked against the manifest's `deployment_revision` and NOT against
+        MODEL_REVISION: the SDK's `last_model_revision` is the SIE deployment
+        digest that models served together share, not the HuggingFace revision
+        of these weights. Comparing it with MODEL_REVISION would reject all 120
+        of this example's own calls.
+        """
+        manifest = copy.deepcopy(self.manifest)
+        self.assertNotEqual(manifest["deployment_revision"], manifest["model_revision"])
+        for call in self.calls["calls"]:
+            self.assertEqual(call["recorded"]["model_revision"], manifest["deployment_revision"])
+        manifest["deployment_revision"] = "0" * 64
+        with _temp_calls(self.calls, manifest=manifest) as data_dir:
+            self.assertEqual(score.main_with(data_dir), 1)
+
+    def test_an_existing_backup_path_is_refused_not_deleted(self) -> None:
+        """A path this script names is not a path it owns.
+
+        fetch.py moves `data/` aside before renaming the new tree into place.
+        It used to rmtree whatever already sat at that name, which would delete
+        a reader's unrelated directory without a word.
+        """
+        fetch = _module("fetch")
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "data"
+            dest.mkdir()
+            backup = fetch.backup_path(dest)
+            backup.mkdir()
+            (backup / "unrelated.txt").write_text("not ours")
+
+            self.assertIn("already exists", fetch.refuse_reason(dest) or "")
+            with self.assertRaisesRegex(RuntimeError, "backup path"):
+                fetch.swap_into_place(Path(tmp) / "staging", dest)
+            self.assertTrue((backup / "unrelated.txt").exists())
+
     def test_a_recording_from_another_model_revision_is_not_scored(self) -> None:
         manifest = copy.deepcopy(self.manifest)
         manifest["model_revision"] = "0" * 40
