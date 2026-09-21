@@ -41,14 +41,23 @@ python3 score.py         # reproduces both figures offline
 python3 run.py --check   # rebuilds all 62 recorded requests from the inputs
 ```
 
-Standard library only, no API key, no Hugging Face token, no inference spend.
-`fetch.py` pins a commit SHA, not `main`.
+These three need nothing installed: they are standard library only, and none
+of them needs an API key, a Hugging Face token or any inference spend.
+`fetch.py` pins a commit SHA, not `main`, and checks every downloaded file
+against a digest.
 
-To call the API yourself:
+To call the API yourself. This is the only part that needs the SDK, and the
+only command here that spends anything:
 
 ```sh
-SIE_API_KEY=... python3 run.py --record --set snips --out run-output/calls.json
+uv sync
+SIE_API_KEY=... uv run python run.py --record --set snips --out run-output/calls.json
 ```
+
+`run.py` sends through `sie_sdk.SIEClient`. The import is deferred into
+`main()`, so `--check` and `--show` keep working on a bare `python3` with
+nothing installed. `python3 run.py --show <id>` prints a request without
+sending it.
 
 ## What to expect
 
@@ -99,8 +108,19 @@ Sets: `snips` (14, the page), `clinc150` (12), `clinc150-definitions` (12),
   `x-sie-model-revision: 10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff`.
   SIE does not document how that maps to the upstream commit the model config
   pins, so this example claims no mapping.
+- **The recorded path spells the model id differently from the SDK.** The
+  2026-09-15 runner percent-encoded it into
+  `/v1/extract/knowledgator%2Fgliclass-large-v3.0`; `sie_sdk.SIEClient` sends
+  the slash unencoded. The two unquote to the same path and reach the same
+  endpoint, the request bodies are byte-for-byte the same, and `run.py --check`
+  asserts that equivalence rather than hiding it. The other four examples in
+  this batch recorded the unencoded form.
 - **Nothing about re-running today.** The responses were recorded on
   2026-09-15 against server version 0.7.3.
+- **A fresh `--record` run records less than the archive.** `sie_sdk` returns
+  the per-item result rather than the server's envelope, and surfaces no
+  response headers, so an entry written by `--record` carries a `shape` field
+  saying so. `score.py` reads the published `calls.json`.
 - **No tamper resistance.** The digests catch a truncated or corrupted
   download. They are not a provenance chain.
 

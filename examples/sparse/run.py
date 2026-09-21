@@ -2,26 +2,30 @@
 """Send the /sparse-embeddings calls to SIE Cloud, or check the recorded ones.
 
     python3 fetch.py
-    python3 run.py --check      # offline, no key, the default
-    python3 run.py --record     # live, needs SIE_API_KEY
+    python3 run.py --check             # offline, no key, nothing installed
+    python3 run.py --show <input-id>   # offline, prints one request
+    uv sync && uv run python run.py --record    # live, needs SIE_API_KEY
 
 Endpoint      https://api.superlinked.com
 Path          /v1/encode/<model>
 Models        prithivida/Splade_PP_en_v2   (Hugging Face f0d4aa214dcb60c274052a52c0497535e3aec64c)
               BAAI/bge-m3:sparse           (Hugging Face 5617a9f61b028005a4858fdac845db406aefb181)
 
-Standard library only.
+Calls go through `sie_sdk.SIEClient`, per AGENTS.md. The import is deferred into
+main() so `--check` and `--show` run on a bare `python3` with nothing installed.
 
 Thirteen texts go to both models, so 26 calls. Every call asks for
 `output_types: ["sparse"]` and gets back token indices with weights.
 
-`--check` makes no network call. It rebuilds all 26 recorded request bodies
-from `data/inputs/inputs.json` and compares each with the recorded request.
+`--check` rebuilds all 26 recorded request bodies from `data/inputs/inputs.json`
+and compares each with the recorded request. Those bodies were confirmed against
+the SDK by intercepting the client transport: `client.encode` puts exactly these
+26 bodies on the wire, at exactly these paths.
 
-`--record` writes calls.json only. It does NOT rewrite `derived/decoded/`,
-which maps token indices back to strings using each model's own tokenizer. That
-needs the tokenizer files, and this example is built to run without downloading
-model weights.
+`--record` writes calls.json only. It does NOT rewrite `derived/decoded/`, which
+maps token indices back to strings using each model's own tokenizer. That needs
+the tokenizer files, and this example is built to run without downloading model
+weights.
 
 Migrated from apps/site/tests/fixtures/reference/sparse/run.py in
 superlinked/sie-web@b07b6d73.
@@ -34,10 +38,12 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sie_sdk import SIEClient
 
 ENDPOINT = "https://api.superlinked.com"
 MODELS = {
@@ -61,6 +67,7 @@ def build_body(input_id: str, text: str) -> dict[str, Any]:
 def check(data_dir: Path) -> int:
     texts = {item["id"]: item["text"] for item in load(data_dir / "inputs/inputs.json")["inputs"]}
     calls = load(data_dir / "calls.json")["calls"]
+    paths = {model: f"/v1/encode/{model}" for model in MODELS.values()}
 
     rebuilt = 0
     mismatched: list[str] = []
@@ -69,11 +76,14 @@ def check(data_dir: Path) -> int:
         if text is None:
             mismatched.append(f"{call['id']}: no input with that id in inputs/inputs.json")
             continue
+        if call["model"] not in paths:
+            mismatched.append(f"{call['id']}: unexpected model {call['model']}")
+            continue
         if build_body(call["case"], text) != call["request"]["body"]:
             mismatched.append(f"{call['id']}: rebuilt body differs from the recorded body")
             continue
-        if call["model"] not in MODELS.values():
-            mismatched.append(f"{call['id']}: unexpected model {call['model']}")
+        if call["path"] != paths[call["model"]]:
+            mismatched.append(f"{call['id']}: path {call['path']} differs from {paths[call['model']]}")
             continue
         rebuilt += 1
 
@@ -83,63 +93,97 @@ def check(data_dir: Path) -> int:
     return 1 if mismatched else 0
 
 
-def post(url: str, key: str, body: dict[str, Any]) -> tuple[int, dict[str, str], Any, float]:
-    payload = json.dumps(body).encode("utf-8")
-    request = urllib.request.Request(  # noqa: S310
-        url,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-    )
+def record(client: SIEClient, set_name: str, model: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Send one text through the SDK and return its calls.json entry."""
+    body = build_body(item["id"], item["text"])
+    path = f"/v1/encode/{model}"
+    requested_at = datetime.now(UTC).isoformat(timespec="seconds")
     started = time.monotonic()
-    try:
-        with urllib.request.urlopen(request, timeout=300) as response:  # noqa: S310
-            raw, status, headers = response.read(), response.status, dict(response.headers)
-    except urllib.error.HTTPError as error:
-        raw, status, headers = error.read(), error.code, dict(error.headers)
-    return status, headers, json.loads(raw), round((time.monotonic() - started) * 1000, 1)
+    result = client.encode(model, body["items"][0], output_types=body["params"]["output_types"])
+    latency_ms = round((time.monotonic() - started) * 1000, 1)
+    # The SDK hands back indices and values as numpy arrays. Convert to lists so
+    # calls.json holds the same JSON types the archived run recorded, and so
+    # score.py reads a fresh run the same way.
+    sparse = result["sparse"]
+    wire_sparse = {
+        "indices": [int(index) for index in sparse["indices"]],
+        "values": [float(value) for value in sparse["values"]],
+    }
+    return {
+        "id": f"{DECODED_DIR[set_name]}/{item['id']}",
+        "set": set_name,
+        "case": item["id"],
+        "model": model,
+        "endpoint": ENDPOINT,
+        "path": path,
+        "status": 200,
+        "timing": {"at": requested_at, "latency_ms": latency_ms, "attempts": 1},
+        "request": {"method": "POST", "endpoint": ENDPOINT, "path": path, "model": model, "body": body},
+        "response": {
+            "status": 200,
+            "body": {"items": [{"id": result.get("id", item["id"]), "sparse": wire_sparse}], "model": model},
+            "shape": (
+                "rebuilt from the sie_sdk per-item result, with the numpy arrays "
+                "converted to lists; the SDK returns no server envelope, no dims "
+                "or dtype, and no response headers"
+            ),
+        },
+        "recorded": {
+            "model_revision": client.last_model_revision,
+            "retry_count": client.last_retry_count,
+        },
+    }
 
 
-def record(data_dir: Path, out_path: Path) -> int:
-    key = os.environ.get("SIE_API_KEY", "").strip()
-    if not key:
-        raise SystemExit("--record needs SIE_API_KEY. Use --check for the offline check.")
-    endpoint = (os.environ.get("SIE_CLUSTER_URL") or os.environ.get("SIE_BASE_URL") or ENDPOINT).rstrip("/")
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--data", default="data", help="fetched evidence directory")
+    parser.add_argument("--check", action="store_true", help="offline check, the default")
+    parser.add_argument("--show", metavar="INPUT", help="print one request and exit, sending nothing")
+    parser.add_argument("--record", action="store_true", help="make live calls (needs SIE_API_KEY)")
+    parser.add_argument("--out", default="run-output/calls.json", help="where --record writes")
+    args = parser.parse_args()
+
+    data_dir = Path(args.data)
     inputs = load(data_dir / "inputs/inputs.json")["inputs"]
+    by_id = {item["id"]: item for item in inputs}
+
+    if args.show:
+        item = by_id.get(args.show)
+        if item is None:
+            raise SystemExit(f"Unknown input: {args.show}")
+        body = build_body(item["id"], item["text"])
+        shown = [
+            {"model": model, "method": "POST", "path": f"/v1/encode/{model}", "body": body} for model in MODELS.values()
+        ]
+        print(json.dumps(shown, indent=2, ensure_ascii=False))
+        return 0
+
+    if not args.record:
+        return check(data_dir)
+
+    api_key = os.environ.get("SIE_API_KEY", "").strip()
+    if not api_key:
+        raise SystemExit("Set SIE_API_KEY to send these calls, or run score.py on the recorded ones instead")
+    base_url = os.environ.get("SIE_CLUSTER_URL") or os.environ.get("SIE_BASE_URL") or ENDPOINT
+    # Deferred so --check and --show run on a bare `python3` with nothing installed.
+    from sie_sdk import SIEClient  # noqa: PLC0415
+
+    client = SIEClient(base_url, api_key=api_key, timeout_s=900)
 
     calls = []
     for set_name, model in MODELS.items():
-        path = f"/v1/encode/{model}"
         for item in inputs:
-            body = build_body(item["id"], item["text"])
-            status, headers, response, latency_ms = post(f"{endpoint}{path}", key, body)
-            calls.append(
-                {
-                    "id": f"{DECODED_DIR[set_name]}/{item['id']}",
-                    "set": set_name,
-                    "case": item["id"],
-                    "model": model,
-                    "endpoint": endpoint,
-                    "path": path,
-                    "status": status,
-                    "timing": {"latency_ms": latency_ms, "attempts": 1},
-                    "request": {
-                        "method": "POST",
-                        "endpoint": endpoint,
-                        "path": path,
-                        "model": model,
-                        "headers": {"Content-Type": "application/json", "Accept": "application/json"},
-                        "body": body,
-                    },
-                    "response": {"status": status, "body": response},
-                    "recorded": {"model_revision": headers.get("x-sie-model-revision")},
-                }
-            )
-            print(f"{model} {item['id']}: HTTP {status} in {latency_ms:.0f}ms")
+            entry = record(client, set_name, model, item)
+            calls.append(entry)
+            print(f"{model} {item['id']}: {entry['timing']['latency_ms']:.0f}ms", file=sys.stderr)
 
+    ids = [entry["id"] for entry in calls]
+    if len(ids) != len(set(ids)):
+        raise SystemExit("duplicate call ids; refusing to write a calls.json two checks could read differently")
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps({"task": "sparse", "call_count": len(calls), "calls": calls}, indent=2) + "\n",
         encoding="utf-8",
@@ -147,22 +191,6 @@ def record(data_dir: Path, out_path: Path) -> int:
     print(f"wrote {out_path}")
     print("derived/decoded/ is NOT rewritten by --record; it needs each model's tokenizer")
     return 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", default="data", help="fetched evidence directory")
-    parser.add_argument("--check", action="store_true", help="offline check, the default")
-    parser.add_argument("--record", action="store_true", help="make live calls (needs SIE_API_KEY)")
-    parser.add_argument("--out", default="run-output/calls.json", help="where --record writes")
-    args = parser.parse_args()
-
-    data_dir = Path(args.data)
-    if not args.record:
-        return check(data_dir)
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    return record(data_dir, out_path)
 
 
 if __name__ == "__main__":

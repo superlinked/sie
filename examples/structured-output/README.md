@@ -33,17 +33,23 @@ python3 score.py         # reproduces the figure offline
 python3 run.py --check   # rebuilds every recorded request from the inputs
 ```
 
-All three are standard library only. None of them needs an API key, a Hugging
-Face token, or any inference spend. `fetch.py` pins a commit SHA, not
-`main`, and checks every downloaded file against a digest.
+These three need nothing installed: they are standard library only, and none
+of them needs an API key, a Hugging Face token or any inference spend.
+`fetch.py` pins a commit SHA, not `main`, and checks every downloaded file
+against a digest.
 
-To call the API yourself:
+To call the API yourself. This is the only part that needs the SDK, and the
+only command here that spends anything:
 
 ```sh
-SIE_API_KEY=... python3 run.py --record --out run-output/calls.json
+uv sync
+SIE_API_KEY=... uv run python run.py --record --out run-output/calls.json
 ```
 
-That is the only command here that spends anything.
+`run.py` sends through `sie_sdk.SIEClient`. The import is deferred into
+`main()`, so `--check` and `--show` keep working on a bare `python3` with
+nothing installed. `python3 run.py --show <id>` prints a request without
+sending it.
 
 ## What to expect
 
@@ -99,6 +105,10 @@ byte of any request or response.
 - **Nothing about the `diagnostics/*` calls.** They were written by earlier
   runner revisions, `run.py --check` does not rebuild them, and it says so
   rather than counting them as checked.
+- **A fresh `--record` run records less than the archive.** `sie_sdk` returns
+  the per-item result rather than the server's envelope, and surfaces no
+  response headers, so an entry written by `--record` carries a `shape` field
+  saying so. `score.py` reads the published `calls.json`.
 - **No tamper resistance.** The digests here catch a truncated or corrupted
   download. They are not a provenance chain and are not meant to survive
   someone who can write to the dataset.

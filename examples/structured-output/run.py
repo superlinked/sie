@@ -2,20 +2,24 @@
 """Send the /structured-output calls to SIE Cloud, or check the recorded ones.
 
     python3 fetch.py
-    python3 run.py --check        # offline, no key, the default
-    python3 run.py --record       # live, needs SIE_API_KEY
+    python3 run.py --check              # offline, no key, nothing installed
+    python3 run.py --show <case-id>     # offline, prints one request
+    uv sync && uv run python run.py --record    # live, needs SIE_API_KEY
 
 Endpoint      https://api.superlinked.com
 Path          /v1/chat/completions
 Model         Qwen/Qwen3.8-27B-FP8
-Revision      the server returns it in X-Sie-Model-Revision; --record stores it
+Revision      the server returns it in X-Sie-Model-Revision
 
-Standard library only.
+Calls go through `sie_sdk.SIEClient`, per AGENTS.md. The import is deferred
+into main() so `--check` and `--show` run on a bare `python3` with nothing
+installed; that is the property worth protecting, because it lets a reader
+confirm this runner is the one that produced the evidence for free.
 
-`--check` makes no network call. It rebuilds every page-evidence request body
-from `data/inputs/cases.json` and compares it with the request recorded in
-`data/calls.json`. A reader who wants to know whether this script is really the
-script that produced the evidence can run it with no API key and no spend.
+`--check` rebuilds every page-evidence request body from `data/inputs/cases.json`
+and compares it with the request recorded in `data/calls.json`. The bodies in
+this file were confirmed against the SDK by intercepting the client transport:
+`client.chat_completions` puts exactly these 13 bodies on the wire.
 
 The `diagnostics/*` sets in calls.json came from earlier revisions of the
 sie-web runner and are NOT rebuilt here; `--check` reports them as not checked
@@ -33,10 +37,12 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sie_sdk import SIEClient
 
 ENDPOINT = "https://api.superlinked.com"
 PATH = "/v1/chat/completions"
@@ -83,10 +89,12 @@ def check(data_dir: Path) -> int:
         if case is None:
             mismatched.append(f"{call['id']}: no case in inputs/cases.json")
             continue
-        if build_body(case) == call["request"]["body"]:
-            rebuilt += 1
-        else:
+        if build_body(case) != call["request"]["body"]:
             mismatched.append(f"{call['id']}: rebuilt body differs from the recorded body")
+        elif call["path"] != PATH:
+            mismatched.append(f"{call['id']}: path {call['path']} differs from {PATH}")
+        else:
+            rebuilt += 1
 
     print(f"{rebuilt} page requests rebuilt from inputs and matched the recorded request")
     if not_checked:
@@ -99,93 +107,91 @@ def check(data_dir: Path) -> int:
     return 1 if mismatched else 0
 
 
-def api_key() -> str:
-    key = os.environ.get("SIE_API_KEY", "").strip()
-    if not key:
-        raise SystemExit("--record needs SIE_API_KEY. Use --check for the offline check.")
-    return key
-
-
-def post(url: str, key: str, body: dict[str, Any]) -> tuple[int, dict[str, str], Any, float]:
-    payload = json.dumps(body).encode("utf-8")
-    request = urllib.request.Request(  # noqa: S310
-        url,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-    )
+def record(client: SIEClient, case: dict[str, Any]) -> dict[str, Any]:
+    """Send one case through the SDK and return its calls.json entry."""
+    body = build_body(case)
+    requested_at = datetime.now(UTC).isoformat(timespec="seconds")
     started = time.monotonic()
-    try:
-        with urllib.request.urlopen(request, timeout=600) as response:  # noqa: S310
-            raw = response.read()
-            status = response.status
-            headers = dict(response.headers)
-    except urllib.error.HTTPError as error:
-        raw = error.read()
-        status = error.code
-        headers = dict(error.headers)
+    completion = client.chat_completions(
+        body["model"],
+        body["messages"],
+        max_completion_tokens=body["max_completion_tokens"],
+        response_format=body["response_format"],
+    )
     latency_ms = round((time.monotonic() - started) * 1000, 1)
-    return status, headers, json.loads(raw), latency_ms
+    return {
+        "id": f"page/{case['id']}",
+        "set": "page",
+        "case": case["id"],
+        "model": MODEL,
+        "endpoint": ENDPOINT,
+        "path": PATH,
+        "status": 200,
+        "timing": {"at": requested_at, "latency_ms": latency_ms, "attempts": 1},
+        "request": {"method": "POST", "endpoint": ENDPOINT, "path": PATH, "model": MODEL, "body": body},
+        # The SDK surfaces no response headers, so a fresh run records none and
+        # says so rather than leaving an empty field to be read as "none sent".
+        "response": {"status": 200, "body": completion},
+        "recorded": {
+            "model_revision": client.last_model_revision,
+            "retry_count": client.last_retry_count,
+            "response_headers": "not surfaced by sie_sdk; the archived run recorded them from raw HTTP",
+        },
+    }
 
 
-def record(data_dir: Path, out_path: Path) -> int:
-    key = api_key()
-    endpoint = (os.environ.get("SIE_CLUSTER_URL") or os.environ.get("SIE_BASE_URL") or ENDPOINT).rstrip("/")
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--data", default="data", help="fetched evidence directory")
+    parser.add_argument("--check", action="store_true", help="offline check, the default")
+    parser.add_argument("--show", metavar="CASE", help="print one request and exit, sending nothing")
+    parser.add_argument("--record", action="store_true", help="make live calls (needs SIE_API_KEY)")
+    parser.add_argument("--out", default="run-output/calls.json", help="where --record writes")
+    args = parser.parse_args()
+
+    data_dir = Path(args.data)
     cases = load(data_dir / "inputs/cases.json")["cases"]
+    by_id = {case["id"]: case for case in cases}
+
+    if args.show:
+        case = by_id.get(args.show)
+        if case is None:
+            raise SystemExit(f"Unknown case: {args.show}")
+        print(json.dumps({"method": "POST", "path": PATH, "body": build_body(case)}, indent=2, ensure_ascii=False))
+        return 0
+
+    if not args.record:
+        return check(data_dir)
+
+    api_key = os.environ.get("SIE_API_KEY", "").strip()
+    if not api_key:
+        raise SystemExit("Set SIE_API_KEY to send these calls, or run score.py on the recorded ones instead")
+    base_url = os.environ.get("SIE_CLUSTER_URL") or os.environ.get("SIE_BASE_URL") or ENDPOINT
+    # Imported here rather than at module scope so --check and --show run on a
+    # bare `python3` with nothing installed. Sending needs the SDK:
+    # `uv sync`, then `uv run python run.py --record`.
+    from sie_sdk import SIEClient  # noqa: PLC0415
+
+    client = SIEClient(base_url, api_key=api_key, timeout_s=900)
+
     calls = []
     for case in cases:
-        body = build_body(case)
-        status, headers, response, latency_ms = post(f"{endpoint}{PATH}", key, body)
-        calls.append(
-            {
-                "id": f"page/{case['id']}",
-                "set": "page",
-                "case": case["id"],
-                "model": MODEL,
-                "endpoint": endpoint,
-                "path": PATH,
-                "status": status,
-                "timing": {"latency_ms": latency_ms, "attempts": 1},
-                "request": {
-                    "method": "POST",
-                    "endpoint": endpoint,
-                    "path": PATH,
-                    "model": MODEL,
-                    "body": body,
-                },
-                "response": {"status": status, "headers": headers, "body": response},
-                "recorded": {
-                    "model_revision": headers.get("X-Sie-Model-Revision"),
-                    "server_version": headers.get("X-Sie-Server-Version"),
-                },
-            }
-        )
-        print(f"{case['id']}: HTTP {status} in {latency_ms:.0f}ms")
+        entry = record(client, case)
+        calls.append(entry)
+        print(f"{case['id']}: {entry['timing']['latency_ms']:.0f}ms", file=sys.stderr)
+
+    ids = [entry["id"] for entry in calls]
+    if len(ids) != len(set(ids)):
+        raise SystemExit("duplicate call ids; refusing to write a calls.json two checks could read differently")
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps({"task": "structured-output", "call_count": len(calls), "calls": calls}, indent=2) + "\n",
         encoding="utf-8",
     )
     print(f"wrote {out_path}")
     return 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", default="data", help="fetched evidence directory")
-    parser.add_argument("--check", action="store_true", help="offline check, the default")
-    parser.add_argument("--record", action="store_true", help="make live calls (needs SIE_API_KEY)")
-    parser.add_argument("--out", default="run-output/calls.json", help="where --record writes")
-    args = parser.parse_args()
-
-    data_dir = Path(args.data)
-    if not args.record:
-        return check(data_dir)
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    return record(data_dir, out_path)
 
 
 if __name__ == "__main__":

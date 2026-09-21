@@ -2,8 +2,9 @@
 """Send the /guardrails calls to SIE Cloud, or check the recorded ones.
 
     python3 fetch.py
-    python3 run.py --check      # offline, no key, the default
-    python3 run.py --record     # live, needs SIE_API_KEY
+    python3 run.py --check             # offline, no key, nothing installed
+    python3 run.py --show <case-id>    # offline, prints one input's 4 requests
+    uv sync && uv run python run.py --record    # live, needs SIE_API_KEY
 
 Endpoint      https://api.superlinked.com
 Models        fastino/gliguard-LLMGuardrails-300M       (three calls per input)
@@ -11,7 +12,8 @@ Models        fastino/gliguard-LLMGuardrails-300M       (three calls per input)
 Revision      GLiGuard answered with x-sie-model-revision
               5cbfc8c6cfbf1f0e68cc840f6081a8ef68d718d651106d61fc80ebb8ba685171
 
-Standard library only.
+Calls go through `sie_sdk.SIEClient`, per AGENTS.md. The import is deferred into
+main() so `--check` and `--show` run on a bare `python3` with nothing installed.
 
 Four calls go out per input, all four recorded:
 
@@ -21,8 +23,11 @@ Four calls go out per input, all four recorded:
                             call the page's verdicts come from
     granite-jailbreak       Granite Guardian through /v1/generate
 
-`--check` makes no network call. It rebuilds all 48 recorded request bodies
-from `data/inputs/inputs.json` and compares each with the recorded request.
+`--check` rebuilds all 48 recorded request bodies from `data/inputs/inputs.json`
+and compares each with the recorded request. Those bodies were confirmed against
+the SDK by intercepting the client transport: `client.extract` and
+`client.generate` put exactly these 48 bodies on the wire, at exactly these
+paths, including the `__` model spelling `client.generate` normalises to.
 
 Migrated from apps/site/tests/fixtures/reference/guardrails/run.py in
 superlinked/sie-web@b07b6d73. One deliberate difference: sie-web's current
@@ -39,14 +44,19 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sie_sdk import SIEClient
 
 ENDPOINT = "https://api.superlinked.com"
 GLIGUARD = "fastino/gliguard-LLMGuardrails-300M"
 GRANITE = "ibm-granite/granite-guardian-3.0-2b"
+# client.generate normalises the HF-style id to this spelling, which is what the
+# 2026-09-15 run recorded.
+GRANITE_PATH = "/v1/generate/ibm-granite__granite-guardian-3.0-2b"
 
 # GLiGuard's published jailbreak_detection label set, in the published order.
 JAILBREAK_LABELS = [
@@ -118,7 +128,7 @@ def calls_for(case: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "call": "granite-jailbreak",
             "model": GRANITE,
-            "path": "/v1/generate/ibm-granite__granite-guardian-3.0-2b",
+            "path": GRANITE_PATH,
             "body": {"prompt": GRANITE_PROMPT.format(text=text), "max_new_tokens": 16},
         },
     ]
@@ -150,8 +160,9 @@ def check(data_dir: Path) -> int:
             else:
                 rebuilt += 1
 
-    for call_id in sorted(set(by_id) - expected_ids):
-        mismatched.append(f"{call_id}: recorded but this script does not build it")
+    mismatched.extend(
+        f"{call_id}: recorded but this script does not build it" for call_id in sorted(set(by_id) - expected_ids)
+    )
 
     print(f"{rebuilt} of {len(recorded)} recorded requests rebuilt from the inputs and matched")
     for line in mismatched:
@@ -159,84 +170,104 @@ def check(data_dir: Path) -> int:
     return 1 if mismatched else 0
 
 
-def post(url: str, key: str, body: dict[str, Any]) -> tuple[int, dict[str, str], Any, float]:
-    payload = json.dumps(body).encode("utf-8")
-    request = urllib.request.Request(  # noqa: S310
-        url,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-    )
+def record(client: SIEClient, case: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    """Send one call through the SDK and return its calls.json entry."""
+    body = spec["body"]
+    requested_at = datetime.now(UTC).isoformat(timespec="seconds")
     started = time.monotonic()
-    try:
-        with urllib.request.urlopen(request, timeout=300) as response:  # noqa: S310
-            raw, status, headers = response.read(), response.status, dict(response.headers)
-    except urllib.error.HTTPError as error:
-        raw, status, headers = error.read(), error.code, dict(error.headers)
-    return status, headers, json.loads(raw), round((time.monotonic() - started) * 1000, 1)
+    if spec["call"] == "granite-jailbreak":
+        result = client.generate(GRANITE, body["prompt"], max_new_tokens=body["max_new_tokens"])
+        response_body = {key: value for key, value in result.items() if key != "request"}
+        shape = "the sie_sdk generate result; the SDK surfaces no response headers"
+    else:
+        params = body.get("params") or {}
+        result = client.extract(
+            spec["model"], body["items"][0], labels=params.get("labels"), options=params.get("options")
+        )
+        item = {key: value for key, value in result.items() if key not in ("model", "request")}
+        response_body = {"items": [item], "model": result.get("model", spec["model"])}
+        shape = "rebuilt from the sie_sdk per-item result; the SDK returns no server envelope and no headers"
+    latency_ms = round((time.monotonic() - started) * 1000, 1)
+    return {
+        "id": f"{case['id']}__{spec['call']}",
+        "set": "page",
+        "case": case["id"],
+        "call": spec["call"],
+        "model": spec["model"],
+        "endpoint": ENDPOINT,
+        "path": spec["path"],
+        "status": 200,
+        "timing": {"at": requested_at, "latency_ms": latency_ms, "attempts": 1},
+        "request": {
+            "method": "POST",
+            "endpoint": ENDPOINT,
+            "path": spec["path"],
+            "model": spec["model"],
+            "body": body,
+        },
+        "response": {"status": 200, "body": response_body, "shape": shape},
+        "recorded": {
+            "model_revision": client.last_model_revision,
+            "retry_count": client.last_retry_count,
+        },
+    }
 
 
-def record(data_dir: Path, out_path: Path) -> int:
-    key = os.environ.get("SIE_API_KEY", "").strip()
-    if not key:
-        raise SystemExit("--record needs SIE_API_KEY. Use --check for the offline check.")
-    endpoint = (os.environ.get("SIE_CLUSTER_URL") or os.environ.get("SIE_BASE_URL") or ENDPOINT).rstrip("/")
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--data", default="data", help="fetched evidence directory")
+    parser.add_argument("--check", action="store_true", help="offline check, the default")
+    parser.add_argument("--show", metavar="CASE", help="print one input's four requests and exit, sending nothing")
+    parser.add_argument("--record", action="store_true", help="make live calls (needs SIE_API_KEY)")
+    parser.add_argument("--out", default="run-output/calls.json", help="where --record writes")
+    args = parser.parse_args()
+
+    data_dir = Path(args.data)
     cases = load(data_dir / "inputs/inputs.json")["cases"]
+    by_id = {case["id"]: case for case in cases}
+
+    if args.show:
+        case = by_id.get(args.show)
+        if case is None:
+            raise SystemExit(f"Unknown case: {args.show}")
+        shown = [
+            {"call": spec["call"], "method": "POST", "path": spec["path"], "body": spec["body"]}
+            for spec in calls_for(case)
+        ]
+        print(json.dumps(shown, indent=2, ensure_ascii=False))
+        return 0
+
+    if not args.record:
+        return check(data_dir)
+
+    api_key = os.environ.get("SIE_API_KEY", "").strip()
+    if not api_key:
+        raise SystemExit("Set SIE_API_KEY to send these calls, or run score.py on the recorded ones instead")
+    base_url = os.environ.get("SIE_CLUSTER_URL") or os.environ.get("SIE_BASE_URL") or ENDPOINT
+    # Deferred so --check and --show run on a bare `python3` with nothing installed.
+    from sie_sdk import SIEClient  # noqa: PLC0415
+
+    client = SIEClient(base_url, api_key=api_key, timeout_s=900)
 
     calls = []
     for case in cases:
         for spec in calls_for(case):
-            status, headers, response, latency_ms = post(f"{endpoint}{spec['path']}", key, spec["body"])
-            calls.append(
-                {
-                    "id": f"{case['id']}__{spec['call']}",
-                    "set": "page",
-                    "case": case["id"],
-                    "call": spec["call"],
-                    "model": spec["model"],
-                    "endpoint": endpoint,
-                    "path": spec["path"],
-                    "status": status,
-                    "timing": {"latency_ms": latency_ms, "attempts": 1},
-                    "request": {
-                        "method": "POST",
-                        "endpoint": endpoint,
-                        "path": spec["path"],
-                        "model": spec["model"],
-                        "headers": {"Content-Type": "application/json", "Accept": "application/json"},
-                        "body": spec["body"],
-                    },
-                    "response": {"status": status, "headers": headers, "body": response},
-                    "recorded": {"model_revision": headers.get("x-sie-model-revision")},
-                }
-            )
-            print(f"{case['id']} {spec['call']}: HTTP {status} in {latency_ms:.0f}ms")
+            entry = record(client, case, spec)
+            calls.append(entry)
+            print(f"{case['id']} {spec['call']}: {entry['timing']['latency_ms']:.0f}ms", file=sys.stderr)
 
+    ids = [entry["id"] for entry in calls]
+    if len(ids) != len(set(ids)):
+        raise SystemExit("duplicate call ids; refusing to write a calls.json two checks could read differently")
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps({"task": "guardrails", "call_count": len(calls), "calls": calls}, indent=2) + "\n",
         encoding="utf-8",
     )
     print(f"wrote {out_path}")
     return 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", default="data", help="fetched evidence directory")
-    parser.add_argument("--check", action="store_true", help="offline check, the default")
-    parser.add_argument("--record", action="store_true", help="make live calls (needs SIE_API_KEY)")
-    parser.add_argument("--out", default="run-output/calls.json", help="where --record writes")
-    args = parser.parse_args()
-
-    data_dir = Path(args.data)
-    if not args.record:
-        return check(data_dir)
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    return record(data_dir, out_path)
 
 
 if __name__ == "__main__":
