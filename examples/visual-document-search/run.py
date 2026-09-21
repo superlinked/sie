@@ -167,7 +167,9 @@ def main() -> int:
             entries.append(entry)
             for item in entry["response"]["items"]:
                 page_vectors[int(item["id"])] = retrieval.decode_multivector(item["multivector"]["float16_base64"])
-            print(f"  {min(start + BATCH, len(pages))}/{len(pages)} pages")
+            done = min(start + BATCH, len(pages))
+            per_page = entry["timing"]["duration_ms"] / len(chunk) / 1000
+            print(f"  {done}/{len(pages)} pages  {per_page:.2f}s/page", flush=True)
 
         visual = retrieval.visual_rank(query_vectors, page_vectors)
         text = retrieval.bm25_rank(comparison["query"], pages)
