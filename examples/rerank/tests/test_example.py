@@ -1,30 +1,32 @@
-"""Tamper tests for the offline checks, carried over from the committed run.
+"""Tamper tests for the offline checks.
 
     python3 fetch.py
     python3 -m unittest discover -s tests -v
 
-Standard library only, and no server. These were written when the recorded run
-lived in this repository; they now read the fetched dataset instead. Nothing
-here is new: each one still asserts that a specific forgery fails closed.
+Standard library only, and no server. Each one asserts that a specific forgery
+fails closed.
 
-A missing `data/` directory fails these tests rather than skipping them. A
-check that cannot run has not passed.
+A missing `data/` directory fails these tests rather than skipping them. A check
+that cannot run has not passed.
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import importlib.util
 import json
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
-REQUIRED = ("inputs/cases.json", "inputs/sources.json", "calls.json", "manifest.json")
+REQUIRED = ("inputs/cases.json", "calls.json", "manifest.json")
 
 
 def _module(name: str):
@@ -40,14 +42,24 @@ run = _module("run")
 score = _module("score")
 
 
+def strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
+
+
 class RerankExampleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         missing = [name for name in REQUIRED if not (DATA / name).exists()]
         if missing:
             raise AssertionError(f"fetch the evidence first (python3 fetch.py); missing {', '.join(missing)}")
-        cls.cases = json.loads((DATA / "inputs/cases.json").read_text(encoding="utf-8"))
-        cls.sources = json.loads((DATA / "inputs/sources.json").read_text(encoding="utf-8"))
+        cls.payload = json.loads((DATA / "inputs/cases.json").read_text(encoding="utf-8"))
         cls.calls = json.loads((DATA / "calls.json").read_text(encoding="utf-8"))
         cls.manifest = json.loads((DATA / "manifest.json").read_text(encoding="utf-8"))
 
@@ -56,8 +68,9 @@ class RerankExampleTests(unittest.TestCase):
 
         fetch.py pins manifest.json by the digest in its own source and then
         pins every other file by the digest inside that manifest, so the bytes
-        are authenticated before anything parses them. This re-walks the second
-        half against what actually landed on disk.
+        are authenticated before anything parses them. A rewritten candidate
+        excerpt is caught here, at fetch time, rather than by a digest recorded
+        beside the text it covers.
         """
         pinned = self.manifest["files_sha256"]
         self.assertEqual(pinned["calls.json"], self.manifest["calls_sha256"])
@@ -68,59 +81,78 @@ class RerankExampleTests(unittest.TestCase):
         }
         self.assertEqual(on_disk, pinned)
 
-    def test_inputs_are_exact_primary_source_excerpts(self) -> None:
-        score.verify_inputs(self.cases, self.sources)
-        self.assertEqual(len(self.cases["cases"]), 4)
-        self.assertEqual(len(self.sources["sources"]), 4)
+    def test_corpus_is_the_shape_the_published_figures_assume(self) -> None:
+        cases = self.payload["cases"]
+        self.assertEqual(len(cases), 24)
+        self.assertEqual(len({case["id"] for case in cases}), 24)
+        self.assertEqual(len({case["agency"] for case in cases}), 24)
+        for case in cases:
+            self.assertEqual(len(case["candidates"]), 4)
+            roles = sorted(candidate["role"] for candidate in case["candidates"])
+            self.assertEqual(roles, ["asked-about-final", "asked-about-proposal",
+                                     "neighbour-final", "neighbour-proposal"])
+            # The query is the shared docket title. It must not repeat the
+            # neighbour's, or the pool would not be competitive on subject.
+            self.assertNotEqual(case["query"], case["neighbour_title"])
+            for candidate in case["candidates"]:
+                expected = "Rule" if candidate["role"].endswith("final") else "Proposed Rule"
+                self.assertEqual(candidate["type"], expected, candidate["id"])
 
     def test_recorded_envelopes_match_the_runner(self) -> None:
         self.assertEqual(run.check(DATA), 0)
 
-    def test_boolean_score_fails_closed(self) -> None:
-        case_id = "scotus_two_contracts"
-        case = self.cases["cases"][case_id]
-        body = copy.deepcopy(self._body(case_id))
-        body["scores"][0]["score"] = True
-        with self.assertRaisesRegex(SystemExit, "non-numeric score"):
-            score.ranked(case_id, case, body)
+    def test_published_figures_match_the_recording(self) -> None:
+        self.assertEqual(score.main_with(DATA), 0)
+
+    def test_a_missing_call_fails_rather_than_shrinking_the_denominator(self) -> None:
+        """Absent data is a failure, never a skip."""
+        payload = copy.deepcopy(self.calls)
+        dropped = f"{self.payload['cases'][0]['id']}/proposed-positive"
+        payload["calls"] = [call for call in payload["calls"] if call["id"] != dropped]
+        payload["call_count"] = len(payload["calls"])
+        with _temp_calls(payload) as data_dir:
+            self.assertEqual(score.main_with(data_dir), 1)
+
+    def test_two_responses_swapped_between_arms_fails_closed(self) -> None:
+        """The forgery every count and digest survives.
+
+        Trading two responses between arms of the same case keeps the call
+        count, the rank set and every rebuilt request envelope intact, so
+        `run.py --check` still passes. Only the figures pinned in score.py's
+        own source refuse it.
+        """
+        payload = copy.deepcopy(self.calls)
+        case_id = self.payload["cases"][0]["id"]
+        by_id = {call["id"]: call for call in payload["calls"]}
+        left, right = by_id[f"{case_id}/none"], by_id[f"{case_id}/proposed-positive"]
+        left["response"], right["response"] = right["response"], left["response"]
+        with _temp_calls(payload) as data_dir:
+            self.assertEqual(run.check(data_dir), 0, "the envelopes are untouched, so --check must still pass")
+            self.assertEqual(score.main_with(data_dir), 1)
 
     def test_a_candidate_scored_twice_fails_closed(self) -> None:
         """A count is not a set.
 
-        Replacing one candidate's row with a duplicate of another keeps the row
-        count and the 0..n-1 ranks intact, so only comparing the identities
-        catches it.
+        Replacing one scored row with a duplicate of another keeps the row
+        count and the 0..n-1 ranks intact, so only comparing identities catches
+        it.
         """
-        case_id = "ntsb_detector_alert"
-        case = self.cases["cases"][case_id]
-        body = copy.deepcopy(self._body(case_id))
-        body["scores"][0]["item_id"] = body["scores"][1]["item_id"]
-        with self.assertRaisesRegex(SystemExit, "candidates"):
-            score.ranked(case_id, case, body)
-
-    def test_rewritten_excerpt_fails_even_with_its_declared_hash(self) -> None:
-        """The forgery a single declared digest cannot catch.
-
-        Rewrite the text and the digest recorded beside it together and that
-        pair agrees with itself. The canonical digest in sources.json is what
-        refuses it, which is why both files travel together.
-        """
-        cases = copy.deepcopy(self.cases)
-        candidate = cases["cases"]["scotus_two_contracts"]["candidates"][0]
-        candidate["text"] += " tampered"
-        candidate["sha256"] = score.sha256_text(candidate["text"])
-        with self.assertRaisesRegex(SystemExit, "canonical one in sources.json"):
-            score.verify_inputs(cases, self.sources)
-
-    def test_a_failed_run_is_never_scored(self) -> None:
         payload = copy.deepcopy(self.calls)
-        payload["complete"] = False
-        payload["failed_calls"] = 1
-        with self.assertRaisesRegex(SystemExit, "not a complete run"):
-            score.scored_calls(payload)
+        case_id = self.payload["cases"][0]["id"]
+        body = next(c for c in payload["calls"] if c["id"] == f"{case_id}/none")["response"]["body"]
+        body["scores"][0]["item_id"] = body["scores"][1]["item_id"]
+        with _temp_calls(payload) as data_dir:
+            self.assertEqual(score.main_with(data_dir), 1)
+
+    def test_a_recording_from_another_model_revision_is_not_scored(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        manifest["model_revision"] = "0" * 40
+        with _temp_calls(self.calls, manifest=manifest) as data_dir:
+            with self.assertRaisesRegex(SystemExit, "model revision"):
+                score.main_with(data_dir)
 
     def test_metadata_has_no_temporary_filesystem_paths(self) -> None:
-        forbidden = ("/Users/", "/root/", "/tmp/", "reference-batch")
+        forbidden = ("/Users/", "/root/", "/tmp/", "/private/tmp", "reference-batch")
         for path in sorted(DATA.rglob("*.json")):
             for text in strings(json.loads(path.read_text(encoding="utf-8"))):
                 self.assertFalse(
@@ -128,22 +160,27 @@ class RerankExampleTests(unittest.TestCase):
                     f"{path.relative_to(DATA)}: {text}",
                 )
 
-    def _body(self, case_id: str) -> dict[str, Any]:
-        for call in self.calls["calls"]:
-            if call["case"] == case_id:
-                return call["response"]["body"]
-        raise AssertionError(f"no recorded call for {case_id}")
+    def test_every_candidate_cites_a_federal_register_url(self) -> None:
+        for case in self.payload["cases"]:
+            for candidate in case["candidates"]:
+                self.assertTrue(
+                    candidate["html_url"].startswith("https://www.federalregister.gov/documents/"),
+                    candidate["html_url"],
+                )
 
 
-def strings(value: Any):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from strings(item)
+@contextlib.contextmanager
+def _temp_calls(calls: dict[str, Any], manifest: dict[str, Any] | None = None):
+    """A copy of data/ with calls.json, and optionally manifest.json, replaced."""
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp) / "data"
+        shutil.copytree(DATA, data_dir)
+        (data_dir / "calls.json").write_text(json.dumps(calls, indent=1, ensure_ascii=False) + "\n",
+                                             encoding="utf-8")
+        if manifest is not None:
+            (data_dir / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n",
+                                                    encoding="utf-8")
+        yield data_dir
 
 
 if __name__ == "__main__":

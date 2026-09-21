@@ -41,8 +41,8 @@ from pathlib import Path
 
 DATASET = "superlinked/sie-task-evidence"
 TASK = "rerank"
-REVISION = "61593491d9a1b6a46c6a03964dd6349df403264b"
-MANIFEST_SHA256 = "1f95345b1617175b389927bfeaae0a3558c9553c6034b7856ec25a9ac6d2572b"
+REVISION = "a29afadb98360232f5cd8372d5f784d6dde63edc"
+MANIFEST_SHA256 = "8f180c69052e35898d955e1100e74859bb5c92d0d690e86423fe3fffbbcc9221"
 
 BASE = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}/{TASK}"
 HTTP_OK = 200
