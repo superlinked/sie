@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Reproduce the /structured-output page figure from the recorded calls.
+
+    python3 fetch.py
+    python3 score.py
+
+Published on https://superlinked.com/structured-output:
+
+    All 10 documents came back as schema-valid JSON, 91 of 93 fields right
+
+This script re-derives 10, 10 and 91 of 93 offline, with no API key and no
+inference spend. It exits nonzero if any of them fails to reproduce.
+
+What it does:
+
+  1. reads `data/calls.json` and keeps the 13 calls in the `page` set;
+  2. drops the 3 cases listed in `data/inputs/excluded.json`, which are
+     excluded from every published total with a recorded reason, leaving 10;
+  3. parses the assistant message of each recorded response as JSON;
+  4. validates it against that case's JSON Schema from `data/inputs/cases.json`;
+  5. applies the acceptance checks in `data/inputs/checks.json`, which were
+     written before each case's first run.
+
+Schema validation runs under `jsonschema` when it is importable, and otherwise
+under the small validator in this file, which covers the subset these schemas
+use. Whichever runs, its verdict is also compared with the verdict the original
+runner recorded, so two independent implementations have to agree.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+EXPECTED = {"cases": 10, "parsed": 10, "schema_valid": 10, "checks_passed": 91, "checks_total": 93}
+
+JSON_TYPES = {
+    "object": dict,
+    "array": list,
+    "string": str,
+    "number": (int, float),
+    "integer": int,
+    "boolean": bool,
+    "null": type(None),
+}
+
+
+def load(path: Path) -> Any:
+    if not path.exists():
+        raise SystemExit(f"{path} is missing. Run: python3 fetch.py")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def same_value(actual: object, expected: object) -> bool:
+    """Equality that never treats True as 1 or False as 0."""
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return isinstance(actual, bool) and isinstance(expected, bool) and actual is expected
+    return actual == expected
+
+
+def check_passes(op: str, actual: object, expected: object) -> bool:
+    if op == "eq":
+        return same_value(actual, expected)
+    if op == "ieq":
+        return isinstance(actual, str) and actual.casefold() == str(expected).casefold()
+    if op == "icontains":
+        return isinstance(actual, str) and str(expected).casefold() in actual.casefold()
+    if op == "in":
+        return any(same_value(actual, option) for option in expected)
+    if op == "contains_all":
+        return isinstance(actual, list) and all(item in actual for item in expected)
+    if op == "contains_any":
+        return isinstance(actual, list) and any(item in actual for item in expected)
+    raise ValueError(f"unknown check op {op}")
+
+
+def type_ok(value: object, spec: object) -> bool:
+    names = spec if isinstance(spec, list) else [spec]
+    for name in names:
+        if name == "integer":
+            if not isinstance(value, bool) and isinstance(value, int):
+                return True
+            continue
+        if name == "boolean":
+            if isinstance(value, bool):
+                return True
+            continue
+        if name == "number":
+            if not isinstance(value, bool) and isinstance(value, (int, float)):
+                return True
+            continue
+        if isinstance(value, JSON_TYPES[name]):
+            return True
+    return False
+
+
+def validate(schema: dict[str, Any], value: object, path: str = "$") -> list[str]:
+    """Validate the subset of JSON Schema these cases use."""
+    errors: list[str] = []
+    if "type" in schema and not type_ok(value, schema["type"]):
+        return [f"{path}: expected type {schema['type']}"]
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: not one of {schema['enum']}")
+    if "minimum" in schema and isinstance(value, (int, float)) and value < schema["minimum"]:
+        errors.append(f"{path}: below minimum")
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        for name in schema.get("required", []):
+            if name not in value:
+                errors.append(f"{path}.{name}: required property missing")
+        if schema.get("additionalProperties") is False:
+            errors.extend(f"{path}.{name}: additional property" for name in value if name not in properties)
+        for name, subschema in properties.items():
+            if name in value:
+                errors.extend(validate(subschema, value[name], f"{path}.{name}"))
+    if isinstance(value, list) and "items" in schema:
+        for index, item in enumerate(value):
+            errors.extend(validate(schema["items"], item, f"{path}[{index}]"))
+    return errors
+
+
+def validator() -> tuple[str, Any]:
+    try:
+        from importlib import metadata  # noqa: PLC0415
+
+        import jsonschema  # noqa: PLC0415
+    except ImportError:
+        return "built in", None
+    return f"jsonschema {metadata.version('jsonschema')}", jsonschema
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data", default="data", help="fetched evidence directory")
+    args = parser.parse_args()
+    data_dir = Path(args.data)
+
+    cases = {case["id"]: case for case in load(data_dir / "inputs/cases.json")["cases"]}
+    checks = load(data_dir / "inputs/checks.json")["cases"]
+    excluded = {entry["id"] for entry in load(data_dir / "inputs/excluded.json")["excluded"]}
+    calls = [call for call in load(data_dir / "calls.json")["calls"] if call["set"] == "page"]
+
+    name, module = validator()
+    totals = {"cases": 0, "parsed": 0, "schema_valid": 0, "checks_passed": 0, "checks_total": 0}
+    disagreements: list[str] = []
+    wrong_fields: list[str] = []
+
+    for call in calls:
+        case_id = call["case"]
+        if case_id in excluded:
+            continue
+        totals["cases"] += 1
+        text = call["response"]["body"]["choices"][0]["message"]["content"]
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as error:
+            print(f"{case_id}: response is not JSON ({error})", file=sys.stderr)
+            continue
+        totals["parsed"] += 1
+
+        schema = cases[case_id]["schema"]
+        if module is None:
+            valid = not validate(schema, value)
+        else:
+            validator_cls = module.validators.validator_for(schema)
+            validator_cls.check_schema(schema)
+            valid = not list(validator_cls(schema).iter_errors(value))
+        if valid:
+            totals["schema_valid"] += 1
+
+        recorded = call["recorded"].get("schema_validation", {}).get("valid")
+        if recorded is not None and recorded != valid:
+            disagreements.append(f"{case_id}: recorded valid={recorded}, recomputed valid={valid}")
+
+        for check in checks[case_id]:
+            totals["checks_total"] += 1
+            actual = value.get(check["field"]) if isinstance(value, dict) else None
+            if check_passes(check["op"], actual, check["expected"]):
+                totals["checks_passed"] += 1
+            else:
+                wrong_fields.append(f"{case_id}.{check['field']}: expected {check['expected']!r}, got {actual!r}")
+
+    print(f"schema validator: {name}")
+    print(f"documents scored:  {totals['cases']}")
+    print(f"parsed as JSON:    {totals['parsed']}")
+    print(f"schema-valid:      {totals['schema_valid']}")
+    print(f"fields right:      {totals['checks_passed']} of {totals['checks_total']}")
+    print(f"excluded from every total: {len(excluded)} CPSC cases, listed with their reason in inputs/excluded.json")
+    if wrong_fields:
+        print("\nfields the model got wrong:")
+        for line in wrong_fields:
+            print(f"  {line}")
+
+    failures = [
+        f"{key}: got {totals[key]}, page publishes {want}" for key, want in EXPECTED.items() if totals[key] != want
+    ]
+    for line in disagreements:
+        failures.append(f"validator disagreement, {line}")
+    if failures:
+        print("\nFAILED to reproduce the published figure:", file=sys.stderr)
+        for line in failures:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+    print("\nReproduced: all 10 documents schema-valid, 91 of 93 fields right.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
