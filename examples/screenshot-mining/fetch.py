@@ -36,6 +36,15 @@ FILES = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}"
 REQUIRED = ("calls.json", "manifest.json", "inputs/inputs.json")
 
 
+def git_blob_oid(data: bytes) -> str:
+    """The object id git gives these bytes, which is what the dataset publishes.
+
+    SHA-1 is not chosen here for its strength; it is the identifier the dataset
+    already exposes, so the value can be checked against HuggingFace by hand.
+    """
+    return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+
+
 def get(url: str) -> bytes:
     # No Authorization header: the dataset is public and this must work for
     # a reader who has never signed in to HuggingFace.
@@ -64,11 +73,21 @@ def main() -> int:
         body = get(f"{FILES}/{remote}")
         if entry.get("size") is not None and len(body) != entry["size"]:
             raise SystemExit(f"{remote}: downloaded {len(body)} bytes, the dataset lists {entry['size']}")
-        # Large files are stored with Git LFS, and the listing then carries the
-        # SHA-256 of their content. Check it here rather than only at score time.
-        oid = (entry.get("lfs") or {}).get("oid")
-        if oid and hashlib.sha256(body).hexdigest() != oid:
-            raise SystemExit(f"{remote}: the bytes do not hash to the digest the dataset lists")
+        # Every file is checked, by whichever id the dataset publishes for it.
+        # Large files are stored with Git LFS and carry the SHA-256 of their
+        # content; the rest are ordinary git blobs. Checking only the LFS ones
+        # left calls.json, manifest.json and inputs.json verified by size alone.
+        # A file the listing gives neither id for is a failure, not a skip.
+        lfs_oid = (entry.get("lfs") or {}).get("oid")
+        blob_oid = entry.get("oid")
+        if lfs_oid:
+            if hashlib.sha256(body).hexdigest() != lfs_oid:
+                raise SystemExit(f"{remote}: the bytes do not hash to the LFS digest the dataset lists")
+        elif blob_oid:
+            if git_blob_oid(body) != blob_oid:
+                raise SystemExit(f"{remote}: the bytes do not match the object id the dataset lists")
+        else:
+            raise SystemExit(f"{remote}: the dataset lists no id for this file, so it cannot be checked")
         target.write_bytes(body)
         written.add(relative)
         total += len(body)

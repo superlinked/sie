@@ -31,15 +31,60 @@ ROOT = Path(__file__).resolve().parent
 EVIDENCE = ROOT / "evidence"
 PAGE_FIGURE = (10, 12)
 
+# The object ids these files have at the dataset revision fetch.py pins. They
+# live HERE, in the repository, and that is the whole point: a digest stored
+# inside a file cannot authenticate that file. Every request_sha256 and
+# response_sha256 this scorer checks travels inside calls.json, and
+# inputs_sha256 travels inside manifest.json, so an editor who changes a
+# response and recomputes the digest sitting beside it satisfies all of them.
+# Only a value pinned outside the evidence catches that.
+#
+# These are the object ids HuggingFace publishes for the revision, so a reader
+# can check them without running any of this code:
+#   curl -s "https://huggingface.co/api/datasets/superlinked/sie-task-evidence/tree/<revision>/caption-vqa?recursive=true"
+PINNED_OIDS = {
+    "inputs/inputs.json": "46b6371eab6ca67cd7ec20bdf3de133b1a71d034",
+    "calls.json": "5f091587ba4f945dbf7c975839683c922779297a",
+    "manifest.json": "8166a6aed477c7c79cfdb5dd7335b055ee3a7015",
+}
+
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def git_blob_oid(data: bytes) -> str:
+    """The object id git gives these bytes, which is what the dataset publishes.
+
+    SHA-1 is not chosen here for its strength; it is the identifier the dataset
+    already exposes, so the pin can be checked against HuggingFace by hand.
+    """
+    return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
 
 
 def canonical_sha256(value: Any) -> str:
     """The digest the runner recorded: sorted keys, compact separators."""
     text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return sha256_bytes(text.encode("utf-8"))
+
+
+def verify_files() -> list[str]:
+    """Authenticate whole files against the pinned object ids, before parsing.
+
+    This runs first because every other check reads a digest that travels with
+    the evidence. A file that is absent is a failure here, not something a
+    later check quietly skips.
+    """
+    problems: list[str] = []
+    for name, pinned in PINNED_OIDS.items():
+        path = EVIDENCE / name
+        if not path.is_file():
+            problems.append(f"{name} was not downloaded. Run: python3 fetch.py")
+            continue
+        oid = git_blob_oid(path.read_bytes())
+        if oid != pinned:
+            problems.append(f"{name} is {oid}, but this example pins {pinned} at the dataset revision fetch.py uses")
+    return problems
 
 
 def load(name: str) -> Any:
@@ -102,7 +147,20 @@ def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dic
 
     pins = unique_by(inputs["cases"], "id", "inputs.json")
 
+    for case in pins.values():
+        # A case with no checks would pass on any non-empty answer, because
+        # all() over an empty list is True. Absent scoring is a failure, not a
+        # free pass.
+        if not case.get("checks"):
+            problems.append(f"{case['id']}: inputs.json registers no checks, so nothing would score this answer")
+
     for entry in calls["calls"]:
+        # An entry is looked up below by slug and verified here by case. If the
+        # two can disagree, an edit to one field alone gets the evidence
+        # validated as one case and the answer scored against another's
+        # patterns.
+        if entry["slug"] != entry["case"]:
+            problems.append(f"{entry['slug']}: recorded against case {entry['case']!r}; the two must name one case")
         if canonical_sha256(entry["request"]) != entry["request_sha256"]:
             problems.append(f"{entry['slug']}: the request record does not match its recorded digest")
         if canonical_sha256(entry["response"]) != entry["response_sha256"]:
@@ -134,6 +192,15 @@ def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dic
 
 
 def main() -> int:
+    # Whole files first, against pins that do not travel with them. Nothing is
+    # parsed until the bytes are the bytes this example was written against.
+    problems = verify_files()
+    if problems:
+        print("The downloaded evidence is not what this example pins, so nothing was read:", file=sys.stderr)
+        for line in problems:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+
     inputs = load("inputs/inputs.json")
     manifest = load("manifest.json")
     calls = load("calls.json")
@@ -152,6 +219,7 @@ def main() -> int:
     missing: list[str] = []
     rows: list[str] = []
 
+    scored_slugs: set[str] = set()
     for case in inputs["cases"]:
         entry = recorded.get(case["id"])
         if entry is None:
@@ -159,6 +227,7 @@ def main() -> int:
             # cannot read prints a clean ratio over a set it did not score.
             missing.append(case["id"])
             continue
+        scored_slugs.add(entry["slug"])
         body = entry["response"].get("body")
         text = body.get("text") or "" if isinstance(body, dict) else ""
         answer = answer_line(text)
@@ -181,6 +250,15 @@ def main() -> int:
         )
         for name in missing:
             print(f"  {name}", file=sys.stderr)
+        return 1
+
+    unscored = sorted(set(recorded) - scored_slugs)
+    if unscored:
+        # A recorded call no case reaches is evidence nothing looked at, and it
+        # would sit in the file affecting no total. Say so rather than ignore it.
+        print(f"{len(unscored)} recorded call(s) matched no case and were NOT scored:", file=sys.stderr)
+        for slug in unscored:
+            print(f"  {slug}", file=sys.stderr)
         return 1
 
     want_passed, want_total = PAGE_FIGURE

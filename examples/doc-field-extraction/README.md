@@ -76,15 +76,28 @@ commas, with one trailing period ignored. Numbers compare within 1e-9; integers,
 booleans and enums compare exactly. `inputs.json` records those rules and they
 were fixed before the run.
 
-`score.py` checks the bytes before it scores them, four ways. It recomputes the
-scored digest of `inputs.json`; the digest of every request and response record;
-the SHA-256 of every image against the digest recorded for the call that sent
-it; and that recorded digest against the `image_sha256` the case pinned in
-`inputs.json`. The last one is the authoritative side. Without it an image that
-agrees with its own call passes even when it is not the image the case
-registered, so one document could be scored against another's schema with every
-digest intact. A file that is missing, or that any of the four disagree about,
-is a failure and nothing is scored; it is never skipped past.
+`score.py` checks the bytes before it scores them, five ways, and the first one
+is the only one that can catch an edit made after download. It hashes the whole
+of `calls.json`, `manifest.json` and `inputs/inputs.json` against object ids
+pinned in this repository, beside the dataset revision, because a digest stored
+inside a file cannot authenticate that file: every other digest here travels
+with the evidence, so an editor who changes a response and recomputes the digest
+sitting next to it satisfies all of them. Those ids are the ones HuggingFace
+publishes for the revision, so you can check them by hand:
+
+```sh
+curl -s "https://huggingface.co/api/datasets/superlinked/sie-task-evidence/tree/2d733ecb8b270fbb154975776e7f5a4315330f36/doc-field-extraction?recursive=true"
+```
+
+Then, on bytes now known to be the right ones: the scored digest of
+`inputs.json` against the one the run recorded; the digest of every request and
+response record; the SHA-256 of every image against the digest its call carries;
+and that digest against the `image_sha256` the case pinned in `inputs.json`, so
+one document cannot be scored against another's schema. Each entry's `slug` must
+also equal `<case>__<call>`, so an edit to one field cannot have the evidence
+validated as one document and the reply scored against another's expected
+values. A file that is missing, or that any of these disagree about, is a
+failure and nothing is scored; it is never skipped past.
 
 Two calls sit in `diagnostics/` and are counted in nothing: one exploratory call
 on the FAA rebuilt fuel control certificate, and a superseded playground call

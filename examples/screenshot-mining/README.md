@@ -93,16 +93,27 @@ matches only null. Lists compare by position unless a case registers a by-key or
 order-free rule. `inputs.json` records those rules, and they were fixed before
 the run.
 
-`score.py` checks the bytes before it scores them, four ways. It recomputes the
-digest of `inputs.json`; re-digests every response record the way the run
-digested it; hashes every stored image against the `$payload.sha256` of the
-request that sent it; and holds that `$payload` against the `file_name` and
-`image_sha256` the case pinned in `inputs.json`. The last one is the
-authoritative side. Without it an image that agrees with its own call passes
-even when it is not the image the case registered, so one screen could be scored
-against another's expected values with every digest intact. A file that is
-missing, or that any of the four disagree about, is a failure and nothing is
-scored; it is never skipped past.
+`score.py` checks the bytes before it scores them, five ways, and the first one
+is the only one that can catch an edit made after download. It hashes the whole
+of `calls.json`, `manifest.json` and `inputs/inputs.json` against object ids
+pinned in this repository, beside the dataset revision, because a digest stored
+inside a file cannot authenticate that file: every other digest here travels
+with the evidence, so an editor who changes a response and recomputes the digest
+sitting next to it satisfies all of them. Those ids are the ones HuggingFace
+publishes for the revision, so you can check them by hand:
+
+```sh
+curl -s "https://huggingface.co/api/datasets/superlinked/sie-task-evidence/tree/d28e188a47be3a8c5ce3f198c0ee967d3e6c1c65/screenshot-mining?recursive=true"
+```
+
+Then, on bytes now known to be the right ones: the digest of `inputs.json`
+against the one the run recorded; every response record re-digested the way the
+run digested it; every stored image hashed against the `$payload.sha256` of the
+request that sent it; and that `$payload` held against the `file_name` and
+`image_sha256` the case pinned in `inputs.json`, so one screen cannot be scored
+against another's expected values. Each entry's `slug` must also equal
+`<case>__<call>`. A file that is missing, or that any of these disagree about,
+is a failure and nothing is scored; it is never skipped past.
 
 It does not recompute `entry_sha256`, the RFC 8785 canonical digest the
 recording carries over each whole entry. That needs a JSON canonicalizer, which

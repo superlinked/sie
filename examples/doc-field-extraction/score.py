@@ -30,6 +30,24 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 EVIDENCE = ROOT / "evidence"
+
+# The object ids these files have at the dataset revision fetch.py pins. They
+# live HERE, in the repository, and that is the whole point: a digest stored
+# inside a file cannot authenticate that file. Every request_sha256 and
+# response_sha256 this scorer checks travels inside calls.json, and
+# inputs_sha256 travels inside manifest.json, so an editor who changes a
+# response and recomputes the digest sitting beside it satisfies all of them.
+# Only a value pinned outside the evidence catches that.
+#
+# These are the object ids HuggingFace publishes for the revision, so a reader
+# can check them without running any of this code:
+#   curl -s "https://huggingface.co/api/datasets/superlinked/sie-task-evidence/tree/<revision>/doc-field-extraction?recursive=true"
+PINNED_OIDS = {
+    "inputs/inputs.json": "07a806d337906ab97746306109786aabada866f5",
+    "calls.json": "bdfcb482884c674ae54ff50ab59cec5a5089c6e8",
+    "manifest.json": "5025ef7fbe9d5d58d57827d931ee4bb3a47de275",
+}
+
 PAGE_FIGURES = {
     "fields_matched": 180,
     "fields_total": 223,
@@ -45,6 +63,34 @@ INPUTS_METADATA_KEYS = ("note", "registered_utc")
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def git_blob_oid(data: bytes) -> str:
+    """The object id git gives these bytes, which is what the dataset publishes.
+
+    SHA-1 is not chosen here for its strength; it is the identifier the dataset
+    already exposes, so the pin can be checked against HuggingFace by hand.
+    """
+    return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+
+
+def verify_files() -> list[str]:
+    """Authenticate whole files against the pinned object ids, before parsing.
+
+    This runs first because every other check reads a digest that travels with
+    the evidence. A file that is absent is a failure here, not something a
+    later check quietly skips.
+    """
+    problems: list[str] = []
+    for name, pinned in PINNED_OIDS.items():
+        path = EVIDENCE / name
+        if not path.is_file():
+            problems.append(f"{name} was not downloaded. Run: python3 fetch.py")
+            continue
+        oid = git_blob_oid(path.read_bytes())
+        if oid != pinned:
+            problems.append(f"{name} is {oid}, but this example pins {pinned} at the dataset revision fetch.py uses")
+    return problems
 
 
 def canonical_sha256(value: Any) -> str:
@@ -232,6 +278,16 @@ def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dic
     pins = unique_by(inputs["cases"], "id", "inputs.json")
 
     for entry in calls["calls"]:
+        # An entry is looked up below by the slug built from a case id and a
+        # call name, and verified here by its own case field. If the two can
+        # disagree, an edit to slug alone gets the evidence validated as one
+        # document and the reply scored against another's schema and expected
+        # values.
+        if entry["slug"] != f"{entry['case']}__{entry['call']}":
+            problems.append(
+                f"{entry['slug']}: recorded as case {entry['case']!r} call {entry['call']!r}; "
+                f"the slug must be exactly {entry['case']}__{entry['call']}"
+            )
         if canonical_sha256(entry["request"]) != entry["request_sha256"]:
             problems.append(f"{entry['slug']}: the request record does not match its recorded digest")
         if canonical_sha256(entry["response"]) != entry["response_sha256"]:
@@ -264,6 +320,15 @@ def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dic
 
 
 def main() -> int:
+    # Whole files first, against pins that do not travel with them. Nothing is
+    # parsed until the bytes are the bytes this example was written against.
+    problems = verify_files()
+    if problems:
+        print("The downloaded evidence is not what this example pins, so nothing was read:", file=sys.stderr)
+        for line in problems:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+
     inputs = load("inputs/inputs.json")
     manifest = load("manifest.json")
     calls = load("calls.json")
@@ -281,12 +346,14 @@ def main() -> int:
     cases: list[dict[str, Any]] = []
     missing: list[str] = []
 
+    scored_slugs: set[str] = set()
     for case in inputs["cases"]:
         entry = recorded.get(f"{case['id']}__proof")
         if entry is None:
             # Counted and named, never passed over.
             missing.append(f"{case['id']}__proof")
             continue
+        scored_slugs.add(entry["slug"])
         result = evaluate_call(entry, case["expected"], inputs["schemas"][case["schema"]])
         result["id"] = case["id"]
         result["title"] = case["title"]
@@ -298,6 +365,7 @@ def main() -> int:
         missing.append(f"{playground_case['case']}__playground")
         playground = None
     else:
+        scored_slugs.add(playground_entry["slug"])
         playground = evaluate_call(
             playground_entry, playground_case["expected"], json.loads(playground_case["schema_text"])
         )
@@ -307,6 +375,15 @@ def main() -> int:
         print("Call(s) NOT SCORED, so no figure below covers the recorded run:", file=sys.stderr)
         for name in missing:
             print(f"  missing {name}", file=sys.stderr)
+        return 1
+
+    unscored = sorted(set(recorded) - scored_slugs)
+    if unscored:
+        # A recorded call no case reaches is evidence nothing looked at, and it
+        # would sit in the file affecting no total. Say so rather than ignore it.
+        print(f"{len(unscored)} recorded call(s) matched no case and were NOT scored:", file=sys.stderr)
+        for slug in unscored:
+            print(f"  {slug}", file=sys.stderr)
         return 1
 
     total = sum(case["fields_total"] for case in cases)
