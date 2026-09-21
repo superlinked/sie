@@ -44,6 +44,8 @@ def load_recorded(manifest: dict[str, Any], model: str) -> dict[tuple[str, str],
     doc = graph.read_json(graph.CALLS_PATH)
     recorded: dict[tuple[str, str], Any] = {}
     url = expected_url(manifest, model)
+    allowed = graph.allowed_revisions(manifest)
+    observed_revisions: set[str] = set()
     for entry in doc["calls"]:
         key = (entry["candidate"], entry["kind"])
         if key in recorded:
@@ -58,7 +60,11 @@ def load_recorded(manifest: dict[str, Any], model: str) -> dict[tuple[str, str],
             raise InputError(f"{entry['slug']}: recorded response does not match its response_sha256")
         if set(entry["response"]["item"]) != set(graph.ITEM_KEYS):
             raise InputError(f"{entry['slug']}: recorded item does not carry the extract response fields")
+        observed_revisions.add(graph.check_revision(entry["slug"], entry, allowed))
         recorded[key] = entry
+    if observed_revisions != allowed:
+        unused = sorted(allowed - observed_revisions)
+        raise InputError(f"manifest names revision {unused[0]}, which no recorded call used")
     return recorded
 
 
@@ -128,6 +134,8 @@ def score() -> dict[str, Any]:
     review_doc = graph.read_json(graph.REVIEW_PATH)
     manifest = graph.read_json(graph.MANIFEST_PATH)
     recorded = load_recorded(manifest, candidates_doc["model"])
+    expected = {(candidate["id"], kind) for candidate in candidates_doc["candidates"] for kind in graph.KINDS}
+    graph.check_call_set(set(recorded), expected, manifest, "call")
     resolved = resolve(candidates_doc, recorded)
     displayed = graph.shown(candidates_doc)
     hero = displayed[0]

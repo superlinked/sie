@@ -23,7 +23,8 @@ dataset gives you the evidence. Fetching it needs no account and no token.
 
 - Model: `fastino/gliner2-large-v1`
 - Endpoint: `https://api.superlinked.com/v1/extract/fastino%2Fgliner2-large-v1`
-- Model revision: `b122b11eeaee4dabd32bed80412f3234c0d0e943`
+- Served model revision: `10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff`, which every recorded call carries
+- HuggingFace revision the weights came from: `b122b11eeaee4dabd32bed80412f3234c0d0e943`
 - SIE server version 0.7.3, recorded 2026-09-15
 - No threshold or other option is sent, so the server default applies
 

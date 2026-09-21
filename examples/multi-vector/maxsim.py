@@ -50,6 +50,46 @@ def compact_json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def allowed_revisions(manifest: dict[str, Any]) -> set[str]:
+    """The served model revisions the manifest claims this run used.
+
+    The runner writes a single string when one revision served the whole run
+    and a list when more than one did, so both are accepted here.
+    """
+    value = manifest.get("model_revision")
+    revisions = {value} if isinstance(value, str) else set(value or ())
+    if not revisions or not all(isinstance(item, str) and item for item in revisions):
+        raise InputError("manifest does not name a served model revision")
+    return revisions
+
+
+def check_revision(slug: str, entry: dict[str, Any], allowed: set[str]) -> str:
+    """A recorded call has to say which served revision answered it."""
+    revision = entry.get("model_revision")
+    if not isinstance(revision, str) or not revision:
+        raise InputError(f"{slug}: no served model revision recorded")
+    if revision not in allowed:
+        raise InputError(f"{slug}: served revision {revision} is not one the manifest names")
+    return revision
+
+
+def check_call_set(observed: set, expected: set, manifest: dict[str, Any], label: str) -> None:
+    """Exactly the expected calls, no more and no fewer.
+
+    A count alone would survive a swap or a duplicate, so the identities are
+    compared and the manifest's own total is checked against them.
+    """
+    missing = sorted(expected - observed, key=str)
+    extra = sorted(observed - expected, key=str)
+    if missing:
+        raise InputError(f"no recorded {label} for {missing[0]}")
+    if extra:
+        raise InputError(f"calls.json holds {len(extra)} {label} nothing pins, starting with {extra[0]}")
+    recorded_total = manifest.get("calls_recorded")
+    if recorded_total != len(observed):
+        raise InputError(f"manifest says {recorded_total} calls were recorded, calls.json holds {len(observed)}")
+
+
 def load_cases() -> dict[str, Any]:
     """The pinned searches: a question and the four passages it chooses between."""
     doc = read_json(CASES_PATH)

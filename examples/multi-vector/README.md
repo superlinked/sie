@@ -29,7 +29,8 @@ dataset gives you the evidence. Fetching it needs no account and no token.
 
 - Model: `lightonai/GTE-ModernColBERT-v1`, 128 dimensions per token
 - Endpoint: `https://api.superlinked.com/v1/encode/lightonai%2FGTE-ModernColBERT-v1`
-- Model revision: `cbbe53366e564450558f5e639dd499171f127538`
+- Served model revision: `10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff`, which every recorded call carries
+- HuggingFace revision the weights came from: `cbbe53366e564450558f5e639dd499171f127538`
 - SIE server version 0.7.3, recorded 2026-09-15
 - 16 calls: per search, the question with `is_query` true, then its four passages with `is_query` false
 
@@ -63,6 +64,7 @@ SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 `score.py` prints a row per search and ends with:
 
 ```
+8 searches, 128 dimensions per token
 the answer passage beat the closest same-page passage in 7 of 8 searches
 it lost in: mdn-cache-no-store
 ```
@@ -76,8 +78,12 @@ too.
 
 `score.py` fails rather than skipping. A response that does not match its
 `response_sha256`, a request the pinned inputs do not rebuild, a missing call,
-a passage with no recorded vector, or a vector whose row count disagrees with
-the response's own `num_tokens` all exit non-zero.
+a call nothing pins, a passage with no recorded vector, a call whose served
+model revision is not the one the manifest names, or a token vector whose width
+disagrees with its own `token_dims` all exit non-zero. That last one matters
+more than it looks: MaxSim zips a query token against a passage token, and
+`zip` stops at the shorter of the two, so a short row would score on a prefix
+and say nothing about it.
 
 ## What this does NOT establish
 

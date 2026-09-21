@@ -135,6 +135,9 @@ def main() -> int:
     unknown = [slug for slug in selected if slug not in cases]
     if unknown:
         raise SystemExit(f"Unknown case(s): {', '.join(unknown)}")
+    duplicated = sorted({slug for slug in selected if selected.count(slug) > 1})
+    if duplicated:
+        raise SystemExit(f"Repeated --case: {', '.join(duplicated)}")
 
     api_key = os.environ.get("SIE_API_KEY", "").strip()
     if not api_key:

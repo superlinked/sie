@@ -16,6 +16,7 @@ own `num_tokens` all exit non-zero. Nothing is scored around a missing input.
 
 from __future__ import annotations
 
+import math
 import sys
 from typing import Any
 
@@ -40,18 +41,35 @@ def expected_url(manifest: dict[str, Any]) -> str:
     return manifest["endpoint"].rstrip("/") + maxsim.ENCODE_PATH
 
 
-def token_vectors(entry: dict[str, Any]) -> dict[str, list[list[float]]]:
-    """The token vectors one encode response returned, keyed by item id."""
+def token_vectors(entry: dict[str, Any], dims: set[int]) -> dict[str, list[list[float]]]:
+    """The token vectors one encode response returned, keyed by item id.
+
+    MaxSim zips a query token against a passage token, and `zip` stops at the
+    shorter one, so a short row would silently score on a prefix. Every row is
+    therefore checked to be the declared width, and `dims` accumulates across
+    the run so a query and its passages cannot be compared at different widths.
+    """
     out: dict[str, list[list[float]]] = {}
     for item in entry["response"]["items"]:
         block = item["multivector"]
-        if len(block["values"]) != block["num_tokens"]:
-            raise InputError(
-                f"{entry['slug']}: {item['id']} has {len(block['values'])} rows for {block['num_tokens']} tokens"
-            )
+        values = block["values"]
+        if len(values) != block["num_tokens"]:
+            raise InputError(f"{entry['slug']}: {item['id']} has {len(values)} rows for {block['num_tokens']} tokens")
+        if not values:
+            raise InputError(f"{entry['slug']}: {item['id']} carries no token vectors")
+        width = block.get("token_dims")
+        if not isinstance(width, int) or width <= 0:
+            raise InputError(f"{entry['slug']}: {item['id']} declares token_dims {width!r}")
+        for row in values:
+            if len(row) != width:
+                raise InputError(f"{entry['slug']}: {item['id']} has a token vector of {len(row)}, not {width}")
+            for value in row:
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise InputError(f"{entry['slug']}: {item['id']} carries a value that is not a finite number")
         if item["id"] in out:
             raise InputError(f"{entry['slug']}: {item['id']} appears twice in one response")
-        out[item["id"]] = block["values"]
+        dims.add(width)
+        out[item["id"]] = values
     return out
 
 
@@ -60,6 +78,8 @@ def score() -> dict[str, Any]:
     manifest = maxsim.read_json(maxsim.MANIFEST_PATH)
     url = expected_url(manifest)
 
+    allowed = maxsim.allowed_revisions(manifest)
+    observed_revisions: set[str] = set()
     recorded: dict[tuple[str, str], Any] = {}
     for entry in maxsim.read_json(maxsim.CALLS_PATH)["calls"]:
         key = (entry["case"], entry["kind"])
@@ -73,8 +93,16 @@ def score() -> dict[str, Any]:
             raise InputError(f"{entry['slug']}: recorded URL is {entry['request']['url']}, not {url}")
         if maxsim.sha256_bytes(maxsim.compact_json(entry["response"])) != entry["response_sha256"]:
             raise InputError(f"{entry['slug']}: recorded response does not match its response_sha256")
+        observed_revisions.add(maxsim.check_revision(entry["slug"], entry, allowed))
         recorded[key] = entry
+    if observed_revisions != allowed:
+        unused = sorted(allowed - observed_revisions)
+        raise InputError(f"manifest names revision {unused[0]}, which no recorded call used")
 
+    expected = {(case["slug"], kind) for case in cases_doc["cases"] for kind in maxsim.KINDS}
+    maxsim.check_call_set(set(recorded), expected, manifest, "call")
+
+    dims: set[int] = set()
     results = []
     for case in cases_doc["cases"]:
         slug = case["slug"]
@@ -92,18 +120,21 @@ def score() -> dict[str, Any]:
         if calls["passages"]["request"]["body"] != maxsim.passages_body(case):
             raise InputError(f"{slug}: pinned passages do not rebuild the recorded passages request")
 
-        query_vectors = token_vectors(calls["query"])
+        query_vectors = token_vectors(calls["query"], dims)
         if list(query_vectors) != [f"{slug}-query"]:
             raise InputError(f"{slug}: the query call returned {list(query_vectors)}")
-        passage_vectors = token_vectors(calls["passages"])
+        passage_vectors = token_vectors(calls["passages"], dims)
         for passage in case["passages"]:
             if passage["id"] not in passage_vectors:
                 raise InputError(f"{slug}: no recorded vector for {passage['id']}")
 
         results.append(maxsim.rank_passages(case, query_vectors[f"{slug}-query"], passage_vectors))
 
+    if len(dims) != 1:
+        raise InputError(f"the recorded token vectors are not all the same width: {sorted(dims)}")
+
     wins = sum(1 for result in results if result["rank"] == 1)
-    return {"searches": len(results), "wins": wins, "results": results}
+    return {"searches": len(results), "wins": wins, "token_dims": next(iter(dims)), "results": results}
 
 
 def main() -> int:
@@ -122,6 +153,7 @@ def main() -> int:
         )
 
     print()
+    print(f"{summary['searches']} searches, {summary['token_dims']} dimensions per token")
     print(
         f"the answer passage beat the closest same-page passage in {summary['wins']} of {summary['searches']} searches"
     )

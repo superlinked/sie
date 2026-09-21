@@ -72,10 +72,11 @@ thirteenth call on a short excerpt of one report, which is not part of the
 twelve and is not shipped here.
 
 `score.py` fails rather than skipping. A source file whose bytes no longer
-match `inputs/cases.json`, a case with no recorded call, a response that does not
-match its `response_sha256`, or pinned text that no longer rebuilds the
-recorded request body all exit non-zero. Nothing is scored around a missing
-input.
+match `inputs/cases.json`, a case with no recorded call, a call nothing pins, a
+response that does not match its `response_sha256`, a call whose served model
+revision is not the one the manifest names, or pinned text that no longer
+rebuilds the recorded request body all exit non-zero. Nothing is scored around
+a missing input.
 
 ## What this does NOT establish
 

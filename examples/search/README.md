@@ -64,7 +64,7 @@ SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 `score.py` prints a row per question and ends with:
 
 ```
-253 passages, 12 questions
+253 passages, 12 questions, 1024-dimensional vectors
 the answer is in the top 3 for every question
 it ranks first for 9 of the 12
 ```
@@ -77,8 +77,11 @@ the page displays seven of them.
 
 `score.py` fails rather than skipping. A passage whose text no longer matches
 its digest, a response that does not match its `response_sha256`, a request the
-pinned corpus does not rebuild, a passage with no recorded vector, a vector
-returned twice, or an answer that falls outside the top 3 all exit non-zero.
+pinned corpus does not rebuild, a call nothing pins, a call whose served model
+revision is not the one the manifest names, a passage with no recorded vector,
+a vector returned twice, a vector whose declared width disagrees with its own
+values, a non-finite value, or an answer that falls outside the top 3 all exit
+non-zero.
 
 ## What this does NOT establish
 

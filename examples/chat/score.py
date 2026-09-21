@@ -143,6 +143,9 @@ def score() -> dict[str, Any]:
         recorded[entry["slug"]] = entry
 
     url = expected_url(manifest)
+    allowed = prompt.allowed_revisions(manifest)
+    prompt.check_call_set(set(recorded), {case["slug"] for case in cases_doc["cases"]}, manifest, "call")
+    observed_revisions: set[str] = set()
     results = []
     for case in cases_doc["cases"]:
         slug = case["slug"]
@@ -155,6 +158,7 @@ def score() -> dict[str, Any]:
             raise InputError(f"{slug}: recorded response does not match its response_sha256")
         if entry["request"]["url"] != url:
             raise InputError(f"{slug}: recorded URL is {entry['request']['url']}, not {url}")
+        observed_revisions.add(prompt.check_revision(slug, entry, allowed))
 
         # The pinned wikitext must rebuild the request that was sent. One side
         # is inputs/, the other is calls.json, and neither is derived from the
@@ -167,6 +171,10 @@ def score() -> dict[str, Any]:
         if not text.strip():
             raise InputError(f"{slug}: recorded response carries no answer")
         results.append({"slug": slug, **evaluate(case, source, text)})
+
+    if observed_revisions != allowed:
+        unused = sorted(allowed - observed_revisions)
+        raise InputError(f"manifest names revision {unused[0]}, which no recorded call used")
 
     return {
         "reports_scored": len(results),

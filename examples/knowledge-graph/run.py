@@ -126,6 +126,9 @@ def main() -> int:
     unknown = [cid for cid in selected if cid not in candidates]
     if unknown:
         raise SystemExit(f"Unknown candidate(s): {', '.join(unknown)}")
+    duplicated = sorted({cid for cid in selected if selected.count(cid) > 1})
+    if duplicated:
+        raise SystemExit(f"Repeated --candidate: {', '.join(duplicated)}")
 
     api_key = os.environ.get("SIE_API_KEY", "").strip()
     if not api_key:
