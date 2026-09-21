@@ -79,7 +79,7 @@ passed  4 of 6 ordinary messages
 
 `score.py` exits nonzero if any of the three numbers fails to reproduce.
 `run.py --check` prints `48 of 48 recorded requests rebuilt from the inputs and
-matched`.
+matched`, and fails if a call is missing, recorded twice or implied by no input.
 
 ## What is in the dataset
 
@@ -118,10 +118,12 @@ byte of any request or response.
   sie-web. `score.py` scores all 12 and does not check the display count.
 - **Nothing about a threshold.** The verdict here is the top label, not a
   score cut. A production gate would pick a threshold from its own costs.
-- **A fresh `--record` run records less than the archive.** `sie_sdk` returns
-  the per-item result rather than the server's envelope, and surfaces no
-  response headers, so an entry written by `--record` carries a `shape` field
-  saying so. `score.py` reads the published `calls.json`.
+- **A fresh `--record` run records less than the archive.** For the three
+  `client.extract` calls the SDK returns the per-item result rather than the
+  server's envelope, so `--record` rebuilds the envelope around it; the
+  `client.generate` call returns the SDK's own generate result. Neither carries
+  response headers. Each entry carries a `shape` field saying which it is.
+  `score.py` reads the published `calls.json`.
 - **No tamper resistance.** The digests catch a truncated or corrupted
   download. They are not a provenance chain.
 

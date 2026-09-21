@@ -29,6 +29,10 @@ and compares each with the recorded request. Those bodies were confirmed against
 the SDK by intercepting the client transport: `client.extract` puts exactly these
 24 bodies on the wire, at exactly these paths.
 
+It is a bijection, not a walk over what is there: the expected call ids come
+from the inputs, one per model per document, so a call that is missing,
+recorded twice, or implied by no case fails the check.
+
 Migrated from apps/site/tests/fixtures/reference/redact/run.py in
 superlinked/sie-web@b07b6d73.
 """

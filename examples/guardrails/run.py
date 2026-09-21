@@ -29,6 +29,10 @@ the SDK by intercepting the client transport: `client.extract` and
 `client.generate` put exactly these 48 bodies on the wire, at exactly these
 paths, including the `__` model spelling `client.generate` normalises to.
 
+It is a bijection, not a walk over what is there: the expected call ids come
+from the inputs, four per input, so a call that is missing, recorded twice, or
+implied by no input fails the check.
+
 Migrated from apps/site/tests/fixtures/reference/guardrails/run.py in
 superlinked/sie-web@b07b6d73. One deliberate difference: sie-web's current
 runner has since moved the Granite call to /v1/chat/completions and renamed it

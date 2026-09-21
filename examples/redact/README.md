@@ -85,7 +85,8 @@ Reproduced: 23 of 25, 0 of 29, 26 of 45, and 2 of 11 in one request against 8 of
 ```
 
 `score.py` exits nonzero if any figure fails to reproduce. `run.py --check`
-prints `24 of 24 recorded requests rebuilt from the inputs and matched`.
+prints `24 of 24 recorded requests rebuilt from the inputs and matched`, and
+fails if a call is missing, recorded twice or implied by no case.
 
 ## How the figures are derived
 
@@ -132,10 +133,11 @@ byte of any request or response.
 - **Nothing about "0 of 29 amounts" beyond the displayed set.** That figure is
   a claim about what a reader sees on the page, computed over exactly the seven
   documents the page renders, not over all twelve recorded.
-- **A fresh `--record` run records less than the archive.** `sie_sdk` returns
-  the per-item result rather than the server's envelope, and surfaces no
-  response headers, so an entry written by `--record` carries a `shape` field
-  saying so. `score.py` reads the published `calls.json`.
+- **A fresh `--record` run records less than the archive.** `client.extract`
+  returns the per-item result rather than the server's envelope, and surfaces
+  no response headers, so `--record` rebuilds the envelope around that item and
+  each entry carries a `shape` field saying so. `score.py` reads the published
+  `calls.json`.
 - **No tamper resistance.** The digests catch a truncated or corrupted
   download. They are not a provenance chain.
 

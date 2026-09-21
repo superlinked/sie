@@ -21,6 +21,10 @@ and compares it with the request recorded in `data/calls.json`. The bodies in
 this file were confirmed against the SDK by intercepting the client transport:
 `client.chat_completions` puts exactly these 13 bodies on the wire.
 
+It is a bijection, not a walk over what is there: the expected call ids come
+from the inputs, so a page call that is missing, recorded twice, or implied by
+no case fails the check.
+
 The `diagnostics/*` sets in calls.json came from earlier revisions of the
 sie-web runner and are NOT rebuilt here; `--check` reports them as not checked
 rather than counting them as passes.
@@ -176,6 +180,11 @@ def record(client: SIEClient, case: dict[str, Any]) -> dict[str, Any]:
     choices = completion.get("choices") or []
     if not choices or not (choices[0].get("message") or {}).get("content"):
         raise CallFailedError(f"{case['id']}: response carried no assistant message")
+    # chat_completions returns the server's own envelope, unlike extract and
+    # encode, which return a per-item result. The one thing the SDK adds is
+    # request-scoped metadata under `request`, which the archived body has no
+    # counterpart for; dropping it leaves the envelope the gateway sent.
+    envelope = {key: value for key, value in completion.items() if key != "request"}
     return {
         "id": f"page/{case['id']}",
         "set": "page",
@@ -186,13 +195,18 @@ def record(client: SIEClient, case: dict[str, Any]) -> dict[str, Any]:
         "status": 200,
         "timing": {"at": requested_at, "latency_ms": latency_ms, "attempts": 1},
         "request": {"method": "POST", "endpoint": ENDPOINT, "path": PATH, "model": MODEL, "body": body},
-        # The SDK surfaces no response headers, so a fresh run records none and
-        # says so rather than leaving an empty field to be read as "none sent".
-        "response": {"status": 200, "body": completion},
+        "response": {
+            "status": 200,
+            "body": envelope,
+            "shape": (
+                "the server's own chat completion envelope as sie_sdk returns it, "
+                "with the SDK's request-scoped metadata dropped; the SDK surfaces "
+                "no response headers, which the archived run recorded from raw HTTP"
+            ),
+        },
         "recorded": {
             "model_revision": client.last_model_revision,
             "retry_count": client.last_retry_count,
-            "response_headers": "not surfaced by sie_sdk; the archived run recorded them from raw HTTP",
         },
     }
 

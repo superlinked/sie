@@ -22,6 +22,10 @@ and compares each with the recorded request. Those bodies were confirmed against
 the SDK by intercepting the client transport: `client.encode` puts exactly these
 26 bodies on the wire, at exactly these paths.
 
+It is a bijection, not a walk over what is there: the expected call ids come
+from the inputs, one per model per text, so a call that is missing, recorded
+twice, or implied by no input fails the check.
+
 `--record` writes calls.json only. It does NOT rewrite `derived/decoded/`, which
 maps token indices back to strings using each model's own tokenizer. That needs
 the tokenizer files, and this example is built to run without downloading model

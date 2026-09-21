@@ -93,7 +93,7 @@ It exits nonzero if any figure fails to reproduce, including the decomposition:
 float representation cannot paper over a gap.
 
 `run.py --check` prints `26 of 26 recorded requests rebuilt from the inputs and
-matched`.
+matched`, and fails if a call is missing, recorded twice or implied by no input.
 
 ## How each number is derived
 
@@ -138,9 +138,10 @@ byte of any request or response.
   against `prithivida/Splade_PP_en_v2` at Hugging Face revision
   `f0d4aa214dcb60c274052a52c0497535e3aec64c` and `BAAI/bge-m3` at
   `5617a9f61b028005a4858fdac845db406aefb181`.
-- **A fresh `--record` run records less than the archive.** `sie_sdk` returns
-  the per-item result rather than the server's envelope, and surfaces no
-  response headers, so an entry written by `--record` carries a `shape` field
+- **A fresh `--record` run records less than the archive.** `client.encode`
+  returns the per-item result with the vector as numpy arrays, and surfaces no
+  response headers, so `--record` rebuilds the envelope, converts the arrays to
+  lists and records no `dims` or `dtype`. Each entry carries a `shape` field
   saying so. `score.py` reads the published `calls.json`.
 - **No tamper resistance.** The digests catch a truncated or corrupted
   download. They are not a provenance chain.

@@ -22,6 +22,10 @@ main() so `--check` and `--show` run on a bare `python3` with nothing installed.
 confirmed against the SDK by intercepting the client transport: `client.extract`
 puts exactly these 62 bodies on the wire.
 
+It is a bijection, not a walk over what is there: the expected call ids come
+from the case files, one per set per case, so a call that is missing, recorded
+twice, or implied by no case fails the check.
+
 One recorded detail differs from what the SDK sends, and it is a path spelling,
 not a body: the 2026-09-15 runner percent-encoded the model id into
 `/v1/extract/knowledgator%2Fgliclass-large-v3.0`, while the SDK sends the slash

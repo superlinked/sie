@@ -30,7 +30,7 @@ so a clone alone is not enough. Fetch, then score:
 ```sh
 python3 fetch.py         # downloads the pinned revision into data/
 python3 score.py         # reproduces the figure offline
-python3 run.py --check   # rebuilds every recorded request from the inputs
+python3 run.py --check   # rebuilds the 13 page requests from the inputs
 ```
 
 These three need nothing installed: they are standard library only, and none
@@ -72,7 +72,8 @@ Reproduced: all 10 documents schema-valid, 91 of 93 fields right.
 
 `score.py` exits nonzero if any of those numbers fails to reproduce.
 `run.py --check` prints `13 page requests rebuilt from inputs and matched the
-recorded request`.
+recorded request`, and fails if a page call is missing, recorded twice or
+implied by no case.
 
 ## What is in the dataset
 
@@ -107,10 +108,12 @@ byte of any request or response.
 - **Nothing about the `diagnostics/*` calls.** They were written by earlier
   runner revisions, `run.py --check` does not rebuild them, and it says so
   rather than counting them as checked.
-- **A fresh `--record` run records less than the archive.** `sie_sdk` returns
-  the per-item result rather than the server's envelope, and surfaces no
-  response headers, so an entry written by `--record` carries a `shape` field
-  saying so. `score.py` reads the published `calls.json`.
+- **A fresh `--record` run records no response headers.**
+  `client.chat_completions` returns the server's own envelope, so a fresh run's
+  response body matches the archived one; what it cannot carry is the response
+  headers, which the archived run recorded from raw HTTP. Each entry carries a
+  `shape` field saying exactly that. `score.py` reads the published
+  `calls.json`.
 - **No tamper resistance.** The digests here catch a truncated or corrupted
   download. They are not a provenance chain and are not meant to survive
   someone who can write to the dataset.
