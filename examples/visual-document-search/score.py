@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Re-derive the published ranks from the recorded run, offline.
+
+    python3 fetch.py
+    python3 score.py
+
+Standard library only. No API key, no network, no inference spend. Both ranks
+come out of evidence/: the text one from the pages' markdown, the visual one
+from the recorded ColPali multivectors.
+
+    python3 score.py --baseline    # the BM25 side alone, from inputs/, no recording
+
+This fails rather than skipping. A missing file, a page whose bytes no longer
+match their digest, a response that does not match its response_sha256, a
+request the pinned inputs do not rebuild, a page with no recorded multivector, a
+multivector returned twice, a declared width that disagrees with its own values,
+a non-finite score, or a relevant page that falls outside the published rank all
+exit non-zero.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from typing import Any
+
+import retrieval
+
+
+def load_calls() -> dict[str, dict[str, Any]]:
+    path = retrieval.EVIDENCE / "calls.json"
+    if not path.exists():
+        raise SystemExit(f"{path} is missing. Run: python3 fetch.py")
+    calls = json.loads(path.read_text(encoding="utf-8"))["calls"]
+    by_slug: dict[str, dict[str, Any]] = {}
+    for call in calls:
+        if call["slug"] in by_slug:
+            raise SystemExit(f"calls.json records {call['slug']!r} twice")
+        by_slug[call["slug"]] = call
+    return by_slug
+
+
+def check_call(call: dict[str, Any], expected_body: dict[str, Any], manifest: dict[str, Any]) -> None:
+    if call["status"] != 200:
+        raise SystemExit(f"{call['slug']}: recorded status {call['status']}")
+    if call["request"]["body"] != expected_body:
+        raise SystemExit(
+            f"{call['slug']}: the recorded request is not the one the pinned inputs rebuild. "
+            "Either inputs/ changed or the recording is of something else."
+        )
+    expected_url = manifest["endpoint"].rstrip("/") + manifest["path"]
+    if call["request"]["url"] != expected_url:
+        raise SystemExit(f"{call['slug']}: recorded URL {call['request']['url']} is not {expected_url}")
+    digest = retrieval.sha256_bytes(retrieval.compact_json(call["response"]))
+    if digest != call["response_sha256"]:
+        raise SystemExit(f"{call['slug']}: response digest {digest} is not the recorded {call['response_sha256']}")
+
+
+def multivector(item: dict[str, Any]) -> list[list[float]]:
+    rows = retrieval.decode_multivector(item["multivector"]["float16_base64"])
+    if len(rows) != item["multivector"]["tokens"]:
+        raise SystemExit(f"{item['id']}: declares {item['multivector']['tokens']} tokens and carries {len(rows)}")
+    if rows and len(rows[0]) != item["multivector"]["dim"]:
+        raise SystemExit(f"{item['id']}: declares width {item['multivector']['dim']} and carries {len(rows[0])}")
+    return rows
+
+
+def score_comparison(
+    comparison: dict[str, Any], pages: list[dict[str, Any]], calls: dict[str, dict[str, Any]], manifest: dict[str, Any]
+) -> dict[str, Any]:
+    for page in pages:
+        retrieval.check_page_bytes(page)
+
+    query_slug = f"{comparison['id']}/query"
+    if query_slug not in calls:
+        raise SystemExit(f"calls.json has no query call for {comparison['id']}")
+    check_call(calls[query_slug], retrieval.query_body(comparison), manifest)
+    query_vectors = multivector(calls[query_slug]["response"]["items"][0])
+
+    page_vectors: dict[int, list[list[float]]] = {}
+    batch = 0
+    covered = 0
+    while covered < len(pages):
+        slug = f"{comparison['id']}/pages-{batch:03d}"
+        if slug not in calls:
+            raise SystemExit(f"calls.json stops at {covered} of {len(pages)} pages for {comparison['id']}")
+        chunk = pages[covered : covered + len(calls[slug]["request"]["body"]["items"])]
+        check_call(calls[slug], retrieval.page_body(chunk), manifest)
+        for item in calls[slug]["response"]["items"]:
+            corpus_id = int(item["id"])
+            if corpus_id in page_vectors:
+                raise SystemExit(f"{comparison['id']}: page {corpus_id} has two recorded multivectors")
+            page_vectors[corpus_id] = multivector(item)
+        covered += len(chunk)
+        batch += 1
+
+    expected = {page["corpus_id"] for page in pages}
+    if set(page_vectors) != expected:
+        missing = sorted(expected - set(page_vectors))
+        extra = sorted(set(page_vectors) - expected)
+        raise SystemExit(f"{comparison['id']}: missing {missing[:5]}, unexpected {extra[:5]}")
+
+    visual = retrieval.visual_rank(query_vectors, page_vectors)
+    text = retrieval.bm25_rank(comparison["query"], pages)
+    relevant = comparison["relevant_corpus_id"]
+    return {
+        "id": comparison["id"],
+        "label": comparison["label"],
+        "pages": len(pages),
+        "text_rank": [cid for cid, _ in text].index(relevant) + 1,
+        "visual_rank": [cid for cid, _ in visual].index(relevant) + 1,
+        "visual_score": dict(visual)[relevant],
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Reproduce the published ranks from the recorded run")
+    parser.add_argument("--baseline", action="store_true", help="BM25 only, straight from inputs/, no recording read")
+    args = parser.parse_args()
+
+    comparisons = retrieval.load_comparisons()
+    by_document = retrieval.load_pages()
+
+    if args.baseline:
+        print(f"BM25 over the ViDoRe markdown, k1={retrieval.K1}, b={retrieval.B}\n")
+        print(f"{'comparison':<36}{'pages':>6}{'text rank':>11}")
+        for comparison in comparisons:
+            pages = by_document[comparison["doc_id"]]
+            text = retrieval.bm25_rank(comparison["query"], pages)
+            rank = [cid for cid, _ in text].index(comparison["relevant_corpus_id"]) + 1
+            print(f"{comparison['label']:<36}{len(pages):>6}{rank:>11}")
+        return 0
+
+    manifest_path = retrieval.EVIDENCE / "manifest.json"
+    if not manifest_path.exists():
+        raise SystemExit(f"{manifest_path} is missing. Run: python3 fetch.py")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    calls = load_calls()
+
+    print(f"{manifest['model']} on {manifest['endpoint']}, recorded {manifest['run_date']}")
+    print(f"BM25 baseline, k1={retrieval.K1}, b={retrieval.B}\n")
+    print(f"{'comparison':<36}{'pages':>6}{'text':>6}{'visual':>8}{'maxsim':>10}")
+
+    rows = []
+    for comparison in comparisons:
+        row = score_comparison(comparison, by_document[comparison["doc_id"]], calls, manifest)
+        rows.append(row)
+        print(
+            f"{row['label']:<36}{row['pages']:>6}{row['text_rank']:>6}{row['visual_rank']:>8}{row['visual_score']:>10.3f}"
+        )
+
+    scored = sum(row["pages"] for row in rows)
+    leading = sum(1 for row in rows if row["visual_rank"] == 1)
+    print()
+    print(f"{len(rows)} comparisons over {scored} pages")
+    print(f"the visual side puts the benchmark page first in {leading} of {len(rows)}")
+    print(f"the text side never does, at best rank {min(row['text_rank'] for row in rows)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
