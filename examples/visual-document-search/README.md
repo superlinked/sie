@@ -122,11 +122,17 @@ instead puts the page second.
 `score.py` fails rather than skipping. A missing file, a manifest naming a
 different model or a different model revision, a page whose bytes no longer
 match their digest, a response that does not match its `response_sha256`, a
-request the pinned inputs do not rebuild, a page with no recorded multivector, a
-multivector recorded twice, a declared token count or width that disagrees with
-its own values, a non-finite score, or a manifest whose recorded results are
-missing, duplicated, extra or at a different rank from the ones derived here all
-exit non-zero.
+request the pinned inputs do not rebuild, a response whose item ids are not the
+ones its own request asked for in that order, a call nothing scores, a page with
+no recorded multivector, a multivector recorded twice, a declared token count or
+width that disagrees with its own values, a non-finite score, or a manifest
+whose recorded results are missing, duplicated, extra or at a different rank
+from the ones derived here all exit non-zero.
+
+A response digest proves a response has not been edited. It does not tie a
+response to the request beside it, which is why the id sequence is checked per
+call: without that, two page batches could trade answers, every digest would
+still verify, and every page would still appear exactly once.
 
 That last check is the one covering the text side. Response digests span the
 multivectors, so a changed vector is caught before any rank is computed. Nothing

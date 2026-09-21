@@ -57,6 +57,25 @@ def check_call(call: dict[str, Any], expected_body: dict[str, Any], manifest: di
         raise SystemExit(f"{call['slug']}: response digest {digest} is not the recorded {call['response_sha256']}")
 
 
+def response_items(call: dict[str, Any], expected_ids: list[str]) -> list[dict[str, Any]]:
+    """The response items for one call, bound to that call's own request.
+
+    A response digest proves a response has not been edited. It does not tie
+    the response to the request beside it, so without this a page batch could
+    carry another batch's answers and still satisfy a global coverage check.
+    Comparing the id sequence in order closes that.
+    """
+    items = call["response"]["items"]
+    got = [item.get("id") for item in items]
+    if got != expected_ids:
+        raise SystemExit(
+            f"{call['slug']}: the response does not answer its own request.\n"
+            f"  requested: {', '.join(expected_ids)}\n"
+            f"  returned:  {', '.join(str(value) for value in got)}"
+        )
+    return items
+
+
 def multivector(item: dict[str, Any]) -> list[list[float]]:
     rows = retrieval.decode_multivector(item["multivector"]["float16_base64"])
     if len(rows) != item["multivector"]["tokens"]:
@@ -67,7 +86,11 @@ def multivector(item: dict[str, Any]) -> list[list[float]]:
 
 
 def score_comparison(
-    comparison: dict[str, Any], pages: list[dict[str, Any]], calls: dict[str, dict[str, Any]], manifest: dict[str, Any]
+    comparison: dict[str, Any],
+    pages: list[dict[str, Any]],
+    calls: dict[str, dict[str, Any]],
+    manifest: dict[str, Any],
+    consumed: set[str],
 ) -> dict[str, Any]:
     for page in pages:
         retrieval.check_page_bytes(page)
@@ -76,7 +99,9 @@ def score_comparison(
     if query_slug not in calls:
         raise SystemExit(f"calls.json has no query call for {comparison['id']}")
     check_call(calls[query_slug], retrieval.query_body(comparison), manifest)
-    query_vectors = multivector(calls[query_slug]["response"]["items"][0])
+    consumed.add(query_slug)
+    # Exactly one item, carrying the id the request asked for.
+    query_vectors = multivector(response_items(calls[query_slug], [comparison["id"]])[0])
 
     page_vectors: dict[int, list[list[float]]] = {}
     batch = 0
@@ -87,7 +112,11 @@ def score_comparison(
             raise SystemExit(f"calls.json stops at {covered} of {len(pages)} pages for {comparison['id']}")
         chunk = pages[covered : covered + len(calls[slug]["request"]["body"]["items"])]
         check_call(calls[slug], retrieval.page_body(chunk), manifest)
-        for item in calls[slug]["response"]["items"]:
+        consumed.add(slug)
+        # The ids this batch asked for, in order, taken from the request body
+        # check_call has just proven equal to the one the pinned inputs rebuild.
+        requested = [item["id"] for item in calls[slug]["request"]["body"]["items"]]
+        for item in response_items(calls[slug], requested):
             corpus_id = int(item["id"])
             if corpus_id in page_vectors:
                 raise SystemExit(f"{comparison['id']}: page {corpus_id} has two recorded multivectors")
@@ -193,13 +222,20 @@ def main() -> int:
     print(f"{'comparison':<36}{'pages':>6}{'text':>6}{'visual':>8}{'maxsim':>10}")
 
     rows = []
+    consumed: set[str] = set()
     for comparison in comparisons:
-        row = score_comparison(comparison, by_document[comparison["doc_id"]], calls, manifest)
+        row = score_comparison(comparison, by_document[comparison["doc_id"]], calls, manifest, consumed)
         check_against_recorded(row, recorded[row["id"]])
         rows.append(row)
         print(
             f"{row['label']:<36}{row['pages']:>6}{row['text_rank']:>6}{row['visual_rank']:>8}{row['visual_score']:>10.3f}"
         )
+
+    # A call nothing scores is either evidence for a claim this example does not
+    # make, or a leftover. Either way it does not travel silently.
+    unconsumed = sorted(set(calls) - consumed)
+    if unconsumed:
+        raise SystemExit(f"calls.json holds {len(unconsumed)} call(s) nothing scores: {', '.join(unconsumed[:5])}")
 
     scored = sum(row["pages"] for row in rows)
     leading = sum(1 for row in rows if row["visual_rank"] == 1)

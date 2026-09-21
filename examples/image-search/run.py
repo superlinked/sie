@@ -183,6 +183,17 @@ def main() -> int:
         entries.append(entry)
         print(f"{name:<8} {len(body['items']):>2} items {entry['timing']['duration_ms']:>9.0f} ms")
 
+    # Re-read after the last call. The preflight check above proves the weights
+    # were right when the run started; this proves they did not roll over while
+    # it was in flight, which would leave the manifest attributing the vectors
+    # to a checkpoint that did not produce all of them.
+    final_revision = served_revision(client)
+    if final_revision != model_revision:
+        raise SystemExit(
+            f"The endpoint served {model_revision!r} before these calls and {final_revision!r} after them. "
+            "The recording spans two checkpoints, so it is not written out. Re-run it."
+        )
+
     revisions = sorted({entry["deployment_revision"] for entry in entries if entry["deployment_revision"]})
     manifest = {
         "task": "image-search",

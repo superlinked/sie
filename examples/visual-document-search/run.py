@@ -229,6 +229,17 @@ def main() -> int:
         )
         print(f"  text rank {text_rank}, visual rank {visual_rank}, of {len(pages)}\n")
 
+    # Re-read after the last call. The preflight check proves the weights were
+    # right when the run started; this proves they did not change while a run
+    # over 712 pages was in flight, which would leave the manifest attributing
+    # the multivectors to a checkpoint that did not produce all of them.
+    final_revision = served_revision(client)
+    if final_revision != model_revision:
+        raise SystemExit(
+            f"The server served {model_revision!r} before these calls and {final_revision!r} after them. "
+            "The recording spans two checkpoints, so it is not written out. Re-run it."
+        )
+
     manifest = {
         "task": "visual-document-search",
         "page": "https://superlinked.com/visual-document-search",
