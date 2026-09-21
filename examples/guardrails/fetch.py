@@ -41,12 +41,21 @@ from pathlib import Path
 
 DATASET = "superlinked/sie-task-evidence"
 TASK = "guardrails"
-REVISION = "af2fa890a0e20c4f3652856a40000016d8ba29c5"
-MANIFEST_SHA256 = "d7897af2a0da17b6fca8e8c573bb6f37d6062a5a203f85985fdbb59a49f63516"
+REVISION = "a25e41631eb324e5fa740b8710f33f05aa0cfe9e"
+MANIFEST_SHA256 = "819dfa6e318a8808a02a4f42fb73962086a1049d78b7b18b1b52483d9582ef8f"
 
 BASE = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}/{TASK}"
 HTTP_OK = 200
 MARKER_NAME = ".sie-evidence"
+
+# Every published figure for this task is derived from calls.json, so any file
+# this script cannot fetch leaves every one of them underivable. There is no
+# "incomplete bundle, no figure affected" case here; say so plainly rather than
+# leaving a reader to work out which number they can still trust.
+INCOMPLETE = (
+    "incomplete bundle, nothing written and no figure derivable "
+    "(score.py reads calls.json and inputs/inputs.json, and both are pinned)"
+)
 
 
 def download(relative_path: str) -> bytes:
@@ -154,23 +163,49 @@ def main() -> int:
 
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    manifest_bytes = download("manifest.json")
+    try:
+        manifest_bytes = download("manifest.json")
+    except RuntimeError as error:
+        print(f"{INCOMPLETE}: {error}", file=sys.stderr)
+        return 1
     if digest(manifest_bytes) != MANIFEST_SHA256:
         print(
             f"manifest.json digest is {digest(manifest_bytes)}, expected {MANIFEST_SHA256}",
             file=sys.stderr,
         )
         return 1
-    manifest = json.loads(manifest_bytes)
+    try:
+        manifest = json.loads(manifest_bytes)
+    except ValueError as error:
+        print(f"manifest.json is not readable JSON: {error}", file=sys.stderr)
+        return 1
 
+    # Read rather than indexed. A manifest missing one of these would otherwise
+    # raise a KeyError, and a traceback is not a verdict. MANIFEST_SHA256 above
+    # already rejects any manifest but the pinned one, so this is unreachable
+    # unless the pin is edited; it costs three lines and removes the shape.
+    missing_keys = [key for key in ("files_sha256", "calls_sha256", "call_count") if key not in manifest]
+    if missing_keys:
+        print(f"manifest.json has no {', '.join(missing_keys)}", file=sys.stderr)
+        return 1
     files = manifest["files_sha256"]
+    if "calls.json" not in files:
+        print("manifest.json pins no digest for calls.json, so its contents cannot be checked", file=sys.stderr)
+        return 1
+
     # Staged beside the destination, so the swap below is a rename on one
     # filesystem rather than a copy that can fail half way.
     staging = Path(tempfile.mkdtemp(prefix=f".{TASK}-evidence-", dir=dest.parent))
     try:
         (staging / "manifest.json").write_bytes(manifest_bytes)
         for relative_path, expected in sorted(files.items()):
-            payload = download(relative_path)
+            try:
+                payload = download(relative_path)
+            except RuntimeError as error:
+                # An absent or unreachable file is a FAILURE, never a skip: a
+                # partial tree scores as though it were whole otherwise.
+                print(f"{INCOMPLETE}: {error}", file=sys.stderr)
+                return 1
             actual = digest(payload)
             if actual != expected:
                 print(f"{relative_path} digest is {actual}, expected {expected}", file=sys.stderr)

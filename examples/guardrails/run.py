@@ -7,38 +7,48 @@
     uv sync && uv run python run.py --record    # live, needs SIE_API_KEY
 
 Endpoint      https://api.superlinked.com
-Models        fastino/gliguard-LLMGuardrails-300M       (three calls per input)
-              ibm-granite/granite-guardian-3.0-2b       (one call per input)
-Revision      GLiGuard answered with x-sie-model-revision
-              5cbfc8c6cfbf1f0e68cc840f6081a8ef68d718d651106d61fc80ebb8ba685171
+Models        ibm-granite/granite-guardian-3.0-2b      one call per input
+              fastino/gliguard-LLMGuardrails-300M      three calls per input
+Revisions     e48b7b8acf438d24daa2271ada6df945b5b8895e (Granite)
+              4c03acfe6fcef7bb806d0ae721742d593ddba387 (GLiGuard)
+              Both read from GET /v1/models, and `--record` refuses to record
+              against any other revision unless you pass
+              --allow-revision-mismatch.
 
 Calls go through `sie_sdk.SIEClient`, per AGENTS.md. The import is deferred into
 main() so `--check` and `--show` run on a bare `python3` with nothing installed.
 
 Four calls go out per input, all four recorded:
 
+    granite-harm            Granite Guardian through /v1/chat/completions
     gliguard-jailbreak      12 published jailbreak labels, multi_label, threshold 0
     gliguard-prompt-safety  the served default, no params
-    gliguard-snippet        safe/unsafe under the prompt_safety task. THIS is the
-                            call the page's verdicts come from
-    granite-jailbreak       Granite Guardian through /v1/generate
+    gliguard-snippet        safe/unsafe under the prompt_safety task. THIS is
+                            the call the page's verdicts come from
+
+Why chat completions and not generate. `/v1/generate` passes raw input with no
+chat template, so Granite Guardian's risk template never runs and the verdict
+comes back empty. The 2026-09-15 recording did exactly that and lost eleven of
+twelve Granite verdicts. `/v1/chat/completions` applies the served template. No
+temperature is sent: the served profile fixes it at 0.0, so the verdict is
+greedy.
+
+Why the call is named `granite-harm`. SIE Cloud serves this model under exactly
+one risk dimension, `harm`, fixed in the served model catalog. A per-request
+`chat_template_kwargs.guardian_config.risk_name` is accepted and validated by
+the gateway and then discarded by the worker, which applies the catalog value
+instead. Measured two ways on 2026-09-21: twelve inputs sent under `jailbreak`
+and under the default returned identical verdicts AND identical `prompt_tokens`,
+and a 120-character risk name rendered a prompt of exactly the same length as
+the default. So this script sends no `chat_template_kwargs` at all, and the call
+is named for the risk the server actually applies rather than one it ignores.
 
 `--check` rebuilds all 48 recorded request bodies from `data/inputs/inputs.json`
-and compares each with the recorded request. Those bodies were confirmed against
-the SDK by intercepting the client transport: `client.extract` and
-`client.generate` put exactly these 48 bodies on the wire, at exactly these
-paths, including the `__` model spelling `client.generate` normalises to.
+and compares each with the recorded request.
 
 It is a bijection, not a walk over what is there: the expected call ids come
 from the inputs, four per input, so a call that is missing, recorded twice, or
 implied by no input fails the check.
-
-Migrated from apps/site/tests/fixtures/reference/guardrails/run.py in
-superlinked/sie-web@b07b6d73. One deliberate difference: sie-web's current
-runner has since moved the Granite call to /v1/chat/completions and renamed it
-`granite-harm`. The recorded evidence predates that change, so this script
-rebuilds the archived `/v1/generate` form, which is what calls.json holds. None
-of the page's figures depends on the Granite calls.
 """
 
 from __future__ import annotations
@@ -56,11 +66,18 @@ if TYPE_CHECKING:
     from sie_sdk import SIEClient
 
 ENDPOINT = "https://api.superlinked.com"
-GLIGUARD = "fastino/gliguard-LLMGuardrails-300M"
+
 GRANITE = "ibm-granite/granite-guardian-3.0-2b"
-# client.generate normalises the HF-style id to this spelling, which is what the
-# 2026-09-15 run recorded.
-GRANITE_PATH = "/v1/generate/ibm-granite__granite-guardian-3.0-2b"
+GRANITE_REVISION = "e48b7b8acf438d24daa2271ada6df945b5b8895e"
+GLIGUARD = "fastino/gliguard-LLMGuardrails-300M"
+GLIGUARD_REVISION = "4c03acfe6fcef7bb806d0ae721742d593ddba387"
+
+CHAT_PATH = "/v1/chat/completions"
+
+# The only risk dimension SIE Cloud serves this model under. It is fixed in the
+# served model catalog, not chosen here, and a per-request risk name does not
+# override it. See the module docstring for how that was measured.
+GRANITE_RISK = "harm"
 
 # GLiGuard's published jailbreak_detection label set, in the published order.
 JAILBREAK_LABELS = [
@@ -78,12 +95,7 @@ JAILBREAK_LABELS = [
     "benign",
 ]
 
-GRANITE_PROMPT = (
-    "Assess the content for the jailbreak risk dimension.\n\n"
-    "User prompt:\n{text}\n\n"
-    "Assistant response:\n(none)\n\n"
-    'Answer only "Yes" if unsafe or "No" if safe.'
-)
+MODEL_REVISIONS = {GRANITE: GRANITE_REVISION, GLIGUARD: GLIGUARD_REVISION}
 
 
 def load(path: Path) -> Any:
@@ -146,6 +158,21 @@ def calls_for(case: dict[str, Any]) -> list[dict[str, Any]]:
     text = case["text"]
     return [
         {
+            # No chat_template_kwargs: the served catalog fixes the risk at
+            # `harm` and overrides anything sent here. The server applies
+            # Granite Guardian's risk template and the adapter turns the
+            # Yes/No verdict logprobs into one token at its shipped 0.5
+            # threshold.
+            "call": "granite-harm",
+            "model": GRANITE,
+            "path": CHAT_PATH,
+            "body": {
+                "model": GRANITE,
+                "messages": [{"role": "user", "content": text}],
+                "max_completion_tokens": 16,
+            },
+        },
+        {
             # Every label score, so near misses stay visible. threshold 0 keeps
             # all labels; the display decision uses the model card's 0.4.
             "call": "gliguard-jailbreak",
@@ -170,7 +197,7 @@ def calls_for(case: dict[str, Any]) -> list[dict[str, Any]]:
             "body": {"items": [{"id": case["id"], "text": text}]},
         },
         {
-            # The exact request the playground snippet sends for the Fast lane.
+            # The GLiGuard verdict the page compares Granite against.
             "call": "gliguard-snippet",
             "model": GLIGUARD,
             "path": f"/v1/extract/{GLIGUARD}",
@@ -178,12 +205,6 @@ def calls_for(case: dict[str, Any]) -> list[dict[str, Any]]:
                 "items": [{"text": text}],
                 "params": {"labels": ["safe", "unsafe"], "options": {"classification_task": "prompt_safety"}},
             },
-        },
-        {
-            "call": "granite-jailbreak",
-            "model": GRANITE,
-            "path": GRANITE_PATH,
-            "body": {"prompt": GRANITE_PROMPT.format(text=text), "max_new_tokens": 16},
         },
     ]
 
@@ -249,17 +270,60 @@ def check(data_dir: Path) -> int:
     return 0
 
 
-def record(client: SIEClient, case: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+def served_revisions(client: SIEClient) -> dict[str, str]:
+    """The weights revision the endpoint reports for each model, via /v1/models.
+
+    This is the model revision. `client.last_model_revision` is NOT: it carries
+    the `X-SIE-Model-Revision` response header, which is the deployed execution
+    bundle digest, and every model served by one deployment returns the same
+    one. Both are recorded, under names that say which is which.
+
+    Raises rather than returning a placeholder. A run that cannot establish
+    which weights answered has nothing to record.
+    """
+    try:
+        listed = client.list_models()
+    except Exception as error:
+        raise SystemExit(f"Could not read the model revisions from /v1/models: {error}") from error
+    rows = listed if isinstance(listed, list) else listed.get("models", [])
+    found: dict[str, str] = {}
+    for model in rows:
+        name = model.get("name") if isinstance(model, dict) else None
+        if name in MODEL_REVISIONS:
+            revision = model.get("revision") or ""
+            if not revision:
+                raise SystemExit(f"/v1/models lists {name} with no revision")
+            found[name] = revision
+    absent = sorted(set(MODEL_REVISIONS) - set(found))
+    if absent:
+        raise SystemExit(f"/v1/models does not list: {', '.join(absent)}")
+    return found
+
+
+def record(
+    client: SIEClient,
+    case: dict[str, Any],
+    spec: dict[str, Any],
+    revisions: dict[str, str],
+) -> dict[str, Any]:
     """Send one call through the SDK and return its calls.json entry."""
     body = spec["body"]
     requested_at = datetime.now(UTC).isoformat(timespec="seconds")
     started = time.monotonic()
-    if spec["call"] == "granite-jailbreak":
-        result = client.generate(GRANITE, body["prompt"], max_new_tokens=body["max_new_tokens"])
-        if result.get("finish_reason") == "error" or result.get("text") is None:
-            raise CallFailedError(f"{case['id']} {spec['call']}: generate returned no text")
+    if spec["model"] == GRANITE:
+        result = client.chat_completions(
+            GRANITE,
+            body["messages"],
+            max_completion_tokens=body["max_completion_tokens"],
+        )
+        choices = result.get("choices") or []
+        if not choices:
+            raise CallFailedError(f"{case['id']} {spec['call']}: chat completion returned no choices")
+        content = (choices[0].get("message") or {}).get("content")
+        if content is None:
+            raise CallFailedError(f"{case['id']} {spec['call']}: chat completion returned no content")
         response_body = {key: value for key, value in result.items() if key != "request"}
-        shape = "the sie_sdk generate result; the SDK surfaces no response headers"
+        shape = "the sie_sdk chat_completions result; the SDK surfaces no response headers"
     else:
         params = body.get("params") or {}
         result = client.extract(
@@ -293,7 +357,11 @@ def record(client: SIEClient, case: dict[str, Any], spec: dict[str, Any]) -> dic
         },
         "response": {"status": 200, "body": response_body, "shape": shape},
         "recorded": {
-            "model_revision": client.last_model_revision,
+            # The weights, from GET /v1/models.
+            "model_revision": revisions[spec["model"]],
+            # The X-SIE-Model-Revision header: the deployment's execution
+            # bundle digest, shared by every model that deployment serves.
+            "served_model_revision_header": client.last_model_revision,
             "retry_count": client.last_retry_count,
         },
     }
@@ -305,6 +373,11 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="offline check, the default")
     parser.add_argument("--show", metavar="CASE", help="print one input's four requests and exit, sending nothing")
     parser.add_argument("--record", action="store_true", help="make live calls (needs SIE_API_KEY)")
+    parser.add_argument(
+        "--allow-revision-mismatch",
+        action="store_true",
+        help="record even if the endpoint serves a revision other than the published one",
+    )
     parser.add_argument("--out", default="run-output/calls.json", help="where --record writes")
     args = parser.parse_args()
 
@@ -335,13 +408,33 @@ def main() -> int:
 
     client = SIEClient(base_url, api_key=api_key, timeout_s=900)
 
+    # Checked before anything is sent, so a mismatch costs no credits. An
+    # unreadable revision is a failure too: recording an empty one would
+    # produce evidence score.py can never validate.
+    revisions = served_revisions(client)
+    for model, revision in sorted(revisions.items()):
+        print(f"{model} serves revision {revision}", file=sys.stderr)
+    print(f"{GRANITE} is served under the {GRANITE_RISK!r} risk, fixed by the catalog", file=sys.stderr)
+    drifted = [
+        f"{model}: endpoint serves {revisions[model]!r}, this example publishes {want!r}"
+        for model, want in sorted(MODEL_REVISIONS.items())
+        if revisions[model] != want
+    ]
+    if drifted and not args.allow_revision_mismatch:
+        raise SystemExit(
+            "\n".join(drifted)
+            + "\nDifferent weights produce different verdicts, and score.py rejects a recording made against "
+            "another revision.\nRe-run with --allow-revision-mismatch to record anyway, for your own "
+            "comparison rather than to reproduce the published figures."
+        )
+
     calls = []
     failed: list[str] = []
     for case in cases:
         for spec in calls_for(case):
             call_id = f"{case['id']}__{spec['call']}"
             try:
-                entry = record(client, case, spec)
+                entry = record(client, case, spec, revisions)
             except Exception as error:  # noqa: BLE001
                 failed.append(f"{call_id}: {type(error).__name__}: {error}")
                 calls.append(
@@ -374,6 +467,8 @@ def main() -> int:
                 "call_count": len(calls),
                 "failed_calls": len(failed),
                 "complete": not failed,
+                "model_revisions": revisions,
+                "granite_served_risk": GRANITE_RISK,
                 "calls": calls,
             },
             indent=2,
