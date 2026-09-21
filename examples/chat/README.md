@@ -22,7 +22,8 @@ dataset gives you the evidence. Fetching it needs no account and no token.
 
 - Model: `Qwen/Qwen3.8-27B-FP8`
 - Endpoint: `https://api.superlinked.com/v1/chat/completions`
-- Served model revision: `8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955`
+- Model revision: `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, as `GET /v1/models` reported on 2026-09-21
+- Served deployment revision: `8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955`, the `X-SIE-Model-Revision` every recorded call carries. Models served together share this value, so it names the deployment rather than the weights.
 - SIE server version 0.7.3, recorded 2026-09-15
 
 Each answer is scored against four checks, written before the run:

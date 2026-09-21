@@ -29,7 +29,7 @@ dataset gives you the evidence. Fetching it needs no account and no token.
 
 - Model: `lightonai/GTE-ModernColBERT-v1`, 128 dimensions per token
 - Endpoint: `https://api.superlinked.com/v1/encode/lightonai%2FGTE-ModernColBERT-v1`
-- Served model revision: `10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff`, which every recorded call carries
+- Served deployment revision: `10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff`, the `X-SIE-Model-Revision` every recorded call carries. Models served together share this value, so it names the deployment rather than the weights.
 - HuggingFace revision the weights came from: `cbbe53366e564450558f5e639dd499171f127538`
 - SIE server version 0.7.3, recorded 2026-09-15
 - 16 calls: per search, the question with `is_query` true, then its four passages with `is_query` false

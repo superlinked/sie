@@ -27,7 +27,8 @@ dataset gives you the evidence. Fetching it needs no account and no token.
 
 - Model: `Snowflake/snowflake-arctic-embed-l-v2.0`, 1024-dimensional dense vectors
 - Endpoint: `https://api.superlinked.com/v1/encode/Snowflake/snowflake-arctic-embed-l-v2.0`
-- Served model revision: `10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff`
+- Model revision: `ac6544c8a46e00af67e330e85a9028c66b8cfd9a`, as `GET /v1/models` reported on 2026-09-21
+- Served deployment revision: `10333b84de80b402376b626eb25366fb081d3faeb893eb4b01cf32e8c27e4aff`, the `X-SIE-Model-Revision` every recorded call carries. Models served together share this value, so it names the deployment rather than the weights.
 - SIE server version 0.7.3, recorded 2026-09-15
 - 12 calls: the 253 passages in batches of 24, then all 12 questions in one call
 
