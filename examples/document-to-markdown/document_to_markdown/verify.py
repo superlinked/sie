@@ -33,7 +33,7 @@ from typing import Any
 from rich.console import Console
 
 from document_to_markdown.canonical import canonical_sha256
-from document_to_markdown.config import PDF_DIR, ROOT
+from document_to_markdown.config import PDF_DIR, ROOT, is_fetched_bundle
 
 console = Console()
 
@@ -74,12 +74,17 @@ def sources_manifest_for(run_dir: Path) -> Path:
 
     A fixed path would check a local run against somebody else's provenance,
     which is the same shape as the duplicate-slug problem below: two checks
-    reading rows that were never about the same file. When neither exists the
-    fallback is returned and its presence check fails, so a missing manifest is
-    a failure rather than a skipped check.
+    reading rows that were never about the same file.
+
+    Which bundle this is decides the answer, never whether the file happens to
+    be there. A fetched bundle missing its ``inputs/sources.json`` gets that
+    path back regardless, so the presence check fails; falling back would let
+    whatever PDFs are sitting in ``pdfs/`` satisfy the provenance checks for a
+    different set of artifacts, which is the failure this join exists to
+    prevent. A local bundle with no PDF manifest fails the same way.
     """
     bundled = run_dir / "inputs" / "sources.json"
-    return bundled if bundled.is_file() else PDF_DIR / "manifest.json"
+    return bundled if is_fetched_bundle(run_dir) else PDF_DIR / "manifest.json"
 
 
 def _resolve_payloads(value: Any, run_dir: Path, results: list[tuple[bool, str]]) -> Any:

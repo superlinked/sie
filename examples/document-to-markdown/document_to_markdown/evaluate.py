@@ -10,7 +10,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from document_to_markdown.config import load_config, select_documents
+from document_to_markdown.config import is_fetched_bundle, load_config, select_documents
 
 console = Console()
 
@@ -109,7 +109,7 @@ def evaluate_run(run_dir: Path, slugs: list[str], out_path: Path | None = None) 
     # the marker below: its evaluation.json is pinned by a digest the fetch
     # checked, and overwriting it would leave the bytes disagreeing with the
     # manifest. Those go to run-output/ so both copies survive to be compared.
-    fetched = (run_dir / ".sie-evidence").is_file()
+    fetched = is_fetched_bundle(run_dir)
     destination = out_path or (Path("run-output/evaluation.json") if fetched else run_dir / "evaluation.json")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
