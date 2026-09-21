@@ -32,8 +32,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+HTTP_OK = 200
 
 EXPECTED = {"cases": 10, "parsed": 10, "schema_valid": 10, "checks_passed": 91, "checks_total": 93}
 
@@ -52,6 +55,28 @@ def load(path: Path) -> Any:
     if not path.exists():
         raise SystemExit(f"{path} is missing. Run: python3 fetch.py")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def keep_all(_call: dict[str, Any]) -> bool:
+    """Every recorded call counts toward this task's figures."""
+    return True
+
+
+def scored_calls(payload: dict[str, Any], keep: Callable[[dict[str, Any]], bool]) -> list[dict[str, Any]]:
+    """The calls the figure is computed from, refusing anything that failed.
+
+    A recorder that hit an error writes the call with status "error" and sets
+    `complete` to false. Scoring such a file would turn a failed run into a
+    published number, so it stops here instead.
+    """
+    if payload.get("complete") is False:
+        failed = payload.get("failed_calls", "some")
+        raise SystemExit(f"refusing to score: {failed} calls in this calls.json failed, so it is not a complete run")
+    calls = [call for call in payload["calls"] if keep(call)]
+    broken = [call["id"] for call in calls if call.get("status") != HTTP_OK]
+    if broken:
+        raise SystemExit("refusing to score calls that did not return 200: " + ", ".join(sorted(broken)))
+    return calls
 
 
 def same_value(actual: object, expected: object) -> bool:
@@ -141,7 +166,7 @@ def main() -> int:
     cases = {case["id"]: case for case in load(data_dir / "inputs/cases.json")["cases"]}
     checks = load(data_dir / "inputs/checks.json")["cases"]
     excluded = {entry["id"] for entry in load(data_dir / "inputs/excluded.json")["excluded"]}
-    calls = [call for call in load(data_dir / "calls.json")["calls"] if call["set"] == "page"]
+    calls = scored_calls(load(data_dir / "calls.json"), lambda call: call["set"] == "page")
 
     name, module = validator()
     totals = {"cases": 0, "parsed": 0, "schema_valid": 0, "checks_passed": 0, "checks_total": 0}

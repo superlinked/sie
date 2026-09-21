@@ -54,7 +54,10 @@ python3 run.py --check   # rebuilds all 26 recorded requests from the inputs
 These three need nothing installed: they are standard library only, and none
 of them needs an API key, a Hugging Face token, any inference spend or any
 model weights. `fetch.py` pins a commit SHA, not `main`, and checks every
-downloaded file against a digest.
+downloaded file against a digest. It replaces `--dest` wholesale, so it
+refuses to touch anything without the `.sie-evidence` marker it writes, and
+it swaps the new directory in by rename rather than deleting the old one
+first.
 
 To call the API yourself. This is the only part that needs the SDK, and the
 only command here that spends anything:

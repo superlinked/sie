@@ -50,6 +50,32 @@ MODEL = "Qwen/Qwen3.8-27B-FP8"
 MAX_COMPLETION_TOKENS = 512
 
 
+class CallFailedError(Exception):
+    """A call that did not produce a usable result.
+
+    The SDK raises for a transport or HTTP failure. This covers the other
+    half: a 200 whose item carries an `error`, which must never be recorded
+    as though it were a result.
+    """
+
+
+def failure_entry(
+    call_id: str, case_id: str, model: str, path: str, body: dict[str, Any], error: BaseException
+) -> dict[str, Any]:
+    """What a failed call records. Never a status that reads as success."""
+    return {
+        "id": call_id,
+        "case": case_id,
+        "model": model,
+        "endpoint": ENDPOINT,
+        "path": path,
+        "status": "error",
+        "error": {"type": type(error).__name__, "message": str(error)},
+        "request": {"method": "POST", "endpoint": ENDPOINT, "path": path, "model": model, "body": body},
+        "response": None,
+    }
+
+
 def build_body(case: dict[str, Any]) -> dict[str, Any]:
     """The exact body the playground snippet sends for this task."""
     schema = case["schema"]
@@ -75,36 +101,63 @@ def load(path: Path) -> Any:
 
 
 def check(data_dir: Path) -> int:
+    """Compare the recorded page calls with the ones the inputs imply.
+
+    A bijection, not a walk over what happens to be there: the expected call
+    ids come from inputs/cases.json, so a call that is missing, recorded twice
+    or not derivable from any case all fail. Checking only the calls present
+    would pass a calls.json with one of them deleted.
+    """
     cases = {case["id"]: case for case in load(data_dir / "inputs/cases.json")["cases"]}
     calls = load(data_dir / "calls.json")["calls"]
 
-    rebuilt = 0
-    mismatched: list[str] = []
+    expected = {f"page/{case_id}" for case_id in cases}
+
+    recorded: dict[str, dict[str, Any]] = {}
+    duplicates: list[str] = []
     not_checked: list[str] = []
     for call in calls:
         if call["set"] != "page":
             not_checked.append(call["id"])
             continue
-        case = cases.get(call["case"])
-        if case is None:
-            mismatched.append(f"{call['id']}: no case in inputs/cases.json")
+        if call["id"] in recorded:
+            duplicates.append(call["id"])
             continue
+        recorded[call["id"]] = call
+
+    missing = sorted(expected - set(recorded))
+    unexpected = sorted(set(recorded) - expected)
+
+    rebuilt = 0
+    mismatched: list[str] = []
+    for call_id in sorted(expected & set(recorded)):
+        call = recorded[call_id]
+        case = cases[call["case"]]
         if build_body(case) != call["request"]["body"]:
-            mismatched.append(f"{call['id']}: rebuilt body differs from the recorded body")
+            mismatched.append(f"{call_id}: rebuilt body differs from the recorded body")
         elif call["path"] != PATH:
-            mismatched.append(f"{call['id']}: path {call['path']} differs from {PATH}")
+            mismatched.append(f"{call_id}: path {call['path']} differs from {PATH}")
         else:
             rebuilt += 1
 
     print(f"{rebuilt} page requests rebuilt from inputs and matched the recorded request")
+    print(f"{len(expected)} calls expected from inputs/cases.json, {len(recorded)} recorded in the page set")
     if not_checked:
         print(
             f"{len(not_checked)} calls NOT checked: archived diagnostics sweeps "
             "written by earlier runner revisions, which this script does not rebuild"
         )
+    for call_id in missing:
+        print(f"MISSING {call_id}: expected from the inputs, absent from calls.json", file=sys.stderr)
+    for call_id in duplicates:
+        print(f"DUPLICATE {call_id}: recorded more than once", file=sys.stderr)
+    for call_id in unexpected:
+        print(f"UNEXPECTED {call_id}: recorded but no case in inputs/cases.json implies it", file=sys.stderr)
     for line in mismatched:
         print(f"MISMATCH {line}", file=sys.stderr)
-    return 1 if mismatched else 0
+    if missing or duplicates or unexpected or mismatched:
+        return 1
+    return 0
 
 
 def record(client: SIEClient, case: dict[str, Any]) -> dict[str, Any]:
@@ -119,6 +172,10 @@ def record(client: SIEClient, case: dict[str, Any]) -> dict[str, Any]:
         response_format=body["response_format"],
     )
     latency_ms = round((time.monotonic() - started) * 1000, 1)
+    # A 200 is not a result. Refuse anything without a usable message.
+    choices = completion.get("choices") or []
+    if not choices or not (choices[0].get("message") or {}).get("content"):
+        raise CallFailedError(f"{case['id']}: response carried no assistant message")
     return {
         "id": f"page/{case['id']}",
         "set": "page",
@@ -175,8 +232,15 @@ def main() -> int:
     client = SIEClient(base_url, api_key=api_key, timeout_s=900)
 
     calls = []
+    failed: list[str] = []
     for case in cases:
-        entry = record(client, case)
+        try:
+            entry = record(client, case)
+        except Exception as error:  # noqa: BLE001
+            failed.append(f"page/{case['id']}: {type(error).__name__}: {error}")
+            calls.append(failure_entry(f"page/{case['id']}", case["id"], MODEL, PATH, build_body(case), error))
+            print(f"{case['id']}: FAILED {type(error).__name__}", file=sys.stderr)
+            continue
         calls.append(entry)
         print(f"{case['id']}: {entry['timing']['latency_ms']:.0f}ms", file=sys.stderr)
 
@@ -187,10 +251,27 @@ def main() -> int:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
-        json.dumps({"task": "structured-output", "call_count": len(calls), "calls": calls}, indent=2) + "\n",
+        json.dumps(
+            {
+                "task": "structured-output",
+                "call_count": len(calls),
+                "failed_calls": len(failed),
+                "complete": not failed,
+                "calls": calls,
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     print(f"wrote {out_path}")
+    if failed:
+        # A run that failed must not look like a run that succeeded.
+        print(f"{len(failed)} of {len(calls)} calls FAILED:", file=sys.stderr)
+        for line in failed:
+            print(f"  {line}", file=sys.stderr)
+        print(f'{out_path} records them with status "error" and is not a complete run', file=sys.stderr)
+        return 1
     return 0
 
 

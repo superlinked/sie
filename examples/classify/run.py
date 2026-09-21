@@ -77,6 +77,32 @@ def load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+class CallFailedError(Exception):
+    """A call that did not produce a usable result.
+
+    The SDK raises for a transport or HTTP failure. This covers the other
+    half: a 200 whose item carries an `error`, which must never be recorded
+    as though it were a result.
+    """
+
+
+def failure_entry(
+    call_id: str, case_id: str, model: str, path: str, body: dict[str, Any], error: BaseException
+) -> dict[str, Any]:
+    """What a failed call records. Never a status that reads as success."""
+    return {
+        "id": call_id,
+        "case": case_id,
+        "model": model,
+        "endpoint": ENDPOINT,
+        "path": path,
+        "status": "error",
+        "error": {"type": type(error).__name__, "message": str(error)},
+        "request": {"method": "POST", "endpoint": ENDPOINT, "path": path, "model": model, "body": body},
+        "response": None,
+    }
+
+
 def labels_for(case_file: dict[str, Any], definitions: bool) -> list[str]:
     if definitions:
         return [entry["label"] for entry in case_file["definition_labels"]]
@@ -88,41 +114,62 @@ def build_body(text: str, labels: list[str]) -> dict[str, Any]:
 
 
 def check(data_dir: Path) -> int:
+    """Compare the recorded calls with the ones the inputs imply.
+
+    A bijection, not a walk over what happens to be there: the expected call
+    ids come from the case files, one per set per case, so a call that is
+    missing, recorded twice or not derivable from any case all fail. Checking
+    only the calls present would pass a calls.json with one of them deleted.
+    """
     calls = load(data_dir / "calls.json")["calls"]
+
+    expected: dict[str, tuple[dict[str, Any], list[str]]] = {}
+    for set_name, (folder, definitions) in SETS.items():
+        case_file = load(data_dir / f"inputs/{folder}/cases.json")
+        labels = labels_for(case_file, definitions)
+        for case in case_file["cases"]:
+            expected[f"{set_name}/{case['slug']}"] = (case, labels)
+
+    recorded: dict[str, dict[str, Any]] = {}
+    duplicates: list[str] = []
+    for call in calls:
+        if call["id"] in recorded:
+            duplicates.append(call["id"])
+            continue
+        recorded[call["id"]] = call
+
+    missing = sorted(set(expected) - set(recorded))
+    unexpected = sorted(set(recorded) - set(expected))
+
     rebuilt = 0
     mismatched: list[str] = []
-    unknown: list[str] = []
-
     if urllib.parse.unquote(RECORDED_PATH) != PATH:
         mismatched.append(f"recorded path {RECORDED_PATH} does not unquote to {PATH}")
 
-    for set_name, (folder, definitions) in SETS.items():
-        case_file = load(data_dir / f"inputs/{folder}/cases.json")
-        by_slug = {case["slug"]: case for case in case_file["cases"]}
-        labels = labels_for(case_file, definitions)
-        for call in calls:
-            if call["set"] != set_name:
-                continue
-            case = by_slug.get(call["case"])
-            if case is None:
-                mismatched.append(f"{call['id']}: no case with that slug in inputs/{folder}/cases.json")
-                continue
-            if build_body(case["text"], labels) != call["request"]["body"]:
-                mismatched.append(f"{call['id']}: rebuilt body differs from the recorded body")
-            elif urllib.parse.unquote(call["path"]) != PATH:
-                mismatched.append(f"{call['id']}: path {call['path']} is not {PATH}")
-            else:
-                rebuilt += 1
-
-    unknown = [call["id"] for call in calls if call["set"] not in SETS]
+    for call_id in sorted(set(expected) & set(recorded)):
+        call = recorded[call_id]
+        case, labels = expected[call_id]
+        if build_body(case["text"], labels) != call["request"]["body"]:
+            mismatched.append(f"{call_id}: rebuilt body differs from the recorded body")
+        elif urllib.parse.unquote(call["path"]) != PATH:
+            mismatched.append(f"{call_id}: path {call['path']} is not {PATH}")
+        else:
+            rebuilt += 1
 
     print(f"{rebuilt} of {len(calls)} recorded requests rebuilt from the inputs and matched")
+    print(f"{len(expected)} calls expected across {len(SETS)} sets, {len(recorded)} recorded")
     print(f"recorded path {RECORDED_PATH} unquotes to {PATH}, which is what the SDK sends")
-    for line in unknown:
-        print(f"NOT CHECKED {line}: unknown set", file=sys.stderr)
+    for call_id in missing:
+        print(f"MISSING {call_id}: expected from the inputs, absent from calls.json", file=sys.stderr)
+    for call_id in duplicates:
+        print(f"DUPLICATE {call_id}: recorded more than once", file=sys.stderr)
+    for call_id in unexpected:
+        print(f"UNEXPECTED {call_id}: recorded but no case in inputs/ implies it", file=sys.stderr)
     for line in mismatched:
         print(f"MISMATCH {line}", file=sys.stderr)
-    return 1 if mismatched or unknown or rebuilt != len(calls) else 0
+    if missing or duplicates or unexpected or mismatched:
+        return 1
+    return 0
 
 
 def record(client: SIEClient, set_name: str, slug: str, text: str, labels: list[str]) -> dict[str, Any]:
@@ -132,6 +179,11 @@ def record(client: SIEClient, set_name: str, slug: str, text: str, labels: list[
     started = time.monotonic()
     result = client.extract(MODEL, body["items"][0], labels=labels)
     latency_ms = round((time.monotonic() - started) * 1000, 1)
+    # A 200 can still carry a per-item failure. Never record one as a result.
+    if result.get("error"):
+        raise CallFailedError(f"{slug}: item error {result['error']}")
+    if not result.get("classifications"):
+        raise CallFailedError(f"{slug}: response carried no classifications")
     # Rebuild the envelope the archived run recorded, so score.py reads a fresh
     # run the same way. The SDK returns the per-item result, not the server's
     # envelope, and surfaces no response headers; both are said so below.
@@ -196,8 +248,16 @@ def main() -> int:
     case_file = load(data_dir / f"inputs/{folder}/cases.json")
     labels = labels_for(case_file, definitions)
     calls = []
+    failed: list[str] = []
     for case in case_file["cases"]:
-        entry = record(client, args.set, case["slug"], case["text"], labels)
+        call_id = f"{args.set}/{case['slug']}"
+        try:
+            entry = record(client, args.set, case["slug"], case["text"], labels)
+        except Exception as error:  # noqa: BLE001
+            failed.append(f"{call_id}: {type(error).__name__}: {error}")
+            calls.append(failure_entry(call_id, case["slug"], MODEL, PATH, build_body(case["text"], labels), error))
+            print(f"{case['slug']}: FAILED {type(error).__name__}", file=sys.stderr)
+            continue
         calls.append(entry)
         print(f"{case['slug']}: {entry['timing']['latency_ms']:.0f}ms", file=sys.stderr)
 
@@ -208,10 +268,27 @@ def main() -> int:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
-        json.dumps({"task": "classify", "call_count": len(calls), "calls": calls}, indent=2) + "\n",
+        json.dumps(
+            {
+                "task": "classify",
+                "call_count": len(calls),
+                "failed_calls": len(failed),
+                "complete": not failed,
+                "calls": calls,
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     print(f"wrote {out_path}")
+    if failed:
+        # A run that failed must not look like a run that succeeded.
+        print(f"{len(failed)} of {len(calls)} calls FAILED:", file=sys.stderr)
+        for line in failed:
+            print(f"  {line}", file=sys.stderr)
+        print(f'{out_path} records them with status "error" and is not a complete run', file=sys.stderr)
+        return 1
     return 0
 
 

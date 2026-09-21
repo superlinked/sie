@@ -41,8 +41,11 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+HTTP_OK = 200
 
 MODEL_SET = "urchade__gliner_multi_pii-v1"
 
@@ -111,6 +114,28 @@ def load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def keep_all(_call: dict[str, Any]) -> bool:
+    """Every recorded call counts toward this task's figures."""
+    return True
+
+
+def scored_calls(payload: dict[str, Any], keep: Callable[[dict[str, Any]], bool]) -> list[dict[str, Any]]:
+    """The calls the figure is computed from, refusing anything that failed.
+
+    A recorder that hit an error writes the call with status "error" and sets
+    `complete` to false. Scoring such a file would turn a failed run into a
+    published number, so it stops here instead.
+    """
+    if payload.get("complete") is False:
+        failed = payload.get("failed_calls", "some")
+        raise SystemExit(f"refusing to score: {failed} calls in this calls.json failed, so it is not a complete run")
+    calls = [call for call in payload["calls"] if keep(call)]
+    broken = [call["id"] for call in calls if call.get("status") != HTTP_OK]
+    if broken:
+        raise SystemExit("refusing to score calls that did not return 200: " + ", ".join(sorted(broken)))
+    return calls
+
+
 def covered(entities: list[dict[str, Any]], gold: dict[str, Any]) -> bool:
     """True when the union of returned spans covers every character of gold."""
     overlaps = sorted(
@@ -140,7 +165,7 @@ def main() -> int:
 
     cases = {case["id"]: case for case in load(data_dir / "inputs/cases.json")["cases"]}
     entities: dict[str, list[dict[str, Any]]] = {}
-    for call in load(data_dir / "calls.json")["calls"]:
+    for call in scored_calls(load(data_dir / "calls.json"), lambda call: call["set"] == MODEL_SET):
         if call["set"] != MODEL_SET:
             continue
         if call["case"] in entities:
