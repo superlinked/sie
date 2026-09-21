@@ -34,8 +34,8 @@ from pathlib import Path
 
 DATASET = "superlinked/sie-task-evidence"
 TASK = "image-search"
-REVISION = "f2878c132ea44c6ab3ece4bbc226739d939dd249"
-MANIFEST_SHA256 = "49c650191eb426a50e12a63a4dffc7c3a1417e09375d6ccf7b6e586fffd1a260"
+REVISION = "c28bc851802d1c8728d728c24a50e94a76299a04"
+MANIFEST_SHA256 = "0b89072bd90eb1b903fd9730253b89083f2b3e0193eb5d7f309c8bfbf568d2f8"
 
 BASE = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}/{TASK}"
 HTTP_OK = 200

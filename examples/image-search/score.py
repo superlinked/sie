@@ -42,12 +42,12 @@ import catalogue
 # something the recording cannot move. Editing evidence/ alone will not satisfy
 # this. Filled in from the run; `None` means "not published".
 PUBLISHED: dict[str, int] = {
-    "images": 52,
+    "images": 50,
     "requests": 24,
     "first/category": 2,
-    "first/colour-category": 9,
+    "first/colour-category": 7,
     "first/material-category": 6,
-    "first/full": 15,
+    "first/full": 13,
 }
 
 KIND_ORDER = ("full", "wrong-colour", "wrong-material", "wrong-category", "one-attribute", "unrelated")

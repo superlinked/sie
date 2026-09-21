@@ -4,9 +4,16 @@ The runnable example behind [superlinked.com/image-search](https://superlinked.c
 
 ## What this shows
 
-A catalogue of public-domain photographs from the Metropolitan Museum of Art,
-encoded by `google/siglip-so400m-patch14-384`, ranked against text requests that
+50 public-domain photographs from the Metropolitan Museum of Art, encoded by
+`google/siglip-so400m-patch14-384` and ranked against 24 text requests that
 name a colour, a material and an object.
+
+```
+the object                       2 of 24   median rank 5.5
+colour and object                7 of 24   median rank 3
+material and object              6 of 24   median rank 2
+colour, material and object     13 of 24   median rank 1
+```
 
 **The catalogue carries no colour.** Every photograph is a museum record with an
 `objectName` and a `medium`, and nothing in either says blue or brown. The
@@ -27,6 +34,24 @@ a blue porcelain vase
 
 Scoring compares where the photograph matching all three lands under each form.
 That makes "the whole request wins" a measurement rather than an assertion.
+
+## Where the attributes come from, exactly
+
+`material` is the first vocabulary word that appears LITERALLY in the Met's own
+`medium`, with `stoneware` checked before `porcelain` so a "Porcelaneous
+stoneware" reads as the stoneware the Met calls it. A photograph whose `medium`
+names none of the vocabulary is dropped rather than inferred.
+
+That rule is stricter than the one this example started with, and it cost the
+headline figure. An earlier catalogue labelled six stoneware pieces
+`earthenware` and two `Copper alloy` plates `brass`, and scored 15 of 24 on the
+complete request. This one scores 13. The lower number is the published one,
+because the higher one rested on eight labels the museum record does not
+support.
+
+`category` is the Met's `objectName` through a synonym table: its Dish is a
+plate, its Ewer and Pitcher are jugs, its Beaker is a cup, its Tea caddy is a
+box. Both values are in `inputs/catalogue.json`.
 
 ## Why the catalogue is built the way it is
 
