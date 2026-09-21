@@ -1,7 +1,7 @@
 [project]
 name = "superlinked-sie-image-search-example"
 version = "0.1.0"
-description = "Rank photographs against a text query with SIE Cloud"
+description = "Search a picture catalogue with words it was never tagged with"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "sie-sdk>=0.6.23,<0.8.0",

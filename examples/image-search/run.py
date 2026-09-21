@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
-"""Encode six photographs and one text query with SIE Cloud.
+"""Encode the catalogue and every request form with SIE Cloud.
 
-    uv run python run.py              # both calls, writes run-output/
-    python3 run.py --show images      # print a request body, no network
-    python3 run.py --show query
-
-Two calls, the call the /image-search task page shows:
+    uv run python run.py              # every call, writes run-output/
+    python3 run.py --show images-01   # print a request body, no network
+    python3 run.py --show queries
 
     POST https://api.superlinked.com/v1/encode/google/siglip-so400m-patch14-384
-    images: {"items": [...6 photographs...], "params": {"output_types": ["dense"]}}
-    query:  {"items": [{"text": "a red leather handbag"}], "params": {...}}
 
 SigLIP puts text and pixels in one 1152-dimensional space, so ranking is a
-cosine between what the two calls return. There is no reranker and no caption
-step in between.
+cosine between what the image calls and the query call return. There is no
+reranker and no caption step in between.
 
 Results go to --output as a manifest.json and a calls.json in the dataset's own
 shape, one entry per call holding the request, the response, the HTTP status,
@@ -36,7 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import ranking
+import catalogue
 
 HERE = Path(__file__).resolve().parent
 
@@ -50,7 +46,7 @@ def dense_items(results: list[Any], body: dict[str, Any]) -> list[dict[str, Any]
     if len(results) != len(body["items"]):
         raise SystemExit(f"Sent {len(body['items'])} items and got {len(results)} back")
     items = []
-    for sent, result in zip(body["items"], results):
+    for sent, result in zip(body["items"], results, strict=True):
         if result.get("id") != sent["id"]:
             raise SystemExit(f"Response item id {result.get('id')!r} does not match request item {sent['id']!r}")
         vector = result["dense"]
@@ -68,39 +64,39 @@ def send(client: Any, name: str, body: dict[str, Any], records: list[dict[str, A
     """Send one encode call and return its calls.json entry.
 
     The recorded request body names each image by file and digest. What goes on
-    the wire is the file's bytes: the SDK transports already encoded PNG and
-    JPEG unchanged, so the digest in the record is the digest of what SIE read.
+    the wire is the file's bytes: the SDK transports already encoded JPEG bytes
+    unchanged, so the digest in the record is the digest of what SIE read.
     """
     by_id = {record["id"]: record for record in records}
     items: list[dict[str, Any]] = []
     for item in body["items"]:
         if "images" in item:
-            path = ranking.INPUTS / by_id[item["id"]]["file"]
+            path = catalogue.INPUTS / by_id[item["id"]]["file"]
             items.append({"id": item["id"], "images": [path.read_bytes()]})
         else:
             items.append({"id": item["id"], "text": item["text"]})
 
     requested_at = datetime.now(UTC).isoformat(timespec="seconds")
     started = time.monotonic()
-    results = client.encode(ranking.MODEL, items, output_types=list(body["params"]["output_types"]))
+    results = client.encode(catalogue.MODEL, items, output_types=list(body["params"]["output_types"]))
     elapsed_ms = round((time.monotonic() - started) * 1000, 1)
     if not isinstance(results, list):
         results = [results]
-    response = {"items": dense_items(results, body), "model": ranking.MODEL}
+    response = {"items": dense_items(results, body), "model": catalogue.MODEL}
     return {
         "slug": name,
-        "kind": "images" if name == "images" else "query",
+        "kind": "queries" if name == "queries" else "images",
         "requested_at": requested_at,
         "request": {
             "method": "POST",
             # The URL the SDK actually used, not this module's default, so a run
             # against a regional endpoint records where it really went.
-            "url": client.base_url.rstrip("/") + ranking.ENCODE_PATH,
+            "url": client.base_url.rstrip("/") + catalogue.ENCODE_PATH,
             "body": body,
         },
         "status": 200,
         "response": response,
-        "response_sha256": ranking.sha256_bytes(ranking.compact_json(response)),
+        "response_sha256": catalogue.sha256_bytes(catalogue.compact_json(response)),
         "deployment_revision": client.last_model_revision,
         "timing": {"duration_ms": elapsed_ms},
     }
@@ -112,22 +108,33 @@ def served_revision(client: Any) -> str:
     Raises rather than returning a placeholder. A run that cannot establish
     which weights answered has nothing to record.
     """
-    try:
-        listed = client.list_models()
-    except Exception as error:
-        raise SystemExit(f"Could not read the model revision from /v1/models: {error}") from error
+    # The gateway occasionally answers this with a body that is not JSON.
+    # Three tries, then fail: a run that cannot establish which weights
+    # answered has nothing to record, and a transient must not look like one.
+    listed = None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            listed = client.list_models()
+            break
+        except Exception as error:  # noqa: BLE001
+            last_error = error
+            print(f"/v1/models attempt {attempt + 1} failed: {error}", file=sys.stderr)
+            time.sleep(2 * (attempt + 1))
+    if listed is None:
+        raise SystemExit(f"Could not read the model revision from /v1/models: {last_error}")
     for model in listed if isinstance(listed, list) else listed.get("models", []):
         name = model.get("name") if isinstance(model, dict) else None
-        if name == ranking.MODEL:
+        if name == catalogue.MODEL:
             revision = model.get("revision") or ""
             if not revision:
-                raise SystemExit(f"/v1/models lists {ranking.MODEL} with no revision")
+                raise SystemExit(f"/v1/models lists {catalogue.MODEL} with no revision")
             return revision
-    raise SystemExit(f"/v1/models does not list {ranking.MODEL}")
+    raise SystemExit(f"/v1/models does not list {catalogue.MODEL}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Encode the pinned photographs and query")
+    parser = argparse.ArgumentParser(description="Encode the pinned catalogue and requests")
     parser.add_argument("--show", metavar="NAME", help="print one request body and exit, without calling anything")
     parser.add_argument(
         "--allow-revision-mismatch",
@@ -142,9 +149,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    records = ranking.load_images()
-    query = ranking.load_query()
-    bodies = ranking.bodies(records, query)
+    records = catalogue.load_catalogue()
+    queries = catalogue.load_queries()
+    bodies = catalogue.bodies(records, queries)
 
     if args.show:
         body = bodies.get(args.show)
@@ -157,21 +164,22 @@ def main() -> int:
 
     api_key = os.environ.get("SIE_API_KEY", "").strip()
     if not api_key:
-        raise SystemExit("Set SIE_API_KEY. To check the published figure without a key, run score.py instead.")
+        raise SystemExit("Set SIE_API_KEY. To check the published figures without a key, run score.py instead.")
 
-    client = SIEClient(os.environ.get("SIE_BASE_URL", ranking.ENDPOINT), api_key=api_key, timeout_s=900)
+    client = SIEClient(os.environ.get("SIE_BASE_URL", catalogue.ENDPOINT), api_key=api_key, timeout_s=900)
     base_url = client.base_url.rstrip("/")
-    print(f"endpoint {base_url}{ranking.ENCODE_PATH}")
-    print(f"model    {ranking.MODEL}")
+    print(f"endpoint {base_url}{catalogue.ENCODE_PATH}")
+    print(f"model    {catalogue.MODEL}")
+    print(f"catalogue {len(records)} photographs, {len(queries)} requests x {len(catalogue.FORMS)} forms")
 
     # Checked before anything is encoded, so a mismatch costs no credits. An
     # unreadable revision is a failure too: recording an empty one would produce
     # evidence score.py can never validate.
     model_revision = served_revision(client)
     print(f"revision {model_revision}")
-    if model_revision != ranking.MODEL_REVISION and not args.allow_revision_mismatch:
+    if model_revision != catalogue.MODEL_REVISION and not args.allow_revision_mismatch:
         raise SystemExit(
-            f"This endpoint serves {model_revision!r} and this example publishes {ranking.MODEL_REVISION!r}.\n"
+            f"This endpoint serves {model_revision!r} and this example publishes {catalogue.MODEL_REVISION!r}.\n"
             "Different weights produce different scores, and score.py rejects a recording made against "
             "another revision.\nRe-run with --allow-revision-mismatch to record anyway, for your own "
             "comparison rather than to reproduce the published figures."
@@ -181,7 +189,7 @@ def main() -> int:
     for name, body in bodies.items():
         entry = send(client, name, body, records)
         entries.append(entry)
-        print(f"{name:<8} {len(body['items']):>2} items {entry['timing']['duration_ms']:>9.0f} ms")
+        print(f"{name:<11} {len(body['items']):>3} items {entry['timing']['duration_ms']:>9.0f} ms")
 
     # Re-read after the last call. The preflight check above proves the weights
     # were right when the run started; this proves they did not roll over while
@@ -199,8 +207,8 @@ def main() -> int:
         "task": "image-search",
         "page": "https://superlinked.com/image-search",
         "endpoint": base_url,
-        "path": ranking.ENCODE_PATH,
-        "model": ranking.MODEL,
+        "path": catalogue.ENCODE_PATH,
+        "model": catalogue.MODEL,
         # The HF revision of the checkpoint, read from GET /v1/models rather than
         # assumed. X-SIE-Model-Revision is a deployment digest that models served
         # together share, so it is recorded separately under deployment_revision
@@ -209,10 +217,12 @@ def main() -> int:
         "deployment_revision": revisions[0] if len(revisions) == 1 else revisions,
         "run_date": datetime.now(UTC).date().isoformat(),
         "recorded_by": "examples/image-search/run.py",
-        "metric": ranking.METRIC,
-        "dims": ranking.DIMS,
+        "metric": catalogue.METRIC,
+        "dims": catalogue.DIMS,
         "images": len(records),
-        "queries": 1,
+        "requests": len(queries),
+        "forms": list(catalogue.FORMS),
+        "query_items": len(catalogue.query_items(queries)),
         "calls_recorded": len(entries),
         "image_transport": (
             "raw file bytes; calls.json records each image's file name and SHA-256 "

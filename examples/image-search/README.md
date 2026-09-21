@@ -1,128 +1,126 @@
-# Find the photograph a shopper described
+# Search a picture catalogue with words it was never tagged with
+
+The runnable example behind [superlinked.com/image-search](https://superlinked.com/image-search).
 
 ## What this shows
 
-Six photographs and one line of text go to SIE Cloud as vectors in the same
-1152-dimensional space. The query is `a red leather handbag`. No captions are
-generated, no keywords are indexed and no reranker runs. A cosine over what came
-back puts the handbag first.
+A catalogue of public-domain photographs from the Metropolitan Museum of Art,
+encoded by `google/siglip-so400m-patch14-384`, ranked against text requests that
+name a colour, a material and an object.
 
-The six were chosen so that a colour match and a category match both sit in the
-set. Red shoes share the colour. A black handbag shares the category. A green
-backpack, a black camera and a blue running shoe fill out the rest. The full
-match beats every partial one.
+**The catalogue carries no colour.** Every photograph is a museum record with an
+`objectName` and a `medium`, and nothing in either says blue or brown. The
+colour written beside each photograph here is ground truth for scoring, assigned
+by looking at the picture; it is never sent to the model and never indexed. The
+model sees pixels and the request sees words, and the only thing joining them is
+that SigLIP puts both in one 1152-dimensional space.
 
-The run is already recorded. Both encode calls and the vectors they returned
-live in the public HuggingFace dataset
-[superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence),
-pinned to one revision by `fetch.py`. Download it and you can re-derive the
-published number with **no API key and no inference spend**. Those are the same
-vectors behind the figures on
-[superlinked.com/image-search](https://superlinked.com/image-search).
+Each request is written four ways, from the bare object up to all three
+attributes:
 
-You cannot verify this by cloning alone. The clone gives you the code; the
-dataset gives you the evidence. Fetching it needs no account and no token.
+```
+a vase
+a blue vase
+a porcelain vase
+a blue porcelain vase
+```
 
-- Model: `google/siglip-so400m-patch14-384`, 1152-dimensional dense vectors
-- Endpoint: `https://api.superlinked.com/v1/encode/google/siglip-so400m-patch14-384`
-- Model revision: `9fdffc58afc957d1a03a25b10dba0329ab15c2a3`
-- Recorded 2026-09-21
-- 2 calls: the six photographs in one batch, then the query
+Scoring compares where the photograph matching all three lands under each form.
+That makes "the whole request wins" a measurement rather than an assertion.
+
+## Why the catalogue is built the way it is
+
+A request only counts if first place has to be taken from a near miss. So a
+(colour, material, object) triple becomes a request only when the catalogue also
+holds a photograph matching each PAIR of the three:
+
+- the same colour and material on another object
+- the same colour and object in another material
+- the same material and object in another colour
+
+`score.py` re-checks that for every request before it derives a figure, and
+refuses the whole run if any request has lost a near miss. It also refuses a
+catalogue holding two photographs with the same triple, because then "the
+photograph matching all three" is not one photograph and no figure over it means
+anything.
 
 ## Run it
 
-Download the recorded run, then rank it. Both steps are standard library only,
-so there is nothing to install and no key to set:
+The code is in this repository. The photographs, the requests and the recorded
+responses are in the public Hugging Face dataset
+[`superlinked/sie-task-evidence`](https://huggingface.co/datasets/superlinked/sie-task-evidence),
+so a clone alone is not enough. Fetch, then score:
 
 ```sh
-python3 fetch.py
-python3 score.py
+python3 fetch.py   # downloads the pinned revision into evidence/
+python3 score.py   # reproduces every published figure offline
 ```
 
-Look at a request without sending it:
+Both are standard library only. Neither needs an API key, a Hugging Face token
+or any inference spend. `fetch.py` pins a dataset commit rather than `main`, and
+checks every file, each photograph included, against a digest from a manifest
+its own source pins.
 
-```sh
-python3 run.py --show images
-python3 run.py --show query
-```
-
-Encode it yourself, which needs a key and spends credits:
+To record against SIE Cloud yourself. This is the only part that needs the SDK,
+and the only command here that spends anything:
 
 ```sh
 uv sync
-SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
+SIE_API_KEY=... uv run python run.py
 ```
 
-## What result to expect
+`run.py` sends through `sie_sdk.SIEClient`. The import is deferred into `main()`,
+so `--show` keeps working on a bare `python3` with nothing installed.
 
-`score.py` prints the ranking and ends with:
+## How the figures are derived
+
+Two sides, two sources. The photograph each request is looking for was fixed in
+`inputs/queries.json` before any call, by a rule over the catalogue's attributes
+that reads no score. The ranking comes out of the recorded vectors in
+`calls.json`. The figures `score.py` asserts against come from a third place
+again: the page, pinned in `score.py`'s own source, so editing the fetched
+evidence alone will not satisfy it.
+
+Everything fails rather than skips. A missing file, a photograph whose bytes no
+longer match their digest, a response that does not match its
+`response_sha256`, a request the pinned inputs do not rebuild, a photograph or a
+request with no recorded vector, a vector returned twice, a declared width that
+disagrees with its own values, or a non-finite value all exit non-zero.
+
+## What is in the dataset
 
 ```
-rank     score  image
-   1     0.168  Red leather handbag <- the query's subject
-   2     0.068  Black handbag
-   3     0.067  Red shoes
-   4     0.057  Green backpack
-   5     0.028  Black camera
-   6    -0.008  Blue running shoe
-
-6 photographs, 1152-dimensional vectors, one text query
-the red leather handbag ranks first at 0.168
-the closest other photograph is the black handbag at 0.068
-a gap of 0.100, or 2.5x
+image-search/
+  inputs/catalogue.json  every photograph: its file, digest, byte length,
+                         dimensions, its colour, material and object, and the
+                         Met record each attribute came from
+  inputs/*.jpg           the photographs themselves, exactly the bytes encoded
+  inputs/queries.json    the requests, each naming a colour, a material, an
+                         object and the photograph matching all three
+  calls.json             one entry per encode call: the request, the returned
+                         vectors, the status, the served deployment revision
+                         and the round-trip time
+  manifest.json          endpoint, model and its revision, run date, and a
+                         digest for every file above
 ```
-
-Those are the figures the task page publishes. The handbag clears the field by a
-wide margin, and the two partial matches land close together well below it.
-
-`score.py` fails rather than skipping. A manifest naming a different model or a
-different model revision, an image whose bytes no longer match their digest, a
-response that does not match its `response_sha256`, a request the pinned inputs
-do not rebuild, a call nothing scores, a call whose served deployment revision
-is not the one the manifest names, an image with no recorded vector, a vector
-returned twice, a vector whose declared width disagrees with its own values, a
-non-finite value, or a ranking in any order other than the published one all
-exit non-zero.
-
-The expected order lives in `ranking.py` as `EXPECTED_ORDER`, in the committed
-source rather than in the evidence. Editing `evidence/` alone cannot satisfy it,
-because one side of that comparison is something the recording does not
-control. `MODEL_REVISION` is pinned the same way, and `run.py` checks it against
-the endpoint before encoding anything, so a run against other weights costs no
-credits and never produces evidence `score.py` would accept.
 
 ## What this does NOT establish
 
-- **Not a benchmark score.** Six photographs and one query is a demonstration,
-  not a measurement. There is no held-out set and no confidence interval here,
-  so nothing in this output supports a percentage you could quote.
-- **Not a claim about attribution.** SigLIP returns one pooled vector per
-  image. The scores say which photograph the sentence matches. They do not say
-  which pixels earned the match, and this example draws no boxes.
-- **Not a test of scale.** Six images are ranked by a Python loop. Nothing here
-  speaks to recall or index behaviour at a million images.
-- **Not evidence the set is unbiased.** The six photographs and the query were
-  chosen together, with the colour match and the category match put in on
-  purpose. It is a designed set, not a sample of a catalogue.
-- **Not bound to the website.** The same run backs the fixtures in
-  `superlinked/sie-web` under `apps/site/tests/fixtures/reference/image-search/`,
-  which is what that repository's CI checks. Nothing automatically ties the two
-  copies together, so they could drift.
+- **This is a demonstration, not a benchmark.** No figure here generalises to
+  your catalogue, and a set of this size is not a retrieval evaluation.
+- **Colour is a judgement.** Object and material come from the Met's own
+  cataloguing. Colour was assigned by looking at each photograph, and a reader
+  who disagrees with one can see the picture and say so. It is recorded per
+  photograph, with `colour_source` saying exactly that.
+- **Museum objects are not product photography.** Lighting, background and
+  framing are consistent in a way a real catalogue's are not.
+- **The displayed pictures are not the encoded ones.** The website serves
+  smaller renditions so the page stays light. The bytes SIE read are the files
+  in the dataset, and their digests are what `score.py` checks.
+- **No tamper resistance.** The digests catch a truncated or corrupted
+  download. They are not a provenance chain.
 
-## Inputs
-
-`evidence/inputs/images.json` holds the six photographs with the subject,
-author, source URL, licence and SHA-256 of each. `score.py` checks every digest
-before ranking anything. The files come from Wikimedia Commons, Unsplash and
-Flickr under public-domain, Creative Commons or Unsplash terms.
-
-`evidence/inputs/query.json` holds the one query.
-
-`ranking.py` builds the request bodies and does the cosine. `run.py` and
-`score.py` both read it from there, so the request the scorer rebuilds is the
-request the runner sends, and the scorer refuses a recording it cannot rebuild.
-
-The photographs travel as raw file bytes. SIE's SDK keeps already encoded PNG
-and JPEG unchanged on the wire, so the digest recorded in `calls.json` is the
-digest of what SIE read, and `inputs/` holds those exact bytes rather than a
-second base64 copy of them.
+sie-web keeps its own copy of these recordings under
+`apps/site/tests/fixtures/reference/image-search/`, which is what its CI tests
+read. The two copies hold the same recorded responses. Nothing binds them
+together, so they can drift.
