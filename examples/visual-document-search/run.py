@@ -103,6 +103,20 @@ def send(client: Any, slug: str, kind: str, body: dict[str, Any], payload: list[
     }
 
 
+def served_revision(client: Any) -> str:
+    """The model revision the server that just answered reports for itself."""
+    try:
+        listed = client.list_models()
+    except Exception as error:  # noqa: BLE001 - the run is still valid without it
+        print(f"could not read the model revision from /v1/models: {error}")
+        return ""
+    for model in listed if isinstance(listed, list) else listed.get("models", []):
+        name = model.get("name") if isinstance(model, dict) else None
+        if name == retrieval.MODEL:
+            return model.get("revision", "")
+    return ""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rank ViDoRe pages with ColPali on a self-hosted SIE server")
     parser.add_argument("--show", metavar="ID", help="print one query request body and exit, without calling anything")
@@ -197,6 +211,8 @@ def main() -> int:
         "endpoint": resolved,
         "path": retrieval.ENCODE_PATH,
         "model": retrieval.MODEL,
+        # Read back from the server that answered, not assumed from this file.
+        "model_revision": served_revision(client),
         "run_date": datetime.now(UTC).date().isoformat(),
         "recorded_by": "examples/visual-document-search/run.py",
         "scoring": "MaxSim over L2-normalized ColPali multivectors, as retrieval.maxsim",
