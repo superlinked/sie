@@ -66,8 +66,32 @@ def apply_checks(text: str, checks: list[dict[str, Any]]) -> list[dict[str, Any]
     return results
 
 
+def unique_by(rows: list[dict[str, Any]], key: str, what: str) -> dict[str, dict[str, Any]]:
+    """Index rows by a key, refusing duplicates.
+
+    Not a dict comprehension. A comprehension keeps the LAST row sharing a key
+    and `next()` takes the FIRST, so two rows with one id let two checks agree
+    with different data while every digest still verifies.
+    """
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row[key] in indexed:
+            raise SystemExit(f"{what} lists {row[key]!r} twice; refusing to score an ambiguous record")
+        indexed[row[key]] = row
+    return indexed
+
+
 def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dict[str, Any]) -> list[str]:
-    """Check the bytes before scoring them. Anything unreadable is a failure."""
+    """Check the bytes before scoring them. Anything unreadable is a failure.
+
+    Four checks. `inputs.json` is hashed against the digest the run recorded.
+    Every request and response record is re-digested the way the run digested
+    it. Every stored file is hashed against the digest its own entry carries.
+    And that entry digest is held against the `image_sha256` the case pinned in
+    `inputs.json`, which is the authoritative side: without it an image that
+    agrees with the call that sent it passes even when it is not the image the
+    case registered, so a swap between two cases would go unnoticed.
+    """
     problems: list[str] = []
 
     inputs_sha = sha256_bytes((EVIDENCE / "inputs" / "inputs.json").read_bytes())
@@ -75,6 +99,8 @@ def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dic
         problems.append(
             f"inputs.json hashes to {inputs_sha}, but the run was recorded against {manifest['inputs_sha256']}"
         )
+
+    pins = unique_by(inputs["cases"], "id", "inputs.json")
 
     for entry in calls["calls"]:
         if canonical_sha256(entry["request"]) != entry["request_sha256"]:
@@ -87,6 +113,23 @@ def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dic
                 problems.append(f"{entry['slug']}: {image['path']} was not downloaded")
             elif sha256_bytes(path.read_bytes()) != image["sha256"]:
                 problems.append(f"{entry['slug']}: {image['path']} is not the image this call was sent")
+
+        case = pins.get(entry["slug"])
+        if case is None:
+            problems.append(f"{entry['slug']}: inputs.json registers no case with this id, so nothing pins its image")
+            continue
+        # One image per case is what inputs.json registers. Comparing only
+        # entry["images"][0] would let a second image ride along unchecked.
+        if len(entry["images"]) != 1:
+            problems.append(f"{entry['slug']}: {len(entry['images'])} images recorded, but the case pins exactly one")
+            continue
+        image = entry["images"][0]
+        want_name = Path(case["image"]).name
+        if Path(image["path"]).name != want_name or image["sha256"] != case["image_sha256"]:
+            problems.append(
+                f"{entry['slug']}: this call sent {Path(image['path']).name} ({image['sha256'][:12]}), "
+                f"but inputs.json pins {want_name} ({case['image_sha256'][:12]})"
+            )
     return problems
 
 
@@ -102,7 +145,9 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
         return 1
 
-    recorded = {entry["slug"]: entry for entry in calls["calls"]}
+    # verify_evidence walks the list; this walks the index. Two duplicate slugs
+    # would let them read different rows, so the index refuses duplicates.
+    recorded = unique_by(calls["calls"], "slug", "calls.json")
     passed = 0
     missing: list[str] = []
     rows: list[str] = []

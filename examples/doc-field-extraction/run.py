@@ -85,7 +85,16 @@ def inputs_digest(inputs: dict[str, Any]) -> str:
 def load_inputs() -> dict[str, Any]:
     if not INPUTS_PATH.is_file():
         raise SystemExit(f"Missing {INPUTS_PATH}. Run: python3 fetch.py")
-    return json.loads(INPUTS_PATH.read_text(encoding="utf-8"))
+    inputs = json.loads(INPUTS_PATH.read_text(encoding="utf-8"))
+    # main() indexes these by id, and a dict keeps the LAST row sharing a key.
+    # Reject duplicates outright rather than let a second row shadow the case
+    # the run is about to send, which nothing downstream would notice.
+    seen: set[str] = set()
+    for case in inputs["cases"]:
+        if case["id"] in seen:
+            raise SystemExit(f"Duplicate case {case['id']}")
+        seen.add(case["id"])
+    return inputs
 
 
 def image_for(case: dict[str, Any]) -> tuple[bytes, str]:

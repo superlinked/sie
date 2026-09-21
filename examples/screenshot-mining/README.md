@@ -93,11 +93,16 @@ matches only null. Lists compare by position unless a case registers a by-key or
 order-free rule. `inputs.json` records those rules, and they were fixed before
 the run.
 
-`score.py` checks the bytes before it scores them. It recomputes the digest of
-`inputs.json`, re-digests every response record the way the run digested it, and
-hashes every stored image against the `$payload.sha256` of the request that sent
-it. A file that is missing or does not match is a failure and nothing is scored;
-it is never skipped past.
+`score.py` checks the bytes before it scores them, four ways. It recomputes the
+digest of `inputs.json`; re-digests every response record the way the run
+digested it; hashes every stored image against the `$payload.sha256` of the
+request that sent it; and holds that `$payload` against the `file_name` and
+`image_sha256` the case pinned in `inputs.json`. The last one is the
+authoritative side. Without it an image that agrees with its own call passes
+even when it is not the image the case registered, so one screen could be scored
+against another's expected values with every digest intact. A file that is
+missing, or that any of the four disagree about, is a failure and nothing is
+scored; it is never skipped past.
 
 It does not recompute `entry_sha256`, the RFC 8785 canonical digest the
 recording carries over each whole entry. That needs a JSON canonicalizer, which

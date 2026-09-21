@@ -65,11 +65,15 @@ expressions `inputs.json` registered before any model call. A case passes only
 when every one of its checks passes. Scoring is deterministic string matching,
 so no model judges another model.
 
-`score.py` checks the bytes before it scores them. It recomputes the digest of
-`inputs.json`, the digest of every request and response record, and the SHA-256
-of every image against the digest recorded for the call that sent it. A file
-that is missing or that does not match is a failure and nothing is scored; it is
-never skipped past.
+`score.py` checks the bytes before it scores them, four ways. It recomputes the
+digest of `inputs.json`; the digest of every request and response record; the
+SHA-256 of every image against the digest recorded for the call that sent it;
+and that recorded digest against the `image_sha256` the case pinned in
+`inputs.json`. The last one is the authoritative side. Without it an image that
+agrees with its own call passes even when it is not the image the case
+registered, so one case's photograph could be scored against another's question
+with every digest intact. A file that is missing, or that any of the four
+disagree about, is a failure and nothing is scored; it is never skipped past.
 
 The prompt ends with "Start your reply with the answer in one sentence." That
 sentence was added after a single exploratory call, kept in

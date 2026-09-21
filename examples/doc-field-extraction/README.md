@@ -76,11 +76,15 @@ commas, with one trailing period ignored. Numbers compare within 1e-9; integers,
 booleans and enums compare exactly. `inputs.json` records those rules and they
 were fixed before the run.
 
-`score.py` checks the bytes before it scores them. It recomputes the scored
-digest of `inputs.json`, the digest of every request and response record, and
+`score.py` checks the bytes before it scores them, four ways. It recomputes the
+scored digest of `inputs.json`; the digest of every request and response record;
 the SHA-256 of every image against the digest recorded for the call that sent
-it. A file that is missing or does not match is a failure and nothing is scored;
-it is never skipped past.
+it; and that recorded digest against the `image_sha256` the case pinned in
+`inputs.json`. The last one is the authoritative side. Without it an image that
+agrees with its own call passes even when it is not the image the case
+registered, so one document could be scored against another's schema with every
+digest intact. A file that is missing, or that any of the four disagree about,
+is a failure and nothing is scored; it is never skipped past.
 
 Two calls sit in `diagnostics/` and are counted in nothing: one exploratory call
 on the FAA rebuilt fuel control certificate, and a superseded playground call

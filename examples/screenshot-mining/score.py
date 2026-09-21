@@ -162,14 +162,33 @@ def parse_generation(value: Any) -> tuple[Any, str | None]:
         return None, f"invalid JSON: {error}"
 
 
-def verify_evidence(manifest: dict[str, Any], calls: dict[str, Any]) -> list[str]:
+def unique_by(rows: list[dict[str, Any]], key: str, what: str) -> dict[str, dict[str, Any]]:
+    """Index rows by a key, refusing duplicates.
+
+    Not a dict comprehension. A comprehension keeps the LAST row sharing a key
+    and `next()` takes the FIRST, so two rows with one id let two checks agree
+    with different data while every digest still verifies.
+    """
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row[key] in indexed:
+            raise SystemExit(f"{what} lists {row[key]!r} twice; refusing to score an ambiguous record")
+        indexed[row[key]] = row
+    return indexed
+
+
+def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dict[str, Any]) -> list[str]:
     """Check the bytes before scoring them. Anything unreadable is a failure.
 
-    Three checks, and one that is deliberately not run. `inputs.json` is hashed
+    Four checks, and one that is deliberately not run. `inputs.json` is hashed
     against the digest the run recorded. Every response record is re-digested
     the way the run digested it. Every stored image is hashed against the
     `$payload.sha256` of the request that sent it, which is the check the
-    recorded `$payload` note asks a reader to perform.
+    recorded `$payload` note asks a reader to perform. And that `$payload` is
+    held against the `file_name` and `image_sha256` the case pinned in
+    `inputs.json`, which is the authoritative side: without it an image that
+    agrees with the call that sent it passes even when it is not the image the
+    case registered, so a swap between two screens would go unnoticed.
 
     Not checked here: `entry_sha256`, the RFC 8785 canonical digest over each
     whole entry. That needs a JSON canonicalizer; the implementation lives in
@@ -185,6 +204,8 @@ def verify_evidence(manifest: dict[str, Any], calls: dict[str, Any]) -> list[str
             f"inputs.json hashes to {inputs_sha}, but the run was recorded against {manifest['inputs_sha256']}"
         )
 
+    pins = unique_by(inputs["cases"], "id", "inputs.json")
+
     for entry in calls["calls"]:
         response = entry["response"]
         # The digest the run recorded covers the response record as it was
@@ -192,19 +213,38 @@ def verify_evidence(manifest: dict[str, Any], calls: dict[str, Any]) -> list[str
         rebuilt = {"status": entry["http_status"], "headers": response["http_headers"], "body": response["value"]}
         if canonical_sha256(rebuilt) != response["recorded_sha256"]:
             problems.append(f"{entry['slug']}: the response record does not match its recorded digest")
-        for image in entry["request"]["body"].get("images") or []:
-            payload = image.get("$payload")
-            if not payload:
-                continue
-            path = EVIDENCE / "inputs" / "images" / payload["file_name"]
-            if not path.is_file():
-                problems.append(f"{entry['slug']}: inputs/images/{payload['file_name']} was not downloaded")
-                continue
-            data = path.read_bytes()
-            if sha256_bytes(data) != payload["sha256"] or len(data) != payload["bytes"]:
-                problems.append(
-                    f"{entry['slug']}: inputs/images/{payload['file_name']} is not the image this call was sent"
-                )
+
+        case = pins.get(entry["case"])
+        if case is None:
+            problems.append(
+                f"{entry['slug']}: inputs.json registers no case {entry['case']!r}, so nothing pins its image"
+            )
+            continue
+
+        payloads = [image["$payload"] for image in entry["request"]["body"].get("images") or [] if "$payload" in image]
+        # One screenshot per call is what inputs.json registers. Checking only
+        # the first would let a second image ride along unchecked, and a call
+        # carrying none would otherwise pass this loop by doing nothing.
+        if len(payloads) != 1:
+            problems.append(f"{entry['slug']}: {len(payloads)} image payloads recorded, but the case pins exactly one")
+            continue
+        payload = payloads[0]
+
+        if payload["file_name"] != case["file_name"] or payload["sha256"] != case["image_sha256"]:
+            problems.append(
+                f"{entry['slug']}: this call sent {payload['file_name']} ({payload['sha256'][:12]}), "
+                f"but inputs.json pins {case['file_name']} ({case['image_sha256'][:12]})"
+            )
+
+        path = EVIDENCE / "inputs" / "images" / payload["file_name"]
+        if not path.is_file():
+            problems.append(f"{entry['slug']}: inputs/images/{payload['file_name']} was not downloaded")
+            continue
+        data = path.read_bytes()
+        if sha256_bytes(data) != payload["sha256"] or len(data) != payload["bytes"]:
+            problems.append(
+                f"{entry['slug']}: inputs/images/{payload['file_name']} is not the image this call was sent"
+            )
     return problems
 
 
@@ -213,14 +253,16 @@ def main() -> int:
     manifest = load("manifest.json")
     calls = load("calls.json")
 
-    problems = verify_evidence(manifest, calls)
+    problems = verify_evidence(inputs, manifest, calls)
     if problems:
         print("The evidence did not verify, so nothing was scored:", file=sys.stderr)
         for line in problems:
             print(f"  {line}", file=sys.stderr)
         return 1
 
-    recorded = {entry["slug"]: entry for entry in calls["calls"]}
+    # verify_evidence walks the list; this walks the index. Two duplicate slugs
+    # would let them read different rows, so the index refuses duplicates.
+    recorded = unique_by(calls["calls"], "slug", "calls.json")
     missing: list[str] = []
     per_screen: dict[str, tuple[int, int]] = {}
     proof_passed = proof_total = 0
