@@ -94,11 +94,21 @@ def verify_evidence(manifest: dict[str, Any], calls: dict[str, Any], inputs: dic
     """
     problems: list[str] = []
 
-    inputs_sha = sha256_bytes((EVIDENCE / "inputs" / "inputs.json").read_bytes())
-    if inputs_sha != manifest["inputs_sha256"]:
+    # Checked for existence before it is opened, so an absent file is a
+    # reported failure rather than a traceback, and does not depend on main()
+    # happening to have loaded it first.
+    inputs_path = EVIDENCE / "inputs" / "inputs.json"
+    if not inputs_path.is_file():
         problems.append(
-            f"inputs.json hashes to {inputs_sha}, but the run was recorded against {manifest['inputs_sha256']}"
+            "inputs/inputs.json was not downloaded. It holds the labels sent and the hand counts every figure "
+            "below is scored against; run: python3 fetch.py"
         )
+    else:
+        inputs_sha = sha256_bytes(inputs_path.read_bytes())
+        if inputs_sha != manifest["inputs_sha256"]:
+            problems.append(
+                f"inputs.json hashes to {inputs_sha}, but the run was recorded against {manifest['inputs_sha256']}"
+            )
 
     pinned = {case["id"]: case for case in inputs["cases"]}
     for entry in calls["calls"]:

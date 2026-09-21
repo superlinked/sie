@@ -146,17 +146,36 @@ def verify_evidence(manifest: dict[str, Any], calls: dict[str, Any], inputs: dic
     """
     problems: list[str] = []
 
-    inputs_sha = sha256_bytes((EVIDENCE / "inputs" / "inputs.json").read_bytes())
-    if inputs_sha != manifest["inputs_sha256"]:
+    # Each file is checked for existence before it is opened, so an absent one
+    # is a reported failure naming the figure it takes away, never a traceback
+    # and never a comparison that quietly does not happen.
+    inputs_path = EVIDENCE / "inputs" / "inputs.json"
+    if not inputs_path.is_file():
         problems.append(
-            f"inputs.json hashes to {inputs_sha}, but the run was recorded against {manifest['inputs_sha256']}"
+            "inputs/inputs.json was not downloaded. It holds the human transcripts and the 61 key terms, so "
+            "neither published figure can be computed without it; run: python3 fetch.py"
         )
-    spelling_sha = sha256_bytes((EVIDENCE / "inputs" / "normalizer.json").read_bytes())
-    if spelling_sha != manifest["normalizer"]["spelling_map_sha256"]:
+    else:
+        inputs_sha = sha256_bytes(inputs_path.read_bytes())
+        if inputs_sha != manifest["inputs_sha256"]:
+            problems.append(
+                f"inputs.json hashes to {inputs_sha}, but the run was recorded against {manifest['inputs_sha256']}"
+            )
+
+    spelling_path = EVIDENCE / "inputs" / "normalizer.json"
+    if not spelling_path.is_file():
         problems.append(
-            "normalizer.json is not the spelling map the recorded counts were computed with, so no figure "
-            "below would be comparable"
+            "inputs/normalizer.json was not downloaded. Both published figures, the 56 of 61 key terms and the "
+            "pooled 8.1% word error rate, are counted after this spelling map is applied, so neither can be "
+            "checked without it; run: python3 fetch.py"
         )
+    else:
+        spelling_sha = sha256_bytes(spelling_path.read_bytes())
+        if spelling_sha != manifest["normalizer"]["spelling_map_sha256"]:
+            problems.append(
+                "normalizer.json is not the spelling map the recorded counts were computed with, so no figure "
+                "below would be comparable"
+            )
 
     registered = {case["id"] for case in inputs["cases"]}
     seen: set[tuple[str, str]] = set()

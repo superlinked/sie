@@ -40,7 +40,11 @@ image-classify/
 The photographs themselves are not here. They are VisA originals inside a 20 GB
 Amazon Science tar, pinned by SHA-256 and by their path inside it. The WebP
 files under `inputs/display/` are the page's renditions, different bytes, and
-the manifest says so rather than letting them read as the input.
+the manifest says so rather than letting them read as the input. `score.py`
+hashes all sixteen against the digests the manifest pins anyway: they change no
+figure, but a missing or altered one means the bundle is incomplete, and it is
+reported as a failure that says so. Every file the scorer opens is checked for
+existence first, so a partial fetch is a named failure rather than a traceback.
 
 ## Run it
 

@@ -90,8 +90,10 @@ library port of the Transformers 4.57.6 implementation, whose normalization is
 unmodified from it. Its docstring names the three things that do differ, none of
 them in the algorithm. It is loaded with the spelling map the run recorded, which
 `fetch.py` downloads alongside the calls. `score.py` hashes that map before it
-scores, and a missing one is a failure rather than a silent fall back to an empty
-map, which would still produce numbers.
+scores, and a missing one is a failure naming both figures it takes away, rather
+than a silent fall back to an empty map, which would still produce numbers. The
+same holds for every file the scorer opens: each is checked for existence before
+it is read, so a partial fetch is a named failure and never a traceback.
 
 Word error rate is `(substitutions + deletions + insertions) / reference words`
 by word-level Levenshtein, pooled by summing edits and reference words over all

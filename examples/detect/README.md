@@ -36,7 +36,10 @@ detect/
 Each request record carries a descriptor naming the image file, its SHA-256 and
 its byte length in place of the base64 it sent. `score.py` hashes the stored
 file against that descriptor and against the digest `inputs.json` pinned before
-the run, and fails if either disagrees.
+the run, and fails if either disagrees. Every file it opens is checked for
+existence first, so a partial fetch is a named failure saying what can no longer
+be checked, never a traceback and never a comparison that quietly does not
+happen.
 
 ## Run it
 

@@ -122,6 +122,36 @@ def verify_evidence(manifest: dict[str, Any], calls: dict[str, Any], inputs: dic
                 "own recorded note; this scorer was written for the mismatching case"
             )
 
+    # The display renditions. They are not the bytes any call was sent and no
+    # figure below moves if one is absent, but the manifest pins every one and
+    # fetch.py requires them, so a missing or altered file means the bundle is
+    # incomplete. Reported as a failure that says what it does and does not
+    # affect, rather than passed over because the number survives it.
+    per_case = manifest["input_sources"]["per_case"]
+    if set(per_case) != {case["id"] for case in inputs[PASS_REJECT]}:
+        problems.append(
+            f"the manifest pins display renditions for a different set of photos than {PASS_REJECT} registers"
+        )
+    verified = 0
+    for case_id, meta in sorted(per_case.items()):
+        path = EVIDENCE / meta["display_file"]
+        if not path.is_file():
+            problems.append(
+                f"{case_id}: {meta['display_file']} was not downloaded. It changes no figure below, being the "
+                "page's rendition rather than the bytes scored, but the bundle is incomplete; "
+                "run: python3 fetch.py"
+            )
+            continue
+        data = path.read_bytes()
+        if sha256_bytes(data) != meta["display_sha256"] or len(data) != meta["display_bytes"]:
+            problems.append(f"{case_id}: {meta['display_file']} is not the rendition the manifest pins")
+            continue
+        verified += 1
+    if verified != manifest["images"]["display_count"]:
+        problems.append(
+            f"{verified} display renditions verified, the manifest counts {manifest['images']['display_count']}"
+        )
+
     for entry in calls["calls"]:
         if canonical_sha256(entry["request"]) != entry["request_sha256"]:
             problems.append(f"{entry['slug']}: the request record does not match its recorded digest")
