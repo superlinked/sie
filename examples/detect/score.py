@@ -278,6 +278,8 @@ def main() -> int:
         if got_values != (hits, total):
             failures.append(f"{case_id}: got {got_values}, page publishes {hits} of {total}")
 
+    # An internal guard on the constants above, not a reading of the page: it
+    # catches a per-photo entry added here without updating the total.
     displayed = len(PAGE_PER_PHOTO) + 2
     if displayed != PAGE_DISPLAYED:
         failures.append(f"displayed photos: checked {displayed}, page says {PAGE_DISPLAYED}")

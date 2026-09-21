@@ -45,6 +45,9 @@ PAGE_KEY_TERMS = (56, 61)
 PAGE_POOLED_WER = "8.1%"
 PAGE_REFERENCE_WORDS = 594
 PAGE_TERMS_WRONG = 5
+# Read off the built page, not derived from anything here: two of the five
+# wrong terms are displayed. The remainder below is computed from the scored
+# misses, so it cannot agree with a wrong constant.
 PAGE_TERMS_WRONG_SHOWN = 2
 # The per-clip figures the page prints: three proof cards and the hero.
 PAGE_PER_CLIP = {
@@ -267,6 +270,10 @@ def main() -> int:
     )
     for line in misses:
         print(f"  missed: {line}")
+    print(
+        f"The page shows {PAGE_TERMS_WRONG_SHOWN} of those {len(misses)} wrong terms; "
+        f"the other {len(misses) - PAGE_TERMS_WRONG_SHOWN} are counted above and displayed nowhere"
+    )
 
     if clips != PAGE_CLIPS:
         failures.append(f"clips: got {clips}, page publishes {PAGE_CLIPS}")
@@ -281,10 +288,6 @@ def main() -> int:
         failures.append(f"reference words: got {snippet['words']}, page publishes {PAGE_REFERENCE_WORDS}")
     if len(misses) != PAGE_TERMS_WRONG:
         failures.append(f"terms wrong: got {len(misses)}, page publishes {PAGE_TERMS_WRONG}")
-    # The page shows two of the five wrong terms. Stated as a remainder rather
-    # than left to the reader: three are counted here and displayed nowhere.
-    if PAGE_TERMS_WRONG - PAGE_TERMS_WRONG_SHOWN != 3:
-        failures.append("the page's shown-versus-counted split for wrong terms no longer adds up")
 
     for case_id, expected in PAGE_PER_CLIP.items():
         got = per_clip.get(case_id, {}).get("snippet")
@@ -296,6 +299,8 @@ def main() -> int:
                 failures.append(f"{case_id} {field}: got {got[field]}, page publishes {want}")
     if PAGE_PLAYGROUND not in per_clip:
         failures.append(f"{PAGE_PLAYGROUND}: the playground clip is not in the scored set")
+    # An internal guard on the constants above, not a reading of the page: it
+    # catches a per-clip entry added here without updating the total.
     displayed = len(PAGE_PER_CLIP) + 1
     if displayed != PAGE_DISPLAYED_CLIPS:
         failures.append(f"displayed clips: checked {displayed}, page says {PAGE_DISPLAYED_CLIPS}")
