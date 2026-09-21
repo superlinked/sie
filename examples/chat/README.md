@@ -88,8 +88,12 @@ page's playground call. It is fetched and rescored with the rest, printed with
 
 ### The four answers that miss the reference
 
-`score.py` exits non-zero only if an answer quotes text that is not in its
-passage, because that is what the page headlines. `reference` is 20 of 24, and here is every miss, so
+`score.py` fails on any integrity problem first: a missing input, a case with
+no recorded call, a call nothing pins, a response that does not match its
+digest, a pinned input that no longer rebuilds its recorded request, or a
+served revision the manifest does not name. Once all of that passes, the
+scoring exit status is decided by one thing: whether any answer quoted text
+that is not in its passage, because that is what the page headlines. `reference` is 20 of 24, and here is every miss, so
 nobody has to take a summary's word for what they are.
 
 One is a model error:

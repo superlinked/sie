@@ -58,10 +58,12 @@ def answer_text(response: Any) -> str:
 
 
 def parse_reply(text: str) -> dict[str, Any]:
-    # Blank lines are kept. Filtering them here let a reply of "Answer: ...",
-    # a blank line and "Quote: ..." satisfy the documented "exactly two lines",
-    # so the format check was looser than the sentence describing it.
-    lines = text.strip().split("\n")
+    # No filtering and no stripping. Dropping blank lines let a reply of
+    # "Answer: ...", a blank line and "Quote: ..." satisfy the documented
+    # "exactly two lines", and `text.strip()` did the same for a leading or
+    # trailing blank line. `splitlines()` still reads "a\nb\n" as two lines,
+    # so a single trailing newline is not counted as a third.
+    lines = text.splitlines()
     answer = ""
     quote = ""
     for line in lines:
