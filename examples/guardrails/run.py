@@ -102,20 +102,44 @@ class CallFailedError(Exception):
 
 
 def failure_entry(
-    call_id: str, case_id: str, model: str, path: str, body: dict[str, Any], error: BaseException
+    call_id: str,
+    set_name: str,
+    case_id: str,
+    model: str,
+    path: str,
+    body: dict[str, Any],
+    error: BaseException,
+    call_name: str | None = None,
 ) -> dict[str, Any]:
-    """What a failed call records. Never a status that reads as success."""
-    return {
+    """What a failed call records.
+
+    Every field the success path writes, so that `check` and `score.py` can
+    read a calls.json holding failures instead of raising KeyError on it. Only
+    the values differ: the status never reads as success, the response is null
+    and `error` says what went wrong. A recorder and a reader that disagree
+    about shape is how a failed run gets mistaken for a missing one.
+    """
+    entry: dict[str, Any] = {
         "id": call_id,
+        "set": set_name,
         "case": case_id,
-        "model": model,
-        "endpoint": ENDPOINT,
-        "path": path,
-        "status": "error",
-        "error": {"type": type(error).__name__, "message": str(error)},
-        "request": {"method": "POST", "endpoint": ENDPOINT, "path": path, "model": model, "body": body},
-        "response": None,
     }
+    if call_name is not None:
+        entry["call"] = call_name
+    entry.update(
+        {
+            "model": model,
+            "endpoint": ENDPOINT,
+            "path": path,
+            "status": "error",
+            "error": {"type": type(error).__name__, "message": str(error)},
+            "timing": {"at": datetime.now(UTC).isoformat(timespec="seconds"), "latency_ms": None, "attempts": 1},
+            "request": {"method": "POST", "endpoint": ENDPOINT, "path": path, "model": model, "body": body},
+            "response": None,
+            "recorded": {},
+        }
+    )
+    return entry
 
 
 def calls_for(case: dict[str, Any]) -> list[dict[str, Any]]:
@@ -320,7 +344,18 @@ def main() -> int:
                 entry = record(client, case, spec)
             except Exception as error:  # noqa: BLE001
                 failed.append(f"{call_id}: {type(error).__name__}: {error}")
-                calls.append(failure_entry(call_id, case["id"], spec["model"], spec["path"], spec["body"], error))
+                calls.append(
+                    failure_entry(
+                        call_id,
+                        "page",
+                        case["id"],
+                        spec["model"],
+                        spec["path"],
+                        spec["body"],
+                        error,
+                        call_name=spec["call"],
+                    )
+                )
                 print(f"{case['id']} {spec['call']}: FAILED {type(error).__name__}", file=sys.stderr)
                 continue
             calls.append(entry)

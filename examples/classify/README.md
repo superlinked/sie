@@ -56,6 +56,10 @@ uv sync
 SIE_API_KEY=... uv run python run.py --record --set snips --out run-output/calls.json
 ```
 
+`--record` sends one set. The published `calls.json` holds all five, so
+`--check` over a single-set recording correctly reports the other four as
+missing.
+
 `run.py` sends through `sie_sdk.SIEClient`. The import is deferred into
 `main()`, so `--check` and `--show` keep working on a bare `python3` with
 nothing installed. `python3 run.py --show <id>` prints a request without

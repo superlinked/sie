@@ -56,7 +56,7 @@ sending it.
 ## What to expect
 
 ```
-schema validator: jsonschema 4.21.1
+schema validator: built in
 documents scored:  10
 parsed as JSON:    10
 schema-valid:      10
@@ -69,6 +69,13 @@ fields the model got wrong:
 
 Reproduced: all 10 documents schema-valid, 91 of 93 fields right.
 ```
+
+`score.py` needs nothing installed. Schema validation runs under the small
+validator built into `score.py`, which covers the subset of JSON Schema these
+cases use, and it prints `schema validator: built in`. If `jsonschema` happens
+to be importable, `score.py` uses that instead and prints its version, and the
+two verdicts are compared against the one the original runner recorded, so all
+three have to agree. `jsonschema` is optional and nothing here installs it.
 
 `score.py` exits nonzero if any of those numbers fails to reproduce.
 `run.py --check` prints `13 page requests rebuilt from inputs and matched the
