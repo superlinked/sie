@@ -1,0 +1,151 @@
+{{irdoc|status=final}}
+
+== Summary ==
+{{Incident scorecard
+| task = T381092
+| paged-num = 1
+| responders-num = 1
+| coordinators = [[User:FNegri-WMF]]
+| start = 03:09
+| end = 03:57
+| metrics = No relevant SLOs exist.
+| impact = No impact as we were lucky and the affected proxy instance was the "standby" instance, and not the "active" one.
+}}
+
+* '''Systemd unit for nginx failed in proxy-04 VM'''
+* '''This was caused by Puppet removing the “nameserver” IP from Nginx configuration files'''
+* '''It’s a known bug already tracked in [[phab:T379927|T379927]]'''
+{{TOC|align=right}}
+
+== Timeline ==
+
+* ''All times in UTC.''
+* 03:07 first error logged by Puppet: puppet-agent-cronjob: W: Failed to fetch <nowiki>http://mirrors.wikimedia.org/debian/dists/bullseye/InRelease</nowiki>  Temporary failure resolving 'mirrors.wikimedia.org'
+* 03:09 Puppet removes the “nameserver” value from /etc/resolv.conf, which breaks following Puppet runs. This is a known issue (T379927)
+* 03:09 Puppet also removes the nameserver IP from all the files in the directory /etc/nginx/sites-available/
+* 03:09 nginx logs a fatal error
+* 03:12 '''FIRING: ProjectProxyMainProxyDown''': Proxy on proxy-04 is down - <nowiki>https://prometheus-alerts.wmcloud.org/?q=alertname%3DProjectProxyMainProxyDown</nowiki>
+* 03:12 Francesco Negri receives a page
+* 03:29 checking VM status in horizon, VM is up. I can ssh but the “nginx” service is down and fails to restart.
+* 03:40 Incident opened.  Francesco Negri becomes IC.
+* 03:47 A similar alert was triggered on 2024-11-21 on the other proxy (proxy-03) and it autoresolved after 5 minutes. It looks unrelated, as the nginx logs don’t show any error on 2024-11-21.
+* 03:54 the error is caused by a missing IP in /etc/nginx/sites-enabled/catalyst-qte-wmcloud-org:19
+* 03:54 I compared that file between proxy-03 and proxy-04, in proxy-03 the line is "resolver 172.20.255.1;", in proxy-04 it is "resolver ;"
+* 03:55 forcing a puppet run fails with "getaddrinfo: Temporary failure in name resolution"
+* 03:55 this sounds like another instance of T379927
+* 03:56 I edited /etc/resolv.conf manually and restarted puppet
+* 03:57 '''that fixed the issue with puppet AND the issue with nginx'''
+* 04:12 the alert is no longer firing in alertmanager, but it was not auto-resolved in victorops. I'm resolving it manually
+* 04:13 '''the incident is resolved'''
+* 04:15 RESOLVED: ProjectProxyMainProxyDown: Proxy on proxy-04 is down - <nowiki>https://prometheus-alerts.wmcloud.org/?q=alertname%3DProjectProxyMainProxyDown</nowiki>
+
+==Detection==
+A page was sent to the WMCS team.
+
+The firing alert was '''ProjectProxyMainProxyDown''' which is an appropriate alert.
+
+==Conclusions ==
+
+This incident did not cause any user-facing problem. Maybe it shouldn't even have paged.
+
+===What went well?===
+
+* The alert triggered immediately and sent a page
+
+===What went poorly?===
+
+* Alertmanager did trigger the page, but it did not send an email and it did not create a phab task
+* There was no user-facing outage, so maybe a page was not necessary
+
+===Where did we get lucky?===
+
+* Francesco responded to the page, and he happened to know about the root cause ([[phab:T379927|T379927]]) because he was already investigating it
+* The error happened on the "standby" proxy instance and not in the "active" one. Note that if it had happened on the "active" one, Keepalived would have quickly routed traffic to the other instance, so no major outage would have happened anyway (I think).
+
+==Links to relevant documentation==
+
+* [[Portal:Cloud VPS/Admin/Web proxy]]
+
+==Actionables==
+
+* [[phab:T379927|T379927]] Puppet removed "nameserver" line from /etc/resolv.conf
+* [[phab:T381107|T381107]] Add runbook to ProjectProxyMainProxyDown, and reconsider severity
+
+==Scorecard==
+
+
+{| class="wikitable"
+|+[[Incident Scorecard|Incident Engagement  ScoreCard]]
+!
+!Question
+!Answer
+(yes/no)
+!Notes
+|-
+! rowspan="5" |People
+|Were the people responding to this incident sufficiently different than the previous five incidents? 
+|yes
+|
+|-
+|Were the people who responded prepared enough to respond effectively
+|yes
+|
+|-
+|Were fewer than five people paged?
+|yes
+|
+|-
+|Were pages routed to the correct sub-team(s)?
+|yes
+|
+|-
+|Were pages routed to online (business hours) engineers?  ''Answer “no” if engineers were paged after business hours.''
+|no
+|
+|-
+! rowspan="5" |Process
+|Was the "Incident status" section atop the Google Doc kept up-to-date during the incident?
+|yes
+|
+|-
+| Was a public wikimediastatus.net entry created? 
+|no
+|
+|-
+|Is there a phabricator task for the incident?
+|yes
+|
+|-
+|Are the documented action items assigned?
+|no
+|
+|-
+|Is this incident sufficiently different from earlier incidents so as not to be a repeat occurrence? 
+|yes
+|
+|-
+! rowspan="5" |Tooling
+|To the best of your knowledge was the open task queue free of any tasks that would have prevented this incident? ''Answer “no” if there are'' ''open tasks that would prevent this incident or make mitigation easier if implemented.''
+|no
+|
+|-
+| Were the people responding able to communicate effectively during the incident with the existing tooling?
+|N/A
+|
+|-
+|Did existing monitoring notify the initial responders?
+|yes
+|
+|-
+|Were the engineering tools that were to be used during the incident, available and in service? 
+|yes
+|
+|-
+|Were the steps taken to mitigate guided by an existing runbook?
+|no
+|
+|-
+! colspan="2" align="right" |Total score (count of all “yes” answers above)
+|9
+|
+|}

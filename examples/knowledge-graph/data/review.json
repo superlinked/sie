@@ -1,0 +1,35 @@
+{
+  "description": "Edges a person read against the source paragraph and marked. These are human judgements, not anything the model returned. GLiNER2 gives every relation a confidence score and no correctness signal, so the only way a wrong edge gets flagged is that somebody read the paragraph.",
+  "reviewed": "The 11 edges the model returned for the four paragraphs whose page_role is 'proof' or 'proof and playground'. The 5 hero edges were read the same way and none was marked.",
+  "verdicts": {
+    "wrong": "the paragraph does not support this relation between these two entities",
+    "not-stated": "the relation may hold in the world, but this paragraph never says so",
+    "other-mention": "the relation is right, but the endpoint span the model returned points at a different mention of that text"
+  },
+  "flagged": [
+    {
+      "candidate": "tarsus-alkeus",
+      "head": "Alkeus Pharmaceuticals, Inc.",
+      "relation": "incorporated in",
+      "tail": "Delaware",
+      "verdict": "other-mention",
+      "note": "The edge is true, but the model returned only the Delaware that describes Apex 2026 Merger Sub, so the highlighted span is that later mention."
+    },
+    {
+      "candidate": "fresenius-morphine",
+      "head": "Fresenius Kabi",
+      "relation": "headquartered in",
+      "tail": "LAKE ZURICH",
+      "verdict": "not-stated",
+      "note": "LAKE ZURICH is the dateline of the release; the text never names a headquarters."
+    },
+    {
+      "candidate": "flex-credit-facility",
+      "head": "Citibank, N.A.",
+      "relation": "administrative agent of",
+      "tail": "Flex Ltd.",
+      "verdict": "wrong",
+      "note": "The filing makes Citibank administrative agent under the Credit Agreement, not agent of Flex."
+    }
+  ]
+}

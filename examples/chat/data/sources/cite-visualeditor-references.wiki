@@ -1,0 +1,151 @@
+{{irdoc|status=review}}
+
+== Summary ==
+{{Incident scorecard
+| task = T400038
+| paged-num = 0
+| responders-num = 5
+| coordinators = Johannes Richter (WMDE), WMDE-Fisch
+| start = 2025-07-17 16:12
+| end = 2025-07-21 09:30
+| metrics = No relevant SLOs exist
+| impact = When an article containing [https://www.mediawiki.org/wiki/Help:Cite#Separating_references_from_text list-defined refs] was visually edited, no matter what was edited it would be saved without these list-defined refs.
+}}
+
+WMDE Technical Wishes deployed a change to the Cite extension which changed how Visual Editor serializes the <code><nowiki><references></nowiki></code> tag when saving edits.  This tag contains all of the "list-defined references", and Parsoid looks in the <code>data-mw</code> attribute which we had anticipated, but also has a supplementary check for a DOM <nowiki><li> element with a known ID.  The deployed bad code omitted this ID which caused Parsoid to assume that all list-defined references had been deleted from the document.  Any page edited and saved would lose its list-defined references.</nowiki>
+
+The impact was limited because many wikis and articles don't commonly use list-defined references, and several of the larger wikis wrap all references tags in a template such as <code><nowiki>{{reflist}}</nowiki></code>.
+
+{{TOC|align=right}}
+
+==Timeline==
+''All times in UTC.''
+
+*2025-07-01 12:04 Works begins on {{PhabT|396017}} which will later lead to the outage.
+*2025-07-11 11:04 Problematic patch {{Gerrit|1168120}} is merged and will be deployed with the next train.
+*2025-07-17 16:12 '''OUTAGE BEGINS:''' Version 1.45.0-wmf.10 was [https://sal.toolforge.org/log/15aWGZgBffdvpiTrEQNZ rolled out] to group2.
+*2025-07-19 22:05 User:Gesetzesfreak [https://de.wikipedia.org/w/index.php?diff=258065379 runs into the bug], which causes a vandalism discussion.
+*2025-07-20 21:17 Johannes Richter (WMDE) files a bug report as {{PhabT|400013}}.
+*2025-07-20 21:35 David Lynch leaves a note on WMF Slack pointing to T400013.
+*2025-07-21 05:31 Johannes Richter notifies WMDE Tech Wishes of the bug.
+*2025-07-21 06:15 Bug assessment makes it clear that the issue affects all wikis and {{PhabT|400038}} is created.
+*2025-07-21 07:30 '''OUTAGE ENDS:''' The commit that caused the issue was [[gerrit:1170800|reverted]] and [[gerrit:c/mediawiki/extensions/Cite/+/1171031|backported]] to the Wikimedia production cluster.
+*2025-07-23 08:37 All impacted edits are identified with automation in {{PhabT|400053}} and manual verification. They are resolved on-wiki.
+*2025-07-23 14:00 Notified the seven Wikipedia language versions affected by the bug with a list of affected articles per project ([[:pt:Wikipédia:Esplanada/geral/Bug report (23jul2025)|example]]).
+
+==Detection==
+First noticed by a user and brought to a [https://de.wikipedia.org/w/index.php?diff=258065379 German Wikipedia talk page].
+
+==Conclusions ==
+
+===What went well?===
+
+* The team's community communications staff member became aware of the issue quickly.
+* It was possible to identify the problematic patch and revert it in isolation.
+* Impacted edits had a subtle signature but it was still possible to make an exhaustive list, with only a reasonable number of false positives.
+* The team had capacity to make the issue our top priority and was able to resolve it ourselves.
+* Wikipedia editors on several affected wikis shared appreciation of our communication and our handling of the issue.
+
+===What went poorly?===
+
+* We learned too late of a large gap in our automated testing: cases which wire actual Visual Editor outputs as Parsoid inputs.
+* The tasks were never marked "Unbreak Now!" as they should have been once we realized there was editor-facing impact and data loss.
+* Reverting the impacted edits caused well-intended user content to be deleted.
+* Some editors were accused of vandalism because of a software glitch out of their control.
+* The responding team could have added more updates on the task, letting observers know about our progress on the issue.
+* The WMDE software department does not have clear processes for how to deal with on-wiki incidents.
+
+===Where did we get lucky?===
+
+* The conditions for triggering the bug were very specific, and only 49 revisions (which weren't already vandalism) were affected.
+* The resulting article content included Cite errors which are visible as red text and appear in maintenance categories, which is what alerted various editor communities.
+
+==Links to relevant documentation==
+
+* [https://docs.google.com/document/d/13ZScENROJkVj1J-PJjF2qgVLtTg5TgEO7meguT9v724/edit?tab=t.0 Visual Editor and Parsoid development for subrefs] - this is the team's internal technical documentation about new Cite features.  It doesn't include a section relevant to this issue, yet.
+
+==Actionables==
+
+* {{PhabT|401335}}: Spike: define operational monitoring requirements for Cite error alerting
+* {{PhabT|400311}}: Investigation: Write visual editor debug tool to produce Converter test cases
+* {{PhabT|401334}}: Split out reusable Parsoid+Cite analysis module from scraper
+* {{PhabT|400803}}: Tech debt: review uses of references list item id during Parsoid html2wt
+
+==Scorecard==
+
+
+{| class="wikitable"
+|+[[Incident Scorecard|Incident Engagement  ScoreCard]]
+!
+!Question
+!Answer
+(yes/no)
+!Notes
+|-
+! rowspan="5" |People
+|Were the people responding to this incident sufficiently different than the previous five incidents? 
+|yes
+|
+|-
+|Were the people who responded prepared enough to respond effectively
+|yes
+|
+|-
+|Were fewer than five people paged?
+|yes
+|
+|-
+|Were pages routed to the correct sub-team(s)?
+|yes
+|
+|-
+|Were pages routed to online (business hours) engineers?  ''Answer “no” if engineers were paged after business hours.''
+|yes
+|
+|-
+! rowspan="5" |Process
+|Was the "Incident status" section atop the Google Doc kept up-to-date during the incident?
+|no
+|
+|-
+| Was a public wikimediastatus.net entry created? 
+|no
+|
+|-
+|Is there a phabricator task for the incident?
+|yes
+|
+|-
+|Are the documented action items assigned?
+|no
+|
+|-
+|Is this incident sufficiently different from earlier incidents so as not to be a repeat occurrence? 
+|yes
+|
+|-
+! rowspan="5" |Tooling
+|To the best of your knowledge was the open task queue free of any tasks that would have prevented this incident? ''Answer “no” if there are open tasks that would prevent this incident or make mitigation easier if implemented.''
+|yes
+|
+|-
+| Were the people responding able to communicate effectively during the incident with the existing tooling?
+|yes
+|
+|-
+|Did existing monitoring notify the initial responders?
+|no
+|
+|-
+|Were the engineering tools that were to be used during the incident, available and in service? 
+|yes
+|
+|-
+|Were the steps taken to mitigate guided by an existing runbook?
+|no
+|
+|-
+! colspan="2" align="right" |Total score (count of all “yes” answers above)
+|10
+|
+|}

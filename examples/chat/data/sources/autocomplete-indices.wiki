@@ -1,0 +1,134 @@
+{{irdoc|status=draft}}
+
+== Summary ==
+{{Incident scorecard
+| task = T393663
+| paged-num = 0
+| responders-num = 1
+| coordinators = David Causse
+| start = 2025-05-08 2:30 AM
+| end = 2025-05-08 8:25 AM
+| metrics = N/A
+| impact = Autocomplete (typeahead) search results were missing or stale
+}}During the incident, users typing in the Wikipedia search bar did not get expected results.
+
+{{TOC|align=right}}
+
+==Timeline==
+''All times in UTC.'' 
+
+* 2025-05-07 0220 [https://logstash.wikimedia.org/app/discover#/doc/logstash-*/logstash-mediawiki-1-7.0.0-1-2025.05.07?id=OJUeq5YBfOjk-Vo1yy77 The daily job which creates our autocomplete indices fails] (restricted link), causing a subset of English Wikipedia articles to disappear from autocomplete results.
+
+*2025-05-07 1554  Bking (Search Platform SRE) merges [[gerrit:c/operations/puppet/+/1141903|this patch]] as a part of our ongoing [[phab:T388610|OpenSearch migration]]. As a result, the next day's daily job is cancelled and there is no opportunity for the job to fix the autocomplete results.
+*2025-05-07 1832 User thesavagenorwegian [[phab:T393635|opens this Phab task]] to report the problem.
+*2025-05-08 0825 - Dcausse (Search Platform software engineer) routes traffic away from EQIAD. User impact stops.
+
+==Detection==
+'''Issue first detected by:''' The community, see [[phab:T393663|this Phab task]].
+
+'''Relevant alerts:''' Did not fire
+
+==Conclusions ==
+
+===What went well?===
+
+* We (Search Platform) already had a plan to route traffic away from EQIAD, so it was easy to implement.
+
+===What went poorly?===
+
+* Several community members opened tickets, which suggests noticeable impact.
+
+===Where did we get lucky?===
+
+* We (Search Platform) already had a plan to route traffic away from EQIAD, so it was easy to implement.
+
+==Links to relevant documentation==
+
+* [[phab:T363521|T363521 Completion suggester can promote a bad build]]
+
+==Actionables==
+
+* Follow up on:
+** [[phab:T363521|T363521 Completion suggester can promote a bad build]]
+** [[phab:T393786|T393786 Document review/refresh for DPE-owned OpenSearch clusters]]
+** [[phab:T393523|T393523 Investigate CirrusSearch "Pool queue is full" errors]]
+** [[phab:T393709|T393709 Consider hosting autocomplete indices in a separate OpenSearch cluster]]
+
+==Scorecard==
+
+
+{| class="wikitable"
+|+[[Incident Scorecard|Incident Engagement  ScoreCard]]
+!
+!Question
+!Answer
+(yes/no)
+!Notes
+|-
+! rowspan="5" |People
+|Were the people responding to this incident sufficiently different than the previous five incidents? 
+|N/A
+|
+|-
+|Were the people who responded prepared enough to respond effectively
+|Y
+|
+|-
+|Were fewer than five people paged?
+|N/A
+|
+|-
+|Were pages routed to the correct sub-team(s)?
+|N/A
+|
+|-
+|Were pages routed to online (business hours) engineers?  ''Answer “no” if engineers were paged after business hours.''
+|N/A
+|
+|-
+! rowspan="5" |Process
+|Was the "Incident status" section atop the Google Doc kept up-to-date during the incident?
+|N/A
+|
+|-
+| Was a public wikimediastatus.net entry created? 
+|N
+|
+|-
+|Is there a phabricator task for the incident?
+|Y
+|
+|-
+|Are the documented action items assigned?
+|N
+|
+|-
+|Is this incident sufficiently different from earlier incidents so as not to be a repeat occurrence? 
+|Y
+|
+|-
+! rowspan="5" |Tooling
+|To the best of your knowledge was the open task queue free of any tasks that would have prevented this incident? ''Answer “no” if there are open tasks that would prevent this incident or make mitigation easier if implemented.''
+|N
+|We could have reduced impact by coordinating the job removal with the datacenter switchover.
+|-
+| Were the people responding able to communicate effectively during the incident with the existing tooling?
+|Y
+|
+|-
+|Did existing monitoring notify the initial responders?
+|N
+|
+|-
+|Were the engineering tools that were to be used during the incident, available and in service? 
+|Y
+|
+|-
+|Were the steps taken to mitigate guided by an existing runbook?
+|N
+|
+|-
+! colspan="2" align="right" |Total score (count of all “yes” answers above)
+|5
+|
+|}

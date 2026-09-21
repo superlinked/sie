@@ -1,0 +1,137 @@
+{{irdoc|status=final}}
+
+== Summary ==
+{{Incident scorecard
+| task = T370304
+| paged-num = Unknown (VictorOps history does not go back that far)
+| responders-num = 2 (Amir1, bvibber)
+| coordinators = N/A
+| start = 2024-07-21 20:59
+| end = 2024-07-21 21:09
+| impact = Wiki unavailability
+}}
+
+Database servers became unavailable with errors like <code>Wikimedia\Rdbms\DBUnexpectedError: Database servers in extension1 are overloaded. In order to protect application servers, the circuit breaking to databases of this section have been activated. Please try again a few seconds.</code>
+
+This is because s4 gets overloaded and it brings down x1 with itself, bringing down services.
+
+A previous incarnation of this incident occurred on 2024-07-13.
+
+{{TOC|align=right}}
+
+==Timeline==
+[https://sal.toolforge.org/production?d=2024-07-21 SAL log]
+
+''All times in UTC.''
+
+2024-07-21
+* 20:57 Write queries begin to exceed 400 wr/s 
+* 20:59 5XX errors begin being served ('''OUTAGE BEGINS''')
+* 21:01 Metrics no longer collected due to server overwhelm
+* 21:03 Metrics begin collecting again
+* 21:09 5XX errors return to nominal rates ('''OUTAGE ENDS''')
+* 22:14 Gerrit change {{Gerrit|1055629}} merged in to reduce write load
+* 22:44 Gerrit change {{Gerrit|1055629}} deployed
+
+<gallery>
+File:2024-07-21 incident wiki health overview.png|Site health overview
+File:2024-07-21 incident mysql write query stats.png|[https://grafana.wikimedia.org/dashboard/snapshot/eCbkCalIXHGFHc6o4LLYj7cXvpavaVUv MySQL Write query stats]
+</gallery>
+
+==Detection==
+
+Automated alerting fired at 21:00 and 21:01:
+
+<pre>
+<jinxer-wm> FIRING: PHPFPMTooBusy: Not enough idle PHP-FPM workers for Mediawiki mw-api-ext at eqiad: 0.06649% idle - https://bit.ly/wmf-fpmsat - https://grafana.wikimedia.org/d/U7JT--knk/mw-on-k8s?orgId=1&viewPanel=84&var-dc=eqiad%20prometheus/k8s&var-service=mediawiki&var-namespace=mw-api-ext&var-container_name=All - https://alerts.wikimedia.org/?q=alertname%3DPHPFPMTooBusy
+</pre>
+<pre>
+<jinxer-wm> FIRING: MediaWikiHighErrorRate: Elevated rate of MediaWiki errors - kube-mw-api-ext - https://wikitech.wikimedia.org/wiki/Application_servers/Runbook - https://grafana.wikimedia.org/d/000000438/mediawiki-exceptions-alerts?panelId=18&fullscreen&orgId=1&var-datasource=codfw%20prometheus/ops - https://alerts.wikimedia.org/?q=alertname%3DMediaWikiHighErrorRate
+
+</pre>
+
+At 21:04, Amir became active on the channel (<code><Amir1> we just had another one</code>)
+
+==Actionables==
+
+[https://phabricator.wikimedia.org/T371251 Switchover s4 master (db1238 -> db1160)]
+
+==Scorecard==
+
+
+{| class="wikitable"
+|+[[Incident Scorecard|Incident Engagement  ScoreCard]]
+!
+!Question
+!Answer
+(yes/no)
+!Notes
+|-
+! rowspan="5" |People
+|Were the people responding to this incident sufficiently different than the previous five incidents? 
+|yes
+|
+|-
+|Were the people who responded prepared enough to respond effectively
+|no
+|
+|-
+|Were fewer than five people paged?
+|no
+|
+|-
+|Were pages routed to the correct sub-team(s)?
+|no
+|
+|-
+|Were pages routed to online (business hours) engineers?  ''Answer “no” if engineers were paged after business hours.''
+|no
+|
+|-
+! rowspan="5" |Process
+|Was the "Incident status" section atop the Google Doc kept up-to-date during the incident?
+|no
+|
+|-
+| Was a public wikimediastatus.net entry created? 
+|no
+|
+|-
+|Is there a phabricator task for the incident?
+|yes
+|
+|-
+|Are the documented action items assigned?
+|
+|
+|-
+|Is this incident sufficiently different from earlier incidents so as not to be a repeat occurrence? 
+|no
+|
+|-
+! rowspan="5" |Tooling
+|To the best of your knowledge was the open task queue free of any tasks that would have prevented this incident? ''Answer “no” if there are''
+''open tasks that would prevent this incident or make mitigation easier if implemented.''
+|yes
+|
+|-
+| Were the people responding able to communicate effectively during the incident with the existing tooling?
+|yes
+|
+|-
+|Did existing monitoring notify the initial responders?
+|yes
+|
+|-
+|Were the engineering tools that were to be used during the incident, available and in service? 
+|no
+|
+|-
+|Were the steps taken to mitigate guided by an existing runbook?
+|no
+|
+|-
+! colspan="2" align="right" |Total score (count of all “yes” answers above)
+|5
+|
+|}

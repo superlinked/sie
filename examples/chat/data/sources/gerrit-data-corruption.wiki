@@ -1,0 +1,177 @@
+{{irdoc|status=final}}
+
+== Summary ==
+{{Incident scorecard
+| task = T393034
+| paged-num = 0
+| responders-num = 5
+| coordinators = sobanski
+| start = 2025-04-30 15:42:00
+| end = 2025-04-30 21:19:00
+| impact = Gerrit was down for ~5h. Two repositories were corrupted and had to be repaired.
+}}
+
+[[Gerrit]] was switched over from gerrit2002 to gerrit1003 in [[phab:T387833|T387833]]. Afterwards we were notified that some changes were missing in the UI: a change to mediawiki-config had been merged and deployed earlier and was now showing unmerged and missing patchsets. This happened because during the DNS change: both hosts were considered to be primary and unexpected replication took place for approximately an hour and twenty minutes (at most). The result was gerrit2002 would replicate an outdated state to the new primary gerrit1003. The few changes made to the primary would thus be deleted as the other hosts replicated the state from before the switchover. A change made to operations/mediawiki-config was merged and pulled on the deployment sever, meanwhile another change was made on the new primary and that resulted in a split brain of the repository. In the process of troubleshooting we identified two corrupted repositories and fixed them, one by abandoning the pending change and the other one by force pushing the expected state from the deployment server directly on the Gerrit host.
+
+==Timeline==
+''All times in UTC.''
+
+For the investigation below, we focused on the change [[gerrit:c/operations/mediawiki-config/+/1138508|1138508]] made to operations/mediawiki-config. This was reported by Timo has having been merged and deployed, but was no showing as unmerged and missing recent patchsets.
+
+* Gerrit on gerrit2002 was stopped/started several times between 15:18:37 and 17:05:00
+* 15:42 - 17:05 Replication enabled
+
+* 15:41:54 gerrit1003 scheduled replication operations/mediawiki-config [..all..]
+* 15:48:40 gerrit2002 scheduled replication operations/mediawiki-config [..all..]
+* 15:49:48 gerrit1003 replication completed in 1288ms
+* 15:58:26 gerrit2002 replication completed in 1381ms
+* 16:08:26 gerrit1003: Jenkins submit 1138508/7. Gerrit creates 1138508/8 due to the repo having Rebase if necessary
+* gerrit2002: Full replications triggered multiple as Gerrit is restarted
+* 16:16:09 gerrit2002 processes a full replication. It does not have the ref refs/changes/08/1138508/8 and pushes a delete.
+* 16:16:09 '''[CORRUPTION STARTS]''' gerrit2002 replication pushes refs/changes/08/1138508/8 and similar to gerrit1003.
+* 16:23:35 last entry in gerrit2002 replication_log
+
+* 16:45:22 Timo reports on IRC #wikimedia-operations that Gerrit change 1138508 is no more showing as merged.
+* Hashar notifies everyone that means we have a data corruption in Gerrit.
+* 17:05 Incident opened. lsobanski becomes IC.
+* 17:05 '''[DOWNTIME STARTS]''' Gerrit and Puppet shut down on both primary and replica host
+* 17:16 Created backups of git trees on both hosts
+* 17:32 Confirmed that attempting to restore from Bacula fails with “no filesets” (jobs exist and Bacula reports successful backups)
+* 18:35 We actually have a data backup from gerrit1003, backups were disabled on gerrit2002
+* 18:39 Queued a restore of an hourly backup from 15:00 UTC to gerrit1003
+* 18:53 Restore of an hourly backup from 15:00 UTC to gerrit1003 ETA is around 3hrs
+* 18:58 Running out of disk space on gerrit1003, stopping the restore
+* 19:00 Identifying possible bad changes, there may be a small enough number of them to fix using data from Zuul merge hosts
+* 19:47 Current understanding is that we have two bad merged changes: SmashPig (Fundraising) and Mediawiki config
+* 20: 30 '''[DOWNTIME ENDS]''' Brought up Gerrit primary with two repositories set to read only
+* 21:12 Attempting to manually fix mediawiki-config failed due to stale index
+* 21:14 Reindexing the change
+* 21:19 '''[CORRUPTION ENDS]''' Fixed both repositories and set them to active
+* 21:39 Blocked SSH access from Gerrit replica to primary: <nowiki>https://gerrit.wikimedia.org/r/c/operations/puppet/+/1140250</nowiki>
+* 21:45 Brought up Gerrit replica
+* 21:58 Reset deploy2002:/srv/mediawiki-staging to match deploy100
+
+==Detection==
+We were notified by a user that changes were missing from the UI. The state of the system was anomalous but once fixed, alerting for this specific issue should not be required.
+
+==Conclusions ==
+
+* Gerrit doesn't require to be running on the replica for replication to take place
+* There is no need for SSH access from Gerrit replica to the primary   
+
+===What went well?===
+
+* The troubleshooting and brainstorming was efficient, with ideas and actions communicated well
+* The ultimate fix was narrow in scope (as opposed to some alternatives we considered)
+
+===What went poorly?===
+
+* We had 5 hours of downtime (a good chunk of that spent to have a clear understanding of the scope of the corruption and to find the root cause of the corruption).
+* We only took a snapshot of the Git tree after the corruption happened
+* Gerrit backup was only running on a single host and not affected by the switchover
+* There was initial confusion when restoring from backup 
+* The switch over was planned late in the afternoon just before an holiday (May 1st)
+* The switch over task lacked the #gerrit tag
+
+===Where did we get lucky?===
+
+* The problem was quickly detected
+* Only two repositories were corrupted since we barely any patchsets proposed during the short time window.
+* We had subject matter experts were still around after the switchover
+
+==Links to relevant documentation==
+
+* [[Gerrit/Operations#Switch_over]]
+
+==Actionables==
+
+* Verify the status of Gerrit backups
+* Enable backups for the replica?
+* Add a local backup step to the Gerrit switchover cookbook
+* Troubleshoot setting the replica status by Puppet
+* Ensure `role::gerrit` defaults to setting up a replica rather than a primary
+* Look into the impact of running rsync on the git data set (Antoine states that should not be needed since Gerrit does a full replication).
+* Shutting down Gerrit takes a while and is ultimately killed by systemd after 90 seconds
+* Remove SSH access from Gerrit replica(s) to primary as part of the switchover cookbook
+* assert DNS entries are resolved to the expected values from all the hosts 
+* Make the SSH configuration and the primary/replica configuration uniform: either hard-coded hosts or service name based
+** Consider splitting Puppet roles between `role::gerrit::primary` and `role::gerrit::replica`, there were some confusion with the conditionals "is_replica" statements scattered in the manifests.
+
+==Scorecard==
+
+
+{| class="wikitable"
+|+[[Incident Scorecard|Incident Engagement  ScoreCard]]
+!
+!Question
+!Answer
+(yes/no)
+!Notes
+|-
+! rowspan="5" |People
+|Were the people responding to this incident sufficiently different than the previous five incidents? 
+|Yes
+|
+|-
+|Were the people who responded prepared enough to respond effectively
+|Yes
+|
+|-
+|Were fewer than five people paged?
+|No
+|No pages
+|-
+|Were pages routed to the correct sub-team(s)?
+|No
+|
+|-
+|Were pages routed to online (business hours) engineers?  ''Answer “no” if engineers were paged after business hours.''
+|No
+|No pages
+|-
+! rowspan="5" |Process
+|Was the "Incident status" section atop the Google Doc kept up-to-date during the incident?
+|Yes
+|
+|-
+| Was a public wikimediastatus.net entry created? 
+|Yes
+|
+|-
+|Is there a phabricator task for the incident?
+|Yes
+|
+|-
+|Are the documented action items assigned?
+|
+|
+|-
+|Is this incident sufficiently different from earlier incidents so as not to be a repeat occurrence? 
+|Yes
+|We had a similar result but caused by a different trigger in [[phab:T236114|T236114]]
+|-
+! rowspan="5" |Tooling
+|To the best of your knowledge was the open task queue free of any tasks that would have prevented this incident? ''Answer “no” if there are open tasks that would prevent this incident or make mitigation easier if implemented.''
+|Yes
+|
+|-
+| Were the people responding able to communicate effectively during the incident with the existing tooling?
+|Yes
+|We used Google Meet for troubleshooting
+|-
+|Did existing monitoring notify the initial responders?
+|No
+|
+|-
+|Were the engineering tools that were to be used during the incident, available and in service? 
+|?
+|
+|-
+|Were the steps taken to mitigate guided by an existing runbook?
+|No
+|
+|-
+! colspan="2" align="right" |Total score (count of all “yes” answers above)
+|
+|
+|}

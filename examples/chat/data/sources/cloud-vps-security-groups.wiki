@@ -1,0 +1,148 @@
+{{irdoc|status=draft}}
+
+== Summary ==
+{{Incident scorecard
+| task = 
+| paged-num = 0
+| responders-num = 3
+| coordinators = David Caro
+| start = 2025-05-07 12:51
+| end = 2025-05-07 13:35
+| impact = An unknown number of web services hosted on cloud-vps failed with network timeouts due to blocked network ports. Quarry was fully offline for the full duration of the outage, about 45 minutes.
+}}
+
+A change in security groups (to fill up) causes outages on some cloud vps VMs and projects
+*This affects toolforge (build service down)
+*This affects quarry (webservice down)
+*This affects prometheus (grafana unable to get data from it)
+*Potentially others
+
+As part of ongoing efforts to make all of cloud-vps work with IPv6, we just now ran an automated script to expand existing security group rules to ipv6 access. A bug in that script effectively destroyed existing rules rather than updating them, which caused many open doors to unceremoniously slam shut.
+
+In order to recover from this as quickly as possible, we restored a backup of the network database from earlier today (04:28 UTC). This restored service but also wiped out any networking changes that might have been made during that time.
+
+{{TOC|align=right}}
+
+==Timeline==
+*12:52 script to update security groups globally is run, something is not working as expected, “getting a bunch of failures for 'Quota exceeded for resources: ['security_group_rule'].'”
+*12:58 dcaro gets alert for quarry down, asks in chat  <- '''user-facing outage begins'''
+*13:02  Incident opened. Dcaro becomes IC.
+*13:09 testing db restore of the securitygrouprules table in codfw1
+*13:14 codfw1 looks ok, going to apply on eqiad
+*13:23 we do a full restore of the coludvps DB on eqiad (truncating the table only had too many foreign keys)
+*13:27 service partially restored (ex. grafana), quarry still down
+*13:36 restarted quarry web deployment, quarry restored, everything up  <- '''user-facing outage resolved'''
+*13:38 fullstack test passed, incident over
+
+==Detection==
+The script that was meant to edit security group rules failed with a quota error. It was immediately clear that it was not editing rules but adding all new rules to the 'admin' project which immediately filled the admin project's quota for rules.
+
+Taavi immediately recognized that this meant that rules were being deleted and not replaced.
+
+Incident response began immediately; Quarry alerted a few minutes later, and Simon appeared in the IRC channel a few minutes later to ask about an outage in his service.
+
+==Conclusions ==
+
+===What went well?===
+
+* Galera database backups saved us from a long, tedious recreation of the lost rules.
+* Quick recognition of the problem, multiple cloud-vps SREs online during the incident.
+
+===What went poorly?===
+
+* We initially attempted to selectively restore just the security-group rule table from the database, but got mired in multiple external key dependencies.
+* When restarting neutron services after the database restore, the restart cookbook restarted neutron on all cloudvirts (which was unimportant, and took forever) before restarting the service on the cloudcontrol nodes.
+* When trying to restart quarry web pods, had some trouble finding the right k8s certificate to connect to the cluster
+
+===Where did we get lucky?===
+
+We were lucky that the backup of the Neutron database was recent (8 hours) and that no users seem to have created any major services during the lost time.
+
+==Links to relevant documentation==
+
+==Actionables==
+
+[x] QuarryDown alert should be added to https://alerts.wikimedia.org/?q=team%3Dwmcs -- the alert emailed but didn't page or appear on the dashboard.
+
+[] Update the wmcs.openstack.restart_openstack cookbook to prioritize control nodes for faster restoration of critical services.
+
+[] Make it easier/less human-dependent to connect to the k8s cluster on quarry infra (ex. link the cert always in the root account in the default path so it always works from root by default)
+
+==Scorecard==
+
+
+{| class="wikitable"
+|+[[Incident Scorecard|Incident Engagement  ScoreCard]]
+!
+!Question
+!Answer
+(yes/no)
+!Notes
+|-
+! rowspan="5" |People
+|Were the people responding to this incident sufficiently different than the previous five incidents? 
+|n/a
+|small team, it's always us!
+|-
+|Were the people who responded prepared enough to respond effectively
+|yes
+|
+|-
+|Were fewer than five people paged?
+|yes
+|
+|-
+|Were pages routed to the correct sub-team(s)?
+|n/a
+|no pages
+|-
+|Were pages routed to online (business hours) engineers?  ''Answer “no” if engineers were paged after business hours.''
+|n/a
+|
+|-
+! rowspan="5" |Process
+|Was the "Incident status" section atop the Google Doc kept up-to-date during the incident?
+|yes
+|
+|-
+| Was a public wikimediastatus.net entry created? 
+|no
+|
+|-
+|Is there a phabricator task for the incident?
+|no
+|
+|-
+|Are the documented action items assigned?
+|yes
+|
+|-
+|Is this incident sufficiently different from earlier incidents so as not to be a repeat occurrence? 
+|yes
+|
+|-
+! rowspan="5" |Tooling
+|To the best of your knowledge was the open task queue free of any tasks that would have prevented this incident? ''Answer “no” if there are open tasks that would prevent this incident or make mitigation easier if implemented.''
+|yes
+|
+|-
+| Were the people responding able to communicate effectively during the incident with the existing tooling?
+|yes
+|
+|-
+|Did existing monitoring notify the initial responders?
+|yes
+|
+|-
+|Were the engineering tools that were to be used during the incident, available and in service? 
+|yes
+|
+|-
+|Were the steps taken to mitigate guided by an existing runbook?
+|no
+|
+|-
+! colspan="2" align="right" |Total score (count of all “yes” answers above)
+|9
+|
+|}
