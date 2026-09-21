@@ -12,7 +12,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from document_to_markdown.config import DATA_DIR, PDF_DIR, DocumentSource, load_config, select_documents
+from document_to_markdown.config import PDF_DIR, DocumentSource, load_config, select_documents
 
 console = Console()
 
@@ -96,7 +96,11 @@ def fetch_documents(slugs: list[str], *, refresh: bool) -> Path:
         )
         console.print(f"[green]{status:10}[/] {document.slug}  {len(payload) / 1024:.1f} KiB  {checksum[:12]}")
 
-    manifest_path = DATA_DIR / "manifest.json"
+    # Beside the PDFs, not in the fetched evidence tree. The recorded run's
+    # provenance is data/inputs/sources.json, which `python3 fetch.py`
+    # downloads and verify-run reads; this one describes what you just
+    # downloaded, so a fresh fetch can never overwrite the recorded one.
+    manifest_path = PDF_DIR / "manifest.json"
     manifest_path.write_text(
         json.dumps(
             {

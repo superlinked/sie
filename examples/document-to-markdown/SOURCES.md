@@ -1,7 +1,8 @@
 # Source documents
 
-The example downloads every source at run time. Complete third-party PDFs are
-not committed to this repository.
+The example downloads every source at run time. No complete third-party PDF is
+in this repository, and only the FEMA form, a work of the U.S. federal
+government, is redistributed at all.
 
 ## NVIDIA Q4 FY2025 CFO Commentary
 
@@ -37,9 +38,13 @@ not committed to this repository.
 - Rights basis: work of the U.S. federal government under 17 U.S.C. § 105.
   Do not imply FEMA or DHS endorsement. Government seals and insignia may have
   separate restrictions.
-- Reproducibility: the exact government PDF is bundled as a fallback because
-  FEMA may reject requests from datacenter IP addresses. The manifest still
-  records the official publisher URL.
+- Reproducibility: the exact government PDF travels with the Hugging Face
+  dataset as a fallback, because FEMA may reject requests from datacenter IP
+  addresses. `python3 fetch.py` puts it at
+  `data/inputs/fema-proof-of-loss-form.pdf`, and the manifest still records the
+  official publisher URL.
 
-`uv run fetch-documents` writes the acquired size and SHA-256 for every file to
-`data/manifest.json`.
+The recorded run's provenance is `data/inputs/sources.json`, downloaded by
+`python3 fetch.py`: the acquired size, SHA-256, rights note and retrieval path
+for every file. `uv run fetch-documents` writes the same shape for the copies it
+downloads, at `pdfs/manifest.json`.

@@ -9,8 +9,15 @@ import yaml
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
-PDF_DIR = DATA_DIR / "pdfs"
+# Written by `python3 fetch.py`, which owns this directory and replaces it
+# wholesale. Nothing else writes into it, so the digests the fetch checked stay
+# true of what is on disk.
+EVIDENCE_DIR = ROOT / "data"
+SOURCES_PATH = EVIDENCE_DIR / "inputs" / "sources.json"
+# Written by `uv run fetch-documents`, and kept outside the fetched tree so a
+# re-fetch does not delete the PDFs and a PDF download does not overwrite the
+# recorded provenance.
+PDF_DIR = ROOT / "pdfs"
 RUNS_DIR = ROOT / "runs"
 
 

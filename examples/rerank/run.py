@@ -1,51 +1,75 @@
+#!/usr/bin/env python3
+"""Send the /rerank calls to a SIE deployment, or check the recorded ones.
+
+    python3 fetch.py
+    python3 run.py --check            # offline, no key, nothing installed
+    python3 run.py --show <case-id>   # offline, prints one call
+    uv sync && uv run python run.py --record   # live, needs a reranker endpoint
+
+Model         Qwen/Qwen3-Reranker-4B
+Path          /v1/score/Qwen/Qwen3-Reranker-4B
+Recorded run  public SIE v0.6.23 on an L4 in Modal, 2026-07-24. The run did not
+              save its base URL, so calls.json and manifest.json record the
+              runtime, the server commit and the hardware instead of an endpoint.
+
+Calls go through `sie_sdk.SIEClient`, per AGENTS.md. The import is deferred into
+main() so `--check` and `--show` run on a bare `python3` with nothing installed.
+
+`--check` rebuilds all four recorded call envelopes from `data/inputs/cases.json`
+and compares each with the recorded one. It is a bijection, not a walk over what
+is there: the expected call ids come from the inputs, one per case, so a call
+that is missing, recorded twice or implied by no case fails the check.
+
+What the envelope records is the SDK call, not the wire body: `client.score`
+takes a query Item and a list of candidate Items, and `source_id` and
+`source_excerpt_sha256` are provenance fields the SIE payload does not carry.
+That was true when this run was recorded and it is still true; the field names
+say so rather than pretending to be a request body.
+"""
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import math
 import os
-from datetime import UTC, datetime
+import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-ROOT = Path(__file__).resolve().parent
-CASES_PATH = ROOT / "data" / "cases.json"
-SOURCES_PATH = ROOT / "data" / "sources.json"
+if TYPE_CHECKING:
+    from sie_sdk import SIEClient
+
 MODEL = "Qwen/Qwen3-Reranker-4B"
-ARTIFACT_NAMES = {
-    "sec_filing_amendment": "sec-restatement",
-    "cms_lower_limb_orthosis": "cms-orthosis-documentation",
-    "ntsb_detector_alert": "ntsb-bearing-alert",
-    "scotus_two_contracts": "supreme-court-arbitration",
-}
+PATH = f"/v1/score/{MODEL}"
+DEFAULT_ENDPOINT = "http://127.0.0.1:8080"
+REQUEST_SHAPE = (
+    "the SDK call envelope run.py builds, not the wire body. "
+    "source_id and source_excerpt_sha256 are provenance fields "
+    "the SIE payload does not carry."
+)
+RESPONSE_SHAPE = (
+    "the per-item result sie_sdk returned, unmodified. The SDK surfaces no server envelope and no response headers."
+)
 
 
-def read_json(path: Path) -> Any:
+class CallFailedError(Exception):
+    """A call that did not produce a usable result."""
+
+
+def load(path: Path) -> Any:
+    if not path.exists():
+        raise SystemExit(f"{path} is missing. Run: python3 fetch.py")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def to_jsonable(value: Any) -> Any:
+    """What the SDK returned, as plain JSON types and nothing else."""
     if isinstance(value, dict):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -57,54 +81,37 @@ def to_jsonable(value: Any) -> Any:
     return value
 
 
-def load_and_verify_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
-    cases = read_json(CASES_PATH)
-    sources = read_json(SOURCES_PATH)
-    policy = cases.get("integrity_policy", {})
-    if policy.get("synthetic_or_paraphrased_evidence") is not False:
-        raise ValueError("Cases must reject synthetic or paraphrased evidence")
-    if sources.get("synthetic_or_paraphrased_evidence") is not False:
-        raise ValueError("Source manifest must reject synthetic evidence")
-    if cases.get("model") != MODEL:
-        raise ValueError(f"Expected model {MODEL}")
-    if set(cases["cases"]) != set(ARTIFACT_NAMES):
-        raise ValueError("Case set changed")
+def failure_entry(case_id: str, endpoint: str, envelope: dict[str, Any], error: BaseException) -> dict[str, Any]:
+    """What a failed call records.
 
-    known_sources = sources["sources"]
-    for case_id, case in cases["cases"].items():
-        if not case["query_provenance"].startswith("authored evaluation query"):
-            raise ValueError(f"Missing query provenance for {case_id}")
-        candidate_ids: set[str] = set()
-        for candidate in case["candidates"]:
-            candidate_id = candidate["id"]
-            if candidate_id in candidate_ids:
-                raise ValueError(f"Duplicate candidate {candidate_id}")
-            candidate_ids.add(candidate_id)
-            source = known_sources.get(candidate["source_id"])
-            if source is None:
-                raise ValueError(f"Unknown source for {candidate_id}")
-            actual = sha256_bytes(candidate["text"].encode("utf-8"))
-            if actual != candidate["sha256"]:
-                raise ValueError(f"Source excerpt changed for {candidate_id}")
-            canonical = source.get("excerpts", {}).get(candidate_id)
-            if canonical is None:
-                raise ValueError(f"Missing canonical excerpt for {candidate_id}")
-            if candidate["locator"] != canonical["locator"] or actual != canonical["sha256"]:
-                raise ValueError(f"Canonical excerpt changed for {candidate_id}")
-        if case["expected_top_candidate_id"] not in candidate_ids:
-            raise ValueError(f"Expected top candidate missing for {case_id}")
-    return cases, sources
+    Every field the success path writes, so that `check` and `score.py` read a
+    calls.json holding failures instead of raising KeyError on it. Only the
+    values differ: the status never reads as success, the response is null and
+    `error` says what went wrong.
+    """
+    return {
+        "id": f"page/{case_id}",
+        "set": "page",
+        "case": case_id,
+        "model": MODEL,
+        "endpoint": endpoint,
+        "path": PATH,
+        "status": "error",
+        "error": {"type": type(error).__name__, "message": str(error)},
+        "timing": {"latency_ms": None, "attempts": 1},
+        "request": {"method": "SIEClient.score", "shape": REQUEST_SHAPE, "body": envelope},
+        "response": None,
+        "recorded": {},
+    }
 
 
-def build_audit_envelope(case_id: str, case: dict[str, Any]) -> dict[str, Any]:
+def build_envelope(case_id: str, case: dict[str, Any]) -> dict[str, Any]:
+    """The SDK call this example makes for one case, as it is recorded."""
     return {
         "method": "SIEClient.score",
-        "endpoint": f"/v1/score/{MODEL}",
+        "endpoint": PATH,
         "model": MODEL,
-        "query": {
-            "id": f"{case_id}-query",
-            "text": case["query"],
-        },
+        "query": {"id": f"{case_id}-query", "text": case["query"]},
         "items": [
             {
                 "id": candidate["id"],
@@ -119,105 +126,162 @@ def build_audit_envelope(case_id: str, case: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_response(
-    case_id: str,
-    case: dict[str, Any],
-    response: dict[str, Any],
-) -> dict[str, Any]:
-    if response.get("model") != MODEL:
-        raise ValueError(f"Unexpected model in response for {case_id}")
-    if response.get("query_id") != f"{case_id}-query":
-        raise ValueError(f"Unexpected query ID for {case_id}")
-    score_rows = response.get("scores")
-    if not isinstance(score_rows, list):
-        raise TypeError(f"Missing score list for {case_id}")
-    scores: list[dict[Any, Any]] = []
-    for index, row in enumerate(score_rows):
-        if not isinstance(row, dict):
-            raise TypeError(f"Invalid score row at index {index}")
-        scores.append(row)
+def check(data_dir: Path) -> int:
+    cases = load(data_dir / "inputs/cases.json")["cases"]
+    calls = load(data_dir / "calls.json")["calls"]
 
-    expected_ids = {candidate["id"] for candidate in case["candidates"]}
-    observed_ids = {row.get("item_id") for row in scores}
-    if observed_ids != expected_ids or len(scores) != len(expected_ids):
-        raise ValueError(f"Candidate coverage changed for {case_id}")
-    ranks: list[int] = []
-    for row in scores:
-        rank = row.get("rank")
-        if type(rank) is not int:
-            raise ValueError(f"Invalid rank for {row.get('item_id')}")
-        ranks.append(rank)
-    ranks.sort()
-    if ranks != list(range(len(scores))):
-        raise ValueError(f"Ranks are incomplete for {case_id}")
-    for row in scores:
-        score = row.get("score")
-        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
-            raise ValueError(f"Invalid score for {row.get('item_id')}")
-    top = min(scores, key=lambda row: row["rank"])
-    expected_top = case["expected_top_candidate_id"]
-    if top["item_id"] != expected_top:
-        raise ValueError(f"{case_id}: expected {expected_top}, received {top['item_id']}")
-    return {
-        "passed": True,
-        "expected_top_candidate_id": expected_top,
-        "observed_top_candidate_id": top["item_id"],
-        "candidate_count": len(scores),
-    }
-
-
-def run_cases(selected_case: str | None) -> dict[str, Any]:
-    from sie_sdk import Item, SIEClient
-
-    cases, _ = load_and_verify_inputs()
-    base_url = os.environ.get("SIE_BASE_URL", "http://127.0.0.1:8080")
-    api_key = os.environ.get("SIE_API_KEY") or None
-    client = SIEClient(base_url, api_key=api_key, timeout_s=900)
-    results: dict[str, Any] = {}
-
-    for case_id, case in cases["cases"].items():
-        if selected_case and case_id != selected_case:
+    expected = {f"page/{case_id}": (case_id, case) for case_id, case in cases.items()}
+    recorded: dict[str, dict[str, Any]] = {}
+    duplicates: list[str] = []
+    for call in calls:
+        if call["id"] in recorded:
+            duplicates.append(call["id"])
             continue
-        response = client.score(
-            MODEL,
-            Item(id=f"{case_id}-query", text=case["query"]),
-            [Item(id=candidate["id"], text=candidate["text"]) for candidate in case["candidates"]],
-            wait_for_capacity=True,
-            provision_timeout_s=900,
-        )
-        raw = to_jsonable(response)
-        evaluation = validate_response(case_id, case, raw)
-        results[case_id] = {
-            "audit_envelope": build_audit_envelope(case_id, case),
-            "raw_response": raw,
-            "evaluation": evaluation,
-        }
-    if not results:
-        raise ValueError(f"Unknown case: {selected_case}")
+        recorded[call["id"]] = call
+
+    missing = sorted(set(expected) - set(recorded))
+    unexpected = sorted(set(recorded) - set(expected))
+
+    rebuilt = 0
+    mismatched: list[str] = []
+    for call_id in sorted(set(expected) & set(recorded)):
+        call = recorded[call_id]
+        case_id, case = expected[call_id]
+        if call["case"] != case_id:
+            mismatched.append(f"{call_id}: case {call['case']} differs from {case_id}")
+        elif call["model"] != MODEL:
+            mismatched.append(f"{call_id}: model {call['model']} differs from {MODEL}")
+        elif call["path"] != PATH:
+            mismatched.append(f"{call_id}: path {call['path']} differs from {PATH}")
+        elif build_envelope(case_id, case) != call["request"]["body"]:
+            mismatched.append(f"{call_id}: rebuilt envelope differs from the recorded one")
+        else:
+            rebuilt += 1
+
+    print(f"{rebuilt} of {len(calls)} recorded calls rebuilt from the inputs and matched")
+    print(f"{len(expected)} calls expected from {len(cases)} cases, {len(recorded)} recorded")
+    for call_id in missing:
+        print(f"MISSING {call_id}: expected from the inputs, absent from calls.json", file=sys.stderr)
+    for call_id in duplicates:
+        print(f"DUPLICATE {call_id}: recorded more than once", file=sys.stderr)
+    for call_id in unexpected:
+        print(f"UNEXPECTED {call_id}: recorded but no case in inputs/cases.json implies it", file=sys.stderr)
+    for line in mismatched:
+        print(f"MISMATCH {line}", file=sys.stderr)
+    if missing or duplicates or unexpected or mismatched:
+        return 1
+    return 0
+
+
+def record(client: SIEClient, endpoint: str, case_id: str, case: dict[str, Any]) -> dict[str, Any]:
+    """Send one case through the SDK and return its calls.json entry."""
+    from sie_sdk import Item  # noqa: PLC0415
+
+    envelope = build_envelope(case_id, case)
+    started = time.monotonic()
+    result = client.score(
+        MODEL,
+        Item(id=f"{case_id}-query", text=case["query"]),
+        [Item(id=candidate["id"], text=candidate["text"]) for candidate in case["candidates"]],
+        wait_for_capacity=True,
+        provision_timeout_s=900,
+    )
+    latency_ms = round((time.monotonic() - started) * 1000, 3)
+    body = to_jsonable(result)
+    # A 200 is not a result. Refuse anything without scores to read.
+    if not isinstance(body, dict) or not body.get("scores"):
+        raise CallFailedError(f"{case_id}: response carried no scores")
     return {
-        "completed_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "endpoint": base_url,
+        "id": f"page/{case_id}",
+        "set": "page",
+        "case": case_id,
         "model": MODEL,
-        "cases": results,
+        "endpoint": endpoint,
+        "path": PATH,
+        "status": 200,
+        "timing": {"latency_ms": latency_ms, "attempts": 1},
+        "request": {"method": "SIEClient.score", "shape": REQUEST_SHAPE, "body": envelope},
+        "response": {"status": 200, "shape": RESPONSE_SHAPE, "body": body},
+        "recorded": {"model_revision": client.last_model_revision, "retry_count": client.last_retry_count},
     }
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Rank exact primary-source passages with public SIE")
-    parser.add_argument("--case", choices=sorted(ARTIFACT_NAMES))
-    parser.add_argument("--output", type=Path)
-    return parser.parse_args()
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--data", default="data", help="fetched evidence directory")
+    parser.add_argument("--check", action="store_true", help="offline check, the default")
+    parser.add_argument("--show", metavar="CASE", help="print one call and exit, sending nothing")
+    parser.add_argument("--record", action="store_true", help="make live calls")
+    parser.add_argument("--out", default="run-output/calls.json", help="where --record writes")
+    args = parser.parse_args()
 
+    data_dir = Path(args.data)
+    cases = load(data_dir / "inputs/cases.json")["cases"]
 
-def main() -> None:
-    args = parse_args()
-    result = run_cases(args.case)
-    if args.output:
-        write_json(args.output, result)
-        print(f"Wrote {args.output}")
-    else:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    if args.show:
+        if args.show not in cases:
+            raise SystemExit(f"Unknown case: {args.show}. Known: {', '.join(cases)}")
+        print(json.dumps(build_envelope(args.show, cases[args.show]), indent=2, ensure_ascii=False))
+        return 0
+
+    if not args.record:
+        return check(data_dir)
+
+    # Sanity-check the excerpts before spending anything on them: a rewritten
+    # candidate must not reach the model as though it were a source quotation.
+    sources = load(data_dir / "inputs/sources.json")["sources"]
+    for case_id, case in cases.items():
+        for candidate in case["candidates"]:
+            canonical = sources.get(candidate["source_id"], {}).get("excerpts", {}).get(candidate["id"])
+            if canonical is None or sha256_text(candidate["text"]) != canonical["sha256"]:
+                raise SystemExit(f"{case_id}/{candidate['id']}: excerpt does not match inputs/sources.json")
+
+    endpoint = os.environ.get("SIE_CLUSTER_URL") or os.environ.get("SIE_BASE_URL") or DEFAULT_ENDPOINT
+    api_key = os.environ.get("SIE_API_KEY") or None
+    # Deferred so --check and --show run on a bare `python3` with nothing installed.
+    from sie_sdk import SIEClient  # noqa: PLC0415
+
+    client = SIEClient(endpoint, api_key=api_key, timeout_s=900)
+
+    calls = []
+    failed: list[str] = []
+    for case_id, case in cases.items():
+        try:
+            entry = record(client, endpoint, case_id, case)
+        except Exception as error:  # noqa: BLE001
+            failed.append(f"page/{case_id}: {type(error).__name__}: {error}")
+            calls.append(failure_entry(case_id, endpoint, build_envelope(case_id, case), error))
+            print(f"{case_id}: FAILED {type(error).__name__}", file=sys.stderr)
+            continue
+        calls.append(entry)
+        print(f"{case_id}: {entry['timing']['latency_ms']:.0f}ms", file=sys.stderr)
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(
+            {
+                "task": "rerank",
+                "call_count": len(calls),
+                "failed_calls": len(failed),
+                "complete": not failed,
+                "calls": calls,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"wrote {out_path}")
+    if failed:
+        # A run that failed must not look like a run that succeeded.
+        print(f"{len(failed)} of {len(cases)} calls FAILED:", file=sys.stderr)
+        for line in failed:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

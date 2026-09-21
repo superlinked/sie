@@ -1,1 +1,5 @@
-verified-run/.work/
+data/
+run-output/
+.venv/
+__pycache__/
+*.pyc

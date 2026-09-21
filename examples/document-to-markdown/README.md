@@ -7,7 +7,8 @@ headings, and form labels.
 The source set includes an NVIDIA CFO commentary, a SiriusPoint investor deck,
 the Docling paper, and a FEMA proof-of-loss form. The fetch command records the
 publisher URL and exact checksum for each local copy. The federal government
-form is bundled as a fallback because FEMA may block datacenter downloads.
+form travels with the dataset as a fallback because FEMA may block datacenter
+downloads.
 
 ## What the run proves
 
@@ -16,7 +17,7 @@ The conversion is one SDK call:
 ```python
 result = client.extract(
     "docling",
-    Item(document=Path("data/pdfs/nvidia-q4-fy2025-cfo-commentary.pdf")),
+    Item(document=Path("pdfs/nvidia-q4-fy2025-cfo-commentary.pdf")),
 )
 markdown = result["data"]["markdown"]
 ```
@@ -30,10 +31,20 @@ not pretend a form has one useful reading order.
 ## Verified result
 
 Recorded against SIE Cloud, `https://api.superlinked.com`, on September 16,
-2026. All 25 checks passed. The run is committed under
-[`runs/cloud-20260916/`](runs/cloud-20260916) — every request, response, model
-revision and timing — so these numbers can be checked rather than taken on
-trust.
+2026. All 25 checks passed. Every request, response, model revision and timing
+is in the public Hugging Face dataset
+[`superlinked/sie-task-evidence`](https://huggingface.co/datasets/superlinked/sie-task-evidence),
+so these numbers can be checked rather than taken on trust:
+
+```bash
+python3 fetch.py            # standard library only, no key, no token
+uv run verify-run data
+```
+
+`fetch.py` pins a commit SHA rather than `main`, and checks every downloaded
+file against a digest before the verifier sees it. The run bundle it downloads
+is byte-for-byte the one that used to sit in this repository under
+`runs/cloud-20260916/`, so the digest chain below is the same chain.
 
 | Document | Checks | Latency, recorded run |
 |---|---:|---:|
@@ -63,18 +74,17 @@ Totals are summed from the unrounded measurements, so adding the rounded rows
 above can land a tenth of a second away — run 3's rows come to 29.4 s against a
 true total of 29.3 s. The exact milliseconds are in each run's manifest.
 
-Run 3 is the committed one because it is the only run produced by the code in
-this commit: runs 1 and 2 predate `convert.py` recording a per-call model
-revision, so they carry no `calls.json` and `verify-run` cannot check them.
+Run 3 is the recorded one because it is the only run produced by this version
+of `convert.py`: runs 1 and 2 predate it recording a per-call model revision,
+so they carry no `calls.json` and `verify-run` cannot check them.
 That is the reason, and it is worth being blunt about what it does not explain.
 **Run 3 is also the fastest of the three overall, and fastest on three of the
 four documents.** It was not chosen for that.
 
-[`runs/repeat-runs/repeat-runs.json`](runs/repeat-runs/repeat-runs.json) keeps
-runs 1 and 2 — their timings and the SHA-256 of every file they produced — but
-not their Markdown, so the corpus is redistributed once rather than three
-times. To check the byte-identical claim yourself, hash
-`runs/cloud-20260916/markdown/<slug>.md` and compare.
+`data/inputs/repeat-runs.json` keeps runs 1 and 2 — their timings and the
+SHA-256 of every file they produced — but not their Markdown, so the corpus is
+redistributed once rather than three times. To check the byte-identical claim
+yourself, hash `data/markdown/<slug>.md` and compare.
 
 Read any of these as single measurements on shared Cloud hardware we do not
 control, not as a benchmark. The model was not resident when the session began,
@@ -99,15 +109,20 @@ describes untouched, and this one did.
 The whole bundle verifies offline, with no API key and no network:
 
 ```bash
-uv run verify-run runs/cloud-20260916
+python3 fetch.py
+uv run verify-run data
 ```
 
 It recomputes the 25 from the recorded check arrays rather than reading a
 stored total, checks every digest, and asserts that each scored Markdown file is
 exactly the Markdown its recorded API response returned. That last check exists
-because `eval-documents` reads `runs/<id>/markdown/<slug>.md` and never opens
+because `eval-documents` reads `<run>/markdown/<slug>.md` and never opens
 the response beside it, so on its own it would be scoring a file this harness
 wrote. Binding the two was added after running the example exposed the gap.
+
+It prints `61 of 61 checks passed, 4 not checked`. The four not checked are the
+source PDF digests, which need the PDFs: run `uv run fetch-documents` and they
+become checks too. A missing file is reported, never skipped into the total.
 
 ## Run it
 
@@ -118,9 +133,17 @@ cd examples/document-to-markdown
 cp .env.example .env
 uv sync
 
-uv run fetch-documents
+uv run fetch-documents                 # the four source PDFs, into pdfs/
 uv run convert-documents --run-id local
 uv run eval-documents runs/local
+```
+
+Checking the recorded run instead needs no key and no endpoint:
+
+```bash
+python3 fetch.py                       # the recorded run, into data/
+uv run verify-run data                 # digests and relations
+uv run eval-documents data             # the 25 checks, against the recorded Markdown
 ```
 
 The default `.env` points at a local SIE server:
@@ -139,34 +162,53 @@ SIE_API_KEY=...
 
 ## Source and result layout
 
+In this repository, and nothing else:
+
 ```text
 config.yaml                       source URLs, model, and acceptance checks
-fixtures/SOURCES.md               rights and attribution notes
-data/pdfs/                        fetched PDFs, ignored by git
-data/manifest.json                source URL, rights, byte length and SHA-256 per PDF
-runs/<run-id>/manifest.json       endpoint, model revisions, timings, and digests
-runs/<run-id>/calls.json          every call in one file: request, response,
-                                  status, headers, timing, model revision
-runs/<run-id>/payloads/*.json     large unscored response members, by digest
-runs/<run-id>/markdown/*.md       exported Markdown, the text the checks score
-runs/<run-id>/evaluation.json     exact pass and failure details
-runs/repeat-runs/                 earlier complete runs, kept for the
-                                  byte-identical claim above
+SOURCES.md                        rights and attribution notes
+fetch.py                          downloads the recorded run at a pinned revision
+document_to_markdown/             fetch, convert, evaluate, verify, canonical JSON
 ```
 
+Downloaded by `python3 fetch.py` into `data/`, which it owns and replaces
+wholesale:
+
+```text
+data/manifest.json                the dataset manifest: endpoint, models, run
+                                  dates and a SHA-256 for every file below
+data/run-manifest.json            endpoint, model revisions, timings, and digests
+data/calls.json                   every call in one file: request, response,
+                                  status, headers, timing, model revision
+data/payloads/*.json              large unscored response members, by digest
+data/markdown/*.md                exported Markdown, the text the checks score
+data/evaluation.json              exact pass and failure details
+data/inputs/sources.json          source URL, rights, byte length and SHA-256 per PDF
+data/inputs/repeat-runs.json      earlier complete runs, kept for the
+                                  byte-identical claim above
+data/inputs/fema-proof-of-loss-form.pdf   the one PDF that is redistributed
+```
+
+Written by the commands you run: `pdfs/` by `fetch-documents`, `runs/<run-id>/`
+by `convert-documents`, `run-output/` by `eval-documents`. All four directories
+are ignored by git.
+
 The source PDFs stay fetch-only: two of the four are investor documents whose
-rights notes say not to redistribute the complete file. `data/manifest.json` is
-committed instead, pinning each URL, byte length and SHA-256, which is what a
-reader needs to confirm they fetched the same bytes this run scored.
+rights notes say not to redistribute the complete file. `data/inputs/sources.json`
+pins each URL, byte length and SHA-256 instead, which is what a reader needs to
+confirm they fetched the same bytes this run scored. The FEMA form is the
+exception and travels with the dataset, because it is a work of the U.S. federal
+government under 17 U.S.C. 105 and because `fema.gov` refuses datacenter
+addresses.
 
 One of the four may refuse you. `fema.gov` answers a request carrying a Chrome
 user-agent with `403` and serves plain `curl` the PDF — backwards from what
 anyone debugging that 403 would guess, and the reason `fetch.py` retries with
 `curl` before falling back to the bundled copy. Tested from one network only,
 so it says nothing about what a browser on a home connection sees. The
-`retrieval` field in `data/manifest.json` records which path a fetch took;
-`publisher-after-403-via-curl` means the fallback was used. The run committed
-here predates that finer-grained value and records `publisher` for all four,
+`retrieval` field in `data/inputs/sources.json` records which path a fetch took;
+`publisher-after-403-via-curl` means the fallback was used. The recorded run
+predates that finer-grained value and records `publisher` for all four,
 which is true of every one of them — FEMA's arrived through the `curl` retry.
 
 One call is one entry in `calls.json` rather than a file of its own. Members
@@ -182,7 +224,7 @@ check one:
 | Digest | Taken over |
 | --- | --- |
 | `manifest_sha256`, `calls.sha256`, `entry_sha256`, `scored_markdown.response_markdown_sha256` | RFC 8785 canonical encoding of the parsed value, so reformatting a copy does not change it |
-| `$payload.sha256`, `scored_markdown.sha256`, `document_sha256`, `source_sha256`, and `sha256` in `data/manifest.json` | the recorded file bytes, reproducible with `shasum -a 256` |
+| `$payload.sha256`, `scored_markdown.sha256`, `document_sha256`, `source_sha256`, and `sha256` in `data/inputs/sources.json` | the recorded file bytes, reproducible with `shasum -a 256` |
 
 The split is not arbitrary. Content that is compared against a reformatted copy
 elsewhere is hashed canonically; content that is a file a reader will hash
@@ -202,7 +244,8 @@ run has.
 
 All 25 checks pass. The tables are still not structurally reliable, and those
 two facts are both true because the checks test different things than you might
-assume. Everything below is in `runs/cloud-20260916/markdown/` to read.
+assume. Everything below is in `data/markdown/` to read, once you have run
+`python3 fetch.py`.
 
 **The tables do not survive as tables.** There is not one structurally clean
 table in this corpus — I checked all fifteen. The behaviour is consistent:

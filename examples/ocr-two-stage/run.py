@@ -1,290 +1,118 @@
 #!/usr/bin/env python3
-"""Record the /ocr two-stage page evidence against SIE Cloud.
+"""Send the /ocr two-stage calls to SIE Cloud, or check the recorded ones.
 
-Stage 1 turns each page image into Markdown with LightOnOCR. Stage 2 turns
-*that recorded Markdown* into typed fields under a pre-registered JSON schema.
-The page image never reaches stage 2, which is what makes this a pipeline
-rather than two independent demos.
+    python3 fetch.py
+    python3 run.py --check            # offline, no key, nothing installed
+    python3 run.py --show <doc-id>    # offline, prints both stages for one document
+    python3 run.py --verify-inputs    # fetches the images and checks their digests
+    uv sync && uv run python run.py --record   # live, needs SIE_API_KEY
 
-Usage (from the repository root):
+Endpoint      https://api.superlinked.com
+Stage 1       POST /v1/extract/lightonai/LightOnOCR-2-1B, one page image
+Stage 2       POST /v1/chat/completions, the stage-1 Markdown under a strict
+              JSON schema, once on Qwen/Qwen3.8-27B-FP8 and once on Qwen/Qwen3.5-4B
 
-    python3 examples/ocr-two-stage/run.py --probe
-    python3 examples/ocr-two-stage/run.py --stage 1
-    python3 examples/ocr-two-stage/run.py --stage 2
-    python3 examples/ocr-two-stage/run.py                 # both stages
-    python3 examples/ocr-two-stage/run.py --doc ID
-    python3 examples/ocr-two-stage/run.py --verify-inputs # fetch + digests only
+The page image never reaches stage 2. That is what makes this a pipeline rather
+than two demonstrations, and `--check` is where the claim is tested: it rebuilds
+each stage-2 request body from the instruction template and the Markdown in the
+recorded stage-1 response, then compares it with the stage-2 request that was
+actually sent. If stage 2 had seen anything else, the rebuild would differ.
 
-Stage 1 sends the shape packages/tasks/src/codegen.ts generates for the `ocr`
-task: POST /v1/extract/<model with / as __> with one base64 image. Stage 2
-sends POST /v1/chat/completions with a strict JSON-schema response format and
-the stage-1 Markdown pasted into one user message.
+Calls go through `sie_sdk.SIEClient`, per AGENTS.md. The import is deferred into
+main() so `--check` and `--show` run on a bare `python3` with nothing installed.
 
-Credentials:
-    SIE_API_KEY       bearer key; when unset, the script reads SIE_KEY_FILE
-    SIE_KEY_FILE      a bare one-line key (default: ~/.secrets/sie_api_key_sep)
-    SIE_CLUSTER_URL   endpoint; SIE_BASE_URL is accepted as an alias
-                      (default: https://api.superlinked.com)
+The images are not in the dataset. Several carry licences that do not permit
+redistribution, and one is a copyrighted investor page used as an attributed
+excerpt. Each document in `inputs/inputs.json` carries the URL serving the exact
+bytes that were sent, their length and their SHA-256; `--verify-inputs` and
+`--record` fetch by that URL and refuse anything that differs. The recorded
+stage-1 request stores that digest in place of the base64, so the payload can be
+rebuilt from the image rather than shipped with it.
 
-The key only ever goes into the Authorization header. It is never printed, and
-the script deletes any file it wrote that contains it. Stored stage-1 requests
-replace the base64 image with the image path and its SHA-256, so the exact
-payload can be rebuilt from the committed image.
-
-Standard library only.
+The key only ever goes into the SDK client. It is never printed, and `--record`
+refuses to keep a file that contains it.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.parse
 import urllib.request
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-ROOT = Path(__file__).resolve().parent
-INPUTS_PATH = ROOT / "data" / "inputs.json"
-RUN_DIR = ROOT / "verified-run"
-CALLS_PATH = RUN_DIR / "calls.json"
-# Per-call working files. Gitignored: the committed artifact is calls.json.
-WORK_DIR = RUN_DIR / ".work"
-REQUESTS_DIR = WORK_DIR / "requests"
-RESPONSES_DIR = WORK_DIR / "responses"
-MANIFEST_PATH = WORK_DIR / "manifest.json"
-# Diagnostics for --probe, kept out of the committed run.
-PROBE_DIR = WORK_DIR / "probe"
+if TYPE_CHECKING:
+    from sie_sdk import SIEClient
 
-DEFAULT_ENDPOINT = "https://api.superlinked.com"
-DEFAULT_KEY_FILE = Path.home() / ".secrets" / "sie_api_key_sep"
-PROVISION_TIMEOUT_S = 900
-ATTEMPT_TIMEOUT_S = 300
-RETRY_STATUSES = {202, 429, 502, 503, 504}
-PROBE_DOC = "product-gs1-128-label"
+ENDPOINT = "https://api.superlinked.com"
+STAGE1_STORED_IMAGE = "<base64 of apps/site/public/reference/ocr-review/{image}, sha256 {sha256}>"
+
+
+class CallFailedError(Exception):
+    """A call that did not produce a usable result."""
+
+
+def load(path: Path) -> Any:
+    if not path.exists():
+        raise SystemExit(f"{path} is missing. Run: python3 fetch.py")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def sha256_text(value: str) -> str:
-    return sha256_bytes(value.encode("utf-8"))
+def to_jsonable(value: Any) -> Any:
+    """What the SDK returned, as plain JSON types and nothing else."""
+    if isinstance(value, dict):
+        return {str(key): to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_jsonable(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return to_jsonable(value.model_dump())
+    if hasattr(value, "tolist"):
+        return to_jsonable(value.tolist())
+    return value
 
 
-def canonical_sha256(value: Any) -> str:
-    return sha256_bytes(
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    )
+# --- the two request bodies, rebuilt from the registered inputs -------------
 
 
-def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent="\t", ensure_ascii=False) + "\n", encoding="utf-8")
+def stage1_stored_body(doc: dict[str, Any]) -> dict[str, Any]:
+    """The stage-1 body as it is recorded, with the digest standing in for the
+    base64 so the run can be checked without redistributing the image."""
+    stored = STAGE1_STORED_IMAGE.format(image=doc["image"], sha256=doc["image_sha256"])
+    return {"items": [{"images": [{"data": stored, "format": doc["format"]}]}]}
 
 
-def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def wire_primitive_model(model: str) -> str:
-    """Byte-identical to wirePrimitiveModel() in packages/tasks/src/codegen.ts."""
-    return urllib.parse.quote(model.replace("/", "__"), safe="")
-
-
-def load_credentials() -> tuple[str, str]:
-    key = os.environ.get("SIE_API_KEY", "").strip()
-    endpoint = (os.environ.get("SIE_CLUSTER_URL") or os.environ.get("SIE_BASE_URL") or "").strip()
-    if not key:
-        key_file = Path(os.environ.get("SIE_KEY_FILE", str(DEFAULT_KEY_FILE))).expanduser()
-        key = key_file.read_text(encoding="utf-8").strip()
-    if not key or "\n" in key:
-        raise SystemExit("No usable SIE API key found (set SIE_API_KEY or SIE_KEY_FILE)")
-    resolved = (endpoint or DEFAULT_ENDPOINT).rstrip("/")
-    if urllib.parse.urlparse(resolved).scheme != "https":
-        raise SystemExit(f"Refusing to send the API key to a non-HTTPS endpoint: {resolved}")
-    return key, resolved
-
-
-def post_json(endpoint: str, key: str, path: str, payload: bytes) -> dict[str, Any]:
-    deadline = time.monotonic() + PROVISION_TIMEOUT_S
-    attempts = 0
-    while True:
-        attempts += 1
-        request = urllib.request.Request(
-            endpoint + path,
-            data=payload,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        )
-        # Unredirected: urllib replays normal headers on a redirect, which
-        # would hand the bearer token to whatever host the redirect names.
-        request.add_unredirected_header("Authorization", f"Bearer {key}")
-        started = time.monotonic()
-        try:
-            with urllib.request.urlopen(request, timeout=ATTEMPT_TIMEOUT_S) as response:
-                status = response.status
-                headers = dict(response.headers.items())
-                raw = response.read()
-        except urllib.error.HTTPError as error:
-            status = error.code
-            headers = dict(error.headers.items()) if error.headers else {}
-            raw = error.read()
-        except (urllib.error.URLError, TimeoutError) as error:
-            if time.monotonic() > deadline:
-                raise
-            print(f"  transport error ({type(error).__name__}), retrying", file=sys.stderr)
-            time.sleep(10)
-            continue
-        latency_s = time.monotonic() - started
-        if status in RETRY_STATUSES and time.monotonic() < deadline:
-            retry_after = headers.get("Retry-After") or headers.get("retry-after")
-            try:
-                wait = min(float(retry_after) if retry_after else 15.0, 30.0)
-            except ValueError:
-                wait = 15.0
-            print(f"  HTTP {status}, waiting {wait:.0f}s for capacity", file=sys.stderr)
-            time.sleep(wait)
-            continue
-        text = raw.decode("utf-8", errors="replace")
-        try:
-            parsed: Any = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = None
-        return {
-            "status": status,
-            "latency_s": round(latency_s, 4),
-            "attempts": attempts,
-            # Keep model, version, usage and request-id headers; drop the
-            # account key identifier so no key metadata reaches the repository.
-            "headers": {
-                name.lower(): value
-                for name, value in headers.items()
-                if (name.lower().startswith("x-sie") and name.lower() != "x-sie-key-id")
-                or name.lower() in {"content-type", "date"}
-            },
-            "json": parsed,
-            "text": None if parsed is not None else text,
-        }
-
-
-def image_for(doc: dict[str, Any]) -> bytes:
-    """Fetch the exact bytes that were sent, and refuse anything else.
-
-    The images are not committed: several carry licences that do not allow
-    redistribution here, and one is a copyrighted investor page used as an
-    attributed excerpt. `source.url` serves the same bytes the run used, and
-    `source.sha256` is what makes the fetch trustworthy.
-    """
-    source = doc["source"]
-    with urllib.request.urlopen(source["url"], timeout=120) as response:
-        data = response.read()
-    if len(data) != source["bytes"]:
-        raise SystemExit(
-            f"{doc['id']}: fetched {len(data)} bytes, registered {source['bytes']}"
-        )
-    digest = sha256_bytes(data)
-    if digest != doc["image_sha256"]:
-        raise SystemExit(
-            f"{doc['id']}: {doc['image']} does not match the checksum registered in inputs.json"
-        )
-    return data
-
-
-def verify_inputs(inputs: dict[str, Any]) -> None:
-    for doc in inputs["documents"]:
-        image_for(doc)
-    print(f"verified {len(inputs['documents'])} registered images", file=sys.stderr)
-
-
-def stage1_body(image_b64: str, fmt: str) -> dict[str, Any]:
-    return {"items": [{"images": [{"data": image_b64, "format": fmt}]}]}
-
-
-def run_stage1(
-    invocation: str,
-    endpoint: str,
-    key: str,
-    inputs: dict[str, Any],
-    doc: dict[str, Any],
-    out_requests: Path,
-    out_responses: Path,
-) -> tuple[dict[str, Any], list[Path]]:
-    model = inputs["stage1"]["model"]
-    path = f"/v1/extract/{wire_primitive_model(model)}"
-    raw = image_for(doc)
-    body = stage1_body(base64.b64encode(raw).decode("ascii"), doc["format"])
-    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    name = f"{doc['id']}__stage1"
-    print(f"{name}: POST {path}", file=sys.stderr)
-    started_utc = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    response = post_json(endpoint, key, path, payload)
-
-    stored_body = stage1_body(
-        f"<base64 of apps/site/public/reference/ocr-review/{doc['image']}, sha256 {doc['image_sha256']}>",
-        doc["format"],
-    )
-    request_record = {
-        "method": "POST",
-        "endpoint": endpoint,
-        "path": path,
+def stage2_body(
+    inputs: dict[str, Any], doc: dict[str, Any], call: dict[str, Any], model: str, markdown: str
+) -> dict[str, Any]:
+    stage2 = inputs["stage2"]
+    return {
         "model": model,
-        "headers": {"Content-Type": "application/json", "Accept": "application/json"},
-        "payload_sha256": sha256_bytes(payload),
-        "body": stored_body,
+        "messages": [
+            {
+                "role": "user",
+                "content": stage2["instruction_template"].format(document_type=doc["document_type"], markdown=markdown),
+            }
+        ],
+        "temperature": stage2["temperature"],
+        "max_tokens": stage2["max_tokens"],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": call["schema"], "strict": True, "schema": inputs["schemas"][call["schema"]]},
+        },
     }
-    response_record = {
-        "status": response["status"],
-        "headers": response["headers"],
-        "body": response["json"] if response["json"] is not None else response["text"],
-    }
-    request_path = out_requests / f"{name}.json"
-    response_path = out_responses / f"{name}.json"
-    write_json(request_path, request_record)
-    write_json(response_path, response_record)
-
-    markdown = stage1_markdown(response_record)
-    record = {
-        "document": doc["id"],
-        "stage": 1,
-        "invocation_id": invocation,
-        "endpoint": endpoint,
-        "call_started_utc": started_utc,
-        "model": model,
-        "model_revision": response["headers"].get("x-sie-model-revision"),
-        "server_version": response["headers"].get("x-sie-server-version"),
-        "status": response["status"],
-        "latency_s": response["latency_s"],
-        "attempts": response["attempts"],
-        "image": doc["image"],
-        "image_sha256": doc["image_sha256"],
-        "markdown_chars": len(markdown) if markdown is not None else None,
-        "markdown_sha256": sha256_text(markdown) if markdown is not None else None,
-        "payload_sha256": request_record["payload_sha256"],
-        "request_sha256": canonical_sha256(request_record),
-        "response_sha256": canonical_sha256(response_record),
-    }
-    print(
-        f"  HTTP {response['status']} in {response['latency_s']:.1f}s,"
-        f" markdown chars={record['markdown_chars']}",
-        file=sys.stderr,
-    )
-    return record, [request_path, response_path]
 
 
-def stage1_markdown(response_record: dict[str, Any]) -> str | None:
+def stage1_markdown(body: Any) -> str | None:
     """Read entities[0].text, the field the generated OCR snippet prints."""
-    body = response_record.get("body")
     if not isinstance(body, dict):
         return None
     items = body.get("items")
@@ -294,330 +122,343 @@ def stage1_markdown(response_record: dict[str, Any]) -> str | None:
     if isinstance(entities, list) and entities and isinstance(entities[0], dict):
         text = entities[0].get("text")
         return text if isinstance(text, str) else None
-    data = body.get("data")
-    if isinstance(data, dict):
-        for field in ("markdown", "text"):
-            if isinstance(data.get(field), str):
-                return data[field]
-    for field in ("markdown", "text"):
-        if isinstance(body.get(field), str):
-            return body[field]
     return None
 
 
-def stage2_body(
-    inputs: dict[str, Any], model: str, schema_id: str, document_type: str, markdown: str
-) -> dict[str, Any]:
-    stage2 = inputs["stage2"]
-    content = stage2["instruction_template"].format(
-        document_type=document_type, markdown=markdown
+def expected_slugs(inputs: dict[str, Any]) -> list[str]:
+    """Every call the registered inputs imply, in recorded order."""
+    slugs = []
+    for doc in inputs["documents"]:
+        slugs.append(f"{doc['id']}__stage1")
+    for doc in inputs["documents"]:
+        for call in doc["calls"]:
+            for model_key in inputs["stage2"]["models"]:
+                slugs.append(f"{doc['id']}__{call['id']}__stage2__{model_key}")
+    return slugs
+
+
+# --- offline check ----------------------------------------------------------
+
+
+def check(data_dir: Path) -> int:
+    """Rebuild all 20 recorded request bodies from the registered inputs.
+
+    A bijection, not a walk over what is there: the expected slugs come from
+    inputs.json, so a call that is missing, recorded twice or implied by no
+    document all fail. Checking only the calls present would pass a calls.json
+    with one of them deleted.
+    """
+    inputs = load(data_dir / "inputs/inputs.json")
+    payload = load(data_dir / "calls.json")
+
+    recorded: dict[str, dict[str, Any]] = {}
+    duplicates: list[str] = []
+    for call in payload["calls"]:
+        if call["slug"] in recorded:
+            duplicates.append(call["slug"])
+            continue
+        recorded[call["slug"]] = call
+
+    expected = expected_slugs(inputs)
+    if len(expected) != len(set(expected)):
+        raise SystemExit("inputs.json implies the same call slug twice")
+    missing = sorted(set(expected) - set(recorded))
+    unexpected = sorted(set(recorded) - set(expected))
+
+    rebuilt = 0
+    mismatched: list[str] = []
+    stage2_from_stage1 = 0
+    for doc in inputs["documents"]:
+        slug = f"{doc['id']}__stage1"
+        call = recorded.get(slug)
+        if call is None:
+            continue
+        if call["request"]["body"] != stage1_stored_body(doc):
+            mismatched.append(f"{slug}: rebuilt body differs from the recorded body")
+        elif call["request"]["path"] != inputs["stage1"]["path"]:
+            mismatched.append(f"{slug}: path {call['request']['path']} differs from {inputs['stage1']['path']}")
+        elif call["model"] != inputs["stage1"]["model"]:
+            mismatched.append(f"{slug}: model {call['model']} differs from {inputs['stage1']['model']}")
+        else:
+            rebuilt += 1
+
+        markdown = stage1_markdown(call["response"]["body"])
+        if markdown is None:
+            mismatched.append(f"{slug}: recorded response carries no Markdown to feed stage 2")
+            continue
+        for stage2_call in doc["calls"]:
+            for model_key, model in inputs["stage2"]["models"].items():
+                stage2_slug = f"{doc['id']}__{stage2_call['id']}__stage2__{model_key}"
+                entry = recorded.get(stage2_slug)
+                if entry is None:
+                    continue
+                if entry["request"]["body"] != stage2_body(inputs, doc, stage2_call, model, markdown):
+                    mismatched.append(f"{stage2_slug}: rebuilt body differs from the recorded body")
+                elif entry["request"]["path"] != inputs["stage2"]["path"]:
+                    mismatched.append(
+                        f"{stage2_slug}: path {entry['request']['path']} differs from {inputs['stage2']['path']}"
+                    )
+                else:
+                    rebuilt += 1
+                    stage2_from_stage1 += 1
+
+    print(f"{rebuilt} of {len(payload['calls'])} recorded requests rebuilt from the inputs and matched")
+    print(f"{len(expected)} calls expected from {len(inputs['documents'])} documents, {len(recorded)} recorded")
+    print(
+        f"{stage2_from_stage1} stage-2 requests rebuilt from the Markdown in the recorded stage-1 response,"
+        " so stage 2 saw that text and nothing else"
     )
+    for slug in missing:
+        print(f"MISSING {slug}: expected from the inputs, absent from calls.json", file=sys.stderr)
+    for slug in duplicates:
+        print(f"DUPLICATE {slug}: recorded more than once", file=sys.stderr)
+    for slug in unexpected:
+        print(f"UNEXPECTED {slug}: recorded but no document in inputs.json implies it", file=sys.stderr)
+    for line in mismatched:
+        print(f"MISMATCH {line}", file=sys.stderr)
+    if missing or duplicates or unexpected or mismatched:
+        return 1
+    return 0
+
+
+# --- images -----------------------------------------------------------------
+
+
+def image_for(doc: dict[str, Any]) -> bytes:
+    """Fetch the exact bytes that were sent, and refuse anything else."""
+    source = doc["source"]
+    request = urllib.request.Request(source["url"], headers={"Accept": "*/*"})  # noqa: S310
+    with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310
+        data = response.read()
+    if len(data) != source["bytes"]:
+        raise SystemExit(f"{doc['id']}: fetched {len(data)} bytes, registered {source['bytes']}")
+    if sha256_bytes(data) != doc["image_sha256"]:
+        raise SystemExit(f"{doc['id']}: {doc['image']} does not match the digest registered in inputs.json")
+    return data
+
+
+# --- recording --------------------------------------------------------------
+
+
+def entry(slug: str, doc_id: str, stage: int, model: str, path: str, body: dict[str, Any]) -> dict[str, Any]:
     return {
+        "slug": slug,
+        "document": doc_id,
+        "stage": stage,
         "model": model,
-        "messages": [{"role": "user", "content": content}],
-        "temperature": stage2["temperature"],
-        "max_tokens": stage2["max_tokens"],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema_id,
-                "strict": True,
-                "schema": inputs["schemas"][schema_id],
-            },
+        "status": 200,
+        "request": {
+            "method": "POST",
+            "endpoint": ENDPOINT,
+            "path": path,
+            "model": model,
+            "headers": {"Content-Type": "application/json", "Accept": "application/json"},
+            "body": body,
         },
     }
 
 
-def run_stage2(
-    invocation: str,
-    endpoint: str,
-    key: str,
+def record_stage1(client: SIEClient, inputs: dict[str, Any], doc: dict[str, Any]) -> dict[str, Any]:
+    from sie_sdk import Item  # noqa: PLC0415
+
+    model = inputs["stage1"]["model"]
+    raw = image_for(doc)
+    started = time.monotonic()
+    result = client.extract(model, Item(images=[{"data": raw, "format": doc["format"]}]))
+    duration_s = round(time.monotonic() - started, 4)
+    item = to_jsonable(result)
+    if stage1_markdown({"items": [item]}) is None:
+        raise CallFailedError(f"{doc['id']}: stage 1 returned no text")
+    record = entry(f"{doc['id']}__stage1", doc["id"], 1, model, inputs["stage1"]["path"], stage1_stored_body(doc))
+    record.update(
+        {
+            "model_revision": client.last_model_revision,
+            "server_version": None,
+            "attempts": client.last_retry_count + 1,
+            "timing": {"duration_s": duration_s},
+            "response": {
+                "status": 200,
+                "headers": {},
+                "shape": (
+                    "rebuilt around the per-item result sie_sdk returned; the SDK "
+                    "returns no server envelope and surfaces no response headers"
+                ),
+                "body": {"items": [item]},
+            },
+        }
+    )
+    return record
+
+
+def record_stage2(
+    client: SIEClient,
     inputs: dict[str, Any],
     doc: dict[str, Any],
     call: dict[str, Any],
-    model: str,
     model_key: str,
     markdown: str,
-    markdown_sha256: str,
-    out_requests: Path,
-    out_responses: Path,
-) -> tuple[dict[str, Any], list[Path]]:
-    path = inputs["stage2"]["path"]
-    body = stage2_body(inputs, model, call["schema"], doc["document_type"], markdown)
-    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    name = f"{doc['id']}__{call['id']}__stage2__{model_key}"
-    print(f"{name}: POST {path}", file=sys.stderr)
-    started_utc = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    response = post_json(endpoint, key, path, payload)
-
-    request_record = {
-        "method": "POST",
-        "endpoint": endpoint,
-        "path": path,
-        "model": model,
-        "headers": {"Content-Type": "application/json", "Accept": "application/json"},
-        "payload_sha256": sha256_bytes(payload),
-        "stage1_markdown_sha256": markdown_sha256,
-        "body": body,
-    }
-    response_record = {
-        "status": response["status"],
-        "headers": response["headers"],
-        "body": response["json"] if response["json"] is not None else response["text"],
-    }
-    request_path = out_requests / f"{name}.json"
-    response_path = out_responses / f"{name}.json"
-    write_json(request_path, request_record)
-    write_json(response_path, response_record)
-
-    content = stage2_content(response_record)
-    parsed: Any = None
-    parse_error: str | None = None
-    if isinstance(content, str):
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as error:
-            parse_error = str(error)
-
-    body_json = response["json"] if isinstance(response["json"], dict) else {}
-    usage = body_json.get("usage") or {}
-    choices = body_json.get("choices") or []
-    finish = choices[0].get("finish_reason") if choices and isinstance(choices[0], dict) else None
-    record = {
-        "document": doc["id"],
-        "call": call["id"],
-        "stage": 2,
-        "invocation_id": invocation,
-        "endpoint": endpoint,
-        "call_started_utc": started_utc,
-        "model": model,
-        "model_key": model_key,
-        "schema": call["schema"],
-        "model_revision": response["headers"].get("x-sie-model-revision"),
-        "server_version": response["headers"].get("x-sie-server-version"),
-        "status": response["status"],
-        "latency_s": response["latency_s"],
-        "attempts": response["attempts"],
-        "finish_reason": finish,
-        "prompt_tokens": usage.get("prompt_tokens"),
-        "completion_tokens": usage.get("completion_tokens"),
-        "stage1_markdown_sha256": markdown_sha256,
-        "json_parsed": parsed is not None,
-        "parse_error": parse_error,
-        "content_sha256": sha256_text(content) if isinstance(content, str) else None,
-        "payload_sha256": request_record["payload_sha256"],
-        "request_sha256": canonical_sha256(request_record),
-        "response_sha256": canonical_sha256(response_record),
-    }
-    print(
-        f"  HTTP {response['status']} in {response['latency_s']:.1f}s, finish={finish},"
-        f" tokens in/out={usage.get('prompt_tokens')}/{usage.get('completion_tokens')},"
-        f" json={'ok' if parsed is not None else parse_error or 'missing'}",
-        file=sys.stderr,
+) -> dict[str, Any]:
+    model = inputs["stage2"]["models"][model_key]
+    body = stage2_body(inputs, doc, call, model, markdown)
+    started = time.monotonic()
+    completion = client.chat_completions(
+        model,
+        body["messages"],
+        temperature=body["temperature"],
+        max_tokens=body["max_tokens"],
+        response_format=body["response_format"],
     )
-    return record, [request_path, response_path]
-
-
-def stage2_content(response_record: dict[str, Any]) -> str | None:
-    body = response_record.get("body")
-    if not isinstance(body, dict):
-        return None
-    choices = body.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-        message = choices[0].get("message")
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            return message["content"]
-    return None
-
-
-def load_stage1_markdown(doc_id: str) -> tuple[str, str]:
-    path = RESPONSES_DIR / f"{doc_id}__stage1.json"
-    if not path.exists():
-        raise SystemExit(f"{doc_id}: no recorded stage-1 response; run --stage 1 first")
-    markdown = stage1_markdown(read_json(path))
-    if not isinstance(markdown, str):
-        raise SystemExit(f"{doc_id}: recorded stage-1 response carries no text")
-    return markdown, sha256_text(markdown)
-
-
-def assert_no_key(key: str, paths: list[Path]) -> None:
-    for path in paths:
-        if key in path.read_text(encoding="utf-8"):
-            path.unlink()
-            raise SystemExit(f"Refusing to keep {path.name}: it contains the API key")
-
-
-def merge_manifest(new_records: list[dict[str, Any]], started: str) -> None:
-    manifest: dict[str, Any] = {}
-    if MANIFEST_PATH.exists():
-        manifest = read_json(MANIFEST_PATH)
-    calls: list[dict[str, Any]] = manifest.get("calls", [])
-    index = {(c.get("document"), c.get("call"), c.get("stage"), c.get("model_key")): i for i, c in enumerate(calls)}
-    for record in new_records:
-        keyed = (record.get("document"), record.get("call"), record.get("stage"), record.get("model_key"))
-        if keyed in index:
-            calls[index[keyed]] = record
-        else:
-            index[keyed] = len(calls)
-            calls.append(record)
-    # A manifest accumulates calls from several invocations, so the top-level
-    # time is only the latest write. Provenance lives per call: its invocation
-    # id, its endpoint and its start time. The page derives its run date from
-    # the recorded response headers, not from any of this.
-    endpoints = {call.get("endpoint") for call in calls if call.get("endpoint")}
-    manifest.update(
+    duration_s = round(time.monotonic() - started, 4)
+    envelope = {key: value for key, value in to_jsonable(completion).items() if key != "request"}
+    # A 200 is not a result. Refuse anything without a usable message.
+    choices = envelope.get("choices") or []
+    if not choices or not (choices[0].get("message") or {}).get("content"):
+        raise CallFailedError(f"{doc['id']}/{call['id']}/{model_key}: response carried no assistant message")
+    slug = f"{doc['id']}__{call['id']}__stage2__{model_key}"
+    record = entry(slug, doc["id"], 2, model, inputs["stage2"]["path"], body)
+    record.update(
         {
-            "last_run_started_utc": started,
-            "composite": len({call.get("invocation_id") for call in calls}) > 1,
-            "endpoints": sorted(endpoints),
-            "inputs_sha256": sha256_bytes(INPUTS_PATH.read_bytes()),
-            "calls": calls,
+            "call": call["id"],
+            "model_key": model_key,
+            "model_revision": client.last_model_revision,
+            "server_version": None,
+            "attempts": client.last_retry_count + 1,
+            "timing": {"duration_s": duration_s},
+            "response": {
+                "status": 200,
+                "headers": {},
+                "shape": "the server's own chat completion envelope as sie_sdk returns it",
+                "body": envelope,
+            },
         }
     )
-    write_json(MANIFEST_PATH, manifest)
+    return record
 
 
-def consolidate() -> None:
-    """Fold the per-call working files into verified-run/calls.json.
-
-    This is the file a reader checks our numbers from, and the only one the
-    example commits. evaluate.py reads it and nothing else, so the published
-    figures can be re-derived with no API key and no network.
-    """
-    manifest = read_json(MANIFEST_PATH)
-    calls = []
-    for entry in manifest["calls"]:
-        if entry["stage"] == 1:
-            slug = f"{entry['document']}__stage1"
-        else:
-            slug = f"{entry['document']}__{entry['call']}__stage2__{entry['model_key']}"
-        calls.append(
-            {
-                "slug": slug,
-                "document": entry["document"],
-                "stage": entry["stage"],
-                "model": entry["model"],
-                "model_revision": entry.get("model_revision"),
-                "server_version": entry.get("server_version"),
-                "status": entry["status"],
-                "attempts": entry.get("attempts"),
-                "timing": {"duration_s": entry.get("latency_s")},
-                "request": read_json(REQUESTS_DIR / f"{slug}.json"),
-                "response": read_json(RESPONSES_DIR / f"{slug}.json"),
-            }
-        )
-    write_json(
-        CALLS_PATH,
-        {
-            "about": (
-                "Every call the run made, request and response, in recorded "
-                "order. With data/inputs.json and data/predictions.json, "
-                "which carry the pre-registered expectations, this is "
-                "everything evaluate.py needs: no API key, no network."
-            ),
-            "recorded_utc": manifest.get("last_run_started_utc"),
-            "endpoint": manifest["endpoints"][0] if manifest.get("endpoints") else None,
-            "models": sorted({call["model"] for call in calls}),
-            "calls": calls,
-        },
-    )
-    print(f"wrote {CALLS_PATH.relative_to(ROOT)} with {len(calls)} calls")
+def refuse_if_key_present(key: str, path: Path) -> None:
+    if key and key in path.read_text(encoding="utf-8"):
+        path.unlink()
+        raise SystemExit(f"Refusing to keep {path.name}: it contains the API key")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("--doc", help="run one document id")
-    parser.add_argument("--stage", type=int, choices=[1, 2], help="run one stage")
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--data", default="data", help="fetched evidence directory")
+    parser.add_argument("--check", action="store_true", help="offline check, the default")
+    parser.add_argument("--show", metavar="DOC", help="print one document's calls and exit, sending nothing")
     parser.add_argument(
-        "--stage2-model",
-        choices=["primary", "secondary"],
-        help="run one stage-2 model (default: both)",
+        "--verify-inputs", action="store_true", help="fetch every registered image and check its digest"
     )
-    parser.add_argument(
-        "--probe",
-        action="store_true",
-        help=f"both stages on {PROBE_DOC}, stored under diagnostics/probe",
-    )
-    parser.add_argument(
-        "--verify-inputs", action="store_true", help="check every registered image checksum"
-    )
+    parser.add_argument("--record", action="store_true", help="make live calls (needs SIE_API_KEY)")
+    parser.add_argument("--doc", help="record one document id")
+    parser.add_argument("--out", default="run-output/calls.json", help="where --record writes")
     args = parser.parse_args()
 
-    inputs = read_json(INPUTS_PATH)
+    data_dir = Path(args.data)
+    inputs = load(data_dir / "inputs/inputs.json")
+    by_id = {doc["id"]: doc for doc in inputs["documents"]}
+
+    if args.show:
+        doc = by_id.get(args.show)
+        if doc is None:
+            raise SystemExit(f"Unknown document: {args.show}. Known: {', '.join(by_id)}")
+        calls = load(data_dir / "calls.json")["calls"]
+        markdown = stage1_markdown(next(c for c in calls if c["slug"] == f"{doc['id']}__stage1")["response"]["body"])
+        shown = [{"stage": 1, "path": inputs["stage1"]["path"], "body": stage1_stored_body(doc)}]
+        for call in doc["calls"]:
+            for model_key, model in inputs["stage2"]["models"].items():
+                shown.append(
+                    {
+                        "stage": 2,
+                        "model_key": model_key,
+                        "path": inputs["stage2"]["path"],
+                        "body": stage2_body(inputs, doc, call, model, markdown),
+                    }
+                )
+        print(json.dumps(shown, indent=2, ensure_ascii=False))
+        return 0
 
     if args.verify_inputs:
-        verify_inputs(inputs)
-        return
+        for doc in inputs["documents"]:
+            image_for(doc)
+            print(f"{doc['id']}: {doc['source']['bytes']} bytes match {doc['image_sha256'][:12]}")
+        print(f"verified {len(inputs['documents'])} registered images")
+        return 0
 
-    key, endpoint = load_credentials()
-    started = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    invocation = uuid.uuid4().hex
-    docs = [d for d in inputs["documents"] if args.doc in (None, d["id"])]
-    if not docs:
+    if not args.record:
+        return check(data_dir)
+
+    api_key = os.environ.get("SIE_API_KEY", "").strip()
+    if not api_key:
+        raise SystemExit("Set SIE_API_KEY to send these calls, or run score.py on the recorded ones instead")
+    base_url = os.environ.get("SIE_CLUSTER_URL") or os.environ.get("SIE_BASE_URL") or ENDPOINT
+    # Deferred so --check, --show and --verify-inputs run on a bare `python3`.
+    from sie_sdk import SIEClient  # noqa: PLC0415
+
+    client = SIEClient(base_url, api_key=api_key, timeout_s=900)
+
+    documents = [doc for doc in inputs["documents"] if args.doc in (None, doc["id"])]
+    if not documents:
         raise SystemExit(f"No registered document matches {args.doc!r}")
 
-    model_keys = [args.stage2_model] if args.stage2_model else ["primary", "secondary"]
-    models = inputs["stage2"]["models"]
+    calls: list[dict[str, Any]] = []
+    failed: list[str] = []
+    for doc in documents:
+        try:
+            stage1 = record_stage1(client, inputs, doc)
+        except Exception as error:  # noqa: BLE001
+            failed.append(f"{doc['id']}__stage1: {type(error).__name__}: {error}")
+            print(f"{doc['id']} stage 1: FAILED {type(error).__name__}", file=sys.stderr)
+            continue
+        calls.append(stage1)
+        markdown = stage1_markdown(stage1["response"]["body"])
+        print(f"{doc['id']} stage 1: {stage1['timing']['duration_s']:.1f}s, {len(markdown)} chars", file=sys.stderr)
+        for call in doc["calls"]:
+            for model_key in inputs["stage2"]["models"]:
+                try:
+                    calls.append(record_stage2(client, inputs, doc, call, model_key, markdown))
+                except Exception as error:  # noqa: BLE001
+                    failed.append(f"{doc['id']}/{call['id']}/{model_key}: {type(error).__name__}: {error}")
+                    print(f"{doc['id']} {call['id']} {model_key}: FAILED {type(error).__name__}", file=sys.stderr)
 
-    if args.probe:
-        doc = next(d for d in inputs["documents"] if d["id"] == PROBE_DOC)
-        req_dir, res_dir = PROBE_DIR / "requests", PROBE_DIR / "responses"
-        record, written = run_stage1(invocation, endpoint, key, inputs, doc, req_dir, res_dir)
-        assert_no_key(key, written)
-        markdown = stage1_markdown(read_json(written[1]))
-        print("--- stage 1 markdown ---")
-        print(markdown)
-        if not isinstance(markdown, str):
-            raise SystemExit("probe: stage 1 returned no text")
-        call = doc["calls"][0]
-        record2, written2 = run_stage2(
-            invocation, endpoint, key, inputs, doc, call, models["primary"],
-            "primary", markdown, sha256_text(markdown), req_dir, res_dir,
+    slugs = [call["slug"] for call in calls]
+    if len(slugs) != len(set(slugs)):
+        raise SystemExit("duplicate call slugs; refusing to write a calls.json two checks could read differently")
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(
+            {
+                "about": (
+                    "Every call the run made, request and response, in recorded order. "
+                    "With inputs/inputs.json and inputs/predictions.json, which carry the "
+                    "pre-registered expectations, this is everything score.py needs: no "
+                    "API key, no network."
+                ),
+                "recorded_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "endpoint": base_url,
+                "models": sorted({call["model"] for call in calls}),
+                "failed_calls": len(failed),
+                "complete": not failed,
+                "calls": calls,
+            },
+            indent="\t",
+            ensure_ascii=False,
         )
-        assert_no_key(key, written2)
-        print("--- stage 2 content ---")
-        print(stage2_content(read_json(written2[1])))
-        write_json(PROBE_DIR / "manifest.json", {"run_started_utc": started, "calls": [record, record2]})
-        return
-
-    records: list[dict[str, Any]] = []
-    written_all: list[Path] = []
-
-    if args.stage in (None, 1):
-        for doc in docs:
-            record, written = run_stage1(invocation, endpoint, key, inputs, doc, REQUESTS_DIR, RESPONSES_DIR)
-            records.append(record)
-            written_all.extend(written)
-            assert_no_key(key, written)
-
-    if args.stage in (None, 2):
-        for doc in docs:
-            markdown, markdown_sha = load_stage1_markdown(doc["id"])
-            for call in doc["calls"]:
-                for model_key in model_keys:
-                    record, written = run_stage2(
-                        invocation, endpoint, key, inputs, doc, call,
-                        models[model_key], model_key, markdown, markdown_sha,
-                        REQUESTS_DIR, RESPONSES_DIR,
-                    )
-                    records.append(record)
-                    written_all.extend(written)
-                    assert_no_key(key, written)
-
-    merge_manifest(records, started)
-    consolidate()
-    assert_no_key(key, [MANIFEST_PATH, CALLS_PATH])
-    failed = [r for r in records if r["status"] != 200]
-    print(
-        f"\n{len(records)} calls, {len(records) - len(failed)} HTTP 200, {len(failed)} other",
-        file=sys.stderr,
+        + "\n",
+        encoding="utf-8",
     )
-    for record in failed:
-        where = f"{record.get('document')} {record.get('call', 'stage1')}"
-        print(f"  FAILED {where}: HTTP {record['status']}", file=sys.stderr)
+    refuse_if_key_present(api_key, out_path)
+    print(f"wrote {out_path} with {len(calls)} calls")
+    if failed:
+        # A run that failed must not look like a run that succeeded.
+        print(f"{len(failed)} calls FAILED:", file=sys.stderr)
+        for line in failed:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

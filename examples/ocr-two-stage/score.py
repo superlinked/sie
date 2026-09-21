@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
-"""Score the recorded /ocr two-stage run against the pre-registered expectations.
+"""Reproduce the /ocr page figures from the recorded two-stage run.
 
-    python3 apps/site/tests/fixtures/reference/ocr/evaluate.py
+    python3 fetch.py
+    python3 score.py
 
 Reads inputs.json (registered before any call) together with the recorded
-stage-1 and stage-2 responses, and writes evaluation.json. Every verdict is
-computed here; none is hand-authored, and this script never reads the page.
+stage-1 and stage-2 responses, and writes evaluation.json beside them. Every
+verdict is computed here; none is hand-authored, and this script never reads
+the page.
 
 The verdict turns on one question: did the field's registered `printed` token
 survive into stage 1's Markdown? That is what separates an error stage 2
 inherited from stage 1 from an error stage 2 made on text it could read.
 
-Standard library only. No network.
+The page publishes four figures and this script re-derives all of them, exiting
+nonzero if any fails:
+
+    81 of 86   registered printed tokens survive into stage 1's Markdown
+    78 of 89   fields match for Qwen/Qwen3.8-27B-FP8, 7 of 7 replies schema-valid
+    27 of 89   fields match for Qwen/Qwen3.5-4B, 2 of 7 replies schema-valid
+
+Standard library only. No network, no API key, no inference spend.
+
+This was `evaluate.py`, reading three committed files. It now reads the same
+three files from the pinned Hugging Face revision that `fetch.py` downloads.
+Every verdict rule, the normalization and the schema checks are unchanged.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -23,17 +37,47 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent
-INPUTS_PATH = ROOT / "data" / "inputs.json"
-CALLS_PATH = ROOT / "verified-run" / "calls.json"
-EVALUATION_PATH = ROOT / "verified-run" / "evaluation.json"
-
 MISSING = object()
+
+# Set by main() from --data. The three files this script reads and nothing else.
+DATA_DIR = Path("data")
+INPUTS_PATH = DATA_DIR / "inputs" / "inputs.json"
+PREDICTIONS_PATH = DATA_DIR / "inputs" / "predictions.json"
+CALLS_PATH = DATA_DIR / "calls.json"
+EVALUATION_PATH = DATA_DIR / "evaluation.json"
+
+# What the page prints. Typed out from the rendered page, not computed from the
+# recordings, so agreement means something.
+EXPECTED = {
+    "stage1_tokens_in_text": 81,
+    "stage1_registered_tokens": 86,
+    "primary_matched": 78,
+    "primary_registered_fields": 89,
+    "primary_schema_valid": 7,
+    "primary_calls": 7,
+    "secondary_matched": 27,
+    "secondary_registered_fields": 89,
+    "secondary_schema_valid": 2,
+    "secondary_calls": 7,
+    "documents_registered": 6,
+    "documents_displayed": 3,
+}
 
 # Every response this example scores lives in one calls.json, keyed by the slug
 # the runner recorded. sie-web keeps the same responses as one file per call;
 # the verdict rules below are identical either way.
 _CALLS: dict[str, Any] = {}
+
+
+def use_data_dir(data_dir: Path) -> None:
+    """Point the three reads at a fetched evidence directory."""
+    global DATA_DIR, INPUTS_PATH, PREDICTIONS_PATH, CALLS_PATH, EVALUATION_PATH  # noqa: PLW0603
+    DATA_DIR = data_dir
+    INPUTS_PATH = data_dir / "inputs" / "inputs.json"
+    PREDICTIONS_PATH = data_dir / "inputs" / "predictions.json"
+    CALLS_PATH = data_dir / "calls.json"
+    EVALUATION_PATH = data_dir / "evaluation.json"
+    _CALLS.clear()
 
 
 def norm(value: Any) -> str:
@@ -47,6 +91,10 @@ def norm(value: Any) -> str:
 
 
 def read_json(path: Path) -> Any:
+    if not path.exists():
+        # A missing input is a failure, never a skip. Scoring what is left
+        # would report a smaller run as a complete one.
+        raise SystemExit(f"{path} is missing. Run: python3 fetch.py")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -303,7 +351,7 @@ def score_predictions(
     function refuses to run if the two disagree, so a prediction cannot be
     restated on the page in softer words than the one that was registered.
     """
-    spec = read_json(ROOT / "data" / "predictions.json")
+    spec = read_json(PREDICTIONS_PATH)
     registered = inputs["predictions"]["items"]
     fields = primary_fields(documents)
     primary = totals["primary"]
@@ -312,9 +360,7 @@ def score_predictions(
     for entry in spec["predictions"]:
         index = entry["index"]
         if index >= len(registered) or entry["text"] != registered[index]:
-            raise SystemExit(
-                f"prediction {index} in predictions.json does not match inputs.json verbatim"
-            )
+            raise SystemExit(f"prediction {index} in predictions.json does not match inputs.json verbatim")
         check = entry["check"]
         kind = check["kind"]
         numbers = {
@@ -341,9 +387,7 @@ def score_predictions(
             # most favours it. Used where the registered text names a date the
             # prediction's own reasoning does not produce.
             field = find_field(documents, check["document"], check["call"], check["path"])
-            held = field["path_resolved"] and any(
-                norm(field["returned"]) == norm(v) for v in check["values"]
-            )
+            held = field["path_resolved"] and any(norm(field["returned"]) == norm(v) for v in check["values"])
         elif kind == "any_verdict":
             hits = [f for f in fields if f["verdict"] == check["verdict"]]
             numbers["count"] = len(hits)
@@ -369,9 +413,7 @@ def score_predictions(
     return scored
 
 
-def find_field(
-    documents: list[dict[str, Any]], doc_id: str, call_id: str, path: str
-) -> dict[str, Any]:
+def find_field(documents: list[dict[str, Any]], doc_id: str, call_id: str, path: str) -> dict[str, Any]:
     for document in documents:
         if document["document"] != doc_id:
             continue
@@ -476,7 +518,12 @@ def evaluate_call(
     }
 
 
-def main() -> None:
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--data", default="data", help="fetched evidence directory")
+    args = parser.parse_args()
+    use_data_dir(Path(args.data))
+
     inputs = read_json(INPUTS_PATH)
     documents: list[dict[str, Any]] = []
     model_keys = list(inputs["stage2"]["models"])
@@ -556,9 +603,7 @@ def main() -> None:
         "predictions": predictions,
         "documents": documents,
     }
-    EVALUATION_PATH.write_text(
-        json.dumps(evaluation, indent="\t", ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    EVALUATION_PATH.write_text(json.dumps(evaluation, indent="\t", ensure_ascii=False) + "\n", encoding="utf-8")
 
     print(f"stage 1: {stage1_found}/{stage1_tokens} registered printed tokens survive into the Markdown")
     for model_key, total in totals.items():
@@ -578,6 +623,30 @@ def main() -> None:
                         f"  {field['verdict']:16} {field['path']}"
                         f"  printed={field['printed']!r} returned={field['returned']!r}"
                     )
+
+    got = {
+        "stage1_tokens_in_text": stage1_found,
+        "stage1_registered_tokens": stage1_tokens,
+        "primary_matched": totals["primary"]["matched"],
+        "primary_registered_fields": totals["primary"]["registered_fields"],
+        "primary_schema_valid": totals["primary"]["schema_valid"],
+        "primary_calls": totals["primary"]["calls"],
+        "secondary_matched": totals["secondary"]["matched"],
+        "secondary_registered_fields": totals["secondary"]["registered_fields"],
+        "secondary_schema_valid": totals["secondary"]["schema_valid"],
+        "secondary_calls": totals["secondary"]["calls"],
+        "documents_registered": evaluation["documents_registered"],
+        "documents_displayed": evaluation["documents_displayed"],
+    }
+    failures = [f"{key}: got {got[key]}, page publishes {want}" for key, want in EXPECTED.items() if got[key] != want]
+    if failures:
+        sys.stdout.flush()
+        print("\nFAILED to reproduce the published figures:", file=sys.stderr)
+        for line in failures:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+    print("\nReproduced: 81 of 86, 78 of 89 with 7 of 7 schema-valid, and 27 of 89 with 2 of 7.")
+    return 0
 
 
 if __name__ == "__main__":

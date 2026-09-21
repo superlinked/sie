@@ -71,7 +71,7 @@ def _evaluate_markdown(
     return checks
 
 
-def evaluate_run(run_dir: Path, slugs: list[str]) -> bool:
+def evaluate_run(run_dir: Path, slugs: list[str], out_path: Path | None = None) -> bool:
     config = load_config()
     documents = select_documents(config, slugs)
     rows = []
@@ -103,7 +103,13 @@ def evaluate_run(run_dir: Path, slugs: list[str]) -> bool:
         "passed": passed_all,
         "documents": rows,
     }
-    (run_dir / "evaluation.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    # Written beside the run by default rather than into it. A fetched run
+    # directory holds an evaluation.json the manifest pins by digest, and
+    # overwriting it would leave the bytes on disk disagreeing with the
+    # digest that was checked at download time.
+    destination = out_path or (run_dir / "evaluation.json")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     table = Table("Document", "Checks", "Result")
     for row in rows:
         table.add_row(
@@ -112,6 +118,15 @@ def evaluate_run(run_dir: Path, slugs: list[str]) -> bool:
             "[green]pass[/]" if row["passed"] == row["total"] else "[red]fail[/]",
         )
     console.print(table)
+    console.print(f"Wrote {destination}")
+
+    recorded_path = run_dir / "evaluation.json"
+    if recorded_path.exists() and recorded_path != destination:
+        recorded = json.loads(recorded_path.read_text(encoding="utf-8"))
+        here = {row["slug"]: (row["passed"], row["total"]) for row in rows}
+        there = {row["slug"]: (row["passed"], row["total"]) for row in recorded["documents"]}
+        agree = {slug: totals for slug, totals in there.items() if here.get(slug) == totals}
+        console.print(f"{len(agree)} of {len(there)} documents score the same as the recorded {recorded_path.name}")
     return passed_all
 
 
@@ -119,8 +134,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run deterministic checks against a saved conversion")
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("slugs", nargs="*", default=["all"])
+    parser.add_argument("--out", type=Path, default=Path("run-output/evaluation.json"))
     args = parser.parse_args()
-    if not evaluate_run(args.run_dir, args.slugs):
+    if not evaluate_run(args.run_dir, args.slugs, args.out):
         raise SystemExit(1)
 
 
