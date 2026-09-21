@@ -13,12 +13,14 @@ One call per case, the call the /chat task page shows:
      "max_completion_tokens": 256}
 
 No sampling fields are sent, so the answer is whatever the model profile
-defaults produce. Each result is written to --output as one entry holding the
-request, the response, the HTTP status, the served model revision and the
-round-trip time. The key comes from SIE_API_KEY and is never written out.
+defaults produce. Results go to --output as a manifest.json and a calls.json in
+the dataset's own shape, one entry per call holding the request, the response,
+the HTTP status, the served model revision and the round-trip time. The key
+comes from SIE_API_KEY and is never written out.
 
-You do not need a key to check the published figure. calls.json already holds
-the recorded run, and `python3 score.py` scores it offline.
+You do not need a key, and you do not need to run this. The recorded calls are
+already published. `python3 fetch.py` downloads them and `python3 score.py`
+scores them offline.
 """
 
 from __future__ import annotations
@@ -56,7 +58,9 @@ def record(client: SIEClient, case: dict[str, Any], body: dict[str, Any]) -> dic
         "requested_at": requested_at,
         "request": {
             "method": "POST",
-            "url": f"{prompt.ENDPOINT}{prompt.CHAT_COMPLETIONS_PATH}",
+            # The URL the SDK actually used, not this module's default, so a run
+            # against a regional endpoint records where it really went.
+            "url": client.base_url.rstrip("/") + prompt.CHAT_COMPLETIONS_PATH,
             "body": body,
         },
         "status": 200,
@@ -71,7 +75,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Record status updates from pinned incident reports")
     parser.add_argument("--case", action="append", default=[], help="slug to run; repeatable, default all")
     parser.add_argument("--show", metavar="SLUG", help="print one request body and exit, without calling anything")
-    parser.add_argument("--output", type=Path, default=HERE / "run-output" / "calls.json")
+    parser.add_argument(
+        "--output", type=Path, default=HERE / "run-output", help="directory for manifest.json and calls.json"
+    )
     return parser.parse_args()
 
 
@@ -99,8 +105,8 @@ def main() -> int:
     if not api_key:
         raise SystemExit("Set SIE_API_KEY. To check the published figure without a key, run score.py instead.")
 
-    base_url = os.environ.get("SIE_BASE_URL", prompt.ENDPOINT)
-    client = SIEClient(base_url, api_key=api_key, timeout_s=900)
+    client = SIEClient(os.environ.get("SIE_BASE_URL", prompt.ENDPOINT), api_key=api_key, timeout_s=900)
+    base_url = client.base_url.rstrip("/")
     print(f"endpoint {base_url}{prompt.CHAT_COMPLETIONS_PATH}")
     print(f"model    {cases_doc['model']}")
 
@@ -112,25 +118,26 @@ def main() -> int:
         revision = entry["model_revision"] or "not reported"
         print(f"{slug:<32} {entry['timing']['duration_ms']:>8.0f} ms  revision {revision}")
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(
-            {
-                "endpoint": base_url,
-                "model": cases_doc["model"],
-                "recorded_by": "examples/chat/run.py",
-                "response_sha256": (
-                    "sha256 of json.dumps(response, ensure_ascii=False, separators=(',', ':')).encode('utf-8')"
-                ),
-                "calls": entries,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    print(f"Wrote {args.output}")
+    revisions = sorted({entry["model_revision"] for entry in entries if entry["model_revision"]})
+    manifest = {
+        "task": "chat",
+        "page": "https://superlinked.com/chat",
+        "endpoint": base_url,
+        "path": prompt.CHAT_COMPLETIONS_PATH,
+        "model": cases_doc["model"],
+        "model_revision": revisions[0] if len(revisions) == 1 else revisions,
+        "run_date": datetime.now(UTC).date().isoformat(),
+        "recorded_by": "examples/chat/run.py",
+        "sampling": "model profile defaults; no temperature, top_p or seed was sent",
+        "calls_recorded": len(entries),
+        "response_sha256": (
+            "sha256 of json.dumps(response, ensure_ascii=False, separators=(',', ':')).encode('utf-8')"
+        ),
+    }
+    args.output.mkdir(parents=True, exist_ok=True)
+    for name, value in (("manifest.json", manifest), ("calls.json", {"calls": entries})):
+        (args.output / name).write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Wrote {args.output}/manifest.json and {args.output}/calls.json")
     return 0
 
 

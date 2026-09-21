@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
-CASES_PATH = HERE / "data" / "cases.json"
-CALLS_PATH = HERE / "calls.json"
+EVIDENCE = HERE / "evidence"
+CASES_PATH = EVIDENCE / "inputs" / "cases.json"
+CALLS_PATH = EVIDENCE / "calls.json"
+MANIFEST_PATH = EVIDENCE / "manifest.json"
 
 ENDPOINT = "https://api.superlinked.com"
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -40,7 +42,9 @@ class InputError(Exception):
 
 def read_json(path: Path) -> Any:
     if not path.exists():
-        raise InputError(f"Missing {path.name}")
+        if EVIDENCE not in path.parents and path != EVIDENCE:
+            raise InputError(f"Missing {path}")
+        raise InputError(f"Missing {path.relative_to(HERE)}. Run `python3 fetch.py` first.")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -62,7 +66,7 @@ def load_cases() -> dict[str, Any]:
         if slug in seen:
             raise InputError(f"Duplicate case {slug}")
         seen.add(slug)
-        path = HERE / case["source_file"]
+        path = EVIDENCE / "inputs" / case["source_file"]
         if not path.exists():
             raise InputError(f"{slug}: missing {case['source_file']}")
         body = path.read_bytes()
@@ -74,7 +78,7 @@ def load_cases() -> dict[str, Any]:
 
 
 def wikitext(case: dict[str, Any]) -> str:
-    return (HERE / case["source_file"]).read_text(encoding="utf-8")
+    return (EVIDENCE / "inputs" / case["source_file"]).read_text(encoding="utf-8")
 
 
 def scorecard_fields(text: str) -> dict[str, str]:

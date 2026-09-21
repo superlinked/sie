@@ -3,9 +3,9 @@
 
     python3 score.py
 
-Reads the pinned paragraphs from data/, the recorded calls from calls.json,
-and the hand review from data/review.json, then prints the five figures the
-/knowledge-graph task page publishes.
+Reads everything from evidence/, which `python3 fetch.py` downloads: the
+pinned paragraphs, the recorded calls and the hand review. Prints the five
+figures the /knowledge-graph task page publishes.
 
 Every check is fail-closed. A paragraph whose text no longer matches its
 digest, a candidate with a missing call, a response that does not match its
@@ -23,11 +23,27 @@ import graph
 from graph import InputError
 
 
-def load_recorded() -> dict[tuple[str, str], Any]:
+def expected_url(manifest: dict[str, Any], model: str) -> str:
+    """The URL every recorded call must carry.
+
+    The path is derived here from the pinned model, not read from the manifest,
+    so a recording cannot tell the scorer which endpoint it was allowed to use.
+    The host does come from the manifest, because a run against a regional
+    endpoint or a self-hosted cluster is legitimate.
+    """
+    path = graph.extract_path(model)
+    if manifest.get("path") != path:
+        raise InputError(f"manifest records path {manifest.get('path')!r}; the pinned model needs {path!r}")
+    if manifest.get("model") != model:
+        raise InputError(f"manifest model is {manifest.get('model')!r}, the pinned model is {model!r}")
+    return manifest["endpoint"].rstrip("/") + path
+
+
+def load_recorded(manifest: dict[str, Any], model: str) -> dict[tuple[str, str], Any]:
     """Recorded calls keyed by (candidate, kind), rejecting duplicates."""
     doc = graph.read_json(graph.CALLS_PATH)
     recorded: dict[tuple[str, str], Any] = {}
-    expected_url = f"{doc['endpoint']}{doc['path']}"
+    url = expected_url(manifest, model)
     for entry in doc["calls"]:
         key = (entry["candidate"], entry["kind"])
         if key in recorded:
@@ -36,8 +52,8 @@ def load_recorded() -> dict[tuple[str, str], Any]:
             raise InputError(f"{entry['slug']}: unknown call kind {entry['kind']!r}")
         if entry["status"] != 200:
             raise InputError(f"{entry['slug']}: recorded HTTP {entry['status']}")
-        if entry["request"]["url"] != expected_url:
-            raise InputError(f"{entry['slug']}: recorded URL is {entry['request']['url']}, not {expected_url}")
+        if entry["request"]["url"] != url:
+            raise InputError(f"{entry['slug']}: recorded URL is {entry['request']['url']}, not {url}")
         if graph.sha256_bytes(graph.compact_json(entry["response"])) != entry["response_sha256"]:
             raise InputError(f"{entry['slug']}: recorded response does not match its response_sha256")
         if set(entry["response"]["item"]) != set(graph.ITEM_KEYS):
@@ -54,7 +70,6 @@ def resolve(candidates_doc: dict[str, Any], recorded: dict[tuple[str, str], Any]
     Neither side of those comparisons is derived from the other.
     """
     model = candidates_doc["model"]
-    path = graph.extract_path(model)
     resolved: dict[str, dict[str, Any]] = {}
     for candidate in candidates_doc["candidates"]:
         cid = candidate["id"]
@@ -65,8 +80,6 @@ def resolve(candidates_doc: dict[str, Any], recorded: dict[tuple[str, str], Any]
                 raise InputError(f"{cid}: no recorded {kind} call in calls.json")
             if entry["request"]["model"] != model:
                 raise InputError(f"{cid}: recorded {kind} call used {entry['request']['model']}, not {model}")
-            if not entry["request"]["url"].endswith(path):
-                raise InputError(f"{cid}: recorded {kind} URL does not address {model}")
             calls[kind] = entry
 
         entities = calls["entities"]["response"]["item"]["entities"]
@@ -113,7 +126,9 @@ def match_reviews(review_doc: dict[str, Any], resolved: dict[str, dict[str, Any]
 def score() -> dict[str, Any]:
     candidates_doc = graph.load_candidates()
     review_doc = graph.read_json(graph.REVIEW_PATH)
-    resolved = resolve(candidates_doc, load_recorded())
+    manifest = graph.read_json(graph.MANIFEST_PATH)
+    recorded = load_recorded(manifest, candidates_doc["model"])
+    resolved = resolve(candidates_doc, recorded)
     displayed = graph.shown(candidates_doc)
     hero = displayed[0]
     proof = displayed[1:]

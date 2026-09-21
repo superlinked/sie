@@ -113,9 +113,28 @@ def evaluate(case: dict[str, Any], source: str, text: str) -> dict[str, Any]:
     }
 
 
+def expected_url(manifest: dict[str, Any]) -> str:
+    """The URL every recorded call must carry.
+
+    The path comes from this file, not from the manifest, so a recording cannot
+    tell the scorer which endpoint it is allowed to have used. The host does
+    come from the manifest, because a run against a regional endpoint or a
+    self-hosted cluster is legitimate.
+    """
+    recorded_path = manifest.get("path")
+    if recorded_path != prompt.CHAT_COMPLETIONS_PATH:
+        raise InputError(
+            f"manifest records path {recorded_path!r}; this scorer only scores {prompt.CHAT_COMPLETIONS_PATH!r}"
+        )
+    if manifest.get("model") != prompt.read_json(prompt.CASES_PATH)["model"]:
+        raise InputError("manifest model and the pinned cases disagree")
+    return manifest["endpoint"].rstrip("/") + prompt.CHAT_COMPLETIONS_PATH
+
+
 def score() -> dict[str, Any]:
     """Score every pinned case against its recorded call."""
     cases_doc = prompt.load_cases()
+    manifest = prompt.read_json(prompt.MANIFEST_PATH)
     calls_doc = prompt.read_json(prompt.CALLS_PATH)
     recorded: dict[str, Any] = {}
     for entry in calls_doc["calls"]:
@@ -123,7 +142,7 @@ def score() -> dict[str, Any]:
             raise InputError(f"Duplicate recorded call {entry['slug']}")
         recorded[entry["slug"]] = entry
 
-    expected_url = f"{calls_doc['endpoint']}{calls_doc['path']}"
+    url = expected_url(manifest)
     results = []
     for case in cases_doc["cases"]:
         slug = case["slug"]
@@ -134,11 +153,11 @@ def score() -> dict[str, Any]:
             raise InputError(f"{slug}: recorded HTTP {entry['status']}")
         if prompt.sha256_bytes(prompt.compact_json(entry["response"])) != entry["response_sha256"]:
             raise InputError(f"{slug}: recorded response does not match its response_sha256")
-        if entry["request"]["url"] != expected_url:
-            raise InputError(f"{slug}: recorded URL is {entry['request']['url']}, not {expected_url}")
+        if entry["request"]["url"] != url:
+            raise InputError(f"{slug}: recorded URL is {entry['request']['url']}, not {url}")
 
         # The pinned wikitext must rebuild the request that was sent. One side
-        # is data/, the other is calls.json, and neither is derived from the
+        # is inputs/, the other is calls.json, and neither is derived from the
         # other.
         source = prompt.wikitext(case)
         if prompt.request_body(cases_doc, source, case) != entry["request"]["body"]:

@@ -10,10 +10,16 @@ want, such as acquired, subsidiary of and develops. What comes back is a graph
 whose nodes carry character offsets into the paragraph, so every node points at
 the text it came from.
 
-The run is already recorded. `calls.json` holds all twenty requests and the
-entities and relations they returned, so you can re-derive the published counts
-with no API key and no network. Those are the same values behind the figures on
+The run is already recorded. The twenty requests and the entities and relations
+they returned live in the public HuggingFace dataset
+[superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence),
+pinned to one revision by `fetch.py`. Download it and you can re-derive the
+published counts with **no API key and no inference spend**. Those are the same
+values behind the figures on
 [superlinked.com/knowledge-graph](https://superlinked.com/knowledge-graph).
+
+You cannot verify this by cloning alone. The clone gives you the code; the
+dataset gives you the evidence. Fetching it needs no account and no token.
 
 - Model: `fastino/gliner2-large-v1`
 - Endpoint: `https://api.superlinked.com/v1/extract/fastino%2Fgliner2-large-v1`
@@ -22,22 +28,18 @@ with no API key and no network. Those are the same values behind the figures on
 - No threshold or other option is sent, so the server default applies
 
 Three of the eleven edges in the proof paragraphs are wrong in a way no score
-exposes. `data/review.json` records them, with the reason each was marked. They
+exposes. `inputs/review.json` records them, with the reason each was marked. They
 are human judgements from reading the source paragraph, not anything the model
 returned, and the example treats them as data you can disagree with.
 
 ## Run it
 
-Count the recorded run. Nothing to install, no key, no network:
+Download the recorded run, then count it. Both steps are standard library
+only, so there is nothing to install and no key to set:
 
 ```sh
+python3 fetch.py
 python3 score.py
-```
-
-Run the tests, which also cover the fail-closed paths:
-
-```sh
-python3 -m unittest discover -s tests -v
 ```
 
 Look at both requests for one paragraph without sending them:
@@ -50,7 +52,7 @@ Send the calls yourself, which needs a key and spends credits:
 
 ```sh
 uv sync
-SIE_API_KEY=sk-sie-... uv run python run.py --output run-output/calls.json
+SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 ```
 
 ## What result to expect
@@ -100,10 +102,13 @@ and a flagged edge the model never returned.
   `apps/site/tests/fixtures/reference/knowledge-graph/`, which is what that
   repository's CI checks. Nothing automatically ties the two copies together,
   so they could drift.
+- **Not a guarantee the dataset is unchanged.** `fetch.py` pins a dataset
+  revision rather than `main`, so a later upload cannot silently change what
+  you score. It does not prove the revision holds what it held yesterday.
 
 ## Inputs
 
-`data/candidates.json` pins ten paragraphs, each with the SHA-256 of its own
+`evidence/inputs/candidates.json` pins ten paragraphs, each with the SHA-256 of its own
 text, the URL and SHA-256 of the document it was taken from, and a note saying
 how the paragraph was derived from that document. Sources are SEC EDGAR
 filings, NHTSA recall reports and FDA recall notices, all public records.
@@ -113,7 +118,7 @@ it and why. `score.py` reads the counts off those roles, so the "5 shown" and
 "11 proof edges" figures come from the pinned data rather than from anything
 the display trims.
 
-`data/review.json` holds the three flagged edges. `score.py` checks each
+`evidence/inputs/review.json` holds the three flagged edges. `score.py` checks each
 flagged triple against the recorded relations, so the review cannot flag an
 edge the model never returned, and cannot reach an edge outside the eleven it
 claims to be counting.

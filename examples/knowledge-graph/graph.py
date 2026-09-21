@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
-CANDIDATES_PATH = HERE / "data" / "candidates.json"
-REVIEW_PATH = HERE / "data" / "review.json"
-CALLS_PATH = HERE / "calls.json"
+EVIDENCE = HERE / "evidence"
+CANDIDATES_PATH = EVIDENCE / "inputs" / "candidates.json"
+REVIEW_PATH = EVIDENCE / "inputs" / "review.json"
+CALLS_PATH = EVIDENCE / "calls.json"
+MANIFEST_PATH = EVIDENCE / "manifest.json"
 
 ENDPOINT = "https://api.superlinked.com"
 KINDS = ("entities", "relations")
@@ -31,7 +33,9 @@ class InputError(Exception):
 
 def read_json(path: Path) -> Any:
     if not path.exists():
-        raise InputError(f"Missing {path.name}")
+        if EVIDENCE not in path.parents and path != EVIDENCE:
+            raise InputError(f"Missing {path}")
+        raise InputError(f"Missing {path.relative_to(HERE)}. Run `python3 fetch.py` first.")
     return json.loads(path.read_text(encoding="utf-8"))
 
 

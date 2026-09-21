@@ -9,10 +9,16 @@ public status update. A report names hosts (`gerrit1003`), Phabricator tasks
 none of that, must state the outage window the report states, and must stay
 short enough to read at a glance.
 
-The run is already recorded. `calls.json` holds all twelve requests and the
-exact responses they returned, so you can re-derive the published number with
-no API key and no network. Those are the same bytes behind the figure on
+The run is already recorded. The twelve requests and the exact responses they
+returned live in the public HuggingFace dataset
+[superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence),
+pinned to one revision by `fetch.py`. Download it and you can re-derive the
+published number with **no API key and no inference spend**. Those are the same
+bytes behind the figure on
 [superlinked.com/chat](https://superlinked.com/chat).
+
+You cannot verify this by cloning alone. The clone gives you the code; the
+dataset gives you the evidence. Fetching it needs no account and no token.
 
 - Model: `Qwen/Qwen3.8-27B-FP8`
 - Endpoint: `https://api.superlinked.com/v1/chat/completions`
@@ -30,16 +36,12 @@ Each answer is scored against four checks, written before the run:
 
 ## Run it
 
-Score the recorded run. Nothing to install, no key, no network:
+Download the recorded run, then score it. Both steps are standard library
+only, so there is nothing to install and no key to set:
 
 ```sh
+python3 fetch.py
 python3 score.py
-```
-
-Run the tests, which also cover the fail-closed paths:
-
-```sh
-python3 -m unittest discover -s tests -v
 ```
 
 Look at a request without sending it:
@@ -52,7 +54,7 @@ Send the calls yourself, which needs a key and spends credits:
 
 ```sh
 uv sync
-SIE_API_KEY=sk-sie-... uv run python run.py --output run-output/calls.json
+SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 ```
 
 ## What result to expect
@@ -70,7 +72,7 @@ thirteenth call on a short excerpt of one report, which is not part of the
 twelve and is not shipped here.
 
 `score.py` fails rather than skipping. A source file whose bytes no longer
-match `data/cases.json`, a case with no recorded call, a response that does not
+match `inputs/cases.json`, a case with no recorded call, a response that does not
 match its `response_sha256`, or pinned text that no longer rebuilds the
 recorded request body all exit non-zero. Nothing is scored around a missing
 input.
@@ -98,15 +100,21 @@ input.
   `superlinked/sie-web` under `apps/site/tests/fixtures/reference/chat/`, which
   is what that repository's CI checks. Nothing automatically ties the two
   copies together, so they could drift.
+- **Not a guarantee the dataset is unchanged.** `fetch.py` pins a dataset
+  revision rather than `main`, so a later upload cannot silently change what
+  you score. It does not prove the revision holds what it held yesterday.
 
 ## Inputs
 
-`data/cases.json` pins twelve Wikitech incident reports by revision id, with
-the SHA-256 and byte length of the wikitext committed beside it in
-`data/sources/`. Wikitech content is CC BY-SA 4.0. `score.py` verifies every
-file against its digest before scoring, and separately rebuilds each recorded
-request from that wikitext, so the committed text is provably the text that
-produced the recorded answer.
+`evidence/inputs/cases.json` pins twelve Wikitech incident reports by revision
+id, with the SHA-256 and byte length of the wikitext beside it in
+`evidence/inputs/sources/`. Wikitech content is CC BY-SA 4.0, and
+`evidence/manifest.json` records the URL and licence of every report.
+
+`score.py` verifies each file against its digest before scoring, and separately
+rebuilds each recorded request from that wikitext. The pinned text is therefore
+provably the text that produced the recorded answer, which a digest alone would
+not show.
 
 `prompt.py` derives the report the model sees from the wikitext: the page
 title, the scorecard fields, then the prose. `run.py` and `score.py` both read

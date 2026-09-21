@@ -13,13 +13,14 @@ Two calls per paragraph, the pair the /knowledge-graph task page shows:
        relation types to look for
 
 No threshold or other option is sent, so the server default applies and the
-output is what the page's snippet produces. Results go to --output as one entry
-per call holding the request, the response, the status, the served model
-revision and the round-trip time. The key comes from SIE_API_KEY and is never
-written out.
+output is what the page's snippet produces. Results go to --output as a
+manifest.json and a calls.json in the dataset's own shape, one entry per call
+holding the request, the response, the status, the served model revision and
+the round-trip time. The key comes from SIE_API_KEY and is never written out.
 
-You do not need a key to check the published figures. calls.json already holds
-the recorded run, and `python3 score.py` counts it offline.
+You do not need a key, and you do not need to run this. The recorded calls are
+already published. `python3 fetch.py` downloads them and `python3 score.py`
+counts them offline.
 """
 
 from __future__ import annotations
@@ -75,7 +76,9 @@ def call(
         "kind": kind,
         "request": {
             "method": "POST",
-            "url": f"{graph.ENDPOINT}{graph.extract_path(model)}",
+            # The URL the SDK actually used, not this module's default, so a run
+            # against a regional endpoint records where it really went.
+            "url": client.base_url.rstrip("/") + graph.extract_path(model),
             "model": model,
             # The wire body these SDK arguments produce.
             "body": body,
@@ -92,7 +95,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Record an entity and relation graph for pinned filing paragraphs")
     parser.add_argument("--candidate", action="append", default=[], help="id to run; repeatable, default all")
     parser.add_argument("--show", metavar="ID", help="print both request bodies for one paragraph and exit")
-    parser.add_argument("--output", type=Path, default=HERE / "run-output" / "calls.json")
+    parser.add_argument(
+        "--output", type=Path, default=HERE / "run-output", help="directory for manifest.json and calls.json"
+    )
     return parser.parse_args()
 
 
@@ -126,8 +131,8 @@ def main() -> int:
     if not api_key:
         raise SystemExit("Set SIE_API_KEY. To check the published figures without a key, run score.py instead.")
 
-    base_url = os.environ.get("SIE_BASE_URL", graph.ENDPOINT)
-    client = SIEClient(base_url, api_key=api_key, timeout_s=900)
+    client = SIEClient(os.environ.get("SIE_BASE_URL", graph.ENDPOINT), api_key=api_key, timeout_s=900)
+    base_url = client.base_url.rstrip("/")
     print(f"endpoint {base_url}{graph.extract_path(model)}")
     print(f"model    {model}")
 
@@ -142,27 +147,29 @@ def main() -> int:
         revision = second["model_revision"] or "not reported"
         print(f"{cid:<24} {len(entities):>3} entities {edges:>3} edges  revision {revision}")
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(
-            {
-                "endpoint": base_url,
-                "path": graph.extract_path(model),
-                "model": model,
-                "recorded_by": "examples/knowledge-graph/run.py",
-                "recorded_on": datetime.now(UTC).date().isoformat(),
-                "response_sha256": (
-                    "sha256 of json.dumps(response, ensure_ascii=False, separators=(',', ':')).encode('utf-8')"
-                ),
-                "calls": entries,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    print(f"Wrote {args.output}")
+    revisions = sorted({entry["model_revision"] for entry in entries if entry["model_revision"]})
+    manifest = {
+        "task": "knowledge-graph",
+        "page": "https://superlinked.com/knowledge-graph",
+        "endpoint": base_url,
+        "path": graph.extract_path(model),
+        "model": model,
+        "model_revision": revisions[0] if len(revisions) == 1 else revisions,
+        "run_date": datetime.now(UTC).date().isoformat(),
+        "recorded_by": "examples/knowledge-graph/run.py",
+        "request_options": "none, so the server default threshold applies",
+        "calls_recorded": len(entries),
+        "response_sha256": (
+            "sha256 of json.dumps(response, ensure_ascii=False, separators=(',', ':')).encode('utf-8')"
+        ),
+        "response_scope": (
+            "the server's per-item extraction result. Request-scoped usage and credit metadata are not carried here."
+        ),
+    }
+    args.output.mkdir(parents=True, exist_ok=True)
+    for name, value in (("manifest.json", manifest), ("calls.json", {"calls": entries})):
+        (args.output / name).write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Wrote {args.output}/manifest.json and {args.output}/calls.json")
     return 0
 
 
