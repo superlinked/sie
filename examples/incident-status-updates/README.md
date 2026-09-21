@@ -15,7 +15,7 @@ returned live in the public HuggingFace dataset
 pinned to one revision by `fetch.py`. Download it and you can re-derive the
 published number with **no API key and no inference spend**. Those are the same
 bytes behind the figure on
-[superlinked.com/saas](https://superlinked.com/saas).
+[superlinked.com/sre](https://superlinked.com/sre).
 
 The dataset folder this fetches is named `chat/`, because the run was first
 published as the Chat task page's evidence. `fetch.py` pins the revision where
@@ -71,7 +71,7 @@ SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 12 of 12 incident reports passed all four checks
 ```
 
-That is the figure the SaaS solutions page publishes. The page displays four of the
+That is the figure the SRE solutions page publishes. The page displays four of the
 twelve reports, one in the hero and three in the proof grid; all twelve are in
 `calls.json` here and all twelve are scored. The page's playground runs a
 thirteenth call on a short excerpt of one report, which is not part of the
@@ -104,7 +104,7 @@ a missing input.
 - **Not a benchmark.** The recorded `duration_ms` values are provenance. They
   include queueing and whatever the cluster was doing at the time.
 - **Not bound to the website.** The same recordings back the fixtures in
-  `superlinked/sie-web` under `apps/site/tests/fixtures/reference/saas/`, which
+  `superlinked/sie-web` under `apps/site/tests/fixtures/reference/sre/`, which
   is what that repository's CI checks. Nothing automatically ties the two
   copies together, so they could drift.
 - **Not a guarantee the dataset is unchanged.** `fetch.py` pins a dataset

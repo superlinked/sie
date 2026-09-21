@@ -124,7 +124,7 @@ def main() -> int:
     revisions = sorted({entry["model_revision"] for entry in entries if entry["model_revision"]})
     manifest = {
         "task": "chat",
-        "page": "https://superlinked.com/saas",
+        "page": "https://superlinked.com/sre",
         "endpoint": base_url,
         "path": prompt.CHAT_COMPLETIONS_PATH,
         "model": cases_doc["model"],
