@@ -75,13 +75,21 @@ a gap of 0.100, or 2.5x
 Those are the figures the task page publishes. The handbag clears the field by a
 wide margin, and the two partial matches land close together well below it.
 
-`score.py` fails rather than skipping. An image whose bytes no longer match
-their digest, a response that does not match its `response_sha256`, a request
-the pinned inputs do not rebuild, a call nothing scores, a call whose served
-deployment revision is not the one the manifest names, an image with no recorded
-vector, a vector returned twice, a vector whose declared width disagrees with
-its own values, a non-finite value, or a ranking that no longer leads with the
-handbag all exit non-zero.
+`score.py` fails rather than skipping. A manifest naming a different model or a
+different model revision, an image whose bytes no longer match their digest, a
+response that does not match its `response_sha256`, a request the pinned inputs
+do not rebuild, a call nothing scores, a call whose served deployment revision
+is not the one the manifest names, an image with no recorded vector, a vector
+returned twice, a vector whose declared width disagrees with its own values, a
+non-finite value, or a ranking in any order other than the published one all
+exit non-zero.
+
+The expected order lives in `ranking.py` as `EXPECTED_ORDER`, in the committed
+source rather than in the evidence. Editing `evidence/` alone cannot satisfy it,
+because one side of that comparison is something the recording does not
+control. `MODEL_REVISION` is pinned the same way, and `run.py` checks it against
+the endpoint before encoding anything, so a run against other weights costs no
+credits and never produces evidence `score.py` would accept.
 
 ## What this does NOT establish
 

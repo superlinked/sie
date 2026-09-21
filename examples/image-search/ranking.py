@@ -29,6 +29,28 @@ MODEL = "google/siglip-so400m-patch14-384"
 ENCODE_PATH = f"/v1/encode/{MODEL}"
 DIMS = 1152
 
+# The HuggingFace revision of the weights, as GET /v1/models reports it. This is
+# the checkpoint the published figures came from, and both run.py and score.py
+# refuse to proceed against a different one.
+#
+# Not to be confused with the deployment revision carried on every response in
+# X-SIE-Model-Revision. That digest identifies the SIE deployment, and models
+# served together share it: arctic-embed-l-v2.0, siglip2-base, bge-m3 and this
+# model all return the same value, so it can never stand in for the weights.
+MODEL_REVISION = "9fdffc58afc957d1a03a25b10dba0329ab15c2a3"
+
+# The published ranking, in order. Pinned here in the committed source so
+# score.py compares what it derives from the recording against something the
+# recording cannot move. Editing evidence/ alone will not satisfy this.
+EXPECTED_ORDER = (
+    "red-leather-handbag",
+    "black-handbag",
+    "red-shoes",
+    "green-backpack",
+    "black-camera",
+    "blue-running-sneaker",
+)
+
 # SigLIP is trained with one contrastive objective over both towers, so a query
 # and an image go through the same encoder with no is_query asymmetry. The
 # ranking below is a plain cosine, which is what that training makes meaningful.

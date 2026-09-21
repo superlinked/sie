@@ -106,9 +106,34 @@ def send(client: Any, name: str, body: dict[str, Any], records: list[dict[str, A
     }
 
 
+def served_revision(client: Any) -> str:
+    """The model revision the endpoint reports for itself, via GET /v1/models.
+
+    Raises rather than returning a placeholder. A run that cannot establish
+    which weights answered has nothing to record.
+    """
+    try:
+        listed = client.list_models()
+    except Exception as error:
+        raise SystemExit(f"Could not read the model revision from /v1/models: {error}") from error
+    for model in listed if isinstance(listed, list) else listed.get("models", []):
+        name = model.get("name") if isinstance(model, dict) else None
+        if name == ranking.MODEL:
+            revision = model.get("revision") or ""
+            if not revision:
+                raise SystemExit(f"/v1/models lists {ranking.MODEL} with no revision")
+            return revision
+    raise SystemExit(f"/v1/models does not list {ranking.MODEL}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Encode the pinned photographs and query")
     parser.add_argument("--show", metavar="NAME", help="print one request body and exit, without calling anything")
+    parser.add_argument(
+        "--allow-revision-mismatch",
+        action="store_true",
+        help="record even if the endpoint serves a revision other than the published one",
+    )
     parser.add_argument(
         "--output", type=Path, default=HERE / "run-output", help="directory for manifest.json and calls.json"
     )
@@ -139,6 +164,19 @@ def main() -> int:
     print(f"endpoint {base_url}{ranking.ENCODE_PATH}")
     print(f"model    {ranking.MODEL}")
 
+    # Checked before anything is encoded, so a mismatch costs no credits. An
+    # unreadable revision is a failure too: recording an empty one would produce
+    # evidence score.py can never validate.
+    model_revision = served_revision(client)
+    print(f"revision {model_revision}")
+    if model_revision != ranking.MODEL_REVISION and not args.allow_revision_mismatch:
+        raise SystemExit(
+            f"This endpoint serves {model_revision!r} and this example publishes {ranking.MODEL_REVISION!r}.\n"
+            "Different weights produce different scores, and score.py rejects a recording made against "
+            "another revision.\nRe-run with --allow-revision-mismatch to record anyway, for your own "
+            "comparison rather than to reproduce the published figures."
+        )
+
     entries = []
     for name, body in bodies.items():
         entry = send(client, name, body, records)
@@ -153,10 +191,10 @@ def main() -> int:
         "path": ranking.ENCODE_PATH,
         "model": ranking.MODEL,
         # The HF revision of the checkpoint, read from GET /v1/models rather than
-        # assumed. X-SIE-Model-Revision is a deployment-wide digest: the same
-        # value comes back for arctic-embed and siglip2, so it is recorded
-        # separately under deployment_revision and never as the model's revision.
-        "model_revision": "",
+        # assumed. X-SIE-Model-Revision is a deployment digest that models served
+        # together share, so it is recorded separately under deployment_revision
+        # and never as the model's revision.
+        "model_revision": model_revision,
         "deployment_revision": revisions[0] if len(revisions) == 1 else revisions,
         "run_date": datetime.now(UTC).date().isoformat(),
         "recorded_by": "examples/image-search/run.py",
@@ -173,15 +211,6 @@ def main() -> int:
             "sha256 of json.dumps(response, ensure_ascii=False, separators=(',', ':')).encode('utf-8')"
         ),
     }
-    try:
-        listed = client.list_models()
-        for model in listed if isinstance(listed, list) else listed.get("models", []):
-            name = model.get("name") if isinstance(model, dict) else None
-            if name == ranking.MODEL:
-                manifest["model_revision"] = model.get("revision", "")
-    except Exception as error:  # noqa: BLE001 - the run is still valid without the listing
-        print(f"could not read the model revision from /v1/models: {error}")
-
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

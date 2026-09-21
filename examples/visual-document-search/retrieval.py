@@ -41,6 +41,12 @@ MODEL = "vidore/colpali-v1.3-hf"
 ENCODE_PATH = f"/v1/encode/{MODEL}"
 TOKEN_DIM = 128
 
+# The HuggingFace revision of the weights, as GET /v1/models reports it. This is
+# the checkpoint the published ranks came from, and both run.py and score.py
+# refuse to proceed against a different one. SIE pins this revision for the
+# model, so a server of the same version serves the same weights.
+MODEL_REVISION = "133a9eb02947310513f52f8f0d39d622e0eab8dc"
+
 # BM25 over the page's markdown, the text baseline the comparison is against.
 K1 = 1.2
 B = 0.75

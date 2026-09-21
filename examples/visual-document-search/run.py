@@ -104,23 +104,34 @@ def send(client: Any, slug: str, kind: str, body: dict[str, Any], payload: list[
 
 
 def served_revision(client: Any) -> str:
-    """The model revision the server that just answered reports for itself."""
+    """The model revision the server reports for itself, via GET /v1/models.
+
+    Raises rather than returning a placeholder. A run that cannot establish
+    which weights answered has nothing to record.
+    """
     try:
         listed = client.list_models()
-    except Exception as error:  # noqa: BLE001 - the run is still valid without it
-        print(f"could not read the model revision from /v1/models: {error}")
-        return ""
+    except Exception as error:
+        raise SystemExit(f"Could not read the model revision from /v1/models: {error}") from error
     for model in listed if isinstance(listed, list) else listed.get("models", []):
         name = model.get("name") if isinstance(model, dict) else None
         if name == retrieval.MODEL:
-            return model.get("revision", "")
-    return ""
+            revision = model.get("revision") or ""
+            if not revision:
+                raise SystemExit(f"/v1/models lists {retrieval.MODEL} with no revision")
+            return revision
+    raise SystemExit(f"/v1/models does not list {retrieval.MODEL}. Is this server serving the ColPali bundle?")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rank ViDoRe pages with ColPali on a self-hosted SIE server")
     parser.add_argument("--show", metavar="ID", help="print one query request body and exit, without calling anything")
     parser.add_argument("--only", metavar="ID", help="run a single comparison")
+    parser.add_argument(
+        "--allow-revision-mismatch",
+        action="store_true",
+        help="record even if the server serves a revision other than the published one",
+    )
     parser.add_argument(
         "--output", type=Path, default=HERE / "run-output", help="directory for manifest.json and calls.json"
     )
@@ -151,6 +162,19 @@ def main() -> int:
     resolved = client.base_url.rstrip("/")
     print(f"endpoint {resolved}{retrieval.ENCODE_PATH}")
     print(f"model    {retrieval.MODEL}")
+
+    # Checked before anything is encoded, so a mismatch costs no GPU time. An
+    # unreadable revision is a failure too: recording an empty one would produce
+    # evidence score.py can never validate.
+    model_revision = served_revision(client)
+    print(f"revision {model_revision}")
+    if model_revision != retrieval.MODEL_REVISION and not args.allow_revision_mismatch:
+        raise SystemExit(
+            f"This server serves {model_revision!r} and this example publishes {retrieval.MODEL_REVISION!r}.\n"
+            "Different weights produce different ranks, and score.py rejects a recording made against "
+            "another revision.\nRe-run with --allow-revision-mismatch to record anyway, for your own "
+            "comparison rather than to reproduce the published figures."
+        )
     print("the first call loads the model, so it takes a few minutes\n")
 
     entries: list[dict[str, Any]] = []
@@ -212,7 +236,7 @@ def main() -> int:
         "path": retrieval.ENCODE_PATH,
         "model": retrieval.MODEL,
         # Read back from the server that answered, not assumed from this file.
-        "model_revision": served_revision(client),
+        "model_revision": model_revision,
         "run_date": datetime.now(UTC).date().isoformat(),
         "recorded_by": "examples/visual-document-search/run.py",
         "scoring": "MaxSim over L2-normalized ColPali multivectors, as retrieval.maxsim",

@@ -114,6 +114,48 @@ def score_comparison(
     }
 
 
+def recorded_results(manifest: dict[str, Any], comparisons: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The manifest's own result rows, one per comparison, keyed by id.
+
+    Rejects duplicates, extras and gaps rather than letting a lookup silently
+    pick a row. A slug-keyed list collapsed to a dict keeps the LAST match, so
+    two rows sharing an id would let this check and the ranking check read
+    different rows.
+    """
+    results = manifest.get("results")
+    if not isinstance(results, list):
+        raise SystemExit("manifest.json has no results list, so there is nothing to check the ranks against")
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in results:
+        identifier = row.get("id")
+        if identifier in by_id:
+            raise SystemExit(f"manifest.json records {identifier!r} twice")
+        by_id[identifier] = row
+    wanted = {comparison["id"] for comparison in comparisons}
+    missing = sorted(wanted - set(by_id))
+    if missing:
+        raise SystemExit(f"manifest.json has no recorded result for {', '.join(missing)}")
+    extra = sorted(set(by_id) - wanted)
+    if extra:
+        raise SystemExit(f"manifest.json records a result nothing scores: {', '.join(extra)}")
+    return by_id
+
+
+def check_against_recorded(row: dict[str, Any], expected: dict[str, Any]) -> None:
+    """The ranks derived from calls.json must be the ranks the run recorded.
+
+    The two sides are different artifacts: `row` is recomputed here from the
+    multivectors in calls.json and the markdown in inputs/pages.json, while
+    `expected` was written into manifest.json by run.py at run time. That makes
+    this a check on the recording rather than a restatement of it. It is the
+    only check covering the BM25 side, whose markdown no response digest spans.
+    """
+    for key in ("text_rank", "visual_rank", "pages"):
+        if row[key] != expected.get(key if key != "pages" else "candidate_pages"):
+            recorded = expected.get(key if key != "pages" else "candidate_pages")
+            raise SystemExit(f"{row['id']}: derived {key} {row[key]} does not match the recorded {recorded}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reproduce the published ranks from the recorded run")
     parser.add_argument("--baseline", action="store_true", help="BM25 only, straight from inputs/, no recording read")
@@ -136,7 +178,15 @@ def main() -> int:
     if not manifest_path.exists():
         raise SystemExit(f"{manifest_path} is missing. Run: python3 fetch.py")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("model") != retrieval.MODEL:
+        raise SystemExit(f"manifest names model {manifest.get('model')!r}, this example scores {retrieval.MODEL!r}")
+    if manifest.get("model_revision") != retrieval.MODEL_REVISION:
+        raise SystemExit(
+            f"manifest names model revision {manifest.get('model_revision')!r}, "
+            f"this example scores {retrieval.MODEL_REVISION!r}. Different weights produce different ranks."
+        )
     calls = load_calls()
+    recorded = recorded_results(manifest, comparisons)
 
     print(f"{manifest['model']} on {manifest['endpoint']}, recorded {manifest['run_date']}")
     print(f"BM25 baseline, k1={retrieval.K1}, b={retrieval.B}\n")
@@ -145,6 +195,7 @@ def main() -> int:
     rows = []
     for comparison in comparisons:
         row = score_comparison(comparison, by_document[comparison["doc_id"]], calls, manifest)
+        check_against_recorded(row, recorded[row["id"]])
         rows.append(row)
         print(
             f"{row['label']:<36}{row['pages']:>6}{row['text_rank']:>6}{row['visual_rank']:>8}{row['visual_score']:>10.3f}"

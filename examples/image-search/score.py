@@ -95,6 +95,13 @@ def main() -> int:
     if not manifest_path.exists():
         raise SystemExit(f"{manifest_path} is missing. Run: python3 fetch.py")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("model") != ranking.MODEL:
+        raise SystemExit(f"manifest names model {manifest.get('model')!r}, this example scores {ranking.MODEL!r}")
+    if manifest.get("model_revision") != ranking.MODEL_REVISION:
+        raise SystemExit(
+            f"manifest names model revision {manifest.get('model_revision')!r}, "
+            f"this example scores {ranking.MODEL_REVISION!r}. Different weights produce different scores."
+        )
 
     records = ranking.load_images()
     query = ranking.load_query()
@@ -120,6 +127,14 @@ def main() -> int:
         print(f"{position:>4}  {score:>8.3f}  {labels[name]}{marker}")
     print()
 
+    derived_order = tuple(name for name, _ in ranked)
+    if derived_order != ranking.EXPECTED_ORDER:
+        raise SystemExit(
+            "The ranking is not the published one.\n"
+            f"  published: {', '.join(ranking.EXPECTED_ORDER)}\n"
+            f"  derived:   {', '.join(derived_order)}"
+        )
+
     top_name, top_score = ranked[0]
     if top_name != TARGET:
         raise SystemExit(f"The top result is {top_name!r}, not {TARGET!r}. The published claim no longer holds.")
@@ -127,7 +142,13 @@ def main() -> int:
     print(f"{len(records)} photographs, {ranking.DIMS}-dimensional vectors, one text query")
     print(f"the red leather handbag ranks first at {top_score:.3f}")
     print(f"the closest other photograph is the {labels[runner_up_name].lower()} at {runner_up_score:.3f}")
-    print(f"a gap of {top_score - runner_up_score:.3f}, or {top_score / runner_up_score:.1f}x")
+    gap = f"a gap of {top_score - runner_up_score:.3f}"
+    # A cosine can legitimately be zero or negative, and neither divides into a
+    # meaningful multiple. Only the ratio is conditional; the gap always prints.
+    if runner_up_score > 0:
+        print(f"{gap}, or {top_score / runner_up_score:.1f}x")
+    else:
+        print(gap)
     return 0
 
 

@@ -119,12 +119,20 @@ all three score zero. What is left to match on is `morgan` and `stanley`, which
 appear on 90% and 89% of the document's pages. Ranking the rendered image
 instead puts the page second.
 
-`score.py` fails rather than skipping. A missing file, a page whose bytes no
-longer match their digest, a response that does not match its
-`response_sha256`, a request the pinned inputs do not rebuild, a page with no
-recorded multivector, a multivector recorded twice, a declared token count or
-width that disagrees with its own values, or a non-finite score all exit
-non-zero.
+`score.py` fails rather than skipping. A missing file, a manifest naming a
+different model or a different model revision, a page whose bytes no longer
+match their digest, a response that does not match its `response_sha256`, a
+request the pinned inputs do not rebuild, a page with no recorded multivector, a
+multivector recorded twice, a declared token count or width that disagrees with
+its own values, a non-finite score, or a manifest whose recorded results are
+missing, duplicated, extra or at a different rank from the ones derived here all
+exit non-zero.
+
+That last check is the one covering the text side. Response digests span the
+multivectors, so a changed vector is caught before any rank is computed. Nothing
+digests the markdown in `pages.json`, so BM25 is where a silent edit would
+otherwise land: the ranks `run.py` recorded in `manifest.json` and the ranks
+recomputed here come from different files, and they have to agree.
 
 ## What this does NOT establish
 
