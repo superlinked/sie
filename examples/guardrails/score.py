@@ -48,6 +48,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+# The model ids and their pinned weights revisions, from the runner, so there
+# is one copy of each. run.py imports nothing but the standard library at
+# module level (its SDK import is deferred into main()), so this keeps score.py
+# runnable on a bare python3 with no API key and nothing installed.
+from run import MODEL_REVISIONS
+
 HTTP_OK = 200
 
 GLIGUARD_CALL = "gliguard-snippet"
@@ -64,6 +70,40 @@ def load(path: Path) -> Any:
     if not path.exists():
         raise SystemExit(f"{path} is missing. Run: python3 fetch.py")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def check_revisions(payload: dict[str, Any]) -> None:
+    """Refuse a recording made against weights other than the published ones.
+
+    `run.py --record` stops on a revision mismatch, but
+    `--allow-revision-mismatch` exists so anyone can record against whatever
+    their endpoint serves. Such a file is a legitimate thing to produce and an
+    illegitimate thing to score: different weights give different verdicts, so
+    it could reproduce these totals by coincidence and exit 0. Without this the
+    revision pin only constrains the writer, never the reader.
+
+    The expected values are imported from run.py rather than repeated here.
+    Two copies of a 40-character SHA in one directory is a drift waiting to
+    happen, and the copy nobody looks at is the one that goes stale.
+    """
+    recorded = payload.get("model_revisions")
+    if recorded is None:
+        raise SystemExit(
+            "refusing to score: this calls.json records no model_revisions, so the weights behind it "
+            "cannot be established. Re-fetch with fetch.py."
+        )
+    if recorded != MODEL_REVISIONS:
+        differences = sorted(
+            f"{model}: recorded {recorded.get(model, 'nothing')}, this example scores {want}"
+            for model, want in MODEL_REVISIONS.items()
+            if recorded.get(model) != want
+        ) + sorted(
+            f"{model}: recorded but not scored by this example" for model in set(recorded) - set(MODEL_REVISIONS)
+        )
+        raise SystemExit(
+            "refusing to score a recording made against other weights, which produce other verdicts:\n  "
+            + "\n  ".join(differences)
+        )
 
 
 def keep_all(_call: dict[str, Any]) -> bool:
@@ -135,9 +175,16 @@ def verdicts_for(
         if call["case"] in found:
             raise SystemExit(f"two {call_name} calls recorded for {call['case']}")
         found[call["case"]] = read(call)
-    missing = [case["id"] for case in cases if case["id"] not in found]
+    # A bijection with the inputs, not a lookup. Checking only for missing
+    # cases lets an extra verdict call sit in the recording unnoticed, because
+    # `tally` walks the inputs and never looks at what else is there.
+    expected_cases = {case["id"] for case in cases}
+    missing = sorted(expected_cases - set(found))
     if missing:
         raise SystemExit(f"no {call_name} call recorded for: {', '.join(missing)}")
+    unexpected = sorted(set(found) - expected_cases)
+    if unexpected:
+        raise SystemExit(f"{call_name} call recorded for inputs that are in no inputs.json: {', '.join(unexpected)}")
     return found
 
 
@@ -182,7 +229,9 @@ def main() -> int:
     data_dir = Path(args.data)
 
     cases = load(data_dir / "inputs/inputs.json")["cases"]
-    calls = scored_calls(load(data_dir / "calls.json"), keep_all)
+    payload = load(data_dir / "calls.json")
+    check_revisions(payload)
+    calls = scored_calls(payload, keep_all)
 
     gliguard = verdicts_for(calls, cases, GLIGUARD_CALL, gliguard_verdict)
     granite = verdicts_for(calls, cases, GRANITE_CALL, granite_verdict)

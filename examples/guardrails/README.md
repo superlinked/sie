@@ -99,6 +99,16 @@ with a row per input for each model, naming every miss and every false alarm.
 `run.py --check` prints `48 of 48 recorded requests rebuilt from the inputs and
 matched`, and fails if a call is missing, recorded twice or implied by no input.
 
+`score.py` refuses two recordings before it counts anything. One made against
+other weights, because `--allow-revision-mismatch` lets anyone record against
+whatever their endpoint serves and different weights give different verdicts, so
+such a file could reproduce these totals by coincidence; it reads the recorded
+`model_revisions` and compares both against the pins in `run.py`, and a file
+that records no revisions at all is refused rather than assumed. And one whose
+verdict calls do not correspond one to one with the inputs, in either direction:
+a missing call and a call for an input that is in no `inputs.json` both stop it,
+because the tally walks the inputs and would otherwise never notice the extra.
+
 ## What is in the dataset
 
 ```
