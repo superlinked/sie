@@ -46,9 +46,14 @@ def token_vectors(entry: dict[str, Any], dims: set[int]) -> dict[str, list[list[
 
     MaxSim zips a query token against a passage token, and `zip` stops at the
     shorter one, so a short row would silently score on a prefix. Every row is
-    therefore checked to be the declared width, and `dims` accumulates across
-    the run so a query and its passages cannot be compared at different widths.
+    therefore checked to be the declared width, `dims` accumulates across the
+    run so a query and its passages cannot be compared at different widths, and
+    the ids a response echoes have to be exactly the ids its request sent.
     """
+    sent = [item["id"] for item in entry["request"]["body"]["items"]]
+    returned = [item["id"] for item in entry["response"]["items"]]
+    if returned != sent:
+        raise InputError(f"{entry['slug']}: the response echoes {returned}, not the {sent} its request sent")
     out: dict[str, list[list[float]]] = {}
     for item in entry["response"]["items"]:
         block = item["multivector"]

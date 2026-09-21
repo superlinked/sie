@@ -55,10 +55,17 @@ def allowed_revisions(manifest: dict[str, Any]) -> set[str]:
     and a list when more than one did, so both are accepted here.
     """
     value = manifest.get("model_revision")
-    revisions = {value} if isinstance(value, str) else set(value or ())
+    if isinstance(value, str):
+        revisions = [value]
+    elif isinstance(value, list):
+        revisions = value
+    else:
+        # A dict would iterate as its keys and an int would raise TypeError, so
+        # neither is coerced into an answer here.
+        raise InputError(f"manifest model_revision is {type(value).__name__}, expected a string or a list of strings")
     if not revisions or not all(isinstance(item, str) and item for item in revisions):
         raise InputError("manifest does not name a served model revision")
-    return revisions
+    return set(revisions)
 
 
 def check_revision(slug: str, entry: dict[str, Any], allowed: set[str]) -> str:

@@ -51,6 +51,12 @@ def vectors_from(entry: dict[str, Any], into: dict[str, list[float]], dims: set[
     just rank something meaningless. `dims` accumulates across the run, so a
     batch encoded at a different width is caught rather than averaged in.
     """
+    sent = [item["id"] for item in entry["request"]["body"]["items"]]
+    returned = [item["id"] for item in entry["response"]["items"]]
+    if returned != sent:
+        # Batches merge into one map, so a response carrying another batch's ids
+        # would quietly move vectors between passages.
+        raise InputError(f"{entry['slug']}: the response echoes {len(returned)} ids that are not the {len(sent)} sent")
     for item in entry["response"]["items"]:
         if item["id"] in into:
             raise InputError(f"{entry['slug']}: {item['id']} was already encoded by another call")
