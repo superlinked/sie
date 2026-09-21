@@ -76,28 +76,40 @@ commas, with one trailing period ignored. Numbers compare within 1e-9; integers,
 booleans and enums compare exactly. `inputs.json` records those rules and they
 were fixed before the run.
 
-`score.py` checks the bytes before it scores them, five ways, and the first one
-is the only one that can catch an edit made after download. It hashes the whole
-of `calls.json`, `manifest.json` and `inputs/inputs.json` against object ids
-pinned in this repository, beside the dataset revision, because a digest stored
-inside a file cannot authenticate that file: every other digest here travels
-with the evidence, so an editor who changes a response and recomputes the digest
-sitting next to it satisfies all of them. Those ids are the ones HuggingFace
-publishes for the revision, so you can check them by hand:
+`score.py` checks the bytes before it scores them. The checks fall into two
+layers, and they catch different attacks.
+
+**The metadata files.** `calls.json`, `manifest.json` and `inputs/inputs.json`
+are hashed whole, before anything is parsed, against object ids pinned in this
+repository beside the dataset revision. That is the layer that defeats a
+coordinated edit: every other digest here travels inside those three files, so
+someone who changes a recorded response and recomputes the `response_sha256`
+sitting beside it satisfies all of them, and the run still prints the published
+figure. Only a value pinned outside the evidence sees that. These are the ids
+HuggingFace publishes for the revision, so you can check them by hand:
 
 ```sh
 curl -s "https://huggingface.co/api/datasets/superlinked/sie-task-evidence/tree/2d733ecb8b270fbb154975776e7f5a4315330f36/doc-field-extraction?recursive=true"
 ```
 
-Then, on bytes now known to be the right ones: the scored digest of
-`inputs.json` against the one the run recorded; the digest of every request and
-response record; the SHA-256 of every image against the digest its call carries;
-and that digest against the `image_sha256` the case pinned in `inputs.json`, so
-one document cannot be scored against another's schema. Each entry's `slug` must
-also equal `<case>__<call>`, so an edit to one field cannot have the evidence
-validated as one document and the reply scored against another's expected
-values. A file that is missing, or that any of these disagree about, is a
-failure and nothing is scored; it is never skipped past.
+**The image files.** No image id is pinned here, so the object ids above would
+not notice a modified image. Two digests cover that instead: each file is
+hashed against the digest `calls.json` records for the call that sent it, and
+that digest is held against the `image_sha256` the case registered in
+`inputs.json`. The first catches an image edited while the metadata is left
+untouched. The second catches an image that hashes correctly for the call
+carrying it but is not the one the case pinned, so one document cannot be
+scored against another's schema and expected values. Editing an image *and* the
+digests that describe it means editing the metadata, which is the first layer
+again.
+
+The remaining checks are consistency within the evidence: the scored digest of
+`inputs.json` against the one the run recorded, every request and response
+record against its own, and each entry's `slug` against `<case>__<call>`, so an
+edit to one field cannot have the evidence validated as one document and the
+reply scored against another's schema. A recorded call that no case reaches is
+a failure too rather than a silent pass. Anything missing, or that any check
+disagrees about, is a failure and nothing is scored; it is never skipped past.
 
 Two calls sit in `diagnostics/` and are counted in nothing: one exploratory call
 on the FAA rebuilt fuel control certificate, and a superseded playground call
