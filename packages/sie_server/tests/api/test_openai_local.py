@@ -1006,6 +1006,7 @@ def test_mlx_chat_rejects_video(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
             + base64.b64encode(b"#EXTM3U\n#EXTINF:10,\nhttp://169.254.169.254/a.ts\n").decode()
         },
         {"url": "data:video/mp4;base64,AAAA"},
+        {"url": "data:video/;base64,AAAAGGZ0eXBpc29t"},
     ],
 )
 def test_cuda_chat_rejects_invalid_video_before_model_lookup(

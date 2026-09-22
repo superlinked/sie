@@ -423,8 +423,9 @@ def _decode_data_uri_video(url: str) -> tuple[bytes, str]:
     params = header.split(";")
     if "base64" not in params[1:]:
         raise ValueError("video data URI must be base64-encoded")
-    if not params[0].startswith("video/"):
-        raise ValueError("video data URI must have a video/* media type")
+    media_type, _, subtype = params[0].partition("/")
+    if media_type != "video" or not subtype:
+        raise ValueError("video data URI must have a video/<subtype> media type")
     if (len(payload) * 3) // 4 > MAX_VIDEO_BYTES:
         raise ValueError(f"video too large: exceeds the {MAX_VIDEO_BYTES}-byte limit")
     try:
