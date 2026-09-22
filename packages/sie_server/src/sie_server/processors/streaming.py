@@ -75,9 +75,8 @@ from sie_server.core.runtime_options import apply_generation_runtime_options
 from sie_server.core.text_tokens import estimate_tokens_from_chars
 from sie_server.core.tokenizer import image_first_chat_message, load_tokenizer
 from sie_server.core.video_frames import (
-    MAX_VIDEO_BYTES,
     VideoDecodeError,
-    probe_video_bytes,
+    check_generation_video_bounds,
     sniff_video_container,
 )
 from sie_server.observability import worker_telemetry as _metrics
@@ -313,8 +312,9 @@ _MAX_VIDEOS_PER_REQUEST = 1
 # 32x32 patch across all sampled frames); a config test enforces this.
 _VISION_TOKENS_PER_VIDEO_ESTIMATE = 8192
 
-# Largest decoded frame the worker lets the runtime decode (4K UHD).
-_MAX_VIDEO_FRAME_PIXELS = 3840 * 2160
+# Mirrors the sidecar's per-item generation media budget for queue callers
+# that bypass it.
+_MAX_DECODE_VIDEO_BYTES = 16 * 1024 * 1024
 
 
 def _decode_data_uri_image(url: str) -> tuple[bytes, str | None]:
@@ -469,9 +469,9 @@ def _parse_message_videos_field(raw: object, idx: int) -> tuple[VideoInput, ...]
         if isinstance(raw_data, bytes):
             data = raw_data
         elif isinstance(raw_data, str) and raw_data:
-            if (len(raw_data) * 3) // 4 > MAX_VIDEO_BYTES:
+            if (len(raw_data) * 3) // 4 > _MAX_DECODE_VIDEO_BYTES:
                 return _ValidationError(
-                    code="invalid_request", message=f"{path}: video too large; exceeds {MAX_VIDEO_BYTES} bytes"
+                    code="invalid_request", message=f"{path}: video too large; exceeds {_MAX_DECODE_VIDEO_BYTES} bytes"
                 )
             try:
                 data = base64.b64decode(raw_data, validate=True)
@@ -483,10 +483,10 @@ def _parse_message_videos_field(raw: object, idx: int) -> tuple[VideoInput, ...]
             )
         if not data:
             return _ValidationError(code="invalid_request", message=f"{path}: video data is empty")
-        if len(data) > MAX_VIDEO_BYTES:
+        if len(data) > _MAX_DECODE_VIDEO_BYTES:
             return _ValidationError(
                 code="invalid_request",
-                message=f"{path}: video too large ({len(data)} bytes); exceeds {MAX_VIDEO_BYTES} bytes",
+                message=f"{path}: video too large ({len(data)} bytes); exceeds {_MAX_DECODE_VIDEO_BYTES} bytes",
             )
         container = sniff_video_container(data)
         if container is None:
@@ -3558,19 +3558,11 @@ class StreamingProcessor:
             return _ValidationError(code="invalid_request", message=f"model '{model_id}' does not support video input")
         for index, video in enumerate(videos):
             try:
-                width, height, _duration_s = await asyncio.to_thread(
-                    probe_video_bytes, video["data"], suffix=f".{video.get('format') or 'mp4'}"
+                await asyncio.to_thread(
+                    check_generation_video_bounds, video["data"], suffix=f".{video.get('format') or 'mp4'}"
                 )
             except VideoDecodeError as exc:
                 return _ValidationError(code="invalid_request", message=f"videos[{index}]: {exc}")
-            if width * height > _MAX_VIDEO_FRAME_PIXELS:
-                return _ValidationError(
-                    code="invalid_request",
-                    message=(
-                        f"videos[{index}]: resolution {width}x{height} exceeds the "
-                        f"{_MAX_VIDEO_FRAME_PIXELS}-pixel frame limit"
-                    ),
-                )
         return None
 
     async def _check_context_length(

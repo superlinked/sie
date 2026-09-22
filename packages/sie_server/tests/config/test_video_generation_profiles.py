@@ -11,6 +11,10 @@ from sie_server.processors.streaming import _VISION_TOKENS_PER_VIDEO_ESTIMATE
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
 MAX_TOTAL_PIXELS = _VISION_TOKENS_PER_VIDEO_ESTIMATE * 1024
+# SGLang's Qwen-VL video preprocessing never shrinks a frame below
+# 1.05 x ``min_pixels`` (default 128 x 28 x 28), so ``total_pixels`` only bounds
+# the visual tokens while ``max_frames`` keeps that per-frame floor inside it.
+DEFAULT_VIDEO_MIN_PIXELS = 128 * 28 * 28
 
 
 def _video_budget_violations(config: ModelConfig) -> list[str]:
@@ -23,8 +27,12 @@ def _video_budget_violations(config: ModelConfig) -> list[str]:
         if "--mm-process-config" in args:
             video = json.loads(args[args.index("--mm-process-config") + 1]).get("video") or {}
         total_pixels = video.get("total_pixels")
+        max_frames = video.get("max_frames")
+        min_pixels = video.get("min_pixels", DEFAULT_VIDEO_MIN_PIXELS)
         if not isinstance(total_pixels, int) or not 0 < total_pixels <= MAX_TOTAL_PIXELS:
             violations.append(f"{config.sie_id}:{name} video.total_pixels={total_pixels!r}")
+        elif not isinstance(max_frames, int) or not 0 < max_frames * min_pixels * 1.05 / 2 <= MAX_TOTAL_PIXELS:
+            violations.append(f"{config.sie_id}:{name} video.max_frames={max_frames!r} min_pixels={min_pixels!r}")
     return violations
 
 
@@ -63,9 +71,11 @@ def _synthetic(video_block: dict[str, Any] | None) -> ModelConfig:
 @pytest.mark.parametrize(
     ("video_block", "violates"),
     [
-        ({"fps": 2, "total_pixels": MAX_TOTAL_PIXELS}, False),
-        ({"fps": 2, "total_pixels": MAX_TOTAL_PIXELS + 1}, True),
-        ({"fps": 2}, True),
+        ({"fps": 2, "max_frames": 64, "total_pixels": MAX_TOTAL_PIXELS}, False),
+        ({"fps": 2, "max_frames": 64, "total_pixels": MAX_TOTAL_PIXELS + 1}, True),
+        ({"fps": 2, "total_pixels": MAX_TOTAL_PIXELS}, True),
+        ({"fps": 2, "max_frames": 768, "total_pixels": MAX_TOTAL_PIXELS}, True),
+        ({"fps": 2, "max_frames": 64}, True),
         (None, True),
     ],
 )

@@ -88,8 +88,9 @@ pub fn native_request_body_limit(endpoint: &str) -> usize {
 ///
 /// Public for the same reason as [`native_request_body_limit`], and separate
 /// from it because the compat generation routes do NOT take the 24 MiB native
-/// `generate` cap: their bodies carry no inline native media array, so they sit
-/// on the shared [`MAX_JSON_BODY_BYTES`] bound. An estimate that bounded a chat
+/// `generate` cap: inline chat media (base64 `image_url` / `video_url` data URIs)
+/// rides inside this shared [`MAX_JSON_BODY_BYTES`] bound, which is therefore
+/// also the effective per-request media ceiling. An estimate that bounded a chat
 /// body at the native number would accept 1.5x what the route it prices
 /// accepts — the exact way around the rail this helper exists to prevent
 /// (#2435).

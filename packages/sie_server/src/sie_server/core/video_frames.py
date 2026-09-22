@@ -213,12 +213,22 @@ def sniff_video_container(data: bytes) -> str | None:
     return None
 
 
-def probe_video_bytes(data: bytes, *, suffix: str) -> tuple[int, int, float]:
-    """Return ``(width, height, duration_s)`` from container metadata without decoding frames.
+# Generation-path decode rails. The generation runtime decodes a clip on its
+# own request loop, seeking from the preceding keyframe for every sampled
+# frame, so work scales with the stream's frame count and frame size rather
+# than with the frames it keeps.
+MAX_GENERATION_VIDEO_FRAMES: Final[int] = 3600
+MAX_GENERATION_VIDEO_FPS: Final[float] = 120.0
+MAX_GENERATION_VIDEO_FRAME_PIXELS: Final[int] = 1920 * 1080
 
-    Fails closed on a container the decoder cannot open or that reports no
-    usable dimensions, frame count, or frame rate, and enforces the byte and
-    duration admission caps.
+
+def check_generation_video_bounds(data: bytes, *, suffix: str) -> None:
+    """Admit a clip for generation only if its container metadata is within the decode rails.
+
+    Reads metadata without decoding frames. Fails closed on a container the
+    decoder cannot open or that reports no usable dimensions, frame count, or
+    frame rate, and enforces the byte, duration, frame-count, frame-rate, and
+    frame-size caps.
 
     Raises:
         VideoDecodeError: on any of the above.
@@ -244,7 +254,18 @@ def probe_video_bytes(data: bytes, *, suffix: str) -> tuple[int, int, float]:
             capture.release()
     if total is None or not all(math.isfinite(v) and v > 0 for v in (width, height)):
         raise VideoDecodeError("video input does not report usable dimensions, frame count, and frame rate")
-    return int(width), int(height), total / fps
+    if total > MAX_GENERATION_VIDEO_FRAMES:
+        msg = f"video input has {total} frames, exceeding the {MAX_GENERATION_VIDEO_FRAMES}-frame cap"
+        raise VideoDecodeError(msg)
+    if fps > MAX_GENERATION_VIDEO_FPS:
+        msg = f"video input is {fps:.1f} fps, exceeding the {MAX_GENERATION_VIDEO_FPS:.0f} fps cap"
+        raise VideoDecodeError(msg)
+    if int(width) * int(height) > MAX_GENERATION_VIDEO_FRAME_PIXELS:
+        msg = (
+            f"video resolution {int(width)}x{int(height)} exceeds the "
+            f"{MAX_GENERATION_VIDEO_FRAME_PIXELS}-pixel frame limit"
+        )
+        raise VideoDecodeError(msg)
 
 
 def _load_decoder() -> Any:

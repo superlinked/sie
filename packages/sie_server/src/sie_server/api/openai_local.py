@@ -53,7 +53,12 @@ from sie_server.config.model import validate_chat_template_kwargs
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
-from sie_server.core.video_frames import MAX_VIDEO_BYTES, VideoDecodeError, probe_video_bytes, sniff_video_container
+from sie_server.core.video_frames import (
+    MAX_VIDEO_BYTES,
+    VideoDecodeError,
+    check_generation_video_bounds,
+    sniff_video_container,
+)
 from sie_server.observability.tracing import tracer
 from sie_server.processors.streaming import _decode_data_uri_image
 from sie_server.types.inputs import Item
@@ -78,7 +83,6 @@ _MAX_CHAT_RESPONSE_BYTES = int(os.environ.get("SIE_CHAT_MAX_RESPONSE_BYTES", str
 _MAX_CHAT_MESSAGES = 4096
 _MAX_CHAT_CHOICES = 128
 _MAX_CHAT_VIDEOS = 1
-_MAX_CHAT_VIDEO_PIXELS = 3840 * 2160
 _MAX_U32 = (1 << 32) - 1
 _ALLOWED_CHAT_ROLES = frozenset({"system", "user", "assistant", "tool", "developer"})
 # Compatibility requests project onto the same native score bound.
@@ -501,14 +505,9 @@ def _validate_chat_message_media(messages: Any) -> list[tuple[str, bytes, str]]:
 def _probe_chat_videos(videos: list[tuple[str, bytes, str]]) -> None:
     for path, data, suffix in videos:
         try:
-            width, height, _duration_s = probe_video_bytes(data, suffix=suffix)
+            check_generation_video_bounds(data, suffix=suffix)
         except VideoDecodeError as exc:
             raise _bad_request(str(exc), param=path) from exc
-        if width * height > _MAX_CHAT_VIDEO_PIXELS:
-            raise _bad_request(
-                f"video resolution {width}x{height} exceeds the {_MAX_CHAT_VIDEO_PIXELS}-pixel frame limit",
-                param=path,
-            )
 
 
 def _validated_child_chat_url(server_url: object) -> str:

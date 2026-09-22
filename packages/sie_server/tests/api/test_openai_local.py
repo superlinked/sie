@@ -1066,8 +1066,10 @@ def test_cuda_chat_rejects_second_video_part(monkeypatch: pytest.MonkeyPatch, tm
 @pytest.mark.parametrize(
     ("limit", "value", "message"),
     [
-        ("_MAX_CHAT_VIDEO_PIXELS", 64 * 47, "exceeds the 3008-pixel frame limit"),
+        ("MAX_GENERATION_VIDEO_FRAME_PIXELS", 64 * 47, "exceeds the 3008-pixel frame limit"),
         ("MAX_VIDEO_DURATION_S", 0.1, "admission cap"),
+        ("MAX_GENERATION_VIDEO_FRAMES", 5, "frame cap"),
+        ("MAX_GENERATION_VIDEO_FPS", 5.0, "fps cap"),
     ],
 )
 def test_cuda_chat_rejects_video_over_decode_bounds_before_model_load(
@@ -1077,8 +1079,7 @@ def test_cuda_chat_rejects_video_over_decode_bounds_before_model_load(
     value: float,
     message: str,
 ) -> None:
-    target = openai_local if limit.startswith("_") else video_frames
-    monkeypatch.setattr(target, limit, value)
+    monkeypatch.setattr(video_frames, limit, value)
     client, registry = _cuda_chat_client(
         monkeypatch,
         lambda _request: pytest.fail("unbounded video must not reach upstream"),

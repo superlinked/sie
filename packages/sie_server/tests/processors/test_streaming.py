@@ -4390,7 +4390,7 @@ async def test_video_rejected_on_model_without_video_input(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("limit", ["pixels", "duration", "undecodable"])
+@pytest.mark.parametrize("limit", ["pixels", "duration", "frames", "fps", "undecodable"])
 async def test_video_over_decode_bounds_never_reaches_adapter(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, limit: str
 ) -> None:
@@ -4398,9 +4398,13 @@ async def test_video_over_decode_bounds_never_reaches_adapter(
 
     clip = _mp4_bytes(tmp_path)
     if limit == "pixels":
-        monkeypatch.setattr(streaming_mod, "_MAX_VIDEO_FRAME_PIXELS", 64 * 47)
+        monkeypatch.setattr(video_frames, "MAX_GENERATION_VIDEO_FRAME_PIXELS", 64 * 47)
     elif limit == "duration":
         monkeypatch.setattr(video_frames, "MAX_VIDEO_DURATION_S", 0.1)
+    elif limit == "frames":
+        monkeypatch.setattr(video_frames, "MAX_GENERATION_VIDEO_FRAMES", 5)
+    elif limit == "fps":
+        monkeypatch.setattr(video_frames, "MAX_GENERATION_VIDEO_FPS", 5.0)
     else:
         clip = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64
     proc, nc, adapter, _ = _video_processor(monkeypatch, video=True)
@@ -4408,6 +4412,13 @@ async def test_video_over_decode_bounds_never_reaches_adapter(
     await proc.process(_make_msg(wi), "test/model")
     assert _decode_chunks(nc)[-1]["error"]["code"] == "invalid_request"
     assert adapter.received_videos == "UNSET"
+
+
+def test_queued_video_over_sidecar_budget_is_rejected() -> None:
+    oversized = b"\x00\x00\x00\x18ftypisom" + b"\x00" * (16 * 1024 * 1024)
+    result = streaming_mod._parse_message_videos_field([{"data": oversized, "format": "mp4"}], 0)
+    assert isinstance(result, _ValidationError)
+    assert "video too large" in result.message
 
 
 @pytest.mark.parametrize(
