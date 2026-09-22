@@ -45,6 +45,8 @@ from sie_server.adapters._generation_base import (
     GenerationError,
     GenerationInvalidRequestError,
     GenerationResult,
+    reasoning_starts_in_prompt,
+    resolve_reasoning_format,
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
@@ -1332,6 +1334,13 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # tokens (the chat template renders them worker-side). ``None`` when
         # there are no images, keeping the text-only request body unchanged.
         image_data = _encode_image_data(images)
+        # SGLang's native /generate treats a request as non-reasoning unless it
+        # says otherwise: a grammar then constrains the open thinking block and
+        # --enable-strict-thinking never engages. Its chat endpoint derives this
+        # from the chat template; here the rendered prompt carries it.
+        require_reasoning = self._reasoning_parser is not None and reasoning_starts_in_prompt(
+            prompt, resolve_reasoning_format(None, self)
+        )
 
         # Guard verdict thresholding only runs on the single-candidate (n=1)
         # path, so reject multi-candidate sampling up front — otherwise a guard
@@ -1483,6 +1492,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 sbody["lora_path"] = lora_path
             if image_data:
                 sbody["image_data"] = image_data
+            if require_reasoning:
+                sbody["require_reasoning"] = True
             if logprobs:
                 sbody["return_logprob"] = True
                 # Without this SGLang omits the decoded token TEXT from
@@ -1633,6 +1644,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 nbody["lora_path"] = lora_path
             if image_data:
                 nbody["image_data"] = image_data
+            if require_reasoning:
+                nbody["require_reasoning"] = True
             if logprobs or rank:
                 nbody["return_logprob"] = True
                 # Surface decoded token text (see streaming body below) so the
@@ -1746,6 +1759,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
             body["lora_path"] = lora_path
         if image_data:
             body["image_data"] = image_data
+        if require_reasoning:
+            body["require_reasoning"] = True
         # OpenAI ``logprobs`` → SGLang ``return_logprob`` (top-level body
         # flag, not under sampling_params). ``top_logprobs`` →
         # ``top_logprobs_num``. SGLang surfaces them under

@@ -906,6 +906,88 @@ def test_gemma_generate_preserves_reasoning_markers_for_sie_suppression(mock_asy
     assert result.text == "answer"
 
 
+def _posted_generate_body(
+    mock_async_client: MagicMock,
+    prompt: str,
+    *,
+    reasoning_parser: str | None,
+    n: int | None = None,
+    stream: bool = False,
+) -> dict[str, Any]:
+    finish = '"meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "stop"}}'
+    if n is not None and not stream:
+        response = MagicMock()
+        response.json = MagicMock(
+            return_value=[
+                {
+                    "text": "x",
+                    "meta_info": {"finish_reason": {"type": "stop"}, "completion_tokens": 1, "prompt_tokens": 1},
+                }
+            ]
+            * n
+        )
+        response.raise_for_status = MagicMock()
+        response.aread = AsyncMock()
+        response.__aenter__ = AsyncMock(return_value=response)
+        client_instance = _make_client_with_stream(_FakeStreamingResponse([]))
+        client_instance.stream.return_value = response
+    elif n is not None:
+        lines = [f'data: {{"index": {index}, "text": "x", {finish}}}' for index in range(n)] + ["data: [DONE]"]
+        client_instance = _make_client_with_stream(_FakeStreamingResponse(lines))
+    else:
+        client_instance = _make_client_with_stream(_FakeStreamingResponse([f'data: {{"text": "x", {finish}}}']))
+    mock_async_client.return_value = client_instance
+    adapter = SGLangGenerationAdapter(
+        model_name_or_path="zai-org/GLM-5.3-Flash",
+        served_model_name="zai-org/GLM-5.3-Flash",
+        reasoning_parser=reasoning_parser,
+    )
+    adapter._server_url = "http://localhost:30005"
+
+    async def _drain() -> None:
+        async for _ in adapter.generate(prompt=prompt, max_new_tokens=8, n=n, stream=stream):
+            pass
+
+    asyncio.run(_drain())
+    return client_instance.stream.call_args.kwargs["json"]
+
+
+@pytest.mark.parametrize(("n", "stream"), [(None, False), (2, True), (2, False)])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_requires_reasoning_when_the_prompt_leaves_thinking_open(
+    mock_async_client: MagicMock, n: int | None, stream: bool
+) -> None:
+    body = _posted_generate_body(
+        mock_async_client, "[gMASK]<sop><|user|>Hi<|assistant|><think>", reasoning_parser="glm45", n=n, stream=stream
+    )
+
+    assert body["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    ("prompt", "reasoning_parser"),
+    [
+        ("<|im_start|>assistant\n<think>\n\n</think>\n\n", "qwen3"),
+        ("<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n", "qwen3"),
+        ("[gMASK]<sop><|user|>Hi<|assistant|><think>", None),
+    ],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_leaves_reasoning_to_the_engine_default_otherwise(
+    mock_async_client: MagicMock, prompt: str, reasoning_parser: str | None
+) -> None:
+    body = _posted_generate_body(mock_async_client, prompt, reasoning_parser=reasoning_parser)
+
+    assert "require_reasoning" not in body
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_requires_reasoning_after_a_seeded_gemma_channel(mock_async_client: MagicMock) -> None:
+    body = _posted_generate_body(mock_async_client, "<|turn>model\n<|channel>", reasoning_parser="gemma4")
+
+    assert body["require_reasoning"] is True
+
+
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
 def test_generate_logprobs_request_sets_return_text_in_logprobs(mock_async_client: MagicMock, adapter) -> None:
     """A logprobs request must ask SGLang for decoded token TEXT.
