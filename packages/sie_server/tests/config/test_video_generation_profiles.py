@@ -17,6 +17,11 @@ MAX_TOTAL_PIXELS = _VISION_TOKENS_PER_VIDEO_ESTIMATE * 1024
 DEFAULT_VIDEO_MIN_PIXELS = 128 * 28 * 28
 
 
+def _positive_int(value: object) -> int | None:
+    """Return a positive ``int`` pixel/frame count, or ``None`` for anything else (``bool`` included)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 def _video_budget_violations(config: ModelConfig) -> list[str]:
     if not config.inputs.video or config.tasks.generate is None:
         return []
@@ -39,13 +44,16 @@ def _video_budget_violations(config: ModelConfig) -> list[str]:
             if not isinstance(video, dict):
                 violations.append(f"{config.sie_id}:{name} --mm-process-config is not an object")
                 continue
-        total_pixels = video.get("total_pixels")
-        max_frames = video.get("max_frames")
-        min_pixels = video.get("min_pixels", DEFAULT_VIDEO_MIN_PIXELS)
-        if not isinstance(total_pixels, int) or not 0 < total_pixels <= MAX_TOTAL_PIXELS:
-            violations.append(f"{config.sie_id}:{name} video.total_pixels={total_pixels!r}")
-        elif not isinstance(max_frames, int) or not 0 < max_frames * min_pixels * 1.05 / 2 <= MAX_TOTAL_PIXELS:
-            violations.append(f"{config.sie_id}:{name} video.max_frames={max_frames!r} min_pixels={min_pixels!r}")
+        total_pixels = _positive_int(video.get("total_pixels"))
+        max_frames = _positive_int(video.get("max_frames"))
+        min_pixels = _positive_int(video.get("min_pixels", DEFAULT_VIDEO_MIN_PIXELS))
+        if total_pixels is None or total_pixels > MAX_TOTAL_PIXELS:
+            violations.append(f"{config.sie_id}:{name} video.total_pixels={video.get('total_pixels')!r}")
+        elif max_frames is None or min_pixels is None or max_frames * min_pixels * 1.05 / 2 > MAX_TOTAL_PIXELS:
+            violations.append(
+                f"{config.sie_id}:{name} video.max_frames={video.get('max_frames')!r} "
+                f"min_pixels={video.get('min_pixels', DEFAULT_VIDEO_MIN_PIXELS)!r}"
+            )
     return violations
 
 
@@ -91,6 +99,11 @@ def _synthetic(video_block: dict[str, Any] | None, *, trailing: list[str] | None
         ({"fps": 2, "total_pixels": MAX_TOTAL_PIXELS}, True),
         ({"fps": 2, "max_frames": 768, "total_pixels": MAX_TOTAL_PIXELS}, True),
         ({"fps": 2, "max_frames": 64}, True),
+        ({"fps": 2, "max_frames": 64, "total_pixels": MAX_TOTAL_PIXELS, "min_pixels": None}, True),
+        ({"fps": 2, "max_frames": 64, "total_pixels": MAX_TOTAL_PIXELS, "min_pixels": "100352"}, True),
+        ({"fps": 2, "max_frames": True, "total_pixels": MAX_TOTAL_PIXELS}, True),
+        ({"fps": 2, "max_frames": 64, "total_pixels": True}, True),
+        ({"fps": 2, "max_frames": 0, "total_pixels": MAX_TOTAL_PIXELS}, True),
         (None, True),
     ],
 )
