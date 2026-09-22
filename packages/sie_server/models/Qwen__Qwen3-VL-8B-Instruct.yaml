@@ -56,12 +56,14 @@ profiles:
         inter_chunk_timeout_s: 15
         overall_timeout_s: 600
         # Model card VL sampling: temperature 0.7, top_p 0.8, top_k 20,
-        # presence_penalty 1.5.
+        # presence_penalty 1.5. min_new_tokens=1: on an untemplated native
+        # generate prompt the model emits EOS as its first token (empty text).
         default_sampling:
           temperature: 0.7
           top_p: 0.8
           top_k: 20
           presence_penalty: 1.5
+          min_new_tokens: 1
         stop_tokens:
           - "<|im_end|>"
   # RTX PRO 6000 (96 GB, sm_120) shape; identical launch to ``default``.
@@ -86,12 +88,14 @@ profiles:
         inter_chunk_timeout_s: 15
         overall_timeout_s: 600
         # Model card VL sampling: temperature 0.7, top_p 0.8, top_k 20,
-        # presence_penalty 1.5.
+        # presence_penalty 1.5. min_new_tokens=1: on an untemplated native
+        # generate prompt the model emits EOS as its first token (empty text).
         default_sampling:
           temperature: 0.7
           top_p: 0.8
           top_k: 20
           presence_penalty: 1.5
+          min_new_tokens: 1
         stop_tokens:
           - "<|im_end|>"
   # Grammar-safe fallback; identical launch to ``default``.
@@ -116,11 +120,13 @@ profiles:
         inter_chunk_timeout_s: 15
         overall_timeout_s: 600
         # Model card VL sampling: temperature 0.7, top_p 0.8, top_k 20,
-        # presence_penalty 1.5.
+        # presence_penalty 1.5. min_new_tokens=1: on an untemplated native
+        # generate prompt the model emits EOS as its first token (empty text).
         default_sampling:
           temperature: 0.7
           top_p: 0.8
           top_k: 20
           presence_penalty: 1.5
+          min_new_tokens: 1
         stop_tokens:
           - "<|im_end|>"
