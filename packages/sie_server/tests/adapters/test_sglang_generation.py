@@ -2521,7 +2521,7 @@ secret = "data:video/mp4;base64,PRIVATEPAYLOADPRIVATEPAYLOAD"
 assert BaseMultimodalProcessor._load_single_item("ok", Modality.VIDEO) == "loaded"
 try:
     BaseMultimodalProcessor._load_single_item(secret, Modality.VIDEO, None, None, True)
-except RuntimeError as exc:
+except ValueError as exc:
     rendered = "".join(traceback.format_exception(exc))
     assert "PRIVATEPAYLOAD" not in rendered, rendered
     assert str(exc) == "Error while loading VIDEO data (ValueError)", str(exc)
@@ -2964,6 +2964,49 @@ async def test_http_type_refusal_requires_status_backend_and_grammar(status, bac
     )
     with pytest.raises(httpx.HTTPStatusError):
         await _raise_for_sglang_http_error(response, grammar=grammar, grammar_backend=backend)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("modality", "param"), [("VIDEO", "videos"), ("IMAGE", "images")])
+async def test_http_media_load_failure_is_invalid_request(modality: str, param: str) -> None:
+    response = httpx.Response(
+        400,
+        json={"error": {"message": f"Error while loading {modality} data (ValueError)"}},
+        request=httpx.Request("POST", "http://localhost/generate"),
+    )
+    with pytest.raises(GenerationInvalidRequestError) as error:
+        await _raise_for_sglang_http_error(response, grammar=None, grammar_backend=None)
+    assert error.value.param == param
+
+
+@pytest.mark.parametrize(("modality", "param"), [("VIDEO", "videos"), ("IMAGE", "images")])
+def test_stream_media_load_failure_is_invalid_request(modality: str, param: str) -> None:
+    event = {"error": {"message": f"Error while loading {modality} data (RuntimeError)"}}
+    with pytest.raises(GenerationInvalidRequestError) as error:
+        _raise_for_sglang_event_error(event)
+    assert error.value.param == param
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (400, "Error while loading data data:video/mp4;base64,AAAA: boom"),
+        (400, "Error while loading VIDEO data (ValueError) extra"),
+        (400, "Error while loading AUDIO data (ValueError)"),
+        (500, "Error while loading VIDEO data (ValueError)"),
+    ],
+)
+async def test_media_load_mapping_requires_the_exact_hook_message(status: int, message: str) -> None:
+    response = httpx.Response(
+        status, json={"error": {"message": message}}, request=httpx.Request("POST", "http://localhost/generate")
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await _raise_for_sglang_http_error(response, grammar=None, grammar_backend=None)
+    if status == 400:
+        with pytest.raises(GenerationError) as error:
+            _raise_for_sglang_event_error({"error": {"message": message}})
+        assert not isinstance(error.value, GenerationInvalidRequestError)
 
 
 @pytest.mark.asyncio

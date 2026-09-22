@@ -8,7 +8,9 @@ when the shared bundle advances to a release containing that fix.
 
 The same hook redacts multimodal load failures: SGLang raises
 ``Error while loading data {data}`` with the full inline payload, which its
-serving layer then logs with a traceback.
+serving layer then logs with a traceback. The redacted error is a
+``ValueError`` because that is the only exception SGLang's ``/generate`` turns
+into a 400 response; the adapter maps its fixed message to ``invalid_request``.
 """
 
 from __future__ import annotations
@@ -70,7 +72,7 @@ def _patch_base_processor_module(module: ModuleType) -> None:
                 cause = exc.__context__ if exc.__context__ is not None else exc
                 modality_name = getattr(modality, "name", "multimodal")
                 message = f"Error while loading {modality_name} data ({type(cause).__name__})"
-                raise RuntimeError(message) from None
+                raise ValueError(message) from None
 
         processor_class._load_single_item = classmethod(redacted_load)
 

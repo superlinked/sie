@@ -515,7 +515,7 @@ from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProces
 
 try:
     BaseMultimodalProcessor._load_single_item("data:image/png;base64,PRIVATEIMAGE", None)
-except RuntimeError as exc:
+except ValueError as exc:
     assert "PRIVATEIMAGE" not in str(exc), str(exc)
 print("chained-generic-hook")
 """

@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -247,6 +248,18 @@ def _encode_video_data(videos: list[VideoInput] | None) -> list[str] | None:
 
 _JSON_SCHEMA_TYPE_DIAGNOSTIC = f"Failed to compile json grammar: {OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC}"
 _MAX_ERROR_BODY_BYTES = 4096
+# Exact message the SGLang compat hook raises for an undecodable image or video.
+_MEDIA_LOAD_ERROR = re.compile(r"Error while loading (IMAGE|VIDEO) data \([A-Za-z_][A-Za-z0-9_]*\)")
+_MEDIA_LOAD_PARAMS = {"IMAGE": "images", "VIDEO": "videos"}
+
+
+def _raise_for_media_load_error(message: object) -> None:
+    match = _MEDIA_LOAD_ERROR.fullmatch(message) if isinstance(message, str) else None
+    if match is not None:
+        modality = match.group(1)
+        raise GenerationInvalidRequestError(
+            _MEDIA_LOAD_PARAMS[modality], f"The generation backend could not decode the {modality.lower()} input"
+        )
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -261,13 +274,7 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 async def _raise_for_sglang_http_error(
     response: httpx.Response, *, grammar: GrammarSpec | None, grammar_backend: str | None
 ) -> None:
-    if (
-        response.status_code == 400
-        and grammar_backend == "outlines"
-        and grammar is not None
-        and grammar.kind == "json_schema"
-        and response.headers.get("content-encoding", "identity") == "identity"
-    ):
+    if response.status_code == 400 and response.headers.get("content-encoding", "identity") == "identity":
 
         async def read_error() -> bytes:
             body = bytearray()
@@ -283,8 +290,16 @@ async def _raise_for_sglang_http_error(
         except (ValueError, RecursionError, GenerationError, httpx.HTTPError, TimeoutError):
             pass
         else:
-            if payload == {"error": {"message": _JSON_SCHEMA_TYPE_DIAGNOSTIC}}:
+            error = payload.get("error") if isinstance(payload, dict) and payload.keys() == {"error"} else None
+            message = error.get("message") if isinstance(error, dict) and error.keys() == {"message"} else None
+            if (
+                message == _JSON_SCHEMA_TYPE_DIAGNOSTIC
+                and grammar_backend == "outlines"
+                and grammar is not None
+                and grammar.kind == "json_schema"
+            ):
                 raise GenerationInvalidRequestError("grammar", OUTLINES_JSON_SCHEMA_TYPE_MESSAGE)
+            _raise_for_media_load_error(message)
     response.raise_for_status()
 
 
@@ -295,6 +310,8 @@ def _raise_for_sglang_event_error(
     if not isinstance(event, dict):
         raise GenerationError("SGLang /generate returned an invalid event")
     if "error" in event:
+        error = event["error"]
+        _raise_for_media_load_error(error.get("message") if isinstance(error, dict) else None)
         raise GenerationError("SGLang /generate returned an in-band error")
     meta = event.get("meta_info")
     finish = meta.get("finish_reason") if isinstance(meta, dict) else None
