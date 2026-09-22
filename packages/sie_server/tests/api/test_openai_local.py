@@ -61,6 +61,7 @@ def _cuda_chat_client(
     default_sampling: dict[str, Any] | None = None,
     max_output_tokens: int = 64,
     server_url: str = "http://127.0.0.1:30400",
+    video: bool = False,
 ) -> tuple[TestClient, MagicMock]:
     adapter = SGLangGenerationAdapter(
         model_name_or_path="upstream/repo",
@@ -82,6 +83,7 @@ def _cuda_chat_client(
     config = SimpleNamespace(
         tasks=SimpleNamespace(generate=generate_task, score=None),
         resolve_profile=MagicMock(return_value=profile),
+        inputs=SimpleNamespace(video=video),
     )
     registry = MagicMock()
     registry.device = "cuda:0"
@@ -898,6 +900,154 @@ def test_cuda_chat_rejects_remote_media_before_model_load(monkeypatch: pytest.Mo
 
     assert response.status_code == 400
     assert response.json()["error"]["param"] == "messages[0].content[1].image_url"
+    registry.get.assert_not_called()
+
+
+_VIDEO_DATA_URI = "data:video/mp4;base64,AAAAIGZ0eXBpc29t"
+
+
+def _video_messages(video_url: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What happens first?"},
+                {"type": "video_url", "video_url": video_url},
+            ],
+        }
+    ]
+
+
+def test_cuda_chat_forwards_inline_video_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-video",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "upstream-served-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "A ball rolls."},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    client, _ = _cuda_chat_client(monkeypatch, _handler, video=True)
+    messages = _video_messages({"url": _VIDEO_DATA_URI})
+    response = client.post("/v1/chat/completions", json={"model": "Qwen/Qwen3.5-4B", "messages": messages})
+
+    assert response.status_code == 200
+    assert seen["body"]["messages"] == messages
+
+
+def test_cuda_chat_rejects_video_for_model_without_video_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, registry = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("video request must not reach upstream"),
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _VIDEO_DATA_URI})},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == "messages"
+    registry.get.assert_not_called()
+
+
+def test_mlx_chat_rejects_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, registry = _mlx_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("video request must not reach upstream"),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    registry.get_config.return_value.inputs = SimpleNamespace(video=True)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _VIDEO_DATA_URI})},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    registry.get.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "video_url",
+    [
+        {"url": "https://example.com/clip.mp4"},
+        {"url": "http://169.254.169.254/latest/meta-data/"},
+        "file:///etc/passwd",
+        {"url": "data:image/png;base64,iVBORw0KGgo="},
+        {"url": "data:video/mp4,AAAA"},
+        {"url": "data:video/mp4;base64"},
+        {"url": "data:video/mp4;base64,not base64!"},
+        {"url": "data:video/mp4;base64,"},
+        {"url": ""},
+        {},
+    ],
+)
+def test_cuda_chat_rejects_invalid_video_before_model_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    video_url: Any,
+) -> None:
+    client, registry = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("invalid video must not reach upstream"),
+        video=True,
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages(video_url)},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "messages[0].content[1].video_url"
+    registry.get_config.assert_not_called()
+    registry.get.assert_not_called()
+
+
+def test_cuda_chat_rejects_oversized_video_before_decoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(openai_local, "MAX_VIDEO_BYTES", 8)
+    client, registry = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("oversized video must not reach upstream"),
+        video=True,
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _VIDEO_DATA_URI})},
+    )
+
+    assert response.status_code == 400
+    assert "video too large" in response.json()["error"]["message"]
+    registry.get.assert_not_called()
+
+
+def test_cuda_chat_still_rejects_audio(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, registry = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("audio must not reach upstream"),
+        video=True,
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,UklGRg=="}}],
+        }
+    ]
+    response = client.post("/v1/chat/completions", json={"model": "Qwen/Qwen3.5-4B", "messages": messages})
+
+    assert response.status_code == 400
     registry.get.assert_not_called()
 
 

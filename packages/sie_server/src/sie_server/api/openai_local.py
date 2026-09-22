@@ -21,6 +21,8 @@ authority.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import math
@@ -51,6 +53,7 @@ from sie_server.config.model import validate_chat_template_kwargs
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
+from sie_server.core.video_frames import MAX_VIDEO_BYTES
 from sie_server.observability.tracing import tracer
 from sie_server.processors.streaming import _decode_data_uri_image
 from sie_server.types.inputs import Item
@@ -340,6 +343,12 @@ def _validate_chat_messages(messages: list[Any]) -> None:
                         f"'{part_path}.image_url' is required for image content parts",
                         param=f"{part_path}.image_url",
                     )
+            elif part_type == "video_url":
+                if "video_url" not in part_obj:
+                    raise _bad_request(
+                        f"'{part_path}.video_url' is required for video content parts",
+                        param=f"{part_path}.video_url",
+                    )
             else:
                 raise _bad_request(
                     f"unsupported content part type {part_type!r}",
@@ -397,10 +406,37 @@ def _validate_mlx_chat_body(body: dict[str, Any]) -> None:
         raise _bad_request(f"field '{unknown}' is not supported", param=unknown, code="unsupported_field")
 
 
-def _validate_chat_message_media(messages: Any) -> None:
-    """Reject child-side remote media fetches before proxying to a child."""
+def _validate_data_uri_video(url: str) -> None:
+    if not url.startswith("data:"):
+        raise ValueError("video content must be an inline base64 'data:' URI; remote URL fetching is not supported")
+    header, sep, payload = url[len("data:") :].partition(",")
+    if not sep:
+        raise ValueError("malformed video data URI (missing ',')")
+    params = header.split(";")
+    if "base64" not in params[1:]:
+        raise ValueError("video data URI must be base64-encoded")
+    if not params[0].startswith("video/"):
+        raise ValueError("video data URI must have a video/* media type")
+    stripped = payload.strip()
+    if (len(stripped) * 3) // 4 > MAX_VIDEO_BYTES:
+        raise ValueError(f"video too large: exceeds the {MAX_VIDEO_BYTES}-byte limit")
+    try:
+        data = base64.b64decode(stripped, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"invalid base64 video data: {exc}") from exc
+    if not data:
+        raise ValueError("video data URI decoded to empty bytes")
+
+
+def _validate_chat_message_media(messages: Any) -> bool:
+    """Reject child-side remote media fetches before proxying to a child.
+
+    Returns whether any message carries a ``video_url`` part.
+    """
+    has_video = False
 
     def _walk(value: Any, path: str) -> None:
+        nonlocal has_video
         if isinstance(value, list):
             for index, item in enumerate(value):
                 _walk(item, f"{path}[{index}]")
@@ -421,7 +457,20 @@ def _validate_chat_message_media(messages: Any) -> None:
                 except ValueError as exc:
                     raise _bad_request(str(exc), param=item_path) from exc
                 continue
-            if key in {"audio_url", "video_url"}:
+            if key == "video_url":
+                url = item.get("url") if isinstance(item, dict) else item
+                if not isinstance(url, str) or not url:
+                    raise _bad_request(
+                        f"'{item_path}' must be a non-empty string or an object with a non-empty 'url'",
+                        param=item_path,
+                    )
+                try:
+                    _validate_data_uri_video(url)
+                except ValueError as exc:
+                    raise _bad_request(str(exc), param=item_path) from exc
+                has_video = True
+                continue
+            if key == "audio_url":
                 raise _bad_request(
                     f"'{item_path}' is not supported; remote media fetching is disabled",
                     param=item_path,
@@ -430,6 +479,7 @@ def _validate_chat_message_media(messages: Any) -> None:
             _walk(item, item_path)
 
     _walk(messages, "messages")
+    return has_video
 
 
 def _validated_child_chat_url(server_url: object) -> str:
@@ -808,7 +858,7 @@ async def _chat_completions(
             param="messages",
         )
     _validate_chat_messages(messages)
-    _validate_chat_message_media(messages)
+    has_video = _validate_chat_message_media(messages)
     chat_template_kwargs = body.get("chat_template_kwargs")
     if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
         raise _bad_request("'chat_template_kwargs' must be an object", param="chat_template_kwargs")
@@ -846,6 +896,12 @@ async def _chat_completions(
             raise _bad_request(
                 f"Model '{model}' does not support streaming generation",
                 param="stream",
+                code="unsupported_field",
+            )
+        if has_video and not (config.inputs.video and str(device).startswith("cuda")):
+            raise _bad_request(
+                f"Model '{model}' does not accept video input on this device",
+                param="messages",
                 code="unsupported_field",
             )
         if str(device).startswith("cuda"):
