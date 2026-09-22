@@ -7,12 +7,15 @@ by ``mise run mac-smoke`` on Apple Silicon.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import cv2
 import httpx
 import numpy as np
 import pytest
@@ -23,6 +26,7 @@ from sie_server.adapters.mlx.generation import MLXGenerationAdapter
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.api import openai_local
 from sie_server.api.openai_local import _validate_mlx_seed, router
+from sie_server.core import video_frames
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
@@ -903,22 +907,22 @@ def test_cuda_chat_rejects_remote_media_before_model_load(monkeypatch: pytest.Mo
     registry.get.assert_not_called()
 
 
-_VIDEO_DATA_URI = "data:video/mp4;base64,AAAAIGZ0eXBpc29t"
+def _video_data_uri(tmp_path: Path, *, width: int = 64, height: int = 48, frames: int = 6) -> str:
+    path = tmp_path / "clip.mp4"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (width, height))
+    for index in range(frames):
+        writer.write(np.full((height, width, 3), index * 40, dtype=np.uint8))
+    writer.release()
+    return "data:video/mp4;base64," + base64.b64encode(path.read_bytes()).decode()
 
 
-def _video_messages(video_url: Any) -> list[dict[str, Any]]:
-    return [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "What happens first?"},
-                {"type": "video_url", "video_url": video_url},
-            ],
-        }
-    ]
+def _video_messages(video_url: Any, *, parts: int = 1) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": "What happens first?"}]
+    content += [{"type": "video_url", "video_url": video_url} for _ in range(parts)]
+    return [{"role": "user", "content": content}]
 
 
-def test_cuda_chat_forwards_inline_video_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cuda_chat_forwards_inline_video_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     seen: dict[str, Any] = {}
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -941,21 +945,21 @@ def test_cuda_chat_forwards_inline_video_unchanged(monkeypatch: pytest.MonkeyPat
         )
 
     client, _ = _cuda_chat_client(monkeypatch, _handler, video=True)
-    messages = _video_messages({"url": _VIDEO_DATA_URI})
+    messages = _video_messages({"url": _video_data_uri(tmp_path)})
     response = client.post("/v1/chat/completions", json={"model": "Qwen/Qwen3.5-4B", "messages": messages})
 
     assert response.status_code == 200
     assert seen["body"]["messages"] == messages
 
 
-def test_cuda_chat_rejects_video_for_model_without_video_input(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cuda_chat_rejects_video_for_model_without_video_input(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     client, registry = _cuda_chat_client(
         monkeypatch,
         lambda _request: pytest.fail("video request must not reach upstream"),
     )
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _VIDEO_DATA_URI})},
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _video_data_uri(tmp_path)})},
     )
 
     assert response.status_code == 400
@@ -964,7 +968,7 @@ def test_cuda_chat_rejects_video_for_model_without_video_input(monkeypatch: pyte
     registry.get.assert_not_called()
 
 
-def test_mlx_chat_rejects_video(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mlx_chat_rejects_video(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     client, registry = _mlx_chat_client(
         monkeypatch,
         lambda _request: pytest.fail("video request must not reach upstream"),
@@ -973,7 +977,7 @@ def test_mlx_chat_rejects_video(monkeypatch: pytest.MonkeyPatch) -> None:
     registry.get_config.return_value.inputs = SimpleNamespace(video=True)
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _VIDEO_DATA_URI})},
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _video_data_uri(tmp_path)})},
     )
 
     assert response.status_code == 400
@@ -994,6 +998,14 @@ def test_mlx_chat_rejects_video(monkeypatch: pytest.MonkeyPatch) -> None:
         {"url": "data:video/mp4;base64,"},
         {"url": ""},
         {},
+        "data:video/mp4;base64,AAAAGGZ0eXBpc29t",
+        {"url": "data:video/mp4;base64,AAAAGGZ0eXBpc29t", "max_dynamic_patch": 64},
+        {"url": "data:video/mp4;base64, AAAAGGZ0eXBpc29t"},
+        {
+            "url": "data:video/mp4;base64,"
+            + base64.b64encode(b"#EXTM3U\n#EXTINF:10,\nhttp://169.254.169.254/a.ts\n").decode()
+        },
+        {"url": "data:video/mp4;base64,AAAA"},
     ],
 )
 def test_cuda_chat_rejects_invalid_video_before_model_lookup(
@@ -1016,7 +1028,8 @@ def test_cuda_chat_rejects_invalid_video_before_model_lookup(
     registry.get.assert_not_called()
 
 
-def test_cuda_chat_rejects_oversized_video_before_decoding(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cuda_chat_rejects_oversized_video_before_decoding(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    video = _video_data_uri(tmp_path)
     monkeypatch.setattr(openai_local, "MAX_VIDEO_BYTES", 8)
     client, registry = _cuda_chat_client(
         monkeypatch,
@@ -1025,11 +1038,76 @@ def test_cuda_chat_rejects_oversized_video_before_decoding(monkeypatch: pytest.M
     )
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _VIDEO_DATA_URI})},
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": video})},
     )
 
     assert response.status_code == 400
     assert "video too large" in response.json()["error"]["message"]
+    registry.get.assert_not_called()
+
+
+def test_cuda_chat_rejects_second_video_part(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    client, registry = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("second video must not reach upstream"),
+        video=True,
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _video_data_uri(tmp_path)}, parts=2)},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "messages[0].content[2].video_url"
+    registry.get_config.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("limit", "value", "message"),
+    [
+        ("_MAX_CHAT_VIDEO_PIXELS", 64 * 47, "exceeds the 3008-pixel frame limit"),
+        ("MAX_VIDEO_DURATION_S", 0.1, "admission cap"),
+    ],
+)
+def test_cuda_chat_rejects_video_over_decode_bounds_before_model_load(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    limit: str,
+    value: float,
+    message: str,
+) -> None:
+    target = openai_local if limit.startswith("_") else video_frames
+    monkeypatch.setattr(target, limit, value)
+    client, registry = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("unbounded video must not reach upstream"),
+        video=True,
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": _video_data_uri(tmp_path)})},
+    )
+
+    assert response.status_code == 400
+    assert message in response.json()["error"]["message"]
+    assert response.json()["error"]["param"] == "messages[0].content[1].video_url"
+    registry.get.assert_not_called()
+
+
+def test_cuda_chat_rejects_undecodable_video_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, registry = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("undecodable video must not reach upstream"),
+        video=True,
+    )
+    garbage = base64.b64encode(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64).decode()
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _video_messages({"url": f"data:video/mp4;base64,{garbage}"})},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "messages[0].content[1].video_url"
     registry.get.assert_not_called()
 
 

@@ -198,6 +198,40 @@ def extract_frames(video: Any, *, max_frames: int = MAX_SAMPLED_FRAMES) -> list[
             capture.release()
 
 
+def probe_video_bytes(data: bytes, *, suffix: str) -> tuple[int, int, float]:
+    """Return ``(width, height, duration_s)`` from container metadata without decoding frames.
+
+    Fails closed on a container the decoder cannot open or that reports no
+    usable dimensions, frame count, or frame rate, and enforces the byte and
+    duration admission caps.
+
+    Raises:
+        VideoDecodeError: on any of the above.
+    """
+    if not data:
+        raise VideoDecodeError("video input carries no data")
+    if len(data) > MAX_VIDEO_BYTES:
+        msg = f"video input is {len(data)} bytes, exceeding the {MAX_VIDEO_BYTES}-byte admission cap"
+        raise VideoDecodeError(msg)
+    cv2 = _load_decoder()
+    with tempfile.NamedTemporaryFile(suffix=suffix) as handle:
+        handle.write(data)
+        handle.flush()
+        capture = cv2.VideoCapture(handle.name)
+        try:
+            if not capture.isOpened():
+                raise VideoDecodeError("video input could not be opened by the decoder")
+            total = _validated_frame_total(cv2, capture)
+            width = float(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0.0)
+            height = float(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0.0)
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        finally:
+            capture.release()
+    if total is None or not all(math.isfinite(v) and v > 0 for v in (width, height)):
+        raise VideoDecodeError("video input does not report usable dimensions, frame count, and frame rate")
+    return int(width), int(height), total / fps
+
+
 def _load_decoder() -> Any:
     """Import the OpenCV decoder, failing closed when the image lacks it.
 
