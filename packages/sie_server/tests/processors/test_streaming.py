@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import threading
 import time
 from collections.abc import AsyncIterator, Mapping
@@ -2804,6 +2805,49 @@ async def test_streaming_tool_choice_required_forwards_forcing_grammar() -> None
     assert grammar is not None
     assert grammar.kind == "regex"
     assert "get_weather" in grammar.value
+
+
+@pytest.mark.asyncio
+async def test_streaming_glm_tool_call_is_forced_and_parsed_in_its_own_format() -> None:
+    nc = AsyncMock()
+    call = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>"
+    adapter = _FakeGenAdapter(
+        [
+            GenerationChunk(text_delta=call, is_first=True),
+            GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=5, completion_tokens=9),
+        ]
+    )
+    adapter._grammar_backend = "xgrammar"  # type: ignore[attr-defined]
+    captured: dict[str, Any] = {}
+    original = adapter.generate
+
+    async def _capture(prompt, *, max_new_tokens, temperature=1.0, top_p=1.0, stop=None, **kwargs):
+        captured.update(kwargs)
+        async for chunk in original(
+            prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p, stop=stop
+        ):
+            yield chunk
+
+    adapter.generate = _capture  # type: ignore[method-assign]
+    registry = _make_registry(adapter)
+    resolved = MagicMock()
+    resolved.loadtime = {"tool_call_parser": "glm47"}
+    registry.get_config.return_value.resolve_profile.return_value = resolved
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    wi = _make_work_item(
+        generate={"prompt": "weather?", "max_new_tokens": 64, "tools": _WEATHER_TOOLS, "tool_choice": "required"}
+    )
+
+    await proc.process(_make_msg(wi), "test/model")
+
+    grammar = captured.get("grammar")
+    assert grammar is not None
+    assert re.fullmatch(grammar.value, call)
+    decoded = _decode_chunks(nc)
+    tcs = _tool_call_deltas(decoded)
+    assert tcs[0]["function"]["name"] == "get_weather"
+    assert tcs[1]["function"]["arguments"] == '{"city":"Tokyo"}'
+    assert decoded[-1]["finish_reason"] == "tool_calls"
 
 
 @pytest.mark.asyncio

@@ -114,6 +114,37 @@ def test_required_hermes_json_regex() -> None:
     assert not pat.fullmatch(bad)
 
 
+# ── build_tool_choice_grammar: regex shape (glm_xml) ───────────────
+
+
+def test_required_glm_xml_regex_matches_any_tool() -> None:
+    spec = build_tool_choice_grammar(_TOOLS, "required", "glm_xml")
+    assert spec is not None
+    assert spec.kind == "regex"
+    pat = re.compile(spec.value)
+    weather = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>"
+    spaced = "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Tokyo</arg_value>\n</tool_call>"
+    assert pat.fullmatch(weather)
+    assert pat.fullmatch(spaced)
+    assert pat.fullmatch("<tool_call>get_time</tool_call>")
+    assert pat.fullmatch(weather + "\n<tool_call>get_time</tool_call>")
+    assert not pat.fullmatch("<tool_call>delete_everything</tool_call>")
+    assert not pat.fullmatch("I cannot help with that.")
+
+
+def test_named_glm_xml_regex_pins_the_whole_name() -> None:
+    tools = (
+        {"type": "function", "function": {"name": "get"}},
+        {"type": "function", "function": {"name": "get_weather"}},
+    )
+    spec = build_tool_choice_grammar(tools, {"type": "function", "function": {"name": "get"}}, "glm_xml")
+    assert spec is not None
+    pat = re.compile(spec.value)
+    assert pat.fullmatch("<tool_call>get<arg_key>x</arg_key><arg_value>1</arg_value></tool_call>")
+    assert not pat.fullmatch("<tool_call>get_weather<arg_key>x</arg_key><arg_value>1</arg_value></tool_call>")
+    assert not pat.fullmatch("<tool_call>get_weather</tool_call>")
+
+
 def test_auto_format_refuses_to_force_instead_of_guessing_qwen_xml() -> None:
     # Regression (fix #7): when the format is unresolved ("auto"), forcing a
     # tool_choice must NOT silently assume Qwen XML — a non-Qwen model would

@@ -47,6 +47,7 @@ _PARALLEL_TOOL_CALLS_VIOLATED = "parallel_tool_calls_violated"
 # ``<tool_call>…</tool_call>``:
 #   - ``qwen_xml``    — Qwen3(-Coder): ``<function=NAME><parameter=K>V</parameter>…</function>``
 #   - ``hermes_json`` — Hermes: ``{"name": "...", "arguments": {...}}``
+#   - ``glm_xml``     — GLM: ``NAME<arg_key>K</arg_key><arg_value>V</arg_value>…``
 #   - ``auto``        — runtime heuristic (XML if the block starts with
 #                       ``<function=``, else JSON). Kept as a fallback for
 #                       callers that cannot resolve the model's configured
@@ -54,7 +55,7 @@ _PARALLEL_TOOL_CALLS_VIOLATED = "parallel_tool_calls_violated"
 #                       model config (``tasks.generate`` → adapter
 #                       ``tool_call_parser``) so production traffic uses an
 #                       explicit format rather than guessing per block.
-ToolCallFormat = Literal["auto", "qwen_xml", "hermes_json"]
+ToolCallFormat = Literal["auto", "qwen_xml", "hermes_json", "glm_xml"]
 
 # A model that emits ``<tool_call>`` and never closes it would let
 # ``tool_buffer`` grow without bound (same for free-form prose with no
@@ -595,6 +596,8 @@ def _tool_call_deltas(raw: str, index: int, tool_call_format: ToolCallFormat = "
         name, arguments = _parse_xml_tool_call(raw)
     elif tool_call_format == "hermes_json":
         name, arguments = _parse_hermes_tool_call(raw)
+    elif tool_call_format == "glm_xml":
+        name, arguments = _parse_glm_tool_call(raw)
     elif raw.startswith("<function="):
         name, arguments = _parse_xml_tool_call(raw)
     else:
@@ -687,6 +690,49 @@ def _parse_xml_tool_call(raw: str) -> tuple[str, dict[str, object]]:
         except (json.JSONDecodeError, ValueError):
             arguments[key] = val
         pos = close_idx + len(_XML_PARAM_CLOSE)
+        count += 1
+    return name, arguments
+
+
+_GLM_KEY_OPEN = "<arg_key>"
+_GLM_KEY_CLOSE = "</arg_key>"
+_GLM_VALUE_OPEN = "<arg_value>"
+_GLM_VALUE_CLOSE = "</arg_value>"
+
+
+def _parse_glm_tool_call(raw: str) -> tuple[str, dict[str, object]]:
+    """Parse the GLM tool-call form.
+
+    Example::
+
+        get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>
+
+    Returns ``(name, arguments)``; the name is the text before the first
+    ``<arg_key>``. The chat template writes string values raw and every other
+    value as JSON, so values are coerced as in the Qwen XML form. Tags are
+    located with linear ``str.find`` scans, bounded by ``_MAX_XML_PARAMS``.
+    """
+    first_key = raw.find(_GLM_KEY_OPEN)
+    name = (raw if first_key == -1 else raw[:first_key]).strip()
+    arguments: dict[str, object] = {}
+    pos = first_key
+    count = 0
+    while pos != -1 and count < _MAX_XML_PARAMS:
+        key_open = raw.find(_GLM_KEY_OPEN, pos)
+        if key_open == -1:
+            break
+        key_close = raw.find(_GLM_KEY_CLOSE, key_open)
+        value_open = -1 if key_close == -1 else raw.find(_GLM_VALUE_OPEN, key_close)
+        value_close = -1 if value_open == -1 else raw.find(_GLM_VALUE_CLOSE, value_open)
+        if value_close == -1:
+            raise ValueError("malformed GLM tool-call: unterminated argument")
+        key = raw[key_open + len(_GLM_KEY_OPEN) : key_close].strip()
+        value = raw[value_open + len(_GLM_VALUE_OPEN) : value_close].strip()
+        try:
+            arguments[key] = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            arguments[key] = value
+        pos = value_close + len(_GLM_VALUE_CLOSE)
         count += 1
     return name, arguments
 

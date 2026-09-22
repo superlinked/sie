@@ -526,6 +526,90 @@ def test_xml_param_scan_garbled_openers_no_close_is_fast() -> None:
     assert elapsed < 2.0
 
 
+# ── GLM argument tags ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
+        "<arg_key>days</arg_key><arg_value>3</arg_value></tool_call>",
+        "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Tokyo</arg_value>\n"
+        "<arg_key>days</arg_key>\n<arg_value>3</arg_value>\n</tool_call>",
+    ],
+)
+async def test_explicit_glm_xml_format(raw: str) -> None:
+    import json
+
+    out = await _collect("Checking. " + raw, tool_call_format="glm_xml")
+
+    assert out[0].text_delta == "Checking. "
+    assert _deltas(out)[0].function_name == "get_weather"
+    assert json.loads(_args_for(out)) == {"city": "Tokyo", "days": 3}
+    assert out[-1].finish_reason == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_glm_xml_call_without_arguments() -> None:
+    out = await _collect("<tool_call>get_time</tool_call>", tool_call_format="glm_xml")
+
+    assert _deltas(out)[0].function_name == "get_time"
+    assert _args_for(out) == "{}"
+
+
+@pytest.mark.asyncio
+async def test_glm_xml_argument_values_coerce_like_qwen_xml() -> None:
+    import json
+
+    raw = (
+        "<tool_call>f"
+        "<arg_key>num</arg_key><arg_value>5</arg_value>"
+        "<arg_key>flag</arg_key><arg_value>true</arg_value>"
+        '<arg_key>nested</arg_key><arg_value>{"a": [1, 2]}</arg_value>'
+        "<arg_key>text</arg_key><arg_value>café ☕</arg_value>"
+        "<arg_key>multiline</arg_key><arg_value>line1\nline2</arg_value>"
+        "</tool_call>"
+    )
+    out = await _collect(raw, tool_call_format="glm_xml")
+
+    assert json.loads(_args_for(out)) == {
+        "num": 5,
+        "flag": True,
+        "nested": {"a": [1, 2]},
+        "text": "café ☕",
+        "multiline": "line1\nline2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_glm_xml_unterminated_argument_is_terminal_parse_error() -> None:
+    out = await _collect(
+        "<tool_call>f<arg_key>a</arg_key><arg_value>1</tool_call>",
+        tool_call_format="glm_xml",
+    )
+
+    assert out[-1].done is True
+    assert out[-1].error_code == "MODEL_OUTPUT_PARSE_ERROR"
+    assert "unterminated argument" in (out[-1].error_message or "")
+
+
+def test_glm_argument_scan_bounds_argument_count() -> None:
+    import time
+
+    from sie_server.processors.tool_call_parser import _MAX_XML_PARAMS, _parse_glm_tool_call
+
+    n = _MAX_XML_PARAMS + 5_000
+    raw = "f" + "".join(f"<arg_key>p{i}</arg_key><arg_value>{i}</arg_value>" for i in range(n))
+    t0 = time.monotonic()
+    name, args = _parse_glm_tool_call(raw)
+    elapsed = time.monotonic() - t0
+
+    assert name == "f"
+    assert len(args) == _MAX_XML_PARAMS
+    assert elapsed < 2.0
+
+
 # ── Per-choice (n>1) streaming (H5) ──────────────────────────────────────
 
 
