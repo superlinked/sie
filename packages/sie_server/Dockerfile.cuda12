@@ -216,6 +216,18 @@ FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS runtime-transformers5
 FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04 AS runtime-sglang
 ENV CUDA_HOME=/usr/local/cuda \
     LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+# FFmpeg shared libraries: SGLang decodes video inputs with torchcodec, which
+# dlopens them at first use and has no bundled FFmpeg.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libavcodec58 \
+    libavdevice58 \
+    libavfilter7 \
+    libavformat58 \
+    libavutil56 \
+    libswresample3 \
+    libswscale5
 FROM runtime-sglang AS runtime-sglang-embedding
 FROM runtime-sglang AS runtime-sglang-vision-extract
 # NOTE: the sglang-cu130 bundle (CUDA 13 / sglang 0.5.13 / torch 2.11 cu130) is built by
