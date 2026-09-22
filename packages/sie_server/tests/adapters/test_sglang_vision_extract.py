@@ -481,6 +481,62 @@ print("native-lighton-ready")
     assert completed.stdout.strip() == "native-lighton-ready"
 
 
+def test_vision_compat_chains_generic_sglang_hook(tmp_path: Path) -> None:
+    package_root = tmp_path / "fake-package"
+    processors = package_root / "sglang" / "srt" / "multimodal" / "processors"
+    processors.mkdir(parents=True)
+    for package in (
+        package_root / "sglang",
+        package_root / "sglang" / "srt",
+        package_root / "sglang" / "srt" / "multimodal",
+        processors,
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (processors / "base_processor.py").write_text(
+        """class BaseMultimodalProcessor:
+    def process_mm_data(self, input_text, images=None, videos=None, audios=None, **kwargs):
+        return kwargs
+
+    @classmethod
+    def _load_single_item(cls, data, modality, *args):
+        try:
+            raise ValueError(data)
+        except Exception as e:
+            raise RuntimeError(f"Error while loading data {data}: {e}")
+""",
+        encoding="utf-8",
+    )
+
+    adapters = Path(__file__).resolve().parents[2] / "src/sie_server/adapters"
+    vision_compat = adapters / "sglang_vision_extract/_compat"
+    generic_compat = adapters / "sglang/_compat"
+    script = """import sitecustomize
+from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+try:
+    BaseMultimodalProcessor._load_single_item("data:image/png;base64,PRIVATEIMAGE", None)
+except RuntimeError as exc:
+    assert "PRIVATEIMAGE" not in str(exc), str(exc)
+print("chained-generic-hook")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((str(vision_compat), str(generic_compat), str(package_root)))
+    env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+
+    completed = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "PRIVATEIMAGE" not in completed.stderr
+    assert completed.stdout.strip() == "chained-generic-hook"
+
+
 def test_resolve_processor_dir_preserves_local_path(tmp_path: Path) -> None:
     instance = SGLangVisionExtractAdapter(tmp_path)
 

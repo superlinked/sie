@@ -5,6 +5,10 @@ settings, but its base processor does not forward the image settings to the
 Hugging Face processor. Upstream #18467 now passes them as ``images_kwargs``.
 This site hook runs only in the SGLang generation subprocess and can be removed
 when the shared bundle advances to a release containing that fix.
+
+The same hook redacts multimodal load failures: SGLang raises
+``Error while loading data {data}`` with the full inline payload, which its
+serving layer then logs with a traceback.
 """
 
 from __future__ import annotations
@@ -53,6 +57,23 @@ def _patch_base_processor_module(module: ModuleType) -> None:
         )
 
     processor_class.process_mm_data = compat_process
+
+    original_load = processor_class.__dict__.get("_load_single_item")
+    if isinstance(original_load, classmethod):
+        load_function = original_load.__func__
+
+        @wraps(load_function)
+        def redacted_load(cls: Any, data: Any, modality: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return load_function(cls, data, modality, *args, **kwargs)
+            except RuntimeError as exc:
+                cause = exc.__context__ if exc.__context__ is not None else exc
+                modality_name = getattr(modality, "name", "multimodal")
+                message = f"Error while loading {modality_name} data ({type(cause).__name__})"
+                raise RuntimeError(message) from None
+
+        processor_class._load_single_item = classmethod(redacted_load)
+
     setattr(processor_class, _CLASS_PATCH_MARKER, True)
 
 

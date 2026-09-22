@@ -2361,6 +2361,78 @@ print("mm-process-config-ready")
     assert completed.stdout.strip() == "mm-process-config-ready"
 
 
+def test_mm_process_config_compat_redacts_media_load_failures(tmp_path: Path) -> None:
+    package_root = tmp_path / "fake-package"
+    processors = package_root / "sglang" / "srt" / "multimodal" / "processors"
+    processors.mkdir(parents=True)
+    for package in (
+        package_root / "sglang",
+        package_root / "sglang" / "srt",
+        package_root / "sglang" / "srt" / "multimodal",
+        processors,
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (processors / "base_processor.py").write_text(
+        """import enum
+
+
+class Modality(enum.Enum):
+    IMAGE = 1
+    VIDEO = 2
+
+
+class BaseMultimodalProcessor:
+    def process_mm_data(self, input_text, images=None, videos=None, audios=None, **kwargs):
+        return kwargs
+
+    @classmethod
+    def _load_single_item(cls, data, modality, frame_count_limit=None, audio_sample_rate=None, discard=True):
+        try:
+            if data == "ok":
+                return "loaded"
+            raise ValueError(f"cannot decode {data}")
+        except Exception as e:
+            raise RuntimeError(f"Error while loading data {data}: {e}")
+""",
+        encoding="utf-8",
+    )
+
+    compat_dir = Path(__file__).resolve().parents[2] / "src/sie_server/adapters/sglang/_compat"
+    script = """import sitecustomize
+import traceback
+
+from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor, Modality
+
+secret = "data:video/mp4;base64,PRIVATEPAYLOADPRIVATEPAYLOAD"
+assert BaseMultimodalProcessor._load_single_item("ok", Modality.VIDEO) == "loaded"
+try:
+    BaseMultimodalProcessor._load_single_item(secret, Modality.VIDEO, None, None, True)
+except RuntimeError as exc:
+    rendered = "".join(traceback.format_exception(exc))
+    assert "PRIVATEPAYLOAD" not in rendered, rendered
+    assert str(exc) == "Error while loading VIDEO data (ValueError)", str(exc)
+else:
+    raise AssertionError("load failure was swallowed")
+print("media-load-redaction-ready")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((str(compat_dir), str(package_root)))
+    env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+
+    completed = subprocess.run(  # noqa: S603 - executes the fixed local interpreter
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "PRIVATEPAYLOAD" not in completed.stderr
+    assert completed.stdout.strip() == "media-load-redaction-ready"
+
+
 @pytest.mark.parametrize(
     ("n", "stream", "best_of"), [(1, True, None), (2, True, None), (2, False, None), (1, False, 2)]
 )

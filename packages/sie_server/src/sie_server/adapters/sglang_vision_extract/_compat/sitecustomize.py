@@ -9,14 +9,20 @@ The SGLang model registry discovers implementations by importing every model
 module. Importing LightOnOCR eagerly from ``sitecustomize`` races that registry
 bootstrap, so install a one-shot wrapper around the same ``import_module``
 boundary and patch the class only after its native module has initialized.
+
+Python imports only the first ``sitecustomize`` on the path, so this hook
+also runs the next one on ``PYTHONPATH`` (the generic SGLang generation hook
+the adapter places after it).
 """
 
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 import sys
 from functools import wraps
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -74,5 +80,23 @@ def _install_lightonocr_compat() -> None:
     setattr(importlib, "import_module", deferred_import_module)  # noqa: B010
 
 
+def _run_next_sitecustomize() -> None:
+    own_dir = Path(__file__).resolve().parent
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry) / "sitecustomize.py"
+        if not candidate.is_file() or candidate.resolve().parent == own_dir:
+            continue
+        spec = importlib.util.spec_from_file_location("_sie_chained_sitecustomize", candidate)
+        if spec is None or spec.loader is None:
+            return
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return
+
+
 if os.environ.get("SIE_SGLANG_LIGHTON_OCR_COMPAT") == "1":
     _install_lightonocr_compat()
+_run_next_sitecustomize()
