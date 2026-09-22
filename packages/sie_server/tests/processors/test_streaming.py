@@ -2808,9 +2808,15 @@ async def test_streaming_tool_choice_required_forwards_forcing_grammar() -> None
 
 
 @pytest.mark.asyncio
-async def test_streaming_glm_tool_call_is_forced_and_parsed_in_its_own_format() -> None:
+@pytest.mark.parametrize(
+    ("parser", "call"),
+    [
+        ("glm47", "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>"),
+        ("qwen25", '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Tokyo"}}\n</tool_call>'),
+    ],
+)
+async def test_streaming_tool_call_is_forced_and_parsed_in_the_configured_format(parser: str, call: str) -> None:
     nc = AsyncMock()
-    call = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>"
     adapter = _FakeGenAdapter(
         [
             GenerationChunk(text_delta=call, is_first=True),
@@ -2831,7 +2837,7 @@ async def test_streaming_glm_tool_call_is_forced_and_parsed_in_its_own_format() 
     adapter.generate = _capture  # type: ignore[method-assign]
     registry = _make_registry(adapter)
     resolved = MagicMock()
-    resolved.loadtime = {"tool_call_parser": "glm47"}
+    resolved.loadtime = {"tool_call_parser": parser}
     registry.get_config.return_value.resolve_profile.return_value = resolved
     proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
     wi = _make_work_item(

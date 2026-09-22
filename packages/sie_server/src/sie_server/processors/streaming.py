@@ -1150,10 +1150,11 @@ class StreamingProcessor:
         Drives format selection from a single source of truth — the
         adapter's ``tool_call_parser`` (the same value passed to SGLang's
         ``--tool-call-parser`` launch flag) — instead of guessing per
-        block from the model output. ``qwen3_coder`` (and any other
-        ``qwen*`` parser) → ``qwen_xml``; ``hermes`` → ``hermes_json``;
-        ``glm*`` → ``glm_xml``; anything unknown / missing → ``auto`` (keep the runtime
-        heuristic so out-of-tree models still work).
+        block from the model output. ``qwen25`` (Qwen2.5-style Hermes JSON)
+        and ``hermes`` → ``hermes_json``; ``qwen3_coder`` (and any other
+        ``qwen*`` parser) → ``qwen_xml``; ``glm*`` → ``glm_xml``; anything
+        unknown / missing → ``auto`` (keep the runtime heuristic so
+        out-of-tree models still work).
         """
         try:
             config = self._registry.get_config(model_id)
@@ -1167,10 +1168,10 @@ class StreamingProcessor:
         if not isinstance(parser, str):
             return "auto"
         parser_l = parser.lower()
+        if parser_l == "qwen25" or "hermes" in parser_l:
+            return "hermes_json"
         if parser_l.startswith("qwen"):
             return "qwen_xml"
-        if "hermes" in parser_l:
-            return "hermes_json"
         if parser_l.startswith("glm"):
             return "glm_xml"
         return "auto"
