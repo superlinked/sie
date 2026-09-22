@@ -132,6 +132,30 @@ def test_required_glm_xml_regex_matches_any_tool() -> None:
     assert not pat.fullmatch("I cannot help with that.")
 
 
+def test_glm_xml_regex_accepts_only_complete_argument_pairs() -> None:
+    from sie_server.processors.tool_call_parser import _parse_glm_tool_call
+
+    spec = build_tool_choice_grammar(_TOOLS, "required", "glm_xml")
+    assert spec is not None
+    pat = re.compile(spec.value)
+    two = (
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
+        "\n<arg_key>days</arg_key>\n<arg_value>3</arg_value></tool_call>"
+    )
+    assert pat.fullmatch(two)
+    assert _parse_glm_tool_call(two.removeprefix("<tool_call>").removesuffix("</tool_call>")) == (
+        "get_weather",
+        {"city": "Tokyo", "days": 3},
+    )
+    for dangling in (
+        "<tool_call>get_weather<arg_key>city</tool_call>",
+        "<tool_call>get_weather<arg_key>city</arg_key></tool_call>",
+        "<tool_call>get_weather<arg_key>ci<ty</arg_key><arg_value>x</arg_value></tool_call>",
+        "<tool_call>get_weather<arg_value>x</arg_value></tool_call>",
+    ):
+        assert not pat.fullmatch(dangling), dangling
+
+
 def test_named_glm_xml_regex_pins_the_whole_name() -> None:
     tools = (
         {"type": "function", "function": {"name": "get"}},

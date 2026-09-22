@@ -533,10 +533,14 @@ def test_xml_param_scan_garbled_openers_no_close_is_fast() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
-        "<arg_key>days</arg_key><arg_value>3</arg_value></tool_call>",
-        "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Tokyo</arg_value>\n"
-        "<arg_key>days</arg_key>\n<arg_value>3</arg_value>\n</tool_call>",
+        (
+            "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
+            "<arg_key>days</arg_key><arg_value>3</arg_value></tool_call>"
+        ),
+        (
+            "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Tokyo</arg_value>\n"
+            "<arg_key>days</arg_key>\n<arg_value>3</arg_value>\n</tool_call>"
+        ),
     ],
 )
 async def test_explicit_glm_xml_format(raw: str) -> None:
@@ -627,12 +631,15 @@ def test_glm_argument_scan_bounds_argument_count() -> None:
     n = _MAX_XML_PARAMS + 5_000
     raw = "f" + "".join(f"<arg_key>p{i}</arg_key><arg_value>{i}</arg_value>" for i in range(n))
     t0 = time.monotonic()
-    name, args = _parse_glm_tool_call(raw)
+    with pytest.raises(ValueError, match=f"more than {_MAX_XML_PARAMS} arguments"):
+        _parse_glm_tool_call(raw)
     elapsed = time.monotonic() - t0
+    assert elapsed < 2.0
 
+    at_cap = "f" + "".join(f"<arg_key>p{i}</arg_key><arg_value>{i}</arg_value>" for i in range(_MAX_XML_PARAMS))
+    name, args = _parse_glm_tool_call(at_cap)
     assert name == "f"
     assert len(args) == _MAX_XML_PARAMS
-    assert elapsed < 2.0
 
 
 # ── Per-choice (n>1) streaming (H5) ──────────────────────────────────────

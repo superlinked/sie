@@ -718,8 +718,8 @@ def _parse_glm_tool_call(raw: str) -> tuple[str, dict[str, object]]:
     pairs, and a name or key carrying a tag is rejected, so an unpaired or
     misplaced tag is a parse error rather than part of the call. The chat
     template writes string values raw and every other value as JSON, so values
-    are coerced as in the Qwen XML form. The scan is linear and parses at most
-    ``_MAX_XML_PARAMS`` pairs.
+    are coerced as in the Qwen XML form. The scan is linear, and a call with
+    more than ``_MAX_XML_PARAMS`` pairs is rejected rather than truncated.
     """
     first_key = raw.find(_GLM_KEY_OPEN)
     name = (raw if first_key == -1 else raw[:first_key]).strip()
@@ -750,6 +750,8 @@ def _parse_glm_tool_call(raw: str) -> tuple[str, dict[str, object]]:
             arguments[key] = value
         pos = value_close + len(_GLM_VALUE_CLOSE)
         count += 1
+    if _skip_whitespace(raw, pos) < len(raw):
+        raise ValueError(f"malformed GLM tool-call: more than {_MAX_XML_PARAMS} arguments")
     return name, arguments
 
 

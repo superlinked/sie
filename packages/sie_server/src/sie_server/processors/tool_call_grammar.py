@@ -200,8 +200,10 @@ def _glm_xml_force_regex(names: list[str]) -> str:
         <tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value></tool_call>
 
     The name ends at the first ``<arg_key>`` or at ``</tool_call>`` for a call
-    without arguments, which pins it to the allowed set; the arguments stay
-    free, as in the other formats.
+    without arguments, which pins it to the allowed set. Arguments are complete
+    key/value pairs so every accepted block parses; values stay free, as in the
+    other formats, and keys exclude ``<``/``>`` as the parser requires.
     """
-    block = r"<tool_call>\s*" + _name_alternation(names) + r"\s*(?:<arg_key>" + _INNER + r")?</tool_call>"
+    pair = r"<arg_key>[^<>]*</arg_key>\s*<arg_value>" + _INNER + r"</arg_value>\s*"
+    block = r"<tool_call>\s*" + _name_alternation(names) + r"\s*(?:" + pair + r")*</tool_call>"
     return r"\s*(?:" + block + r"\s*)+"
