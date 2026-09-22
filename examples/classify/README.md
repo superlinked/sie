@@ -8,21 +8,30 @@ Fourteen held-out SNIPS validation requests scored against seven action labels
 by `knowledgator/gliclass-large-v3.0` on `https://api.superlinked.com`, with
 no training and no fine-tune. The labels are just strings in the request.
 
-The page publishes two figures:
+Two figures, both reported in the page's
+[SOURCES.md](https://superlinked.com/reference/classify/SOURCES.md):
 
-> All 14 held-out requests land on the action they were written for
+> the reference action ranked first for all 14 requests
 
-and, in the proof body:
+and:
 
-> The same model put the reference label first for only 3 to 5 of 12 texts
-> across 4 earlier runs on CFPB complaint products and CLINC150 assistant
-> domains, where the labels overlapped. The 7 distinct action names above
-> scored 14 of 14.
+> the same model on the same endpoint led on only 3 to 5 of 12 texts across
+> four earlier runs
 
 `score.py` re-derives both from the recorded responses, offline. The second one
 is the honest half: when the label set overlaps, the same model does much
 worse, and the four runs that showed it are in the dataset rather than
 discarded.
+
+**These are not the page's headline.** Since 2026-09-22 the page leads with a
+three-model comparison recorded separately: the same 14 requests answered by
+this classifier and by `Qwen/Qwen3.5-4B` and `Qwen/Qwen3.8-27B-FP8`, three
+passes each. All three got every call right, and the classifier was charged 1
+credit per request against the 27B's 6. That recording is not in this dataset
+revision, so **this example does not reproduce the page's headline figure.**
+It reproduces the two figures above, which is what it has always reproduced.
+The comparison bundle, its pre-registration and its runner live in sie-web at
+`apps/site/tests/fixtures/reference/classify/comparison/`.
 
 Cases were selected by a published rule before any run. `inputs/snips/cases.json`
 records the selection rule, the build bar (`at least 10 of 14`), the upstream
@@ -68,7 +77,7 @@ sending it.
 ## What to expect
 
 ```
-Page evidence, 7 distinct action names (SNIPS validation rows)
+Distinct action names (SNIPS validation rows)
   reference label ranked first: 14 of 14
 
 Four earlier runs, where the labels overlapped
@@ -78,7 +87,7 @@ Four earlier runs, where the labels overlapped
   clinc150-definitions   5 of 12
   range: 3 to 5 of 12
 
-Reproduced: 14 of 14 on the page set, 3 to 5 of 12 across the 4 earlier runs.
+Reproduced: 14 of 14 on the distinct labels, 3 to 5 of 12 across the 4 earlier runs.
 ```
 
 `score.py` exits nonzero if either figure fails to reproduce.
@@ -99,8 +108,8 @@ classify/
 The 62 calls were 124 separate JSON files in sie-web. Merging them changed no
 byte of any request or response.
 
-Sets: `snips` (14, the page), `clinc150` (12), `clinc150-definitions` (12),
-`cfpb` (12), `cfpb-definitions` (12).
+Sets: `snips` (14, the distinct action names), `clinc150` (12),
+`clinc150-definitions` (12), `cfpb` (12), `cfpb-definitions` (12).
 
 ## What this does NOT establish
 
@@ -128,6 +137,10 @@ Sets: `snips` (14, the page), `clinc150` (12), `clinc150-definitions` (12),
   no response headers, so `--record` rebuilds the envelope around that item and
   each entry carries a `shape` field saying so. `score.py` reads the published
   `calls.json`.
+- **Nothing the page currently leads with.** The 2026-09-22 three-model
+  comparison is not in this dataset revision, so nothing here reproduces the
+  credit prices, the medians or the 126-of-126 figure the page publishes.
+  Those come from a separate bundle held in sie-web.
 - **No tamper resistance.** The digests catch a truncated or corrupted
   download. They are not a provenance chain.
 

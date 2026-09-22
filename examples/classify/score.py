@@ -4,19 +4,21 @@
     python3 fetch.py
     python3 score.py
 
-Published on https://superlinked.com/classify:
+Reported in https://superlinked.com/reference/classify/SOURCES.md:
 
-    All 14 held-out requests land on the action they were written for
+    the reference action ranked first for all 14 requests
 
-and, in the proof body:
+and:
 
-    The same model put the reference label first for only 3 to 5 of 12 texts
-    across 4 earlier runs on CFPB complaint products and CLINC150 assistant
-    domains, where the labels overlapped. The 7 distinct action names above
-    scored 14 of 14.
+    the same model on the same endpoint led on only 3 to 5 of 12 texts across
+    four earlier runs
 
 This script re-derives both offline, with no API key and no inference spend,
 and exits nonzero if either fails to reproduce.
+
+It does NOT reproduce the page's headline, which since 2026-09-22 comes from a
+three-model comparison recorded separately and not present in this dataset
+revision. See the README.
 
 The rule, for every set: sort the returned classifications by score, take the
 top one, and compare it with the reference label the case was written for. For
@@ -119,12 +121,12 @@ def main() -> int:
     failures: list[str] = []
 
     first, total, misses = score_set(PAGE_SET, calls, data_dir)
-    print("Page evidence, 7 distinct action names (SNIPS validation rows)")
+    print("Distinct action names (SNIPS validation rows)")
     print(f"  reference label ranked first: {first} of {total}")
     for line in misses:
         print(f"  miss: {line}")
     if (first, total) != EXPECTED_PAGE:
-        failures.append(f"snips: got {first} of {total}, page publishes {EXPECTED_PAGE[0]} of {EXPECTED_PAGE[1]}")
+        failures.append(f"snips: got {first} of {total}, SOURCES.md reports {EXPECTED_PAGE[0]} of {EXPECTED_PAGE[1]}")
 
     print("\nFour earlier runs, where the labels overlapped")
     counts = []
@@ -139,7 +141,7 @@ def main() -> int:
     if (min(counts), max(counts)) != EXPECTED_EARLIER_RANGE:
         failures.append(
             f"earlier runs span {min(counts)} to {max(counts)} of 12, "
-            f"page publishes {EXPECTED_EARLIER_RANGE[0]} to {EXPECTED_EARLIER_RANGE[1]} of 12"
+            f"SOURCES.md reports {EXPECTED_EARLIER_RANGE[0]} to {EXPECTED_EARLIER_RANGE[1]} of 12"
         )
     print(f"  range: {min(counts)} to {max(counts)} of {EXPECTED_EARLIER_TOTAL}")
 
@@ -148,7 +150,7 @@ def main() -> int:
         for line in failures:
             print(f"  {line}", file=sys.stderr)
         return 1
-    print("\nReproduced: 14 of 14 on the page set, 3 to 5 of 12 across the 4 earlier runs.")
+    print("\nReproduced: 14 of 14 on the distinct labels, 3 to 5 of 12 across the 4 earlier runs.")
     return 0
 
 
