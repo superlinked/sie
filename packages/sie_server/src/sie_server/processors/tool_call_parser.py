@@ -700,6 +700,12 @@ _GLM_VALUE_OPEN = "<arg_value>"
 _GLM_VALUE_CLOSE = "</arg_value>"
 
 
+def _skip_whitespace(raw: str, pos: int) -> int:
+    while pos < len(raw) and raw[pos].isspace():
+        pos += 1
+    return pos
+
+
 def _parse_glm_tool_call(raw: str) -> tuple[str, dict[str, object]]:
     """Parse the GLM tool-call form.
 
@@ -708,25 +714,35 @@ def _parse_glm_tool_call(raw: str) -> tuple[str, dict[str, object]]:
         get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>
 
     Returns ``(name, arguments)``; the name is the text before the first
-    ``<arg_key>``. The chat template writes string values raw and every other
-    value as JSON, so values are coerced as in the Qwen XML form. Tags are
-    located with linear ``str.find`` scans, bounded by ``_MAX_XML_PARAMS``.
+    ``<arg_key>``. Only whitespace may separate the name and the argument
+    pairs, and a name or key carrying a tag is rejected, so an unpaired or
+    misplaced tag is a parse error rather than part of the call. The chat
+    template writes string values raw and every other value as JSON, so values
+    are coerced as in the Qwen XML form. The scan is linear and parses at most
+    ``_MAX_XML_PARAMS`` pairs.
     """
     first_key = raw.find(_GLM_KEY_OPEN)
     name = (raw if first_key == -1 else raw[:first_key]).strip()
+    if not name or any(char.isspace() or char in "<>" for char in name):
+        raise ValueError("malformed GLM tool-call: invalid function name")
     arguments: dict[str, object] = {}
-    pos = first_key
+    pos = len(raw) if first_key == -1 else first_key
     count = 0
-    while pos != -1 and count < _MAX_XML_PARAMS:
-        key_open = raw.find(_GLM_KEY_OPEN, pos)
-        if key_open == -1:
-            break
-        key_close = raw.find(_GLM_KEY_CLOSE, key_open)
-        value_open = -1 if key_close == -1 else raw.find(_GLM_VALUE_OPEN, key_close)
-        value_close = -1 if value_open == -1 else raw.find(_GLM_VALUE_CLOSE, value_open)
+    while (pos := _skip_whitespace(raw, pos)) < len(raw) and count < _MAX_XML_PARAMS:
+        if not raw.startswith(_GLM_KEY_OPEN, pos):
+            raise ValueError("malformed GLM tool-call: expected <arg_key>")
+        key_close = raw.find(_GLM_KEY_CLOSE, pos)
+        if key_close == -1:
+            raise ValueError("malformed GLM tool-call: unterminated argument")
+        value_open = _skip_whitespace(raw, key_close + len(_GLM_KEY_CLOSE))
+        if not raw.startswith(_GLM_VALUE_OPEN, value_open):
+            raise ValueError("malformed GLM tool-call: expected <arg_value>")
+        value_close = raw.find(_GLM_VALUE_CLOSE, value_open)
         if value_close == -1:
             raise ValueError("malformed GLM tool-call: unterminated argument")
-        key = raw[key_open + len(_GLM_KEY_OPEN) : key_close].strip()
+        key = raw[pos + len(_GLM_KEY_OPEN) : key_close].strip()
+        if "<" in key or ">" in key:
+            raise ValueError("malformed GLM tool-call: invalid argument key")
         value = raw[value_open + len(_GLM_VALUE_OPEN) : value_close].strip()
         try:
             arguments[key] = json.loads(value)

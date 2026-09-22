@@ -594,6 +594,31 @@ async def test_glm_xml_unterminated_argument_is_terminal_parse_error() -> None:
     assert "unterminated argument" in (out[-1].error_message or "")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        ("<tool_call>f<arg_value>1</arg_value></tool_call>", "invalid function name"),
+        ("<tool_call>get weather</tool_call>", "invalid function name"),
+        (
+            "<tool_call>f<arg_key>a</arg_key><arg_value>1</arg_value><arg_value>2</arg_value></tool_call>",
+            "expected <arg_key>",
+        ),
+        ("<tool_call>f<arg_key>a</arg_key>junk<arg_value>1</arg_value></tool_call>", "expected <arg_value>"),
+        (
+            "<tool_call>f<arg_key>a<arg_value>1</arg_value><arg_key>b</arg_key><arg_value>2</arg_value></tool_call>",
+            "invalid argument key",
+        ),
+    ],
+)
+async def test_glm_xml_misplaced_tags_are_terminal_parse_errors(raw: str, reason: str) -> None:
+    out = await _collect(raw, tool_call_format="glm_xml")
+
+    assert _deltas(out) == []
+    assert out[-1].error_code == "MODEL_OUTPUT_PARSE_ERROR"
+    assert reason in (out[-1].error_message or "")
+
+
 def test_glm_argument_scan_bounds_argument_count() -> None:
     import time
 
