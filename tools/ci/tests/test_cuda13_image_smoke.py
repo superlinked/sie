@@ -36,9 +36,25 @@ def test_sglang_check_uses_safe_distribution_and_adapter_surfaces():
 
 def test_sglang_native_wheels_require_exact_cu130_local_variants():
     script = cuda13_image_smoke.validation_script("sglang-cu130")
-    assert '(("sgl-deep-gemm", "0.1.2"), ("sglang-kernel", "0.4.3"))' in script
+    assert '(("sgl-deep-gemm", "0.2.0"), ("sglang-kernel", "0.4.7"))' in script
     assert '.partition("+")' in script
     assert '(upstream, "+", "cu130")' in script
+
+
+@pytest.mark.parametrize(
+    ("bundle", "torch_version"),
+    [("sglang-cu130", "2.13.0"), ("tensorrt-llm", "2.11.0")],
+)
+def test_each_engine_pins_its_own_torch(bundle, torch_version):
+    """The two bundles ship different torch builds, so a point version cannot be shared."""
+    script = cuda13_image_smoke.validation_script(bundle)
+    assert f'torch.__version__.split("+", 1)[0] == "{torch_version}"' in script
+    assert script.count("torch.__version__.split") == 1
+
+
+def test_common_checks_pin_only_the_cuda_family():
+    assert 'torch.version.cuda.startswith("13.")' in cuda13_image_smoke.COMMON_CHECKS
+    assert "torch.__version__" not in cuda13_image_smoke.COMMON_CHECKS
 
 
 def test_tensorrt_check_locates_engine_and_verifies_qualified_sources():

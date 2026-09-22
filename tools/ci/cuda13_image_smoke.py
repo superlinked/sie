@@ -16,7 +16,6 @@ import sie_server
 import torch
 import transformers
 
-assert torch.__version__.split("+", 1)[0] == "2.13.0", torch.__version__
 assert torch.version.cuda and torch.version.cuda.startswith("13."), torch.version.cuda
 """
 
@@ -25,6 +24,7 @@ import tvm_ffi
 import xgrammar
 from sie_server.adapters.sglang import cuda13, gemma, generation
 
+assert torch.__version__.split("+", 1)[0] == "2.13.0", torch.__version__
 expected = {
     "sglang": "0.5.20",
     "transformers": "5.12.1",
@@ -48,6 +48,7 @@ from pathlib import Path
 
 from sie_server.adapters.tensorrt_llm import _server, compat, generation
 
+assert torch.__version__.split("+", 1)[0] == "2.11.0", torch.__version__
 expected = {
     "tensorrt-llm": "1.3.0rc24",
     "transformers": "5.5.4",
