@@ -1,0 +1,63 @@
+sie_id: "zai-org/GLM-5.3-Flash"
+hf_id: "zai-org/GLM-5.3-Flash"
+hf_revision: eb9eb208eb0d988989d07a6a12d0fdeb5f52574a
+# Glm5NextForConditionalGeneration: 321B parameters in a 305.8 GiB blockwise
+# FP8 checkpoint (e4m3, 128x128 weight blocks, dynamic activations), which
+# SGLang detects from the checkpoint itself. No transformers release carries
+# glm5_next; the sglang-cu130 engine registers the architecture and its
+# processor. The weights need eight 80 GB accelerators.
+inputs:
+  text: true
+  # The architecture reads images, but on the pinned engine its answers about
+  # them are wrong (the colours arrive permuted), through the engine's own chat
+  # endpoint too. Text only until that is fixed and measured again.
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: null
+  generate:
+    # The checkpoint's native window is 1,048,576 tokens. This route admits
+    # what was measured on eight 80 GB accelerators.
+    context_length: 16384
+    max_output_tokens: 4096
+    # The chat template always opens a thinking block, so without a reasoning
+    # parser the answer follows the reasoning and its closing </think> tag.
+    # Grammar and tool calling are not measured on this engine yet.
+    capabilities:
+      grammar: []
+      streaming: true
+      tools: false
+max_sequence_length: 16384
+profiles:
+  default:
+    max_batch_tokens: 16384
+    kv_budget_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
+    adapter_options:
+      loadtime:
+        tensor_parallel_size: 8
+        # The first request after a cold start compiled kernels for 91 s before
+        # its first byte, measured on eight H100s.
+        request_read_timeout_s: 300
+        # A cold start took 884 s on eight H100s, most of it kernel compilation
+        # and decode CUDA-graph capture.
+        startup_timeout_s: 1800
+        max_seq_length: 16384
+        mem_fraction_static: 0.85
+        served_model_name: zai-org/GLM-5.3-Flash
+        trust_remote_code: false
+        grammar_backend: xgrammar
+        speculative:
+          enabled: false
+      runtime:
+        first_chunk_timeout_s: 300
+        inter_chunk_timeout_s: 60
+        overall_timeout_s: 600
+        # generation_config.json at the pinned revision.
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
