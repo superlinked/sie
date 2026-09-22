@@ -50,7 +50,7 @@ profiles:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":1003520},"video":{"fps":2,"max_frames":64,"total_pixels":16777216}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520},"video":{"fps":2,"max_frames":64,"total_pixels":8388608}}'
       runtime:
         first_chunk_timeout_s: 90
         inter_chunk_timeout_s: 15
@@ -82,7 +82,7 @@ profiles:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":1003520},"video":{"fps":2,"max_frames":64,"total_pixels":16777216}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520},"video":{"fps":2,"max_frames":64,"total_pixels":8388608}}'
       runtime:
         first_chunk_timeout_s: 90
         inter_chunk_timeout_s: 15
@@ -114,7 +114,7 @@ profiles:
           enabled: false
         extra_launch_args:
           - "--mm-process-config"
-          - '{"image":{"min_pixels":65536,"max_pixels":1003520},"video":{"fps":2,"max_frames":64,"total_pixels":16777216}}'
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520},"video":{"fps":2,"max_frames":64,"total_pixels":8388608}}'
       runtime:
         first_chunk_timeout_s: 90
         inter_chunk_timeout_s: 15
