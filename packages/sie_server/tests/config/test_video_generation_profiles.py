@@ -23,7 +23,7 @@ def _video_budget_violations(config: ModelConfig) -> list[str]:
     violations: list[str] = []
     for name in config.profiles:
         args = [str(arg) for arg in config.resolve_profile(name).loadtime.get("extra_launch_args") or []]
-        video: dict[str, Any] = {}
+        video: dict[str, Any] | None = {}
         flag = args.index("--mm-process-config") if "--mm-process-config" in args else -1
         if flag >= 0:
             value = args[flag + 1] if flag + 1 < len(args) else ""
@@ -31,9 +31,13 @@ def _video_budget_violations(config: ModelConfig) -> list[str]:
                 violations.append(f"{config.sie_id}:{name} --mm-process-config has no value")
                 continue
             try:
-                video = json.loads(value).get("video") or {}
+                decoded = json.loads(value)
             except json.JSONDecodeError:
                 violations.append(f"{config.sie_id}:{name} --mm-process-config is not JSON")
+                continue
+            video = decoded.get("video") or {} if isinstance(decoded, dict) else None
+            if not isinstance(video, dict):
+                violations.append(f"{config.sie_id}:{name} --mm-process-config is not an object")
                 continue
         total_pixels = video.get("total_pixels")
         max_frames = video.get("max_frames")
@@ -100,6 +104,9 @@ def test_video_budget_check_detects_unbounded_profiles(video_block: dict[str, An
         ([], "--mm-process-config has no value"),
         (["--kv-cache-dtype", "bfloat16"], "--mm-process-config has no value"),
         (["not json"], "--mm-process-config is not JSON"),
+        (["null"], "--mm-process-config is not an object"),
+        (['["video"]'], "--mm-process-config is not an object"),
+        (['{"video": 5}'], "--mm-process-config is not an object"),
     ],
 )
 def test_video_budget_check_reports_a_flag_without_a_usable_value(trailing: list[str], expected: str) -> None:
