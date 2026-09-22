@@ -36,7 +36,7 @@ from sie_server.adapters.tensorrt_llm import _server
 from sie_server.adapters.tensorrt_llm.compat import install_transformers_5_t5_tokenizer_compatibility
 from sie_server.config.model import is_immutable_revision
 from sie_server.types.grammar import GrammarSpec
-from sie_server.types.inputs import ImageInput
+from sie_server.types.inputs import ImageInput, VideoInput
 
 logger = logging.getLogger(__name__)
 
@@ -438,6 +438,7 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
             "stream": False,
             "lora_path": None,
             "images": None,
+            "videos": None,
         }
         normalized.update(parameters)
         return normalized
@@ -457,6 +458,8 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
             raise GenerationUnsupportedFieldError("grammar")
         if normalized.get("images"):
             raise GenerationUnsupportedFieldError("images")
+        if normalized.get("videos"):
+            raise GenerationUnsupportedFieldError("videos")
         if normalized.get("lora_path"):
             raise GenerationUnsupportedFieldError(
                 "lora_path",
@@ -626,6 +629,7 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
         stream: bool = False,
         lora_path: str | None = None,
         images: list[ImageInput] | None = None,
+        videos: list[VideoInput] | None = None,
     ) -> AsyncIterator[GenerationChunk]:
         parameters: dict[str, Any] = {
             "prompt": prompt,
@@ -648,6 +652,7 @@ class TensorRTLLMGenerationAdapter(GenerationAdapter):
             "stream": stream,
             "lora_path": lora_path,
             "images": images,
+            "videos": videos,
         }
         self._ensure_generation_accepting()
         server_url = self._check_loaded()

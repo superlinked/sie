@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from sie_server.types.grammar import GrammarSpec
-    from sie_server.types.inputs import ImageInput, Item
+    from sie_server.types.inputs import ImageInput, Item, VideoInput
 
 # Default declared footprint. Consumed by the MemoryManager once the
 # synthetic budget tracker (#1848) makes ``estimated_bytes`` load-bearing;
@@ -416,6 +416,7 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         logprobs: bool = False,
         top_logprobs: int | None = None,
         images: list[ImageInput] | None = None,
+        videos: list[VideoInput] | None = None,
     ) -> AsyncIterator[GenerationChunk]:
         _ = (
             temperature,
@@ -432,6 +433,7 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
             logprobs,
             top_logprobs,
             images,
+            videos,
         )
         if not self._loaded:
             raise RuntimeError(ERR_NOT_LOADED)

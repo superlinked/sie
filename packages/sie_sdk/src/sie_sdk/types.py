@@ -700,17 +700,30 @@ class ChatImageURL(TypedDict, total=False):
     url: str
 
 
+class ChatVideoURL(TypedDict):
+    """``video_url`` payload of a video content part.
+
+    A base64 ``data:video/<subtype>;base64,...`` URI of an MP4/MOV,
+    WebM/Matroska, or AVI container. Remote URLs are rejected.
+    """
+
+    url: str
+
+
 class ChatContentPart(TypedDict, total=False):
     """One part of a multimodal ``messages[*].content`` array.
 
     Text parts (``text`` / ``input_text``) carry ``text``; image parts
     (``image_url`` / ``input_image``) carry ``image_url`` as a base64 ``data:``
-    URI and are accepted for vision-capable generation models.
+    URI and are accepted for vision-capable generation models. One
+    ``video_url`` part per request is accepted for models that declare video
+    input.
     """
 
-    type: Literal["text", "input_text", "image_url", "input_image"]
+    type: Literal["text", "input_text", "image_url", "input_image", "video_url"]
     text: str
     image_url: str | ChatImageURL
+    video_url: ChatVideoURL
 
 
 class ChatMessage(TypedDict, total=False):

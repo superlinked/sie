@@ -327,6 +327,7 @@ def test_scheduler_enforces_native_source_token_bound(tmp_path: Path) -> None:
         ({"seed": 1}, GenerationInvalidRequestError, "seed"),
         ({"stop": ["!"]}, GenerationUnsupportedFieldError, "stop"),
         ({"frequency_penalty": 0.0}, GenerationUnsupportedFieldError, "frequency_penalty"),
+        ({"videos": [{"data": b"video"}]}, GenerationUnsupportedFieldError, "videos"),
         ({"n": 2}, GenerationUnsupportedFieldError, "n"),
         ({"n": True}, GenerationUnsupportedFieldError, "n"),
         ({"best_of": True}, GenerationUnsupportedFieldError, "best_of"),

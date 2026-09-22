@@ -198,6 +198,21 @@ def extract_frames(video: Any, *, max_frames: int = MAX_SAMPLED_FRAMES) -> list[
             capture.release()
 
 
+def sniff_video_container(data: bytes) -> str | None:
+    """Identify an MP4/MOV, WebM/Matroska, or AVI container from its magic bytes.
+
+    FFmpeg selects its demuxer by content, so callers that forward bytes to a
+    decoder must gate on this rather than on a declared media type.
+    """
+    if data[4:8] == b"ftyp":
+        return "mp4"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "mkv"
+    if data[:4] == b"RIFF" and data[8:12] == b"AVI ":
+        return "avi"
+    return None
+
+
 def probe_video_bytes(data: bytes, *, suffix: str) -> tuple[int, int, float]:
     """Return ``(width, height, duration_s)`` from container metadata without decoding frames.
 

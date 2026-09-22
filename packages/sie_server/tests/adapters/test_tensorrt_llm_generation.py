@@ -1421,6 +1421,7 @@ def test_stream_rejects_non_sse_and_http_errors(status_code: int, content: bytes
     [
         ({"grammar": object()}, GenerationUnsupportedFieldError, "grammar", "unsupported_field"),
         ({"images": [{"data": b"image"}]}, GenerationUnsupportedFieldError, "images", "unsupported_field"),
+        ({"videos": [{"data": b"video"}]}, GenerationUnsupportedFieldError, "videos", "unsupported_field"),
         ({"lora_path": "adapter"}, GenerationUnsupportedFieldError, "lora_path", "unsupported_field"),
         ({"n": 2}, GenerationUnsupportedFieldError, "n", "unsupported_field"),
         ({"best_of": 2}, GenerationUnsupportedFieldError, "best_of", "unsupported_field"),

@@ -29,7 +29,7 @@ from sie_server.adapters._generation_base import (
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.types.grammar import GrammarSpec
-from sie_server.types.inputs import ImageInput
+from sie_server.types.inputs import ImageInput, VideoInput
 
 CTranslate2ComputeType = Literal[
     "default",
@@ -332,6 +332,7 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
             "stream": False,
             "lora_path": None,
             "images": None,
+            "videos": None,
         }
         normalized.update(parameters)
         return normalized
@@ -351,6 +352,8 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
                 raise GenerationUnsupportedFieldError(name)
         if parameters.get("images") not in (None, []):
             raise GenerationUnsupportedFieldError("images")
+        if parameters.get("videos") not in (None, []):
+            raise GenerationUnsupportedFieldError("videos")
         if parameters.get("lora_path") is not None:
             raise GenerationUnsupportedFieldError(
                 "lora_path",
@@ -617,6 +620,7 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
         stream: bool = False,
         lora_path: str | None = None,
         images: list[ImageInput] | None = None,
+        videos: list[VideoInput] | None = None,
     ) -> AsyncIterator[GenerationChunk]:
         parameters: dict[str, Any] = {
             "prompt": prompt,
@@ -639,6 +643,7 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
             "stream": stream,
             "lora_path": lora_path,
             "images": images,
+            "videos": videos,
         }
         normalized = self._normalize_generate_parameters(parameters)
         prepared = consume_generation_preflight(self, normalized)

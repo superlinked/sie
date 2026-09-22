@@ -334,6 +334,7 @@ const CLIENT_SAFE_UNSUPPORTED_GENERATION_PARAMS: &[&str] = &[
     "logprobs",
     "top_logprobs",
     "images",
+    "videos",
     "stream",
 ];
 

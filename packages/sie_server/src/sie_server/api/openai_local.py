@@ -53,7 +53,7 @@ from sie_server.config.model import validate_chat_template_kwargs
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
-from sie_server.core.video_frames import MAX_VIDEO_BYTES, VideoDecodeError, probe_video_bytes
+from sie_server.core.video_frames import MAX_VIDEO_BYTES, VideoDecodeError, probe_video_bytes, sniff_video_container
 from sie_server.observability.tracing import tracer
 from sie_server.processors.streaming import _decode_data_uri_image
 from sie_server.types.inputs import Item
@@ -434,13 +434,10 @@ def _decode_data_uri_video(url: str) -> tuple[bytes, str]:
         raise ValueError(f"invalid base64 video data: {exc}") from exc
     if not data:
         raise ValueError("video data URI decoded to empty bytes")
-    if data[4:8] == b"ftyp":
-        return data, ".mp4"
-    if data[:4] == b"\x1a\x45\xdf\xa3":
-        return data, ".mkv"
-    if data[:4] == b"RIFF" and data[8:12] == b"AVI ":
-        return data, ".avi"
-    raise ValueError("video data must be an MP4/MOV, WebM/Matroska, or AVI container")
+    container = sniff_video_container(data)
+    if container is None:
+        raise ValueError("video data must be an MP4/MOV, WebM/Matroska, or AVI container")
+    return data, f".{container}"
 
 
 def _validate_chat_message_media(messages: Any) -> list[tuple[str, bytes, str]]:

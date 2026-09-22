@@ -37,6 +37,9 @@ pub const MAX_OFFLOADED_PAYLOAD_BYTES: usize =
 /// item for direct queue/local-ingest work that bypasses that request parser.
 pub const MAX_IMAGES_PER_ITEM: usize = 16;
 
+/// Mirror of the gateway's per-request chat video cap.
+pub const MAX_VIDEOS_PER_ITEM: usize = 1;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MediaValidationError {
     #[error("item must be a map")]
@@ -55,6 +58,8 @@ pub enum MediaValidationError {
     ImagesNotArray,
     #[error("too many images ({actual}); maximum is {MAX_IMAGES_PER_ITEM} per item")]
     TooManyImages { actual: usize },
+    #[error("too many videos ({actual}); maximum is {MAX_VIDEOS_PER_ITEM} per item")]
+    TooManyVideos { actual: usize },
     #[error(
         "media payload is too large ({actual} bytes); maximum is {MAX_MEDIA_BYTES_PER_ITEM} bytes per item"
     )]
@@ -112,8 +117,9 @@ pub fn validate_item_media(item: &Value) -> Result<(), MediaValidationError> {
     Ok(())
 }
 
-/// Replace rolling-compatible generation image base64 strings with msgpack
-/// binary after enforcing the public request's aggregate count and byte caps.
+/// Replace rolling-compatible generation image and video base64 strings with
+/// msgpack binary after enforcing the public request's aggregate count and
+/// byte caps (images and videos share one byte budget).
 ///
 /// Compressed image decode and model-specific transforms remain adapter-owned.
 pub fn normalize_generate_media(generate: &mut Value) -> Result<(), MediaValidationError> {
@@ -134,37 +140,54 @@ pub fn normalize_generate_media(generate: &mut Value) -> Result<(), MediaValidat
     };
 
     let mut image_count = 0usize;
+    let mut video_count = 0usize;
     let mut total_bytes = 0usize;
     for (message_index, message) in messages.iter_mut().enumerate() {
         let message_path = format!("generate.messages[{message_index}]");
         let Value::Map(message_fields) = message else {
             return Err(MediaValidationError::GenerateObjectNotMap { path: message_path });
         };
-        let Some(images) = unique_field_mut(message_fields, "images").map_err(|_| {
-            MediaValidationError::DuplicateGenerateField {
-                path: message_path.clone(),
-                field: "images",
+        for field in ["images", "videos"] {
+            let Some(media) = unique_field_mut(message_fields, field).map_err(|_| {
+                MediaValidationError::DuplicateGenerateField {
+                    path: message_path.clone(),
+                    field,
+                }
+            })?
+            else {
+                continue;
+            };
+            if matches!(media, Value::Nil) {
+                continue;
             }
-        })?
-        else {
-            continue;
-        };
-        if matches!(images, Value::Nil) {
-            continue;
-        }
-        let Value::Array(images) = images else {
-            return Err(MediaValidationError::GenerateImagesNotArray { path: message_path });
-        };
-
-        image_count = image_count.saturating_add(images.len());
-        if image_count > MAX_IMAGES_PER_ITEM {
-            return Err(MediaValidationError::TooManyImages {
-                actual: image_count,
-            });
-        }
-        for (image_index, image) in images.iter_mut().enumerate() {
-            let image_path = format!("{message_path}.images[{image_index}]");
-            normalize_generate_image(image, &image_path, &mut total_bytes)?;
+            let Value::Array(media) = media else {
+                return Err(MediaValidationError::GenerateImagesNotArray {
+                    path: if field == "images" {
+                        message_path.clone()
+                    } else {
+                        format!("{message_path}.{field}")
+                    },
+                });
+            };
+            if field == "images" {
+                image_count = image_count.saturating_add(media.len());
+                if image_count > MAX_IMAGES_PER_ITEM {
+                    return Err(MediaValidationError::TooManyImages {
+                        actual: image_count,
+                    });
+                }
+            } else {
+                video_count = video_count.saturating_add(media.len());
+                if video_count > MAX_VIDEOS_PER_ITEM {
+                    return Err(MediaValidationError::TooManyVideos {
+                        actual: video_count,
+                    });
+                }
+            }
+            for (media_index, item) in media.iter_mut().enumerate() {
+                let item_path = format!("{message_path}.{field}[{media_index}]");
+                normalize_generate_image(item, &item_path, &mut total_bytes)?;
+            }
         }
     }
     Ok(())
@@ -489,6 +512,80 @@ mod tests {
         assert_eq!(
             unique_field(image, "data").unwrap(),
             Some(&Value::Binary(b"hello".to_vec()))
+        );
+    }
+
+    fn generate_with_message(fields: Vec<(&str, Value)>) -> Value {
+        Value::Map(vec![(
+            Value::from("messages"),
+            Value::Array(vec![Value::Map(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| (Value::from(key), value))
+                    .collect(),
+            )]),
+        )])
+    }
+
+    #[test]
+    fn generation_video_base64_is_normalized_to_binary() {
+        let mut generate = generate_with_message(vec![(
+            "videos",
+            Value::Array(vec![media(Value::from("aGVsbG8="), Value::from("mp4"))]),
+        )]);
+        normalize_generate_media(&mut generate).unwrap();
+        let Value::Map(root) = generate else {
+            panic!("generate map")
+        };
+        let Value::Array(messages) = unique_field(&root, "messages").unwrap().unwrap() else {
+            panic!("messages")
+        };
+        let Value::Map(message) = &messages[0] else {
+            panic!("message")
+        };
+        let Value::Array(videos) = unique_field(message, "videos").unwrap().unwrap() else {
+            panic!("videos")
+        };
+        let Value::Map(video) = &videos[0] else {
+            panic!("video")
+        };
+        assert_eq!(
+            unique_field(video, "data").unwrap(),
+            Some(&Value::Binary(b"hello".to_vec()))
+        );
+    }
+
+    #[test]
+    fn generation_rejects_second_video_and_shares_byte_budget_with_images() {
+        let clip = || media(Value::from("aGVsbG8="), Value::from("mp4"));
+        let mut two = generate_with_message(vec![("videos", Value::Array(vec![clip(), clip()]))]);
+        assert_eq!(
+            normalize_generate_media(&mut two),
+            Err(MediaValidationError::TooManyVideos { actual: 2 })
+        );
+
+        let half = vec![7u8; MAX_MEDIA_BYTES_PER_ITEM / 2 + 1];
+        let mut over = generate_with_message(vec![
+            (
+                "images",
+                Value::Array(vec![media(Value::Binary(half.clone()), Value::Nil)]),
+            ),
+            (
+                "videos",
+                Value::Array(vec![media(Value::Binary(half), Value::Nil)]),
+            ),
+        ]);
+        assert!(matches!(
+            normalize_generate_media(&mut over),
+            Err(MediaValidationError::MediaTooLarge { .. })
+        ));
+
+        let mut not_array = generate_with_message(vec![("videos", Value::from("x"))]);
+        assert_eq!(
+            normalize_generate_media(&mut not_array),
+            Err(MediaValidationError::GenerateImagesNotArray {
+                path: "generate.messages[0].videos".to_string()
+            })
         );
     }
 

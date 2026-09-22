@@ -27,7 +27,7 @@ from typing import Any, ClassVar, Literal, cast
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.types.grammar import GrammarSpec
-from sie_server.types.inputs import ImageInput
+from sie_server.types.inputs import ImageInput, VideoInput
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +167,7 @@ _CLIENT_SAFE_GENERATION_PARAMS = frozenset(
         "logprobs",
         "top_logprobs",
         "images",
+        "videos",
         "stream",
     }
 )
@@ -956,6 +957,7 @@ class GenerationAdapter(ModelAdapter):
         logprobs: bool = False,
         top_logprobs: int | None = None,
         images: list[ImageInput] | None = None,
+        videos: list[VideoInput] | None = None,
     ) -> AsyncIterator[GenerationChunk]:
         """Stream generation chunks from a prompt.
 
@@ -999,6 +1001,9 @@ class GenerationAdapter(ModelAdapter):
                 adapter forwards the image bytes to the engine. ``None``
                 or empty for text-only generation. Text-only adapters may
                 ignore this argument.
+            videos: Optional list of wire-format :class:`VideoInput` clips,
+                each matching one video placeholder the chat template
+                rendered. Only adapters for ``inputs.video`` models accept it.
 
         Yields:
             :class:`GenerationChunk` instances. At least one terminal

@@ -57,7 +57,7 @@ from sie_server.types.grammar import (
     OUTLINES_JSON_SCHEMA_TYPE_MESSAGE,
     GrammarSpec,
 )
-from sie_server.types.inputs import ImageInput, media_bytes
+from sie_server.types.inputs import ImageInput, VideoInput, media_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +221,27 @@ def _encode_image_data(images: list[ImageInput] | None) -> list[str] | None:
             fmt = "jpeg"
         b64 = base64.b64encode(raw).decode("ascii")
         encoded.append(f"data:image/{fmt};base64,{b64}")
+    return encoded
+
+
+_ALLOWED_VIDEO_FORMATS = frozenset({"mp4", "mkv", "avi"})
+
+
+def _encode_video_data(videos: list[VideoInput] | None) -> list[str] | None:
+    """Translate wire ``VideoInput`` entries into SGLang ``video_data`` data URIs.
+
+    Only inline data URIs are emitted: SGLang would fetch an ``http(s)`` value
+    itself. ``None`` without videos keeps the request body unchanged.
+    """
+    if not videos:
+        return None
+    encoded: list[str] = []
+    for video in videos:
+        raw = media_bytes(video, kind="video")
+        fmt = (video.get("format") or "mp4").strip().lower()
+        if fmt not in _ALLOWED_VIDEO_FORMATS:
+            fmt = "mp4"
+        encoded.append(f"data:video/{fmt};base64,{base64.b64encode(raw).decode('ascii')}")
     return encoded
 
 
@@ -1325,6 +1346,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         stream: bool = False,
         lora_path: str | None = None,
         images: list[ImageInput] | None = None,
+        videos: list[VideoInput] | None = None,
     ) -> AsyncIterator[GenerationChunk]:
         self._check_loaded()
 
@@ -1341,6 +1363,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         require_reasoning = self._reasoning_parser is not None and reasoning_starts_in_prompt(
             prompt, resolve_reasoning_format(None, self)
         )
+        video_data = _encode_video_data(videos)
 
         # Guard verdict thresholding only runs on the single-candidate (n=1)
         # path, so reject multi-candidate sampling up front — otherwise a guard
@@ -1494,6 +1517,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 sbody["image_data"] = image_data
             if require_reasoning:
                 sbody["require_reasoning"] = True
+            if video_data:
+                sbody["video_data"] = video_data
             if logprobs:
                 sbody["return_logprob"] = True
                 # Without this SGLang omits the decoded token TEXT from
@@ -1646,6 +1671,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 nbody["image_data"] = image_data
             if require_reasoning:
                 nbody["require_reasoning"] = True
+            if video_data:
+                nbody["video_data"] = video_data
             if logprobs or rank:
                 nbody["return_logprob"] = True
                 # Surface decoded token text (see streaming body below) so the
@@ -1761,6 +1788,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
             body["image_data"] = image_data
         if require_reasoning:
             body["require_reasoning"] = True
+        if video_data:
+            body["video_data"] = video_data
         # OpenAI ``logprobs`` → SGLang ``return_logprob`` (top-level body
         # flag, not under sampling_params). ``top_logprobs`` →
         # ``top_logprobs_num``. SGLang surfaces them under

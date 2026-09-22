@@ -40,6 +40,7 @@ from sie_server.adapters.sglang.generation import (
     SGLangGenerationAdapter,
     _chunk_from_sglang_event,
     _encode_image_data,
+    _encode_video_data,
     _mamba_strategy_value,
     _p_unsafe_from_verdict_logprobs,
     _parse_sglang_generate_response,
@@ -618,6 +619,37 @@ def test_generate_forwards_image_data(mock_async_client: MagicMock, adapter) -> 
     assert body["image_data"][0].startswith("data:image/jpeg;base64,")
     # image_data is a TOP-LEVEL /generate field, not a sampling param.
     assert "image_data" not in body["sampling_params"]
+
+
+def test_encode_video_data_builds_data_uris_and_clamps_format() -> None:
+    out = _encode_video_data([{"data": b"\x00\x00\x00\x18ftypisom", "format": "mp4"}])
+    assert out is not None
+    assert out[0].startswith("data:video/mp4;base64,")
+    assert base64.b64decode(out[0].split(",", 1)[1]) == b"\x00\x00\x00\x18ftypisom"
+    clamped = _encode_video_data([{"data": b"x", "format": "x-mpegurl"}])
+    assert clamped is not None
+    assert clamped[0].startswith("data:video/mp4;base64,")
+    assert _encode_video_data(None) is None
+    assert _encode_video_data([]) is None
+    with pytest.raises(InvalidMediaError):
+        _encode_video_data([{"data": "not-bytes", "format": "mp4"}])
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_forwards_video_data(mock_async_client: MagicMock, adapter) -> None:
+    sse_lines = [
+        'data: {"text": "red", "meta_info": {"prompt_tokens": 5, "completion_tokens": 1, "finish_reason": {"type": "stop"}}}',
+    ]
+    mock_async_client.return_value = _make_client_with_stream(_FakeStreamingResponse(sse_lines))
+    adapter._server_url = "http://localhost:30005"
+
+    videos = [{"data": b"\x00\x00\x00\x18ftypisom", "format": "mp4"}]
+    asyncio.run(collect_generation(adapter.generate(prompt="<video>what happens", max_new_tokens=8, videos=videos)))
+
+    body = client_instance_stream_body(mock_async_client)
+    assert body["video_data"][0].startswith("data:video/mp4;base64,")
+    assert "video_data" not in body["sampling_params"]
+    assert "image_data" not in body
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")

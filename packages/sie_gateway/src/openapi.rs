@@ -844,7 +844,9 @@ fn patch_chat_message_schema(value: &mut Value) {
                             (`image_url` / `input_image`) carrying a base64 `data:` URI are \
                             accepted for generation models that declare `inputs.image`; non-vision models \
                             reject with 400 unsupported_field and remote (non-`data:`) URLs \
-                            reject with 400 invalid_request. May be \
+                            reject with 400 invalid_request. One `video_url` part per request \
+                            (`{url: \"data:video/<subtype>;base64,...\"}`, MP4/MOV, WebM/Matroska \
+                            or AVI) is accepted for generation models that declare `inputs.video`. May be \
                             `null` on a `role:\"assistant\"` message that carries `tool_calls`.",
             "oneOf": [
                 {"type": "string"},
@@ -854,7 +856,7 @@ fn patch_chat_message_schema(value: &mut Value) {
                         "type": "object",
                         "required": ["type"],
                         "properties": {
-                            "type": {"type": "string", "enum": ["text", "input_text", "image_url", "input_image"]},
+                            "type": {"type": "string", "enum": ["text", "input_text", "image_url", "input_image", "video_url"]},
                             "text": {"type": "string"},
                             "image_url": {
                                 "description": "Image payload for `image_url` / `input_image` parts: a base64 `data:` URI, either as a bare string or as `{ \"url\": \"data:...\" }`. Remote (non-`data:`) URLs reject with 400 invalid_request.",
@@ -862,6 +864,13 @@ fn patch_chat_message_schema(value: &mut Value) {
                                     {"type": "string"},
                                     {"type": "object", "properties": {"url": {"type": "string"}}},
                                 ],
+                            },
+                            "video_url": {
+                                "description": "Video payload for `video_url` parts: `{ \"url\": \"data:video/<subtype>;base64,...\" }` with no other keys. The container is identified from its bytes (MP4/MOV, WebM/Matroska, AVI). Remote URLs reject with 400 invalid_request.",
+                                "type": "object",
+                                "required": ["url"],
+                                "additionalProperties": false,
+                                "properties": {"url": {"type": "string"}},
                             },
                         },
                     },

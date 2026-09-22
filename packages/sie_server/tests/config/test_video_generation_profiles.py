@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+from sie_server.config.model import ModelConfig
+from sie_server.processors.streaming import _VISION_TOKENS_PER_VIDEO_ESTIMATE
+
+MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+MAX_TOTAL_PIXELS = _VISION_TOKENS_PER_VIDEO_ESTIMATE * 1024
+
+
+def _video_budget_violations(config: ModelConfig) -> list[str]:
+    if not config.inputs.video or config.tasks.generate is None:
+        return []
+    violations: list[str] = []
+    for name in config.profiles:
+        args = [str(arg) for arg in config.resolve_profile(name).loadtime.get("extra_launch_args") or []]
+        video: dict[str, Any] = {}
+        if "--mm-process-config" in args:
+            video = json.loads(args[args.index("--mm-process-config") + 1]).get("video") or {}
+        total_pixels = video.get("total_pixels")
+        if not isinstance(total_pixels, int) or not 0 < total_pixels <= MAX_TOTAL_PIXELS:
+            violations.append(f"{config.sie_id}:{name} video.total_pixels={total_pixels!r}")
+    return violations
+
+
+def test_video_generation_profiles_bound_visual_tokens() -> None:
+    violations = []
+    for path in sorted(MODELS_DIR.glob("*.yaml")):
+        data = yaml.safe_load(path.read_text())
+        if (data.get("inputs") or {}).get("video") and (data.get("tasks") or {}).get("generate") is not None:
+            violations += _video_budget_violations(ModelConfig.model_validate(data))
+    assert not violations, (
+        "video generation profiles must set --mm-process-config video.total_pixels "
+        f"<= {MAX_TOTAL_PIXELS} (the worker's per-video token estimate): {violations}"
+    )
+
+
+def _synthetic(video_block: dict[str, Any] | None) -> ModelConfig:
+    args = ["--mm-process-config", json.dumps({"video": video_block})] if video_block is not None else []
+    return ModelConfig.model_validate(
+        {
+            "sie_id": "org/video-model",
+            "hf_id": "org/video-model",
+            "inputs": {"text": True, "video": True},
+            "tasks": {"generate": {"context_length": 32768, "max_output_tokens": 1024}},
+            "profiles": {
+                "default": {
+                    "adapter_path": "sie_server.adapters.sglang.generation:SGLangGenerationAdapter",
+                    "max_batch_tokens": 1024,
+                    "kv_budget_tokens": 32768,
+                    "adapter_options": {"loadtime": {"extra_launch_args": args}},
+                }
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("video_block", "violates"),
+    [
+        ({"fps": 2, "total_pixels": MAX_TOTAL_PIXELS}, False),
+        ({"fps": 2, "total_pixels": MAX_TOTAL_PIXELS + 1}, True),
+        ({"fps": 2}, True),
+        (None, True),
+    ],
+)
+def test_video_budget_check_detects_unbounded_profiles(video_block: dict[str, Any] | None, violates: bool) -> None:
+    assert bool(_video_budget_violations(_synthetic(video_block))) is violates

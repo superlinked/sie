@@ -4309,3 +4309,125 @@ async def test_grammar_follower_interruption_preserves_shared_compile(monkeypatc
         kept = [chunk for chunk in terminals if chunk["request_id"] in {"req-0", "req-2"}]
         assert len(kept) == 2
         assert all(chunk["error"]["code"] == "invalid_request" and chunk.get("usage") is None for chunk in kept)
+
+
+def _mp4_bytes(tmp_path: Any, *, width: int = 64, height: int = 48, frames: int = 6) -> bytes:
+    import cv2
+    import numpy as np
+
+    path = tmp_path / "clip.mp4"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (width, height))
+    for index in range(frames):
+        writer.write(np.full((height, width, 3), index * 40, dtype=np.uint8))
+    writer.release()
+    return path.read_bytes()
+
+
+def _video_message(data: bytes, *, markers: int = 1) -> dict[str, Any]:
+    return {
+        "role": "user",
+        "content": "what happens first?",
+        "videos": [{"data": base64.b64encode(data).decode(), "format": "mp4"}],
+        "content_parts": [{"type": "video"}] * markers + [{"type": "text", "text": "what happens first?"}],
+    }
+
+
+class _VideoRecordingAdapter(_FakeGenAdapter):
+    def __init__(self, script: list[GenerationChunk]) -> None:
+        super().__init__(script)
+        self.received_videos: Any = "UNSET"
+
+    async def generate(self, prompt: str, *, max_new_tokens: int, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        self.received_videos = kwargs.get("videos")
+        for chunk in self._script:
+            yield chunk
+
+
+def _video_processor(monkeypatch: pytest.MonkeyPatch, *, video: bool) -> tuple[StreamingProcessor, Any, Any, list]:
+    rendered: list[Any] = []
+
+    async def _fake_get_tokenizer(self: Any, model_id: str) -> Any:
+        class _Tok:
+            def apply_chat_template(self, message_dicts: Any, **_kw: Any) -> str:
+                rendered.append(message_dicts)
+                return "rendered prompt"
+
+        return _Tok()
+
+    monkeypatch.setattr(StreamingProcessor, "_get_tokenizer", _fake_get_tokenizer)
+    adapter = _VideoRecordingAdapter(
+        [
+            GenerationChunk(text_delta="red", is_first=True),
+            GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=5, completion_tokens=1),
+        ]
+    )
+    registry = _make_registry(adapter)
+    registry.get_config.return_value.inputs.video = video
+    nc = AsyncMock()
+    return StreamingProcessor(nc=nc, registry=registry, worker_id="w1"), nc, adapter, rendered
+
+
+@pytest.mark.asyncio
+async def test_messages_video_field_reaches_adapter_with_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    clip = _mp4_bytes(tmp_path)
+    proc, nc, adapter, rendered = _video_processor(monkeypatch, video=True)
+    wi = _make_work_item(generate={"messages": [_video_message(clip)], "max_new_tokens": 8})
+    await proc.process(_make_msg(wi), "test/model")
+    assert _decode_chunks(nc)[-1].get("error") is None
+    assert adapter.received_videos == [{"data": clip, "format": "mp4"}]
+    assert rendered[0][0]["content"][0] == {"type": "video"}
+
+
+@pytest.mark.asyncio
+async def test_video_rejected_on_model_without_video_input(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    proc, nc, adapter, _ = _video_processor(monkeypatch, video=False)
+    wi = _make_work_item(generate={"messages": [_video_message(_mp4_bytes(tmp_path))], "max_new_tokens": 8})
+    await proc.process(_make_msg(wi), "test/model")
+    terminal = _decode_chunks(nc)[-1]
+    assert terminal["error"]["code"] == "invalid_request"
+    assert "does not support video input" in terminal["error"]["message"]
+    assert adapter.received_videos == "UNSET"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", ["pixels", "duration", "undecodable"])
+async def test_video_over_decode_bounds_never_reaches_adapter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, limit: str
+) -> None:
+    from sie_server.core import video_frames
+
+    clip = _mp4_bytes(tmp_path)
+    if limit == "pixels":
+        monkeypatch.setattr(streaming_mod, "_MAX_VIDEO_FRAME_PIXELS", 64 * 47)
+    elif limit == "duration":
+        monkeypatch.setattr(video_frames, "MAX_VIDEO_DURATION_S", 0.1)
+    else:
+        clip = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64
+    proc, nc, adapter, _ = _video_processor(monkeypatch, video=True)
+    wi = _make_work_item(generate={"messages": [_video_message(clip)], "max_new_tokens": 8})
+    await proc.process(_make_msg(wi), "test/model")
+    assert _decode_chunks(nc)[-1]["error"]["code"] == "invalid_request"
+    assert adapter.received_videos == "UNSET"
+
+
+@pytest.mark.parametrize(
+    ("messages", "fragment"),
+    [
+        ([_video_message(b"\x00\x00\x00\x18ftypisom", markers=0)], "0 video placeholder(s) but 1 video(s)"),
+        ([_video_message(b"\x00\x00\x00\x18ftypisom", markers=2)], "2 video placeholder(s) but 1 video(s)"),
+        (
+            [_video_message(b"\x00\x00\x00\x18ftypisom"), _video_message(b"\x00\x00\x00\x18ftypisom")],
+            "too many videos",
+        ),
+        (
+            [{**_video_message(b"#EXTM3U\n"), "content_parts": [{"type": "video"}]}],
+            "MP4/MOV, WebM/Matroska, or AVI",
+        ),
+        ([{**_video_message(b"x"), "videos": "nope"}], "videos must be an array"),
+    ],
+)
+def test_validate_rejects_malformed_video_messages(messages: list[dict[str, Any]], fragment: str) -> None:
+    proc = StreamingProcessor(nc=AsyncMock(), registry=_make_registry(_FakeGenAdapter([])), worker_id="w1")
+    result = proc._validate_generate_params({"generate": {"messages": messages, "max_new_tokens": 8}}, None)
+    assert isinstance(result, _ValidationError)
+    assert fragment in result.message

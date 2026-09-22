@@ -244,6 +244,19 @@ pub struct ChatImage {
     pub format: Option<String>,
 }
 
+/// One video attached to a chat message, extracted from an OpenAI
+/// ``video_url`` data URI at the gateway. Same transport shape as
+/// :struct:`ChatImage`: a base64 payload string the sidecar normalizes to
+/// bounded msgpack binary before Python model execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatVideo {
+    /// Base64-encoded video container bytes (standard alphabet, no ``data:`` prefix).
+    pub data: String,
+    /// Container hint derived from the payload's magic bytes (``"mp4"``, ``"mkv"``, ``"avi"``).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
 /// One ordered content part of a multimodal chat message — either a text
 /// fragment or an image placeholder (the bytes ride the message's flat
 /// ``images`` list, consumed in order as ``Image`` parts are encountered).
@@ -255,6 +268,7 @@ pub struct ChatImage {
 pub enum ContentPart {
     Text { text: String },
     Image,
+    Video,
 }
 
 /// One chat message in the OpenAI request shape. Role is validated
@@ -262,7 +276,7 @@ pub enum ContentPart {
 /// (multi-part text parts are concatenated). Any ``image_url`` parts are
 /// decoded into ``images`` and gated on the model's vision capability
 /// after model resolution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -291,6 +305,11 @@ pub struct ChatMessage {
     /// engine is unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_parts: Option<Vec<ContentPart>>,
+    /// Video input decoded from the message's ``video_url`` content parts,
+    /// consumed in order as ``Video`` parts are encountered in
+    /// ``content_parts`` (always present when ``videos`` is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub videos: Option<Vec<ChatVideo>>,
 }
 
 /// Structured-output grammar.
@@ -8220,6 +8239,7 @@ mod tests {
                 format: Some("png".to_string()),
             }]),
             content_parts: None,
+            videos: None,
         };
         let mp = rmp_serde::to_vec_named(&msg).unwrap();
         // (1) sidecar step: decode as serde_json::Value — MUST succeed.
@@ -8238,6 +8258,42 @@ mod tests {
     /// NATS→sidecar(``serde_json::Value``)→worker round-trip, preserving the
     /// text↔image ORDER and the internally-tagged shape the worker parses
     /// (``{"type":"text","text":…}`` / ``{"type":"image"}``).
+    #[test]
+    fn test_chat_message_videos_survive_sidecar_serde_json_value() {
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: "what happens?".to_string(),
+            videos: Some(vec![ChatVideo {
+                data: "AAAAGGZ0eXA=".to_string(),
+                format: Some("mp4".to_string()),
+            }]),
+            content_parts: Some(vec![
+                ContentPart::Video,
+                ContentPart::Text {
+                    text: "what happens?".to_string(),
+                },
+            ]),
+            ..ChatMessage::default()
+        };
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["videos"][0]["data"], "AAAAGGZ0eXA=");
+        assert_eq!(value["videos"][0]["format"], "mp4");
+        assert_eq!(
+            value["content_parts"][0],
+            serde_json::json!({"type": "video"})
+        );
+        assert!(value.get("images").is_none());
+        let back: ChatMessage = serde_json::from_value(value).unwrap();
+        assert_eq!(back.videos.unwrap()[0].data, "AAAAGGZ0eXA=");
+        let plain = serde_json::to_value(ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+            ..ChatMessage::default()
+        })
+        .unwrap();
+        assert!(plain.get("videos").is_none());
+    }
+
     #[test]
     fn test_content_parts_ordering_survives_sidecar_round_trip() {
         let msg = ChatMessage {
@@ -8268,6 +8324,7 @@ mod tests {
                     text: "which has a cat?".to_string(),
                 },
             ]),
+            videos: None,
         };
         let mp = rmp_serde::to_vec_named(&msg).unwrap();
         // (1) sidecar step: decode as serde_json::Value — MUST succeed.

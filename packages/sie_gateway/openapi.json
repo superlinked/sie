@@ -226,7 +226,7 @@
         "description": "One chat message in an OpenAI chat-completions request.\n\nPer the strict allow-list parser, ``content`` is either a\nplain string OR a list of content parts (``{type:\"text\"|\"input_text\",\ntext:\"...\"}``). ``image_url`` / ``input_image`` parts carrying a base64\n``data:`` URI are accepted for generation models declaring ``inputs.image`` (non-vision\nmodels reject 400 ``unsupported_field``; remote URLs reject 400\n``invalid_request``). Assistant messages that carry ``tool_calls`` may set\n``content: null``.\n\n``tool_calls`` is accepted only on ``role:\"assistant\"`` messages; each\nentry has the validated shape ``{id, type:\"function\", function:{name, arguments}}``\nwhere ``arguments`` is a JSON-encoded string (OpenAI convention).\n``tool_call_id`` is required on ``role:\"tool\"`` messages and rejected\non every other role.",
         "properties": {
           "content": {
-            "description": "Either a string or an array of content parts (`{type:\"text\"|\"input_text\", text:\"...\"}`). Image parts (`image_url` / `input_image`) carrying a base64 `data:` URI are accepted for generation models that declare `inputs.image`; non-vision models reject with 400 unsupported_field and remote (non-`data:`) URLs reject with 400 invalid_request. May be `null` on a `role:\"assistant\"` message that carries `tool_calls`.",
+            "description": "Either a string or an array of content parts (`{type:\"text\"|\"input_text\", text:\"...\"}`). Image parts (`image_url` / `input_image`) carrying a base64 `data:` URI are accepted for generation models that declare `inputs.image`; non-vision models reject with 400 unsupported_field and remote (non-`data:`) URLs reject with 400 invalid_request. One `video_url` part per request (`{url: \"data:video/<subtype>;base64,...\"}`, MP4/MOV, WebM/Matroska or AVI) is accepted for generation models that declare `inputs.video`. May be `null` on a `role:\"assistant\"` message that carries `tool_calls`.",
             "oneOf": [
               {
                 "type": "string"
@@ -258,9 +258,23 @@
                         "text",
                         "input_text",
                         "image_url",
-                        "input_image"
+                        "input_image",
+                        "video_url"
                       ],
                       "type": "string"
+                    },
+                    "video_url": {
+                      "additionalProperties": false,
+                      "description": "Video payload for `video_url` parts: `{ \"url\": \"data:video/<subtype>;base64,...\" }` with no other keys. The container is identified from its bytes (MP4/MOV, WebM/Matroska, AVI). Remote URLs reject with 400 invalid_request.",
+                      "properties": {
+                        "url": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "url"
+                      ],
+                      "type": "object"
                     }
                   },
                   "required": [

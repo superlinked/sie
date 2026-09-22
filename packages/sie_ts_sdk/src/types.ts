@@ -1110,13 +1110,16 @@ export interface ChatMessage {
  * One content part inside a multimodal `messages[*].content` array. Text parts
  * (`text` / `input_text`) are concatenated; image parts (`image_url` /
  * `input_image`) carry a base64 `data:` URI and are accepted for vision-capable
- * generation models.
+ * generation models. One `video_url` part per request (a base64
+ * `data:video/<subtype>;base64,...` MP4/MOV, WebM/Matroska, or AVI container)
+ * is accepted for models that declare video input.
  */
 export type ChatContentPart =
   | { type: "text"; text: string }
   | { type: "input_text"; text: string }
   | { type: "image_url"; image_url: { url: string } }
-  | { type: "input_image"; image_url: string | { url: string } };
+  | { type: "input_image"; image_url: string | { url: string } }
+  | { type: "video_url"; video_url: { url: string } };
 
 /** A tool call emitted by the model. */
 export interface ToolCall {

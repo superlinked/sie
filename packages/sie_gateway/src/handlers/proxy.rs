@@ -4713,6 +4713,55 @@ fn decode_image_data_uri(value: &serde_json::Value) -> Result<(String, Option<St
     Ok((payload.to_string(), format))
 }
 
+/// Extract an inline OpenAI ``video_url`` value into ``(base64, container)``.
+///
+/// Stricter than images because the engine decodes video with FFmpeg, which
+/// picks its demuxer by content: only the ``{"url": "data:video/<subtype>;base64,..."}``
+/// object shape with no other keys, no whitespace in the payload, and a
+/// container identified by its magic bytes (MP4/MOV, WebM/Matroska, AVI) —
+/// never by the declared media type, so a playlist or concat script labelled
+/// ``video/mp4`` is refused. Remote URLs are never fetched.
+fn decode_video_data_uri(value: &serde_json::Value) -> Result<(String, String), String> {
+    use base64::Engine as _;
+
+    let url = match value {
+        serde_json::Value::Object(o) if o.len() == 1 => o
+            .get("url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "video_url must be an object with only a non-empty 'url'".to_string())?,
+        _ => return Err("video_url must be an object with only a non-empty 'url'".to_string()),
+    };
+    let rest = url.strip_prefix("data:").ok_or_else(|| {
+        "video content must be an inline base64 'data:' URI; remote URL fetching is not supported".to_string()
+    })?;
+    let (header, payload) = rest
+        .split_once(',')
+        .ok_or_else(|| "malformed video data URI (missing ',')".to_string())?;
+    let mut params = header.split(';');
+    let mime = params.next().unwrap_or("");
+    match mime.split_once('/') {
+        Some(("video", subtype)) if !subtype.is_empty() => {}
+        _ => return Err("video data URI must have a video/<subtype> media type".to_string()),
+    }
+    if !params.any(|p| p == "base64") {
+        return Err("video data URI must be base64-encoded".to_string());
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|e| format!("invalid base64 video data: {e}"))?;
+    let container = if decoded.get(4..8) == Some(b"ftyp") {
+        "mp4"
+    } else if decoded.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        "mkv"
+    } else if decoded.starts_with(b"RIFF") && decoded.get(8..12) == Some(b"AVI ") {
+        "avi"
+    } else {
+        return Err("video data must be an MP4/MOV, WebM/Matroska, or AVI container".to_string());
+    };
+    Ok((payload.to_string(), container.to_string()))
+}
+
 /// Validate an OpenAI ``/v1/chat/completions`` request body against
 /// the chat-completions supported subset.
 ///
@@ -4822,6 +4871,11 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
     // worker. Mirrors the worker's ``_MAX_IMAGES_PER_REQUEST``.
     const MAX_IMAGES_PER_REQUEST: usize = 16;
     let mut total_images: usize = 0;
+    // The engine samples each video's frames on its request loop and a flat
+    // ``video_data`` list is only unambiguous for one clip under ``n > 1``.
+    // Mirrors the worker's ``_MAX_VIDEOS_PER_REQUEST``.
+    const MAX_VIDEOS_PER_REQUEST: usize = 1;
+    let mut total_videos: usize = 0;
     // ``tool`` is allowed so the multi-turn tool-use loop works: the
     // caller replays the assistant's tool_call request and the tool
     // result back into ``messages`` for the model's final answer.
@@ -5015,6 +5069,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         // resolution (mirrors the grammar/tools capability gates) — parsing
         // here is capability-agnostic because the model isn't resolved yet.
         let mut message_images: Vec<publisher::ChatImage> = Vec::new();
+        let mut message_videos: Vec<publisher::ChatVideo> = Vec::new();
         // Ordered text↔image layout, preserving the parts' original order so
         // the worker can interleave placeholders (vs. images-first). Only the
         // placeholder positions depend on this; bytes still ride
@@ -5114,6 +5169,43 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
                                 }
                             }
                         }
+                        "video_url" => {
+                            let Some(video_url) = part_obj.get("video_url") else {
+                                return bad(
+                                    &format!(
+                                        "messages[{idx}].content[{pi}].video_url is required for video content parts"
+                                    ),
+                                    Some(&format!("messages[{idx}].content[{pi}].video_url")),
+                                    oai_code::INVALID_REQUEST,
+                                );
+                            };
+                            total_videos += 1;
+                            if total_videos > MAX_VIDEOS_PER_REQUEST {
+                                return bad(
+                                    &format!(
+                                        "too many videos ({total_videos}); maximum is {MAX_VIDEOS_PER_REQUEST} per request"
+                                    ),
+                                    Some(&format!("messages[{idx}].content[{pi}].video_url")),
+                                    oai_code::INVALID_REQUEST,
+                                );
+                            }
+                            match decode_video_data_uri(video_url) {
+                                Ok((data, format)) => {
+                                    message_videos.push(publisher::ChatVideo {
+                                        data,
+                                        format: Some(format),
+                                    });
+                                    content_parts.push(publisher::ContentPart::Video);
+                                }
+                                Err(reason) => {
+                                    return bad(
+                                        &format!("messages[{idx}].content[{pi}]: {reason}"),
+                                        Some(&format!("messages[{idx}].content[{pi}].video_url")),
+                                        oai_code::INVALID_REQUEST,
+                                    );
+                                }
+                            }
+                        }
                         other => {
                             return bad(
                                 &format!(
@@ -5141,6 +5233,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
             }
         };
         let has_images = !message_images.is_empty();
+        let has_videos = !message_videos.is_empty();
         messages.push(publisher::ChatMessage {
             role,
             content,
@@ -5154,8 +5247,13 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
             // Forward the ordered layout only for multimodal messages — a
             // text-only message keeps ``content_parts: None`` and renders from
             // ``content`` as before (no wire bloat, no behavior change).
-            content_parts: if has_images {
+            content_parts: if has_images || has_videos {
                 Some(content_parts)
+            } else {
+                None
+            },
+            videos: if has_videos {
+                Some(message_videos)
             } else {
                 None
             },
@@ -7139,6 +7237,22 @@ async fn proxy_chat_inner(
                     .into_response();
             }
         }
+        let has_videos = params
+            .messages
+            .iter()
+            .any(|m| m.videos.as_ref().is_some_and(|videos| !videos.is_empty()));
+        if has_videos && !info.info_extras.supports_video_generation() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json_openai_error(
+                    format!("Model '{model_name}' does not support video input"),
+                    oai_type::INVALID_REQUEST,
+                    Some("messages"),
+                    oai_code::UNSUPPORTED_FIELD,
+                )),
+            )
+                .into_response();
+        }
     } else if params.grammar.is_some() {
         // No model info means we cannot determine grammar capabilities;
         // safer to reject than to publish work the model cannot honour.
@@ -7177,6 +7291,21 @@ async fn proxy_chat_inner(
             StatusCode::BAD_REQUEST,
             Json(json_openai_error(
                 format!("Model '{model_name}' does not support image input (no model info)"),
+                oai_type::INVALID_REQUEST,
+                Some("messages"),
+                oai_code::UNSUPPORTED_FIELD,
+            )),
+        )
+            .into_response();
+    } else if params
+        .messages
+        .iter()
+        .any(|m| m.videos.as_ref().is_some_and(|videos| !videos.is_empty()))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_openai_error(
+                format!("Model '{model_name}' does not support video input (no model info)"),
                 oai_type::INVALID_REQUEST,
                 Some("messages"),
                 oai_code::UNSUPPORTED_FIELD,
@@ -8238,6 +8367,7 @@ fn responses_params_from_json(body: &serde_json::Value) -> ResponsesParamsResult
                     // via /v1/chat/completions (the cut-your-bill skill surface).
                     images: None,
                     content_parts: None,
+                    videos: None,
                 });
             }
             publisher::GenerateInput::Messages { messages }
@@ -11314,6 +11444,7 @@ fn generate_params_from_json(
                 tool_call_id: None,
                 images: Some(images),
                 content_parts: None,
+                videos: None,
             }],
         },
         None => publisher::GenerateInput::Prompt { prompt },
@@ -11732,6 +11863,7 @@ fn generate_params_from_rmpv(
                 tool_call_id: None,
                 images: Some(images),
                 content_parts: None,
+                videos: None,
             }],
         },
         None => publisher::GenerateInput::Prompt { prompt },
@@ -22058,6 +22190,90 @@ mod tests {
         // a string so it survives the sidecar's serde_json::Value.
         assert_eq!(images[0].data, "aGVsbG8=");
         assert_eq!(images[0].format.as_deref(), Some("png"));
+    }
+
+    fn _mp4_b64() -> String {
+        use base64::Engine as _;
+        let mut bytes = vec![0u8, 0, 0, 0x18];
+        bytes.extend_from_slice(b"ftypisom");
+        bytes.extend_from_slice(&[0u8; 12]);
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn test_chat_params_accepts_video_data_uri_with_ordered_parts() {
+        let mut body = _chat_body_min("m");
+        body["messages"] = serde_json::json!([
+            {"role": "user", "content": [
+                {"type": "video_url", "video_url": {"url": format!("data:video/mp4;base64,{}", _mp4_b64())}},
+                {"type": "text", "text": "what happens first?"},
+            ]}
+        ]);
+        let p = _expect_chat_ok(body);
+        assert_eq!(p.messages[0].content, "what happens first?");
+        assert!(p.messages[0].images.is_none());
+        let videos = p.messages[0].videos.as_ref().expect("videos populated");
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].data, _mp4_b64());
+        assert_eq!(videos[0].format.as_deref(), Some("mp4"));
+        let parts = p.messages[0]
+            .content_parts
+            .as_ref()
+            .expect("content_parts for video msg");
+        assert!(matches!(parts[0], publisher::ContentPart::Video));
+        assert!(
+            matches!(&parts[1], publisher::ContentPart::Text { text } if text == "what happens first?")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_params_rejects_invalid_video_parts() {
+        use base64::Engine as _;
+        let hls = base64::engine::general_purpose::STANDARD
+            .encode(b"#EXTM3U\n#EXTINF:1,\nhttp://169.254.169.254/a.ts\n");
+        let mp4 = _mp4_b64();
+        let cases = [
+            serde_json::json!({"url": "https://example.com/clip.mp4"}),
+            serde_json::json!(format!("data:video/mp4;base64,{mp4}")),
+            serde_json::json!({"url": format!("data:video/mp4;base64,{mp4}"), "max_dynamic_patch": 64}),
+            serde_json::json!({"url": format!("data:video/;base64,{mp4}")}),
+            serde_json::json!({"url": format!("data:image/png;base64,{mp4}")}),
+            serde_json::json!({"url": format!("data:video/mp4,{mp4}")}),
+            serde_json::json!({"url": format!("data:video/mp4;base64, {mp4}")}),
+            serde_json::json!({"url": format!("data:video/mp4;base64,{hls}")}),
+            serde_json::json!({"url": ""}),
+        ];
+        for video_url in cases {
+            let mut body = _chat_body_min("m");
+            body["messages"] = serde_json::json!([
+                {"role": "user", "content": [
+                    {"type": "text", "text": "x"},
+                    {"type": "video_url", "video_url": video_url.clone()},
+                ]}
+            ]);
+            let v = _expect_chat_err(body).await;
+            assert_eq!(v["error"]["code"], "invalid_request", "{video_url}");
+            assert_eq!(
+                v["error"]["param"], "messages[0].content[1].video_url",
+                "{video_url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_params_rejects_second_video() {
+        let url = format!("data:video/mp4;base64,{}", _mp4_b64());
+        let mut body = _chat_body_min("m");
+        body["messages"] = serde_json::json!([
+            {"role": "user", "content": [{"type": "video_url", "video_url": {"url": url}}]},
+            {"role": "user", "content": [{"type": "video_url", "video_url": {"url": url}}]},
+        ]);
+        let v = _expect_chat_err(body).await;
+        assert_eq!(v["error"]["param"], "messages[1].content[0].video_url");
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("too many videos"));
     }
 
     #[test]

@@ -376,6 +376,13 @@ impl ModelInfoExtras {
     pub fn supports_vision_generation(&self) -> bool {
         self.inputs.iter().any(|s| s == "image") && self.outputs.iter().any(|s| s == "tokens")
     }
+
+    /// Whether the model can serve video *generation* on
+    /// ``/v1/chat/completions``: ``inputs.video`` AND a generation task
+    /// (``inputs.video`` alone is also set by video encode models).
+    pub fn supports_video_generation(&self) -> bool {
+        self.inputs.iter().any(|s| s == "video") && self.outputs.iter().any(|s| s == "tokens")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1311,6 +1318,27 @@ tasks:
 
         let extras = ModelInfoExtras::from_yaml_raw(&raw);
         assert_eq!(extras.outputs, vec!["tokens"]);
+    }
+
+    #[test]
+    fn test_supports_video_generation_requires_video_and_generate() {
+        let video_gen = ModelInfoExtras::from_yaml_raw(
+            &serde_yaml::from_str(
+                "name: m\ninputs:\n  text: true\n  video: true\ntasks:\n  generate: {}\n",
+            )
+            .unwrap(),
+        );
+        assert!(video_gen.supports_video_generation());
+        let video_encode = ModelInfoExtras::from_yaml_raw(
+            &serde_yaml::from_str("name: m\ninputs:\n  video: true\ntasks:\n  encode: {}\n")
+                .unwrap(),
+        );
+        assert!(!video_encode.supports_video_generation());
+        let image_gen = ModelInfoExtras::from_yaml_raw(
+            &serde_yaml::from_str("name: m\ninputs:\n  image: true\ntasks:\n  generate: {}\n")
+                .unwrap(),
+        );
+        assert!(!image_gen.supports_video_generation());
     }
 
     #[test]
