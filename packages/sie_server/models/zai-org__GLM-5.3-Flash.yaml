@@ -53,10 +53,10 @@ profiles:
         # The first request after a cold start compiled kernels for 91 s before
         # its first byte, measured on eight H100s.
         request_read_timeout_s: 300
-        # Cold starts on eight H100s took from 884 s to over 1,800 s. Reading
-        # the 306 GiB checkpoint took from a few minutes to 25 minutes, and
-        # kernel compilation plus decode CUDA-graph capture about 7 more.
-        startup_timeout_s: 3600
+        # Cold starts on eight H100s took from 684 s to about 36 minutes.
+        # Reading the 306 GiB checkpoint took from a few minutes to 25 minutes,
+        # and decode CUDA-graph capture about 7.5 more.
+        startup_timeout_s: 2400
         max_seq_length: 16384
         mem_fraction_static: 0.85
         served_model_name: zai-org/GLM-5.3-Flash
