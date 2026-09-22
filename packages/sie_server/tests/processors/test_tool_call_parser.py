@@ -533,10 +533,14 @@ def test_xml_param_scan_garbled_openers_no_close_is_fast() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
-        "<arg_key>days</arg_key><arg_value>3</arg_value></tool_call>",
-        "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Tokyo</arg_value>\n"
-        "<arg_key>days</arg_key>\n<arg_value>3</arg_value>\n</tool_call>",
+        (
+            "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
+            "<arg_key>days</arg_key><arg_value>3</arg_value></tool_call>"
+        ),
+        (
+            "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Tokyo</arg_value>\n"
+            "<arg_key>days</arg_key>\n<arg_value>3</arg_value>\n</tool_call>"
+        ),
     ],
 )
 async def test_explicit_glm_xml_format(raw: str) -> None:

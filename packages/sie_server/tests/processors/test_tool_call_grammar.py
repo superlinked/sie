@@ -155,8 +155,10 @@ def test_every_glm_call_the_regex_forces_parses() -> None:
     calls = [
         "<tool_call>get_time</tool_call>",
         "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>",
-        "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Tokyo</arg_value>\n"
-        "<arg_key>days</arg_key>\n<arg_value>3</arg_value>\n</tool_call>",
+        (
+            "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Tokyo</arg_value>\n"
+            "<arg_key>days</arg_key>\n<arg_value>3</arg_value>\n</tool_call>"
+        ),
     ]
     for call in calls:
         assert re.fullmatch(spec.value, call)
