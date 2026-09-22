@@ -10,11 +10,22 @@ Ten public records, each with its own JSON Schema, sent to
 NHTSA vehicle complaints, SEC officer appointment filings and GSA surplus
 vehicle listings.
 
-The page publishes one figure:
+The page's heading:
 
-> All 10 documents came back as schema-valid JSON, 91 of 93 fields right
+> All 21 yes-or-no fields came back right, and no document says true or false
 
-`score.py` re-derives that figure from the recorded responses, offline.
+and the line under its proof grid:
+
+> 91 of 93 checked fields were right, and 11 of the 13 fields that pick from a
+> fixed list were right
+
+`score.py` re-derives every one of those from the recorded responses, offline.
+
+A yes-or-no field is one the case schema declared `"type": "boolean"` or
+`"type": ["boolean", "null"]`, read from the schema the call sent rather than
+from the value that came back. Sixteen are plain booleans. Five admit null, and
+two of those correctly came back null because the GSA listing gives no answer,
+which still counts as a question the schema asked.
 
 Acceptance checks were written on 2026-09-15 from reading each source text,
 before that case's first model run, and are in `inputs/checks.json` with that
@@ -61,14 +72,21 @@ documents scored:  10
 parsed as JSON:    10
 schema-valid:      10
 fields right:      91 of 93
+  yes-or-no fields:  21 of 21
+  picks from a list: 11 of 13
+  everything else:   59 of 59
+documents saying true or false: 0
 excluded from every total: 3 CPSC cases, listed with their reason in inputs/excluded.json
 
 fields the model got wrong:
   gsa-377053.condition: expected 'unknown', got 'repairable'
   nhtsa-11231274.components: expected ['AIR BAGS'], got ['FIRE RELATED']
 
-Reproduced: all 10 documents schema-valid, 91 of 93 fields right.
+Reproduced: all 21 yes-or-no fields right, no document says true or false, 91 of 93 checked fields right.
 ```
+
+Both fields the model got wrong are picks from a fixed list, which is why that
+group scores 11 of 13 while the other two are perfect.
 
 `score.py` needs nothing installed. Schema validation runs under the small
 validator built into `score.py`, which covers the subset of JSON Schema these
@@ -108,6 +126,10 @@ byte of any request or response.
 - **Nothing about the two wrong fields being the only possible errors.** The
   93 checks cover the fields that could be read off each source text. Fields
   the source does not state are schema-validated and not scored.
+- **Nothing about why a yes-or-no field is right.** `score.py` establishes that
+  the answer matches the check and that the words true and false appear in no
+  source text. It cannot show the model reasoned rather than guessed, and with
+  21 binary answers a run of luck is not ruled out by this set.
 - **Nothing about reproducibility of a new run.** The figure is re-derived from
   responses recorded on 2026-09-15 against server version 0.7.3 and model
   revision `8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955`.

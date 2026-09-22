@@ -6,10 +6,20 @@
 
 Published on https://superlinked.com/structured-output:
 
-    All 10 documents came back as schema-valid JSON, 91 of 93 fields right
+    All 21 yes-or-no fields came back right, and no document says true or false
 
-This script re-derives 10, 10 and 91 of 93 offline, with no API key and no
-inference spend. It exits nonzero if any of them fails to reproduce.
+and, under the proof grid:
+
+    91 of 93 checked fields were right, and 11 of the 13 fields that pick from
+    a fixed list were right
+
+This script re-derives all of those offline, with no API key and no inference
+spend. It exits nonzero if any of them fails to reproduce.
+
+A yes-or-no field is one the case schema declared `"type": "boolean"` or
+`"type": ["boolean", "null"]`. That is read from the schema the call actually
+sent, not from the value that came back, so a field that correctly returned
+null because its listing gives no answer still counts as a question asked.
 
 What it does:
 
@@ -19,7 +29,9 @@ What it does:
   3. parses the assistant message of each recorded response as JSON;
   4. validates it against that case's JSON Schema from `data/inputs/cases.json`;
   5. applies the acceptance checks in `data/inputs/checks.json`, which were
-     written before each case's first run.
+     written before each case's first run;
+  6. groups those checks by what the schema asked for, and searches each source
+     text for the words true and false, which is the page's second claim.
 
 Schema validation runs under `jsonschema` when it is importable, and otherwise
 under the small validator in this file, which covers the subset these schemas
@@ -31,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -38,7 +51,39 @@ from typing import Any
 
 HTTP_OK = 200
 
-EXPECTED = {"cases": 10, "parsed": 10, "schema_valid": 10, "checks_passed": 91, "checks_total": 93}
+EXPECTED = {
+    "cases": 10,
+    "parsed": 10,
+    "schema_valid": 10,
+    "checks_passed": 91,
+    "checks_total": 93,
+    "yes_no_passed": 21,
+    "yes_no_total": 21,
+    "enum_passed": 11,
+    "enum_total": 13,
+}
+
+# The page heading says no document says true or false. Checked against the
+# source texts here, not against that sentence.
+LITERAL_BOOLEAN = re.compile(r"(?<![A-Za-z])(?:true|false)(?![A-Za-z])", re.IGNORECASE)
+
+
+def asked_for(spec: object) -> str:
+    """What the schema declared a field to be: a yes-or-no question, a pick from
+    a fixed list, or an ordinary value. Read from the schema that was sent."""
+    if not isinstance(spec, dict):
+        return "value"
+    declared = spec.get("type")
+    types = declared if isinstance(declared, list) else [declared]
+    if "boolean" in types:
+        return "yes_no"
+    items = spec.get("items")
+    if isinstance(spec.get("enum"), list):
+        return "enum"
+    if isinstance(items, dict) and isinstance(items.get("enum"), list):
+        return "enum"
+    return "value"
+
 
 JSON_TYPES = {
     "object": dict,
@@ -169,9 +214,20 @@ def main() -> int:
     calls = scored_calls(load(data_dir / "calls.json"), lambda call: call["set"] == "page")
 
     name, module = validator()
-    totals = {"cases": 0, "parsed": 0, "schema_valid": 0, "checks_passed": 0, "checks_total": 0}
+    totals = {
+        "cases": 0,
+        "parsed": 0,
+        "schema_valid": 0,
+        "checks_passed": 0,
+        "checks_total": 0,
+        "yes_no_passed": 0,
+        "yes_no_total": 0,
+        "enum_passed": 0,
+        "enum_total": 0,
+    }
     disagreements: list[str] = []
     wrong_fields: list[str] = []
+    spelled_out: list[str] = []
 
     for call in calls:
         case_id = call["case"]
@@ -200,11 +256,19 @@ def main() -> int:
         if recorded is not None and recorded != valid:
             disagreements.append(f"{case_id}: recorded valid={recorded}, recomputed valid={valid}")
 
+        if LITERAL_BOOLEAN.search(cases[case_id]["text"]):
+            spelled_out.append(case_id)
+
         for check in checks[case_id]:
             totals["checks_total"] += 1
+            group = asked_for(schema.get("properties", {}).get(check["field"]))
+            if group != "value":
+                totals[f"{group}_total"] += 1
             actual = value.get(check["field"]) if isinstance(value, dict) else None
             if check_passes(check["op"], actual, check["expected"]):
                 totals["checks_passed"] += 1
+                if group != "value":
+                    totals[f"{group}_passed"] += 1
             else:
                 wrong_fields.append(f"{case_id}.{check['field']}: expected {check['expected']!r}, got {actual!r}")
 
@@ -213,6 +277,13 @@ def main() -> int:
     print(f"parsed as JSON:    {totals['parsed']}")
     print(f"schema-valid:      {totals['schema_valid']}")
     print(f"fields right:      {totals['checks_passed']} of {totals['checks_total']}")
+    print(f"  yes-or-no fields:  {totals['yes_no_passed']} of {totals['yes_no_total']}")
+    print(f"  picks from a list: {totals['enum_passed']} of {totals['enum_total']}")
+    print(
+        f"  everything else:   {totals['checks_passed'] - totals['yes_no_passed'] - totals['enum_passed']}"
+        f" of {totals['checks_total'] - totals['yes_no_total'] - totals['enum_total']}"
+    )
+    print(f"documents saying true or false: {len(spelled_out)}")
     print(f"excluded from every total: {len(excluded)} CPSC cases, listed with their reason in inputs/excluded.json")
     if wrong_fields:
         print("\nfields the model got wrong:")
@@ -224,12 +295,17 @@ def main() -> int:
     ]
     for line in disagreements:
         failures.append(f"validator disagreement, {line}")
+    for case_id in spelled_out:
+        failures.append(f"{case_id}: source text says true or false, so the page heading is wrong")
     if failures:
         print("\nFAILED to reproduce the published figure:", file=sys.stderr)
         for line in failures:
             print(f"  {line}", file=sys.stderr)
         return 1
-    print("\nReproduced: all 10 documents schema-valid, 91 of 93 fields right.")
+    print(
+        f"\nReproduced: all {totals['yes_no_total']} yes-or-no fields right, no document says"
+        f" true or false, {totals['checks_passed']} of {totals['checks_total']} checked fields right."
+    )
     return 0
 
 
