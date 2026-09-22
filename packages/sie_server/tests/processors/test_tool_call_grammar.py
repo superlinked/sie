@@ -9,6 +9,7 @@ from sie_server.processors.tool_call_grammar import (
     extract_tool_names,
     normalize_tool_choice,
 )
+from sie_server.processors.tool_call_parser import _parse_glm_tool_call
 
 _TOOLS = (
     {"type": "function", "function": {"name": "get_weather", "parameters": {}}},
@@ -130,6 +131,37 @@ def test_required_glm_xml_regex_matches_any_tool() -> None:
     assert pat.fullmatch(weather + "\n<tool_call>get_time</tool_call>")
     assert not pat.fullmatch("<tool_call>delete_everything</tool_call>")
     assert not pat.fullmatch("I cannot help with that.")
+
+
+@pytest.mark.parametrize(
+    "incomplete",
+    [
+        "<tool_call>get_weather<arg_key>city</tool_call>",
+        "<tool_call>get_weather<arg_key>city</arg_key></tool_call>",
+        "<tool_call>get_weather<arg_value>Tokyo</arg_value></tool_call>",
+        "<tool_call>get_weather<arg_key>ci<ty</arg_key><arg_value>Tokyo</arg_value></tool_call>",
+        "<tool_call>get_weather<arg_key>city</arg_key>junk<arg_value>Tokyo</arg_value></tool_call>",
+    ],
+)
+def test_glm_xml_regex_requires_complete_argument_pairs(incomplete: str) -> None:
+    spec = build_tool_choice_grammar(_TOOLS, "required", "glm_xml")
+    assert spec is not None
+    assert not re.fullmatch(spec.value, incomplete)
+
+
+def test_every_glm_call_the_regex_forces_parses() -> None:
+    spec = build_tool_choice_grammar(_TOOLS, "required", "glm_xml")
+    assert spec is not None
+    calls = [
+        "<tool_call>get_time</tool_call>",
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>",
+        "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Tokyo</arg_value>\n"
+        "<arg_key>days</arg_key>\n<arg_value>3</arg_value>\n</tool_call>",
+    ]
+    for call in calls:
+        assert re.fullmatch(spec.value, call)
+        name, _arguments = _parse_glm_tool_call(call.removeprefix("<tool_call>").removesuffix("</tool_call>"))
+        assert name in {"get_time", "get_weather"}
 
 
 def test_named_glm_xml_regex_pins_the_whole_name() -> None:
