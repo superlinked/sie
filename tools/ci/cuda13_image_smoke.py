@@ -16,7 +16,7 @@ import sie_server
 import torch
 import transformers
 
-assert torch.__version__.split("+", 1)[0] == "2.11.0", torch.__version__
+assert torch.__version__.split("+", 1)[0] == "2.13.0", torch.__version__
 assert torch.version.cuda and torch.version.cuda.startswith("13."), torch.version.cuda
 """
 
@@ -26,16 +26,16 @@ import xgrammar
 from sie_server.adapters.sglang import cuda13, gemma, generation
 
 expected = {
-    "sglang": "0.5.13",
-    "transformers": "5.8.1",
+    "sglang": "0.5.20",
+    "transformers": "5.12.1",
     "kernels": "0.14.1",
-    "flashinfer-python": "0.6.12",
+    "flashinfer-python": "0.6.18",
     "xgrammar": "0.2.1",
-    "apache-tvm-ffi": "0.1.9",
+    "apache-tvm-ffi": "0.1.11",
 }
 for distribution, version in expected.items():
     assert importlib.metadata.version(distribution) == version, distribution
-for distribution, upstream in (("sgl-deep-gemm", "0.1.2"), ("sglang-kernel", "0.4.3")):
+for distribution, upstream in (("sgl-deep-gemm", "0.2.0"), ("sglang-kernel", "0.4.7")):
     actual_upstream, separator, variant = importlib.metadata.version(distribution).partition("+")
     assert (actual_upstream, separator, variant) == (upstream, "+", "cu130"), distribution
 assert importlib.metadata.distribution("sglang").files

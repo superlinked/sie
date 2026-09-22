@@ -26,13 +26,23 @@ platform: cuda13
 # JIT kernel (jit_kernel/csrc/elementwise/activation.cuh) fails to compile
 # under strict nvcc — "select_kernel ... expected a type, got
 # ActivationKind::kSiLU" — confirmed broken on BOTH CUDA 12.9 and 13.0. 0.5.13
-# fixes it. Both 0.5.11 and 0.5.13 require torch 2.11 (the torch 2.9->2.11 bump
-# landed at 0.5.11, not 0.5.12), so there is no torch-2.9 path to Gemma 4 —
-# this bundle's image carries torch 2.11 (cu130) on a CUDA 13 base — built by
+# fixed it, and this bundle pinned 0.5.13 until the move to 0.5.20 below.
+#
+# Now pinned to 0.5.20, which is the first release carrying the ``glm5_next``
+# model (python/sglang/srt/models/glm5_next.py, EntryClass
+# ``Glm5NextForConditionalGeneration``). 0.5.13 has no such module, so the
+# architecture cannot load on it at any width. 0.5.20 moves its own exact pins
+# with it: torch 2.11 -> 2.13 (cu130 wheels exist for both), transformers
+# 5.8.1 -> 5.12.1, flashinfer-python 0.6.12 -> 0.6.18, sgl-deep-gemm
+# 0.1.2 -> 0.2.0, sglang-kernel 0.4.3 -> 0.4.7, apache-tvm-ffi 0.1.9 -> 0.1.11,
+# and it adds humming-kernels and quack-kernels. xgrammar stays at 0.2.1.
+# Those versions are sglang's own ``==`` pins, not choices made here.
+#
+# The bundle's image carries torch (cu130) on a CUDA 13 base — built by
 # the dedicated ``cuda13`` platform (packages/sie_server/Dockerfile.cuda13),
 # selected via the ``platform: cuda13`` field above. The shared base venv still
-# ships torch 2.9.1, so the cu130 image carries two torches (~+3 GB); slimming
-# torch out of sie-server core would remove that (tracked follow-up in #1415).
+# ships its own torch, so the cu130 image carries two torches (~+3 GB); slimming
+# torch out of sie-server core would remove that.
 #
 # Distinct thin adapter modules scope routing here because bundle compatibility
 # keys on module paths. Gemma models use `...sglang.gemma`; Qwen profiles that
@@ -56,7 +66,7 @@ deps:
   # unsatisfiable: 0.5.13 requires kernels>=0.14.1,<0.15. sglang declares a
   # bare unpinned `kernels`, so without 0.5.13's transitive pin uv would grab
   # the latest, which breaks sglang's import — let sglang constrain it.)
-  sglang: '==0.5.13'
+  sglang: '==0.5.20'
   # Structured-output backend the Gemma model configs select
   # (tasks.generate ... grammar_backend: xgrammar). Pinned to the version
   # sglang 0.5.13 resolves, to prevent silent drift (mirrors the sglang
@@ -67,4 +77,4 @@ deps:
   # dependency open at >=0.1.9. SGLang 0.5.13 pins apache-tvm-ffi==0.1.9
   # exactly, so declare the same version explicitly: this keeps the import in
   # the image and lets the bundle resolve as one compatible dependency set.
-  apache-tvm-ffi: '==0.1.9'
+  apache-tvm-ffi: '==0.1.11'
