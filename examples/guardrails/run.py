@@ -377,10 +377,17 @@ def served_revisions(client: SIEClient) -> dict[str, str]:
         raise SystemExit(f"Could not read the model revisions from /v1/models: {error}") from error
     rows = listed if isinstance(listed, list) else listed.get("models", [])
     wanted = {*MODEL_REVISIONS, QWEN_4B, QWEN_27B}
+    # Not listed at all and listed without a revision are different failures,
+    # and an earlier version of this function conflated them: a Qwen model the
+    # endpoint does not serve passed the preflight, so `--record` spent the
+    # four guard-model calls on every case before failing per call and writing
+    # an incomplete recording. Absence stops the run before anything is sent.
+    listed_names: set[str] = set()
     found: dict[str, str] = {}
     for model in rows:
         name = model.get("name") if isinstance(model, dict) else None
         if name in wanted:
+            listed_names.add(name)
             revision = model.get("revision") or ""
             # Only the two pinned models must carry one. A published revision
             # this run cannot read is a failure; an unpinned one is recorded
@@ -390,11 +397,12 @@ def served_revisions(client: SIEClient) -> dict[str, str]:
                     raise SystemExit(f"/v1/models lists {name} with no revision")
                 continue
             found[name] = revision
-    absent = sorted(wanted - set(found))
-    blocking = sorted(set(MODEL_REVISIONS) - set(found))
-    if blocking:
-        raise SystemExit(f"/v1/models does not list: {', '.join(blocking)}")
-    for name in absent:
+    absent = sorted(wanted - listed_names)
+    if absent:
+        raise SystemExit(f"/v1/models does not list: {', '.join(absent)}")
+    # Every pinned model is now known to be listed, and one listed without a
+    # revision already raised above, so there is nothing left to block on.
+    for name in sorted(wanted - set(found)):
         print(f"/v1/models reports no revision for {name}; recording none", file=sys.stderr)
     return found
 

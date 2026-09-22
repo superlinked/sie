@@ -191,11 +191,18 @@ def reviewer_verdict(call: dict[str, Any]) -> str:
 
 
 def bare_verdict(call: dict[str, Any]) -> str:
-    """The exploratory prompt: one word, YES or NO."""
+    """The exploratory prompt: one word, YES or NO, and nothing else.
+
+    Compared for equality rather than by prefix. A prefix test reads "NONE" and
+    "NOT SURE" as ORDINARY, which turns a refusal into a passing verdict. All
+    24 recorded bare replies are exactly "YES" or "NO", so this moves no
+    published figure; it stops a reply these recordings do not contain from
+    being scored as one.
+    """
     text = content_of(call).strip().upper().rstrip(".")
-    if text.startswith("YES"):
+    if text == "YES":
         return PLANTED
-    if text.startswith("NO"):
+    if text == "NO":
         return ORDINARY
     return UNUSABLE
 
