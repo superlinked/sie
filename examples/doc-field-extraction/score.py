@@ -5,16 +5,23 @@ key, no network, no inference spend.
     python3 fetch.py
     python3 score.py
 
-Prints the three figures the page publishes:
+Prints the figures the page publishes:
 
     180 of 223 fields exact across all 8 recorded documents, in 9 calls
     8 of 8 ticked and empty boxes read correctly
-    9 of 9 replies valid against the schema, first call
+    a second call over the same eight answers: 204 of 223, 24 fixed, 0 broken
+    17 of 17 replies valid against the schema, first try
 
 This is the website's evaluate.py with its inputs repointed at the fetched
 evidence: it reads the pre-registered expected values and the recorded replies,
 applies the comparison rules `inputs.json` records under "scoring", and never
 edits an expected value.
+
+The second pass is scored by the same functions, over `second-pass/calls.json`,
+which lives in this repository rather than in the dataset because no arm sends
+an image. Its three arms and their prompts were fixed in
+`second-pass/PRE-REGISTRATION.md` before any of those 24 calls, together with
+the rule that published one of them and the rule that would have published none.
 
 Standard library only.
 """
@@ -55,7 +62,20 @@ PAGE_FIGURES = {
     "calls": 9,
     "booleans": 8,
     "schema_valid": 9,
+    # The second call, arm a2 of the pre-registered three.
+    "second_pass_arm": "a2",
+    "second_pass_matched": 204,
+    "second_pass_fixed": 24,
+    "second_pass_broken": 0,
+    # Both passes plus the playground call, every reply schema-valid first try.
+    "schema_valid_both_passes": 17,
 }
+
+# The bar this experiment had to clear, copied from second-pass/PRE-REGISTRATION.md,
+# which was committed before the first of those 24 calls.
+SECOND_PASS_RULE = {"min_total": 195, "max_regressions": 5}
+
+SECOND_PASS = ROOT / "second-pass"
 
 # Must stay identical to inputs_digest() in the runner that recorded the run.
 INPUTS_METADATA_KEYS = ("note", "registered_utc")
@@ -239,6 +259,10 @@ def evaluate_call(entry: dict[str, Any], expected: dict[str, Any], schema: dict[
         "fields_matched": sum(1 for field in fields if field["match"]),
         "extra_rows": extra_rows,
         "field_results": fields,
+        # The object this call returned. The second pass sends it back as its
+        # input, so it comes from the verified first pass rather than from a
+        # copy stored beside the second.
+        "returned": parsed,
     }
 
 
@@ -317,6 +341,169 @@ def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dic
                 f"but inputs.json pins {case['image']} ({case['image_sha256'][:12]})"
             )
     return problems
+
+
+def second_pass_reply(entry: dict[str, Any]) -> Any:
+    """The JSON object one second-pass reply carries, or None.
+
+    A1 and A3 answer on /v1/generate and A2 on /v1/chat/completions, so the text
+    sits in a different place. Returning None rather than raising keeps an
+    unusable reply scoreable as zero matches instead of stopping the run.
+    """
+    body = entry["response"]["body"]
+    if not isinstance(body, dict):
+        return None
+    if entry["path"].endswith("/chat/completions"):
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return None
+        text = (choices[0].get("message") or {}).get("content")
+    else:
+        text = body.get("text")
+    if not isinstance(text, str):
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def rebuild_second_pass_body(
+    arm_name: str,
+    arm: dict[str, Any],
+    experiment: dict[str, Any],
+    case: dict[str, Any],
+    first_pass_reply: Any,
+) -> dict[str, Any]:
+    """The request body this arm sends for this case, built from the inputs.
+
+    Byte-identical in structure to run_second_pass.py in superlinked/sie-web.
+    Keeping it here is what makes the recorded requests checkable: the digests
+    in calls.json travel with the calls, so only a body rebuilt from the
+    pre-registered arm and the first pass's own reply can catch a request that
+    was edited and re-digested.
+    """
+    schema = arm["schemas"][case["schema"]]
+    max_new_tokens = experiment["max_new_tokens"]
+    if arm_name == "a2":
+        system = arm["prompt"] + "\n\nRequired JSON schema:\n" + json.dumps(schema, indent=2)
+        return {
+            "model": experiment["model"],
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(first_pass_reply, indent=2, ensure_ascii=False)},
+            ],
+            "max_completion_tokens": max_new_tokens,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "doc_field_extraction", "strict": True, "schema": schema},
+            },
+        }
+    prompt = arm["prompt"]
+    if arm["sends_stage_one"]:
+        prompt += "\n\nFirst pass:\n" + json.dumps(first_pass_reply, indent=2, ensure_ascii=False)
+    placeholder = (
+        f"<base64 of apps/site/public/reference/doc-field-extraction/{case['image']}, "
+        f"sha256 {case['image_sha256']}>"
+    )
+    return {
+        "prompt": prompt,
+        "max_new_tokens": max_new_tokens,
+        "images": [{"data": placeholder, "format": case["format"]}],
+        "grammar": {"json_schema": schema, "strict": True},
+    }
+
+
+def score_second_pass(
+    inputs: dict[str, Any], first_pass: list[dict[str, Any]], recorded: dict[str, dict[str, Any]]
+) -> tuple[dict[str, Any], list[str]]:
+    """Score all three arms, and rebuild every request before trusting one.
+
+    `first_pass` is the scored first call, so the fixed and broken counts are
+    paired field by field against the run this example already verified, never
+    against a copy of it stored beside the second pass.
+    """
+    problems: list[str] = []
+    experiment = json.loads((SECOND_PASS / "experiment.json").read_text(encoding="utf-8"))
+    calls = json.loads((SECOND_PASS / "calls.json").read_text(encoding="utf-8"))
+    entries = unique_by(calls["calls"], "slug", "second-pass/calls.json")
+
+    cases = unique_by(inputs["cases"], "id", "inputs.json")
+    first_by_case = {case["id"]: case for case in first_pass}
+    arm_names = sorted(experiment["arms"])
+
+    # A bijection: the expected slugs come from the arms and the registered
+    # cases, so a call that is missing, duplicated or implied by no arm fails.
+    expected_slugs = {f"{case_id}__{arm}" for arm in arm_names for case_id in cases}
+    if set(entries) != expected_slugs:
+        problems.append(
+            f"second-pass/calls.json holds {sorted(set(entries) - expected_slugs)} that no arm implies "
+            f"and is missing {sorted(expected_slugs - set(entries))}"
+        )
+        return {}, problems
+
+    arms: dict[str, Any] = {}
+    for arm_name in arm_names:
+        arm = experiment["arms"][arm_name]
+        scored: list[dict[str, Any]] = []
+        for case_id, case in cases.items():
+            entry = entries[f"{case_id}__{arm_name}"]
+            if entry["status"] != 200:
+                problems.append(f"{entry['slug']}: recorded status {entry['status']}")
+            # These two digests travel inside calls.json, so they catch a
+            # corrupted file and nothing more; an editor who changes a record
+            # and recomputes the digest beside it satisfies both. What pins this
+            # file is that it lives in the repository rather than in the
+            # dataset, so any change to it shows in the diff, and that the
+            # request is rebuilt below from the pre-registered arm.
+            if canonical_sha256(entry["request"]) != entry["request_sha256"]:
+                problems.append(f"{entry['slug']}: the request record does not match its recorded digest")
+            if canonical_sha256(entry["response"]) != entry["response_sha256"]:
+                problems.append(f"{entry['slug']}: the response record does not match its recorded digest")
+            first = first_by_case[case_id]
+            rebuilt = rebuild_second_pass_body(
+                arm_name, arm, experiment, case, first["returned"] if arm["sends_stage_one"] else None
+            )
+            if rebuilt != entry["request"]["body"]:
+                problems.append(f"{entry['slug']}: the recorded request is not the one this arm builds")
+            reply = second_pass_reply(entry)
+            schema = inputs["schemas"][case["schema"]]
+            errors = schema_errors(reply, schema) if reply is not None else ["reply did not parse as JSON"]
+            fields: list[dict[str, Any]] = []
+            extra_rows: list[str] = []
+            compare(case["expected"], reply if isinstance(reply, dict) else {}, "", fields, extra_rows)
+            before = {row["field"]: row["match"] for row in first["field_results"]}
+            if set(before) != {row["field"] for row in fields}:
+                problems.append(f"{entry['slug']}: a different field set from the first pass; nothing is comparable")
+                continue
+            scored.append(
+                {
+                    "id": case_id,
+                    "fields_total": len(fields),
+                    "fields_matched": sum(1 for row in fields if row["match"]),
+                    "schema_valid_json": not errors,
+                    "fixed": [row["field"] for row in fields if row["match"] and not before[row["field"]]],
+                    "broken": [row["field"] for row in fields if not row["match"] and before[row["field"]]],
+                    "field_results": fields,
+                }
+            )
+        total = sum(case["fields_matched"] for case in scored)
+        fixed = sum(len(case["fixed"]) for case in scored)
+        broken = sum(len(case["broken"]) for case in scored)
+        arms[arm_name] = {
+            "label": arm["label"],
+            "fields_total": sum(case["fields_total"] for case in scored),
+            "fields_matched": total,
+            "fixed": fixed,
+            "broken": broken,
+            "schema_valid": sum(1 for case in scored if case["schema_valid_json"]),
+            "clears_bar": total >= SECOND_PASS_RULE["min_total"] and broken <= SECOND_PASS_RULE["max_regressions"],
+            "cases": scored,
+        }
+
+    winners = [name for name in arm_names if arms[name]["clears_bar"]]
+    winners.sort(key=lambda name: (-arms[name]["fields_matched"], arms[name]["broken"], name))
+    return {"arms": arms, "winner": winners[0] if winners else None, "run": calls["run_started_utc"]}, problems
 
 
 def main() -> int:
@@ -408,6 +595,38 @@ def main() -> int:
     print(f"{booleans_matched} of {len(booleans)} ticked and empty boxes read correctly")
     print(f"{schema_valid} of {len(scored_calls)} replies valid against the schema, first call")
 
+    second, second_problems = score_second_pass(inputs, cases, recorded)
+    if second_problems:
+        print("\nThe second pass did not verify, so it was NOT scored:", file=sys.stderr)
+        for line in second_problems:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+
+    print(f"\nSecond call, {second['run'][:10]}. Three arms, one pre-registered rule:")
+    print(
+        f"  {'bar: ' + str(SECOND_PASS_RULE['min_total']) + ' of ' + str(total):<46}"
+        f" and at most {SECOND_PASS_RULE['max_regressions']} broken"
+    )
+    for name in sorted(second["arms"]):
+        arm = second["arms"][name]
+        print(
+            f"  {name}  {arm['label']:<32} {arm['fields_matched']} of {arm['fields_total']}"
+            f"   fixed {arm['fixed']:>3}   broke {arm['broken']:>3}"
+            f"   {'CLEARS' if arm['clears_bar'] else 'below the bar'}"
+        )
+    winner = second["winner"]
+    if winner is None:
+        print("\nNo arm cleared the bar, so the page publishes no second call.", file=sys.stderr)
+        return 1
+    won = second["arms"][winner]
+    second_schema_valid = schema_valid + won["schema_valid"]
+    second_responses = len(scored_calls) + len(won["cases"])
+    print(
+        f"\n{won['fields_matched']} of {won['fields_total']} fields exact after the second call, "
+        f"up from {matched}: {won['fixed']} fixed, {won['broken']} broken"
+    )
+    print(f"{second_schema_valid} of {second_responses} replies valid against the schema, first try, across both passes")
+
     want = PAGE_FIGURES
     checks = {
         "fields": (matched, total) == (want["fields_matched"], want["fields_total"]),
@@ -415,6 +634,12 @@ def main() -> int:
         "calls": len(scored_calls) == want["calls"],
         "booleans": (booleans_matched, len(booleans)) == (want["booleans"], want["booleans"]),
         "schema valid on the first call": schema_valid == want["schema_valid"] and first_call == want["schema_valid"],
+        "the arm the rule selected": winner == want["second_pass_arm"],
+        "the second call's total": won["fields_matched"] == want["second_pass_matched"],
+        "what the second call fixed and broke": (won["fixed"], won["broken"])
+        == (want["second_pass_fixed"], want["second_pass_broken"]),
+        "schema valid across both passes": second_schema_valid == want["schema_valid_both_passes"]
+        and second_responses == want["schema_valid_both_passes"],
     }
     failed = [name for name, ok in checks.items() if not ok]
     if failed:

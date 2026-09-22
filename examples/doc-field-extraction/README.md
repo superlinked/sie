@@ -1,15 +1,34 @@
-# Read a form into typed fields
+# Read a form into typed fields, then send the answer back for a check
 
 Eight scanned documents, one call each to `Qwen/Qwen3.8-27B-FP8` on SIE Cloud
 with a strict JSON-schema grammar, plus a ninth playground call on one of them.
-The extractions behind
+Then a second call over each of those eight answers. The extractions behind
 [superlinked.com/doc-field-extraction](https://superlinked.com/doc-field-extraction).
 
-180 of 223 expected field values came back exactly. Every one of the eight
+180 of 223 expected field values came back exactly on the first call. A second
+call that sees the schema and the first answer, and never sees the page, took
+that to 204: it fixed 24 and broke none of the 180. Every one of the eight
 ticked and empty checkboxes on the two FAA release certificates read correctly,
-and all nine replies were valid against their schema on the first call. A
-receipt photographed sideways produced schema-valid JSON with invented numbers,
-which is the most useful failure in the set.
+and all 17 replies across both passes were valid against their schema on the
+first try. A receipt photographed sideways produced schema-valid JSON with
+invented numbers, and the second call could not touch it, which is the most
+useful pair of results in the set.
+
+The interesting part is which arm won. Three were fixed in writing before any of
+those 24 calls, and the two that lost are why this is worth reading:
+
+| arm | what it sends | fields exact | fixed | broke |
+|---|---|---|---|---|
+| first call alone | image + schema | 180 of 223 | | |
+| A1, one call | image + a schema with a description on every field | 174 of 223 | 10 | 16 |
+| **A2, second call** | **schema + the first answer, no image** | **204 of 223** | **24** | **0** |
+| A3, second call | image + schema + the first answer | 185 of 223 | 5 | 0 |
+
+Writing better field descriptions made it worse. Handing the second call the
+page image dropped it from 24 fixes to 5. The second call helps because it
+answers a different question from the first, not a harder version of the same
+one: the first reads the page, the second checks each value against the field it
+was written into.
 
 ## Where the evidence lives
 
@@ -28,6 +47,20 @@ doc-field-extraction/
   diagnostics/           two calls kept out of every total (see below)
 ```
 
+The second pass is the exception and lives here, in the repository:
+
+```
+second-pass/
+  PRE-REGISTRATION.md    the three arms and the decision rule, before any call
+  experiment.json        each arm's prompt and schemas
+  calls.json             24 entries: three arms over the eight documents
+```
+
+It is in git rather than in the dataset because none of it is large and no arm
+sends an image. The two arms that reference one name it by the path and SHA-256
+the first pass pinned, so `python3 score.py` scores both passes after a single
+`fetch.py`.
+
 ## Run it
 
 Download the recorded run, then score it. Both steps are standard library
@@ -38,12 +71,21 @@ python3 fetch.py
 python3 score.py
 ```
 
-Expect a per-document line, then the three figures the page publishes:
+Expect a per-document line, then the figures the page publishes:
 
 ```
 180 of 223 fields exact across all 8 recorded documents, in 9 calls
 8 of 8 ticked and empty boxes read correctly
 9 of 9 replies valid against the schema, first call
+
+Second call, 2026-09-22. Three arms, one pre-registered rule:
+  bar: 195 of 223                                and at most 5 broken
+  a1  One call, described schema       174 of 223   fixed  10   broke  16   below the bar
+  a2  Second call, no image            204 of 223   fixed  24   broke   0   CLEARS
+  a3  Second call, with the image      185 of 223   fixed   5   broke   0   below the bar
+
+204 of 223 fields exact after the second call, up from 180: 24 fixed, 0 broken
+17 of 17 replies valid against the schema, first try, across both passes
 ```
 
 `score.py` exits non-zero if that is not what it computes, rather than printing
@@ -111,6 +153,19 @@ reply scored against another's schema. A recorded call that no case reaches is
 a failure too rather than a silent pass. Anything missing, or that any check
 disagrees about, is a failure and nothing is scored; it is never skipped past.
 
+**The second pass.** Its file is pinned by living in this repository, so any
+change to it shows in the diff. On top of that, `score.py` rebuilds all 24
+request bodies from `second-pass/experiment.json`, `inputs.json` and the first
+pass's own replies, and compares each with the request recorded on disk. That is
+the check with teeth, and the one the digests in `second-pass/calls.json` cannot
+do: those travel with the records they describe, so they catch a corrupted file
+and nothing else. The expected 24 slugs come from the arms and the registered
+cases, so a call that is missing, duplicated or implied by no arm fails there
+too. The arms are also scored by the same `compare` and `schema_errors` this
+file already uses for the first pass, against the same unedited `expected`
+values, and every fixed and broken count is paired field by field against the
+first pass this script has already verified.
+
 Two calls sit in `diagnostics/` and are counted in nothing: one exploratory call
 on the FAA rebuilt fuel control certificate, and a superseded playground call
 whose schema asked for `payment_terms` and got the printed "NET 30" followed by
@@ -137,15 +192,24 @@ the starting point for that, not as a clearance.
 - Not a benchmark. Eight documents chosen to span aviation certificates,
   regulatory logs, metrology tables, invoices, customs labels, utility bills and
   a receipt photograph is a demonstration, not a measurement.
-- Not a claim about your documents. 180 of 223 is the score on these eight, and
-  it ranges from 16 of 16 on one FAA certificate to 4 of 11 on the sideways
-  receipt.
-- Schema-valid does not mean correct. All nine replies validated; the receipt's
-  did so while inventing a store address, a total and an item count. That is the
-  gap this example is most useful for showing.
+- Not a claim about your documents. 180 of 223, and 204 after the second call,
+  is the score on these eight. It ranges from 16 of 16 on both FAA certificates
+  to 4 of 11 on the sideways receipt, which the second call does not move.
+- The zero is not a guarantee. "Broke none of the 180" is what happened in this
+  recorded run. Nothing pins a seed, so a rerun can break one.
+- Three arms is not an ablation of the design space. It is the smallest set that
+  answers the two questions worth asking before adding a call: would a better
+  schema do it instead, and does the second call need the page.
+- Schema-valid does not mean correct. All 17 replies across both passes
+  validated; the receipt's did so while inventing a store address, a total and
+  an item count, and the second call passed that reply through untouched. That
+  is the gap this example is most useful for showing.
 - Not reproducible against the live API. These are recordings. A rerun goes
   through a different served revision and unfixed sampling, so it will differ.
-- The page's proof grid shows three of the eight documents, the hero repeats
-  fields from one of those three, and the playground shows a fourth, the Wolters
-  Kluwer invoice. The page's own line, "the 5 documents not shown", counts the
-  grid. All eight are here, and so are the two diagnostics calls.
+- The page's proof grid shows three of the eight documents, the hero shows a
+  fourth, the FAA rebuilt fuel control certificate, and the playground a fifth,
+  the Wolters Kluwer invoice. Its line under the grid counts all three surfaces
+  and says so. All eight are here, and so are the two diagnostics calls.
+- Each proof card prints six rows of a longer answer. The card's own footer
+  gives the score over every field of that document, and this example holds all
+  of them.
