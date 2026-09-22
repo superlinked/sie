@@ -49,7 +49,10 @@ def _video_budget_violations(config: ModelConfig) -> list[str]:
         min_pixels = _positive_int(video.get("min_pixels", DEFAULT_VIDEO_MIN_PIXELS))
         if total_pixels is None or total_pixels > MAX_TOTAL_PIXELS:
             violations.append(f"{config.sie_id}:{name} video.total_pixels={video.get('total_pixels')!r}")
-        elif max_frames is None or min_pixels is None or max_frames * min_pixels * 1.05 / 2 > MAX_TOTAL_PIXELS:
+        # Integer arithmetic throughout: a float conversion of a pathological
+        # count would raise OverflowError instead of recording a violation.
+        # ``frames * min_pixels * 1.05 / 2 > budget`` <=> ``frames * min_pixels * 105 > budget * 200``.
+        elif max_frames is None or min_pixels is None or max_frames * min_pixels * 105 > MAX_TOTAL_PIXELS * 200:
             violations.append(
                 f"{config.sie_id}:{name} video.max_frames={video.get('max_frames')!r} "
                 f"min_pixels={video.get('min_pixels', DEFAULT_VIDEO_MIN_PIXELS)!r}"
@@ -104,6 +107,7 @@ def _synthetic(video_block: dict[str, Any] | None, *, trailing: list[str] | None
         ({"fps": 2, "max_frames": True, "total_pixels": MAX_TOTAL_PIXELS}, True),
         ({"fps": 2, "max_frames": 64, "total_pixels": True}, True),
         ({"fps": 2, "max_frames": 0, "total_pixels": MAX_TOTAL_PIXELS}, True),
+        ({"fps": 2, "max_frames": 10**400, "total_pixels": MAX_TOTAL_PIXELS}, True),
         (None, True),
     ],
 )
