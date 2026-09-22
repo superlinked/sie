@@ -41,8 +41,8 @@ from pathlib import Path
 
 DATASET = "superlinked/sie-task-evidence"
 TASK = "guardrails"
-REVISION = "a25e41631eb324e5fa740b8710f33f05aa0cfe9e"
-MANIFEST_SHA256 = "819dfa6e318a8808a02a4f42fb73962086a1049d78b7b18b1b52483d9582ef8f"
+REVISION = "beed0b2455fff3c8c41061760d92ba314a0bfe5e"
+MANIFEST_SHA256 = "70fbe6f6ff043e7cda7dad5109dbf1f3a574f0df7b6f376bc0b353ea46e818c1"
 
 BASE = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}/{TASK}"
 HTTP_OK = 200
