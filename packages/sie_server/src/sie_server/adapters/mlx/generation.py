@@ -44,6 +44,7 @@ from sie_server.adapters._generation_base import (
     FinishReason,
     GenerationAdapter,
     GenerationChunk,
+    GenerationUnsupportedFieldError,
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
@@ -393,7 +394,7 @@ class MLXGenerationAdapter(GenerationAdapter):
         if images:
             raise ValueError("vision input is not supported on the Mac MLX generation path yet (see plan §9)")
         if videos:
-            raise ValueError("video input is not supported on the Mac MLX generation path")
+            raise GenerationUnsupportedFieldError("videos")
         # Unused on the MLX path today (kept to satisfy the streaming contract):
         # mlx_lm.server's /v1/completions does not expose these knobs uniformly.
         if min_new_tokens is not None:

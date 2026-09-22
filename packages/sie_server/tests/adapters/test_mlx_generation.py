@@ -14,7 +14,7 @@ from typing import Any, Self
 from unittest.mock import patch
 
 import pytest
-from sie_server.adapters._generation_base import collect_generation
+from sie_server.adapters._generation_base import GenerationUnsupportedFieldError, collect_generation
 from sie_server.adapters.mlx import _server
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter
 from sie_server.adapters.sglang.generation import (
@@ -225,6 +225,14 @@ async def test_generate_rejects_images(adapter: MLXGenerationAdapter) -> None:
     with pytest.raises(ValueError, match="vision"):
         gen = adapter.generate(prompt="hi", max_new_tokens=8, images=[{"data": b"x", "format": "png"}])
         await gen.__anext__()
+
+
+async def test_generate_rejects_videos_as_unsupported_field(adapter: MLXGenerationAdapter) -> None:
+    with pytest.raises(GenerationUnsupportedFieldError) as error:
+        gen = adapter.generate(prompt="hi", max_new_tokens=8, videos=[{"data": b"x", "format": "mp4"}])
+        await gen.__anext__()
+    assert error.value.param == "videos"
+    assert error.value.code == "unsupported_field"
 
 
 async def test_generate_rejects_unsupported_min_new_tokens(adapter: MLXGenerationAdapter) -> None:
