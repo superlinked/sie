@@ -623,20 +623,22 @@ async def test_glm_xml_misplaced_tags_are_terminal_parse_errors(raw: str, reason
     assert reason in (out[-1].error_message or "")
 
 
-def test_glm_argument_scan_bounds_argument_count() -> None:
+def test_glm_argument_scan_parses_up_to_the_cap_and_refuses_more() -> None:
     import time
 
     from sie_server.processors.tool_call_parser import _MAX_XML_PARAMS, _parse_glm_tool_call
 
-    n = _MAX_XML_PARAMS + 5_000
-    raw = "f" + "".join(f"<arg_key>p{i}</arg_key><arg_value>{i}</arg_value>" for i in range(n))
-    t0 = time.monotonic()
-    name, args = _parse_glm_tool_call(raw)
-    elapsed = time.monotonic() - t0
+    def call(n: int) -> str:
+        return "f" + "".join(f"<arg_key>p{i}</arg_key><arg_value>{i}</arg_value>" for i in range(n))
 
+    name, args = _parse_glm_tool_call(call(_MAX_XML_PARAMS))
     assert name == "f"
     assert len(args) == _MAX_XML_PARAMS
-    assert elapsed < 2.0
+
+    t0 = time.monotonic()
+    with pytest.raises(ValueError, match=f"more than {_MAX_XML_PARAMS} arguments"):
+        _parse_glm_tool_call(call(_MAX_XML_PARAMS + 5_000))
+    assert time.monotonic() - t0 < 2.0
 
 
 # ── Per-choice (n>1) streaming (H5) ──────────────────────────────────────
