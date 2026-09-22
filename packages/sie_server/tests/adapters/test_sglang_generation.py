@@ -34,12 +34,13 @@ from sie_server.adapters._generation_base import (
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.adapters.sglang import _server
 from sie_server.adapters.sglang import generation as generation_module
-from sie_server.adapters.sglang.cuda13 import SGLangStrictThinkingAdapter
+from sie_server.adapters.sglang.cuda13 import SGLangCuda13Adapter, SGLangStrictThinkingAdapter
+from sie_server.adapters.sglang.gemma import SGLangGemmaAdapter
 from sie_server.adapters.sglang.generation import (
     SGLangGenerationAdapter,
     _chunk_from_sglang_event,
     _encode_image_data,
-    _mamba_scheduler_strategy_value,
+    _mamba_strategy_value,
     _p_unsafe_from_verdict_logprobs,
     _parse_sglang_generate_response,
     _raise_for_sglang_event_error,
@@ -98,31 +99,33 @@ def test_load_required_memory_bytes_uses_mem_fraction_static() -> None:
     assert adapter.load_required_memory_bytes(device_type="cpu", device_total_bytes=10 * gb) is None
 
 
+@pytest.mark.parametrize("flag", ["--mamba-scheduler-strategy", "--mamba-radix-cache-strategy"])
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
         # two-token form (Qwen3.5-4B YAML shape) → exact value
-        (["--mamba-scheduler-strategy", "extra_buffer"], "extra_buffer"),
-        (["--mamba-scheduler-strategy", "default"], "default"),
+        (["FLAG", "extra_buffer"], "extra_buffer"),
+        (["FLAG", "default"], "default"),
         # flag=value form
-        (["--mamba-scheduler-strategy=extra_buffer"], "extra_buffer"),
-        (["--mamba-scheduler-strategy=default"], "default"),
+        (["FLAG=extra_buffer"], "extra_buffer"),
+        (["FLAG=default"], "default"),
         # absent → None
         (["--disable-overlap-schedule"], None),
         ([], None),
         # trailing flag with no value → None (no crash)
-        (["--mamba-scheduler-strategy"], None),
+        (["FLAG"], None),
         # a stray ``extra_buffer`` token elsewhere must NOT be read as the value
-        (["--some-other-flag", "extra_buffer", "--mamba-scheduler-strategy", "default"], "default"),
+        (["--some-other-flag", "extra_buffer", "FLAG", "default"], "default"),
         # last occurrence wins (argparse semantics)
-        (
-            ["--mamba-scheduler-strategy", "default", "--mamba-scheduler-strategy", "extra_buffer"],
-            "extra_buffer",
-        ),
+        (["FLAG", "default", "FLAG", "extra_buffer"], "extra_buffer"),
     ],
 )
-def test_mamba_scheduler_strategy_value(args: list[str], expected: str | None) -> None:
-    assert _mamba_scheduler_strategy_value(args) == expected
+def test_mamba_strategy_value(flag: str, args: list[str], expected: str | None) -> None:
+    assert _mamba_strategy_value([arg.replace("FLAG", flag) for arg in args], flag) == expected
+
+
+def test_mamba_strategy_value_ignores_the_other_engines_spelling() -> None:
+    assert _mamba_strategy_value(["--mamba-scheduler-strategy", "extra_buffer"], "--mamba-radix-cache-strategy") is None
 
 
 def test_speculative_launch_args_support_qwen_eagle_and_gemma_assistant() -> None:
@@ -2878,7 +2881,9 @@ async def test_duplicate_event_keys_raise_typed_error_before_output(adapter, n, 
     assert "secret" not in str(error.value)
 
 
-def _tp_adapter(**overrides: Any) -> SGLangGenerationAdapter:
+def _tp_adapter(
+    adapter_class: type[SGLangGenerationAdapter] = SGLangGenerationAdapter, **overrides: Any
+) -> SGLangGenerationAdapter:
     kwargs: dict[str, Any] = {
         "model_name_or_path": "Qwen/Qwen3-4B-Instruct",
         "max_seq_length": 32768,
@@ -2893,7 +2898,7 @@ def _tp_adapter(**overrides: Any) -> SGLangGenerationAdapter:
         kwargs["request_read_timeout_s"] = 120.0
         kwargs["startup_timeout_s"] = 600.0
     kwargs.update(overrides)
-    return SGLangGenerationAdapter(**kwargs)
+    return adapter_class(**kwargs)
 
 
 def _launch(adapter: SGLangGenerationAdapter, mock_popen: MagicMock, device: str = "cuda:0") -> tuple[list[str], dict]:
@@ -3009,6 +3014,106 @@ def test_capture_path_can_be_re_enabled_explicitly(
     )
 
     assert "--disable-piecewise-cuda-graph" not in cmd
+
+
+@pytest.mark.parametrize("adapter_class", [SGLangCuda13Adapter, SGLangStrictThinkingAdapter, SGLangGemmaAdapter])
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_cuda13_adapters_turn_off_the_prefill_capture_path_by_its_current_name(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    adapter_class: type[SGLangGenerationAdapter],
+) -> None:
+    """The CUDA 13 engine removed the piecewise flag; its prefill-phase flag replaces it."""
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, _env = _launch(_tp_adapter(adapter_class, tensor_parallel_size=4), mock_popen)
+
+    assert "--disable-prefill-cuda-graph" in cmd
+    assert "--disable-piecewise-cuda-graph" not in cmd
+
+
+@pytest.mark.parametrize("adapter_class", [SGLangCuda13Adapter, SGLangStrictThinkingAdapter, SGLangGemmaAdapter])
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, True),
+        ({"disable_piecewise_cuda_graph": False}, False),
+        ({"disable_cuda_graph": True}, False),
+    ],
+)
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_cuda13_adapters_keep_the_prefill_graph_off_at_width_one(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    overrides: dict[str, Any],
+    expected: bool,
+    adapter_class: type[SGLangGenerationAdapter],
+) -> None:
+    """Every CUDA 13 profile was sized on an engine that never captured this graph.
+
+    A profile may opt back in, and turning all CUDA graphs off needs no second flag.
+    """
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, _env = _launch(_tp_adapter(adapter_class, **overrides), mock_popen)
+
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "1"
+    assert ("--disable-prefill-cuda-graph" in cmd) is expected
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_cuda13_speculative_guard_accepts_the_renamed_mamba_flag(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    mock_find_port.return_value = 30005
+    mock_popen.return_value = MagicMock(poll=MagicMock(return_value=None))
+    mock_requests_get.return_value = MagicMock(status_code=200)
+
+    cmd, env = _launch(
+        _tp_adapter(
+            SGLangCuda13Adapter,
+            speculative={"enabled": True, "algorithm": "eagle"},
+            extra_launch_args=["--mamba-radix-cache-strategy", "extra_buffer"],
+        ),
+        mock_popen,
+    )
+
+    assert cmd[cmd.index("--mamba-radix-cache-strategy") + 1] == "extra_buffer"
+    assert env["SGLANG_ENABLE_SPEC_V2"] == "1"
+
+
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_cuda13_speculative_guard_rejects_the_retired_mamba_flag(
+    mock_find_port: MagicMock,
+    mock_popen: MagicMock,
+) -> None:
+    """The CUDA 13 engine no longer declares the old spelling, so it cannot satisfy the guard."""
+    mock_find_port.return_value = 30007
+    adapter = _tp_adapter(
+        SGLangCuda13Adapter,
+        speculative={"enabled": True, "algorithm": "eagle"},
+        extra_launch_args=["--mamba-scheduler-strategy", "extra_buffer"],
+    )
+
+    with pytest.raises(RuntimeError, match="'--mamba-radix-cache-strategy extra_buffer'"):
+        adapter.load("cuda:0")
+
+    mock_popen.assert_not_called()
 
 
 @pytest.mark.parametrize("bad", [0, -1, 9, 2.0, "4", True, None])

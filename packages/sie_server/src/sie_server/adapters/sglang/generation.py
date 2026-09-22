@@ -161,18 +161,16 @@ def _resolve_profile_startup_timeout(declared: float | None, *, tensor_parallel_
     return _server.resolve_startup_timeout(declared)
 
 
-def _mamba_scheduler_strategy_value(extra_launch_args: list[str]) -> str | None:
-    """Return the value passed to ``--mamba-scheduler-strategy``, or ``None``.
+def _mamba_strategy_value(extra_launch_args: list[str], flag: str) -> str | None:
+    """Return the value passed to the mamba strategy ``flag``, or ``None``.
 
-    Parses both the two-token form (``["--mamba-scheduler-strategy",
-    "extra_buffer"]``) and the ``--mamba-scheduler-strategy=value`` form; the
-    last occurrence wins (argparse semantics). Returns ``None`` when the flag is
-    absent. The speculative guard uses this to require the value be *exactly*
-    ``extra_buffer`` — substring-matching the joined args would let a wrong value
-    (e.g. ``--mamba-scheduler-strategy default``) slip past if the token
+    Parses both the two-token form (``[flag, "extra_buffer"]``) and the
+    ``flag=value`` form; the last occurrence wins (argparse semantics). Returns
+    ``None`` when the flag is absent. The speculative guard uses this to require
+    the value be *exactly* ``extra_buffer`` — substring-matching the joined args
+    would let a wrong value (e.g. ``no_buffer``) slip past if the token
     ``extra_buffer`` happened to appear elsewhere in the args.
     """
-    flag = "--mamba-scheduler-strategy"
     prefix = f"{flag}="
     value: str | None = None
     for i, arg in enumerate(extra_launch_args):
@@ -364,6 +362,12 @@ class SGLangGenerationAdapter(GenerationAdapter):
     requires_main_thread: bool = False
     manages_own_load_timeout: bool = True
 
+    # Spellings and defaults of the engine pinned by the ``sglang`` bundle.
+    # Adapters routed to a bundle that pins a newer engine override them.
+    _PREFILL_GRAPH_OFF_FLAG = "--disable-piecewise-cuda-graph"
+    _MAMBA_STRATEGY_FLAG = "--mamba-scheduler-strategy"
+    _PREFILL_GRAPH_OFF_AT_EVERY_WIDTH = False
+
     def __init__(
         self,
         model_name_or_path: str,
@@ -393,8 +397,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # this, so it is inert for every other model.
         guard: dict[str, Any] | None = None,
         speculative: dict[str, Any] | None = None,
-        # When ``speculative.enabled``, the adapter normally REQUIRES
-        # ``--mamba-scheduler-strategy extra_buffer`` in ``extra_launch_args``
+        # When ``speculative.enabled``, the adapter normally REQUIRES the mamba
+        # strategy flag set to ``extra_buffer`` in ``extra_launch_args``
         # — the Qwen3.x Gated-DeltaNet NEXTN + radix-cache pairing. Models whose
         # speculative path doesn't need it (e.g. Gemma 4 MTP — a standard
         # hybrid-attention model using an external ``-it-assistant`` NEXTN draft)
@@ -430,11 +434,13 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # port, which is the point: the engine's own default is a random port,
         # and two groups starting together can collide on it.
         nccl_port: int | None = None,
-        # SGLang enables a piecewise CUDA-graph capture path by default. It is
-        # measured to hang indefinitely at width two and to exhaust memory at
-        # width four, on a card and memory fraction where width one serves
-        # normally, so any width above one disables it unless a profile opts
-        # back in explicitly. None means "decide from the width".
+        # SGLang enables a prefill CUDA-graph capture path by default (the
+        # piecewise path before 0.5.20). It is measured to hang indefinitely at
+        # width two and to exhaust memory at width four, on a card and memory
+        # fraction where width one serves normally, so any width above one
+        # disables it unless a profile opts back in explicitly. None means
+        # "decide from the width", or off at every width for an adapter whose
+        # profiles were sized on an engine that never captured it.
         disable_piecewise_cuda_graph: bool | None = None,
         **kwargs: Any,  # accept extra args from loader for compatibility
     ) -> None:
@@ -457,7 +463,9 @@ class SGLangGenerationAdapter(GenerationAdapter):
             tensor_parallel_size=self._tensor_parallel_size,
         )
         self._disable_piecewise_cuda_graph = (
-            self._tensor_parallel_size > 1 if disable_piecewise_cuda_graph is None else disable_piecewise_cuda_graph
+            self._PREFILL_GRAPH_OFF_AT_EVERY_WIDTH or self._tensor_parallel_size > 1
+            if disable_piecewise_cuda_graph is None
+            else disable_piecewise_cuda_graph
         )
         self._compute_precision = compute_precision
         self._trust_remote_code = trust_remote_code
@@ -707,10 +715,10 @@ class SGLangGenerationAdapter(GenerationAdapter):
         if self._disable_cuda_graph:
             cmd.append("--disable-cuda-graph")
         # Distinct from --disable-cuda-graph, which turns off graph replay
-        # entirely. This disables only the piecewise capture path, so width
-        # above one keeps ordinary graph replay and its throughput.
+        # entirely. This disables only the prefill capture path, so width
+        # above one keeps decode graph replay and its throughput.
         if self._disable_piecewise_cuda_graph and not self._disable_cuda_graph:
-            cmd.append("--disable-piecewise-cuda-graph")
+            cmd.append(self._PREFILL_GRAPH_OFF_FLAG)
         # A forward batch that exceeds this crashes the engine rather than
         # hanging, so requests fail instead of waiting on a rank that will not
         # answer.
@@ -741,8 +749,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # SGLang 0.5.10+ requires ``SGLANG_ENABLE_SPEC_V2=1`` for NEXTN spec
         # decoding to coexist with the radix cache on hybrid-architecture
         # models (Qwen3.5 family — Gated DeltaNet + Gated Attention). The
-        # ``--mamba-scheduler-strategy extra_buffer`` flag, set via the model
-        # YAML's ``extra_launch_args``, is the matching CLI side; both are
+        # mamba strategy flag set to ``extra_buffer`` in the model YAML's
+        # ``extra_launch_args`` is the matching CLI side; both are
         # required as a pair. Empirically validated 2026-05-18 on L4 +
         # A100-40GB. Set unconditionally when speculative is on — the env var
         # is a no-op when sglang doesn't see speculative args.
@@ -750,24 +758,24 @@ class SGLangGenerationAdapter(GenerationAdapter):
         if self._speculative and self._speculative.get("enabled"):
             extra_env["SGLANG_ENABLE_SPEC_V2"] = "1"
             # The pair is required: setting ``SGLANG_ENABLE_SPEC_V2=1``
-            # without ``--mamba-scheduler-strategy extra_buffer`` (or
+            # without the mamba strategy set to ``extra_buffer`` (or
             # equivalent) crashes the radix cache mid-run on Qwen3.5
             # hybrid models with a confusing "spec_v2 requires extra
             # buffer" trace. Refuse to launch when the YAML omits the
             # flag so the misconfiguration surfaces as a startup error
             # instead of a runtime OOM that pages oncall.
             # Require the flag AND its exact ``extra_buffer`` value — a present
-            # flag with a wrong value (e.g. ``--mamba-scheduler-strategy default``)
-            # must not bypass the guard. Parse the flag's value precisely (both
+            # flag with a wrong value (e.g. ``no_buffer``) must not bypass the
+            # guard. Parse the flag's value precisely (both
             # the two-token and ``flag=value`` forms; last occurrence wins) rather
             # than substring-matching the joined args, which a stray
             # ``extra_buffer`` token elsewhere could satisfy.
             if (
                 self._speculative_needs_extra_buffer
-                and _mamba_scheduler_strategy_value(self._extra_launch_args) != "extra_buffer"
+                and _mamba_strategy_value(self._extra_launch_args, self._MAMBA_STRATEGY_FLAG) != "extra_buffer"
             ):
                 raise RuntimeError(
-                    "speculative decoding requires '--mamba-scheduler-strategy extra_buffer' "
+                    f"speculative decoding requires '{self._MAMBA_STRATEGY_FLAG} extra_buffer' "
                     "in extra_launch_args (see Qwen3.5-4B model YAML). Add the flag, set "
                     "speculative_needs_extra_buffer=false (non-DeltaNet models e.g. Gemma 4 "
                     "MTP), or disable speculative.enabled in the model config."

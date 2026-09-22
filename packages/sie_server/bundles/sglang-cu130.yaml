@@ -2,8 +2,8 @@ name: sglang-cu130
 priority: 20
 default: false
 # GPU platform this bundle targets — selects packages/sie_server/Dockerfile.cuda13
-# and tags images ``cuda13-sglang-cu130`` (not ``cuda12-*``). Gemma 4 needs sglang
-# 0.5.13 / torch 2.11 cu130 on a CUDA 13 devel runtime (see below). Read by the
+# and tags images ``cuda13-sglang-cu130`` (not ``cuda12-*``). The pinned engine
+# needs torch cu130 on a CUDA 13 devel runtime (see below). Read by the
 # image build. Bundles without this field default to ``cuda12``.
 platform: cuda13
 # General CUDA 13 / cu130 SGLang worker image, introduced for Google Gemma 4
@@ -38,6 +38,14 @@ platform: cuda13
 # and it adds humming-kernels and quack-kernels. xgrammar stays at 0.2.1.
 # Those versions are sglang's own ``==`` pins, not choices made here.
 #
+# 0.5.20 also renames launch flags SIE uses. ``--mamba-scheduler-strategy`` is
+# now ``--mamba-radix-cache-strategy``; ``--cuda-graph-max-bs`` is split into
+# ``--cuda-graph-max-bs-decode`` and ``--cuda-graph-max-bs-prefill``; and
+# ``--disable-piecewise-cuda-graph`` is gone, the prefill-phase graph it turned
+# off now controlled by ``--disable-prefill-cuda-graph``. The adapters routed
+# here and the profiles that use them carry the new names. The ``sglang``
+# bundle's engine keeps the old ones.
+#
 # The bundle's image carries torch (cu130) on a CUDA 13 base — built by
 # the dedicated ``cuda13`` platform (packages/sie_server/Dockerfile.cuda13),
 # selected via the ``platform: cuda13`` field above. The shared base venv still
@@ -53,28 +61,27 @@ adapters:
 - sie_server.adapters.sglang.gemma
 - sie_server.adapters.sglang.cuda13
 deps:
-  # sglang 0.5.13 = the validated Gemma 4 engine (0.5.11 has the activation.cuh
-  # JIT bug above). Verified transitive resolution on the Modal L4 cu130 image:
-  #   torch==2.11.0 (cu130), transformers==5.8.1, kernels==0.14.1,
-  #   sgl-deep-gemm==0.1.2, sglang-kernel==0.4.3, and
-  #   flashinfer-python==0.6.12 (the exact SGLang 0.5.13 closure).
+  # sglang 0.5.20 (see the VERSION NOTE above). Verified transitive resolution
+  # on the Modal cu130 image:
+  #   torch==2.13.0 (cu130), transformers==5.12.1, kernels==0.14.1,
+  #   sgl-deep-gemm==0.2.0, sglang-kernel==0.4.7, and
+  #   flashinfer-python==0.6.18 (the exact SGLang 0.5.20 closure).
   # These resolve from the cu130 wheel indexes at build/serve time
   # (download.pytorch.org/whl/cu130 + https://docs.sglang.ai/whl/cu130/),
   # supplied by the build (Dockerfile.cuda13 / Modal image). torch,
-  # transformers, and kernels are intentionally NOT re-pinned here — sglang
-  # 0.5.13's own exact pins drive them. (Pinning kernels<0.13 makes the resolve
-  # unsatisfiable: 0.5.13 requires kernels>=0.14.1,<0.15. sglang declares a
-  # bare unpinned `kernels`, so without 0.5.13's transitive pin uv would grab
-  # the latest, which breaks sglang's import — let sglang constrain it.)
+  # transformers, and kernels are intentionally NOT re-pinned here — sglang's
+  # own exact pins drive them. (sglang declares a bare unpinned `kernels`, so
+  # without its transitive pin uv would grab the latest, which breaks sglang's
+  # import — let sglang constrain it.)
   sglang: '==0.5.20'
   # Structured-output backend the Gemma model configs select
   # (tasks.generate ... grammar_backend: xgrammar). Pinned to the version
-  # sglang 0.5.13 resolves, to prevent silent drift (mirrors the sglang
-  # bundle's rationale). NOTE: 0.5.13 uses xgrammar 0.2.x, not the 0.1.32 the
-  # sglang bundle pins for the older engine.
+  # sglang 0.5.20 resolves, to prevent silent drift (mirrors the sglang
+  # bundle's rationale). NOTE: this engine uses xgrammar 0.2.x, not the 0.1.32
+  # the sglang bundle pins for the older engine.
   xgrammar: '==0.2.1'
   # XGrammar 0.2.1 imports ``tvm_ffi`` while its package metadata leaves the
-  # dependency open at >=0.1.9. SGLang 0.5.13 pins apache-tvm-ffi==0.1.9
+  # dependency open at >=0.1.9. SGLang 0.5.20 pins apache-tvm-ffi==0.1.11
   # exactly, so declare the same version explicitly: this keeps the import in
   # the image and lets the bundle resolve as one compatible dependency set.
   apache-tvm-ffi: '==0.1.11'

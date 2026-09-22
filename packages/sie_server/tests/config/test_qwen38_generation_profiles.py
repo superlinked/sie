@@ -144,11 +144,11 @@ def test_qwen38_hardware_launches_keep_fp8_weights_with_tuned_state_precision() 
         assert "--quantization" not in args
         assert args[args.index("--kv-cache-dtype") + 1] == "bfloat16"
         assert args[args.index("--mamba-ssm-dtype") + 1] == "bfloat16"
-        assert args[args.index("--mamba-scheduler-strategy") + 1] == "extra_buffer"
+        assert args[args.index("--mamba-radix-cache-strategy") + 1] == "extra_buffer"
         assert args.count("--disable-overlap-schedule") == 1
         assert args[args.index("--page-size") + 1] == "64"
         assert args[args.index("--max-running-requests") + 1] == "1"
-        assert args[args.index("--cuda-graph-max-bs") + 1] == "1"
+        assert args[args.index("--cuda-graph-max-bs-decode") + 1] == "1"
         assert profile.loadtime["extra_env"] == {"SGLANG_JIT_DEEPGEMM_FAST_WARMUP": "1"}
 
     for profile_name in (

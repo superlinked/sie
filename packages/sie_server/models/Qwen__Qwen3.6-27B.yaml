@@ -337,7 +337,7 @@ profiles:
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--quantization"
           - "fp8"
-          - "--mamba-scheduler-strategy"
+          - "--mamba-radix-cache-strategy"
           - "extra_buffer"
           - "--page-size"
           - "64"
@@ -373,7 +373,7 @@ profiles:
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--quantization"
           - "fp8"
-          - "--mamba-scheduler-strategy"
+          - "--mamba-radix-cache-strategy"
           - "extra_buffer"
           - "--page-size"
           - "64"
@@ -410,7 +410,7 @@ profiles:
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
           - "--quantization"
           - "fp8"
-          - "--mamba-scheduler-strategy"
+          - "--mamba-radix-cache-strategy"
           - "extra_buffer"
           - "--page-size"
           - "64"
