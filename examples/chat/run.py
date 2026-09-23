@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""Answer questions about a passage with SIE Cloud and quote the sentence used.
+"""Record ten-turn support conversations against SIE Cloud, three rules fixed.
 
-    uv run python run.py                          # every pinned question
-    uv run python run.py --case oxygen            # one passage, both questions
-    python3 run.py --show oxygen__answerable      # print a request, no network
+    uv run python run.py                      # all six conversations
+    uv run python run.py --conversation yose  # one conversation, ten turns
+    python3 run.py --show yose 8              # print a request, no network
 
-One call per question, the call the /chat task page shows:
+One call per turn, the call the /chat task page shows:
 
     POST https://api.superlinked.com/v1/chat/completions
     {"model": "Qwen/Qwen3.8-27B-FP8",
-     "messages": [<instruction>, <passage and question>],
-     "max_completion_tokens": 256}
+     "messages": [<system>, <user>, <assistant>, <user>, ...],
+     "max_completion_tokens": 300}
 
-No sampling fields are sent, so the answer is whatever the model profile
+The system message carries the park document and the three standing rules, and
+it is sent once, at the head of every turn. Turn N carries every earlier
+customer turn and every earlier reply the model actually gave, so turn ten
+carries nine exchanges. Nothing re-states the rules after turn one.
+
+No sampling fields are sent, so the reply is whatever the model profile
 defaults produce. Results go to --output as a manifest.json and a calls.json in
 the dataset's own shape, one entry per call holding the request, the response,
 the HTTP status, the served model revision and the round-trip time. The key
@@ -26,6 +31,7 @@ scores them offline.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -33,14 +39,31 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import prompt
+import conversation as corpus_module
 
 HERE = Path(__file__).resolve().parent
 
 
-def record(client: Any, case: dict[str, Any], question: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
-    """Send one question and return its calls.json entry."""
-    requested_at = datetime.now(UTC).isoformat(timespec="seconds")
+def reply_text(response: dict[str, Any]) -> str:
+    choices = response.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def record(
+    client: Any,
+    conversation: dict[str, Any],
+    index: int,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """Send one turn and return its calls.json entry."""
+    slug = corpus_module.turn_slug(conversation, index)
+    requested_at = datetime.now(UTC).isoformat()
     started = time.monotonic()
     response = client.chat_completions(
         body["model"],
@@ -51,107 +74,153 @@ def record(client: Any, case: dict[str, Any], question: dict[str, Any], body: di
     # The SDK attaches request-scoped metadata to the dict it returns. Drop it,
     # so `response` stays the server's own envelope and nothing else.
     envelope = {key: value for key, value in response.items() if key != "request"}
-    # Stop at the question that broke rather than at the end. score.py rejects
-    # an answerless entry or a missing revision later, but by then the
-    # remaining calls have already been paid for.
-    choices = envelope.get("choices") or []
-    content = choices[0].get("message", {}).get("content") if choices and isinstance(choices[0], dict) else None
-    if not isinstance(content, str) or not content.strip():
-        raise SystemExit(f"{prompt.question_slug(case, question)}: the response carried no answer text")
+    # Stop at the turn that broke rather than at the end. A conversation is
+    # sequential: turn N+1 has to carry turn N's reply, so continuing past a
+    # turn with no reply text would record a history that never happened.
+    if not reply_text(envelope).strip():
+        raise SystemExit(f"{slug}: the response carried no reply text")
     if not client.last_model_revision:
-        raise SystemExit(f"{prompt.question_slug(case, question)}: no served model revision reported")
+        raise SystemExit(f"{slug}: no served model revision reported")
     return {
-        "slug": prompt.question_slug(case, question),
-        "case": case["slug"],
-        "qid": question["qid"],
-        "kind": question["kind"],
+        "slug": slug,
+        "role": "evidence",
+        "run": "chat-completions-multi-turn",
+        "conversation": conversation["slug"],
+        "turn": index,
+        "turn_role": conversation["turns"][index - 1]["role"],
         "requested_at": requested_at,
-        "request": {
-            "method": "POST",
-            # The URL the SDK actually used, not this module's default, so a run
-            # against a regional endpoint records where it really went.
-            "url": client.base_url.rstrip("/") + prompt.CHAT_COMPLETIONS_PATH,
-            "body": body,
-        },
-        "status": 200,
-        "response": envelope,
-        "response_sha256": prompt.sha256_bytes(prompt.compact_json(envelope)),
+        # The URL the SDK actually used, not this module's default, so a run
+        # against a regional endpoint records where it really went.
+        "endpoint": corpus_module.CHAT_COMPLETIONS_PATH,
+        "model": body["model"],
+        "http_status": 200,
+        "client_latency_ms": elapsed_ms,
         "model_revision": client.last_model_revision,
-        "timing": {"duration_ms": elapsed_ms},
+        "request": body,
+        "response": envelope,
+        "request_sha256": corpus_module.sha256_text(json.dumps(body)),
+        "response_sha256": corpus_module.sha256_text(json.dumps(envelope, separators=(",", ":"))),
     }
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Record grounded answers from pinned passages")
-    parser.add_argument("--case", action="append", default=[], help="passage slug to run; repeatable, default all")
-    parser.add_argument("--show", metavar="SLUG", help="print one request body and exit, without calling anything")
+    parser = argparse.ArgumentParser(description="Record ten-turn conversations with fixed rules")
     parser.add_argument(
-        "--output", type=Path, default=HERE / "run-output", help="directory for manifest.json and calls.json"
+        "--conversation",
+        action="append",
+        default=[],
+        help="conversation slug to run; repeatable, default all",
+    )
+    parser.add_argument(
+        "--show",
+        nargs=2,
+        metavar=("SLUG", "TURN"),
+        help="print one request body and exit, without calling anything",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=HERE / "run-output",
+        help="directory for manifest.json and calls.json",
     )
     return parser.parse_args()
 
 
-def main() -> int:
-    import json
+def recorded_replies() -> dict[str, str]:
+    """Replies already on the record, for --show on a turn past the first.
 
+    Turn eight's request contains turns one to seven and the replies they got,
+    so showing it without the recording would mean inventing seven replies.
+    """
+    try:
+        calls = corpus_module.read_json(corpus_module.CALLS_PATH)
+    except corpus_module.InputError:
+        return {}
+    return {entry["slug"]: reply_text(entry.get("response") or {}) for entry in calls["calls"]}
+
+
+def main() -> int:
     args = parse_args()
-    cases_doc = prompt.load_cases()
-    cases = {case["slug"]: case for case in cases_doc["cases"]}
-    pairs = [(case, question) for case in cases_doc["cases"] for question in case["questions"]]
-    by_slug = {prompt.question_slug(case, question): (case, question) for case, question in pairs}
+    doc = corpus_module.load_corpus()
+    conversations = {item["slug"]: item for item in doc["conversations"]}
 
     if args.show:
-        pair = by_slug.get(args.show)
-        if pair is None:
-            raise SystemExit(f"Unknown question: {args.show}. Known: {', '.join(sorted(by_slug))}")
-        print(json.dumps(prompt.request_body(cases_doc, *pair), indent=2, ensure_ascii=False))
+        slug, raw_index = args.show
+        item = conversations.get(slug)
+        if item is None:
+            raise SystemExit(f"Unknown conversation: {slug}. Known: {', '.join(sorted(conversations))}")
+        index = int(raw_index)
+        if not 1 <= index <= len(item["turns"]):
+            raise SystemExit(f"{slug} has turns 1 to {len(item['turns'])}, not {index}")
+        replies = recorded_replies() if index > 1 else {}
+        try:
+            body = corpus_module.request_body(item, index, replies)
+        except corpus_module.InputError as error:
+            raise SystemExit(f"{error} Run `python3 fetch.py` to show a turn past the first.") from error
+        print(json.dumps(body, indent=2, ensure_ascii=False))
         return 0
 
-    # Imported only on the path that calls the API, so `--show` and every
-    # offline path run on a bare python3 with nothing installed.
-    from sie_sdk import SIEClient
-
-    selected = args.case or list(cases)
-    unknown = [slug for slug in selected if slug not in cases]
+    selected = args.conversation or list(conversations)
+    unknown = [slug for slug in selected if slug not in conversations]
     if unknown:
-        raise SystemExit(f"Unknown case(s): {', '.join(unknown)}")
-    duplicated = sorted({slug for slug in selected if selected.count(slug) > 1})
-    if duplicated:
-        raise SystemExit(f"Repeated --case: {', '.join(duplicated)}")
+        raise SystemExit(f"Unknown conversation(s): {', '.join(unknown)}")
+    repeated = sorted({slug for slug in selected if selected.count(slug) > 1})
+    if repeated:
+        raise SystemExit(f"Repeated --conversation: {', '.join(repeated)}")
 
     api_key = os.environ.get("SIE_API_KEY", "").strip()
     if not api_key:
-        raise SystemExit("Set SIE_API_KEY. To check the published figure without a key, run score.py instead.")
+        raise SystemExit("Set SIE_API_KEY. To check the published figures without a key, run score.py instead.")
 
-    client = SIEClient(os.environ.get("SIE_BASE_URL", prompt.ENDPOINT), api_key=api_key, timeout_s=900)
+    # Imported only on the path that calls the API, so `--show` and every
+    # offline path run on a bare python3 with nothing installed. The key check
+    # comes first, so a reader who forgot it gets that answer rather than an
+    # import error about a dependency they may not need.
+    from sie_sdk import SIEClient
+
+    client = SIEClient(
+        os.environ.get("SIE_BASE_URL", corpus_module.ENDPOINT),
+        api_key=api_key,
+        timeout_s=900,
+    )
     base_url = client.base_url.rstrip("/")
-    print(f"endpoint {base_url}{prompt.CHAT_COMPLETIONS_PATH}")
-    print(f"model    {cases_doc['model']}")
+    print(f"endpoint {base_url}{corpus_module.CHAT_COMPLETIONS_PATH}")
+    print(f"model    {corpus_module.MODEL}")
 
-    entries = []
+    entries: list[dict[str, Any]] = []
+    replies: dict[str, str] = {}
     for slug in selected:
-        case = cases[slug]
-        for question in case["questions"]:
-            entry = record(client, case, question, prompt.request_body(cases_doc, case, question))
+        item = conversations[slug]
+        for turn in item["turns"]:
+            index = turn["index"]
+            body = corpus_module.request_body(item, index, replies)
+            entry = record(client, item, index, body)
             entries.append(entry)
-            revision = entry["model_revision"] or "not reported"
-            print(f"{entry['slug']:<40} {entry['timing']['duration_ms']:>8.0f} ms  revision {revision}")
+            replies[entry["slug"]] = reply_text(entry["response"])
+            shown = replies[entry["slug"]].replace("\n", " / ")
+            print(f"{entry['slug']:<14} {entry['client_latency_ms']:>8.0f} ms  {shown[:100]}")
 
-    revisions = sorted({entry["model_revision"] for entry in entries if entry["model_revision"]})
+    revisions = sorted({entry["model_revision"] for entry in entries})
+    stamps = sorted(entry["requested_at"] for entry in entries)
     manifest = {
         "task": "chat",
         "page": "https://superlinked.com/chat",
         "endpoint": base_url,
-        "path": prompt.CHAT_COMPLETIONS_PATH,
-        "model": cases_doc["model"],
+        "path": corpus_module.CHAT_COMPLETIONS_PATH,
+        "model": corpus_module.MODEL,
         "model_revision": revisions[0] if len(revisions) == 1 else revisions,
-        "run_date": datetime.now(UTC).date().isoformat(),
+        "run": "chat-completions-multi-turn",
+        "run_date": stamps[0][:10],
+        "run_started_utc": stamps[0],
+        "run_completed_utc": stamps[-1],
         "recorded_by": "examples/chat/run.py",
         "sampling": "model profile defaults; no temperature, top_p or seed was sent",
+        "max_completion_tokens": corpus_module.MAX_COMPLETION_TOKENS,
+        "max_words": corpus_module.MAX_WORDS,
+        "conversations": len(selected),
+        "turns_per_conversation": len(conversations[selected[0]]["turns"]),
         "calls_recorded": len(entries),
-        "response_sha256": (
-            "sha256 of json.dumps(response, ensure_ascii=False, separators=(',', ':')).encode('utf-8')"
-        ),
+        "corpus_sha256": corpus_module.sha256_bytes(corpus_module.CORPUS_PATH.read_bytes()),
     }
     args.output.mkdir(parents=True, exist_ok=True)
     for name, value in (("manifest.json", manifest), ("calls.json", {"calls": entries})):
