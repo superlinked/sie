@@ -26,17 +26,27 @@ Hero, the query "color switching led lights" against an LED bulb listing:
 | Terms SPLADE added | 8.656 |
 | shared terms | 7 listed, "11 more shared terms", so 18 |
 
-Six cards, each as "SPLADE added A of its N terms" against "bge-m3 sparse
-added 0 of its M":
+Three proof cards, each as "N terms returned, A added by the model":
 
 | text | SPLADE | bge-m3 sparse |
 |---|---|---|
 | `b77-card-arrival` | 46 of 56 | 0 of 15 |
-| `b77-transfer-not-received` | 54 of 65 | 0 of 16 |
-| `b77-compromised-card` | 42 of 56 | 0 of 21 |
-| `b77-atm-short-cash` | 44 of 54 | 0 of 18 |
 | `esci-query-chrome-notebook` | 23 of 25 | 0 of 3 |
-| `cpsc-25437-power-bank` | 96 of 113 | 0 of 27 |
+| `cpsc-25431-ladder` | 127 of 144 | 0 of 19 |
+
+The line under that grid is a claim about the whole run rather than about the
+three cards, so `score.py` checks it over every recorded text:
+
+| displayed | value |
+|---|---|
+| recorded texts | 13, in 26 calls |
+| SPLADE added | between 23 and 127 terms the text never used |
+| bge-m3 sparse added | none, on all 13 |
+
+The ten texts the page does not show are recorded all the same, and the
+run-level figures above are derived from all thirteen. Which cards the grid
+displays is a display choice; the run is not, and the two are checked
+separately because they fail separately.
 
 ## Run it
 
@@ -75,7 +85,7 @@ sending it.
 ## What to expect
 
 `score.py` prints the added and active term counts for all 26 calls, then the
-six published cards, then:
+run-level figures, then the three published cards, then:
 
 ```
 Hero pair color-switching-to-color-changing-bulb, model prithivida/Splade_PP_en_v2
@@ -84,8 +94,10 @@ Hero pair color-switching-to-color-changing-bulb, model prithivida/Splade_PP_en_
   terms SPLADE added   8.656
   shared terms         18   (7 listed on the page, 11 more)
 
-Reproduced: the hero pair 13.998 = 5.342 + 8.656 over 18 shared terms,
-and the added-of-active counts on all six published cards.
+Reproduced: the hero pair 13.998 = 5.342 + 8.656 over 18 shared terms;
+the added-of-active counts on the 3 cards the proof grid displays;
+and, over all 13 recorded texts, that SPLADE added between 23
+and 127 terms while bge-m3 sparse added none.
 ```
 
 It exits nonzero if any figure fails to reproduce, including the decomposition:
@@ -110,6 +122,14 @@ mapping was recorded at run time into `derived/decoded/`. `score.py` does not
 take it on trust: it re-counts active terms and added terms from the response
 and fails if the decoded record disagrees.
 
+A card lists twelve rows and says the model returned 144 terms, and both are
+right. Two things separate them. The list is the strongest twelve, not all of
+them. And SPLADE scores entries of the BERT uncased vocabulary, some of which
+are word pieces rather than words, so a `##` entry counts toward the totals
+above without being listed: `##book` is not a term anyone can search for. The
+counts here are counts of returned dimensions and are unaffected by that
+display rule.
+
 ## What is in the dataset
 
 ```
@@ -130,6 +150,11 @@ byte of any request or response.
   search result. Nothing here measures recall or precision on a ranked list.
 - **Nothing about bge-m3 sparse being worse.** It adds no terms by design.
   "0 of 15" is what that model does, not a failure.
+- **Nothing about the three cards being representative.** They were chosen to
+  span the recorded range of added terms and to cover three kinds of text.
+  `score.py` checks that their figures are the recorded ones and that the
+  run-level range holds over all thirteen. It does not check that a reader
+  seeing three cards would draw the same conclusion as one seeing thirteen.
 - **Nothing about the tokenizer mapping if `derived/decoded/` is wrong.** The
   counts are re-derived from the responses and cross-checked, but the token
   strings themselves are taken from the recorded decode. Re-deriving them

@@ -4,9 +4,12 @@
     python3 fetch.py
     python3 score.py
 
-The page has no single headline number. It publishes concrete figures per card,
-and this script re-derives every one of them offline, with no API key and no
-inference spend, exiting nonzero if any fails.
+The page has no single headline number. It publishes concrete figures, and this
+script re-derives every one of them offline, with no API key and no inference
+spend, exiting nonzero if any fails.
+
+What the page shows and what the run contains are different things, and they
+fail separately, so they are checked separately here.
 
 Hero, the shopper query "color switching led lights" against the ILC bulb
 listing, under prithivida/Splade_PP_en_v2:
@@ -16,15 +19,21 @@ listing, under prithivida/Splade_PP_en_v2:
     Terms SPLADE added     8.656
     7 shared terms listed, "11 more shared terms"   (18 shared terms)
 
-Six cards, each "SPLADE added A of its N terms" and "bge-m3 sparse added 0 of
-its M":
+Three proof cards, each "N terms returned, A added by the model":
 
     b77-card-arrival             46 of 56    0 of 15
-    b77-transfer-not-received    54 of 65    0 of 16
-    b77-compromised-card         42 of 56    0 of 21
-    b77-atm-short-cash           44 of 54    0 of 18
     esci-query-chrome-notebook   23 of 25    0 of  3
-    cpsc-25437-power-bank        96 of 113   0 of 27
+    cpsc-25431-ladder           127 of 144   0 of 19
+
+The line under that grid is a claim about the whole run rather than about the
+three cards, so it is checked over every recorded text:
+
+    13 texts, 26 calls
+    SPLADE added between 23 and 127 terms the text never used
+    bge-m3 sparse added none, on all 13
+
+The cards are a display choice and the run is not. Reselecting cards edits
+PAGE_CARDS and nothing else; the run-level checks below do not move.
 
 How each number is derived:
 
@@ -58,13 +67,23 @@ TOLERANCE = 1e-9
 HERO_PAIR = "color-switching-to-color-changing-bulb"
 HERO_EXPECTED = {"score": 13.998, "in_both": 5.342, "added": 8.656, "shared_terms": 18}
 
-CARDS = {
+# The three texts the proof grid displays, with the counts printed on each
+# card. This is the only table a card reselection touches.
+PAGE_CARDS = {
     "b77-card-arrival": {"splade": (46, 56), "bge": (0, 15)},
-    "b77-transfer-not-received": {"splade": (54, 65), "bge": (0, 16)},
-    "b77-compromised-card": {"splade": (42, 56), "bge": (0, 21)},
-    "b77-atm-short-cash": {"splade": (44, 54), "bge": (0, 18)},
     "esci-query-chrome-notebook": {"splade": (23, 25), "bge": (0, 3)},
-    "cpsc-25437-power-bank": {"splade": (96, 113), "bge": (0, 27)},
+    "cpsc-25431-ladder": {"splade": (127, 144), "bge": (0, 19)},
+}
+
+# The line under the grid, which is about every recorded text rather than the
+# three on the page. Checked over the whole run, so it stays true whichever
+# cards the page selects.
+RUN_TOTALS = {
+    "texts": 13,
+    "calls": 26,
+    "splade_added_min": 23,
+    "splade_added_max": 127,
+    "bge_added": 0,
 }
 
 
@@ -141,20 +160,59 @@ def main() -> int:
         )
         print(f"{input_id:<34} {call['model']:<26} {added:>4}  {active_from_response:>5}")
 
+    # --- the whole run, which the line under the grid is about --------------
+    #
+    # A short run must fail rather than pass over whatever it happens to hold:
+    # min() and max() over three texts would agree with themselves perfectly.
+    print("\nThe recorded run, which the line under the proof grid is about")
+    if len(table) != RUN_TOTALS["texts"]:
+        failures.append(f"recorded {len(table)} texts, the page says {RUN_TOTALS['texts']}")
+    if len(calls) != RUN_TOTALS["calls"]:
+        failures.append(f"recorded {len(calls)} calls, the page says {RUN_TOTALS['calls']}")
+
+    missing = [input_id for input_id, models in table.items() if set(models) != {"splade", "bge"}]
+    if missing:
+        failures.append("every text needs both models recorded, these do not: " + ", ".join(sorted(missing)))
+
+    splade_added = [models["splade"][0] for models in table.values() if "splade" in models]
+    bge_added = sorted({models["bge"][0] for models in table.values() if "bge" in models})
+    if not splade_added:
+        failures.append("no SPLADE calls recorded, so the added-term range cannot be derived")
+    else:
+        print(f"  {len(table)} texts, {len(calls)} calls")
+        print(f"  SPLADE added between {min(splade_added)} and {max(splade_added)} terms the text never used")
+        print(f"  bge-m3 sparse added {', '.join(str(value) for value in bge_added)}, on all {len(table)}")
+        if min(splade_added) != RUN_TOTALS["splade_added_min"]:
+            failures.append(
+                f"SPLADE added at least {min(splade_added)}, the page says {RUN_TOTALS['splade_added_min']}"
+            )
+        if max(splade_added) != RUN_TOTALS["splade_added_max"]:
+            failures.append(
+                f"SPLADE added at most {max(splade_added)}, the page says {RUN_TOTALS['splade_added_max']}"
+            )
+        if bge_added != [RUN_TOTALS["bge_added"]]:
+            failures.append(f"bge-m3 sparse added {bge_added}, the page says it adds only {RUN_TOTALS['bge_added']}")
+
+    # --- the three texts the proof grid displays ----------------------------
     print("\nCards published on the page")
-    for input_id, expected in CARDS.items():
+    for input_id, expected in PAGE_CARDS.items():
         got = table.get(input_id)
         if got is None:
-            failures.append(f"{input_id}: no recorded calls")
+            failures.append(f"{input_id}: the page shows this card and the run does not hold it")
             continue
         for model_key, want in expected.items():
             have = got.get(model_key)
             label = "SPLADE" if model_key == "splade" else "bge-m3 sparse"
+            if have is None:
+                failures.append(f"{input_id}/{model_key}: no recorded call")
+                continue
             print(f"  {input_id:<32} {label:<14} added {have[0]} of its {have[1]} terms")
             if have != want:
                 failures.append(
                     f"{input_id}/{model_key}: got {have[0]} of {have[1]}, page publishes {want[0]} of {want[1]}"
                 )
+    shown = len(PAGE_CARDS)
+    print(f"  {shown} of the {len(table)} recorded texts, the other {len(table) - shown} recorded and not displayed")
 
     # --- hero pair ---------------------------------------------------------
     pairs = load(data_dir / f"derived/decoded/{SPLADE_DIR}/pairs.json")
@@ -210,8 +268,10 @@ def main() -> int:
         for line in failures:
             print(f"  {line}", file=sys.stderr)
         return 1
-    print("\nReproduced: the hero pair 13.998 = 5.342 + 8.656 over 18 shared terms,")
-    print("and the added-of-active counts on all six published cards.")
+    print("\nReproduced: the hero pair 13.998 = 5.342 + 8.656 over 18 shared terms;")
+    print(f"the added-of-active counts on the {len(PAGE_CARDS)} cards the proof grid displays;")
+    print(f"and, over all {len(table)} recorded texts, that SPLADE added between {min(splade_added)}")
+    print(f"and {max(splade_added)} terms while bge-m3 sparse added none.")
     return 0
 
 
