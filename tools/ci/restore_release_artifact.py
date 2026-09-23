@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -34,8 +35,17 @@ def restore(
         return False
     if len(matches) != 1 or matches[0].get("expired") is not False:
         raise ValueError("original release artifact is duplicated or expired")
+    expected_head = source_revision
+    if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+        # Actions records the PR head, while the tested bytes come from GITHUB_SHA's merge commit.
+        if os.environ.get("GITHUB_SHA") != source_revision:
+            raise ValueError("candidate artifact source must match the workflow merge SHA")
+        event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+        expected_head = event.get("pull_request", {}).get("head", {}).get("sha")
+        if not isinstance(expected_head, str) or re.fullmatch(r"[0-9a-f]{40}", expected_head) is None:
+            raise ValueError("candidate artifact requires a full pull request head SHA")
     original = matches[0].get("workflow_run", {})
-    if str(original.get("id")) != str(run_id) or original.get("head_sha") != source_revision:
+    if str(original.get("id")) != str(run_id) or original.get("head_sha") != expected_head:
         raise ValueError("original release artifact source/run mismatch")
     subprocess.run(  # noqa: S603
         [  # noqa: S607

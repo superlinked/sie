@@ -125,6 +125,7 @@ def test_chart_publisher_only_uploads_missing_exact_archive(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("mode", ["missing", "valid", "wrong_sha", "expired"])
 def test_retry_restores_only_original_retained_bytes(tmp_path, monkeypatch, mode):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "release")
     (tmp_path / "image.tar").write_bytes(b"retained tested bytes")
     artifact.create_manifest(tmp_path, kind="docker", **IDENTITY)
     record = {
@@ -146,6 +147,7 @@ def test_retry_restores_only_original_retained_bytes(tmp_path, monkeypatch, mode
 
 
 def test_retry_evidence_must_match_retained_image_archive(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "release")
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     (archive_dir / "image.tar").write_bytes(b"retained tested bytes")
@@ -168,3 +170,43 @@ def test_retry_evidence_must_match_retained_image_archive(tmp_path, monkeypatch)
     provenance.write_text("different image evidence")
     with pytest.raises(ValueError, match="differs from its retained archive"):
         restore.restore(evidence, **kwargs)
+
+
+def test_candidate_retry_binds_api_pr_head_and_retained_merge_source(tmp_path, monkeypatch):
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps({"pull_request": {"head": {"sha": "b" * 40}}}))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+    monkeypatch.setenv("GITHUB_SHA", IDENTITY["source_revision"])
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    (directory / "image.tar").write_bytes(b"tested candidate image")
+    manifest = artifact.create_manifest(directory, kind="docker", **IDENTITY)
+    record = {
+        "name": "docker-service-sie-config-0.7.4",
+        "expired": False,
+        "workflow_run": {"id": 1234, "head_sha": "b" * 40},
+    }
+    monkeypatch.setattr(
+        restore.subprocess, "check_output", lambda *_args, **_kwargs: json.dumps([{"artifacts": [record]}])
+    )
+    commands = []
+    monkeypatch.setattr(restore.subprocess, "run", lambda command, **_kwargs: commands.append(command))
+    kwargs = {"name": record["name"], "kind": "docker", **IDENTITY}
+    assert restore.restore(directory, **kwargs)
+    assert len(commands) == 1
+
+    monkeypatch.setenv("GITHUB_SHA", "c" * 40)
+    with pytest.raises(ValueError, match="workflow merge SHA"):
+        restore.restore(directory, **kwargs)
+    monkeypatch.setenv("GITHUB_SHA", IDENTITY["source_revision"])
+    event_path.write_text(json.dumps({"pull_request": {"head": {"sha": "not-a-sha"}}}))
+    with pytest.raises(ValueError, match="full pull request head SHA"):
+        restore.restore(directory, **kwargs)
+    assert len(commands) == 1
+
+    event_path.write_text(json.dumps({"pull_request": {"head": {"sha": "b" * 40}}}))
+    manifest["source_revision"] = "b" * 40
+    (directory / "provenance.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="provenance mismatch: source_revision"):
+        restore.restore(directory, **kwargs)
