@@ -647,16 +647,53 @@ def audio_release_contract() -> tuple[str, str, str]:
     return version, filename, url
 
 
-def audio_checkout_errors(build: str) -> list[str]:
+def default_run_shell(block: str, indent: int) -> str | None:
+    """Read defaults.run.shell from block mappings; unsupported forms fail closed."""
+    lines = block.splitlines()
+    for key in ("defaults", "run", "shell"):
+        prefix = f"{' ' * indent}{key}:"
+        found = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+        if not found:
+            return None
+        if len(found) != 1:
+            return ""
+        start = found[0]
+        value = lines[start].removeprefix(prefix).strip()
+        if key == "shell":
+            return value
+        if value:
+            return ""
+        end = next(
+            (
+                index
+                for index in range(start + 1, len(lines))
+                if lines[index].strip()
+                and not lines[index].lstrip().startswith("#")
+                and len(lines[index]) - len(lines[index].lstrip()) <= indent
+            ),
+            len(lines),
+        )
+        lines = lines[start + 1 : end]
+        indent += 2
+    return None
+
+
+def audio_checkout_errors(build: str, workflow: str) -> list[str]:
     """Require the container's exact-source check to trust only its current workspace."""
     lines = step_lines(build)
     assertion = exact_commands(lines, (("rev-parse", re.compile(re.escape(AUDIO_SOURCE_ASSERTION))),))
+    shell = default_run_shell(build, JOB_FIELD_INDENT)
+    if shell is None:
+        shell = default_run_shell(workflow, 0)
     if assertion is not None:
         start, end = step_bounds(lines, assertion[0][0])
-        active = lines[start:end]
+        active = [line.removeprefix("- ") for line in lines[start:end]]
         if (
-            "set -euo pipefail" in active
-            and not any(line.startswith(("if:", "continue-on-error:", "shell:", "set +")) for line in lines)
+            shell == "bash"
+            and "set -euo pipefail" in active
+            and job_scalar(build, "if") is None
+            and job_scalar(build, "continue-on-error") is None
+            and not any(line.startswith(("if:", "continue-on-error:", "shell:", "set +")) for line in active)
             and not refresh_control_flow(lines, assertion)
             and build.count("safe.directory") == 1
         ):
@@ -678,7 +715,9 @@ def audio_release_errors() -> list[str]:
     if not isinstance(rust, dict) or rust.get("version") != "1.98.1":
         errors.append("native audio release must use the repository Rust 1.98.1 pin")
     workflow = (ROOT / ".github/workflows/release-audio.yml").read_text()
-    errors.extend(audio_checkout_errors(workflow_job_blocks(".github/workflows/release-audio.yml").get("build", "")))
+    errors.extend(
+        audio_checkout_errors(workflow_job_blocks(".github/workflows/release-audio.yml").get("build", ""), workflow)
+    )
     required = (
         "ref: ${{ inputs.sha }}",
         AUDIO_MANYLINUX_IMAGE,
