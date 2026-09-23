@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/superlinked/sie/compare/v0.8.1...v0.8.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **release:** rehearse all artifacts before publication ([#342](https://github.com/superlinked/sie/issues/342)) ([cf2b732](https://github.com/superlinked/sie/commit/cf2b732028703eb6f20cf7db144664f2216eb7d4))
+
 ## [0.8.1](https://github.com/superlinked/sie/compare/v0.8.0...v0.8.1) (2026-09-23)
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "sie-lancedb"
-version = "0.8.1"
+version = "0.8.2"
 description = "SIE integration for LanceDB"
 requires-python = ">=3.12"
 dependencies = [
