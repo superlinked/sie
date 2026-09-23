@@ -56,10 +56,12 @@ second-pass/
   calls.json             24 entries: three arms over the eight documents
 ```
 
-It is in git rather than in the dataset because none of it is large and no arm
-sends an image. The two arms that reference one name it by the path and SHA-256
-the first pass pinned, so `python3 score.py` scores both passes after a single
-`fetch.py`.
+It is in git rather than in the dataset because none of it is large. A1 and A3
+do send the page image; what the recorded requests store in its place is a
+placeholder naming the path and SHA-256 the first pass pinned, so these files
+carry no image bytes and `python3 score.py` scores both passes after a single
+`fetch.py`. A2 is the arm that sends no image at all, and that turns out to be
+why it wins.
 
 ## Run it
 

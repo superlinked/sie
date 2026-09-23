@@ -51,8 +51,10 @@ responses are not re-recorded.
 - **A2, second call, no image.** Stage two receives the original schema and
   stage one's JSON as text, and returns a corrected object.
   `/v1/chat/completions` with `response_format: json_schema`, because
-  superlinked/sie-internal#4370 makes `/v1/generate` skip the chat template for
-  text-only prompts on Qwen.
+  `/v1/generate` skips the chat template for a plain text prompt on Qwen models,
+  so a text-only second call there would be answered by a model that never saw
+  its instructions as a message. An image input does go through the template,
+  which is why A1 and A3 stay on `/v1/generate`.
 - **A3, second call, with the image.** Stage two receives the page image, the
   original schema and stage one's JSON, and returns a corrected object.
   `/v1/generate`, the same path stage one uses.
@@ -87,3 +89,13 @@ page would say that in those words.
 
 Whatever arm wins, the seam is published: which of the 43 it does not fix, by
 class.
+
+---
+
+*One wording change after the run, recorded rather than made silently: the A2
+bullet originally cited a private issue tracker by name for the `/v1/generate`
+chat-template behaviour. The public repository's tree policy forbids that
+reference, so the bullet now states the behaviour itself. No arm, prompt, schema,
+threshold or tie-break was touched, and `score_second_pass.py` rebuilds every
+request from `experiment.json` rather than from this file, so the arms are
+checkable independently of any edit here.*

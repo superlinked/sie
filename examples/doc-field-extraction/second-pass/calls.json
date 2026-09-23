@@ -1,5 +1,5 @@
 {
-	"note": "The 24 second-pass calls behind superlinked.com/doc-field-extraction, three arms over the eight recorded documents. Unlike the first pass, these live in this repository rather than in the dataset: no arm sends an image, and the two that reference one name it by the path and SHA-256 the first pass pinned, so nothing here needs fetching. Recorded by second-pass/run_second_pass.py in superlinked/sie-web.",
+	"note": "The 24 second-pass calls behind superlinked.com/doc-field-extraction, three arms over the eight recorded documents. Unlike the first pass, these live in this repository rather than in the dataset, because they carry no image bytes: A1 and A3 do send the page image, and their recorded requests store a placeholder naming the path and SHA-256 the first pass pinned, while A2 sends no image at all. Nothing here needs fetching. Recorded by second-pass/run_second_pass.py in superlinked/sie-web. The digests here are over these records as stored, so they can be recomputed; they catch corruption, and score.py rebuilds every request from the pre-registered arms because a digest sitting beside the data it describes catches nothing else.",
 	"endpoint": "https://api.superlinked.com",
 	"model": "Qwen/Qwen3.8-27B-FP8",
 	"run_started_utc": "2026-09-22T21:03:56.462366Z",

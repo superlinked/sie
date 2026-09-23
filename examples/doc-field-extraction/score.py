@@ -18,8 +18,9 @@ applies the comparison rules `inputs.json` records under "scoring", and never
 edits an expected value.
 
 The second pass is scored by the same functions, over `second-pass/calls.json`,
-which lives in this repository rather than in the dataset because no arm sends
-an image. Its three arms and their prompts were fixed in
+which lives in this repository rather than in the dataset because it carries no
+image bytes: A1 and A3 do send the page image, and their recorded requests store
+a placeholder naming its path and SHA-256 instead. A2 sends no image at all. Its three arms and their prompts were fixed in
 `second-pass/PRE-REGISTRATION.md` before any of those 24 calls, together with
 the rule that published one of them and the rule that would have published none.
 
@@ -32,6 +33,7 @@ import hashlib
 import json
 import sys
 import unicodedata
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -343,6 +345,20 @@ def verify_evidence(inputs: dict[str, Any], manifest: dict[str, Any], calls: dic
     return problems
 
 
+def second_pass_path(arm_name: str, arm: dict[str, Any], model: str) -> str:
+    """The path this arm posts to, rebuilt rather than compared as a string.
+
+    The generate arms put the model in the path, url-quoted with `/` written as
+    `__`, byte-identical to wireGenerateModel() in the site's codegen and to
+    run_second_pass.py. Rebuilding it checks that the recorded path names the
+    registered model, which a literal comparison against `arm["path"]` would
+    not: that field holds `/v1/generate`, without the model.
+    """
+    if arm_name == "a2":
+        return arm["path"]
+    return f"/v1/generate/{urllib.parse.quote(model.replace('/', '__'), safe='')}"
+
+
 def second_pass_reply(entry: dict[str, Any]) -> Any:
     """The JSON object one second-pass reply carries, or None.
 
@@ -357,7 +373,17 @@ def second_pass_reply(entry: dict[str, Any]) -> Any:
         choices = body.get("choices")
         if not isinstance(choices, list) or not choices:
             return None
-        text = (choices[0].get("message") or {}).get("content")
+        # Every hop is checked before it is indexed. `choices[0].get(...)` and
+        # `(message or {}).get(...)` both raise AttributeError on a non-dict,
+        # and a reply's shape is constrained by nothing but a digest that
+        # travels with it, so the docstring's promise has to be enforced here.
+        first = choices[0]
+        if not isinstance(first, dict):
+            return None
+        message = first.get("message")
+        if not isinstance(message, dict):
+            return None
+        text = message.get("content")
     else:
         text = body.get("text")
     if not isinstance(text, str):
@@ -450,6 +476,28 @@ def score_second_pass(
             entry = entries[f"{case_id}__{arm_name}"]
             if entry["status"] != 200:
                 problems.append(f"{entry['slug']}: recorded status {entry['status']}")
+            # Everything the scorer reads off an entry is held against the arm
+            # and case it was looked up by, not just the body. `path` decides
+            # which parser reads the reply, so an entry with the right body and
+            # a wrong path would be parsed as the other endpoint and still
+            # verify; `arm` and `case` are the same class as the first pass's
+            # `slug` check; and the page claims one model and revision across
+            # both passes, which is a claim only a comparison can hold up.
+            wire_path = second_pass_path(arm_name, arm, experiment["model"])
+            if entry["path"] != wire_path:
+                problems.append(
+                    f"{entry['slug']}: recorded on {entry['path']!r}, but arm {arm_name} posts to {wire_path!r}"
+                )
+            if (entry["arm"], entry["case"]) != (arm_name, case_id):
+                problems.append(
+                    f"{entry['slug']}: recorded as arm {entry['arm']!r} case {entry['case']!r}; "
+                    f"the slug must be exactly {case_id}__{arm_name}"
+                )
+            if entry["model"] != experiment["model"]:
+                problems.append(
+                    f"{entry['slug']}: recorded on {entry['model']!r}, but the arms register "
+                    f"{experiment['model']!r}"
+                )
             # These two digests travel inside calls.json, so they catch a
             # corrupted file and nothing more; an editor who changes a record
             # and recomputes the digest beside it satisfies both. What pins this
@@ -482,6 +530,7 @@ def score_second_pass(
                     "fields_total": len(fields),
                     "fields_matched": sum(1 for row in fields if row["match"]),
                     "schema_valid_json": not errors,
+                    "attempts": entry["attempts"],
                     "fixed": [row["field"] for row in fields if row["match"] and not before[row["field"]]],
                     "broken": [row["field"] for row in fields if not row["match"] and before[row["field"]]],
                     "field_results": fields,
@@ -620,6 +669,10 @@ def main() -> int:
         return 1
     won = second["arms"][winner]
     second_schema_valid = schema_valid + won["schema_valid"]
+    # "First try" is a claim about attempts, so it is counted from attempts.
+    # The first pass already required it; the second pass printed it and
+    # checked only schema validity, so a retried reply satisfied the figure.
+    second_first_try = first_call + sum(1 for case in won["cases"] if case["attempts"] == 1)
     second_responses = len(scored_calls) + len(won["cases"])
     print(
         f"\n{won['fields_matched']} of {won['fields_total']} fields exact after the second call, "
@@ -638,7 +691,9 @@ def main() -> int:
         "the second call's total": won["fields_matched"] == want["second_pass_matched"],
         "what the second call fixed and broke": (won["fixed"], won["broken"])
         == (want["second_pass_fixed"], want["second_pass_broken"]),
-        "schema valid across both passes": second_schema_valid == want["schema_valid_both_passes"]
+        "schema valid on the first try across both passes": second_schema_valid
+        == want["schema_valid_both_passes"]
+        and second_first_try == want["schema_valid_both_passes"]
         and second_responses == want["schema_valid_both_passes"],
     }
     failed = [name for name, ok in checks.items() if not ok]
