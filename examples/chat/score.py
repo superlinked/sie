@@ -59,6 +59,14 @@ PAGE_FIGURES = {
     "billing_only_replies": 2,
     "per_check": {"length": (60, 60), "fee": (60, 60), "ref": (60, 60), "recall": (6, 6)},
     "http_200": 60,
+    # The run facts the page's evidence note publishes, to the precision it
+    # publishes them at: seconds to one decimal, token counts exact. They are
+    # asserted rather than only printed, because this file promises a non-zero
+    # exit when a published figure does not come out, and a figure that is
+    # printed and not compared is one the scorer is willing to be wrong about.
+    "latency_seconds": (1.9, 4.3, 2.8),
+    "prompt_tokens_first_turn": (696, 802),
+    "prompt_tokens_last_turn": (1233, 1353),
     # The five recorded exchanges the page displays, counted across every
     # surface rather than off the proof grid alone: the hero, the three proof
     # cards and the playground, which replays the first turn of the hero's
@@ -337,14 +345,24 @@ def main() -> int:
     latencies = [row["latency_ms"] for row in rows]
     first_turn_prompts = [row["prompt_tokens"] for row in rows if row["turn"] == 1]
     last_turn_prompts = [row["prompt_tokens"] for row in rows if row["turn"] == turns_per_conversation]
-    print(f"  HTTP 200 on {statuses} of {len(recorded)} turns")
-    print(
-        f"  latency {min(latencies) / 1000:.1f} to {max(latencies) / 1000:.1f} seconds per turn, "
-        f"median {statistics.median(latencies) / 1000:.1f}"
+    if any(value is None for value in first_turn_prompts + last_turn_prompts):
+        print("FAILED: a recorded response reports no prompt_tokens, so the token figures cannot be checked")
+        return 1
+    # Rounded once, here, so the printed line and the assertion below read the
+    # same values. Rounding in one place and comparing in another is how a
+    # displayed figure drifts from the one that is checked.
+    latency_seconds = (
+        round(min(latencies) / 1000, 1),
+        round(max(latencies) / 1000, 1),
+        round(statistics.median(latencies) / 1000, 1),
     )
+    prompt_first = (min(first_turn_prompts), max(first_turn_prompts))
+    prompt_last = (min(last_turn_prompts), max(last_turn_prompts))
+    print(f"  HTTP 200 on {statuses} of {len(recorded)} turns")
+    print(f"  latency {latency_seconds[0]} to {latency_seconds[1]} seconds per turn, median {latency_seconds[2]}")
     print(
-        f"  prompt tokens {min(first_turn_prompts)} to {max(first_turn_prompts)} at turn 1, "
-        f"{min(last_turn_prompts)} to {max(last_turn_prompts)} at turn {turns_per_conversation}"
+        f"  prompt tokens {prompt_first[0]} to {prompt_first[1]} at turn 1, "
+        f"{prompt_last[0]} to {prompt_last[1]} at turn {turns_per_conversation}"
     )
 
     print()
@@ -370,6 +388,9 @@ def main() -> int:
         "the replies that answered nothing": len(billing_only) == PAGE_FIGURES["billing_only_replies"],
         "the per-check totals": per_check == {k: tuple(v) for k, v in PAGE_FIGURES["per_check"].items()},
         "every call returning 200": statuses == PAGE_FIGURES["http_200"],
+        "the latency range and median": latency_seconds == PAGE_FIGURES["latency_seconds"],
+        "the prompt-token ranges": prompt_first == PAGE_FIGURES["prompt_tokens_first_turn"]
+        and prompt_last == PAGE_FIGURES["prompt_tokens_last_turn"],
         # The hero shows a customer telling the assistant to stop sending the
         # reference line, and the reply still carrying it.
         "the hero exchange": hero["turn_role"] == "revocation-bait" and hero["checks"]["ref"],

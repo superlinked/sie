@@ -23,6 +23,12 @@ the dataset's own shape, one entry per call holding the request, the response,
 the HTTP status, the served model revision and the round-trip time. The key
 comes from SIE_API_KEY and is never written out.
 
+A run that dies part way through still writes what it recorded, to
+manifest.partial.json and calls.partial.json, and the manifest says which turn
+it stopped on. Those calls were paid for and their replies cannot be obtained
+again, because no sampling fields are sent and the same request returns
+different text next time.
+
 You do not need a key, and you do not need to run this. The recorded calls are
 already published. `python3 fetch.py` downloads them and `python3 score.py`
 scores them offline.
@@ -126,6 +132,59 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def write_output(
+    output: Path,
+    entries: list[dict[str, Any]],
+    base_url: str,
+    turns_per_conversation: int,
+    stopped_at: str | None,
+) -> str:
+    """Write the recorded calls and their manifest, and say which pair it wrote.
+
+    `stopped_at` names the turn a failed run died on. A partial run is written
+    under its own names and says so in the manifest, so it can never be read as
+    a finished recording. Every count comes from the entries rather than from
+    what was selected, because on a partial run those two differ.
+    """
+    complete = stopped_at is None
+    revisions = sorted({entry["model_revision"] for entry in entries})
+    stamps = sorted(entry["requested_at"] for entry in entries)
+    recorded_conversations = {entry["conversation"] for entry in entries}
+    manifest = {
+        "task": "chat",
+        "page": "https://superlinked.com/chat",
+        "endpoint": base_url,
+        "path": corpus_module.CHAT_COMPLETIONS_PATH,
+        "model": corpus_module.MODEL,
+        "model_revision": revisions[0] if len(revisions) == 1 else revisions,
+        "run": "chat-completions-multi-turn",
+        "run_complete": complete,
+        "run_date": stamps[0][:10],
+        "run_started_utc": stamps[0],
+        "run_completed_utc": stamps[-1],
+        "recorded_by": "examples/chat/run.py",
+        "sampling": "model profile defaults; no temperature, top_p or seed was sent",
+        "max_completion_tokens": corpus_module.MAX_COMPLETION_TOKENS,
+        "max_words": corpus_module.MAX_WORDS,
+        "conversations": len(recorded_conversations),
+        "turns_per_conversation": turns_per_conversation,
+        "calls_recorded": len(entries),
+        "corpus_sha256": corpus_module.sha256_bytes(corpus_module.CORPUS_PATH.read_bytes()),
+    }
+    if not complete:
+        manifest["partial"] = (
+            f"The run stopped at {stopped_at}. These are the calls that had already been made, "
+            "kept because their replies cannot be obtained again. This is not a recording of the "
+            "run: score.py requires a recorded call for every pinned turn and refuses a set that "
+            "is short of one."
+        )
+    suffix = "" if complete else ".partial"
+    output.mkdir(parents=True, exist_ok=True)
+    for name, value in ((f"manifest{suffix}.json", manifest), (f"calls{suffix}.json", {"calls": entries})):
+        (output / name).write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return f"{output}/manifest{suffix}.json and {output}/calls{suffix}.json"
+
+
 def recorded_replies() -> dict[str, str]:
     """Replies already on the record, for --show on a turn past the first.
 
@@ -187,45 +246,36 @@ def main() -> int:
     print(f"endpoint {base_url}{corpus_module.CHAT_COMPLETIONS_PATH}")
     print(f"model    {corpus_module.MODEL}")
 
+    turns_per_conversation = len(conversations[selected[0]]["turns"])
     entries: list[dict[str, Any]] = []
     replies: dict[str, str] = {}
-    for slug in selected:
-        item = conversations[slug]
-        for turn in item["turns"]:
-            index = turn["index"]
-            body = corpus_module.request_body(item, index, replies)
-            entry = record(client, item, index, body)
-            entries.append(entry)
-            replies[entry["slug"]] = reply_text(entry["response"])
-            shown = replies[entry["slug"]].replace("\n", " / ")
-            print(f"{entry['slug']:<14} {entry['client_latency_ms']:>8.0f} ms  {shown[:100]}")
+    stopped_at: str | None = None
+    try:
+        for slug in selected:
+            item = conversations[slug]
+            for turn in item["turns"]:
+                index = turn["index"]
+                stopped_at = corpus_module.turn_slug(item, index)
+                body = corpus_module.request_body(item, index, replies)
+                entry = record(client, item, index, body)
+                entries.append(entry)
+                replies[entry["slug"]] = reply_text(entry["response"])
+                shown = replies[entry["slug"]].replace("\n", " / ")
+                print(f"{entry['slug']:<14} {entry['client_latency_ms']:>8.0f} ms  {shown[:100]}")
+    except BaseException:
+        # Every entry here is a call that was made and paid for, and its reply
+        # cannot be obtained again: no sampling fields are sent, so a rerun of
+        # the same request returns different text. Losing them to an error on a
+        # later turn is the expensive failure, so write them before re-raising.
+        # `BaseException`, because record() exits with SystemExit, which is not
+        # an Exception, and a keyboard interrupt costs the same calls.
+        if entries:
+            written = write_output(args.output, entries, base_url, turns_per_conversation, stopped_at)
+            print(f"Stopped at {stopped_at}. Wrote {len(entries)} recorded turn(s) to {written}", file=sys.stderr)
+        raise
 
-    revisions = sorted({entry["model_revision"] for entry in entries})
-    stamps = sorted(entry["requested_at"] for entry in entries)
-    manifest = {
-        "task": "chat",
-        "page": "https://superlinked.com/chat",
-        "endpoint": base_url,
-        "path": corpus_module.CHAT_COMPLETIONS_PATH,
-        "model": corpus_module.MODEL,
-        "model_revision": revisions[0] if len(revisions) == 1 else revisions,
-        "run": "chat-completions-multi-turn",
-        "run_date": stamps[0][:10],
-        "run_started_utc": stamps[0],
-        "run_completed_utc": stamps[-1],
-        "recorded_by": "examples/chat/run.py",
-        "sampling": "model profile defaults; no temperature, top_p or seed was sent",
-        "max_completion_tokens": corpus_module.MAX_COMPLETION_TOKENS,
-        "max_words": corpus_module.MAX_WORDS,
-        "conversations": len(selected),
-        "turns_per_conversation": len(conversations[selected[0]]["turns"]),
-        "calls_recorded": len(entries),
-        "corpus_sha256": corpus_module.sha256_bytes(corpus_module.CORPUS_PATH.read_bytes()),
-    }
-    args.output.mkdir(parents=True, exist_ok=True)
-    for name, value in (("manifest.json", manifest), ("calls.json", {"calls": entries})):
-        (args.output / name).write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"Wrote {args.output}/manifest.json and {args.output}/calls.json")
+    written = write_output(args.output, entries, base_url, turns_per_conversation, None)
+    print(f"Wrote {written}")
     return 0
 
 

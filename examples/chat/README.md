@@ -86,6 +86,13 @@ uv sync
 SIE_API_KEY=sk-sie-... uv run python run.py --conversation yose
 ```
 
+A conversation is sequential, so a turn that fails stops the run at that turn.
+The turns already recorded are written to `manifest.partial.json` and
+`calls.partial.json`, under their own names, and the manifest says which turn it
+stopped on and that the run is incomplete. Those calls were paid for and their
+replies cannot be obtained again, because no sampling fields are sent and the
+same request returns different text next time.
+
 ## What result to expect
 
 `score.py` prints a line per conversation and ends with:
@@ -165,9 +172,17 @@ repository, in a reviewed commit.
 Absence is a failure rather than a skip. A missing file, a pinned turn with no
 recorded call, a recorded call nothing pins, a call whose served revision the
 manifest does not name, a digest that does not match, or a published figure that
-does not come out all exit non-zero and say which. Twelve such cases were run
-against this scorer, including three where the tampered bundle was made
-internally consistent first, so that only the check under test could fire.
+does not come out all exit non-zero and say which. Fifteen such cases were run
+against this scorer, six of them with the tampered bundle made internally
+consistent and its object ids re-pinned first, so that only the check under test
+could fire.
+
+Every figure `score.py` prints is compared, including the run facts: the
+latency range and median to the one decimal the page publishes, and the exact
+prompt-token bounds at the first and last turn. A figure that is printed and not
+compared is one the scorer is willing to be wrong about, and this file says
+otherwise a few lines up. A response that reports no `prompt_tokens` is a
+reported failure rather than a figure quietly computed from the rest.
 
 ## Inputs
 
