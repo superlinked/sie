@@ -240,8 +240,8 @@ def test_release_pr_metadata_refresh_uses_active_exact_pinned_commands(command, 
     [
         (contract.SDK_INSTALL_COMMAND, "mise exec -- pnpm install --lockfile-only"),
         (contract.SDK_FORMAT_COMMAND, contract.SDK_INSTALL_COMMAND),
-        ("if git diff --quiet --", contract.SDK_FORMAT_COMMAND),
-        ("git add ", contract.SDK_FORMAT_COMMAND),
+        (contract.SDK_FORMAT_COMMAND, "git add "),
+        (contract.SDK_FORMAT_COMMAND, "git commit "),
     ],
     ids=["install-before-lock", "format-before-install", "diff-before-format", "add-before-format"],
 )
