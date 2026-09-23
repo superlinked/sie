@@ -124,12 +124,19 @@ class Relation(TypedDict):
         tail: Tail entity text.
         relation: Relation type label.
         score: Confidence score.
+        head_idx: Index of the head entity in the same item's entities list, when the
+            adapter can supply it. Lets a consumer recover the head's character offsets
+            without duplicating them here, which is the only way to attribute a relation
+            when the same surface text occurs more than once in the input.
+        tail_idx: Index of the tail entity in the same item's entities list.
     """
 
     head: str
     tail: str
     relation: str
     score: float
+    head_idx: NotRequired[int]
+    tail_idx: NotRequired[int]
 
 
 class Classification(TypedDict):
