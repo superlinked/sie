@@ -28,7 +28,7 @@ dataset gives you the evidence. Fetching it needs no account and no token.
 - SIE server version 0.7.3, recorded 2026-09-15
 - No threshold or other option is sent, so the server default applies
 
-Three of the eleven edges in the proof paragraphs are wrong in a way no score
+Three of the eleven edges outside the hero graph are wrong in a way no score
 exposes. `inputs/review.json` records them, with the reason each was marked. They
 are human judgements from reading the source paragraph, not anything the model
 returned, and the example treats them as data you can disagree with.
@@ -66,10 +66,24 @@ SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 a hand review flagged 3 of the 11
 ```
 
-Those are the figures the task page publishes. The five paragraphs the page
-leaves out are printed too, each with the edge count and the reason it was not
-displayed. Four of the five returned two edges or fewer, and the fifth comes
-from a filing another task page already uses.
+The page publishes the same 10 recorded, 5 shown, 16 drawn and 3 flagged. It
+splits the 16 differently, because `score.py` reads `page_role` out of
+`inputs/candidates.json` at the pinned revision, where the Fresenius drug
+recall is still recorded as "proof and playground", and the scorer counts every
+displayed paragraph after the hero as a proof paragraph. superlinked/sie-web#468
+took that paragraph off the proof grid, since the playground below it runs that
+exact text and a card repeated it. So the page's split is 8 edges across 3 proof
+paragraphs, 5 in the hero graph and 3 in the playground's paragraph, and the 3
+flagged edges fall 2 on the proof cards and 1 in the playground.
+
+This section said "Those are the figures the task page publishes" until that PR.
+Every total above still is; the sentence was wrong only about the split, and
+correcting `page_role` in the recorded candidates would mean a new dataset
+revision for a field that describes the page rather than the run.
+
+The five paragraphs the page leaves out are printed too, each with the edge
+count and the reason it was not displayed. Four of the five returned two edges
+or fewer, and the fifth comes from a filing another task page already uses.
 
 `score.py` fails rather than skipping. It refuses a paragraph whose text no
 longer matches its digest, a candidate with a missing call, a response that
@@ -79,15 +93,15 @@ and a flagged edge the model never returned.
 
 ## What this does NOT establish
 
-- **Not that the graph is correct.** Three of eleven proof edges are flagged
-  here, and nothing mechanical found them. Every relation the model returns
-  carries a confidence score, and all three flagged edges score high. A graph
-  built from this output without a person reading the source will contain
-  claims the source does not make.
-- **Not an accuracy rate.** Eleven edges over four paragraphs is far too small
-  to support a percentage, and the ten paragraphs were chosen to be readable
-  rather than sampled from anything. Read the three flagged edges as three
-  failure modes worth knowing about, not as a rate.
+- **Not that the graph is correct.** Three of the eleven edges outside the hero
+  graph are flagged here, and nothing mechanical found them. Every relation the
+  model returns carries a confidence score, and all three flagged edges score
+  high. A graph built from this output without a person reading the source will
+  contain claims the source does not make.
+- **Not an accuracy rate.** Eleven edges over the four paragraphs outside the
+  hero is far too small to support a percentage, and the ten paragraphs were
+  chosen to be readable rather than sampled from anything. Read the three
+  flagged edges as three failure modes worth knowing about, not as a rate.
 - **Not that offsets pin a relation.** GLiNER2 names each end of a relation by
   its text, not by an offset. Where a paragraph mentions the same text twice,
   the relation does not say which mention it means. That is exactly what the

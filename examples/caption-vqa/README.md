@@ -130,5 +130,12 @@ record as the starting point for that, not as a clearance.
   through a different served revision and unfixed sampling, so it will differ.
 - Two of the twelve answers are wrong, both analogue needle gauges. That is the
   finding the page reports, not a caveat to it.
-- The page shows five of the twelve cases in its proof grid, plus one in the
-  hero and one in the playground. All twelve are here.
+- The page shows three of the twelve cases in its proof grid, plus one in the
+  hero and one in the playground, and all five of those are matches. The two
+  wrong answers are printed under the grid with the value each question
+  expected, so neither miss is hidden. All twelve are here.
+
+  This said "five of the twelve cases in its proof grid" until
+  superlinked/sie-web#468. The grid held those two wrong answers as its last two
+  cards, so the section ended on failure; they moved under it and the grid was
+  cut to three. No figure moved, and both misses are still on the page.

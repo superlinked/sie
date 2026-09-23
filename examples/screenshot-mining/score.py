@@ -6,7 +6,7 @@ no network, no inference spend.
     python3 score.py
 
 Prints "328 of 335 values matched the screen", the figure the page publishes,
-and the per-screen lines it shows beside four of the screenshots.
+and the per-screen lines it shows beside three of the screenshots.
 
 `expected` in inputs.json was read off each screenshot at full resolution and
 committed before any model run. This compares each recorded reply with it using
@@ -47,12 +47,20 @@ PINNED_OIDS = {
 
 PAGE_FIGURE = (328, 335)
 PAGE_SCREENS = 12
-# The per-screen lines the page prints beside four of the screenshots.
+# The per-screen lines the page prints beside three of the screenshots, in the
+# order its proof grid shows them.
+#
+# This named four screens until superlinked/sie-web#468: superset-slack-dashboard
+# at 28 of 32, kubernetes-dashboard-node, gitlab-pipeline-list at 17 of 19 and
+# gitlab-ci-grafana-dashboard. Those four were the three screens that missed
+# anything plus one clean one, so the page led with 328 of 335 and then
+# illustrated it with its own counterexamples. The grid was reselected to carry
+# the capability, and the two screens that came off it are still scored below;
+# they are simply no longer among the lines the page prints.
 PAGE_PER_SCREEN = {
-    "superset-slack-dashboard": (28, 32),
     "kubernetes-dashboard-node": (26, 26),
-    "gitlab-pipeline-list": (17, 19),
     "gitlab-ci-grafana-dashboard": (51, 52),
+    "airflow-dag-list": (31, 31),
 }
 
 
@@ -415,7 +423,10 @@ def main() -> int:
         for line in failures:
             print(f"  {line}", file=sys.stderr)
         return 1
-    print(f"Matches the {want_passed} of {want_total}, and the four per-screen lines, published on {manifest['page']}.")
+    print(
+        f"Matches the {want_passed} of {want_total}, and the {len(PAGE_PER_SCREEN)} "
+        f"per-screen lines, published on {manifest['page']}."
+    )
     return 0
 
 

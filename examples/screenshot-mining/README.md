@@ -59,7 +59,7 @@ Across all 12 recorded screens, 328 of 335 values matched the screen and 7 did n
 The playground call adds 4 of 4, for 332 of 339 over every recorded call
 ```
 
-`score.py` also checks the four per-screen figures the page prints beside its
+`score.py` also checks the three per-screen figures the page prints beside its
 screenshots, and exits non-zero if any of them, or the headline, is not what it
 computes.
 
@@ -162,8 +162,18 @@ starting point for that, not as a clearance.
   run tests a screenshot at a resolution where the text is genuinely unreadable.
 - Not reproducible against the live API. These are recordings. A rerun goes
   through a different served revision and unfixed sampling, so it will differ.
-- The page's proof grid shows four of the twelve screens, chosen because those
-  four include every screen that missed anything. The hero shows a fifth, the
-  Argo CD Grafana dashboard, and the playground a sixth, the GitLab DORA
-  dashboard. All twelve are here, and so is the playground call, which is scored
-  separately and is not part of the 335.
+- The page's proof grid shows three of the twelve screens: the Kubernetes
+  Dashboard node page at 26 of 26, the GitLab CI Grafana dashboard at 51 of 52
+  with its one miss marked, and the Airflow Dags list at 31 of 31. The hero
+  shows a fourth, the Argo CD Grafana dashboard, and the playground a fifth, the
+  GitLab DORA dashboard. All twelve are here, and so is the playground call,
+  which is scored separately and is not part of the 335.
+
+  This said "shows four of the twelve screens, chosen because those four include
+  every screen that missed anything" until superlinked/sie-web#468. That
+  selection was the defect the PR fixed: a page that leads with 328 of 335 and
+  then shows only the screens that missed illustrates its own claim with the
+  counterexamples. The grid now opens and closes on a screen that matched
+  everything. No figure moved. The Superset Slack Dashboard at 28 of 32 and the
+  GitLab pipeline list at 17 of 19 are still scored here, and the page's totals
+  line now names them as the screens carrying six of the seven misses.
