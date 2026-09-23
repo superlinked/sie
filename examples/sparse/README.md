@@ -122,13 +122,12 @@ mapping was recorded at run time into `derived/decoded/`. `score.py` does not
 take it on trust: it re-counts active terms and added terms from the response
 and fails if the decoded record disagrees.
 
-A card lists twelve rows and says the model returned 144 terms, and both are
-right. Two things separate them. The list is the strongest twelve, not all of
-them. And SPLADE scores entries of the BERT uncased vocabulary, some of which
-are word pieces rather than words, so a `##` entry counts toward the totals
-above without being listed: `##book` is not a term anyone can search for. The
-counts here are counts of returned dimensions and are unaffected by that
-display rule.
+A card lists a handful of rows beside a count like "144 terms", and both are
+right. The count is every returned dimension. The list is a selection the page
+makes out of them, and a dimension is not always a word: SPLADE scores entries
+of the BERT uncased vocabulary, some of which are word pieces such as `##book`.
+Which rows a card shows is the page's decision and can change without any count
+moving, so this example reproduces the counts and not the selection.
 
 ## What is in the dataset
 

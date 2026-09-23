@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -130,8 +131,15 @@ def main() -> int:
     args = parser.parse_args()
     data_dir = Path(args.data)
 
-    calls = {call["id"]: call for call in scored_calls(load(data_dir / "calls.json"), keep_all)}
+    # Keep the raw list. Keying it by id collapses a duplicate, so a calls.json
+    # holding 27 entries with one id twice would satisfy a count taken from the
+    # dict and report 26. Count the list, and reject the duplicate by name.
+    recorded = scored_calls(load(data_dir / "calls.json"), keep_all)
+    calls = {call["id"]: call for call in recorded}
     failures: list[str] = []
+    repeated = sorted(call_id for call_id, seen in Counter(call["id"] for call in recorded).items() if seen > 1)
+    if repeated:
+        failures.append("calls.json records these ids more than once: " + ", ".join(repeated))
 
     # --- per input: active terms and added terms --------------------------
     print("input                              model           added  active")
@@ -167,8 +175,8 @@ def main() -> int:
     print("\nThe recorded run, which the line under the proof grid is about")
     if len(table) != RUN_TOTALS["texts"]:
         failures.append(f"recorded {len(table)} texts, the page says {RUN_TOTALS['texts']}")
-    if len(calls) != RUN_TOTALS["calls"]:
-        failures.append(f"recorded {len(calls)} calls, the page says {RUN_TOTALS['calls']}")
+    if len(recorded) != RUN_TOTALS["calls"]:
+        failures.append(f"recorded {len(recorded)} calls, the page says {RUN_TOTALS['calls']}")
 
     missing = [input_id for input_id, models in table.items() if set(models) != {"splade", "bge"}]
     if missing:
@@ -179,7 +187,7 @@ def main() -> int:
     if not splade_added:
         failures.append("no SPLADE calls recorded, so the added-term range cannot be derived")
     else:
-        print(f"  {len(table)} texts, {len(calls)} calls")
+        print(f"  {len(table)} texts, {len(recorded)} calls")
         print(f"  SPLADE added between {min(splade_added)} and {max(splade_added)} terms the text never used")
         print(f"  bge-m3 sparse added {', '.join(str(value) for value in bge_added)}, on all {len(table)}")
         if min(splade_added) != RUN_TOTALS["splade_added_min"]:
