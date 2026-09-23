@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
-          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$RELEASE_SHA"
           filename="$(mise --no-config exec python@3.12.12 uv@0.5.31 zig@0.13.0 rust@1.98.1 -- python -c 'import runpy; print(runpy.run_path("packages/sie_audio_prep/build_wheel.py")["AUDIO_WHEEL_FILENAME"])')"
           test "$filename" = "sie_audio_prep-$RELEASE_VERSION-cp312-abi3-manylinux_2_28_x86_64.whl"
           echo "filename=$filename" >> "$GITHUB_OUTPUT"
