@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.1](https://github.com/superlinked/sie/compare/v0.8.0...v0.8.1) (2026-09-23)
+
+
+### Features
+
+* **examples:** rebuild the chat example around the recorded multi-turn run ([#338](https://github.com/superlinked/sie/issues/338)) ([25c857e](https://github.com/superlinked/sie/commit/25c857e0ea1a639884ff1f9abbf50d20113327f3))
+
+
+### Bug Fixes
+
+* **release:** repair audio and CUDA 13 build checks ([#340](https://github.com/superlinked/sie/issues/340)) ([605b3fe](https://github.com/superlinked/sie/commit/605b3fea9e6e8630cf431dae0943fce529540c44))
+
 ## [0.8.0](https://github.com/superlinked/sie/compare/v0.7.3...v0.8.0) (2026-09-23)
 
 

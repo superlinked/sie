@@ -1,6 +1,6 @@
 [project]
 name = "sie-mcp"
-version = "0.8.0"
+version = "0.8.1"
 description = "SIE MCP edge - hosted MCP server exposing SIE document jobs"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
