@@ -78,6 +78,9 @@ OPENAPI_VERSION_PATHS = {
     "packages/sie_gateway/openapi.json",
 }
 OPENAPI_STAMP_COMMAND = "mise exec -- python -I tools/ci/release_openapi.py"
+SDK_PACKAGE_PATH = "packages/sie_ts_sdk/package.json"
+SDK_INSTALL_COMMAND = "mise exec -- pnpm --filter @superlinked/sie-sdk install --frozen-lockfile --ignore-scripts"
+SDK_FORMAT_COMMAND = "mise exec -- pnpm --dir packages/sie_ts_sdk exec biome format --write package.json"
 PLAIN_PATHS = r"((?:[\w.][\w./-]* )*[\w.][\w./-]*)"
 CONTRACTS_OPENAPI_COMMANDS = (
     ("mise run openapi", re.compile(re.escape("- run: mise run openapi"))),
@@ -90,6 +93,13 @@ REFRESH_OPENAPI_COMMANDS = (
     ("git add", re.compile(rf"git add {PLAIN_PATHS}")),
     ("git commit", re.compile(r"git commit -m '[^'\\]*'")),
     ("git push", re.compile(re.escape('git push origin "HEAD:refs/heads/$branch"'))),
+)
+REFRESH_METADATA_COMMANDS = (
+    REFRESH_OPENAPI_COMMANDS[0],
+    ("pnpm install", re.compile(re.escape("mise exec -- pnpm install --lockfile-only"))),
+    ("pnpm --filter", re.compile(re.escape(SDK_INSTALL_COMMAND))),
+    ("biome", re.compile(re.escape(SDK_FORMAT_COMMAND))),
+    *REFRESH_OPENAPI_COMMANDS[2:],
 )
 SHELL_CONTROL_FLOW = frozenset(
     {
@@ -461,6 +471,16 @@ def release_openapi_errors(refresh: str, contracts: str, stamped: set[str]) -> l
         errors.append(
             "release PR refresh must run checkout, OpenAPI stamp, diff, add, commit, and push once each, "
             "in order, as exact commands without failure suppression"
+        )
+    metadata = exact_commands(refresh_lines, REFRESH_METADATA_COMMANDS)
+    if (
+        metadata is None
+        or any(SDK_PACKAGE_PATH not in match.group(1).split() for _, match in metadata[4:6])
+        or len({step_bounds(refresh_lines, index) for index, _ in metadata}) != 1
+    ):
+        errors.append(
+            "release PR refresh must refresh the pnpm lock, install the SDK's pinned formatter, and format "
+            "its package.json before diff and staging, in the same step as checkout, commit, and push"
         )
     return errors
 

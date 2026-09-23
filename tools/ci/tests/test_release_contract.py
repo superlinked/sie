@@ -188,6 +188,89 @@ def move_before(lines: list[str], moved: str, anchor: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("command", "replacement"),
+    [
+        (contract.SDK_INSTALL_COMMAND, ""),
+        (contract.SDK_INSTALL_COMMAND, f"{contract.SDK_INSTALL_COMMAND} || true"),
+        (
+            contract.SDK_INSTALL_COMMAND,
+            contract.SDK_INSTALL_COMMAND.replace("--frozen-lockfile", "--no-frozen-lockfile"),
+        ),
+        (contract.SDK_INSTALL_COMMAND, contract.SDK_INSTALL_COMMAND.replace(" --ignore-scripts", "")),
+        (contract.SDK_INSTALL_COMMAND, contract.SDK_INSTALL_COMMAND.replace("@superlinked/sie-sdk", "other-package")),
+        (contract.SDK_FORMAT_COMMAND, ""),
+        (contract.SDK_FORMAT_COMMAND, f"# {contract.SDK_FORMAT_COMMAND}"),
+        (contract.SDK_FORMAT_COMMAND, f"echo {contract.SDK_FORMAT_COMMAND}"),
+        (contract.SDK_FORMAT_COMMAND, f"{contract.SDK_FORMAT_COMMAND} || true"),
+        (
+            contract.SDK_FORMAT_COMMAND,
+            "mise exec -- pnpm dlx @biomejs/biome format --write packages/sie_ts_sdk/package.json",
+        ),
+        (contract.SDK_FORMAT_COMMAND, contract.SDK_FORMAT_COMMAND.replace(" --write", "")),
+        (
+            contract.SDK_FORMAT_COMMAND,
+            contract.SDK_FORMAT_COMMAND.replace("packages/sie_ts_sdk", "integrations/sie_ts_chroma"),
+        ),
+        (contract.SDK_FORMAT_COMMAND, contract.SDK_FORMAT_COMMAND.replace("package.json", "other.json")),
+    ],
+    ids=[
+        "missing-install",
+        "suppressed-install",
+        "unfrozen-install",
+        "install-scripts",
+        "wrong-package-install",
+        "missing-formatter",
+        "commented-formatter",
+        "echoed-formatter",
+        "suppressed-formatter",
+        "external-formatter",
+        "read-only-formatter",
+        "wrong-package-formatter",
+        "wrong-file-formatter",
+    ],
+)
+def test_release_pr_metadata_refresh_uses_active_exact_pinned_commands(command, replacement) -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    assert refresh.count(command) == 1
+    assert contract.release_openapi_errors(refresh.replace(command, replacement), contracts, stamped)
+
+
+@pytest.mark.parametrize(
+    ("moved", "anchor"),
+    [
+        (contract.SDK_INSTALL_COMMAND, "mise exec -- pnpm install --lockfile-only"),
+        (contract.SDK_FORMAT_COMMAND, contract.SDK_INSTALL_COMMAND),
+        ("if git diff --quiet --", contract.SDK_FORMAT_COMMAND),
+        ("git add ", contract.SDK_FORMAT_COMMAND),
+    ],
+    ids=["install-before-lock", "format-before-install", "diff-before-format", "add-before-format"],
+)
+def test_release_pr_metadata_refresh_preserves_lock_install_format_diff_stage_order(moved, anchor) -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    lines = refresh.splitlines()
+    move_before(lines, moved, anchor)
+    assert contract.release_openapi_errors("\n".join(lines), contracts, stamped)
+
+
+@pytest.mark.parametrize("command", ["if git diff --quiet --", "git add "])
+def test_release_pr_metadata_changes_are_detected_and_staged(command) -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    lines = refresh.splitlines()
+    index = line_index(lines, command)
+    assert contract.SDK_PACKAGE_PATH in lines[index]
+    lines[index] = lines[index].replace(f" {contract.SDK_PACKAGE_PATH}", "")
+    assert contract.release_openapi_errors("\n".join(lines), contracts, stamped)
+
+
+def test_release_pr_metadata_refresh_cannot_move_to_a_skipped_step() -> None:
+    refresh, contracts, stamped = openapi_surfaces()
+    lines = refresh.splitlines()
+    index = line_index(lines, contract.SDK_FORMAT_COMMAND)
+    lines[index:index] = ["      - name: Skip formatting", "        if: false", "        run: |"]
+    assert contract.release_openapi_errors("\n".join(lines), contracts, stamped)
+
+
+@pytest.mark.parametrize(
     "rewrite",
     [
         duplicate_diff_check,

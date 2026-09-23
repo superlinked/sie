@@ -25,6 +25,9 @@ committed server and gateway OpenAPI documents. CI regenerates those documents
 and requires identical bytes, so they are not release-please extra files: its
 JSON rewrite changes number formatting and precision, string escapes, and key
 order. Config and MCP join this train for their first PyPI publication.
+The refresh also formats the SDK package metadata rewritten by release-please
+with the lockfile-pinned Biome version and the SDK's formatter configuration.
+Only that manifest is formatted; its release version and metadata are preserved.
 Independently versioned implementation crates are not silently renumbered: a
 Rust worker image follows the release image tag even where its crate has an
 independent version.
@@ -181,6 +184,27 @@ registry credentials. Do not enable two competing publishers for the same
 artifact destination.
 
 ## Recovery
+
+### Release-PR authoring
+
+To refresh an open release PR, use the push-to-`main` authoring workflow. Merge
+any automation repair through normal review and CI, then approve that commit's
+`release-automation` job. The manual entrypoint below only recovers failed
+publication; it does not refresh release PRs.
+
+Before resuming a waiting authoring run, inspect its source revision and workflow:
+release-please can read current `main`, but the run still executes the workflow
+from its original push. An old run can therefore generate current release files
+using outdated refresh steps. Cancel obsolete queued **push** runs before
+cancelling the old waiting run, then retain the authoring run from the intended
+current source. Do not cancel publication or recovery runs as part of this
+cleanup. Keep the environment protections and approve the retained run normally.
+If the intended push run was cancelled, rerun that exact push run after checking
+its source and workflow, while GitHub still permits the rerun; do not replay the
+obsolete backlog. Verify the generated PR's source ancestry after refresh, too:
+the approved run's revision does not freeze release-please's reads of `main`.
+
+### Artifact publication
 
 Retain release build artifacts for at least 30 days. Normal recovery reruns
 failed publication jobs from the original release workflow run. This preserves
