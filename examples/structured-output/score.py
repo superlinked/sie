@@ -271,11 +271,22 @@ def main() -> int:
             group = asked_for(schema.get("properties", {}).get(check["field"]))
             if group != "value":
                 totals[f"{group}_total"] += 1
-            actual = value.get(check["field"]) if isinstance(value, dict) else None
-            if check_passes(check["op"], actual, check["expected"]):
+            # An absent field is not a returned null. `.get()` cannot tell them
+            # apart, so a check expecting null would score a field the model
+            # never returned as correct. Schema validation happens to catch that
+            # today, because every case schema lists every property as required,
+            # but that is a different check shielding this one rather than this
+            # one working.
+            present = isinstance(value, dict) and check["field"] in value
+            actual = value.get(check["field"]) if present else None
+            if present and check_passes(check["op"], actual, check["expected"]):
                 totals["checks_passed"] += 1
                 if group != "value":
                     totals[f"{group}_passed"] += 1
+            elif not present:
+                wrong_fields.append(
+                    f"{case_id}.{check['field']}: expected {check['expected']!r}, field absent from the reply"
+                )
             else:
                 wrong_fields.append(f"{case_id}.{check['field']}: expected {check['expected']!r}, got {actual!r}")
 
