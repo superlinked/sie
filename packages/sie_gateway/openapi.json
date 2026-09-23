@@ -3968,7 +3968,7 @@
       "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
     },
     "title": "SIE Gateway",
-    "version": "0.8.1"
+    "version": "0.8.2"
   },
   "openapi": "3.1.0",
   "paths": {
