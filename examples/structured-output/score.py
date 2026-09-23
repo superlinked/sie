@@ -68,6 +68,13 @@ EXPECTED = {
 LITERAL_BOOLEAN = re.compile(r"(?<![A-Za-z])(?:true|false)(?![A-Za-z])", re.IGNORECASE)
 
 
+# A yes-or-no field is one declared "boolean" or ["boolean", "null"], and
+# nothing wider. Membership alone would also catch a union like
+# ["boolean", "string"], which is not a yes-or-no question and would inflate the
+# published count, so the whole declared set has to be one of these.
+YES_NO_TYPES = frozenset({"boolean", "null"})
+
+
 def asked_for(spec: object) -> str:
     """What the schema declared a field to be: a yes-or-no question, a pick from
     a fixed list, or an ordinary value. Read from the schema that was sent."""
@@ -75,7 +82,7 @@ def asked_for(spec: object) -> str:
         return "value"
     declared = spec.get("type")
     types = declared if isinstance(declared, list) else [declared]
-    if "boolean" in types:
+    if "boolean" in types and set(types) <= YES_NO_TYPES:
         return "yes_no"
     items = spec.get("items")
     if isinstance(spec.get("enum"), list):

@@ -22,8 +22,9 @@ and the line under its proof grid:
 `score.py` re-derives every one of those from the recorded responses, offline.
 
 A yes-or-no field is one the case schema declared `"type": "boolean"` or
-`"type": ["boolean", "null"]`, read from the schema the call sent rather than
-from the value that came back. Sixteen are plain booleans. Five admit null, and
+`"type": ["boolean", "null"]`, and nothing wider, read from the schema the call
+sent rather than from the value that came back. A union like
+`["boolean", "string"]` is not a yes-or-no question and is not counted as one. Sixteen are plain booleans. Five admit null, and
 two of those correctly came back null because the GSA listing gives no answer,
 which still counts as a question the schema asked.
 
