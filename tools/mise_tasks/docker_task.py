@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from tools.ci import cuda13_image_smoke
 from tools.ci.release_artifact import create_manifest, validate_manifest
 from tools.ci.release_guard import api, stable_version
 
@@ -290,17 +291,18 @@ def inspect_loaded(image: str, source_revision: str) -> dict[str, str]:
 
 
 def smoke_image(image: str, *, bundle: str | None = None) -> None:
+    if bundle in cuda13_image_smoke.ALLOWED_BUNDLES:
+        # GPU engine imports need a host driver; use the same qualified CPU checks as PR image CI.
+        for command in cuda13_image_smoke.docker_commands(bundle, image):
+            run(command)
+        return
     command = ["docker", "run", "--rm", "--pull", "never", "--network", "none"]
     if bundle is not None:
         imports = "import sie_server, sie_sdk, sie_audio_prep, torch, transformers; "
         if bundle == "ctranslate2":
             imports += "import ctranslate2; "
-        elif bundle in {"sglang", "sglang-vision-extract", "sglang-cu130"}:
+        elif bundle in {"sglang", "sglang-vision-extract"}:
             imports += "import sglang; "
-        elif bundle == "tensorrt-llm":
-            imports += "import tensorrt_llm; "
-        if bundle in {"sglang-cu130", "tensorrt-llm"}:
-            imports += "assert torch.version.cuda.startswith('13.'); assert transformers.__version__.startswith('5.'); "
         imports += "print('release image imports passed')"
         command.extend(["--entrypoint", "python", image, "-c", imports])
     else:

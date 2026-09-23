@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from tools.ci import cuda13_image_smoke
 from tools.ci.release_artifact import create_manifest
 from tools.mise_tasks import docker_task
 
@@ -123,6 +125,103 @@ def test_build_commands_only_load_source_bound_images():
                 "--push",
             ]
         )
+
+
+@pytest.mark.parametrize("bundle", ["sglang-cu130", "tensorrt-llm"])
+def test_release_cuda13_smoke_uses_qualified_driverless_checks(bundle, monkeypatch):
+    image = f"ghcr.io/superlinked/sie-server:v{VERSION}-cuda13-{bundle}"
+    commands = []
+    monkeypatch.setattr(docker_task, "run", commands.append)
+
+    docker_task.smoke_image(image, bundle=bundle)
+
+    assert commands == cuda13_image_smoke.docker_commands(bundle, image)
+    assert len(commands) == 2
+    for command in commands:
+        assert command[:7] == ["docker", "run", "--rm", "--pull", "never", "--network", "none"]
+        assert "HF_HUB_OFFLINE=1" in command
+        assert "TRANSFORMERS_OFFLINE=1" in command
+    assert commands[0][-2] == "-c"
+    assert commands[0][-1] == cuda13_image_smoke.validation_script(bundle)
+    assert "import tensorrt_llm" not in commands[0][-1]
+    assert "import sglang" not in commands[0][-1]
+    assert commands[1][-6:] == [image, "resolve-deps", "--bundle", bundle, "--models-dir", "/app/models"]
+
+
+@pytest.mark.parametrize(
+    ("bundle", "extra_import"),
+    [
+        ("default", ""),
+        ("transformers5", ""),
+        ("ctranslate2", "import ctranslate2; "),
+        ("sglang", "import sglang; "),
+        ("sglang-vision-extract", "import sglang; "),
+        (None, ""),
+    ],
+)
+def test_other_release_images_keep_existing_smoke_checks(bundle, extra_import, monkeypatch):
+    commands = []
+    monkeypatch.setattr(docker_task, "run", commands.append)
+    docker_task.smoke_image(IMAGE, bundle=bundle)
+    expected = ["docker", "run", "--rm", "--pull", "never", "--network", "none"]
+    if bundle is None:
+        expected.extend([IMAGE, "--help"])
+    else:
+        expected.extend(
+            [
+                "--entrypoint",
+                "python",
+                IMAGE,
+                "-c",
+                "import sie_server, sie_sdk, sie_audio_prep, torch, transformers; "
+                + extra_import
+                + "print('release image imports passed')",
+            ]
+        )
+    assert commands == [expected]
+
+
+@pytest.mark.parametrize("bundle", ["sglang-cu130", "tensorrt-llm"])
+@pytest.mark.parametrize("failed_check", ["imports", "resolve-deps"])
+def test_failed_cuda13_release_smoke_never_exports_image(bundle, failed_check, monkeypatch, tmp_path):
+    commands = []
+
+    def run(command):
+        commands.append(command)
+        if (failed_check == "imports" and "-c" in command) or (
+            failed_check == "resolve-deps" and "resolve-deps" in command
+        ):
+            raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(docker_task, "run", run)
+    export = Mock()
+    monkeypatch.setattr(docker_task, "export_image", export)
+    monkeypatch.setattr(
+        docker_task.sys,
+        "argv",
+        [
+            "docker_task.py",
+            "build-server",
+            "--registry",
+            "ghcr.io/superlinked",
+            "--version",
+            VERSION,
+            "--platform",
+            "cuda13",
+            "--bundle",
+            bundle,
+            "--source-revision",
+            FULL_SHA,
+            "--run-id",
+            "1234",
+            "--archive-dir",
+            str(tmp_path / "artifact"),
+        ],
+    )
+
+    assert docker_task.main() == 1
+    export.assert_not_called()
+    assert len(commands) == (2 if failed_check == "imports" else 3)
 
 
 def test_complete_set_verified_before_alias_commands(complete_source, monkeypatch, tmp_path):

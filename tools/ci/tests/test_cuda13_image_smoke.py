@@ -18,7 +18,7 @@ def test_commands_are_networkless_offline_and_never_publish(bundle):
     assert len(commands) == 2
     for command in commands:
         assert command[:3] == ["docker", "run", "--rm"]
-        assert ["--network", "none"] == command[3:5]
+        assert command[3:7] == ["--pull", "never", "--network", "none"]
         assert "HF_HUB_OFFLINE=1" in command
         assert "TRANSFORMERS_OFFLINE=1" in command
         assert not {"push", "login"} & set(command)

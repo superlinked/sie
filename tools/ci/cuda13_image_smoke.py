@@ -103,6 +103,8 @@ def docker_commands(bundle: str, image_tag: str) -> list[list[str]]:
         "docker",
         "run",
         "--rm",
+        "--pull",
+        "never",
         "--network",
         "none",
         "-e",

@@ -138,9 +138,16 @@ Finalize these identities before enabling uploads:
 
 PyPI/npm upload jobs live in the top-level workflow so the configured OIDC
 identity is unambiguous. Existing package names use their existing registry
-settings; only new PyPI projects need pending publishers. Register config and
-MCP when their first upload is ready. Audio assets do not need another PyPI
-registration.
+settings; only new PyPI projects need pending publishers. PyPI allows only one
+pending project per publisher identity, so bootstrap config and MCP sequentially
+with the same repository, `release.yml` workflow, and `pypi` environment. Register
+`sie-config` first. Its next OIDC token exchange creates the project and converts
+the pending publisher into an ordinary publisher. Then register `sie-mcp` and
+request another original-run publisher retry so a new token exchange creates it.
+One upload attempt mints its token only once; adding the second pending publisher
+does not extend a token already issued to the first attempt. Recovery verifies
+and skips byte-identical files already uploaded and consumes the same retained
+archives. Audio assets do not need another PyPI registration.
 
 npm supports one trusted publisher per package. Its actual upload job uses a
 GitHub-hosted runner and a pinned supported npm version. Ordinary builds and
