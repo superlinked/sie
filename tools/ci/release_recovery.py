@@ -22,7 +22,7 @@ from tools.ci.release_guard import (
 FAMILIES = ("python", "npm", "docker", "helm", "audio", "native")
 FAILED = {"failure", "timed_out", "cancelled", "action_required"}
 PUBLISH_JOB = re.compile(
-    r"^(python-publish|npm-publish)$|^(docker|helm|audio|native) / "
+    r"^(python-publish|npm-publish)$|^docker / matrix$|^(docker|helm|audio|native) / "
     r"(push-server|push-service|publish|verify|alias)(?:\s|\(|$)"
 )
 

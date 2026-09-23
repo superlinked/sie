@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # fmt: off
 #MISE description="Helm chart operations for SIE cluster deployment"
-#USAGE arg "[command]" help="Command: dependencies, lint, template, install, upgrade, uninstall, status"
+#USAGE arg "[command]" help="Command: dependencies, lint, template, package, install, upgrade, uninstall, status"
 #USAGE arg "[args]..." help="Additional arguments to pass to helm"
 # fmt: on
 
@@ -15,6 +15,7 @@ This task handles:
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import hashlib
 import os
@@ -22,6 +23,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -164,6 +166,7 @@ def show_help() -> None:
     log("  dependencies      Build dependencies from Chart.yaml and Chart.lock")
     log("  lint              Lint the Helm chart")
     log("  template          Render templates locally")
+    log("  package           Package and validate a chart with embedded configs (--destination DIR)")
     log("  install           Install to cluster (dry-run by default)")
     log("  install --apply   Actually install to cluster")
     log("  upgrade           Upgrade existing installation")
@@ -215,6 +218,77 @@ def cmd_template(extra_args: list[str]) -> int:
             *validation_args(extra_args),
         ]
     )
+
+
+def validate_packaged_configs(archive: Path) -> None:
+    """Require the retained chart to contain the exact checked-in catalogs."""
+    root = resolve_project_root()
+    chart_name = CHART_DIR.name
+    expected = {
+        f"{chart_name}/files/{kind}/{path.name}": path.read_bytes()
+        for kind in ("bundles", "models")
+        for path in (root / "packages/sie_server" / kind).glob("*.yaml")
+    }
+    actual = {}
+    with tarfile.open(archive, "r:gz") as chart:
+        for member in chart.getmembers():
+            if not any(member.name.startswith(f"{chart_name}/files/{kind}/") for kind in ("bundles", "models")):
+                continue
+            if not member.isfile() or member.name in actual:
+                raise ValueError("packaged chart catalog must contain unique regular files")
+            contents = chart.extractfile(member)
+            if contents is None:
+                raise ValueError("packaged chart catalog member has no contents")
+            actual[member.name] = contents.read()
+    if not expected or actual != expected:
+        raise ValueError("packaged chart catalogs differ from the checked-in bundle/model configs")
+
+
+def cmd_package(extra_args: list[str]) -> int:
+    """Retain only an archive that passes checks after config staging is removed."""
+    parser = argparse.ArgumentParser(prog="mise run helm -- package")
+    parser.add_argument("--destination", type=Path, required=True)
+    args = parser.parse_args(extra_args)
+    with tempfile.TemporaryDirectory(prefix="sie-helm-package-") as temporary:
+        if run_helm(["package", str(CHART_DIR), "--destination", temporary]) != 0:
+            return 1
+        archives = list(Path(temporary).glob("*.tgz"))
+        if len(archives) != 1:
+            raise ValueError("Helm package must produce exactly one chart archive")
+        archive = archives[0]
+        validate_packaged_configs(archive)
+        # Validation must depend on the archive, never on loose staged files.
+        _cleanup_helm_configs()
+        if run_helm(["lint", str(archive), *validation_args([])]) != 0:
+            return 1
+        for options in ([], ["--set", "config.enabled=false", "--set", "gateway.embeddedConfigs.enabled=true"]):
+            result = subprocess.run(  # noqa: S603
+                [  # noqa: S607 - use the repository's mise-managed Helm executable
+                    "mise",
+                    "exec",
+                    "--",
+                    "helm",
+                    "template",
+                    RELEASE_NAME,
+                    str(archive),
+                    "--namespace",
+                    NAMESPACE,
+                    *validation_args(options),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode:
+                log_error(result.stderr)
+                return result.returncode
+        args.destination.mkdir(parents=True, exist_ok=True)
+        destination = args.destination / archive.name
+        if destination.exists() and destination.read_bytes() != archive.read_bytes():
+            raise ValueError("refusing to replace a different retained chart archive")
+        shutil.copyfile(archive, destination)
+        log_success(f"Validated chart retained at {destination}")
+    return 0
 
 
 def cmd_install(extra_args: list[str]) -> int:
@@ -334,6 +408,7 @@ def main() -> int:
         "dependencies": cmd_dependencies,
         "lint": cmd_lint,
         "template": cmd_template,
+        "package": cmd_package,
         "install": cmd_install,
         "upgrade": cmd_upgrade,
         "uninstall": cmd_uninstall,
@@ -347,7 +422,7 @@ def main() -> int:
         return 1
 
     # Commands that render templates need bundle/model configs in files/
-    needs_configs = command in ("lint", "template", "install", "upgrade")
+    needs_configs = command in ("lint", "template", "package", "install", "upgrade")
     if needs_configs:
         if cmd_dependencies([]) != 0:
             return 1

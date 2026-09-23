@@ -105,12 +105,38 @@ PR and candidate builds produce archives without publishing. They use the
 actual package versions in that source tree. Release builds additionally
 require the complete package set to match the release version.
 
+The `Release candidate` workflow rehearses all six artifact families without
+registry credentials or release-writing permissions. It runs on release
+pipeline changes and release version updates, and can be dispatched manually
+against a reviewed branch. It builds the full image matrix and extracts the
+native sidecar from its tested image, as well as building Python, npm, audio,
+and the packaged Helm chart. Require its final `Release candidate / Complete`
+check on the final release PR head before merging that PR.
+
+On a stable release, every builder must pass the `artifacts-ready` gate before
+any publisher can start. Publishers consume the retained archives. This keeps
+a failed image or chart build from leaving packages partially published.
+Registry failures can still interrupt publication; recovery resumes the
+original failed publisher with its same version, source and retained bytes.
+
 Build outputs are tested before upload. Publisher jobs consume those same
 archives or images; they do not independently rebuild them. Before a release
 upload, the run commit, release output commit, checked-out source, and stable
 tag must identify the same revision. Versioned outputs are immutable: an
 existing matching upload may be accepted, but different bytes at the same
 version are a failure.
+
+The Candle CUDA image is checked on driverless runners using its source-bound
+image configuration, extracted ELF executable, and image-local shared-library
+resolution. Only the host-provided `libcuda.so.1` may be unresolved; all other
+missing libraries and loader diagnostics fail validation. The same check runs
+in Rust CUDA image PR CI. These checks do not exercise GPU inference. CPU Rust
+and the other service images retain their executable `--help` smoke checks.
+
+Package Helm charts with `mise run helm -- package --destination DIR`. This
+stages the checked-in model and bundle catalogs, checks their exact bytes in
+the archive, and lints and renders that archive after staging is removed,
+including the embedded-config mode. CI and publication use this same path.
 
 Floating image aliases move only after the full versioned image set verifies.
 An older release recovery keeps those aliases unchanged when a newer stable

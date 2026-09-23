@@ -1,0 +1,155 @@
+name: Release candidate
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release*.yml
+      - .github/workflows/publish-*.yml
+      - .github/release-matrix.json
+      - .dockerignore
+      - .release-please-manifest.json
+      - release-please-config.json
+      - mise.toml
+      - pyproject.toml
+      - uv.lock
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - Cargo.toml
+      - Cargo.lock
+      - tools/ci/**
+      - tools/mise_tasks/docker*
+      - tools/mise_tasks/helm*
+      - packages/**/Dockerfile*
+      - packages/**/pyproject.toml
+      - packages/**/package.json
+      - packages/**/Cargo.toml
+      - packages/**/Cargo.lock
+      - packages/sie_audio_prep/**
+      - packages/sie_server_rust/**
+      - packages/sie_telemetry/**
+      - packages/sie_server/bundles/**
+      - integrations/**/pyproject.toml
+      - integrations/**/package.json
+      - deploy/helm/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.identity.outputs.sha }}
+      version: ${{ steps.identity.outputs.version }}
+      tag_name: ${{ steps.identity.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: identity
+        name: Read coordinated versions from the exact candidate source
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, tomllib
+          from pathlib import Path
+          from tools.ci.distributions import manifests
+
+          sha = os.environ["GITHUB_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}", sha):
+              raise SystemExit("Candidate requires a full source SHA")
+          if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != sha:
+              raise SystemExit("Candidate checkout differs from the workflow source")
+          version = tomllib.loads(Path("packages/sie_sdk/pyproject.toml").read_text())["project"]["version"]
+          if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
+              raise SystemExit("Candidate metadata must contain a stable package version")
+          if json.loads(Path(".release-please-manifest.json").read_text()) != {".": version}:
+              raise SystemExit("Candidate release manifest and package version differ")
+          for family in ("python", "npm"):
+              manifests(family, version)
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"sha={sha}\nversion={version}\ntag_name=v{version}\n")
+          PY
+
+  python:
+    needs: prepare
+    uses: ./.github/workflows/release-python.yml
+    with:
+      source_ref: ${{ needs.prepare.outputs.sha }}
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      build_only: true
+
+  npm:
+    needs: prepare
+    uses: ./.github/workflows/release-npm.yml
+    with:
+      source_ref: ${{ needs.prepare.outputs.sha }}
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      build_only: true
+
+  docker:
+    needs: prepare
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/release-docker.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      sha: ${{ needs.prepare.outputs.sha }}
+
+  audio:
+    needs: prepare
+    uses: ./.github/workflows/release-audio.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      sha: ${{ needs.prepare.outputs.sha }}
+
+  helm:
+    needs: prepare
+    uses: ./.github/workflows/release-helm.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      sha: ${{ needs.prepare.outputs.sha }}
+
+  native:
+    needs: [prepare, docker]
+    uses: ./.github/workflows/release-native.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag_name: ${{ needs.prepare.outputs.tag_name }}
+      sha: ${{ needs.prepare.outputs.sha }}
+
+  complete:
+    name: Release candidate / Complete
+    needs: [prepare, python, npm, docker, audio, helm, native]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every candidate artifact family to finish successfully
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          results = json.loads(os.environ["RESULTS"])
+          expected = {"prepare", "python", "npm", "docker", "audio", "helm", "native"}
+          if set(results) != expected:
+              raise SystemExit("Candidate completion is missing a required artifact family")
+          bad = {name: job["result"] for name, job in results.items() if job["result"] != "success"}
+          if bad:
+              raise SystemExit(f"Incomplete release candidate: {bad}")
+          PY

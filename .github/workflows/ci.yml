@@ -190,7 +190,7 @@ jobs:
         run: mise exec -- uv run --frozen --project . pytest -q tools/ci/tests/test_helm_render.py
       - run: |
           destination="$(mktemp -d)"
-          mise exec -- helm package deploy/helm/sie-cluster --destination "$destination"
+          mise run helm -- package --destination "$destination"
           git diff --exit-code -- deploy/helm/sie-cluster/Chart.lock
 
   live-sdk:

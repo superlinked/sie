@@ -455,7 +455,16 @@ def test_actual_release_completion_script_rejects_non_success(monkeypatch, resul
     assert script is not None
     results = {
         family: {"result": "success"}
-        for family in ("prepare", "python-publish", "npm-publish", "docker", "helm", "audio", "native")
+        for family in (
+            "prepare",
+            "artifacts-ready",
+            "python-publish",
+            "npm-publish",
+            "docker",
+            "helm",
+            "audio",
+            "native",
+        )
     }
     results["native"]["result"] = result
     monkeypatch.setenv("RESULTS", json.dumps(results))
@@ -475,6 +484,22 @@ def test_candle_and_docker_release_source_closure() -> None:
 
 def test_helm_release_follows_verified_images() -> None:
     assert contract.helm_release_errors() == []
+
+
+def test_helm_release_must_package_the_staged_and_validated_catalog(monkeypatch) -> None:
+    read_text = Path.read_text
+
+    def unstaged_package(path, *args, **kwargs):
+        text = read_text(path, *args, **kwargs)
+        if path == contract.ROOT / ".github/workflows/release-helm.yml":
+            text = text.replace(
+                "mise run helm -- package --destination artifact",
+                "mise exec -- helm package deploy/helm/sie-cluster --destination artifact",
+            )
+        return text
+
+    monkeypatch.setattr(Path, "read_text", unstaged_package)
+    assert any("mise run helm -- package" in error for error in contract.helm_release_errors())
 
 
 def test_public_release_app_hands_final_pr_head_to_ci() -> None:

@@ -308,6 +308,17 @@ def test_recovery_cannot_change_original_provenance(key, value, message):
         )
 
 
+def test_failed_publisher_matrix_can_resume_after_all_images_are_retained():
+    jobs = [
+        {"id": 1, "name": "prepare", "conclusion": "success"},
+        {"id": 2, "name": "artifacts-ready", "conclusion": "success"},
+        {"id": 3, "name": "docker / matrix", "conclusion": "failure"},
+        {"id": 4, "name": "docker / push-server (cpu, default)", "conclusion": "skipped"},
+        {"id": 5, "name": "docker-build / build-service (sie-server-rust)", "conclusion": "success"},
+    ]
+    assert recovery.retry_endpoint(jobs, "docker", 123) == "actions/jobs/3/rerun"
+
+
 def artifact():
     return {
         "name": "python-distributions",

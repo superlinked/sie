@@ -374,3 +374,70 @@ def test_cuda13_workflows_have_no_privileged_or_unrelated_behavior():
             uses = [job.get("uses", ""), *(step.get("uses", "") for step in job.get("steps", []))]
             for action in filter(None, uses):
                 assert action.startswith("./") or re.fullmatch(r"[\w/-]+@[a-f0-9]{40}", action)
+
+
+def test_rust_cuda_image_workflow_covers_production_sources_on_pr_and_main_push():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/rust-cuda-image.yml").read_text())
+    triggers = workflow.get("on", workflow.get(True))
+    assert set(triggers) == {"pull_request", "push"}
+    assert triggers["push"]["branches"] == ["main"]
+    expected_paths = {
+        ".github/workflows/rust-cuda-image.yml",
+        ".github/workflows/release-docker.yml",
+        ".dockerignore",
+        "mise.toml",
+        "packages/sie_server_rust/**",
+        "packages/sie_telemetry/**",
+        "tools/ci/rust_cuda_image_smoke.py",
+        "tools/ci/tests/test_rust_cuda_image_smoke.py",
+        "tools/ci/tests/test_required_ci.py",
+        "tools/ci/tests/test_docker_task.py",
+        "tools/mise_tasks/docker_task.py",
+    }
+    assert set(triggers["pull_request"]["paths"]) == expected_paths
+    assert set(triggers["push"]["paths"]) == expected_paths
+    assert workflow["concurrency"] == {
+        "group": "rust-cuda-image-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": True,
+    }
+
+
+def test_rust_cuda_image_workflow_validates_same_loaded_production_image_without_publication():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/rust-cuda-image.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read"}
+    assert set(workflow["jobs"]) == {"compatibility"}
+    job = workflow["jobs"]["compatibility"]
+    assert job["runs-on"] == "blacksmith-8vcpu-ubuntu-2404"
+    assert job["timeout-minutes"] == 90
+    for key in ("if", "continue-on-error", "environment", "secrets", "permissions"):
+        assert key not in job
+    steps = job["steps"]
+    assert [step["uses"] for step in steps if "uses" in step] == [
+        "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
+        "jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac",
+        "useblacksmith/setup-docker-builder@9309da73a81f66976a6d750572e221508b1e2682",
+        "useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850",
+    ]
+    assert steps[0]["with"] == {"persist-credentials": False}
+    build = steps[-2]
+    assert build["with"] == {
+        "context": ".",
+        "file": "packages/sie_server_rust/Dockerfile.candle",
+        "platforms": "linux/amd64",
+        "build-args": "CUDA_COMPUTE_CAP=89",
+        "labels": (
+            "org.opencontainers.image.revision=${{ github.sha }}\n"
+            "org.opencontainers.image.source=https://github.com/superlinked/sie\n"
+        ),
+        "tags": "sie-rust-cuda:ci",
+        "load": True,
+        "push": False,
+    }
+    assert steps[-1]["run"] == (
+        'mise exec -- python tools/ci/rust_cuda_image_smoke.py sie-rust-cuda:ci --source-revision "$GITHUB_SHA"'
+    )
+    for step in steps:
+        assert not {"if", "continue-on-error", "shell"}.intersection(step)
+    serialized = json.dumps(workflow)
+    for forbidden in ("pull_request_target", "id-token", "secrets.", "docker login", "docker push"):
+        assert forbidden not in serialized

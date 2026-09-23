@@ -42,8 +42,12 @@ jobs:
           BUILD_ONLY: ${{ inputs.build_only }}
         run: |
           set -euo pipefail
-          if [ "$BUILD_ONLY" = false ]; then test -n "$RELEASE_VERSION"; fi
-          mise exec -- python tools/ci/release_guard.py build --source-ref "$SOURCE_REF" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
+          if [ "$BUILD_ONLY" = true ]; then
+            mise exec -- python tools/ci/release_guard.py build --source-ref "$SOURCE_REF"
+          else
+            test -n "$RELEASE_VERSION"
+            mise exec -- python tools/ci/release_guard.py build --source-ref "$SOURCE_REF" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
+          fi
       - name: Build complete archives and test clean packed consumers
         env:
           RELEASE_VERSION: ${{ inputs.version }}

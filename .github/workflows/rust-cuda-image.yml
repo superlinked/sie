@@ -1,0 +1,67 @@
+name: Rust CUDA image compatibility
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/rust-cuda-image.yml
+      - .github/workflows/release-docker.yml
+      - .dockerignore
+      - mise.toml
+      - packages/sie_server_rust/**
+      - packages/sie_telemetry/**
+      - tools/ci/rust_cuda_image_smoke.py
+      - tools/ci/tests/test_rust_cuda_image_smoke.py
+      - tools/ci/tests/test_required_ci.py
+      - tools/ci/tests/test_docker_task.py
+      - tools/mise_tasks/docker_task.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/rust-cuda-image.yml
+      - .github/workflows/release-docker.yml
+      - .dockerignore
+      - mise.toml
+      - packages/sie_server_rust/**
+      - packages/sie_telemetry/**
+      - tools/ci/rust_cuda_image_smoke.py
+      - tools/ci/tests/test_rust_cuda_image_smoke.py
+      - tools/ci/tests/test_required_ci.py
+      - tools/ci/tests/test_docker_task.py
+      - tools/mise_tasks/docker_task.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-cuda-image-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
+          install_args: --jobs=1
+          cache: false
+      - uses: useblacksmith/setup-docker-builder@9309da73a81f66976a6d750572e221508b1e2682 # v1
+      - name: Build the production Rust CUDA image without publishing
+        uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v1
+        with:
+          context: .
+          file: packages/sie_server_rust/Dockerfile.candle
+          platforms: linux/amd64
+          build-args: CUDA_COMPUTE_CAP=89
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/superlinked/sie
+          tags: sie-rust-cuda:ci
+          load: true
+          push: false
+      - name: Validate image identity and dependencies without a GPU driver
+        run: mise exec -- python tools/ci/rust_cuda_image_smoke.py sie-rust-cuda:ci --source-revision "$GITHUB_SHA"

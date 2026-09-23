@@ -171,12 +171,12 @@ TRUSTED_WRITE_CONDITION_TERMS = (
 PUBLISHER_JOBS = (
     (".github/workflows/release.yml", "python-publish", "pypi", {"contents": "read", "id-token": "write"}),
     (".github/workflows/release.yml", "npm-publish", "npm", {"contents": "read", "id-token": "write"}),
-    (".github/workflows/release-audio.yml", "publish", "github-release", {"contents": "write"}),
-    (".github/workflows/release-native.yml", "publish", "github-release", {"contents": "write"}),
-    (".github/workflows/release-docker.yml", "push-server", "ghcr", {"contents": "read", "packages": "write"}),
-    (".github/workflows/release-docker.yml", "push-service", "ghcr", {"contents": "read", "packages": "write"}),
-    (".github/workflows/release-docker.yml", "alias", "ghcr", {"contents": "read", "packages": "write"}),
-    (".github/workflows/release-helm.yml", "publish", "helm", {"contents": "read", "packages": "write"}),
+    (".github/workflows/publish-audio.yml", "publish", "github-release", {"contents": "write"}),
+    (".github/workflows/publish-native.yml", "publish", "github-release", {"contents": "write"}),
+    (".github/workflows/publish-docker.yml", "push-server", "ghcr", {"contents": "read", "packages": "write"}),
+    (".github/workflows/publish-docker.yml", "push-service", "ghcr", {"contents": "read", "packages": "write"}),
+    (".github/workflows/publish-docker.yml", "alias", "ghcr", {"contents": "read", "packages": "write"}),
+    (".github/workflows/publish-helm.yml", "publish", "helm", {"contents": "read", "packages": "write"}),
 )
 
 CANDLE_PATHS = (
@@ -540,13 +540,18 @@ def release_workflow_errors() -> list[str]:
     for family in ("python", "npm", "audio", "docker", "helm", "native"):
         if f"uses: ./.github/workflows/release-{family}.yml" not in top:
             errors.append(f"top-level release does not call {family} directly")
-    for family in ("python", "npm"):
+    for family in ("python", "npm", "docker", "helm", "audio", "native"):
         text = (ROOT / f".github/workflows/release-{family}.yml").read_text()
-        if "id-token:" in text or "environment:" in text or "  publish:" in text:
+        if "id-token:" in text or "environment:" in text or ": write" in text or "  publish:" in text:
             errors.append(f"{family} reusable must only build and test")
-        if f"distributions.py build {family}" not in text or "inputs.source_ref" not in text:
+        if family in ("python", "npm") and (
+            f"distributions.py build {family}" not in text or "inputs.source_ref" not in text
+        ):
             errors.append(f"{family} reusable lacks exact-source distribution checks")
-    for path in sorted((ROOT / ".github/workflows").glob("release*.yml")):
+    paths = set((ROOT / ".github/workflows").glob("release*.yml")) | set(
+        (ROOT / ".github/workflows").glob("publish-*.yml")
+    )
+    for path in sorted(paths):
         text = path.read_text()
         for token_name in ("PYPI_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN"):
             if token_name in text:
@@ -554,15 +559,54 @@ def release_workflow_errors() -> list[str]:
         for retention in re.findall(r"retention-days:\s*(\d+)", text):
             if int(retention) < ARTIFACT_RETENTION_DAYS:
                 errors.append(f"{path.name} expires retry artifacts before 30 days")
-        if path.name != "release.yml" and "workflow_dispatch" in text:
+        if path.name not in {"release.yml", "release-candidate.yml"} and "workflow_dispatch" in text:
             errors.append(f"{path.name} must not expose a separate recovery writer")
     blocks = workflow_job_blocks(".github/workflows/release.yml")
     prepare = blocks.get("prepare", "")
     if "release_guard.py prepare" not in prepare or "ref: ${{ github.sha }}" not in prepare:
         errors.append("publication must prepare the exact published tag event")
-    for family in ("python", "npm", "docker", "helm", "audio", "native", "python-publish", "npm-publish"):
+    for family in (
+        "python",
+        "npm",
+        "docker-build",
+        "helm-build",
+        "audio-build",
+        "native-build",
+        "docker",
+        "helm",
+        "audio",
+        "native",
+        "python-publish",
+        "npm-publish",
+    ):
         if "needs.prepare" not in blocks.get(family, "") or "needs.release-please" in blocks.get(family, ""):
             errors.append(f"{family} must consume the published-release prepare identity")
+    barrier = blocks.get("artifacts-ready", "")
+    if (
+        job_scalar(barrier, "needs") != "[prepare, python, npm, docker-build, helm-build, audio-build, native-build]"
+        or "always()" not in barrier
+        or 'job["result"] != "success"' not in barrier
+        or "raise SystemExit" not in barrier
+    ):
+        errors.append("every artifact family must succeed before the publication barrier opens")
+    for family in ("python-publish", "npm-publish", "docker", "helm", "audio", "native"):
+        block = blocks.get(family, "")
+        if "artifacts-ready" not in (
+            job_scalar(block, "needs") or ""
+        ) or "needs.artifacts-ready.result == 'success'" not in (job_scalar(block, "if") or ""):
+            errors.append(f"{family} must wait for the complete tested artifact set")
+    for family in ("docker", "helm", "audio", "native"):
+        if f"uses: ./.github/workflows/publish-{family}.yml" not in blocks.get(family, ""):
+            errors.append(f"{family} must publish retained archives through its guarded publisher")
+    for family in ("helm", "native"):
+        if job_scalar(blocks.get(family, ""), "needs") != "[prepare, artifacts-ready, docker]":
+            errors.append(f"{family} publication must follow verified versioned images")
+    candidate = (ROOT / ".github/workflows/release-candidate.yml").read_text()
+    if any(
+        item in candidate
+        for item in (": write", "environment:", "id-token:", "uses: ./.github/workflows/publish-", "secrets.")
+    ):
+        errors.append("release candidate rehearsal must be read-only and unable to publish")
     errors.extend(release_queue_errors(top, (ROOT / ".github/workflows/ci.yml").read_text()))
     recover = blocks.get("recover", "")
     if "release_recovery" not in recover or "id-token:" in recover or "publish-" in recover:
@@ -570,7 +614,10 @@ def release_workflow_errors() -> list[str]:
     complete = blocks.get("complete", "")
     if "always()" not in complete or 'job["result"] != "success"' not in complete:
         errors.append("release completion must reject every non-success result")
-    if job_scalar(complete, "needs") != "[prepare, python-publish, npm-publish, docker, helm, audio, native]":
+    if (
+        job_scalar(complete, "needs")
+        != "[prepare, artifacts-ready, python-publish, npm-publish, docker, helm, audio, native]"
+    ):
         errors.append("release completion must include every artifact family")
     if (ROOT / ".github/workflows/repair-audio-asset.yml").exists():
         errors.append("obsolete audio repair workflow must be removed")
@@ -718,6 +765,7 @@ def audio_release_errors() -> list[str]:
     errors.extend(
         audio_checkout_errors(workflow_job_blocks(".github/workflows/release-audio.yml").get("build", ""), workflow)
     )
+    workflow += (ROOT / ".github/workflows/publish-audio.yml").read_text()
     required = (
         "ref: ${{ inputs.sha }}",
         AUDIO_MANYLINUX_IMAGE,
@@ -892,7 +940,7 @@ def docker_release_errors() -> list[str]:
     if chart_images != PUBLIC_IMAGE_NAMES:
         errors.append(f"chart-advertised SIE repositories differ from release set: {sorted(chart_images)}")
 
-    workflow = (ROOT / ".github/workflows/release-docker.yml").read_text()
+    workflow = (ROOT / ".github/workflows/publish-docker.yml").read_text()
     if "inputs.publish == true" not in workflow or "PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'" not in workflow:
         errors.append("Docker release is missing its dual publication latch")
     if "needs: [matrix, verify]" not in workflow:
@@ -916,13 +964,13 @@ def helm_release_errors() -> list[str]:
         errors.append("Helm Chart version and appVersion must share the vX.Y.Z release identity")
 
     workflow = (ROOT / ".github/workflows/release-helm.yml").read_text()
+    workflow += (ROOT / ".github/workflows/publish-helm.yml").read_text()
     required = (
         "ref: ${{ inputs.sha }}",
         "mise run helm -- dependencies",
         "mise run helm -- lint --set payloadStore.enabled=false",
         "mise run helm -- template --set payloadStore.enabled=false",
-        "helm package deploy/helm/sie-cluster",
-        "needs: build",
+        "mise run helm -- package --destination artifact",
         "inputs.publish == true",
         "PUBLIC_RELEASE_PUBLISHING_ENABLED == 'true'",
         "packages: write",

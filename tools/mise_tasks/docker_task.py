@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from tools.ci import cuda13_image_smoke
+from tools.ci import cuda13_image_smoke, rust_cuda_image_smoke
 from tools.ci.release_artifact import create_manifest, validate_manifest
 from tools.ci.release_guard import api, stable_version
 
@@ -605,7 +605,10 @@ def main() -> int:
                 if args.command == "build-server"
                 else singleton_image(args.registry, args.version, args.service)
             )
-            smoke_image(image, bundle=args.bundle if args.command == "build-server" else None)
+            if args.command == "build-service" and args.service == "sie-server-rust":
+                rust_cuda_image_smoke.validate(image, source_revision=args.source_revision)
+            else:
+                smoke_image(image, bundle=args.bundle if args.command == "build-server" else None)
             export_image(
                 image, args.archive_dir, version=args.version, source_revision=args.source_revision, run_id=args.run_id
             )
