@@ -48,7 +48,9 @@ dependencies = [
     "gliner>=0.2.26,<1",
     "gliner2>=1.3.1,<2",
     "glirel>=1.0,<2",
-    "gliclass>=0.1,<1",
+    # 0.1.17 adds the cross-attention scorer and pass-through pooling used by
+    # the multilingual GLiClass checkpoints; 0.1.18+ requires transformers 5.
+    "gliclass>=0.1.17,<1",
     # Docling, composite-document parser (PDF/DOCX/HTML) for extract().
     # PINNED TO THE ARTIFACT REVISION, NOT FLOATED (#2872). Docling resolves
     # its RapidOCR det/cls/rec files by a version-specific path table, so the

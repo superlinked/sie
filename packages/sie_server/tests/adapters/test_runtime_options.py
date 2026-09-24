@@ -964,15 +964,17 @@ class TestExtractRuntimeOptions:
         import types
         from unittest.mock import MagicMock
 
+        from sie_server.adapters import gliclass as gliclass_module
         from sie_server.adapters.gliclass import GLiClassAdapter
 
-        # Stub gliclass and transformers imports inside load().
+        # Stub the gliclass import inside load() and the adapter's tokenizer classes.
         fake_gliclass = types.ModuleType("gliclass")
         fake_model = MagicMock()
         # ``model.to(...)`` returns the model itself so the adapter can chain.
         fake_model.to.return_value = fake_model
         fake_gliclass.GLiClassModel = MagicMock()
         fake_gliclass.GLiClassModel.from_pretrained.return_value = fake_model
+        fake_gliclass.GLiClassModelConfig = MagicMock()
         captured: dict[str, object] = {}
 
         def fake_pipeline_ctor(**kwargs: object) -> MagicMock:
@@ -981,17 +983,17 @@ class TestExtractRuntimeOptions:
 
         fake_gliclass.ZeroShotClassificationPipeline = fake_pipeline_ctor
 
-        fake_transformers = types.ModuleType("transformers")
         fake_tokenizer = MagicMock()
         fake_tokenizer.model_max_length = 1_000_000  # default before clamp
-        fake_transformers.AutoTokenizer = MagicMock()
-        fake_transformers.AutoTokenizer.from_pretrained.return_value = fake_tokenizer
+        fake_auto_tokenizer = MagicMock()
+        fake_auto_tokenizer.from_pretrained.return_value = fake_tokenizer
 
         # Inject stubs so ``from gliclass import ...`` inside load() picks them
-        # up. ``monkeypatch.setitem`` restores the original modules on teardown
-        # even if the test is interrupted.
+        # up. ``monkeypatch`` restores the originals on teardown even if the
+        # test is interrupted.
         monkeypatch.setitem(sys.modules, "gliclass", fake_gliclass)
-        monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+        monkeypatch.setattr(gliclass_module, "AutoTokenizer", fake_auto_tokenizer)
+        monkeypatch.setattr(gliclass_module, "PreTrainedTokenizerFast", MagicMock())
 
         adapter = GLiClassAdapter("test-model", max_seq_length=512)
         adapter.load("cpu")

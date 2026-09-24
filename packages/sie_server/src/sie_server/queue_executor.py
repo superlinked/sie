@@ -12,6 +12,7 @@ import msgspec
 import yaml
 from sie_sdk._msgpack import packb as pack_msgpack
 
+from sie_server.adapters.errors import InputTooLongError
 from sie_server.api.ws import compute_bundle_config_hash_cached
 from sie_server.config.model import ModelConfig
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
@@ -1423,6 +1424,12 @@ class QueueExecutor:
         for bi in req.items:
             try:
                 options = merge_runtime_options(config, bi.options)
+                # Same precedence as the HTTP extract path: the request's own
+                # instruction, else one from the options (profile defaults
+                # included).
+                instruction = bi.instruction if bi.instruction is not None else options.get("instruction")
+                if instruction is not None and not isinstance(instruction, str):
+                    raise InvalidInputError("instruction must be a string")
                 server_item = decode_item(bi.item)
                 timing = RequestTiming()
                 timing.start_tokenization()
@@ -1464,7 +1471,7 @@ class QueueExecutor:
                             model_id,
                             [server_item],
                             config,
-                            instruction=bi.instruction,
+                            instruction=instruction,
                             task=task,
                         )
                         prepared_items = prepared_batch.items
@@ -1477,7 +1484,7 @@ class QueueExecutor:
                             [server_item],
                             labels=bi.labels,
                             output_schema=bi.output_schema,
-                            instruction=bi.instruction,
+                            instruction=instruction,
                             options=options,
                         )
                         prepared_items = build_extract_prepared_items([server_item], item_costs=item_costs)
@@ -1490,7 +1497,7 @@ class QueueExecutor:
                         items=[server_item],
                         labels=bi.labels,
                         output_schema=bi.output_schema,
-                        instruction=bi.instruction,
+                        instruction=instruction,
                         options=options,
                         request_id=bi.request_id,
                         timing=timing,
@@ -2009,6 +2016,10 @@ def _inference_exception_outcome(
         # park items in a batcher today, so this arm is a contract guard
         # against a future caller that submits through the queueing path.
         return _nak_outcome(bi)
+    if isinstance(exc, InputTooLongError):
+        # The input exceeds the model's window: INPUT_TOO_LONG (HTTP 400), as
+        # the HTTP path reports it, not a server-side inference failure.
+        return _error_outcome(bi, ErrorCode.INPUT_TOO_LONG.value, str(exc))
     if isinstance(exc, (InvalidInputError, msgspec.ValidationError)):
         # A typed-decode failure (decode_item) or a media contract violation;
         # both surface as INVALID_INPUT (HTTP 400), matching the HTTP path.

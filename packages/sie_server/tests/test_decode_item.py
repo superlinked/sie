@@ -14,6 +14,7 @@ import time
 
 import msgspec
 import pytest
+from sie_server.adapters.errors import InputTooLongError
 from sie_server.ipc_types import EncodeBatchItem
 from sie_server.queue_executor import _inference_exception_outcome
 from sie_server.types.inputs import InvalidInputError, InvalidMediaError, decode_item, media_bytes
@@ -106,3 +107,8 @@ class TestInvalidInputMapping:
         outcome = _inference_exception_outcome(_bi(), InvalidInputError("blank candidate"))
         assert outcome.disposition == "publish_error_and_ack"
         assert outcome.error_code == ErrorCode.INVALID_INPUT.value
+
+    def test_input_too_long_maps_to_input_too_long(self) -> None:
+        outcome = _inference_exception_outcome(_bi(), InputTooLongError("labels do not fit"))
+        assert outcome.disposition == "publish_error_and_ack"
+        assert outcome.error_code == ErrorCode.INPUT_TOO_LONG.value

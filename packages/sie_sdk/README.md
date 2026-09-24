@@ -58,6 +58,73 @@ so a very long document may not get relations for its later entities; its
 entities are still all returned. `threshold` and `relation_threshold` must be
 between 0 and 1, and these models need a `threshold` of at least 0.1.
 
+## Zero-shot classification
+
+GLiClass models (`knowledgator/gliclass-*` and the `knowledgator/opir-*`
+guardrail models) score text against labels passed with each request. Every
+label comes back in `classifications`, sorted by score. By default the scores
+form one distribution that sums to 1; `options={"classification_type":
+"multi-label"}` scores each label independently instead.
+
+```python
+ticket = Item(text="I was charged twice and support has not replied in three days.")
+
+result = client.extract(
+    "knowledgator/gliclass-instruct-large-v1.0",
+    ticket,
+    labels=["billing", "bug report", "feature request"],
+    instruction="Classify the support ticket by its main topic.",
+)
+print(result["classifications"][0]["label"])  # billing
+```
+
+`instruction` is the model's task prompt; the `gliclass-instruct-*` and
+`opir-*` models are trained to follow one. Few-shot examples go in
+`options={"examples": [{"text": ..., "labels": [...]}]}`, with labels taken
+from the request's label set. They can move scores a long way, so check them
+on your own data. The model reads examples after the document, so a long
+document can push them out of the model's window; send
+`options={"overflow_policy": "truncate_text"}` to shorten the document instead.
+
+To answer several questions in one call, pass named `label_groups` instead of
+`labels`. Scores are normalized within each group, and `data` holds one answer
+per group:
+
+```python
+result = client.extract(
+    "knowledgator/gliclass-instruct-large-v1.0",
+    ticket,
+    instruction="Triage the support ticket.",
+    options={
+        "label_groups": {
+            "topic": ["billing", "bug report", "feature request"],
+            "urgency": ["low", "medium", "high"],
+            "needs_human": ["yes", "no"],
+        }
+    },
+)
+urgency = result["data"]["urgency"]
+print(urgency["choice"], urgency["confidence"])  # e.g. medium 0.78
+print(urgency["probabilities"])  # {"low": ..., "medium": ..., "high": ...}
+```
+
+Each group answers `{"type": "choice", "choice", "probabilities",
+"confidence"}`, where `confidence` is `1 - entropy / log(number of labels)`.
+With `"classification_type": "multi-label"` a group answers `{"labels",
+"probabilities"}`: every label scored independently, and `labels` lists those
+at or above `options.threshold` (0.5 when no threshold is set).
+`classifications` lists the same scores under `group.label` names. In a
+grouped request, an example's labels may be written as `"urgency.high"` or as
+`{"urgency": "high"}`.
+
+Usage counts each item's document tokens plus the tokens of the instruction
+and example texts sent with it, since the model encodes them for every item.
+Label names are not counted. With an instruction or examples, each item's
+count is capped at the model window minus the label prompt, unless the
+document count alone is already higher. An item whose document pushes the
+labels out of the window comes back with an `INPUT_TOO_LONG` error in its
+`error` field, and the other items still succeed.
+
 ## Generation prompts and guard verdicts
 
 `generate` and `stream_generate` treat text-only prompts as raw continuation

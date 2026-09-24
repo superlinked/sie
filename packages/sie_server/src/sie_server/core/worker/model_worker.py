@@ -44,6 +44,7 @@ from sie_server.core.worker.types import (
     WorkerStats,
 )
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
+from sie_server.types.inputs import InvalidInputError
 
 if TYPE_CHECKING:
     from sie_server.adapters.base import ModelAdapter
@@ -1484,6 +1485,24 @@ class ModelWorker:
         self._stats.batches_processed += 1
         self._stats.total_tokens_processed += batch.total_tokens
 
+    def _config_key_or_fail(self, metadata: RequestMetadata) -> tuple[Any, ...] | None:
+        """Batching key for one request, or None after failing that request alone.
+
+        The key is built from caller-supplied fields. A value that cannot be
+        hashed must fail only the request that sent it, never the requests
+        batched with it.
+        """
+        try:
+            handler = self._handlers[metadata.operation]
+            config_key = (metadata.operation, *handler.make_config_key(metadata))
+            hash(config_key)
+        except Exception as exc:  # noqa: BLE001 -- isolate one malformed request from its batch
+            logger.warning("Rejecting request with an unbatchable configuration: %s", exc)
+            if not metadata.future.done():
+                metadata.future.set_exception(InvalidInputError(f"Request options cannot be processed: {exc}"))
+            return None
+        return config_key
+
     def _group_by_inference_config(
         self,
         batch: FormattedBatch[HasCost, RequestMetadata],
@@ -1509,9 +1528,9 @@ class ModelWorker:
         metadata_list = batch.metadata
         if len(metadata_list) > 1 and all(m is metadata_list[0] for m in metadata_list):
             first_meta = metadata_list[0]
-            handler = self._handlers[first_meta.operation]
-            handler_key = handler.make_config_key(first_meta)
-            config_key = (first_meta.operation, *handler_key)
+            config_key = self._config_key_or_fail(first_meta)
+            if config_key is None:
+                return {}
 
             items_list: list[Item] = []
             indices_list: list[int] = []
@@ -1527,11 +1546,14 @@ class ModelWorker:
             tuple[list[Item], list[RequestMetadata], list[int], list[HasCost]],
         ] = {}
 
+        failed: set[int] = set()
         for prepared_item, metadata in zip(batch.items, metadata_list, strict=True):
-            # Get handler and create config key
-            handler = self._handlers[metadata.operation]
-            handler_key = handler.make_config_key(metadata)
-            config_key = (metadata.operation, *handler_key)
+            if id(metadata) in failed:
+                continue
+            config_key = self._config_key_or_fail(metadata)
+            if config_key is None:
+                failed.add(id(metadata))
+                continue
 
             if config_key not in groups:
                 groups[config_key] = ([], [], [], [])

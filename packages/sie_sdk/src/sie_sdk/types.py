@@ -511,7 +511,9 @@ class ExtractResult(TypedDict, total=False):
         relations: List of extracted relation triples.
         classifications: List of classification results.
         objects: List of detected objects with bounding boxes.
-        data: Additional structured extraction data (if output_schema was provided).
+        data: Structured extraction data: schema-driven results when
+            output_schema was provided, document parses, or one answer per
+            group when GLiClass options.label_groups was provided.
         error: Stable per-item failure when extraction did not complete.
         request: Request-scoped id, metered usage, and settled debit when
             supplied by the gateway.

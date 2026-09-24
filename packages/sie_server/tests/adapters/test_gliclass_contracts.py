@@ -95,3 +95,97 @@ def test_pipeline_label_set_must_match_requested_labels(result: dict[str, float]
             [Item(text="hello")],
             labels=["positive", "negative"],
         )
+
+
+class TestTokenizerLoading:
+    def test_transformers5_tokenizer_class_falls_back_to_fast_tokenizer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import transformers
+
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        def auto(name: str, **kwargs: object) -> object:
+            raise ValueError("Tokenizer class TokenizersBackend does not exist or is not currently imported.")
+
+        def fast(name: str, **kwargs: object) -> str:
+            calls.append((name, kwargs))
+            return "fast-tokenizer"
+
+        monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", auto)
+        monkeypatch.setattr(transformers.PreTrainedTokenizerFast, "from_pretrained", fast)
+        adapter = GLiClassAdapter("org/model", revision="abc123")
+
+        assert adapter._load_tokenizer({"revision": "abc123"}) == "fast-tokenizer"
+        assert calls == [("org/model", {"revision": "abc123"})]
+
+    def test_other_tokenizer_errors_propagate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import transformers
+
+        def auto(name: str, **kwargs: object) -> object:
+            raise ValueError("Unrecognized model identifier")
+
+        monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", auto)
+
+        with pytest.raises(ValueError, match="Unrecognized model identifier"):
+            GLiClassAdapter("org/model")._load_tokenizer({})
+
+
+class TestModernBertRopeCompatibility:
+    """Checkpoints saved with transformers 5 keep ModernBERT RoPE bases in rope_parameters."""
+
+    @staticmethod
+    def _config(**overrides: object) -> object:
+        from transformers import ModernBertConfig
+
+        fields: dict[str, object] = {"num_hidden_layers": 4, "global_attn_every_n_layers": 3}
+        fields.update(overrides)
+        return ModernBertConfig(**fields)
+
+    def test_rope_parameters_fill_the_transformers4_fields(self) -> None:
+        from sie_server.adapters.gliclass import _restore_modernbert_rope_fields
+
+        config = self._config(
+            rope_parameters={
+                "full_attention": {"rope_theta": 160000.0, "rope_type": "default"},
+                "sliding_attention": {"rope_theta": 160000.0, "rope_type": "default"},
+            },
+            layer_types=["full_attention", "sliding_attention", "sliding_attention", "full_attention"],
+        )
+        assert config.local_rope_theta == 10000.0  # the transformers 4 default a v5 checkpoint would get
+
+        assert _restore_modernbert_rope_fields(config) is True
+        assert config.local_rope_theta == 160000.0
+        assert config.global_rope_theta == 160000.0
+
+    def test_transformers4_checkpoints_are_left_alone(self) -> None:
+        from sie_server.adapters.gliclass import _restore_modernbert_rope_fields
+
+        config = self._config(local_rope_theta=10000.0, global_rope_theta=160000.0)
+
+        assert _restore_modernbert_rope_fields(config) is False
+        assert config.local_rope_theta == 10000.0
+
+    def test_non_modernbert_encoders_are_left_alone(self) -> None:
+        from sie_server.adapters.gliclass import _restore_modernbert_rope_fields
+        from transformers import DebertaV2Config
+
+        assert _restore_modernbert_rope_fields(DebertaV2Config()) is False
+
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            ({"rope_parameters": {"sliding_attention": {"rope_theta": 1.0, "rope_type": "yarn"}}}, "not supported"),
+            ({"rope_parameters": {"rope_theta": 1.0, "rope_type": "default"}}, "keys"),
+            (
+                {
+                    "rope_parameters": {"full_attention": {"rope_theta": 1.0}},
+                    "layer_types": ["full_attention", "full_attention", "sliding_attention", "full_attention"],
+                },
+                "layer_types",
+            ),
+        ],
+    )
+    def test_layouts_transformers4_cannot_express_are_rejected(self, overrides: dict[str, object], match: str) -> None:
+        from sie_server.adapters.gliclass import _restore_modernbert_rope_fields
+
+        with pytest.raises(ValueError, match=match):
+            _restore_modernbert_rope_fields(self._config(**overrides))

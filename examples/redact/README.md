@@ -4,28 +4,39 @@ The runnable example behind [superlinked.com/redact](https://superlinked.com/red
 
 ## What this shows
 
-Twelve documents sent to `urchade/gliner_multi_pii-v1` on
-`https://api.superlinked.com`, each request naming the ID types that document
-uses as plain strings. No training set and no model per type. The response
-gives back exact character offsets, so the surrounding text stays readable.
+Twelve documents sent to `urchade/gliner_multi_pii-v1` and to
+`numind/NuNER_Zero` on `https://api.superlinked.com`, each request naming the
+ID types that document uses as plain strings. No training set and no model per
+type. The response gives back exact character offsets, so the surrounding text
+stays readable.
 
 The documents are CFPB and CMS published sample forms and synthetic records
 from NVIDIA's Nemotron-PII and Gretel's synthetic PII finance dataset, the
 latter two carrying their publishers' own gold PII annotations.
 
-The page publishes four figures, and `score.py` re-derives all of them from the
-recorded responses, offline:
+The page masks personal data in four steps, and `score.py` re-derives each one
+from the recorded responses, offline:
 
-| figure | meaning |
+| step | published PII spans masked |
 |---|---|
-| 23 of 25 | masks confirmed by the published gold spans in six benchmark documents |
-| 0 of 29 | amounts masked across the documents the page renders, so the figures stay readable |
-| 26 of 45 | published PII spans masked by one request per document, before any splitting |
-| 2 of 11 against 8 of 11 | a 564-word chat, one request against two |
+| One call to `gliner_multi_pii-v1`, whole document | 26 of 45 |
+| Split what runs past the model's input window | 33 of 45 |
+| Union a second call to `NuNER_Zero` | 41 of 45 |
+| Mask every later mention of a name already found | 45 of 45 |
 
-26 of 45 is the honest number and it is on the page. The splitting card is why:
-the model reads the first 384 words, 7 of those 11 spans sit past that
-boundary, and a second request recovers 6 of the 7.
+Both models are in the same task's catalog, so the second call is one more
+model id on the same endpoint. Both were recorded on all twelve documents in
+the same run, and the dataset has held all 24 calls since the page was first
+published.
+
+Two more figures it reproduces: 42 of the 49 masks land on a published gold
+span, and 0 of the 29 currency amounts across the ten recorded documents are
+masked.
+
+The second step is why the window matters. The model reads the first 384 words
+and punctuation marks and the reply gives no truncation signal, so a document
+longer than that has to be split by the caller, with each part's starting
+offset added back to the spans it returns.
 
 ## Run it
 
@@ -38,7 +49,18 @@ so a clone alone is not enough. Fetch, then score:
 python3 fetch.py         # downloads the pinned revision into data/
 python3 score.py         # reproduces every published figure offline
 python3 run.py --check   # rebuilds all 24 recorded requests from the inputs
+python3 score.py --floor-0   # the same figures with the confidence floor removed
 ```
+
+The last one is why the 0.6 floor is not doing the work. Five of the run's 168
+spans fall below it: `ID #`, `File #` and `MIC #`, each covering a field's
+printed label and no value, and the given name `Annibale` twice, which the
+first model also returned at the same offsets inside `Annibale Caboto`. Every
+figure above is unchanged with the floor removed, the 42 of 49 included: the
+three field-label spans are on the Closing Disclosure, which carries no gold
+spans and so is not one of the six documents the precision figure is measured
+over, and the two `Annibale` spans merge into masks the first model already
+produced.
 
 These three need nothing installed: they are standard library only, and none
 of them needs an API key, a Hugging Face token or any inference spend.
@@ -64,24 +86,31 @@ sending it.
 
 ```
 benchmark documents scored: 6
-  nemotron_insurance_claims_log        6 of 6 published spans masked
-  nemotron_insurance_application       7 of 7 published spans masked
-  gretel_customer_support_log          2 of 11 published spans masked
-  gretel_it_support_ticket             3 of 11 published spans masked
-  gretel_policyholder_report           4 of 5 published spans masked
-  gretel_german_health_claim           4 of 5 published spans masked
+  nemotron_insurance_claims_log        6 of 6 in one call, 6 composed
+  nemotron_insurance_application       7 of 7 in one call, 7 composed
+  gretel_customer_support_log          2 of 11 in one call, 11 composed
+  gretel_it_support_ticket             3 of 11 in one call, 11 composed
+  gretel_policyholder_report           4 of 5 in one call, 5 composed
+  gretel_german_health_claim           4 of 5 in one call, 5 composed
 
-23 of 25 masks confirmed by the published gold spans
-26 of 45 published PII spans masked by one request per document
-2 masks fall outside the gold spans, so neither benchmark can confirm or refute them
+published PII spans masked, by step:
+  26 of 45  one call to urchade/gliner_multi_pii-v1, whole document
+  33 of 45  splitting what runs past the model's input window
+  41 of 45  unioning a second call to numind/NuNER_Zero
+  45 of 45  masking every later mention of a name already found
 
-0 of 29 amounts masked across the 7 documents the page renders
+42 of 49 masks land on a published gold span
+7 fall outside them, so neither benchmark can confirm or refute those
 
-564-word chat, 11 published spans: 2 masked in one request, 8 when split
+the propagation step added 6 masks: Annibale, Paul
+
+0 of 29 currency amounts masked across the 10 recorded documents
+
+564-word chat, 11 published spans: 2 masked by one call, 11 by the composition
   the model reads the first 384 words, up to character 813
-  7 of those spans sit past word 384, and the second request recovers 6
+  7 of those spans sit past that point, and the second request starts at character 812
 
-Reproduced: 23 of 25, 0 of 29, 26 of 45, and 2 of 11 in one request against 8 of 11 when split.
+Reproduced: 26, 33, 41 and 45 of 45, 42 of 49 on gold, and 0 of 29 amounts masked.
 ```
 
 `score.py` exits nonzero if any figure fails to reproduce. `run.py --check`
@@ -119,20 +148,23 @@ byte of any request or response.
 
 ## What this does NOT establish
 
-- **The 23 of 25 is agreement, not correctness.** Both benchmarks annotate
+- **The 42 of 49 is agreement, not correctness.** Both benchmarks annotate
   only a subset of each document, so a mask outside their gold spans is
-  unjudged rather than wrong. The two unjudged masks cover a doctor's practice
-  address and a payment card's last four digits, which neither benchmark
-  annotates.
+  unjudged rather than wrong. The seven unjudged masks are two claim numbers, a
+  payment card's last four digits, a doctor's practice address, a medical
+  condition, and two further mentions of a name a model had already returned.
 - **Nothing about recall on your documents.** Twelve documents from four
   publishers is a demonstration.
 - **Nothing about the 384-word window being a fixed property.** It is what
-  these recordings show for this model. Measure it for the model you deploy.
-- **Nothing about `numind/NuNER_Zero`.** Its 12 calls are in the dataset and
-  no published figure rests on them, so `score.py` does not score them.
-- **Nothing about "0 of 29 amounts" beyond the displayed set.** That figure is
-  a claim about what a reader sees on the page, computed over exactly the seven
-  documents the page renders, not over all twelve recorded.
+  these recordings show for these models. Measure it for the model you deploy.
+- **Nothing about either model alone being enough.** Chunked, on its own,
+  `gliner_multi_pii-v1` reaches 33 of 45 and `NuNER_Zero` 37 of 45. The 41 is
+  the union of the two, and the 45 needs the propagation step as well.
+- **Nothing about which documents the page shows.** Every figure here is over
+  the recorded set: the four steps and the 42 of 49 over the six documents
+  carrying gold spans, and the 0 of 29 amounts over all ten recorded documents
+  that are not a second chunk. Which of them a page renders is the page's
+  decision and nothing here can read it.
 - **A fresh `--record` run records less than the archive.** `client.extract`
   returns the per-item result rather than the server's envelope, and surfaces
   no response headers, so `--record` rebuilds the envelope around that item and

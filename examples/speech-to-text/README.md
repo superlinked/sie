@@ -54,11 +54,14 @@ Across all 12 recorded clips a search finds 56 of 61 key terms, and 5 came back 
 Pooled word error rate 8.1% over 594 human-transcribed words
 ```
 
-`score.py` also checks the per-clip figures on the four clips the page prints a
-word error rate beside, three proof cards and the hero, and that the fifth clip
-the page plays, the playground's, is in the scored set. It exits non-zero if any
-of those, or either headline, is not what it computes. All twelve are scored
-either way.
+`score.py` also checks the published per-clip figures for four of the clips. It
+exits non-zero if any of those, or either headline, is not what it computes. All
+twelve are scored either way.
+
+It checks figures, never composition. Which clips the page plays, how many, and
+which of the wrong terms it shows are decided in sie-web; nothing here can reach
+the page to read them, so a constant asserting them would go stale on the next
+reselection while this script still exited 0.
 
 Look at a request without sending it, and check that this runner is the one
 that sent them:
@@ -139,10 +142,7 @@ provenance record as the starting point for that, not as a clearance.
   are spelling failures on drug names; `€1250` for `€12.50` is a wrong number.
 - Not reproducible against the live API. These are recordings, and a rerun goes
   through a different served revision.
-- The page plays five of the twelve clips: three proof cards, the hero and the
-  playground, and it shows two of the five wrong terms. The other three wrong
-  terms are among the 61, excluded from the 56, and displayed nowhere. All
-  twelve clips and
-  all 61 terms are scored here.
+- All twelve clips and all 61 terms are scored here. How many of either reach a
+  reader is a display decision made in sie-web and is not checked here.
 - The control call, sent with no instruction, is recorded and scored. It finds
   the same 56 of 61 at a pooled 8.75%, and it is in no published figure.

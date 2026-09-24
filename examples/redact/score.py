@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Reproduce the /redact page figures from the recorded calls.
+"""Reproduce the /redact composition from the recorded calls.
 
     python3 fetch.py
     python3 score.py
 
-The page has no single headline number. It publishes four concrete figures,
-and this script re-derives all of them offline, with no API key and no
-inference spend, exiting nonzero if any fails.
+The page masks personal data with four steps, and this script re-derives each
+one offline from the recorded responses, with no API key and no inference
+spend, exiting nonzero if any figure fails.
 
-    23 of 25   masks confirmed by the published gold spans in six benchmark documents
-    0 of 29    amounts on this page were masked, so the figures stay readable
-    26 of 45   published PII spans masked by one request per document, before any splitting
+    26 of 45   one call to urchade/gliner_multi_pii-v1, whole document
+    33 of 45   splitting what runs past the model's input window
+    41 of 45   unioning a second call to numind/NuNER_Zero
+    45 of 45   masking every later mention of a name already found
 
-and, on the request-splitting card:
+    42 of 49   masks that land on a published gold span
+    0 of 29    currency amounts masked, so the figures stay readable
 
-    This 564-word chat masks 2 of 11 spans in one request and 8 of 11 when split.
-
-All figures are for `urchade/gliner_multi_pii-v1`, which is the model the page
-shows. The `numind/NuNER_Zero` calls over the same documents are in the dataset
-and no published figure rests on them, so nothing here scores them.
+Both models are in the same task's catalog and both were recorded on all twelve
+documents in the same run; the dataset has held all 24 calls since the page was
+first published.
 
 The two sides of every comparison come from different places. The gold spans
 are the benchmark publishers' own annotations, carried in inputs/cases.json.
@@ -27,12 +27,27 @@ derived from the other.
 
 Rules, exactly as sie-web's CI applies them:
 
+  floor       a returned span counts only at score >= 0.6, a threshold the
+              caller sets. Five of the run's 168 spans fall below it: `ID #`,
+              `File #` and `MIC #`, each covering a field's printed label and
+              no value, and the given name `Annibale` twice, which the first
+              model also returned at the same offsets inside `Annibale Caboto`.
+              --floor-0 re-runs every step with the floor removed; all four
+              reach the same figure, so it costs no coverage in this run
   covered     a gold span counts as masked only when the UNION of returned
               spans covers every one of its characters, so two overlapping
               returned spans are never counted twice
-  in schema   a returned span counts toward the 25 only when its label is one
-              the gold schema can express, through GOLD_TO_REQUESTED below
-  on gold     such a span counts toward the 23 when it overlaps any gold span
+  merged      overlapping spans become one mask covering all of them, which is
+              what the caller removes and what the precision figures count
+  propagate   every other whole-word, case-sensitive occurrence of a token of
+              three letters or more from a returned `person` span is masked too
+  in schema   a mask counts toward the 49 only when its label is one the gold
+              schema can express, through GOLD_TO_REQUESTED below
+  on gold     such a mask counts toward the 42 when it overlaps any gold span
+
+What this script does NOT check: which of the recorded documents the page
+displays, or in what order. That is the page's decision, it changes without the
+run changing, and an example has no way to read the page.
 """
 
 from __future__ import annotations
@@ -47,7 +62,16 @@ from typing import Any
 
 HTTP_OK = 200
 
-MODEL_SET = "urchade__gliner_multi_pii-v1"
+FIRST_MODEL = "urchade/gliner_multi_pii-v1"
+SECOND_MODEL = "numind/NuNER_Zero"
+FIRST_SET = "urchade__gliner_multi_pii-v1"
+SECOND_SET = "numind__NuNER_Zero"
+MODEL_SETS = (FIRST_SET, SECOND_SET)
+
+# The confidence floor, and the person label the propagation step reads.
+SCORE_FLOOR = 0.6
+PERSON_LABEL = "person"
+NAME_TOKEN = re.compile(r"[^\W\d_]{3,}")
 
 # Benchmark gold labels mapped to the label names the requests used.
 GOLD_TO_REQUESTED = {
@@ -69,19 +93,6 @@ GOLD_TO_REQUESTED = {
     "credit_debit_card": "credit card number",
 }
 
-# The documents the page renders, across hero, proof cards, playground and the
-# request-splitting card. The amounts figure is over exactly these, because it
-# is a claim about what a reader sees, not about the whole recorded set.
-DISPLAYED = [
-    "cfpb_closing_disclosure_transaction",
-    "cfpb_closing_disclosure_contacts",
-    "cms_medicare_summary_notice_part_b",
-    "gretel_german_health_claim",
-    "gretel_policyholder_report",
-    "cms_medicare_summary_notice_dme",
-    "gretel_customer_support_log",
-]
-
 AMOUNT = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?|\d[\d.,]*\s?EUR|(?<![\w-])\d+\.\d{2}(?![\d-])")
 
 # GLiNER counts words with this rule, so the page's "564-word chat" and its
@@ -92,17 +103,20 @@ WINDOW_CASE = "gretel_customer_support_log"
 WINDOW_TAIL = "gretel_customer_support_log_tail"
 
 EXPECTED = {
-    "returned_on_gold": 23,
-    "returned_in_gold_schema": 25,
+    "gold_spans": 45,
+    "step_one_call": 26,
+    "step_chunked": 33,
+    "step_two_models": 41,
+    "step_propagated": 45,
+    "masks_in_gold_schema": 49,
+    "masks_on_gold": 42,
+    "propagated_masks": 6,
     "amounts_masked": 0,
     "amounts_found": 29,
-    "gold_found": 26,
-    "gold_spans": 45,
     "window_total": 11,
     "window_one_request": 2,
-    "window_two_requests": 8,
+    "window_composed": 11,
     "window_past": 7,
-    "window_recovered": 6,
     "window_words_total": 564,
     "window_words_in_window": 384,
 }
@@ -157,126 +171,262 @@ def mapped_gold(case: dict[str, Any]) -> list[dict[str, Any]]:
     return [span for span in case.get("gold_spans", []) if GOLD_TO_REQUESTED.get(span["label"], "") in case["labels"]]
 
 
+def returned_spans(
+    entities: dict[tuple[str, str], list[dict[str, Any]]],
+    cases: dict[str, dict[str, Any]],
+    case_id: str,
+    *,
+    sets: tuple[str, ...] = MODEL_SETS,
+    chunked: bool = True,
+    floor: float = SCORE_FLOOR,
+) -> list[dict[str, Any]]:
+    """Spans the named models returned, in the parent document's own offsets.
+
+    `chunked` False reads only the whole-document request, which is the
+    single-request regime the first step reports.
+    """
+    parts: list[tuple[str, int]] = [(case_id, 0)]
+    if chunked:
+        parts += sorted(
+            ((case["id"], case["parent_offset"]) for case in cases.values() if case.get("parent_case") == case_id),
+            key=lambda part: part[1],
+        )
+    merged: dict[tuple[int, int, str], dict[str, Any]] = {}
+    for part_id, offset in parts:
+        for model_set in sets:
+            for entity in entities[(model_set, part_id)]:
+                if entity["score"] < floor:
+                    continue
+                span = {
+                    **entity,
+                    "start": entity["start"] + offset,
+                    "end": entity["end"] + offset,
+                    "derived": False,
+                }
+                key = (span["start"], span["end"], span["label"])
+                if key not in merged or merged[key]["score"] < span["score"]:
+                    merged[key] = span
+    return sorted(merged.values(), key=lambda span: (span["start"], span["end"]))
+
+
+def propagated_spans(text: str, spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every other whole-word, case-sensitive mention of a returned name."""
+    tokens = sorted(
+        {token for span in spans if span["label"] == PERSON_LABEL for token in NAME_TOKEN.findall(span["text"])}
+    )
+    added: list[dict[str, Any]] = []
+    for token in tokens:
+        pattern = re.compile(r"(?<![^\W\d_])" + re.escape(token) + r"(?![^\W\d_])")
+        for match in pattern.finditer(text):
+            if any(span["start"] <= match.start() and span["end"] >= match.end() for span in spans):
+                continue
+            added.append(
+                {
+                    "text": token,
+                    "label": PERSON_LABEL,
+                    "score": None,
+                    "start": match.start(),
+                    "end": match.end(),
+                    "derived": True,
+                }
+            )
+    return sorted(added, key=lambda span: span["start"])
+
+
+def composed_spans(
+    entities: dict[tuple[str, str], list[dict[str, Any]]],
+    cases: dict[str, dict[str, Any]],
+    case_id: str,
+    floor: float = SCORE_FLOOR,
+) -> list[dict[str, Any]]:
+    spans = returned_spans(entities, cases, case_id, floor=floor)
+    added = propagated_spans(cases[case_id]["text"], spans)
+    return sorted(spans + added, key=lambda span: (span["start"], span["end"]))
+
+
+def merged_masks(text: str, spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Overlapping spans collapsed into one mask each.
+
+    Two models rarely agree on where a value ends. Keeping whichever span
+    sorted first masked the shorter of two that start together, which left
+    ", M.D." readable after a masked name and left the last character of a
+    password readable on the policyholder letter.
+    """
+    masks: list[dict[str, Any]] = []
+    for span in sorted(spans, key=lambda item: (item["start"], item["end"])):
+        if masks and span["start"] < masks[-1]["end"]:
+            masks[-1]["end"] = max(masks[-1]["end"], span["end"])
+            masks[-1]["spans"].append(span)
+            continue
+        masks.append({"start": span["start"], "end": span["end"], "spans": [span]})
+    for mask in masks:
+        best = max(mask["spans"], key=lambda span: span["score"] or 0)
+        mask["label"] = best["label"]
+        mask["text"] = text[mask["start"] : mask["end"]]
+    return masks
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", default="data", help="fetched evidence directory")
+    parser.add_argument(
+        "--floor-0",
+        action="store_true",
+        help="score every step with the confidence floor removed, to show what it costs",
+    )
     args = parser.parse_args()
+    floor = 0.0 if args.floor_0 else SCORE_FLOOR
+    if args.floor_0:
+        print("confidence floor removed: every figure below is scored at 0.0\n")
     data_dir = Path(args.data)
 
     cases = {case["id"]: case for case in load(data_dir / "inputs/cases.json")["cases"]}
-    entities: dict[str, list[dict[str, Any]]] = {}
-    for call in scored_calls(load(data_dir / "calls.json"), lambda call: call["set"] == MODEL_SET):
-        if call["set"] != MODEL_SET:
-            continue
-        if call["case"] in entities:
-            print(f"two {MODEL_SET} calls recorded for {call['case']}", file=sys.stderr)
+    entities: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for call in scored_calls(load(data_dir / "calls.json"), keep_all):
+        key = (call["set"], call["case"])
+        if key in entities:
+            print(f"two {call['set']} calls recorded for {call['case']}", file=sys.stderr)
             return 1
-        entities[call["case"]] = call["response"]["body"]["items"][0]["entities"]
+        entities[key] = call["response"]["body"]["items"][0]["entities"]
 
-    missing = [case_id for case_id in cases if case_id not in entities]
+    missing = [
+        f"{model_set}/{case_id}"
+        for model_set in MODEL_SETS
+        for case_id in cases
+        if (model_set, case_id) not in entities
+    ]
     if missing:
-        print(f"no {MODEL_SET} call recorded for: {', '.join(missing)}", file=sys.stderr)
+        print(f"no call recorded for: {', '.join(missing)}", file=sys.stderr)
         return 1
 
-    # --- benchmark agreement, one request per document ---------------------
-    totals = {"gold_spans": 0, "gold_found": 0, "returned_in_gold_schema": 0, "returned_on_gold": 0}
-    requested = set(GOLD_TO_REQUESTED.values())
-    benchmark_documents = []
-    for case_id, case in cases.items():
-        if not case.get("gold_spans") or case.get("parent_case"):
-            continue
-        benchmark_documents.append(case_id)
-        found = entities[case_id]
+    parents = [case_id for case_id, case in cases.items() if not case.get("parent_case")]
+    benchmark = [case_id for case_id in parents if cases[case_id].get("gold_spans")]
+
+    # --- the four steps ----------------------------------------------------
+    steps = {"step_one_call": 0, "step_chunked": 0, "step_two_models": 0, "step_propagated": 0}
+    totals = {"gold_spans": 0, "masks_in_gold_schema": 0, "masks_on_gold": 0}
+    per_document: list[tuple[str, int, int, int]] = []
+    for case_id in benchmark:
+        case = cases[case_id]
         gold = mapped_gold(case)
+        one_call = returned_spans(entities, cases, case_id, sets=(FIRST_SET,), chunked=False, floor=floor)
+        chunked = returned_spans(entities, cases, case_id, sets=(FIRST_SET,), floor=floor)
+        two_models = returned_spans(entities, cases, case_id, floor=floor)
+        composed = composed_spans(entities, cases, case_id, floor=floor)
+
         totals["gold_spans"] += len(gold)
-        totals["gold_found"] += sum(1 for span in gold if covered(found, span))
-        for entity in found:
-            if entity["label"] not in requested:
+        steps["step_one_call"] += sum(1 for span in gold if covered(one_call, span))
+        steps["step_chunked"] += sum(1 for span in gold if covered(chunked, span))
+        steps["step_two_models"] += sum(1 for span in gold if covered(two_models, span))
+        composed_hits = sum(1 for span in gold if covered(composed, span))
+        steps["step_propagated"] += composed_hits
+        per_document.append((case_id, len(gold), sum(1 for span in gold if covered(one_call, span)), composed_hits))
+
+        requested = set(case["labels"])
+        for mask in merged_masks(case["text"], composed):
+            if mask["label"] not in requested:
                 continue
-            totals["returned_in_gold_schema"] += 1
-            if any(entity["start"] < span["end"] and span["start"] < entity["end"] for span in gold):
-                totals["returned_on_gold"] += 1
+            totals["masks_in_gold_schema"] += 1
+            if any(mask["start"] < span["end"] and span["start"] < mask["end"] for span in gold):
+                totals["masks_on_gold"] += 1
 
-    print(f"benchmark documents scored: {len(benchmark_documents)}")
-    for case_id in benchmark_documents:
-        gold = mapped_gold(cases[case_id])
-        hit = sum(1 for span in gold if covered(entities[case_id], span))
-        print(f"  {case_id:<36} {hit} of {len(gold)} published spans masked")
-    print(
-        f"\n{totals['returned_on_gold']} of {totals['returned_in_gold_schema']} masks confirmed by the published gold spans"
-    )
-    print(f"{totals['gold_found']} of {totals['gold_spans']} published PII spans masked by one request per document")
-    unjudged = totals["returned_in_gold_schema"] - totals["returned_on_gold"]
-    print(f"{unjudged} masks fall outside the gold spans, so neither benchmark can confirm or refute them")
+    print(f"benchmark documents scored: {len(benchmark)}")
+    for case_id, gold_count, one_call, composed_hits in per_document:
+        print(f"  {case_id:<36} {one_call} of {gold_count} in one call, {composed_hits} composed")
 
-    # --- amounts left readable, over the documents the page renders --------
+    print("\npublished PII spans masked, by step:")
+    total = totals["gold_spans"]
+    print(f"  {steps['step_one_call']:>2} of {total}  one call to {FIRST_MODEL}, whole document")
+    print(f"  {steps['step_chunked']:>2} of {total}  splitting what runs past the model's input window")
+    print(f"  {steps['step_two_models']:>2} of {total}  unioning a second call to {SECOND_MODEL}")
+    print(f"  {steps['step_propagated']:>2} of {total}  masking every later mention of a name already found")
+
+    unjudged = totals["masks_in_gold_schema"] - totals["masks_on_gold"]
+    print(f"\n{totals['masks_on_gold']} of {totals['masks_in_gold_schema']} masks land on a published gold span")
+    print(f"{unjudged} fall outside them, so neither benchmark can confirm or refute those")
+
+    # --- what the propagation step added, over every recorded document -----
+    propagated: list[str] = []
+    for case_id in parents:
+        spans = returned_spans(entities, cases, case_id, floor=floor)
+        propagated += [span["text"] for span in propagated_spans(cases[case_id]["text"], spans)]
+    print(f"\nthe propagation step added {len(propagated)} masks: {', '.join(sorted(set(propagated)))}")
+
+    # --- amounts left readable, over every recorded document ---------------
     amounts = {"found": 0, "masked": 0}
-    for case_id in DISPLAYED:
+    for case_id in parents:
         text = cases[case_id]["text"]
-        spans = entities[case_id]
+        spans = composed_spans(entities, cases, case_id, floor=floor)
         for match in AMOUNT.finditer(text):
             amounts["found"] += 1
             if any(span["start"] < match.end() and match.start() < span["end"] for span in spans):
                 amounts["masked"] += 1
     print(
-        f"\n{amounts['masked']} of {amounts['found']} amounts masked across the {len(DISPLAYED)} documents the page renders"
+        f"\n{amounts['masked']} of {amounts['found']} currency amounts masked"
+        f" across the {len(parents)} recorded documents"
     )
 
-    # --- request splitting -------------------------------------------------
+    # --- the input window --------------------------------------------------
     parent = cases[WINDOW_CASE]
     tail = cases[WINDOW_TAIL]
-    offset = tail["parent_offset"]
     window_end = parent["gliner_window_end_char"]
-    full = entities[WINDOW_CASE]
-    second = entities[WINDOW_TAIL]
-
     gold = mapped_gold(parent)
-    window = {"total": len(gold), "one_request": 0, "two_requests": 0, "past": 0, "recovered": 0}
-    for span in gold:
-        hit_full = covered(full, span)
-        window["one_request"] += hit_full
-        hit_second = False
-        if span["start"] >= offset:
-            shifted = {**span, "start": span["start"] - offset, "end": span["end"] - offset}
-            hit_second = covered(second, shifted)
-        window["two_requests"] += hit_full or hit_second
-        if span["end"] > window_end:
-            window["past"] += 1
-            window["recovered"] += hit_second
-
+    one_call = returned_spans(entities, cases, WINDOW_CASE, sets=(FIRST_SET,), chunked=False, floor=floor)
+    composed = composed_spans(entities, cases, WINDOW_CASE, floor=floor)
+    window = {
+        "total": len(gold),
+        "one_request": sum(1 for span in gold if covered(one_call, span)),
+        "composed": sum(1 for span in gold if covered(composed, span)),
+        "past": sum(1 for span in gold if span["end"] > window_end),
+    }
     words = list(GLINER_WORD.finditer(parent["text"]))
     window["words_total"] = len(words)
     window["words_in_window"] = sum(1 for word in words if word.end() <= window_end)
     print(
         f"\n{window['words_total']}-word chat, {window['total']} published spans:"
-        f" {window['one_request']} masked in one request, {window['two_requests']} when split"
+        f" {window['one_request']} masked by one call, {window['composed']} by the composition"
     )
     print(f"  the model reads the first {window['words_in_window']} words, up to character {window_end}")
-    print(f"  {window['past']} of those spans sit past word 384, and the second request recovers {window['recovered']}")
+    print(
+        f"  {window['past']} of those spans sit past that point,"
+        f" and the second request starts at character {tail['parent_offset']}"
+    )
 
     got = {
-        "returned_on_gold": totals["returned_on_gold"],
-        "returned_in_gold_schema": totals["returned_in_gold_schema"],
+        "gold_spans": totals["gold_spans"],
+        **steps,
+        "masks_in_gold_schema": totals["masks_in_gold_schema"],
+        "masks_on_gold": totals["masks_on_gold"],
+        "propagated_masks": len(propagated),
         "amounts_masked": amounts["masked"],
         "amounts_found": amounts["found"],
-        "gold_found": totals["gold_found"],
-        "gold_spans": totals["gold_spans"],
         "window_total": window["total"],
         "window_one_request": window["one_request"],
-        "window_two_requests": window["two_requests"],
+        "window_composed": window["composed"],
         "window_past": window["past"],
-        "window_recovered": window["recovered"],
         "window_words_total": window["words_total"],
         "window_words_in_window": window["words_in_window"],
     }
     failures = [f"{key}: got {got[key]}, page publishes {want}" for key, want in EXPECTED.items() if got[key] != want]
+    # A step can only ever mask more than the one before it. Checked as an
+    # ordering rather than only as four constants, because four constants that
+    # all move together still pass.
+    ladder = [steps["step_one_call"], steps["step_chunked"], steps["step_two_models"], steps["step_propagated"]]
+    if ladder != sorted(ladder):
+        failures.append(f"the steps do not increase: {ladder}")
+    if ladder[-1] != totals["gold_spans"]:
+        failures.append(f"the last step masks {ladder[-1]} of {totals['gold_spans']}, not all of them")
+    if any(text.isalpha() is False for text in propagated):
+        failures.append("the propagation step added something that is not a name")
     if failures:
         sys.stdout.flush()
         print("\nFAILED to reproduce the published figures:", file=sys.stderr)
         for line in failures:
             print(f"  {line}", file=sys.stderr)
         return 1
-    print("\nReproduced: 23 of 25, 0 of 29, 26 of 45, and 2 of 11 in one request against 8 of 11 when split.")
+    print("\nReproduced: 26, 33, 41 and 45 of 45, 42 of 49 on gold, and 0 of 29 amounts masked.")
+    if args.floor_0:
+        print("Every figure holds with the floor removed, so it costs no coverage in this run.")
     return 0
 
 
