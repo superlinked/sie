@@ -42,6 +42,7 @@ adapters:
 - sie_server.adapters.glirel
 - sie_server.adapters.gliclass
 - sie_server.adapters.laya.adapter
+- sie_server.adapters.gliformer.adapter
 - sie_server.adapters.donut
 - sie_server.adapters.florence2
 - sie_server.adapters.docling.adapter
@@ -82,6 +83,8 @@ deps:
   # gliclass (0.1.17: cross-attention scorer for the multilingual checkpoints;
   # 0.1.18+ needs transformers 5)
   gliclass: '>=0.1.17,<1'
+  # gliformer: exact, the adapter uses package internals (see pyproject.toml)
+  gliformer: '==0.1.2'
   # gliner/glirel/gliclass shared dep
   loguru: '>=0.7,<1'
   # donut, florence2

@@ -50,6 +50,10 @@ dependencies = [
     # 0.1.17 adds the cross-attention scorer and pass-through pooling used by
     # the multilingual GLiClass checkpoints; 0.1.18+ requires transformers 5.
     "gliclass>=0.1.17,<1",
+    # GLiFormer multi-task extraction adapter. Pinned exactly: the adapter
+    # drives the package's processor and schema internals, which change between
+    # 0.x releases, and the bundle overlay resolves this pin live from PyPI.
+    "gliformer==0.1.2",
     # Docling, composite-document parser (PDF/DOCX/HTML) for extract().
     # PINNED TO THE ARTIFACT REVISION, NOT FLOATED (#2872). Docling resolves
     # its RapidOCR det/cls/rec files by a version-specific path table, so the

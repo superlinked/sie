@@ -1027,6 +1027,24 @@ def test_knowledgator_gliclass_small_v1_0_scores() -> None:
     assert scores == pytest.approx({"bug report": 0.76369, "feature request": 0.23616, "billing": 0.000144}, abs=1e-4)
 
 
+def test_knowledgator_gliformer_base_v1_extract() -> None:
+    _assert_extract("knowledgator/gliformer-base-v1", _NER_LABELS, ["location", "organization", "person"])
+
+
+def test_knowledgator_gliformer_base_v1_dense() -> None:
+    _assert_dense("knowledgator/gliformer-base-v1", 768, [-0.0447998046875, 0.00933074951171875, -0.0070648193359375])
+
+
+def test_knowledgator_gliformer_large_v1_extract() -> None:
+    _assert_extract("knowledgator/gliformer-large-v1", _NER_LABELS, ["location", "organization", "person"])
+
+
+def test_knowledgator_gliformer_large_v1_dense() -> None:
+    _assert_dense(
+        "knowledgator/gliformer-large-v1", 1024, [-0.0003440380096435547, -0.032867431640625, 0.0215911865234375]
+    )
+
+
 def test_knowledgator_gliner_bi_base_v2_0_extract() -> None:
     _assert_extract("knowledgator/gliner-bi-base-v2.0", _NER_LABELS, ["location", "organization", "person"])
 
