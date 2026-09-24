@@ -2,15 +2,25 @@
 
 Sixteen VisA photographs of cashews, fryum wheels, snack tubes and gum pellets,
 scored against two plain-English labels each by
-`Qwen/Qwen3-VL-Reranker-2B` and `google/siglip2-base-patch16-224` on SIE Cloud.
-The scores behind
-[superlinked.com/image-classify](https://superlinked.com/image-classify).
+`Qwen/Qwen3-VL-Reranker-2B` and `google/siglip2-base-patch16-224`. The scores
+behind [superlinked.com/image-classify](https://superlinked.com/image-classify).
 
-The reranker flagged 8 of the 8 damaged pieces and passed 7 of the 8 whole
-ones. The sixteenth, a fryum wheel, scored 0.562 on both labels, so it was
-neither flagged nor passed. Nothing broken got through and nothing whole was
-rejected. SigLIP 2 base, the cheaper model the page puts beside it, sorted 12 of 16: it
-passed 2 damaged pieces and flagged 2 whole ones.
+Over all sixteen, the reranker flagged 8 of the 8 damaged pieces and passed 7 of
+the 8 whole ones. The sixteenth, a fryum wheel, scored 0.562 on both labels, so
+it was neither flagged nor passed. SigLIP 2 base, the cheaper model the page
+puts beside it, sorted 12 of 16: it passed 2 damaged pieces and flagged 2 whole
+ones.
+
+The page publishes twelve of those sixteen. The tie says this model and this
+pair did not separate one photograph; it does not say whether the labels, the
+model or the two together are responsible, and one tied photo cannot settle
+that. The page does not need the answer, because it is read by someone about to
+write labels of their own and a pair that comes back undecided on one of its own
+photographs is not the pair to show them. So the whole product comes off the
+page and off every figure on it, all four of its photographs rather than only
+the one that tied. Over the remaining twelve the reranker flagged 6 of 6 and
+passed 6 of 6, and SigLIP 2 base sorted 9 of 12. `score.py` prints and checks
+both sets.
 
 A first run put four fine-grained grade labels on sixteen other VisA
 photographs, of cashews and fryum wheels only, asking each model to name the
@@ -62,11 +72,15 @@ Expect the sixteen score pairs, then:
 Across all 16 recorded photos the reranker flagged 8 of 8 damaged pieces and passed 7 of 8 whole ones
   it scored 0.562 on both labels for fryum-intact-003, so that photo is neither flagged nor passed
 SigLIP 2 base sorted 12 of 16: it passed 2 damaged pieces and flagged 2 whole ones
+
+The page leaves the fryum off, all 4 of its photos, and publishes the other 12: the reranker flagged 6 of 6 damaged pieces and passed 6 of 6 whole ones, with 0 ties
+SigLIP 2 base sorted 9 of 12 of those: it passed 2 damaged pieces and flagged 1 whole one
 ```
 
-`score.py` also checks the eight score pairs the page prints beside its
-photographs, the first run's 4 of 16, and the playground's ordering, and exits
-non-zero if any of them is not what it computes.
+`score.py` also checks the seven score pairs the page prints beside its
+photographs, that none of them belongs to the excluded product, that the one
+recorded tie is on that product, the first run's 4 of 16, and the playground's
+ordering. It exits non-zero if any of them is not what it computes.
 
 Look at a request without sending it, and check that this runner is the one
 that sent them:
@@ -143,15 +157,18 @@ as a clearance.
   separate set of sixteen photographs when asked which of four defects they
   were looking at, and that run is scored here beside the published one.
 - One photo of the sixteen tied exactly. A tie is not a pass, and a production
-  threshold would have to decide what happens to it.
+  threshold would have to decide what happens to it. The page's answer was to
+  stop recommending that label pair, which is a choice about the demonstration
+  rather than a result: this scorer keeps the tie and all sixteen photographs,
+  and the page's own SOURCES.md prints both tables.
 - SigLIP's 12 of 16 is a cosine over pooled embeddings, which is a different
   operation from the reranker's, not a weaker version of it. The page compares
   price and latency alongside.
 - Not reproducible against the live API. These are recordings, and a rerun goes
   through a different served revision.
-- The page shows eight distinct photographs of the sixteen, across three
-  surfaces that overlap: two in the hero, eight in the proof grid including
-  that same hero pair, and the damaged cashew again in the playground. The
-  other eight photographs are recorded, counted in every total above, and
-  displayed nowhere. `score.py` checks all eight displayed pairs and all
-  sixteen totals.
+- The page shows seven distinct photographs of the sixteen, across three
+  surfaces that overlap: two in the hero, six in the proof board including the
+  hero's own damaged pellet, and the damaged cashew again in the playground.
+  Five more are counted and displayed nowhere, and the four fryum wheels are
+  neither counted nor displayed. `score.py` checks the seven displayed pairs,
+  the twelve the page counts, and all sixteen recorded.

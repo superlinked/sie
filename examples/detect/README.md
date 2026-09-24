@@ -1,18 +1,21 @@
 # Put a box on the object an agent names
 
 Nine photographs of warehouses, shop shelves and loading docks, sent to
-`IDEA-Research/grounding-dino-base` and `google/owlv2-base-patch16-ensemble` on
-SIE Cloud with nothing but a list of label strings. The detections behind
+`IDEA-Research/grounding-dino-base` and `google/owlv2-base-patch16-ensemble`
+with nothing but a list of label strings. The detections behind
 [superlinked.com/detect](https://superlinked.com/detect).
 
 Grounding DINO returned 57 boxes across the nine photographs. 55 sit on the
 object the request asked for and 2 do not: one box labelled `price tag` spans
 the whole soft-drink shelf, and one labelled `pallet jack` sits on a different
-machine. Those 55 boxes cover 52 of 88 hand-counted objects, with 3 of them
-landing on an object another box had already found. The gap between 52 found
-and 88 counted is the honest limit here, and it is not evenly spread: `person`
-came back 8 of 8 and 3 of 3, while `price tag` came back 0 of 11 and
-`yellow price sign` 1 of 7.
+machine. That precision figure is what the page publishes.
+
+Recall is the other half, and the page states no figure for it. Those 55 boxes
+cover 52 of 88 hand-counted objects, with 3 of them landing on an object another
+box had already found. The gap is not evenly spread: `person` came back 8 of 8
+and 3 of 3, while `price tag` came back 0 of 11 and `yellow price sign` 1 of 7.
+`score.py` checks the 52 of 88 against the results table in the page's
+SOURCES.md, which is where a reader finds it.
 
 ## Where the evidence lives
 
@@ -58,9 +61,10 @@ Across all 9 recorded photos, 55 of 57 returned boxes sit on the object the requ
 Those 55 boxes cover 52 of 88 hand-counted objects, with 3 more on objects already found
 ```
 
-`score.py` also checks the per-photo lines on all eight photographs the page
-displays, and exits non-zero if any of them, or the headline, is not what it
-computes.
+`score.py` also checks the boxes-per-label tile on all four photographs the page
+displays, checks that every box drawn on one of them is a first box on the
+object its label names, and exits non-zero if any of that, or the headline, is
+not what it computes.
 
 Look at a request without sending it, and check that this runner is the one
 that sent them:
@@ -136,7 +140,10 @@ clearance.
   figure. Nothing on the page or in this scorer compares the two models.
 - Not reproducible against the live API. These are recordings, and a rerun goes
   through a different served revision.
-- The page displays eight of the nine photographs: six proof cards, the hero and
-  the playground. The ninth, `fulfillment-tour`, is recorded, counted in every
-  total above, and shown nowhere. `score.py` checks all eight displayed lines
-  and all nine totals.
+- The page displays four of the nine photographs: three proof cards, plus the
+  sauce aisle which the hero and the playground both run. The other five are
+  recorded, counted in every total above, and shown nowhere. Four of those five
+  carry the run's two wrong boxes and its three second boxes on an object
+  already boxed, and the fifth, the Javits staging hall, is left out on a
+  display judgement the page's SOURCES.md states. `score.py` checks the four
+  displayed tiles and all nine totals.

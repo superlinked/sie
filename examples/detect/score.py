@@ -6,7 +6,12 @@ no inference spend.
     python3 score.py
 
 Prints "55 of 57 returned boxes sit on the object your agent asked for", the
-figure the page publishes, and the per-photo lines it shows beside the cards.
+figure the page publishes, and the boxes-per-label tile each displayed
+photograph prints beside it.
+
+The page states no recall figure anywhere. It used to, and the numbers it
+printed are still here, checked against the results table in the page's
+SOURCES.md rather than against the page.
 
 Two sides that the same edit cannot move together:
 
@@ -37,24 +42,27 @@ EVIDENCE = ROOT / "evidence"
 # computes anything else. If that happens, report it: it means the page or the
 # evidence is wrong, and neither number should be quietly adjusted to agree.
 PAGE_HEADLINE = (55, 57)
-PAGE_COVERAGE = (52, 88)
 PAGE_DUPLICATES = 3
 PAGE_WRONG = 2
 PAGE_PHOTOS = 9
-PAGE_DISPLAYED = 8
-# The per-photo lines the page prints on its six proof cards.
+PAGE_DISPLAYED = 4
+# Recall, which the page states nowhere. Its SOURCES.md prints it in the results
+# table, so this pair is checked against that file rather than against the page.
+SOURCES_COVERAGE = (52, 88)
+# The tile each displayed photograph prints: the label sent, and the boxes that
+# came back carrying it. Every box on a displayed photograph is a first box on
+# the object its label names, which is what the page claims and what makes a
+# boxes count the same number as a found count here.
 PAGE_PER_PHOTO = {
-    "container-dock": {"forklift": (1, 1), "shipping container": (1, 1), "person": (2, 2)},
-    "food-box-floor": {"safety vest": (9, 14)},
-    "produce-department": {"person": (8, 8), "shopping cart": (2, 2), "yellow price sign": (1, 7)},
-    "soft-drink-shelf": {"price tag": (0, 11), "7 Up bottle": (2, 3)},
-    "fema-caribbean-forklift": {"forklift": (1, 1), "pallet jack": (0, 1)},
-    "javits-pallet-jacks": {"pallet jack": (1, 3), "person": (3, 3)},
+    "sauce-shelf": {"sale sign": 10},
+    "food-box-floor": {"safety vest": 9},
+    "fulfillment-tour": {"safety vest": 7},
+    "hangar-pallet-jacks": {"pallet jack": 4},
 }
-# The hero photo and the playground photo, the other two of the eight surfaces
-# the page counts. Every total below covers all nine.
-PAGE_HERO = ("sauce-shelf", 10, 14)
-PAGE_PLAYGROUND = ("hangar-pallet-jacks", 4, 5)
+# The hero and the playground run the same photograph, so four photographs fill
+# five surfaces. Every total below covers all nine recorded photographs.
+PAGE_HERO = "sauce-shelf"
+PAGE_PLAYGROUND = "sauce-shelf"
 
 DETECTION_MODEL = "IDEA-Research/grounding-dino-base"
 VERDICTS = ("hit", "duplicate", "wrong")
@@ -262,11 +270,13 @@ def main() -> int:
     )
 
     want_on, want_boxes = PAGE_HEADLINE
-    want_found, want_counted = PAGE_COVERAGE
+    want_found, want_counted = SOURCES_COVERAGE
     if (on_object, boxes) != PAGE_HEADLINE:
         failures.append(f"headline: got {on_object} of {boxes}, page publishes {want_on} of {want_boxes}")
-    if (found, counted) != PAGE_COVERAGE:
-        failures.append(f"coverage: got {found} of {counted}, page publishes {want_found} of {want_counted}")
+    if (found, counted) != SOURCES_COVERAGE:
+        failures.append(
+            f"coverage: got {found} of {counted}, the page's SOURCES.md prints {want_found} of {want_counted}"
+        )
     if duplicates != PAGE_DUPLICATES:
         failures.append(f"duplicates: got {duplicates}, page publishes {PAGE_DUPLICATES}")
     if wrong != PAGE_WRONG:
@@ -274,25 +284,30 @@ def main() -> int:
     if photos != PAGE_PHOTOS:
         failures.append(f"photos: got {photos}, page publishes {PAGE_PHOTOS}")
 
-    # The per-photo lines, on every surface the page counts: six proof cards,
-    # the hero and the playground. Eight of the nine photos; the ninth,
-    # fulfillment-tour, is recorded, counted in every total above and displayed
-    # nowhere.
+    # The tile on every displayed photograph: four of the nine, across five
+    # surfaces, because the hero and the playground run the same one. The other
+    # five are recorded, counted in every total above and displayed nowhere.
     for case_id, expected in PAGE_PER_PHOTO.items():
-        got = per_photo.get(case_id)
+        got = {label: hits for label, (hits, _counted) in per_photo.get(case_id, {}).items()}
         if got != expected:
             failures.append(f"{case_id}: got {got}, page publishes {expected}")
-    for case_id, hits, total in (PAGE_HERO, PAGE_PLAYGROUND):
-        got_line = per_photo.get(case_id, {})
-        got_values = next(iter(got_line.values()), None)
-        if got_values != (hits, total):
-            failures.append(f"{case_id}: got {got_values}, page publishes {hits} of {total}")
+        # Every box on a displayed photograph has to be a first box on the object
+        # its label names, or the tile is counting something the page does not
+        # claim. Checked from the verdicts rather than from the tile.
+        drawn = next((case for case in review["cases"] if case["id"] == case_id), None)
+        flawed = [d for d in (drawn or {}).get("detections", []) if d["verdict"] != "hit"]
+        if flawed:
+            failures.append(
+                f"{case_id}: {len(flawed)} displayed box(es) are not a first box on the object named"
+            )
+    for case_id in (PAGE_HERO, PAGE_PLAYGROUND):
+        if case_id not in PAGE_PER_PHOTO:
+            failures.append(f"{case_id} carries a page surface and no tile is checked for it")
 
     # An internal guard on the constants above, not a reading of the page: it
     # catches a per-photo entry added here without updating the total.
-    displayed = len(PAGE_PER_PHOTO) + 2
-    if displayed != PAGE_DISPLAYED:
-        failures.append(f"displayed photos: checked {displayed}, page says {PAGE_DISPLAYED}")
+    if len(PAGE_PER_PHOTO) != PAGE_DISPLAYED:
+        failures.append(f"displayed photos: checked {len(PAGE_PER_PHOTO)}, page says {PAGE_DISPLAYED}")
 
     if failures:
         print(
@@ -305,8 +320,8 @@ def main() -> int:
         return 1
 
     print(
-        f"Matches the {want_on} of {want_boxes}, the {want_found} of {want_counted}, and the per-photo lines "
-        f"on all {PAGE_DISPLAYED} displayed photos, published on {manifest['page']}."
+        f"Matches the {want_on} of {want_boxes} published on {manifest['page']}, the tiles on all "
+        f"{PAGE_DISPLAYED} displayed photos, and the {want_found} of {want_counted} in its SOURCES.md."
     )
     return 0
 
