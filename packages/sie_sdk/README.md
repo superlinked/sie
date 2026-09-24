@@ -96,9 +96,10 @@ grouped request, an example's labels may be written as `"urgency.high"` or as
 Usage counts each item's document tokens plus the tokens of the instruction
 and example texts sent with it, since the model encodes them for every item.
 Label names are not counted. With an instruction or examples, each item's
-count is capped at the model window minus the label prompt. An item whose
-document pushes the labels out of the window comes back with an
-`INPUT_TOO_LONG` error in its `error` field, and the other items still succeed.
+count is capped at the model window minus the label prompt, unless the
+document count alone is already higher. An item whose document pushes the
+labels out of the window comes back with an `INPUT_TOO_LONG` error in its
+`error` field, and the other items still succeed.
 
 ## Generation prompts and guard verdicts
 
