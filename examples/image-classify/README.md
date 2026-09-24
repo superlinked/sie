@@ -77,9 +77,9 @@ The page leaves the fryum off, all 4 of its photos, and publishes the other 12: 
 SigLIP 2 base sorted 9 of 12 of those: it passed 2 damaged pieces and flagged 1 whole one
 ```
 
-`score.py` also checks the seven score pairs the page prints beside its
-photographs, that none of them belongs to the excluded product, that the one
-recorded tie is on that product, the first run's 4 of 16, and the playground's
+`score.py` also checks all sixteen recorded score pairs, in both directions so
+that a recorded pair cannot go unpinned, that the run's one tie is on the
+product `TIED_PRODUCT` names, the first run's 4 of 16, and the playground's
 ordering. It exits non-zero if any of them is not what it computes.
 
 Look at a request without sending it, and check that this runner is the one
@@ -166,9 +166,12 @@ as a clearance.
   price and latency alongside.
 - Not reproducible against the live API. These are recordings, and a rerun goes
   through a different served revision.
-- The page shows seven distinct photographs of the sixteen, across three
-  surfaces that overlap: two in the hero, six in the proof board including the
-  hero's own damaged pellet, and the damaged cashew again in the playground.
-  Five more are counted and displayed nowhere, and the four fryum wheels are
-  neither counted nor displayed. `score.py` checks the seven displayed pairs,
-  the twelve the page counts, and all sixteen recorded.
+- All sixteen photographs are scored here, and both sets of figures, the whole
+  run and the run without the fryum, are printed and checked. Which photographs
+  the page displays is the page's decision and is recorded in its own
+  `SOURCES.md`.
+
+  This paragraph used to name them, and the block it described held eight score
+  pairs "the page prints". Both went stale the moment the board was reselected,
+  and nothing here can check either, so the pairs block now holds all sixteen
+  and the claim is gone rather than corrected.

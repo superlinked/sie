@@ -6,12 +6,12 @@ no inference spend.
     python3 score.py
 
 Prints "55 of 57 returned boxes sit on the object your agent asked for", the
-figure the page publishes, and the boxes-per-label tile each displayed
-photograph prints beside it.
+figure the page publishes, and the per-photo boxes-per-label figures pinned in
+PAGE_PER_PHOTO.
 
-The page states no recall figure anywhere. It used to, and the numbers it
-printed are still here, checked against the results table in the page's
-SOURCES.md rather than against the page.
+The page states no recall figure anywhere. The numbers it used to print are
+still computed here and checked against the results table in the page's
+SOURCES.md, which is where a reader finds them now.
 
 Two sides that the same edit cannot move together:
 
@@ -45,24 +45,31 @@ PAGE_HEADLINE = (55, 57)
 PAGE_DUPLICATES = 3
 PAGE_WRONG = 2
 PAGE_PHOTOS = 9
-PAGE_DISPLAYED = 4
 # Recall, which the page states nowhere. Its SOURCES.md prints it in the results
 # table, so this pair is checked against that file rather than against the page.
 SOURCES_COVERAGE = (52, 88)
-# The tile each displayed photograph prints: the label sent, and the boxes that
-# came back carrying it. Every box on a displayed photograph is a first box on
-# the object its label names, which is what the page claims and what makes a
-# boxes count the same number as a found count here.
+
+# Four per-photo figures: the label sent, and the boxes that came back carrying
+# it. Pinned so that a rescore cannot move one quietly.
+#
+# This block used to say which photographs the page displays, in which surface,
+# and it carried a PAGE_DISPLAYED count and named the hero and playground
+# photographs. Every one of those was a claim about a page this script cannot
+# reach, and it was already wrong before this file was last touched: it named
+# six proof cards at a time the page had shown three for weeks, and every run
+# stayed green throughout, because nothing here can tell whether the slugs it
+# was handed are the ones the page draws. Which photographs the page displays is
+# the page's decision and its SOURCES.md records it.
+#
+# What survives is what the recording settles: these figures, PAGE_HEADLINE,
+# PAGE_PHOTOS, PAGE_DUPLICATES, PAGE_WRONG and SOURCES_COVERAGE. All nine
+# photographs are scored and printed below whether the page draws them or not.
 PAGE_PER_PHOTO = {
     "sauce-shelf": {"sale sign": 10},
     "food-box-floor": {"safety vest": 9},
     "fulfillment-tour": {"safety vest": 7},
     "hangar-pallet-jacks": {"pallet jack": 4},
 }
-# The hero and the playground run the same photograph, so four photographs fill
-# five surfaces. Every total below covers all nine recorded photographs.
-PAGE_HERO = "sauce-shelf"
-PAGE_PLAYGROUND = "sauce-shelf"
 
 DETECTION_MODEL = "IDEA-Research/grounding-dino-base"
 VERDICTS = ("hit", "duplicate", "wrong")
@@ -284,30 +291,24 @@ def main() -> int:
     if photos != PAGE_PHOTOS:
         failures.append(f"photos: got {photos}, page publishes {PAGE_PHOTOS}")
 
-    # The tile on every displayed photograph: four of the nine, across five
-    # surfaces, because the hero and the playground run the same one. The other
-    # five are recorded, counted in every total above and displayed nowhere.
+    # The four per-photo figures, and the property that makes a boxes count the
+    # same number as a found count on each: every box these four returned is a
+    # first box on the object its label names. Read from the hand verdicts, not
+    # from the figures, so the two cannot agree by construction.
     for case_id, expected in PAGE_PER_PHOTO.items():
         got = {label: hits for label, (hits, _counted) in per_photo.get(case_id, {}).items()}
         if got != expected:
-            failures.append(f"{case_id}: got {got}, page publishes {expected}")
-        # Every box on a displayed photograph has to be a first box on the object
-        # its label names, or the tile is counting something the page does not
-        # claim. Checked from the verdicts rather than from the tile.
+            failures.append(f"{case_id}: got {got}, this example pins {expected}")
         drawn = next((case for case in review["cases"] if case["id"] == case_id), None)
-        flawed = [d for d in (drawn or {}).get("detections", []) if d["verdict"] != "hit"]
+        if drawn is None:
+            failures.append(f"{case_id}: pinned above and not in the recorded review")
+            continue
+        flawed = [d for d in drawn["detections"] if d["verdict"] != "hit"]
         if flawed:
             failures.append(
-                f"{case_id}: {len(flawed)} displayed box(es) are not a first box on the object named"
+                f"{case_id}: {len(flawed)} box(es) are not a first box on the object named, "
+                "so its boxes count and its found count are not the same number"
             )
-    for case_id in (PAGE_HERO, PAGE_PLAYGROUND):
-        if case_id not in PAGE_PER_PHOTO:
-            failures.append(f"{case_id} carries a page surface and no tile is checked for it")
-
-    # An internal guard on the constants above, not a reading of the page: it
-    # catches a per-photo entry added here without updating the total.
-    if len(PAGE_PER_PHOTO) != PAGE_DISPLAYED:
-        failures.append(f"displayed photos: checked {len(PAGE_PER_PHOTO)}, page says {PAGE_DISPLAYED}")
 
     if failures:
         print(
@@ -319,9 +320,20 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
         return 1
 
+    # What this line may claim, found by tampering with it rather than by reading
+    # it. Swapping one entry of PAGE_PER_PHOTO for a photograph the page does
+    # not display, with its correct figures, leaves the run green: the loop above
+    # checks the numbers of whatever slugs it is handed. That is the hole that
+    # let this file describe six proof cards for weeks after the page had three.
+    # Nothing here can reach the page, so the wording says what was checked.
     print(
-        f"Matches the {want_on} of {want_boxes} published on {manifest['page']}, the tiles on all "
-        f"{PAGE_DISPLAYED} displayed photos, and the {want_found} of {want_counted} in its SOURCES.md."
+        f"Matches the {want_on} of {want_boxes} published on {manifest['page']}, the "
+        f"{len(PAGE_PER_PHOTO)} per-photo figures below PAGE_PER_PHOTO, and the "
+        f"{want_found} of {want_counted} in its SOURCES.md."
+    )
+    print(
+        "Not checked here: which photographs the page displays, or on which surface. "
+        "Its SOURCES.md lists them."
     )
     return 0
 

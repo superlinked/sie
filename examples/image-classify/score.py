@@ -9,8 +9,8 @@ Prints two results. The recorded run, all 16 photographs: the reranker flagged
 8 of 8 damaged pieces and passed 7 of 8 whole ones, with one tie, and SigLIP 2
 base sorted 12 of 16. Then the 12 the page publishes, which leave out one
 product whose two labels score one of its own photographs identically: 6 of 6
-and 6 of 6, no tie, SigLIP 2 base 9 of 12. It prints all sixteen recorded score
-pairs, and checks the seven the page shows beside its photographs.
+and 6 of 6, no tie, SigLIP 2 base 9 of 12. It prints and checks all sixteen
+recorded score pairs.
 
 The SigLIP figure is re-derived here, not read back. The recorded response
 holds the raw image and label vectors; this scorer L2-normalizes them and takes
@@ -49,41 +49,51 @@ RUN_TIE_CASE = "fryum-intact-003"
 RUN_TIE_SCORE = "0.562"
 RUN_SIGLIP_SORTED = (12, 16)
 
-# One product is off the page and off every figure on it. The reranker returned
-# the same score on both of the labels written for the fryum wheel on
-# `fryum-intact-003`, so that model and that pair did not separate it; whether
-# the labels, the model or the two together are responsible is not something one
-# tied photograph settles, and nothing here claims to know. The page does not
-# need the answer: it is read by someone about to write labels of their own, and
-# a pair that comes back undecided on one of its own photographs is not the pair
-# to show them. All four of its photographs come off, not only the one that
-# tied: dropping that photograph alone would leave the page recommending the
-# pair that produced it.
-PAGE_EXCLUDED_PRODUCT = "fryum"
-PAGE_PHOTOS = 12
-PAGE_DAMAGED_FLAGGED = (6, 6)
-PAGE_WHOLE_PASSED = (6, 6)
-PAGE_TIES = 0
-PAGE_SIGLIP_SORTED = (9, 12)
-PAGE_SIGLIP_DAMAGED_PASSED = 2
-PAGE_SIGLIP_WHOLE_FLAGGED = 1
+# The product that carries the run's one tie, and the figures over the other
+# three. `TIED_PRODUCT` is not a name typed here and trusted: the check below
+# reads the product of `RUN_TIE_CASE` out of the inputs file and fails if it is
+# anything else, so the recording settles which product this is.
+#
+# The reranker returned the same score on both of the labels written for the
+# fryum wheel on `fryum-intact-003`, so that model and that pair did not
+# separate it. Whether the labels, the model or the two together are responsible
+# is not something one tied photograph settles, and nothing here claims to know.
+TIED_PRODUCT = "fryum"
+WITHOUT_TIED_PRODUCT = {
+    "photos": 12,
+    "damaged_flagged": (6, 6),
+    "whole_passed": (6, 6),
+    "ties": 0,
+    "siglip_sorted": (9, 12),
+    "siglip_damaged_passed": 2,
+    "siglip_whole_flagged": 1,
+}
 # The first run, four grade labels per photo, cited on the page as the reason
 # the two-label framing was chosen.
 PAGE_GRADES = {"images": 16, "labelsPerImage": 4, "rerankerCorrect": 4, "siglipCorrect": 4}
-# The reranker score pairs the page prints, as (whole, damaged) rounded the way
-# the page rounds them: three products on the board, one whole and one damaged
-# each, plus the hero's own pair. Read off the built page, not off the evidence
-# these scores come from. Two photographs carry two surfaces: the hero's damaged
-# gum pellet is also the board's, and the board's damaged cashew is also the
-# playground's, so seven distinct photographs fill nine cells.
-PAGE_PAIRS = {
-    "chewinggum-intact-000": ("0.593", "0.484"),
-    "chewinggum-damaged-016": ("0.547", "0.651"),
-    "chewinggum-intact-001": ("0.577", "0.500"),
+# Every recorded reranker score pair, as (whole, damaged) rounded to the three
+# decimals the page uses. All sixteen rather than a selection: this block used to
+# hold the eight the proof board printed, which is a claim about a page this
+# script cannot reach, and it went stale the moment the board was reselected.
+# Pinning the whole recording removes the question instead of answering it
+# wrongly a second time.
+RECORDED_PAIRS = {
     "cashew-intact-002": ("0.577", "0.531"),
+    "cashew-intact-003": ("0.577", "0.547"),
     "cashew-damaged-014": ("0.547", "0.637"),
+    "cashew-damaged-015": ("0.593", "0.622"),
+    "fryum-intact-002": ("0.622", "0.608"),
+    "fryum-intact-003": ("0.562", "0.562"),
+    "fryum-damaged-012": ("0.593", "0.719"),
+    "fryum-damaged-013": ("0.593", "0.608"),
     "pipe-fryum-intact-000": ("0.500", "0.453"),
+    "pipe-fryum-intact-001": ("0.562", "0.516"),
+    "pipe-fryum-damaged-015": ("0.500", "0.516"),
     "pipe-fryum-damaged-016": ("0.516", "0.547"),
+    "chewinggum-intact-000": ("0.593", "0.484"),
+    "chewinggum-intact-001": ("0.577", "0.500"),
+    "chewinggum-damaged-005": ("0.531", "0.679"),
+    "chewinggum-damaged-016": ("0.547", "0.651"),
 }
 # The photograph the playground shows, and the order its output panel lists.
 PAGE_PLAYGROUND = ("cashew-damaged-014", "broken or damaged cashew", "0.637", "whole undamaged cashew", "0.547")
@@ -276,8 +286,8 @@ def main() -> int:
 
     # --- the published run --------------------------------------------------
     # Each call is checked against the model and the labels the inputs file
-    # registers before anything is counted, and the score pair the page prints
-    # is recorded here. The counting itself is `tally` below, which runs twice:
+    # registers before anything is counted, and every recorded score pair is
+    # collected here. The counting itself is `tally` below, which runs twice:
     # once over the whole recorded set and once over the set the page publishes.
     pairs: dict[str, tuple[str, str]] = {}
 
@@ -329,7 +339,7 @@ def main() -> int:
         return 1
 
     def tie_score(case: dict[str, Any]) -> str:
-        """The one score a tied photo carries, printed the way the page prints it."""
+        """The one score a tied photo carries, at the three decimals used here."""
         labels = label_set(documents[PASS_REJECT], case)
         scores = reranker_scores(by_slug[f"{PASS_REJECT}__{case['id']}__reranker-score"])
         return f"{scores[labels['intact']]:.3f}"
@@ -354,14 +364,24 @@ def main() -> int:
         }
 
     all_cases = inputs[PASS_REJECT]
-    page_cases = [case for case in all_cases if case["product"] != PAGE_EXCLUDED_PRODUCT]
+    rest_cases = [case for case in all_cases if case["product"] != TIED_PRODUCT]
     run = tally(all_cases)
-    page = tally(page_cases)
-    if run["photos"] == page["photos"]:
+    rest = tally(rest_cases)
+    if run["photos"] == rest["photos"]:
         failures.append(
-            f"no recorded photo belongs to the excluded product {PAGE_EXCLUDED_PRODUCT!r}, "
-            "so the page and the run would publish the same figures"
+            f"no recorded photo belongs to {TIED_PRODUCT!r}, so the two sets of figures "
+            "below would be the same figures twice"
         )
+    # TIED_PRODUCT is read back out of the recording rather than trusted. If the
+    # run's tie is not on that product, removing the product does not remove the
+    # tie and the second set of figures is not what it says it is.
+    for case_id, _score in run["ties"]:
+        tied_case = next((case for case in all_cases if case["id"] == case_id), None)
+        product = (tied_case or {}).get("product")
+        if product != TIED_PRODUCT:
+            failures.append(
+                f"the run's tie is on {case_id} of product {product!r}, and this example pins {TIED_PRODUCT!r}"
+            )
 
     for case_id, (whole_score, damaged_score) in sorted(pairs.items()):
         print(f"  {case_id}: whole {whole_score}, damaged {damaged_score}")
@@ -378,20 +398,16 @@ def main() -> int:
         f"damaged pieces and flagged {run['siglip_whole_flagged']} whole ones"
     )
     print(
-        f"\nThe page leaves the {PAGE_EXCLUDED_PRODUCT} off, all {photos - page['photos']} of its photos, and "
-        f"publishes the other {page['photos']}: the reranker flagged {page['damaged_flagged']} of "
-        f"{page['damaged_total']} damaged pieces and passed {page['whole_passed']} of {page['whole_total']} "
-        f"whole ones, with {len(page['ties'])} ties"
+        f"\nWithout the {TIED_PRODUCT}, all {photos - rest['photos']} of its photos, the other "
+        f"{rest['photos']}: the reranker flagged {rest['damaged_flagged']} of {rest['damaged_total']} "
+        f"damaged pieces and passed {rest['whole_passed']} of {rest['whole_total']} whole ones, with "
+        f"{len(rest['ties'])} ties"
     )
     print(
-        f"SigLIP 2 base sorted {page['siglip_correct']} of {page['photos']} of those: it passed "
-        f"{page['siglip_damaged_passed']} damaged pieces and flagged {page['siglip_whole_flagged']} "
-        f"whole {'one' if page['siglip_whole_flagged'] == 1 else 'ones'}"
+        f"SigLIP 2 base sorted {rest['siglip_correct']} of {rest['photos']} of those: it passed "
+        f"{rest['siglip_damaged_passed']} damaged pieces and flagged {rest['siglip_whole_flagged']} "
+        f"whole {'one' if rest['siglip_whole_flagged'] == 1 else 'ones'}"
     )
-    damaged_flagged, damaged_total = page["damaged_flagged"], page["damaged_total"]
-    whole_passed, whole_total = page["whole_passed"], page["whole_total"]
-    ties = page["ties"]
-    siglip_sorted = page["siglip_correct"]
 
     # --- the first run, four labels per photo -------------------------------
     grades = {"images": len(inputs[GRADES]), "rerankerCorrect": 0, "siglipCorrect": 0}
@@ -410,91 +426,83 @@ def main() -> int:
         f"the reranker got {grades['rerankerCorrect']} and SigLIP 2 base {grades['siglipCorrect']}"
     )
 
-    # --- compare with the page ----------------------------------------------
-    if page["photos"] != PAGE_PHOTOS:
-        failures.append(f"photos: got {page['photos']}, page publishes {PAGE_PHOTOS}")
-    if (damaged_flagged, damaged_total) != PAGE_DAMAGED_FLAGGED:
-        failures.append(
-            f"damaged: got {damaged_flagged} of {damaged_total}, page publishes "
-            f"{PAGE_DAMAGED_FLAGGED[0]} of {PAGE_DAMAGED_FLAGGED[1]}"
-        )
-    if (whole_passed, whole_total) != PAGE_WHOLE_PASSED:
-        failures.append(
-            f"whole: got {whole_passed} of {whole_total}, page publishes "
-            f"{PAGE_WHOLE_PASSED[0]} of {PAGE_WHOLE_PASSED[1]}"
-        )
-    if page["whole_passed"] != page["whole_total"]:
-        failures.append(
-            "the page headline says every whole piece passed, and "
-            f"{page['whole_total'] - page['whole_passed']} did not"
-        )
-    if page["damaged_flagged"] != page["damaged_total"]:
-        failures.append(
-            "the page headline says every damaged piece was flagged, and "
-            f"{page['damaged_total'] - page['damaged_flagged']} was not"
-        )
-    if len(ties) != PAGE_TIES:
-        failures.append(f"ties: got {len(ties)} on the page's photos, page publishes {PAGE_TIES}")
-    # The run's own figures, which the page's SOURCES.md prints in full. They are
-    # checked here because the exclusion above is only honest while the record it
-    # was made from is still the record.
+    # --- compare with the recording ------------------------------------------
+    # Two sets of figures, both settled by the recording. The first is the whole
+    # run, which the page's SOURCES.md prints in full. The second is the same run
+    # without the product that carries its tie, which is the subset the page
+    # publishes; whether it publishes that subset is the page's decision, and
+    # this script cannot see the page, so it checks the arithmetic rather than
+    # the decision.
     if run["photos"] != RUN_PHOTOS:
-        failures.append(f"recorded photos: got {run['photos']}, SOURCES.md prints {RUN_PHOTOS}")
+        failures.append(f"recorded photos: got {run['photos']}, this example pins {RUN_PHOTOS}")
     if (run["damaged_flagged"], run["damaged_total"]) != RUN_DAMAGED_FLAGGED:
         failures.append(
             f"recorded damaged: got {run['damaged_flagged']} of {run['damaged_total']}, "
-            f"SOURCES.md prints {RUN_DAMAGED_FLAGGED[0]} of {RUN_DAMAGED_FLAGGED[1]}"
+            f"this example pins {RUN_DAMAGED_FLAGGED[0]} of {RUN_DAMAGED_FLAGGED[1]}"
         )
     if (run["whole_passed"], run["whole_total"]) != RUN_WHOLE_PASSED:
         failures.append(
             f"recorded whole: got {run['whole_passed']} of {run['whole_total']}, "
-            f"SOURCES.md prints {RUN_WHOLE_PASSED[0]} of {RUN_WHOLE_PASSED[1]}"
+            f"this example pins {RUN_WHOLE_PASSED[0]} of {RUN_WHOLE_PASSED[1]}"
         )
     if (run["siglip_correct"], run["photos"]) != RUN_SIGLIP_SORTED:
         failures.append(
             f"recorded siglip: got {run['siglip_correct']} of {run['photos']}, "
-            f"SOURCES.md prints {RUN_SIGLIP_SORTED[0]} of {RUN_SIGLIP_SORTED[1]}"
+            f"this example pins {RUN_SIGLIP_SORTED[0]} of {RUN_SIGLIP_SORTED[1]}"
         )
     if len(run["ties"]) != RUN_TIES:
-        failures.append(f"recorded ties: got {len(run['ties'])}, SOURCES.md prints {RUN_TIES}")
+        failures.append(f"recorded ties: got {len(run['ties'])}, this example pins {RUN_TIES}")
     for case_id, score in run["ties"]:
         if (case_id, score) != (RUN_TIE_CASE, RUN_TIE_SCORE):
-            failures.append(f"tie: got {case_id} at {score}, SOURCES.md prints {RUN_TIE_CASE} at {RUN_TIE_SCORE}")
-    # The reason the exclusion exists. If the tie is not on the excluded product,
-    # dropping that product no longer removes it and the page is showing one.
-    if any(case_id.split("-")[0] != PAGE_EXCLUDED_PRODUCT for case_id, _ in run["ties"]):
-        failures.append(
-            f"a tie is on a product the page keeps: {[case_id for case_id, _ in run['ties']]}"
-        )
-    if (siglip_sorted, page["photos"]) != PAGE_SIGLIP_SORTED:
-        failures.append(
-            f"siglip: got {siglip_sorted} of {page['photos']}, page publishes "
-            f"{PAGE_SIGLIP_SORTED[0]} of {PAGE_SIGLIP_SORTED[1]}"
-        )
-    if page["siglip_damaged_passed"] != PAGE_SIGLIP_DAMAGED_PASSED:
-        failures.append(
-            f"siglip damaged passed: got {page['siglip_damaged_passed']}, page publishes {PAGE_SIGLIP_DAMAGED_PASSED}"
-        )
-    if page["siglip_whole_flagged"] != PAGE_SIGLIP_WHOLE_FLAGGED:
-        failures.append(
-            f"siglip whole flagged: got {page['siglip_whole_flagged']}, page publishes {PAGE_SIGLIP_WHOLE_FLAGGED}"
-        )
-    for key, want in PAGE_GRADES.items():
-        if grades[key] != want:
-            failures.append(f"first run {key}: got {grades[key]}, page publishes {want}")
-    page_ids = {case["id"] for case in page_cases}
-    for case_id, want in PAGE_PAIRS.items():
-        got = pairs.get(case_id)
-        if got != want:
-            failures.append(f"{case_id}: got {got}, page publishes whole {want[0]}, damaged {want[1]}")
-        # A pair is scored against the whole recorded run, so a photo the page
-        # excludes still has one and matching it proves nothing about the page.
-        # This is the check that catches an excluded photo put back on a card.
-        if case_id not in page_ids:
             failures.append(
-                f"{case_id} is printed as a displayed score pair and belongs to the "
-                f"{PAGE_EXCLUDED_PRODUCT} the page excludes"
+                f"tie: got {case_id} at {score}, this example pins {RUN_TIE_CASE} at {RUN_TIE_SCORE}"
             )
+
+    want = WITHOUT_TIED_PRODUCT
+    if rest["photos"] != want["photos"]:
+        failures.append(f"without {TIED_PRODUCT}: got {rest['photos']} photos, pinned {want['photos']}")
+    if (rest["damaged_flagged"], rest["damaged_total"]) != want["damaged_flagged"]:
+        failures.append(
+            f"without {TIED_PRODUCT}, damaged: got {rest['damaged_flagged']} of {rest['damaged_total']}, "
+            f"pinned {want['damaged_flagged'][0]} of {want['damaged_flagged'][1]}"
+        )
+    if (rest["whole_passed"], rest["whole_total"]) != want["whole_passed"]:
+        failures.append(
+            f"without {TIED_PRODUCT}, whole: got {rest['whole_passed']} of {rest['whole_total']}, "
+            f"pinned {want['whole_passed'][0]} of {want['whole_passed'][1]}"
+        )
+    if len(rest["ties"]) != want["ties"]:
+        failures.append(
+            f"without {TIED_PRODUCT}: got {len(rest['ties'])} ties, pinned {want['ties']}. "
+            "Removing that product no longer removes the run's tie."
+        )
+    if (rest["siglip_correct"], rest["photos"]) != want["siglip_sorted"]:
+        failures.append(
+            f"without {TIED_PRODUCT}, siglip: got {rest['siglip_correct']} of {rest['photos']}, "
+            f"pinned {want['siglip_sorted'][0]} of {want['siglip_sorted'][1]}"
+        )
+    if rest["siglip_damaged_passed"] != want["siglip_damaged_passed"]:
+        failures.append(
+            f"without {TIED_PRODUCT}, siglip damaged passed: got {rest['siglip_damaged_passed']}, "
+            f"pinned {want['siglip_damaged_passed']}"
+        )
+    if rest["siglip_whole_flagged"] != want["siglip_whole_flagged"]:
+        failures.append(
+            f"without {TIED_PRODUCT}, siglip whole flagged: got {rest['siglip_whole_flagged']}, "
+            f"pinned {want['siglip_whole_flagged']}"
+        )
+
+    for key, pinned in PAGE_GRADES.items():
+        if grades[key] != pinned:
+            failures.append(f"first run {key}: got {grades[key]}, this example pins {pinned}")
+    if set(RECORDED_PAIRS) != set(pairs):
+        missing = sorted(set(pairs) - set(RECORDED_PAIRS))
+        extra = sorted(set(RECORDED_PAIRS) - set(pairs))
+        failures.append(f"score pairs: {len(missing)} recorded and unpinned {missing}, {len(extra)} pinned and unrecorded {extra}")
+    for case_id, pinned in RECORDED_PAIRS.items():
+        got = pairs.get(case_id)
+        if got != pinned:
+            failures.append(f"{case_id}: got {got}, this example pins whole {pinned[0]}, damaged {pinned[1]}")
 
     case_id, top_label, top_score, next_label, next_score = PAGE_PLAYGROUND
     played = reranker_scores(by_slug[f"{PASS_REJECT}__{case_id}__reranker-score"])
@@ -512,11 +520,20 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
         return 1
 
+    # What this line may claim. RECORDED_PAIRS holds every recorded pair and is
+    # checked in both directions, so it cannot go stale against a reselection the
+    # way the eight-entry block it replaces did. The figures below it are
+    # arithmetic over the recording. None of it establishes what the page draws.
     print(
-        f"\nMatches the {PAGE_DAMAGED_FLAGGED[0]} of {PAGE_DAMAGED_FLAGGED[1]} damaged, the "
-        f"{PAGE_WHOLE_PASSED[0]} of {PAGE_WHOLE_PASSED[1]} whole, the SigLIP "
-        f"{PAGE_SIGLIP_SORTED[0]} of {PAGE_SIGLIP_SORTED[1]}, and all "
-        f"{len(PAGE_PAIRS)} displayed score pairs, published on {manifest['page']}."
+        f"\nMatches the recording: {RUN_DAMAGED_FLAGGED[0]} of {RUN_DAMAGED_FLAGGED[1]} damaged and "
+        f"{RUN_WHOLE_PASSED[0]} of {RUN_WHOLE_PASSED[1]} whole over all {RUN_PHOTOS}, "
+        f"{WITHOUT_TIED_PRODUCT['damaged_flagged'][0]} of {WITHOUT_TIED_PRODUCT['damaged_flagged'][1]} and "
+        f"{WITHOUT_TIED_PRODUCT['whole_passed'][0]} of {WITHOUT_TIED_PRODUCT['whole_passed'][1]} without the "
+        f"{TIED_PRODUCT}, and all {len(RECORDED_PAIRS)} score pairs."
+    )
+    print(
+        f"Not checked here: which photographs {manifest['page']} displays, or that it "
+        f"publishes the figures without the {TIED_PRODUCT}. Its SOURCES.md records both."
     )
     return 0
 

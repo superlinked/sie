@@ -61,10 +61,10 @@ Across all 9 recorded photos, 55 of 57 returned boxes sit on the object the requ
 Those 55 boxes cover 52 of 88 hand-counted objects, with 3 more on objects already found
 ```
 
-`score.py` also checks the boxes-per-label tile on all four photographs the page
-displays, checks that every box drawn on one of them is a first box on the
-object its label names, and exits non-zero if any of that, or the headline, is
-not what it computes.
+`score.py` also checks the four per-photo figures pinned in `PAGE_PER_PHOTO`,
+and that every box on those four is a first box on the object its label names,
+which is what makes a boxes count and a found count the same number there. It
+exits non-zero if any of that, or the headline, is not what it computes.
 
 Look at a request without sending it, and check that this runner is the one
 that sent them:
@@ -140,10 +140,13 @@ clearance.
   figure. Nothing on the page or in this scorer compares the two models.
 - Not reproducible against the live API. These are recordings, and a rerun goes
   through a different served revision.
-- The page displays four of the nine photographs: three proof cards, plus the
-  sauce aisle which the hero and the playground both run. The other five are
-  recorded, counted in every total above, and shown nowhere. Four of those five
-  carry the run's two wrong boxes and its three second boxes on an object
-  already boxed, and the fifth, the Javits staging hall, is left out on a
-  display judgement the page's SOURCES.md states. `score.py` checks the four
-  displayed tiles and all nine totals.
+- All nine photographs are scored here. Which of them the page displays, and on
+  which surface, is the page's decision and is recorded in its own `SOURCES.md`.
+
+  This paragraph used to say which photographs the page draws. It was wrong for
+  weeks, naming six proof cards after the page had gone to three, and every run
+  stayed green throughout, because nothing in this example can reach the page.
+  The claim is removed rather than restated a third time. The numbers this
+  script and the page share are 55 of 57 and the four per-photo figures, and a
+  tamper confirms what that leaves: swapping a pinned photograph for one the
+  page does not display, with its correct figures, exits 0.
