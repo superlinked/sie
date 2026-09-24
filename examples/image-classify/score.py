@@ -9,8 +9,8 @@ Prints two results. The recorded run, all 16 photographs: the reranker flagged
 8 of 8 damaged pieces and passed 7 of 8 whole ones, with one tie, and SigLIP 2
 base sorted 12 of 16. Then the 12 the page publishes, which leave out one
 product whose two labels score one of its own photographs identically: 6 of 6
-and 6 of 6, no tie, SigLIP 2 base 9 of 12. It also prints the six score pairs
-the page shows beside its photographs.
+and 6 of 6, no tie, SigLIP 2 base 9 of 12. It prints all sixteen recorded score
+pairs, and checks the seven the page shows beside its photographs.
 
 The SigLIP figure is re-derived here, not read back. The recorded response
 holds the raw image and label vectors; this scorer L2-normalizes them and takes
@@ -311,6 +311,22 @@ def main() -> int:
             labels["intact"],
             labels["damaged"],
         )
+
+    # Stop here if any call failed a guard above. Before this file tallied
+    # through a function, the counting sat inside the loop after those
+    # `continue`s, so a mismatched case was skipped; moving it out reopened two
+    # holes. A wrong label set makes `verdict` raise KeyError, so the script
+    # dies with a traceback and the named failure it already collected never
+    # prints, and a wrong model is counted into both sets of figures. Report
+    # what the guards found and count nothing.
+    if failures:
+        print(
+            "The recorded calls do not match the inputs file, so nothing was counted:",
+            file=sys.stderr,
+        )
+        for line in failures:
+            print(f"  {line}", file=sys.stderr)
+        return 1
 
     def tie_score(case: dict[str, Any]) -> str:
         """The one score a tied photo carries, printed the way the page prints it."""
