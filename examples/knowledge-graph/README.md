@@ -71,7 +71,7 @@ SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 
 13 drawn is the figure the task page publishes. The scorer counts every
 displayed paragraph after the hero as a proof paragraph, and the page lays one
-of the five out as its playground, so the 9 and the 5 split the same 14 the
+of the five out as its playground, so the 8 and the 5 split the same 13 the
 page draws.
 
 The five paragraphs the page leaves out are printed too, each with the edge
@@ -121,10 +121,10 @@ filings, NHTSA recall reports and FDA recall notices, all public records.
 
 Each candidate also records `page_role`, which says whether the task page shows
 it and why. `score.py` reads the counts off those roles, so the "5 shown" and
-"11 proof edges" figures come from the pinned data rather than from anything
+"8 proof edges" figures come from the pinned data rather than from anything
 the display trims.
 
-`evidence/inputs/review.json` holds the three flagged edges. `score.py` checks each
+`evidence/inputs/review.json` holds the readings. `score.py` checks each
 flagged triple against the recorded relations, so the review cannot flag an
 edge the model never returned, and cannot reach an edge outside the eleven it
 claims to be counting.
