@@ -9,6 +9,7 @@ score like one labels request per group.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from sie_server.adapters.gliclass import GLiClassAdapter
 from sie_server.types.inputs import Item
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
 from transformers import DebertaV2Config, PreTrainedTokenizerFast
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 _MAX_LENGTH = 64
 _TEXTS = [f"the app crashes on startup {'when config file is missing ' * i}".strip() for i in range(11)]
@@ -228,3 +230,100 @@ def test_joint_groups_are_unchanged_by_the_separate_default(rig: _Rig) -> None:
     assert joint.input_token_counts is not None
     assert separate.input_token_counts is not None
     assert [count * len(_GROUPS) for count in joint.input_token_counts] == separate.input_token_counts
+
+
+# Far longer than the model reads: its window holds about 60 of these words.
+_LONG_DOCUMENT = " ".join(f"the app crashes on startup when config file {index} is missing" for index in range(2_000))
+
+
+def _outputs(output: Any) -> dict[str, Any]:
+    errors = None if output.errors is None else [None if e is None else e.code for e in output.errors]
+    return {
+        "classifications": output.classifications,
+        "data": output.data,
+        "errors": errors,
+        "usage": output.input_token_counts,
+    }
+
+
+@pytest.mark.parametrize("policy", ["default", "truncate_text"])
+@pytest.mark.parametrize(
+    "request_kwargs",
+    [
+        {"labels": _LABELS},
+        {"labels": _LABELS, "instruction": _INSTRUCTION, "options": {"classification_type": "multi-label"}},
+        {"options": {"label_groups": _GROUPS, "group_encoding": "joint"}},
+        {"options": {"label_groups": _GROUPS}},
+    ],
+    ids=["labels", "labels-context", "joint", "separate"],
+)
+def test_cutting_a_long_document_to_what_the_model_reads_changes_nothing(
+    rig: _Rig, policy: str, request_kwargs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    items = [Item(text=_LONG_DOCUMENT), Item(text=_TEXTS[3])]
+    kwargs = {**request_kwargs, "options": {**request_kwargs.get("options", {}), "overflow_policy": policy}}
+
+    cut = rig.adapter.extract(items, **kwargs)
+    monkeypatch.setattr(rig.adapter, "_visible_tokens", lambda: None)
+    whole = rig.adapter.extract(items, **kwargs)
+
+    assert _outputs(cut) == _outputs(whole)
+    if "labels" in request_kwargs and policy == "default" and rig.adapter._pipe.model.config.prompt_first:
+        # The pipeline reads the whole document.
+        expected = rig.pipeline_scores(
+            [item.text for item in items],
+            _LABELS,
+            request_kwargs.get("options", {}).get("classification_type", "single-label"),
+            **({"prompt": _INSTRUCTION} if "instruction" in request_kwargs else {}),
+        )
+        assert _scores(cut) == expected
+
+
+def _counting_tokenizer_chars(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Characters of every string handed to any tokenizer from now on."""
+    seen: list[int] = []
+    original = PreTrainedTokenizerBase.__call__
+
+    def counting(self: Any, text: Any = None, *args: Any, **kwargs: Any) -> Any:
+        texts = text if isinstance(text, list) else [text]
+        seen.append(sum(len(t) for t in texts if isinstance(t, str)))
+        return original(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(PreTrainedTokenizerBase, "__call__", counting)
+    return seen
+
+
+_MANY_GROUPS = {f"q{index}": ["yes", "no"] for index in range(64)}
+
+
+@pytest.mark.parametrize("policy", ["default", "truncate_text"])
+@pytest.mark.parametrize("size", [10_000, 100_000, 1_000_000, 4_000_000])
+def test_characters_tokenized_do_not_grow_with_the_document(
+    rig: _Rig, size: int, policy: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = (_LONG_DOCUMENT * (size // len(_LONG_DOCUMENT) + 1))[:size]
+    seen = _counting_tokenizer_chars(monkeypatch)
+
+    output = rig.adapter.extract(
+        [Item(text=document)], options={"label_groups": _MANY_GROUPS, "overflow_policy": policy}
+    )
+
+    assert output.data is not None
+    # The model reads at most ``window`` document tokens. The document is cut
+    # to a prefix of about 8 characters per token it can read, tokenized with
+    # twice that once to check the cut, and then once per group.
+    window = _MAX_LENGTH - 2
+    bound = (len(_MANY_GROUPS) + 3) * (window + 8) * 8 * 2
+    assert sum(seen) < bound
+
+
+def test_a_multi_megabyte_document_with_64_groups_stays_fast(rig: _Rig) -> None:
+    document = (_LONG_DOCUMENT * 400)[: 4 * 1024 * 1024]
+
+    start = time.perf_counter()
+    output = rig.adapter.extract([Item(text=document)], options={"label_groups": _MANY_GROUPS})
+    elapsed = time.perf_counter() - start
+
+    assert output.data is not None
+    # Tokenizing the whole document once per group took minutes.
+    assert elapsed < 10.0

@@ -258,12 +258,12 @@ class TestUnchangedRequests:
         tokenizer.calls.clear()
         adapter.extract(items, labels=list(_LABELS), options={"overflow_policy": "truncate_text"})
 
-        # One call for the label prompt (as the fit check and the overflow
-        # policy each measure it), one for the documents; the model input
+        # One call for the label prompt, which the fit check and the overflow
+        # policy both measure, and one for the documents; the model input
         # itself is tokenized by the pipe. The overflow policy, fit check and
         # metering share the document tokens.
         label_prompt = "<<LABEL>>billing<<LABEL>>bug report<<LABEL>>feature request<<SEP>>"
-        assert first == [[label_prompt, label_prompt], ["The app crashes", "Charged twice"]]
+        assert first == [[label_prompt], ["The app crashes", "Charged twice"]]
         # Nothing carries over from one request to the next.
         assert tokenizer.calls == first
 
@@ -618,7 +618,7 @@ class TestLabelGroups:
         assert output.data[0]["spam"]["probabilities"]["yes"] == pytest.approx(_sigmoid(0.3), abs=1e-6)
         assert output.data[0]["spam"]["labels"] == ["yes"]
 
-    @pytest.mark.parametrize("value", ["Joint", "per-group", 1, True])
+    @pytest.mark.parametrize("value", ["Joint", "per-group", 1, True, None, ["separate"]])
     def test_unknown_group_encoding_is_rejected(self, value: object) -> None:
         adapter, _ = _group_adapter()
 
@@ -872,8 +872,91 @@ class TestSeparateGroupEncoding:
         with pytest.raises(InvalidInputError, match="at most 128 can fit"):
             adapter.extract([Item(text="x")], options={"label_groups": {"q": ["x" * 70, "y" * 70]}})
 
+    def test_an_item_that_fails_one_group_is_not_checked_against_the_rest(self) -> None:
+        # Text-first model keeping 10 content tokens. Nine words land within the
+        # fit margin of the urgency row, whose exact check refuses them; the
+        # topic row is then skipped for that item.
+        adapter, pipe = _adapter(lambda _text, label: 0.5, prompt_first=False, max_length=12)
+        exact_checks: list[str] = []
+        original = adapter._labels_survive
+
+        def counting(text: str, *args: Any) -> bool:
+            exact_checks.append(text)
+            return original(text, *args)
+
+        adapter._labels_survive = counting  # ty:ignore[invalid-assignment]
+        failing = " ".join(f"w{index}" for index in range(9))
+
+        output = adapter.extract([Item(text=failing), Item(text="short")], options=_group_options())
+
+        assert exact_checks.count(failing) == 1
+        assert output.errors is not None
+        assert output.errors[0] is not None
+        assert output.errors[0].code == "INPUT_TOO_LONG"
+        assert output.errors[1] is None
+        assert {text for call in pipe.prepare_calls for text in call["texts"]} == {"short"}
+
+    def test_a_document_the_groups_cannot_all_afford_fails_alone(self) -> None:
+        # Whitespace carries no tokens here, so the part of this document the
+        # model reads spans 20,000 characters: more than 64 groups may each
+        # tokenize (8,192), though a labels request reads it whole.
+        adapter, _ = _adapter(lambda _text, label: 0.5)
+        sparse = "start" + " " * 20_000 + "end"
+        groups = {f"q{index}": ["yes", "no"] for index in range(64)}
+
+        output = adapter.extract([Item(text=sparse), Item(text="short")], options={"label_groups": groups})
+
+        assert output.errors is not None
+        assert output.errors[0] is not None
+        assert output.errors[0].code == "INPUT_TOO_LONG"
+        assert "8192 characters" in output.errors[0].message
+        assert output.errors[1] is None
+        assert output.input_token_counts is not None
+        assert output.input_token_counts[0] == 0
+        assert adapter.extract([Item(text=sparse)], labels=["yes", "no"]).errors is None
+
+    def test_a_context_that_cannot_fit_is_refused_after_one_groups_worth_of_tokenizing(self) -> None:
+        tokenizer = _MarkerAwareTokenizer()
+        adapter, _ = _adapter(lambda _text, label: 0.5, max_length=64, tokenizer=tokenizer)
+        instruction = " ".join(["word"] * 60)
+        groups = {f"q{index}": ["yes", "no"] for index in range(64)}
+
+        with pytest.raises(InvalidInputError, match="no room for the document"):
+            adapter.extract([Item(text="short")], instruction=instruction, options={"label_groups": groups})
+
+        tokenized = [text for call in tokenizer.calls for text in call]
+        assert tokenized.count(instruction) == 1
+        assert sum(len(text) for text in tokenized) < 2 * len(instruction)
+
+    def test_each_groups_context_shares_one_tokenization_of_the_instruction_and_examples(self) -> None:
+        tokenizer = _MarkerAwareTokenizer()
+        adapter, _ = _adapter(lambda _text, label: 0.5, tokenizer=tokenizer)
+        examples = [{"text": "Refund please", "labels": {"topic": "billing"}}]
+
+        adapter.extract(
+            [Item(text="Charged twice")],
+            instruction="Triage the ticket.",
+            options=_group_options(examples=examples, overflow_policy="truncate_text"),
+        )
+
+        tokenized = [text for call in tokenizer.calls for text in call]
+        assert tokenized.count("Triage the ticket.") == 1
+        assert tokenized.count("Refund please") == 1
+
 
 class TestBatchingCost:
+    @pytest.mark.parametrize("value", [None, "Joint", 1])
+    def test_a_group_encoding_extract_refuses_is_never_costed_as_one_row(self, value: object) -> None:
+        # The cost hook and extract read group_encoding in one place: a value
+        # extract refuses gets no cost of its own, so it cannot be batched
+        # cheaply and then run as separate rows.
+        adapter, _ = _group_adapter()
+        options = {"label_groups": _GROUPS, "group_encoding": value}
+
+        assert adapter.extract_item_costs([Item(text="abcd")], options=options) is None
+        with pytest.raises(InvalidInputError, match="group_encoding"):
+            adapter.extract([Item(text="abcd")], options=options)
+
     def test_separate_groups_cost_every_rows_characters(self) -> None:
         adapter, _ = _group_adapter()
         items = [Item(text="abcd"), Item(text="abcdefgh")]

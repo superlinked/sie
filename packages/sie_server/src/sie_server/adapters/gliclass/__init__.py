@@ -36,6 +36,14 @@ like the pipeline call used before these fields existed):
 Usage counts, for every encoded row, the document tokens plus the instruction
 and example texts encoded with it. Label names are not counted. A separate-group
 request encodes the document once per group, so it counts it once per group.
+
+A document is cut, before anything tokenizes it, to a prefix whose first
+tokens are the ones the model reads (see ``_RequestTokens.visible``), so work
+does not grow with text the model never sees. Scores and usage are unchanged;
+the ``error`` overflow policy reports a lower bound on such a document's
+length. In a separate-group request that prefix may span at most
+``_MAX_ITEM_ROW_CHARS`` characters divided by the number of groups; a document
+needing more fails alone with ``INPUT_TOO_LONG``.
 """
 
 from __future__ import annotations
@@ -113,9 +121,24 @@ _MAX_LABEL_CHARS_PER_TOKEN = 16
 # on the fused encoding: tokenizing the document alone can differ by a token
 # or two from tokenizing it next to the label prompt.
 _FIT_MARGIN_TOKENS = 8
+# A document is cut to the part the model reads before anything else tokenizes
+# it. The first cut tries this many characters per token the model can read...
+_PREFIX_CHARS_PER_TOKEN = 8
+# ...and is kept when it holds this many tokens past that part and its tokens
+# stay the same when the next stretch of the document follows.
+_PREFIX_SLACK_TOKENS = 32
+# Separate group encoding tokenizes a document's prefix once per group. Its
+# characters per item are bounded like its row tokens: at most
+# ``_MAX_LABEL_CHARS_PER_TOKEN`` per row token, so 8,192 per group at 64 groups.
+_MAX_ITEM_ROW_CHARS = _MAX_ITEM_ROW_TOKENS * _MAX_LABEL_CHARS_PER_TOKEN
 _ERR_ITEM_LABELS_TRUNCATED = (
     "The document pushes the labels out of the gliclass model's max sequence length. "
     "Shorten the document, or send options.overflow_policy='truncate_text'."
+)
+_ERR_ITEM_DOCUMENT_TOO_SPARSE = (
+    "The part of the document the gliclass model reads spans more than {limit} characters, too many to "
+    "encode once per label group. Shorten the document, send fewer groups, or send "
+    "options.group_encoding='joint'."
 )
 
 
@@ -163,21 +186,65 @@ class _Context:
 
 
 class _RequestTokens:
-    """What one request tokenizes, each distinct text at most once.
+    """What one adapter call tokenizes, each distinct text at most once.
 
-    ``full`` keeps every token of a document (the overflow policies need them
-    all). ``cut`` returns ids truncated the way the tokenizer truncates to a
-    fixed length, sliced from ``full`` when a text has already been tokenized
-    in full. ``contexts`` holds the request's label contexts. Nothing is kept
-    across requests, so one request's timing cannot reveal what another sent.
+    ``visible`` cuts a document to the prefix the model can read, so nothing
+    downstream tokenizes more of it. ``full`` returns every token of a text
+    (the overflow policies need them all). ``cut`` returns ids truncated the
+    way the tokenizer truncates to a fixed length, sliced from what is already
+    tokenized. ``contexts`` holds the label contexts. The server can batch
+    requests with the same labels and options into one call, and they share
+    this; nothing carries over to the next call.
     """
 
-    def __init__(self, tokenizer: Any) -> None:
+    def __init__(self, tokenizer: Any, visible_tokens: int | None = None) -> None:
         self._tokenizer = tokenizer
+        # Tokens the model can read of a document: its window plus the fit
+        # check's margin. None when unknown, and then documents are not cut.
+        self.visible_tokens = visible_tokens
         self._full: dict[str, list[int]] = {}
-        self._cut: dict[str, list[int]] = {}
-        self._cut_length: int | None = None
+        self._cut: dict[str, tuple[list[int], int]] = {}
+        self._prefixes: dict[str, str | None] = {}
+        # Prefixes cut from longer documents.
+        self.shortened: set[str] = set()
         self.contexts: dict[tuple[Any, ...], _Context] = {}
+        # Token ids of context strings: label prompts, instructions, examples.
+        self.context_ids: dict[str, list[int]] = {}
+
+    def visible(self, text: str, char_limit: int | None = None) -> str | None:
+        """``text`` cut to the prefix the model can read; None when that part exceeds ``char_limit`` characters.
+
+        The model reads at most ``visible_tokens`` tokens of a document, so
+        any prefix whose first ``visible_tokens`` tokens are the document's
+        own gives the model the same input. A prefix is kept when it holds
+        ``_PREFIX_SLACK_TOKENS`` more tokens than that, and its first
+        ``visible_tokens`` tokens do not change when twice as much of the
+        document is tokenized: text after a cut only re-tokenizes near the
+        cut. Otherwise the cut doubles, up to the whole document.
+        """
+        if text not in self._prefixes:
+            self._prefixes[text] = self._find_prefix(text, char_limit)
+        return self._prefixes[text]
+
+    def _find_prefix(self, text: str, char_limit: int | None) -> str | None:
+        need = self.visible_tokens
+        if need is not None and getattr(self._tokenizer, "truncation_side", "right") == "right":
+            size = need * _PREFIX_CHARS_PER_TOKEN
+            while size < len(text):
+                if char_limit is not None:
+                    size = min(size, char_limit)
+                head = text[:size]
+                head_ids, longer = self._tokenizer([head, text[: 2 * size]], add_special_tokens=False)["input_ids"]
+                if len(head_ids) >= need + _PREFIX_SLACK_TOKENS and longer[:need] == head_ids[:need]:
+                    self._full[head] = head_ids
+                    self.shortened.add(head)
+                    return head
+                if char_limit is not None and size >= char_limit:
+                    return None
+                size *= 2
+        if char_limit is not None and len(text) > char_limit:
+            return None
+        return text
 
     def full(self, texts: list[str]) -> list[list[int]]:
         missing = [text for text in dict.fromkeys(texts) if text not in self._full]
@@ -187,22 +254,28 @@ class _RequestTokens:
         return [self._full[text] for text in texts]
 
     def cut(self, texts: list[str], length: int) -> list[list[int]]:
-        if length != self._cut_length:
-            self._cut = {}
-            self._cut_length = length
-        missing = [text for text in dict.fromkeys(texts) if text not in self._cut and text not in self._full]
+        # Truncate once to the longest length a call asks for, then slice.
+        store = max(length, self.visible_tokens or 0)
+        missing = [
+            text
+            for text in dict.fromkeys(texts)
+            if text not in self._full and (text not in self._cut or self._cut[text][1] < length)
+        ]
         if missing:
-            encoded = self._tokenizer(missing, add_special_tokens=False, truncation=True, max_length=length)
-            self._cut.update(zip(missing, encoded["input_ids"], strict=True))
+            encoded = self._tokenizer(missing, add_special_tokens=False, truncation=True, max_length=store)
+            for text, ids in zip(missing, encoded["input_ids"], strict=True):
+                self._cut[text] = (ids, store)
         left = getattr(self._tokenizer, "truncation_side", "right") == "left"
-        ids: list[list[int]] = []
+        cut_ids: list[list[int]] = []
         for text in texts:
-            cached = self._cut.get(text)
-            if cached is None:
-                full = self._full[text]
-                cached = full[len(full) - length :] if left and len(full) > length else full[:length]
-            ids.append(cached)
-        return ids
+            ids = self._full[text] if text in self._full else self._cut[text][0]
+            cut_ids.append(ids[len(ids) - length :] if left and len(ids) > length else ids[:length])
+        return cut_ids
+
+
+def _row_char_limit(group_count: int) -> int:
+    """Characters of a document's readable prefix one separate-group row may tokenize."""
+    return max(1, _MAX_ITEM_ROW_CHARS // max(1, group_count))
 
 
 def _choice_confidence(probabilities: list[float]) -> float:
@@ -453,6 +526,17 @@ class GLiClassAdapter(BaseAdapter):
             raise RuntimeError(ERR_NOT_LOADED)
         return self._pipe
 
+    def _visible_tokens(self) -> int | None:
+        """Most tokens of a document anything reads: the model window plus the fit check's margin.
+
+        None without a configured max sequence length: metering then counts
+        every token of a document, so documents are not cut.
+        """
+        max_length = getattr(self._pipe, "max_length", None)
+        if self._max_seq_length is None or not isinstance(max_length, int):
+            return None
+        return max(1, max_length - self._special_count + _FIT_MARGIN_TOKENS)
+
     def _extract_text(self, item: Item) -> str:
         if not item.text:
             msg = "Item must have text for classification"
@@ -468,6 +552,7 @@ class GLiClassAdapter(BaseAdapter):
         prompt: str | None = None,
         examples: list[dict[str, Any]] | None = None,
         tokens: _RequestTokens | None = None,
+        indices: list[int] | None = None,
     ) -> list[str]:
         """Enforce overflow_policy by pre-tokenizing text and label_prompt separately.
 
@@ -489,7 +574,8 @@ class GLiClassAdapter(BaseAdapter):
           ``budget = max_sequence_length - label_prompt_tokens - special_count``.
 
         Under ``truncate_text`` and ``error``, ``label_prompt`` alone exceeding
-        the cap always raises.
+        the cap always raises. ``indices`` gives each text's item index for
+        error messages when ``texts`` is a subset of the items.
         """
         if policy == "default":
             return texts
@@ -516,9 +602,17 @@ class GLiClassAdapter(BaseAdapter):
                 new_texts.append(text)
                 continue
             if policy == "error":
+                index = i if indices is None else indices[i]
+                if text in tokens.shortened and tokens.visible_tokens is not None:
+                    # Only a prefix of this document was tokenized.
+                    text_tokens = tokens.visible_tokens
+                    counts = f"observed_tokens>={text_tokens + overhead}"
+                    text_count = f"text>={text_tokens}"
+                else:
+                    counts, text_count = f"observed_tokens={observed}", f"text={text_tokens}"
                 raise InputTooLongError(
-                    f"items[{i}] observed_tokens={observed} exceeds max_sequence_length ({self._max_seq_length}) "
-                    f"(text={text_tokens}, label_prompt={label_prompt_tokens}, special={self._special_count})"
+                    f"items[{index}] {counts} exceeds max_sequence_length ({self._max_seq_length}) "
+                    f"({text_count}, label_prompt={label_prompt_tokens}, special={self._special_count})"
                 )
             new_texts.append(self._tokenizer.decode(text_ids[:budget], skip_special_tokens=True))
         return new_texts
@@ -573,7 +667,7 @@ class GLiClassAdapter(BaseAdapter):
 
         opts = options or {}
         label_groups = self._validate_label_groups(opts.get("label_groups"))
-        group_encoding = self._validate_group_encoding(opts.get("group_encoding"), label_groups)
+        group_encoding = self._validate_group_encoding(opts, label_groups)
         classification_type = self._validate_classification_type(
             opts.get("classification_type", self._classification_type)
         )
@@ -602,11 +696,12 @@ class GLiClassAdapter(BaseAdapter):
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
 
         overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
-        tokens = _RequestTokens(self._tokenizer)
+        tokens = _RequestTokens(self._tokenizer, self._visible_tokens())
 
         if label_groups is not None and group_encoding == "separate":
+            char_limit = _row_char_limit(len(label_groups))
             return self._extract_separate(
-                texts,
+                [tokens.visible(text, char_limit) for text in texts],
                 label_groups,
                 classification_type=classification_type,
                 prompt=prompt,
@@ -616,6 +711,7 @@ class GLiClassAdapter(BaseAdapter):
                 tokens=tokens,
             )
 
+        texts = [tokens.visible(text) or text for text in texts]
         texts = self._apply_overflow_policy(
             texts, normalized_labels, overflow_policy, prompt=prompt, examples=examples, tokens=tokens
         )
@@ -708,7 +804,7 @@ class GLiClassAdapter(BaseAdapter):
             groups = opts.get("label_groups")
             if not isinstance(groups, dict) or not groups or len(groups) > _MAX_LABEL_GROUPS:
                 return None
-            if opts.get("group_encoding", _DEFAULT_GROUP_ENCODING) != "separate":
+            if self._requested_group_encoding(opts) != "separate":
                 return None
             group_labels = (label for values in groups.values() if isinstance(values, list) for label in values)
             label_chars = sum(
@@ -848,7 +944,7 @@ class GLiClassAdapter(BaseAdapter):
 
     def _extract_separate(
         self,
-        texts: list[str],
+        texts: list[str | None],
         label_groups: list[tuple[str, list[str]]],
         *,
         classification_type: ClassificationType,
@@ -863,59 +959,82 @@ class GLiClassAdapter(BaseAdapter):
         Each row is what a request with ``labels`` set to the group's labels
         encodes: its overflow policy, window check and metering apply per
         row. An item whose labels do not fit in one of its rows fails with
-        ``INPUT_TOO_LONG`` and is billed nothing; the other items still run.
+        ``INPUT_TOO_LONG``, is billed nothing and is not checked against the
+        remaining groups; the other items still run. ``texts`` holds each
+        document's readable prefix, or None for one whose readable part
+        exceeds the per-group character bound.
+
+        The first group's context is tokenized and checked alone, so a
+        request whose instruction and examples cannot fit is refused before
+        the other groups' contexts are built.
         """
         group_examples = self._examples_by_group(examples, label_groups)
-        self._contexts(
-            tokens,
-            [
-                (group_labels, prompt, group_examples[group] if group_examples is not None else None)
-                for group, (_, group_labels) in enumerate(label_groups)
-            ],
-            overflow=overflow_policy != "default",
-        )
         item_count = len(texts)
-        fits = [True] * item_count
+        sparse = _ERR_ITEM_DOCUMENT_TOO_SPARSE.format(limit=_row_char_limit(len(label_groups)))
+        failures: list[str | None] = [None if text is not None else sparse for text in texts]
         counts: list[int] | None = [0] * item_count
-        group_texts: list[list[str]] = []
-        group_lengths: list[list[int]] | None = []
+        item_rows: list[list[str]] = [[] for _ in range(item_count)]
+        item_lengths: list[list[int]] | None = [[] for _ in range(item_count)]
         for group, (_, group_labels) in enumerate(label_groups):
+            alive = [index for index, failure in enumerate(failures) if failure is None]
+            if not alive:
+                break
+            if group == 1:
+                self._contexts(
+                    tokens,
+                    [
+                        (labels, prompt, group_examples[later] if group_examples is not None else None)
+                        for later, (_, labels) in enumerate(label_groups[1:], start=1)
+                    ],
+                    overflow=overflow_policy != "default",
+                )
             row_examples = group_examples[group] if group_examples is not None else None
             row_texts = self._apply_overflow_policy(
-                texts, group_labels, overflow_policy, prompt=prompt, examples=row_examples, tokens=tokens
+                [cast("str", texts[index]) for index in alive],
+                group_labels,
+                overflow_policy,
+                prompt=prompt,
+                examples=row_examples,
+                tokens=tokens,
+                indices=alive,
             )
             layout = self._request_layout(group_labels, prompt, row_examples, tokens)
             row_fits = self._items_fit(row_texts, layout, group_labels, prompt, row_examples, tokens=tokens)
             row_counts = self._input_token_counts(
-                row_texts, prompt, row_examples, layout, [True] * item_count, tokens=tokens
+                row_texts, prompt, row_examples, layout, [True] * len(alive), tokens=tokens
             )
-            fits = [ok and row_ok for ok, row_ok in zip(fits, row_fits, strict=True)]
-            counts = (
-                None
-                if counts is None or row_counts is None
-                else [total + count for total, count in zip(counts, row_counts, strict=True)]
-            )
-            group_texts.append(row_texts)
-            group_lengths = (
-                None
-                if group_lengths is None or layout is None
-                else [*group_lengths, self._row_lengths(row_texts, layout, tokens)]
-            )
+            row_lengths = None if layout is None else self._row_lengths(row_texts, layout, tokens)
+            if row_counts is None:
+                counts = None
+            if row_lengths is None:
+                item_lengths = None
+            for position, index in enumerate(alive):
+                if not row_fits[position]:
+                    failures[index] = _ERR_ITEM_LABELS_TRUNCATED
+                    continue
+                item_rows[index].append(row_texts[position])
+                if counts is not None and row_counts is not None:
+                    counts[index] += row_counts[position]
+                if item_lengths is not None and row_lengths is not None:
+                    item_lengths[index].append(row_lengths[position])
         if counts is not None:
-            counts = [count if ok else 0 for count, ok in zip(counts, fits, strict=True)]
-        errors = self._item_errors(fits)
-        kept = [index for index, ok in enumerate(fits) if ok]
+            counts = [count if failure is None else 0 for count, failure in zip(counts, failures, strict=True)]
+        errors = (
+            None
+            if all(failure is None for failure in failures)
+            else [
+                None if failure is None else ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=failure)
+                for failure in failures
+            ]
+        )
+        kept = [index for index, failure in enumerate(failures) if failure is None]
         rows = self._separate_scores(
-            [[group_texts[group][index] for group in range(len(label_groups))] for index in kept],
+            [item_rows[index] for index in kept],
             label_groups,
             classification_type=classification_type,
             prompt=prompt,
             group_examples=group_examples,
-            row_lengths=(
-                None
-                if group_lengths is None
-                else [[group_lengths[group][index] for group in range(len(label_groups))] for index in kept]
-            ),
+            row_lengths=None if item_lengths is None else [item_lengths[index] for index in kept],
         )
         return self._grouped_output(
             rows,
@@ -1123,14 +1242,27 @@ class GLiClassAdapter(BaseAdapter):
         raise InvalidInputError("GLiClass classification_type must be 'single-label' or 'multi-label'")
 
     @staticmethod
-    def _validate_group_encoding(value: object, label_groups: list[tuple[str, list[str]]] | None) -> GroupEncoding:
-        if value is None:
+    def _requested_group_encoding(options: dict[str, Any]) -> GroupEncoding:
+        """The request's group encoding: the default when the option is absent.
+
+        The batching cost and ``extract`` both read it here, so a value one
+        of them rejects can never be costed as another encoding.
+        """
+        if "group_encoding" not in options:
             return _DEFAULT_GROUP_ENCODING
-        if value not in ("separate", "joint"):
-            raise InvalidInputError("GLiClass group_encoding must be 'separate' or 'joint'")
-        if label_groups is None:
+        value = options["group_encoding"]
+        if isinstance(value, str) and value in ("separate", "joint"):
+            return cast("GroupEncoding", value)
+        raise InvalidInputError("GLiClass group_encoding must be 'separate' or 'joint'")
+
+    @classmethod
+    def _validate_group_encoding(
+        cls, options: dict[str, Any], label_groups: list[tuple[str, list[str]]] | None
+    ) -> GroupEncoding:
+        encoding = cls._requested_group_encoding(options)
+        if "group_encoding" in options and label_groups is None:
             raise InvalidInputError("GLiClass group_encoding applies only with options.label_groups")
-        return cast("GroupEncoding", value)
+        return encoding
 
     def _check_group_count(self, label_groups: list[tuple[str, list[str]]]) -> None:
         """Bound the rows a separate-group request adds per item: one full row per group."""
@@ -1308,8 +1440,7 @@ class GLiClassAdapter(BaseAdapter):
         request already tokenized are reused.
         """
         entries: list[_Context] = []
-        strings: list[str] = []
-        pending: list[tuple[_Context, int, int, bool]] = []
+        pending: list[tuple[_Context, list[str] | None, str | None]] = []
         for labels, prompt, examples in contexts:
             key = (
                 tuple(labels),
@@ -1318,25 +1449,32 @@ class GLiClassAdapter(BaseAdapter):
             )
             context = tokens.contexts.setdefault(key, _Context())
             entries.append(context)
-            first = len(strings)
-            if context.parts is None:
-                strings.extend(self._layout_strings(labels, prompt, examples))
-            layout_count = len(strings) - first if context.parts is None else -1
-            with_overflow = overflow and context.overflow_tokens is None
-            if with_overflow:
+            parts = self._layout_strings(labels, prompt, examples) if context.parts is None else None
+            empty = None
+            if overflow and context.overflow_tokens is None:
                 pipe = self._require_pipe()
-                strings.append(pipe.prepare_input(text="", labels=labels, **_pipeline_context(prompt, examples)))
-            pending.append((context, first, layout_count, with_overflow))
-        encoded: list[list[int]] = []
+                empty = pipe.prepare_input(text="", labels=labels, **_pipeline_context(prompt, examples))
+            pending.append((context, parts, empty))
+        # Each distinct string is tokenized once per call: the instruction and
+        # example texts repeat in every group's context.
+        strings = list(
+            dict.fromkeys(
+                string
+                for _, parts, empty in pending
+                for string in [*(parts or []), *([empty] if empty is not None else [])]
+                if string not in tokens.context_ids
+            )
+        )
         if strings:
             if self._tokenizer is None:
                 raise RuntimeError(ERR_NOT_LOADED)
             encoded = self._tokenizer(strings, add_special_tokens=False)["input_ids"]
-        for context, first, layout_count, with_overflow in pending:
-            if layout_count >= 0:
-                context.parts = encoded[first : first + layout_count]
-            if with_overflow:
-                context.overflow_tokens = len(encoded[first + max(layout_count, 0)])
+            tokens.context_ids.update(zip(strings, encoded, strict=True))
+        for context, parts, empty in pending:
+            if parts is not None:
+                context.parts = [tokens.context_ids[part] for part in parts]
+            if empty is not None:
+                context.overflow_tokens = len(tokens.context_ids[empty])
         return entries
 
     def _layout_strings(
@@ -1454,20 +1592,22 @@ class GLiClassAdapter(BaseAdapter):
         Documents are tokenized once, on their own. Tokenizing a document next
         to the label prompt can differ from that by a token or two (a trailing
         space before a marker, for example), so items within a few tokens of
-        the window edge are checked exactly on their fused encoding.
+        the window edge are checked exactly on their fused encoding. Counting
+        up to that margin past the window means a document that fills the
+        window by itself is refused without the exact check.
         """
         if layout is None or layout.prompt_first or self._tokenizer is None:
             return [True] * len(texts)
         tokens = tokens or _RequestTokens(self._tokenizer)
         fits: list[bool] = []
-        for text, ids in zip(texts, tokens.cut(texts, layout.window), strict=True):
+        for text, ids in zip(texts, tokens.cut(texts, layout.window + _FIT_MARGIN_TOKENS), strict=True):
             estimate = len(ids) + layout.last_marker
             if estimate < layout.window - _FIT_MARGIN_TOKENS:
                 fits.append(True)
             elif estimate >= layout.window + _FIT_MARGIN_TOKENS:
                 fits.append(False)
             else:
-                fits.append(self._labels_survive(text, list(ids), labels, prompt, examples))
+                fits.append(self._labels_survive(text, list(ids[: layout.window]), labels, prompt, examples))
         return fits
 
     def _labels_survive(
