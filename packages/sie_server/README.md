@@ -48,6 +48,25 @@ removes matched stop sequences consistently from returned text, completion-token
 usage, and logprobs. Long completions delay the first visible text; existing
 request timeouts still apply. Other adapters are unaffected.
 
+### GLiClass usage
+
+For GLiClass classification, `usage.input_tokens` counts each item's document
+tokens plus the instruction and few-shot example texts sent with the request,
+because the model encodes that text again for every item. Label names,
+including the labels attached to examples, are not counted. With an
+instruction or examples, an item's count is capped at the model's
+`max_sequence_length` minus the label prompt, unless the document count alone
+is already higher. An item refused because its document pushes the labels out
+of the window returns a per-item `INPUT_TOO_LONG` error and counts nothing. A
+request that sends no instruction or examples is counted exactly as before.
+
+The instruction and each example text may be at most 2,048 characters, and
+together with the example labels at most 8,192 characters. Up to 32 examples
+are accepted, and they must leave room for the document in the model window.
+Label names are refused when their total length exceeds 16 characters per
+token of the window (8,192 characters for a 512-token model), more than any
+label prompt can fit.
+
 ## Configuration
 
 `sie-server` reads its config from `SIE_*` environment variables (Pydantic
