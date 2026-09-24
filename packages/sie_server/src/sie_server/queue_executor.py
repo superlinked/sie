@@ -12,6 +12,7 @@ import msgspec
 import yaml
 from sie_sdk._msgpack import packb as pack_msgpack
 
+from sie_server.adapters.errors import InputTooLongError
 from sie_server.api.ws import compute_bundle_config_hash_cached
 from sie_server.config.model import ModelConfig
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
@@ -2009,6 +2010,10 @@ def _inference_exception_outcome(
         # park items in a batcher today, so this arm is a contract guard
         # against a future caller that submits through the queueing path.
         return _nak_outcome(bi)
+    if isinstance(exc, InputTooLongError):
+        # The input exceeds the model's window: INPUT_TOO_LONG (HTTP 400), as
+        # the HTTP path reports it, not a server-side inference failure.
+        return _error_outcome(bi, ErrorCode.INPUT_TOO_LONG.value, str(exc))
     if isinstance(exc, (InvalidInputError, msgspec.ValidationError)):
         # A typed-decode failure (decode_item) or a media contract violation;
         # both surface as INVALID_INPUT (HTTP 400), matching the HTTP path.
