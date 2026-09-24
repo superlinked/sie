@@ -967,6 +967,69 @@ def test_every_task_group_is_measured_before_inference_runs() -> None:
     model.inference.assert_not_called()
 
 
+def _prompt_measurements(model: MagicMock) -> int:
+    return sum(sequences == [["P", "P", "P"]] for sequences in model.data_processor.transformer_tokenizer.calls)
+
+
+def test_a_repeated_task_prompt_is_measured_once() -> None:
+    adapter, model = _adapter({"ner": [[]]})
+
+    for text in ("Alice works here", "Bob works there", "Alice works here"):
+        adapter.extract([Item(text=text)], labels=["person", "place"])
+
+    assert _prompt_measurements(model) == 1
+    assert model.inference.call_count == 3
+
+
+def test_task_prompts_are_cached_by_their_exact_task_arguments() -> None:
+    adapter, model = _adapter({"ner": [[]]})
+    requests: list[dict[str, Any]] = [
+        {"labels": ["person", "place"]},
+        {"labels": ["place", "person"]},
+        {"labels": ["person"], "options": {"relation_labels": ["works at"]}},
+        {"options": {"label_groups": {"a": ["x", "y"]}, "threshold": 0.0}},
+        {"options": {"label_groups": {"a": ["y", "x"]}, "threshold": 0.0}},
+        {"options": {"label_groups": {"b": ["x", "y"]}, "threshold": 0.0}},
+    ]
+
+    for request in requests:
+        adapter.extract([Item(text="Alice works here")], **request)
+    assert _prompt_measurements(model) == len(requests)
+
+    for request in requests:
+        adapter.extract([Item(text="Alice works here")], **request)
+    assert _prompt_measurements(model) == len(requests)
+
+
+def test_prompt_limits_are_checked_on_every_request() -> None:
+    adapter, model = _adapter({"ner": [[]]}, max_prompt_tokens=2)
+
+    for _ in range(2):
+        with pytest.raises(InvalidInputError, match="task prompt needs 3 tokens"):
+            adapter.extract([Item(text="Alice works here")], labels=["person"])
+
+    assert _prompt_measurements(model) == 1
+    model.inference.assert_not_called()
+
+
+def test_prompt_cache_keeps_the_most_recently_used_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(adapter_module, "_PROMPT_CACHE_SIZE", 2)
+    adapter, model = _adapter({"ner": [[]]})
+
+    def request(label: str) -> None:
+        adapter.extract([Item(text="Alice works here")], labels=[label])
+
+    for label in ("a", "b", "a", "c"):
+        request(label)
+    assert len(adapter._prompt_counts) == 2
+    assert _prompt_measurements(model) == 3
+
+    request("a")
+    assert _prompt_measurements(model) == 3
+    request("b")
+    assert _prompt_measurements(model) == 4
+
+
 def test_prompt_build_failure_is_an_internal_error() -> None:
     adapter, model = _adapter({"ner": [[]]})
     model.data_processor.collate_raw_batch.side_effect = KeyError("processor drift")
@@ -1124,6 +1187,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
     relation_head = SimpleNamespace(max_relation_entities=None)
     model.model.heads = {"joint_relex": relation_head}
+    set_eval_mode = model.eval
     tokenizer = model.data_processor.transformer_tokenizer
     precision_kwargs = {} if precision is None else {"compute_precision": precision}
     adapter = GLiFormerAdapter(
@@ -1153,7 +1217,7 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
         max_length=2048,
     )
     model.to.assert_called_once_with(device=device, dtype=dtype)
-    model.eval.assert_called_once_with()
+    set_eval_mode.assert_called_once_with()
     model.model.register_forward_hook.assert_called_once_with(adapter_module._upcast_score_outputs)
     assert relation_head.max_relation_entities == 100
     assert tokenizer.model_max_length == 2048
@@ -1164,6 +1228,32 @@ def test_load_pins_snapshot_and_places_model(device: str, precision: str | None,
     adapter.unload()
     assert adapter._model is None
     assert adapter._tokenizer is None
+
+
+def test_per_request_eval_walks_the_model_only_when_it_is_training() -> None:
+    model = MagicMock()
+    model.config = SimpleNamespace(max_len=2048, embedding_config=SimpleNamespace(projection_dim=768))
+    model.model.heads = {"joint_relex": SimpleNamespace(max_relation_entities=None)}
+    set_eval_mode = model.eval
+    set_eval_mode.side_effect = lambda: setattr(model, "training", False) or model
+    model.training = True
+    adapter = GLiFormerAdapter("/local/checkpoint")
+    with (
+        patch.dict(sys.modules, {"gliformer": _fake_gliformer_module(model)}),
+        patch.object(adapter_module.Path, "is_dir", return_value=True),
+    ):
+        adapter.load("cpu")
+    assert set_eval_mode.call_count == 1
+
+    # GLiFormer.inference calls eval() on every request.
+    assert model.eval() is model
+    assert model.eval() is model
+    assert set_eval_mode.call_count == 1
+
+    model.training = True
+    assert model.eval() is model
+    assert set_eval_mode.call_count == 2
+    assert model.training is False
 
 
 def test_load_rejects_embedding_dimension_mismatch() -> None:

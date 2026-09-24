@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 import math
 import threading
 import warnings
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from numbers import Real
@@ -93,6 +95,11 @@ _MAX_TYPE_GROUPS = 64
 
 # Marks an item whose model output could not be used.
 _ITEM_ERROR = "__gliformer_item_error__"
+
+# Distinct task prompts whose token counts are kept. A prompt depends only on
+# the request's task arguments, so a repeated task skips rebuilding and
+# re-tokenizing it.
+_PROMPT_CACHE_SIZE = 256
 
 _IMPORT_LOCK = threading.Lock()
 
@@ -315,6 +322,7 @@ class GLiFormerAdapter(BaseAdapter):
         self._tokenizer: Any = None
         self._normalize_structures: Callable[[Any], Any] | None = None
         self._build_formatter: Callable[[Any], Any] | None = None
+        self._prompt_counts: OrderedDict[bytes, int] = OrderedDict()
         self._device: str | None = None
 
     def load(self, device: str) -> None:
@@ -345,6 +353,7 @@ class GLiFormerAdapter(BaseAdapter):
         dtype = torch.float32 if device == "cpu" else self._resolve_dtype()
         model.to(device=device, dtype=dtype)
         model.eval()
+        _skip_redundant_eval(model)
         model.model.register_forward_hook(_upcast_score_outputs)
         _limit_relation_entities(model.model)
 
@@ -365,6 +374,7 @@ class GLiFormerAdapter(BaseAdapter):
         self._tokenizer = tokenizer
         self._normalize_structures = gliformer.processing.schema.normalize_structuring_schemas
         self._build_formatter = gliformer.processing.schema.build_structuring_output_formatter
+        self._prompt_counts = OrderedDict()
         self._device = device
 
     def extract(
@@ -602,15 +612,44 @@ class GLiFormerAdapter(BaseAdapter):
         return rows
 
     def _prompt_tokens(self, task_kwargs: dict[str, Any]) -> int:
-        """Build one task prompt with the package's processor and count its tokens.
+        """Count the tokens of one task prompt, measuring each distinct prompt once.
 
         GLiFormer prepends the same prompt to every document of a task group
         and truncates the combined sequence to ``max_len``, so the prompt is
-        measured once per group, not per document.
+        measured once per group, not per document. The task arguments hold
+        only strings, lists, dicts and ``None``, so their ``repr`` identifies
+        the prompt, in order. The limits are checked on every request.
 
         Raises:
             InvalidInputError: The prompt exceeds ``max_prompt_tokens`` or
                 leaves no room for a document.
+            RuntimeError: The package's processor could not build the prompt.
+        """
+        cache = self._prompt_counts
+        key = hashlib.sha256(repr(task_kwargs).encode()).digest()
+        count = cache.get(key)
+        if count is None:
+            count = self._measure_prompt(task_kwargs)
+            cache[key] = count
+            if len(cache) > _PROMPT_CACHE_SIZE:
+                cache.popitem(last=False)
+        else:
+            cache.move_to_end(key)
+        if count > self._max_prompt_tokens:
+            raise InvalidInputError(
+                f"GLiFormer task prompt needs {count} tokens; labels, relation types, class labels, and "
+                f"schema fields may take at most {self._max_prompt_tokens}"
+            )
+        model = self._model
+        specials = int(model.data_processor.transformer_tokenizer.num_special_tokens_to_add(pair=False))
+        if count + specials >= int(model.config.max_len):
+            raise InvalidInputError(_ERR_PROMPT_EXHAUSTS_DOCUMENT)
+        return count
+
+    def _measure_prompt(self, task_kwargs: dict[str, Any]) -> int:
+        """Build one task prompt with the package's processor and count its tokens.
+
+        Raises:
             RuntimeError: The package's processor could not build the prompt.
         """
         model = self._model
@@ -628,18 +667,9 @@ class GLiFormerAdapter(BaseAdapter):
             encoded = processor.transformer_tokenizer(
                 [prompt_words], is_split_into_words=True, add_special_tokens=False
             )
-            count = len(encoded["input_ids"][0])
+            return len(encoded["input_ids"][0])
         except Exception as exc:
             raise RuntimeError("GLiFormer could not build the task prompt") from exc
-        if count > self._max_prompt_tokens:
-            raise InvalidInputError(
-                f"GLiFormer task prompt needs {count} tokens; labels, relation types, class labels, and "
-                f"schema fields may take at most {self._max_prompt_tokens}"
-            )
-        specials = int(processor.transformer_tokenizer.num_special_tokens_to_add(pair=False))
-        if count + specials >= int(model.config.max_len):
-            raise InvalidInputError(_ERR_PROMPT_EXHAUSTS_DOCUMENT)
-        return count
 
     def _document_tokens(self, texts: list[str]) -> list[int]:
         """Document subwords per text before the prompt's share of the window.
@@ -678,6 +708,22 @@ class GLiFormerAdapter(BaseAdapter):
             [_normalize_input_entity(item.text or "", entity) for entity in entities or []]
             for item, entities in zip(items, supplied, strict=True)
         ]
+
+
+def _skip_redundant_eval(model: Any) -> None:
+    """Make ``model.eval()`` return at once while the model is in eval mode.
+
+    ``GLiFormer.inference`` and ``embed_text`` call ``eval()`` on every
+    request, which walks all of the model's ~600 modules to clear training
+    flags that are already clear. The adapter never switches the model to
+    training, so only a model left in training mode still needs the walk.
+    """
+    set_eval_mode = model.eval
+
+    def eval_if_training() -> Any:
+        return set_eval_mode() if model.training else model
+
+    model.eval = eval_if_training
 
 
 def _limit_relation_entities(model: Any) -> None:
