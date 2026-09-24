@@ -29,8 +29,11 @@ sent with that paragraph.
 
 A person read every edge the page displays against its source paragraph.
 GLiNER2 returns a confidence score and no correctness signal, so a wrong edge
-is only ever caught by somebody reading the paragraph. `inputs/review.json`
-holds those readings and `score.py` holds each displayed edge to them.
+is only ever caught by somebody reading the paragraph.
+
+`score.py` requires a recorded reading for every displayed edge and fails by
+name when one is missing. The claim and the check are the same statement: a
+displayed edge nobody has read cannot pass.
 
 The review is a superset of the current run. A reading stands as a record of
 what was read, so an edge may be absent from a run whose schema no longer asks
@@ -48,5 +51,6 @@ fails on it.
 `score.py` fails rather than skipping. It refuses a paragraph whose text does
 not match its digest, a candidate with a missing call, a response that does not
 match its `response_sha256`, a request the pinned text does not rebuild, a
-relations call whose metadata is not the entities call's own output, and a
-reviewed edge missing while its relation is still being asked for.
+relations call whose metadata is not the entities call's own output, a
+reviewed edge missing while its relation is still being asked for, and a
+displayed edge with no recorded reading.

@@ -28,12 +28,14 @@ dataset gives you the evidence. Fetching it needs no account and no token.
 - SIE server version 0.7.3, recorded 2026-09-15
 - No threshold or other option is sent, so the server default applies
 
-A person read every edge the page displays against its source paragraph.
-`inputs/review.json` holds those readings. They are human judgements, not
-anything the model returned: GLiNER2 gives every relation a confidence score
-and no correctness signal, so the only way a wrong edge is caught is that
-somebody read the paragraph. `score.py` holds each displayed edge to that
-record.
+A person read every edge the page displays against its source paragraph. Those
+readings are human judgements, not anything the model returned: GLiNER2 gives
+every relation a confidence score and no correctness signal, so the only way a
+wrong edge is caught is that somebody read the paragraph.
+
+`score.py` enforces that rather than asserting it. Every displayed edge has to
+appear in the set a person read, and the run fails by name if one does not, so
+a displayed edge nobody has read cannot score clean.
 
 ## Run it
 
@@ -64,10 +66,10 @@ SIE_API_KEY=sk-sie-... uv run python run.py --output run-output
 
 ```
 10 paragraphs recorded, 5 shown on the page
-9 edges across the 4 proof paragraphs and 5 in the hero graph, 14 drawn in total
+8 edges across the 4 proof paragraphs and 5 in the hero graph, 13 drawn in total
 ```
 
-14 drawn is the figure the task page publishes. The scorer counts every
+13 drawn is the figure the task page publishes. The scorer counts every
 displayed paragraph after the hero as a proof paragraph, and the page lays one
 of the five out as its playground, so the 9 and the 5 split the same 14 the
 page draws.
@@ -80,8 +82,8 @@ or fewer, and the fifth comes from a filing another task page already uses.
 longer matches its digest, a candidate with a missing call, a response that
 does not match its `response_sha256`, a request the pinned text does not
 rebuild, a relations call whose metadata is not the entities call's own output,
-and a reviewed edge that is missing while the relation it rests on is still
-being asked for.
+a reviewed edge that is missing while the relation it rests on is still being
+asked for, and a displayed edge with no recorded reading.
 
 ## What this does NOT establish
 
@@ -90,7 +92,7 @@ being asked for.
   correctness signal, and a high score is not evidence the paragraph says it. A
   graph built from this output without a person reading the source will contain
   claims the source does not make.
-- **Not an accuracy rate.** Nine edges over the four paragraphs outside the
+- **Not an accuracy rate.** Eight edges over the four paragraphs outside the
   hero is far too small to support a percentage, and the ten paragraphs were
   chosen to be readable rather than sampled from anything.
 - **Not that offsets pin a relation.** GLiNER2 names each end of a relation by

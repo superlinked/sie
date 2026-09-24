@@ -105,6 +105,39 @@ def resolve(candidates_doc: dict[str, Any], recorded: dict[tuple[str, str], Any]
     return resolved
 
 
+# Every edge a person read against its source paragraph, as the run first
+# recorded them (dataset revision fc13484f). `inputs/review.json` records the
+# readings that found something; this is the coverage the first sentence of
+# that file claims, written out so the scorer can hold each displayed edge to
+# it. Sixteen edges: eleven across the proof paragraphs and five in the hero.
+#
+# The page's claim is that a person read every edge it shows. Checking only the
+# flagged triples left that claim unenforced, so a displayed edge nobody had
+# read would have scored clean. Narrowing a schema removes edges from a run and
+# never adds one, which is why this set is a superset of what any later run can
+# display, and why an edge outside it means a person has not read it.
+REVIEWED_EDGES = frozenset(
+    {
+        ("flex-credit-facility", "Citibank, N.A.", "administrative agent of", "Flex Ltd."),
+        ("flex-credit-facility", "Flex Ltd.", "borrower under", "Credit Agreement"),
+        ("flex-credit-facility", "credit facility", "commitment amount", "$1.45 billion"),
+        ("ford-jdi-display", "Ford Escape", "equipped with", "8” display"),
+        ("ford-jdi-display", "Lincoln Corsair", "equipped with", "8” display"),
+        ("fresenius-morphine", "Fresenius Kabi", "headquartered in", "LAKE ZURICH"),
+        ("fresenius-morphine", "Fresenius Kabi", "operating company of", "Fresenius Group"),
+        ("fresenius-morphine", "Fresenius Kabi", "recalls", "Simplist® 2 mg/1 mL"),
+        ("tarsus-alkeus", "Alkeus Pharmaceuticals, Inc.", "incorporated in", "Delaware"),
+        ("tarsus-alkeus", "Apex 2026 Merger Sub, Inc.", "subsidiary of", "Tarsus Pharmaceuticals, Inc."),
+        ("tarsus-alkeus", "Tarsus Pharmaceuticals, Inc.", "acquired", "Alkeus Pharmaceuticals, Inc."),
+        ("veracyte-convergent", "Convergent", "develops", "UroAmp"),
+        ("veracyte-convergent", "Convergent", "develops", "urine tumor DNA technology"),
+        ("veracyte-convergent", "Convergent", "focused on", "bladder cancer"),
+        ("veracyte-convergent", "Convergent", "subsidiary of", "Veracyte"),
+        ("veracyte-convergent", "Veracyte", "acquired", "Convergent"),
+    }
+)
+
+
 def match_reviews(review_doc: dict[str, Any], resolved: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Confirm every flagged edge is one this run supports, or one it no longer asks for.
 
@@ -154,6 +187,17 @@ def score() -> dict[str, Any]:
     hero_edges = len(resolved[hero["id"]]["relations"])
     proof_edges = sum(len(resolved[c["id"]]["relations"]) for c in proof)
     reviews = match_reviews(review_doc, resolved)
+
+    unreviewed = [
+        (c["id"], edge["head"], edge["relation"], edge["tail"])
+        for c in displayed
+        for edge in resolved[c["id"]]["relations"]
+        if (c["id"], edge["head"], edge["relation"], edge["tail"]) not in REVIEWED_EDGES
+    ]
+    if unreviewed:
+        listing = "; ".join(f"{cid}: {h} -[{r}]-> {t}" for cid, h, r, t in unreviewed)
+        raise InputError(f"{len(unreviewed)} displayed edge(s) carry no recorded reading: {listing}")
+
     return {
         "candidates_recorded": len(candidates_doc["candidates"]),
         "candidates_shown": len(displayed),
