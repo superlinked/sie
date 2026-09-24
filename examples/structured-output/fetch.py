@@ -41,8 +41,8 @@ from pathlib import Path
 
 DATASET = "superlinked/sie-task-evidence"
 TASK = "structured-output"
-REVISION = "eca4ac89206255642cadc9530f8faad562bc2829"
-MANIFEST_SHA256 = "10ca0e46fdb80f9ed904584894841c10271fc9020279e2ffb4074893b5c65fa7"
+REVISION = "d04453560acaa308032c98feb8fe170d0b3b400e"
+MANIFEST_SHA256 = "a86cf444165dd89c65c63b53591b0cdc5e9677295c2a32ee15fb0415abc712e1"
 
 BASE = f"https://huggingface.co/datasets/{DATASET}/resolve/{REVISION}/{TASK}"
 HTTP_OK = 200

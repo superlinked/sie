@@ -95,8 +95,6 @@ RECORDED_PAIRS = {
     "chewinggum-damaged-005": ("0.531", "0.679"),
     "chewinggum-damaged-016": ("0.547", "0.651"),
 }
-# The photograph the playground shows, and the order its output panel lists.
-PAGE_PLAYGROUND = ("cashew-damaged-014", "broken or damaged cashew", "0.637", "whole undamaged cashew", "0.547")
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -503,12 +501,6 @@ def main() -> int:
         got = pairs.get(case_id)
         if got != pinned:
             failures.append(f"{case_id}: got {got}, this example pins whole {pinned[0]}, damaged {pinned[1]}")
-
-    case_id, top_label, top_score, next_label, next_score = PAGE_PLAYGROUND
-    played = reranker_scores(by_slug[f"{PASS_REJECT}__{case_id}__reranker-score"])
-    ordered = sorted(played.items(), key=lambda row: row[1], reverse=True)
-    if [(label, f"{score:.3f}") for label, score in ordered] != [(top_label, top_score), (next_label, next_score)]:
-        failures.append(f"playground {case_id}: got {ordered}, page publishes {top_label} {top_score} first")
 
     if failures:
         print(

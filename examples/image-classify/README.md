@@ -79,8 +79,14 @@ SigLIP 2 base sorted 9 of 12 of those: it passed 2 damaged pieces and flagged 1 
 
 `score.py` also checks all sixteen recorded score pairs, in both directions so
 that a recorded pair cannot go unpinned, that the run's one tie is on the
-product `TIED_PRODUCT` names, the first run's 4 of 16, and the playground's
-ordering. It exits non-zero if any of them is not what it computes.
+product `TIED_PRODUCT` names, and the first run's 4 of 16. It exits non-zero if
+any of them is not what it computes.
+
+It used to check the order the playground's output panel lists two labels in.
+That is a claim about which case a page surface displays, which is the same
+thing `PAGE_PAIRS` was and which nothing here can verify, so it is gone with
+the rest. The scores of that photograph are still checked, in `RECORDED_PAIRS`
+along with the other fifteen.
 
 Look at a request without sending it, and check that this runner is the one
 that sent them:

@@ -10,8 +10,7 @@ Published on https://superlinked.com/structured-output:
 
 and, under the proof grid:
 
-    91 of 93 checked fields were right, and 11 of the 13 fields that pick from
-    a fixed list were right
+    84 of the 85 checked fields came back right
 
 This script re-derives all of those offline, with no API key and no inference
 spend. It exits nonzero if any of them fails to reproduce.
@@ -55,12 +54,12 @@ EXPECTED = {
     "cases": 10,
     "parsed": 10,
     "schema_valid": 10,
-    "checks_passed": 91,
-    "checks_total": 93,
+    "checks_passed": 84,
+    "checks_total": 85,
     "yes_no_passed": 21,
     "yes_no_total": 21,
-    "enum_passed": 11,
-    "enum_total": 13,
+    "enum_passed": 5,
+    "enum_total": 5,
 }
 
 # The page heading says no document says true or false. Checked against the

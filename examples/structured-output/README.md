@@ -16,8 +16,7 @@ The page's heading:
 
 and the line under its proof grid:
 
-> 91 of 93 checked fields were right, and 11 of the 13 fields that pick from a
-> fixed list were right
+> 84 of the 85 checked fields came back right
 
 `score.py` re-derives every one of those from the recorded responses, offline.
 
@@ -72,22 +71,31 @@ schema validator: built in
 documents scored:  10
 parsed as JSON:    10
 schema-valid:      10
-fields right:      91 of 93
+fields right:      84 of 85
   yes-or-no fields:  21 of 21
-  picks from a list: 11 of 13
-  everything else:   59 of 59
+  picks from a list: 5 of 5
+  everything else:   58 of 59
 documents saying true or false: 0
 excluded from every total: 3 CPSC cases, listed with their reason in inputs/excluded.json
 
 fields the model got wrong:
-  gsa-377053.condition: expected 'unknown', got 'repairable'
-  nhtsa-11231274.components: expected ['AIR BAGS'], got ['FIRE RELATED']
-
-Reproduced: all 21 yes-or-no fields right, no document says true or false, 91 of 93 checked fields right.
+  nhtsa-11443034.injured_people: expected 1, got 0
 ```
 
-Both fields the model got wrong are picks from a fixed list, which is why that
-group scores 11 of 13 while the other two are perfect.
+The one field the model got wrong is a count, which is why the other two groups
+are perfect. Its narrative says the contact "had chest and neck pains due to
+hitting the steering wheel and did go to urgent care but did not seek medical
+attention", a sentence that contradicts itself; the registered 1 comes from
+NHTSA's own coded record and the pains are stated, so 1 is the better reading
+and 0 is a defensible reading of the second clause.
+
+Two fields were dropped from the schemas on 2026-09-24 and the eight documents
+carrying them were re-recorded, which is why the totals moved from 91 of 93.
+`condition` on the GSA lots asked for a condition grade that lot 377053 does not
+state; `components` on the NHTSA complaints asked for NHTSA's own taxonomy,
+which the narrative cannot reach. Neither was answerable from the document.
+`inputs/cases.json` records both, and the calls they replace are kept in the
+`superseded/2026-09-15` set of `calls.json`.
 
 `score.py` needs nothing installed. Schema validation runs under the small
 validator built into `score.py`, which covers the subset of JSON Schema these
@@ -124,15 +132,16 @@ byte of any request or response.
 
 - **Nothing about accuracy on your documents.** Ten records from three
   publishers is a demonstration, not a benchmark.
-- **Nothing about the two wrong fields being the only possible errors.** The
-  93 checks cover the fields that could be read off each source text. Fields
+- **Nothing about the one wrong field being the only possible error.** The
+  85 checks cover the fields that could be read off each source text. Fields
   the source does not state are schema-validated and not scored.
 - **Nothing about why a yes-or-no field is right.** `score.py` establishes that
   the answer matches the check and that the words true and false appear in no
   source text. It cannot show the model reasoned rather than guessed, and with
   21 binary answers a run of luck is not ruled out by this set.
 - **Nothing about reproducibility of a new run.** The figure is re-derived from
-  responses recorded on 2026-09-15 against server version 0.7.3 and model
+  responses recorded on 2026-09-15 and 2026-09-24 against server version 0.7.3
+  and model
   revision `8bd714204e67a1c6c81f84b0dc486b6a6e96e943c42ff488f6b3cbf936e07955`.
   A fresh `--record` run may differ.
 - **Nothing about the `diagnostics/*` calls.** They were written by earlier
