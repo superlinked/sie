@@ -251,7 +251,33 @@ class GLiNERBiAdapter(BaseAdapter):
                 )
             all_entities.append(entity_results)
 
-        return ExtractOutput(entities=all_entities)
+        return ExtractOutput(entities=all_entities, input_token_counts=self._doc_input_token_counts(texts, labels))
+
+    def _doc_input_token_counts(self, texts: list[str], labels: list[str]) -> list[int] | None:
+        """Count the document tokens the bi-encoder actually encodes, per item.
+
+        A bi-encoder encodes labels separately, so its text input is the
+        document alone. Delegate word splitting and max-length word truncation
+        to the pinned GLiNER processor, then count the attended tokens of the
+        retained window, special tokens included, as the GLiNER adapter does.
+        Batches match GLiNER inference's default batch size.
+        """
+        processor = getattr(self._model, "data_processor", None)
+        prepare_inputs = getattr(self._model, "prepare_inputs", None)
+        prepare_base_input = getattr(self._model, "prepare_base_input", None)
+        if processor is None or prepare_inputs is None or prepare_base_input is None:
+            return None
+        try:
+            split_texts, _, _ = prepare_inputs(texts)
+            raw_items = prepare_base_input(split_texts)
+            counts: list[int] = []
+            for start in range(0, len(raw_items), 8):
+                raw_batch = processor.collate_raw_batch(raw_items[start : start + 8], entity_types=labels)
+                encoded = processor.tokenize_inputs(raw_batch["tokens"])
+                counts.extend(int(sum(mask)) for mask in encoded["attention_mask"].tolist())
+        except Exception:  # noqa: BLE001 -- metering must never fail an extraction
+            return None
+        return counts if len(counts) == len(texts) else None
 
     def _predict_with_cached_embeds(
         self,
