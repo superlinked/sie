@@ -9,6 +9,7 @@ import pytest
 import torch
 from sie_server.adapters.gliner import GLiNERAdapter, _cap_relation_candidates
 from sie_server.adapters.gliner_bi import GLiNERBiAdapter
+from sie_server.core.worker.handlers.extract import ExtractHandler
 from sie_server.types.inputs import InvalidInputError, Item
 
 _TEXT = "Steve Jobs founded Apple in Cupertino."
@@ -122,13 +123,34 @@ def test_relation_threshold_defaults_to_the_config_then_the_library() -> None:
     assert _inference(adapter).call_args.kwargs["relation_threshold"] == 0.75
 
 
-def test_relation_labels_from_a_batching_key_tuple_are_accepted() -> None:
-    adapter = _adapter(([[]], [[]]), relex=True)
+def test_relation_labels_batch_by_order_and_reach_the_adapter_as_sent() -> None:
+    handler = ExtractHandler()
 
-    output = adapter.extract([Item(text=_TEXT)], labels=list(_LABELS), options={"relation_labels": ("founded",)})
+    def metadata(relation_labels: list[str]) -> MagicMock:
+        meta = MagicMock()
+        meta.labels = list(_LABELS)
+        meta.output_schema = None
+        meta.instruction = None
+        meta.options = {"relation_labels": relation_labels, "relation_threshold": 0.7}
+        return meta
 
-    assert _inference(adapter).call_args.kwargs["relations"] == ["founded"]
-    assert output.relations == [[]]
+    founded_first = metadata(["founded", "located in"])
+    same = metadata(["founded", "located in"])
+    located_first = metadata(["located in", "founded"])
+    assert handler.make_config_key(founded_first) == handler.make_config_key(same)
+    assert handler.make_config_key(founded_first) != handler.make_config_key(located_first)
+
+    adapter = _adapter(([[], []], [[], []]), relex=True)
+    output = handler.run_inference(
+        adapter,
+        [Item(text=_TEXT), Item(text=_TEXT)],
+        handler.make_config_key(located_first),
+        None,
+        [located_first, located_first],
+    )
+
+    assert _inference(adapter).call_args.kwargs["relations"] == ["located in", "founded"]
+    assert output.relations == [[], []]
 
 
 def test_relation_labels_need_a_relation_model() -> None:
