@@ -32,18 +32,30 @@ DEFAULT_PII_LABELS = [
 ]
 
 REQUEST_TIMEOUT_S = 600.0
+# Lowest score redact_pii keeps. It is sent as the request threshold; otherwise
+# the server applies the model's default (0.5) and drops lower spans first.
 MIN_PII_SCORE = 0.3
 
-# Bounded chunking for the GLiNER extract/redact path. GLiNER runs on a single
-# text item per call (no internal chunking), so a large resolved document is
-# split into overlapping windows, run per-window, and the entities merged with
-# offsets shifted back to the original text. The overlap keeps an entity that
-# straddles a window edge fully present in at least one window; a detection that
+# Bounded windowing for the GLiNER extract/redact path. GLiNER reads only the
+# first ``max_len`` words of each text (384 for the default models) and silently
+# ignores the rest, where a word is a match of ``_GLINER_WORD``, so every
+# punctuation mark counts as one. A document is therefore split into overlapping
+# windows of EXTRACT_WINDOW_WORDS words, well under that limit so the label
+# prompt that shares the encoder input still fits, and the entities are merged
+# with offsets shifted back to the original text. The overlap is longer than the
+# longest span the default models predict (12 words), so an entity that
+# straddles a window edge is whole in at least one window; a detection that
 # touches an interior window edge (likely truncated) is dropped in favor of the
-# neighbor window's full span. EXTRACT_MAX_CHARS bounds the fan-out so one
-# request cannot spawn an unbounded number of (un-batched, ~1 rps) GLiNER calls.
-EXTRACT_CHUNK_CHARS = 8_000
-EXTRACT_OVERLAP_CHARS = 256
+# neighbor window's full span. A run of word characters longer than
+# EXTRACT_MAX_WORD_CHARS counts as several words, so text without breaks still
+# gives bounded windows. Windows are sent EXTRACT_BATCH_WINDOWS per request, and
+# EXTRACT_MAX_CHARS bounds the fan-out so one call cannot spawn an unbounded
+# number of GLiNER requests.
+_GLINER_WORD = re.compile(r"\w+(?:[-_]\w+)*|\S")
+EXTRACT_WINDOW_WORDS = 256
+EXTRACT_OVERLAP_WORDS = 32
+EXTRACT_MAX_WORD_CHARS = 32
+EXTRACT_BATCH_WINDOWS = 8
 EXTRACT_MAX_CHARS = 1_000_000
 
 _MAP_PROMPT = (
@@ -218,19 +230,23 @@ def _generated_text(result: Mapping[str, Any]) -> str:
     return text
 
 
-def _extract_windows(content: str, chunk_chars: int, overlap: int) -> list[tuple[int, str]]:
-    """Overlapping ``(base_offset, window)`` tuples covering ``content`` exactly."""
-    if len(content) <= chunk_chars:
+def _extract_windows(content: str, window_words: int, overlap_words: int) -> list[tuple[int, str]]:
+    """Overlapping ``(base_offset, window)`` tuples of at most ``window_words`` GLiNER words each."""
+    words = [
+        (start, min(start + EXTRACT_MAX_WORD_CHARS, match.end()))
+        for match in _GLINER_WORD.finditer(content)
+        for start in range(match.start(), match.end(), EXTRACT_MAX_WORD_CHARS)
+    ]
+    if len(words) <= window_words:
         return [(0, content)]
-    step = max(1, chunk_chars - overlap)
+    step = max(1, window_words - overlap_words)
     windows: list[tuple[int, str]] = []
-    index = 0
-    length = len(content)
-    while index < length:
-        windows.append((index, content[index : index + chunk_chars]))
-        if index + chunk_chars >= length:
+    for first in range(0, len(words), step):
+        last = min(first + window_words, len(words)) - 1
+        start, end = words[first][0], words[last][1]
+        windows.append((start, content[start:end]))
+        if last == len(words) - 1:
             break
-        index += step
     return windows
 
 
@@ -241,42 +257,49 @@ async def _gliner_entities(
     labels: Sequence[str],
     model: str,
     gpu: str | None,
+    threshold: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Run GLiNER over ``content``, chunking large inputs and merging offset-adjusted spans.
+    """Run GLiNER over ``content`` in word windows and merge offset-adjusted spans.
 
-    GLiNER is called on one text item per request, so a document larger than
-    ``EXTRACT_CHUNK_CHARS`` is split into overlapping windows; each window's
-    entities are shifted back to the original offsets and de-duplicated. A
-    detection clipped at an interior window edge is dropped (its overlapping
-    neighbor holds the full span). Inputs over ``EXTRACT_MAX_CHARS`` are rejected
-    rather than fanned into an unbounded number of GLiNER calls.
+    GLiNER reads only the first ``max_len`` words of each text, so ``content`` is
+    split into overlapping windows of at most ``EXTRACT_WINDOW_WORDS`` words, sent
+    ``EXTRACT_BATCH_WINDOWS`` per request; each window's entities are shifted back
+    to the original offsets and de-duplicated. A detection clipped at an interior
+    window edge is dropped (its overlapping neighbor holds the full span). Inputs
+    over ``EXTRACT_MAX_CHARS`` are rejected rather than fanned into an unbounded
+    number of GLiNER calls. ``threshold`` replaces the model's default minimum score.
     """
     if len(content) > EXTRACT_MAX_CHARS:
         raise OffloadError(
             f"content is {len(content)} characters, over the {EXTRACT_MAX_CHARS}-character "
             "extraction limit; summarize or section the document first, or send a smaller piece"
         )
+    options = None if threshold is None else {"threshold": threshold}
 
-    async def _run(text: str) -> list[Mapping[str, Any]]:
-        result = await client.extract(
+    async def _run(texts: list[str]) -> list[list[Mapping[str, Any]]]:
+        results = await client.extract(
             model,
-            {"text": text},
+            [{"text": text} for text in texts],
             labels=list(labels),
+            options=options,
             gpu=gpu,
             wait_for_capacity=True,
             provision_timeout_s=REQUEST_TIMEOUT_S,
         )
-        return list(result.get("entities", []))
+        return [list(result.get("entities", [])) for result in results]
 
-    windows = _extract_windows(content, EXTRACT_CHUNK_CHARS, EXTRACT_OVERLAP_CHARS)
+    windows = _extract_windows(content, EXTRACT_WINDOW_WORDS, EXTRACT_OVERLAP_WORDS)
+    window_entities: list[list[Mapping[str, Any]]] = []
+    for index in range(0, len(windows), EXTRACT_BATCH_WINDOWS):
+        window_entities += await _run([window for _, window in windows[index : index + EXTRACT_BATCH_WINDOWS]])
     if len(windows) == 1:
-        return [dict(entity) for entity in await _run(content)]
+        return [dict(entity) for entity in window_entities[0]]
 
     merged: dict[tuple[Any, ...], dict[str, Any]] = {}
     last = len(windows) - 1
-    for position, (base, window) in enumerate(windows):
+    for position, ((base, window), entities) in enumerate(zip(windows, window_entities, strict=True)):
         window_len = len(window)
-        for entity in await _run(window):
+        for entity in entities:
             start = entity.get("start")
             end = entity.get("end")
             # Drop detections clipped at an interior window edge; the overlapping
@@ -354,7 +377,9 @@ async def redact_pii(
         raise OffloadError("content contains no text to redact")
     resolved_labels = labels or DEFAULT_PII_LABELS
 
-    entities = await _gliner_entities(client, content=content, labels=resolved_labels, model=model, gpu=gpu)
+    entities = await _gliner_entities(
+        client, content=content, labels=resolved_labels, model=model, gpu=gpu, threshold=MIN_PII_SCORE
+    )
     redacted, placeholder_map, span_count = redact_text(content, entities)
     return {
         "redacted_text": redacted,
