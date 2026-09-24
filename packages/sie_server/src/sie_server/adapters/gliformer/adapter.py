@@ -388,6 +388,7 @@ class GLiFormerAdapter(BaseAdapter):
         relation_threshold = opts.get("relation_threshold")
         if relation_threshold is not None:
             relation_threshold = _validate_threshold(relation_threshold, "relation_threshold")
+        relation_labels = opts.get("relation_labels")
         flat_ner = _validate_flag(opts.get("flat_ner", self._flat_ner), "flat_ner")
         multi_label = _resolve_multi_label(opts, default=self._multi_label)
         request = _plan_request(
@@ -395,8 +396,9 @@ class GLiFormerAdapter(BaseAdapter):
             plan=compile_output_schema(output_schema) if output_schema is not None else None,
             classification_task=_validate_task(opts.get("classification_task")),
             label_groups=_validate_label_groups(opts.get("label_groups")),
+            # An empty list asks for no relations, as in the GLiNER adapter.
             relation_types=(
-                _validate_labels(opts["relation_labels"], "relation_labels") if opts.get("relation_labels") else None
+                None if relation_labels in (None, []) else _validate_labels(relation_labels, "relation_labels")
             ),
             supplied_entities=self._supplied_relation_entities(items),
             relation_threshold=relation_threshold,
@@ -973,7 +975,8 @@ def _normalize_input_entity(text: str, entity: Any) -> Entity:
     if len(label.strip()) > MAX_LABEL_CHARS:
         raise InvalidInputError(f"GLiFormer relation entity labels may have at most {MAX_LABEL_CHARS} characters")
     score = entity.get("score", 1.0)
-    if isinstance(score, bool) or not isinstance(score, Real) or not math.isfinite(score) or not 0 <= score <= 1:
+    # The range check comes first: math.isfinite cannot convert a huge integer.
+    if isinstance(score, bool) or not isinstance(score, Real) or not 0 <= score <= 1 or not math.isfinite(score):
         raise InvalidInputError("GLiFormer relation entity score must be a number between 0 and 1")
     return Entity(text=entity_text, label=label.strip(), score=float(score), start=start, end=end)
 
@@ -1055,7 +1058,10 @@ def _validate_threshold(value: object, name: str = "threshold") -> float:
     message = f"GLiFormer {name} must be a number between 0 and 1"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidInputError(message)
-    threshold = float(value)
+    try:
+        threshold = float(value)
+    except OverflowError as exc:
+        raise InvalidInputError(message) from exc
     if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
         raise InvalidInputError(message)
     return threshold

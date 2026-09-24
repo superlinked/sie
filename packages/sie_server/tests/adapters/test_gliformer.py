@@ -209,6 +209,18 @@ def test_relation_threshold_filters_relations_only(supplied: bool) -> None:
     assert _inference_kwargs(model)["threshold"] == 0.5
 
 
+@pytest.mark.parametrize("relation_labels", [None, []])
+def test_no_relation_labels_run_entity_recognition_only(relation_labels: list[str] | None) -> None:
+    text = "Alice works at Acme"
+    adapter, model = _adapter({"ner": [[_ner(text, "Alice", "person")]]})
+
+    output = adapter.extract([Item(text=text)], labels=["person"], options={"relation_labels": relation_labels})
+
+    assert output.relations is None
+    assert [entity["text"] for entity in output.entities[0]] == ["Alice"]
+    assert _inference_kwargs(model)["entities"] == ["person"]
+
+
 def test_relation_threshold_cannot_lower_the_decoding_threshold() -> None:
     adapter, model = _adapter({"ner": [[]], "joint_relex": [[]]})
     options = {"relation_labels": ["knows"], "threshold": 0.5}
@@ -509,10 +521,14 @@ def test_instruction_is_accepted_and_ignored() -> None:
         ({"labels": ["a", "a"]}, "labels must be unique"),
         ({"labels": ["a", " "]}, "labels must be non-empty strings"),
         ({"labels": ["a"], "options": {"relation_labels": "works at"}}, "relation_labels must be a non-empty list"),
+        ({"labels": ["a"], "options": {"relation_labels": ""}}, "relation_labels must be a non-empty list"),
+        ({"labels": ["a"], "options": {"relation_labels": False}}, "relation_labels must be a non-empty list"),
         ({"labels": ["a"], "options": {"relations": ["works at"]}}, "options.relation_labels, not options.relations"),
         ({"labels": ["a"], "options": {"relations": []}}, "options.relation_labels, not options.relations"),
         ({"labels": ["a"], "options": {"relation_threshold": 1.5}}, "relation_threshold must be a number between"),
         ({"labels": ["a"], "options": {"relation_threshold": False}}, "relation_threshold must be a number between"),
+        ({"labels": ["a"], "options": {"threshold": 10**1000}}, "threshold must be a number between"),
+        ({"labels": ["a"], "options": {"relation_threshold": 10**1000}}, "relation_threshold must be a number between"),
         ({"labels": ["a"], "options": {"classification_task": " "}}, "classification_task must be a non-empty string"),
         (
             {
@@ -548,11 +564,12 @@ def test_metadata_entities_must_cover_every_item_and_exclude_other_relation_mode
     bad_offsets = Item(text="Ada founded Acme", metadata={"entities": [{"text": "Ada", "start": 1, "end": 4}]})
     with pytest.raises(InvalidInputError, match="valid character offsets"):
         adapter.extract([bad_offsets], labels=["founded"])
-    bad_score = Item(
-        text="Ada founded Acme", metadata={"entities": [{"text": "Ada", "start": 0, "end": 3, "score": 2.0}]}
-    )
-    with pytest.raises(InvalidInputError, match="relation entity score must be"):
-        adapter.extract([bad_score], labels=["founded"])
+    for score in (2.0, float("nan"), 10**1000):
+        bad_score = Item(
+            text="Ada founded Acme", metadata={"entities": [{"text": "Ada", "start": 0, "end": 3, "score": score}]}
+        )
+        with pytest.raises(InvalidInputError, match="relation entity score must be"):
+            adapter.extract([bad_score], labels=["founded"])
 
 
 # -- Model output validation and metering -----------------------------------------
