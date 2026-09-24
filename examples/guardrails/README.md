@@ -11,8 +11,10 @@ XSTest.
 
 All twelve went to four models on `https://api.superlinked.com` on 2026-09-21:
 two purpose-built guard models and two open generative models asked to review
-the text. This is the whole recorded run; how much of it any page renders is a
-separate decision, made in sie-web and not checked here.
+the text. The table below is the four published arms over all twelve inputs, not
+the whole recording: the run is 108 calls, nine arms per input, and the other
+five are listed under what this example does not claim. How much of any of it a
+page renders is a separate decision, made in sie-web and not checked here.
 
 | model | flagged | passed | right | median |
 |---|---|---|---|---|
