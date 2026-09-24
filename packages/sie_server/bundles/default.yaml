@@ -79,8 +79,9 @@ deps:
   gliner2: '>=1.3.1,<2'
   # glirel
   glirel: '>=1.0,<2'
-  # gliclass
-  gliclass: '>=0.1,<1'
+  # gliclass (0.1.17: cross-attention scorer for the multilingual checkpoints;
+  # 0.1.18+ needs transformers 5)
+  gliclass: '>=0.1.17,<1'
   # gliner/glirel/gliclass shared dep
   loguru: '>=0.7,<1'
   # donut, florence2

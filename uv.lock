@@ -1318,7 +1318,7 @@ wheels = [
 
 [[package]]
 name = "gliclass"
-version = "0.1.15"
+version = "0.1.17"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
@@ -1327,9 +1327,9 @@ dependencies = [
     { name = "torch", version = "2.9.1+cu129", source = { registry = "https://download.pytorch.org/whl/cu129" }, marker = "sys_platform == 'linux'" },
     { name = "transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f5/f6/dae3851957243e0359c9c06387be430ec1df0d804a270c5eddd00e63ff44/gliclass-0.1.15.tar.gz", hash = "sha256:9f2d578dd0b898c8d48ae9e377a70c72b9e3e24bd0adc047a14455eca273eba9", size = 46286 }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/4d/a14af220823eccbd4f2edfff303b24f0e2acf1a0f4177318347bf0c8524e/gliclass-0.1.17.tar.gz", hash = "sha256:17d2ec477da2270337cad9d8ae4ae90b8c675d1bfed9c73bc77d44996d36b522", size = 47472 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/af/5a/000a5e4bc52d4ca65dd03ad8ac3b29a8a80f66bd4171b71406bb99c7d8fa/gliclass-0.1.15-py3-none-any.whl", hash = "sha256:d457364fc79c286909ea378ffd1a000aac676e924cdd7a9bbbb58acc83d9ceb4", size = 47410 },
+    { url = "https://files.pythonhosted.org/packages/52/3f/0b4e6253a14af7bd1e7306f0b1a8dc6af607caa4a9868015234ee94ad27c/gliclass-0.1.17-py3-none-any.whl", hash = "sha256:330c89e4fb39b50cc9c62d52c44dc7c5a13303883680706c71b598ecf88ab354", size = 48821 },
 ]
 
 [[package]]
@@ -4894,7 +4894,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "flagembedding", specifier = ">=1.3,<2" },
     { name = "flash-attn", marker = "sys_platform == 'linux' and extra == 'flash-attn'", url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.11/flash_attn-2.7.4+cu129torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl" },
-    { name = "gliclass", specifier = ">=0.1,<1" },
+    { name = "gliclass", specifier = ">=0.1.17,<1" },
     { name = "gliner", specifier = ">=0.2,<1" },
     { name = "gliner2", specifier = ">=1.3.1,<2" },
     { name = "glirel", specifier = ">=1.0,<2" },
