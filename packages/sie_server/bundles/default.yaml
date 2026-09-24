@@ -73,8 +73,8 @@ deps:
   pillow: '==12.3.0'
   # grounding_dino
   requests: ''
-  # gliner, gliner_bi
-  gliner: '>=0.2,<1'
+  # gliner, gliner_bi (0.2.26: first release that loads the relex checkpoints)
+  gliner: '>=0.2.26,<1'
   # gliner2
   gliner2: '>=1.3.1,<2'
   # glirel
