@@ -6,7 +6,7 @@ no network, no inference spend.
     python3 score.py
 
 Prints "328 of 335 values matched the screen", the figure the page publishes,
-and the per-screen lines it shows beside three of the screenshots.
+and the three per-screen figures pinned in PAGE_PER_SCREEN.
 
 `expected` in inputs.json was read off each screenshot at full resolution and
 committed before any model run. This compares each recorded reply with it using
@@ -47,29 +47,20 @@ PINNED_OIDS = {
 
 PAGE_FIGURE = (328, 335)
 PAGE_SCREENS = 12
-# The per-screen lines the page prints beside three of the screenshots, in the
-# order its proof grid shows them.
+# Three per-screen figures the page publishes, checked against the recording so
+# that a rescore cannot move a published number quietly.
 #
-# Two corrections, in the order they happened.
+# This block used to say which screens the proof grid draws, and in what order.
+# That claim was wrong twice inside two days: once naming four screens, then
+# naming three from a page change that had not shipped. Both times every run
+# stayed green, because this script cannot see the page and never could. It is
+# gone rather than corrected a third time. Which screens the page draws is the
+# page's decision and the page's SOURCES.md records it.
 #
-# This named four screens until an edit made for superlinked/sie-web#468:
-# superset-slack-dashboard at 28 of 32, kubernetes-dashboard-node,
-# gitlab-pipeline-list at 17 of 19 and gitlab-ci-grafana-dashboard. Those four
-# were the three screens that missed anything plus one clean one, so the page
-# led with 328 of 335 and then illustrated it with its own counterexamples.
-# That PR is still open, so the four-screen grid was what the page published
-# throughout; this file described a grid that had not shipped.
-#
-# It then named kubernetes-dashboard-node, gitlab-ci-grafana-dashboard at 51 of
-# 52 and airflow-dag-list until superlinked/sie-web#477. That grid still printed
-# the one miss on the Grafana dashboard, marked. #477 replaced that card with
-# argocd-applicationsets, which the run read exactly, so every card the page
-# draws now reads its screen without a miss.
-#
-# No figure moved and nothing was rescored in either correction. The three
-# screens that have come off the grid are still scored below, still inside the
-# 328 of 335, and still printed per screen by this script. Which ones the page
-# draws is a display decision; what the run returned is not.
+# What survives is what the recording can settle: these figures, PAGE_FIGURE
+# and PAGE_SCREENS. Nothing here was rescored in any of it, and every one of
+# the twelve screens is scored and printed below whether the page draws it or
+# not.
 PAGE_PER_SCREEN = {
     "argocd-applicationsets": (32, 32),
     "kubernetes-dashboard-node": (26, 26),

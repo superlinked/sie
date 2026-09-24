@@ -72,17 +72,14 @@ it lost in: mdn-cache-no-store
 That is the figure the task page publishes. The loss is narrow and it is
 printed with the rest: 11.718 for the `no-store` passage against 11.746 for the
 `private` passage, a gap of 0.028 on a scale where the whole sum runs past 11.
-The page displays three of the eight searches plus one more in its hero, and
-which four it draws is a display decision recorded in the page's SOURCES.md.
-All eight are scored here either way.
+All eight searches are scored here. Which of them the page features is the
+page's decision and is recorded in its own `SOURCES.md`.
 
-That last sentence used to read "and the search the answer lost is one of the
-three, so the miss is visible there too". It was true until
-superlinked/sie-web#477, which drew a different third card. The claim is
-removed rather than restated the other way round, because which searches the
-page features is the page's to decide and this file cannot stay in step with
-it; the number the page and this script share is 7 of 8, and that has not
-moved.
+This paragraph used to say which searches the page draws, and that the search
+the answer lost was one of them. That went stale as soon as the page was
+reselected, and nothing here can check it, so the claim is removed rather than
+restated the other way round. The number the page and this script share is
+7 of 8, and that has not moved.
 
 `score.py` fails rather than skipping. A response that does not match its
 `response_sha256`, a request the pinned inputs do not rebuild, a missing call,

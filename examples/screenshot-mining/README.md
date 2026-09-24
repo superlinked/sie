@@ -59,16 +59,15 @@ Across all 12 recorded screens, 328 of 335 values matched the screen and 7 did n
 The playground call adds 4 of 4, for 332 of 339 over every recorded call
 ```
 
-`score.py` also checks the three per-screen figures the page prints beside its
-screenshots, and exits non-zero if any of them, or the headline, is not what it
-computes.
+`score.py` also checks three per-screen figures the page publishes, pinned in
+`PAGE_PER_SCREEN`, and exits non-zero if any of them, or the headline, is not
+what it computes. That catches a rescore moving a published number quietly.
 
-It does not check that those three are the screens the page currently draws,
-and it cannot: nothing here reads the page. Tampering shows the gap. Change a
-figure and the run fails; swap the slug for another screen with its correct
-figures and the run stays green. That is how this file came to describe a grid
-from a pull request that had not merged. The page's `SOURCES.md` is where the
-selection is recorded.
+It does not check which screens the page draws, and it cannot: nothing here
+reads the page. Tampering shows the gap. Change a figure and the run fails;
+swap the slug for another screen with its correct figures and the run stays
+green. That is why this file no longer says what the page's grid contains. The
+page's `SOURCES.md` is where the selection is recorded.
 
 Look at a request without sending it:
 
@@ -169,32 +168,13 @@ starting point for that, not as a clearance.
   run tests a screenshot at a resolution where the text is genuinely unreadable.
 - Not reproducible against the live API. These are recordings. A rerun goes
   through a different served revision and unfixed sampling, so it will differ.
-- The page's proof grid shows three of the twelve screens: the Argo CD
-  ApplicationSets page at 32 of 32, the Kubernetes Dashboard node page at 26 of
-  26, and the Airflow Dags list at 31 of 31. The hero shows a fourth, the Argo
-  CD Grafana dashboard, and the playground a fifth, the GitLab DORA dashboard.
-  All twelve are here, and so is the playground call, which is scored separately
-  and is not part of the 335.
+- Not a description of what the page shows. All twelve screens are scored here,
+  and so is the playground call, which is scored separately and is not part of
+  the 335. Which of them the page draws, and where, is the page's decision and
+  is recorded in its own `SOURCES.md`.
 
-  This paragraph has been corrected twice, and neither correction moved a
-  figure or rescored a call.
-
-  It first said "shows four of the twelve screens, chosen because those four
-  include every screen that missed anything". That was the selection
-  superlinked/sie-web#468 set out to fix: a page that leads with 328 of 335 and
-  then shows only the screens that missed illustrates its own claim with the
-  counterexamples. #468 is still open, so the four-screen grid was what the page
-  published the whole time this file described the replacement.
-
-  It then said the grid was the Kubernetes node page, the GitLab CI Grafana
-  dashboard "at 51 of 52 with its one miss marked", and the Airflow Dags list,
-  and that the page's totals line named the Superset Slack Dashboard and the
-  GitLab pipeline list as the screens carrying six of the seven misses.
-  superlinked/sie-web#477 replaced the Grafana card with the Argo CD
-  ApplicationSets page, so no card on the page carries a miss, and its totals
-  line names no screen: it states 328 of 335 over all twelve, says the grid
-  draws three of them, and points at the page's SOURCES.md for the rest.
-
-  The Superset Slack Dashboard at 28 of 32, the GitLab pipeline list at 17 of 19
-  and the GitLab CI Grafana dashboard at 51 of 52 are all still scored here,
-  still inside the 328 of 335, and still printed per screen by `score.py`.
+  This bullet used to name the grid, the hero and the playground screens, and it
+  was wrong twice inside two days: once naming four screens, then naming three
+  from a page change that had not shipped. Every run stayed green through both,
+  because nothing here can read the page. The claim is removed rather than
+  corrected a third time. No figure moved and no call was rescored in any of it.
