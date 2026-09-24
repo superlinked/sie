@@ -973,6 +973,7 @@ class TestExtractRuntimeOptions:
         fake_model.to.return_value = fake_model
         fake_gliclass.GLiClassModel = MagicMock()
         fake_gliclass.GLiClassModel.from_pretrained.return_value = fake_model
+        fake_gliclass.GLiClassModelConfig = MagicMock()
         captured: dict[str, object] = {}
 
         def fake_pipeline_ctor(**kwargs: object) -> MagicMock:
@@ -986,6 +987,7 @@ class TestExtractRuntimeOptions:
         fake_tokenizer.model_max_length = 1_000_000  # default before clamp
         fake_transformers.AutoTokenizer = MagicMock()
         fake_transformers.AutoTokenizer.from_pretrained.return_value = fake_tokenizer
+        fake_transformers.PreTrainedTokenizerFast = MagicMock()
 
         # Inject stubs so ``from gliclass import ...`` inside load() picks them
         # up. ``monkeypatch.setitem`` restores the original modules on teardown

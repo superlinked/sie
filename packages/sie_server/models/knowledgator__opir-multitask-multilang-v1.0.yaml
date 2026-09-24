@@ -1,0 +1,29 @@
+sie_id: knowledgator/opir-multitask-multilang-v1.0
+hf_id: knowledgator/opir-multitask-multilang-v1.0
+hf_revision: 1c1d66bd22e0ba93a435c710a9d9499be292cd65
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 1024  # trained with 1024-token inputs
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.gliclass:GLiClassAdapter
+    adapter_options:
+      loadtime:
+        classification_type: single-label
+      runtime:
+        threshold: 0.0
+  multi-label:
+    extends: default
+    adapter_options:
+      runtime:
+        classification_type: multi-label
+        threshold: 0.0

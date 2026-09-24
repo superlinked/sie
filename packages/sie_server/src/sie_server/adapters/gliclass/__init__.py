@@ -157,6 +157,47 @@ def _string_list(value: Any) -> list[str] | None:
     return None
 
 
+def _restore_modernbert_rope_fields(encoder_config: Any) -> bool:
+    """Carry a transformers-5 ModernBERT RoPE config over to transformers 4.
+
+    transformers 5 saves ModernBERT RoPE bases per layer type in
+    ``rope_parameters`` and no longer writes ``global_rope_theta`` or
+    ``local_rope_theta``. transformers 4 reads only the latter, so a checkpoint
+    saved with 5 would silently run its sliding-window layers with the 4.x
+    default base of 10000. Returns True when the config was changed.
+    """
+    rope_parameters = getattr(encoder_config, "rope_parameters", None)
+    if (
+        getattr(encoder_config, "model_type", None) != "modernbert"
+        or not isinstance(rope_parameters, dict)
+        or not hasattr(encoder_config, "local_rope_theta")  # transformers 5 has no legacy fields
+    ):
+        return False
+    fields = {"full_attention": "global_rope_theta", "sliding_attention": "local_rope_theta"}
+    if not set(rope_parameters) <= set(fields):
+        raise ValueError(
+            f"ModernBERT rope_parameters keys {sorted(rope_parameters)} are not supported by transformers 4"
+        )
+    for layer_type, field in fields.items():
+        params = rope_parameters.get(layer_type)
+        if params is None:
+            continue
+        if params.get("rope_type", "default") != "default" or "rope_theta" not in params:
+            raise ValueError(f"ModernBERT {layer_type} RoPE parameters {params!r} are not supported by transformers 4")
+        setattr(encoder_config, field, float(params["rope_theta"]))
+    layer_types = getattr(encoder_config, "layer_types", None)
+    if layer_types is not None:
+        every = encoder_config.global_attn_every_n_layers
+        expected = [
+            "full_attention" if index % every == 0 else "sliding_attention" for index in range(len(layer_types))
+        ]
+        if list(layer_types) != expected:
+            raise ValueError(
+                "ModernBERT layer_types do not follow global_attn_every_n_layers; transformers 4 cannot load them"
+            )
+    return True
+
+
 class GLiClassAdapter(BaseAdapter):
     """Adapter for GLiClass zero-shot classification models.
 
@@ -225,8 +266,11 @@ class GLiClassAdapter(BaseAdapter):
         Args:
             device: Target device (cuda:0, cuda:1, cpu, mps).
         """
-        from gliclass import GLiClassModel, ZeroShotClassificationPipeline  # ty:ignore[unresolved-import]
-        from transformers import AutoTokenizer
+        from gliclass import (  # ty:ignore[unresolved-import]
+            GLiClassModel,
+            GLiClassModelConfig,
+            ZeroShotClassificationPipeline,
+        )
 
         self._device = device
 
@@ -244,9 +288,13 @@ class GLiClassAdapter(BaseAdapter):
         shared_kwargs: dict[str, Any] = {}
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
-        model = GLiClassModel.from_pretrained(self._model_name_or_path, **shared_kwargs)
+        config = GLiClassModelConfig.from_pretrained(self._model_name_or_path, **shared_kwargs)
+        if _restore_modernbert_rope_fields(config.encoder_config):
+            model = GLiClassModel.from_pretrained(self._model_name_or_path, config=config, **shared_kwargs)
+        else:
+            model = GLiClassModel.from_pretrained(self._model_name_or_path, **shared_kwargs)
         model = model.to(device, dtype=torch_dtype)
-        self._tokenizer = AutoTokenizer.from_pretrained(self._model_name_or_path, **shared_kwargs)
+        self._tokenizer = self._load_tokenizer(shared_kwargs)
 
         # Bound the tokenizer's max length so any internal tokenization in the
         # gliclass library auto-truncates to the model's actual capacity.
@@ -276,6 +324,19 @@ class GLiClassAdapter(BaseAdapter):
             for classification_type in _CLASSIFICATION_TYPES
         }
         self._pipeline = self._pipelines[self._classification_type]
+
+    def _load_tokenizer(self, shared_kwargs: dict[str, Any]) -> PreTrainedTokenizerBase:
+        from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+        try:
+            return AutoTokenizer.from_pretrained(self._model_name_or_path, **shared_kwargs)
+        except ValueError as exc:
+            # Checkpoints saved with transformers 5 record the generic fast
+            # tokenizer as "TokenizersBackend", a class transformers 4 lacks.
+            # Their tokenizer.json loads unchanged as a PreTrainedTokenizerFast.
+            if "TokenizersBackend" not in str(exc):
+                raise
+            return PreTrainedTokenizerFast.from_pretrained(self._model_name_or_path, **shared_kwargs)
 
     def _extract_text(self, item: Item) -> str:
         if not item.text:
