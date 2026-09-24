@@ -374,6 +374,10 @@ const RESOURCE_EXHAUSTED_RETRY_AFTER: &str = RetryAfter::DEFAULT.resource_exhaus
 const LORA_LOADING_ERROR_CODE: &str = "LORA_LOADING";
 const LORA_LOADING_RETRY_AFTER: &str = RetryAfter::DEFAULT.lora_loading;
 const INVALID_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
+/// Worker-side input exceeds the model's context window (for example a label
+/// set that does not fit). Caller-fixable, so it maps to 400 like
+/// ``INVALID_INPUT``; see ``sie_server.adapters.errors.InputTooLongError``.
+const INPUT_TOO_LONG_ERROR_CODE: &str = "INPUT_TOO_LONG";
 const PAYLOAD_TOO_LARGE_ERROR_CODE: &str = err_code::PAYLOAD_TOO_LARGE;
 
 /// Fallback `max_tokens` applied to a chat-completions request that
@@ -9002,6 +9006,7 @@ fn unanimous_terminal_client_error(
     let first = errors.first()?.error_code.as_deref()?;
     let (status, canonical) = match first {
         INVALID_INPUT_ERROR_CODE => (StatusCode::BAD_REQUEST, INVALID_INPUT_ERROR_CODE),
+        INPUT_TOO_LONG_ERROR_CODE => (StatusCode::BAD_REQUEST, INPUT_TOO_LONG_ERROR_CODE),
         PAYLOAD_TOO_LARGE_ERROR_CODE => {
             (StatusCode::PAYLOAD_TOO_LARGE, PAYLOAD_TOO_LARGE_ERROR_CODE)
         }
@@ -18468,6 +18473,7 @@ mod tests {
     fn test_unanimous_terminal_client_errors_map_to_400_and_413() {
         for (code, status) in [
             (INVALID_INPUT_ERROR_CODE, StatusCode::BAD_REQUEST),
+            (INPUT_TOO_LONG_ERROR_CODE, StatusCode::BAD_REQUEST),
             (PAYLOAD_TOO_LARGE_ERROR_CODE, StatusCode::PAYLOAD_TOO_LARGE),
         ] {
             let first = _err_result(Some(code), "rejected 1");
@@ -18485,6 +18491,27 @@ mod tests {
             unanimous_terminal_client_error(&[&invalid, &oversized]),
             None
         );
+        let too_long = _err_result(Some(INPUT_TOO_LONG_ERROR_CODE), "labels do not fit");
+        let failed = _err_result(Some("inference_error"), "backend failure");
+        assert_eq!(unanimous_terminal_client_error(&[&too_long, &failed]), None);
+    }
+
+    #[tokio::test]
+    async fn test_input_too_long_is_a_native_400_with_its_code() {
+        let too_long = _err_result(Some(INPUT_TOO_LONG_ERROR_CODE), "labels do not fit");
+        let (status, code) = unanimous_terminal_client_error(&[&too_long]).unwrap();
+        let response = build_terminal_client_error_response(status, code, "labels do not fit");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers().get("x-sie-error-code").unwrap(),
+            INPUT_TOO_LONG_ERROR_CODE
+        );
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["detail"]["code"], INPUT_TOO_LONG_ERROR_CODE);
+        assert_eq!(value["detail"]["message"], "labels do not fit");
     }
 
     #[test]
