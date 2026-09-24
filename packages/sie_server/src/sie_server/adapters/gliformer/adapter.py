@@ -8,6 +8,7 @@ import logging
 import math
 import threading
 import warnings
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -716,12 +717,17 @@ def _skip_redundant_eval(model: Any) -> None:
     ``GLiFormer.inference`` and ``embed_text`` call ``eval()`` on every
     request, which walks all of the model's ~600 modules to clear training
     flags that are already clear. The adapter never switches the model to
-    training, so only a model left in training mode still needs the walk.
+    training, so only a model left in training mode still needs the walk,
+    which is what ``torch.nn.Module.eval`` does: ``train(False)``. The model
+    is held weakly, so the method stored on it adds no reference cycle.
     """
-    set_eval_mode = model.eval
+    model_ref = weakref.ref(model)
 
     def eval_if_training() -> Any:
-        return set_eval_mode() if model.training else model
+        current = model_ref()
+        if current is not None and current.training:
+            current.train(False)
+        return current
 
     model.eval = eval_if_training
 

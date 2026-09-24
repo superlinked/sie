@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+import weakref
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Literal
@@ -1236,6 +1237,7 @@ def test_per_request_eval_walks_the_model_only_when_it_is_training() -> None:
     model.model.heads = {"joint_relex": SimpleNamespace(max_relation_entities=None)}
     set_eval_mode = model.eval
     set_eval_mode.side_effect = lambda: setattr(model, "training", False) or model
+    model.train.side_effect = lambda mode: setattr(model, "training", mode) or model
     model.training = True
     adapter = GLiFormerAdapter("/local/checkpoint")
     with (
@@ -1243,17 +1245,30 @@ def test_per_request_eval_walks_the_model_only_when_it_is_training() -> None:
         patch.object(adapter_module.Path, "is_dir", return_value=True),
     ):
         adapter.load("cpu")
-    assert set_eval_mode.call_count == 1
+    set_eval_mode.assert_called_once_with()
 
     # GLiFormer.inference calls eval() on every request.
     assert model.eval() is model
     assert model.eval() is model
-    assert set_eval_mode.call_count == 1
+    model.train.assert_not_called()
 
     model.training = True
     assert model.eval() is model
-    assert set_eval_mode.call_count == 2
+    model.train.assert_called_once_with(False)
     assert model.training is False
+
+
+def test_per_request_eval_shortcut_does_not_keep_the_model_alive() -> None:
+    class _Model:
+        training = False
+
+    model = _Model()
+    adapter_module._skip_redundant_eval(model)
+    released = weakref.ref(model)
+
+    del model
+
+    assert released() is None
 
 
 def test_load_rejects_embedding_dimension_mismatch() -> None:
