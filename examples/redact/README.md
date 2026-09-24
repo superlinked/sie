@@ -56,7 +56,11 @@ The last one is why the 0.6 floor is not doing the work. Five of the run's 168
 spans fall below it: `ID #`, `File #` and `MIC #`, each covering a field's
 printed label and no value, and the given name `Annibale` twice, which the
 first model also returned at the same offsets inside `Annibale Caboto`. Every
-figure above holds either way.
+figure above is unchanged with the floor removed, the 42 of 49 included: the
+three field-label spans are on the Closing Disclosure, which carries no gold
+spans and so is not one of the six documents the precision figure is measured
+over, and the two `Annibale` spans merge into masks the first model already
+produced.
 
 These three need nothing installed: they are standard library only, and none
 of them needs an API key, a Hugging Face token or any inference spend.
@@ -144,20 +148,23 @@ byte of any request or response.
 
 ## What this does NOT establish
 
-- **The 23 of 25 is agreement, not correctness.** Both benchmarks annotate
+- **The 42 of 49 is agreement, not correctness.** Both benchmarks annotate
   only a subset of each document, so a mask outside their gold spans is
-  unjudged rather than wrong. The two unjudged masks cover a doctor's practice
-  address and a payment card's last four digits, which neither benchmark
-  annotates.
+  unjudged rather than wrong. The seven unjudged masks are two claim numbers, a
+  payment card's last four digits, a doctor's practice address, a medical
+  condition, and two further mentions of a name a model had already returned.
 - **Nothing about recall on your documents.** Twelve documents from four
   publishers is a demonstration.
 - **Nothing about the 384-word window being a fixed property.** It is what
-  these recordings show for this model. Measure it for the model you deploy.
-- **Nothing about `numind/NuNER_Zero`.** Its 12 calls are in the dataset and
-  no published figure rests on them, so `score.py` does not score them.
-- **Nothing about "0 of 29 amounts" beyond the displayed set.** That figure is
-  a claim about what a reader sees on the page, computed over exactly the seven
-  documents the page renders, not over all twelve recorded.
+  these recordings show for these models. Measure it for the model you deploy.
+- **Nothing about either model alone being enough.** Chunked, on its own,
+  `gliner_multi_pii-v1` reaches 33 of 45 and `NuNER_Zero` 37 of 45. The 41 is
+  the union of the two, and the 45 needs the propagation step as well.
+- **Nothing about which documents the page shows.** Every figure here is over
+  the recorded set: the four steps and the 42 of 49 over the six documents
+  carrying gold spans, and the 0 of 29 amounts over all ten recorded documents
+  that are not a second chunk. Which of them a page renders is the page's
+  decision and nothing here can read it.
 - **A fresh `--record` run records less than the archive.** `client.extract`
   returns the per-item result rather than the server's envelope, and surfaces
   no response headers, so `--record` rebuilds the envelope around that item and
