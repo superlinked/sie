@@ -87,11 +87,12 @@ class GLiNERBiAdapter(BaseAdapter):
 
         self._model: Any = None
         self._device: str | None = None
-        # LRU cache: frozenset(labels) -> pre-computed label embeddings.
+        # LRU cache: labels in request order -> pre-computed label embeddings.
+        # The embeddings are positional, so the key must keep the order.
         # Protected by _cache_lock for thread safety (defensive — the
         # current ModelWorker uses a single-worker executor, but this
         # guards against future architectural changes).
-        self._label_cache: OrderedDict[frozenset[str], Any] = OrderedDict()
+        self._label_cache: OrderedDict[tuple[str, ...], Any] = OrderedDict()
         self._cache_lock = threading.Lock()
 
     def load(self, device: str) -> None:
@@ -244,7 +245,8 @@ class GLiNERBiAdapter(BaseAdapter):
     ) -> list[list[dict[str, Any]]]:
         """Run prediction using pre-computed label embeddings.
 
-        Caches label embeddings keyed by the label set. When a cache hit
+        Caches label embeddings keyed by the ordered label list, because the
+        embeddings are matched to labels by position. When a cache hit
         occurs, the label encoder is skipped entirely — only the text encoder
         and span decoder run.
 
@@ -258,7 +260,7 @@ class GLiNERBiAdapter(BaseAdapter):
         Returns:
             List of entity dicts per text (same format as ``GLiNER.inference``).
         """
-        cache_key = frozenset(labels)
+        cache_key = tuple(labels)
 
         with self._cache_lock:
             if cache_key in self._label_cache:
