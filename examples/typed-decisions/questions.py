@@ -169,9 +169,11 @@ def asked(set_name: str, backend: str, questions: dict[str, dict[str, Any]]) -> 
     return questions if keep is None else {qid: q for qid, q in questions.items() if qid in keep}
 
 
-# The severity rubric is not asked of any model: score.py composes it from the
-# answers to attack_vector, user_interaction, needs_account and impact with the
-# CVSS v3.1 formula (cvss.py). The gold is NVD's base severity.
+# The severity rubric is not asked of any model; its level keys are the ones a
+# computed severity uses. lanes.severity_answer composes that from a backend's
+# answers to weakness, attack_vector and remote_unauthenticated with the CVSS
+# v3.1 formula and the fixed tables in cvss.py; the LLM's comes from the full
+# vector it returns. The gold is NVD's base severity.
 SEVERITY_RUBRIC: dict[str, Any] = {
     "type": SCORE,
     "instructions": "How severe is this vulnerability?",
