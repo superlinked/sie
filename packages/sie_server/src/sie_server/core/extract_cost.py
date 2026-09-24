@@ -46,6 +46,40 @@ if TYPE_CHECKING:
 # rerank candidate cap (``MAX_SCORE_ITEMS``) in magnitude and named-400 shape.
 MAX_EXTRACT_LABELS: Final[int] = 1000
 
+# Bounds on an extract ``output_schema``'s nesting and size, checked at request
+# ingress. The worker builds its batching key and adapters compile the schema by
+# walking it recursively, so a pathologically deep schema would otherwise fail
+# with a RecursionError deep inside the worker (or strand the other requests
+# batched with it) instead of a 400 for the request that sent it. Nesting counts
+# JSON objects and arrays; a JSON Schema object property adds two levels.
+MAX_OUTPUT_SCHEMA_DEPTH: Final[int] = 128
+MAX_OUTPUT_SCHEMA_VALUES: Final[int] = 100_000
+
+
+def output_schema_shape_error(schema: Any) -> str | None:
+    """Return why ``schema`` is too deeply nested or too large, or ``None``.
+
+    Walks the value iteratively, so the check itself cannot hit Python's
+    recursion limit.
+    """
+    stack: list[tuple[Any, int]] = [(schema, 1)]
+    values = 0
+    while stack:
+        value, depth = stack.pop()
+        values += 1
+        if values > MAX_OUTPUT_SCHEMA_VALUES:
+            return f"'output_schema' must contain at most {MAX_OUTPUT_SCHEMA_VALUES} values"
+        if isinstance(value, dict):
+            children = list(value.values())
+        elif isinstance(value, list):
+            children = value
+        else:
+            continue
+        if depth > MAX_OUTPUT_SCHEMA_DEPTH:
+            return f"'output_schema' must nest objects and arrays at most {MAX_OUTPUT_SCHEMA_DEPTH} levels deep"
+        stack.extend((child, depth + 1) for child in children)
+    return None
+
 
 def extract_item_cost(
     item: Item,

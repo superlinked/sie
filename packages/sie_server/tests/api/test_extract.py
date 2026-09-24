@@ -24,8 +24,11 @@ from sie_server.config.model import (
 )
 from sie_server.core.extract_cost import (
     MAX_EXTRACT_LABELS,
+    MAX_OUTPUT_SCHEMA_DEPTH,
+    MAX_OUTPUT_SCHEMA_VALUES,
     build_extract_prepared_items,
     extract_item_cost,
+    output_schema_shape_error,
 )
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.core.registry import ModelRegistry
@@ -421,6 +424,40 @@ class TestExtractEndpoint:
         assert data["detail"]["code"] == "INVALID_INPUT"
         assert str(MAX_EXTRACT_LABELS) in data["detail"]["message"]
         assert "labels" in data["detail"]["message"]
+
+    def test_extract_overly_deep_output_schema_rejected(self, client: TestClient) -> None:
+        """A schema nested past the bound is a 400 at ingress.
+
+        The worker's batching key and adapter compilers walk the schema
+        recursively; hundreds of levels would otherwise surface as a
+        RecursionError inside the worker instead of a 400.
+        """
+        schema: dict[str, Any] = {"type": "string"}
+        for _ in range(400):
+            schema = {"type": "object", "properties": {"a": schema}}
+        response = client.post(
+            "/v1/extract/test-extractor",
+            json={"items": [{"text": "Apple Inc."}], "params": {"output_schema": schema}},
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["code"] == "INVALID_INPUT"
+        assert str(MAX_OUTPUT_SCHEMA_DEPTH) in data["detail"]["message"]
+
+    def test_output_schema_shape_limits(self) -> None:
+        def nested(levels: int) -> dict[str, Any]:
+            node: dict[str, Any] = {}
+            for _ in range(levels - 1):
+                node = {"a": node}
+            return node
+
+        assert output_schema_shape_error(nested(MAX_OUTPUT_SCHEMA_DEPTH)) is None
+        assert "nest" in (output_schema_shape_error(nested(MAX_OUTPUT_SCHEMA_DEPTH + 1)) or "")
+        assert output_schema_shape_error(nested(5000)) is not None  # iterative: no RecursionError
+        wide = {"properties": {f"p{i}": {"type": "string"} for i in range(MAX_OUTPUT_SCHEMA_VALUES)}}
+        assert "at most" in (output_schema_shape_error(wide) or "")
+        assert output_schema_shape_error({"type": "object", "properties": {"n": {"type": "string"}}}) is None
 
     def test_extract_at_cap_labels_accepted(self, client: TestClient) -> None:
         """A labels list exactly at the cap is accepted."""

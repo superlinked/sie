@@ -2,7 +2,7 @@ from typing import Any
 
 import msgspec
 
-from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
+from sie_server.core.extract_cost import MAX_EXTRACT_LABELS, output_schema_shape_error
 from sie_server.core.score_cost import MAX_SCORE_ITEMS
 from sie_server.types.inputs import Item
 
@@ -63,6 +63,8 @@ class ExtractParams(msgspec.Struct):
                 msgspec.convert(self.options["instruction"], type=str | None, strict=True)
             except msgspec.ValidationError as exc:
                 raise msgspec.ValidationError(f"{exc} - at `$.params.options.instruction`") from exc
+        if self.output_schema is not None and (error := output_schema_shape_error(self.output_schema)):
+            raise msgspec.ValidationError(f"Field {error}")
 
 
 class ExtractRequest(msgspec.Struct):

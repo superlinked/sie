@@ -16,7 +16,11 @@ from sie_server.adapters.errors import InputTooLongError
 from sie_server.api.ws import compute_bundle_config_hash_cached
 from sie_server.config.model import ModelConfig
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
-from sie_server.core.extract_cost import adapter_extract_item_costs, build_extract_prepared_items
+from sie_server.core.extract_cost import (
+    adapter_extract_item_costs,
+    build_extract_prepared_items,
+    output_schema_shape_error,
+)
 from sie_server.core.oom import is_oom_error
 from sie_server.core.prepared import AudioPayload, AudioPreparedItem
 from sie_server.core.registry import ModelRegistry
@@ -1423,6 +1427,10 @@ class QueueExecutor:
 
         for bi in req.items:
             try:
+                # Reject before the worker walks the schema to build its
+                # batching key (same bound as the HTTP ExtractParams check).
+                if bi.output_schema is not None and (schema_error := output_schema_shape_error(bi.output_schema)):
+                    raise InvalidInputError(schema_error)
                 options = merge_runtime_options(config, bi.options)
                 # Same precedence as the HTTP extract path: the request's own
                 # instruction, else one from the options (profile defaults

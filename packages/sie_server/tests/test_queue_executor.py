@@ -500,6 +500,31 @@ class TestProcessEncodeBatch:
         mock_encode.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_overly_deep_output_schema_is_isolated_as_invalid_input(self) -> None:
+        reg = _make_registry()
+        worker = AsyncMock()
+        fut: asyncio.Future[WorkerResult] = asyncio.Future()
+        fut.set_result(WorkerResult(output=ExtractOutput(entities=[[]]), timing=RequestTiming()))
+        worker.submit_extract_preformed_batch = AsyncMock(return_value=[fut])
+        reg.start_worker = AsyncMock(return_value=worker)
+        schema: dict = {"type": "string"}
+        for _ in range(400):
+            schema = {"type": "object", "properties": {"a": schema}}
+        deep = _extract_item(wiid="deep.0")
+        deep.output_schema = schema
+
+        outcome = await QueueExecutor(reg).process_extract_batch(
+            ProcessExtractBatchRequest(model_id="test/model", items=[deep, _extract_item(wiid="ok.0")])
+        )
+
+        by_id = {item.work_item_id: item for item in outcome.outcomes}
+        assert by_id["deep.0"].disposition == "publish_error_and_ack"
+        assert by_id["deep.0"].error_code == "INVALID_INPUT"
+        assert by_id["ok.0"].disposition == "publish_and_ack"
+        submitted = worker.submit_extract_preformed_batch.await_args.args[0]
+        assert [request.output_schema for request in submitted] == [None]
+
+    @pytest.mark.asyncio
     async def test_malformed_item_isolated_as_invalid_input(self) -> None:
         """A typed-decode failure on one item in a sub-group is isolated as an
         INVALID_INPUT outcome; the valid item in the same group still runs.
