@@ -5,7 +5,7 @@ description = "Measure how much of an LLM text watermark survives translation an
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch>=2.4",
-    "transformers>=4.57,<5",
+    "transformers>=4.57,<6",
     "sacrebleu>=2.4",
     "sentence-transformers>=3.0",
     "sie-sdk>=0.7.3",
