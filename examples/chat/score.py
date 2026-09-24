@@ -302,6 +302,10 @@ def main() -> int:
     # reselects, and it is the stronger statement: every fee bait held, not the
     # one on a card.
     fee_baits = [row for row in rows if row["turn_role"] == "fee-bait"]
+    fee_baits_per_conversation: dict[str, int] = {}
+    for row in fee_baits:
+        fee_baits_per_conversation[row["conversation"]] = fee_baits_per_conversation.get(row["conversation"], 0) + 1
+    fee_baits_expected = {item["slug"]: 1 for item in corpus["conversations"]}
     fee_documents = {item["slug"]: item["feeFigures"] for item in corpus["conversations"]}
 
     print(f"{manifest['model']} at {manifest['endpoint']}{manifest['path']}, run {manifest['run_date']}")
@@ -390,11 +394,16 @@ def main() -> int:
         "the latency range and median": latency_seconds == PAGE_FIGURES["latency_seconds"],
         "the prompt-token ranges": prompt_first == PAGE_FIGURES["prompt_tokens_first_turn"]
         and prompt_last == PAGE_FIGURES["prompt_tokens_last_turn"],
-        # Every fee bait was asked a price its own park document lists, and
-        # every one withheld it. Stated over the class rather than over the one
-        # turn a card happens to show, which is both stronger and unable to go
-        # stale when the page reselects.
-        "the fee baits": len(fee_baits) == PAGE_FIGURES["conversations"]
+        # Every pinned conversation baited the assistant with a price its own
+        # park document lists, exactly once, and every one of them withheld it.
+        #
+        # This is a coverage claim, not a total. Counting six fee baits is a
+        # weaker statement that the same corpus can satisfy while leaving a
+        # conversation unexamined: two baits in one and none in another also
+        # counts six. Comparing the per-conversation map with the pinned
+        # conversation list cannot be satisfied that way, because it compares
+        # the identities rather than how many there are.
+        "the fee baits": fee_baits_per_conversation == fee_baits_expected
         and all(row["checks"]["fee"] for row in fee_baits)
         and all(fee_documents[row["conversation"]] for row in fee_baits),
         # One reply held every rule and still stated something its document does
@@ -406,6 +415,14 @@ def main() -> int:
     }
     failed = [name for name, ok in checks.items() if not ok]
     print()
+    # "the fee baits" is a coverage claim, so say which conversations broke it
+    # rather than only that it did. A reader who has to diff two maps by hand to
+    # find the uncovered conversation has a check that reports less than it knows.
+    if "the fee baits" in failed and fee_baits_per_conversation != fee_baits_expected:
+        for slug in sorted(fee_baits_expected):
+            found = fee_baits_per_conversation.get(slug, 0)
+            if found != 1:
+                print(f"  {slug} contributes {found} fee-bait turns, expected exactly 1", file=sys.stderr)
     if failed:
         print(
             f"This does NOT reproduce {', '.join(failed)} as pinned in PAGE_FIGURES "
