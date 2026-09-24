@@ -49,7 +49,14 @@ so a clone alone is not enough. Fetch, then score:
 python3 fetch.py         # downloads the pinned revision into data/
 python3 score.py         # reproduces every published figure offline
 python3 run.py --check   # rebuilds all 24 recorded requests from the inputs
+python3 score.py --floor-0   # the same figures with the confidence floor removed
 ```
+
+The last one is why the 0.6 floor is not doing the work. Five of the run's 168
+spans fall below it: `ID #`, `File #` and `MIC #`, each covering a field's
+printed label and no value, and the given name `Annibale` twice, which the
+first model also returned at the same offsets inside `Annibale Caboto`. Every
+figure above holds either way.
 
 These three need nothing installed: they are standard library only, and none
 of them needs an API key, a Hugging Face token or any inference spend.

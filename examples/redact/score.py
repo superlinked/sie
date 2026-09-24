@@ -28,9 +28,12 @@ derived from the other.
 Rules, exactly as sie-web's CI applies them:
 
   floor       a returned span counts only at score >= 0.6, a threshold the
-              caller sets; in this run every span covering a gold value scores
-              at least 0.716, and the spans below 0.6 that are not a name cover
-              a field's printed label and no value
+              caller sets. Five of the run's 168 spans fall below it: `ID #`,
+              `File #` and `MIC #`, each covering a field's printed label and
+              no value, and the given name `Annibale` twice, which the first
+              model also returned at the same offsets inside `Annibale Caboto`.
+              --floor-0 re-runs every step with the floor removed; all four
+              reach the same figure, so it costs no coverage in this run
   covered     a gold span counts as masked only when the UNION of returned
               spans covers every one of its characters, so two overlapping
               returned spans are never counted twice
@@ -175,6 +178,7 @@ def returned_spans(
     *,
     sets: tuple[str, ...] = MODEL_SETS,
     chunked: bool = True,
+    floor: float = SCORE_FLOOR,
 ) -> list[dict[str, Any]]:
     """Spans the named models returned, in the parent document's own offsets.
 
@@ -191,7 +195,7 @@ def returned_spans(
     for part_id, offset in parts:
         for model_set in sets:
             for entity in entities[(model_set, part_id)]:
-                if entity["score"] < SCORE_FLOOR:
+                if entity["score"] < floor:
                     continue
                 span = {
                     **entity,
@@ -233,8 +237,9 @@ def composed_spans(
     entities: dict[tuple[str, str], list[dict[str, Any]]],
     cases: dict[str, dict[str, Any]],
     case_id: str,
+    floor: float = SCORE_FLOOR,
 ) -> list[dict[str, Any]]:
-    spans = returned_spans(entities, cases, case_id)
+    spans = returned_spans(entities, cases, case_id, floor=floor)
     added = propagated_spans(cases[case_id]["text"], spans)
     return sorted(spans + added, key=lambda span: (span["start"], span["end"]))
 
@@ -264,7 +269,15 @@ def merged_masks(text: str, spans: list[dict[str, Any]]) -> list[dict[str, Any]]
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", default="data", help="fetched evidence directory")
+    parser.add_argument(
+        "--floor-0",
+        action="store_true",
+        help="score every step with the confidence floor removed, to show what it costs",
+    )
     args = parser.parse_args()
+    floor = 0.0 if args.floor_0 else SCORE_FLOOR
+    if args.floor_0:
+        print("confidence floor removed: every figure below is scored at 0.0\n")
     data_dir = Path(args.data)
 
     cases = {case["id"]: case for case in load(data_dir / "inputs/cases.json")["cases"]}
@@ -296,10 +309,10 @@ def main() -> int:
     for case_id in benchmark:
         case = cases[case_id]
         gold = mapped_gold(case)
-        one_call = returned_spans(entities, cases, case_id, sets=(FIRST_SET,), chunked=False)
-        chunked = returned_spans(entities, cases, case_id, sets=(FIRST_SET,))
-        two_models = returned_spans(entities, cases, case_id)
-        composed = composed_spans(entities, cases, case_id)
+        one_call = returned_spans(entities, cases, case_id, sets=(FIRST_SET,), chunked=False, floor=floor)
+        chunked = returned_spans(entities, cases, case_id, sets=(FIRST_SET,), floor=floor)
+        two_models = returned_spans(entities, cases, case_id, floor=floor)
+        composed = composed_spans(entities, cases, case_id, floor=floor)
 
         totals["gold_spans"] += len(gold)
         steps["step_one_call"] += sum(1 for span in gold if covered(one_call, span))
@@ -335,7 +348,7 @@ def main() -> int:
     # --- what the propagation step added, over every recorded document -----
     propagated: list[str] = []
     for case_id in parents:
-        spans = returned_spans(entities, cases, case_id)
+        spans = returned_spans(entities, cases, case_id, floor=floor)
         propagated += [span["text"] for span in propagated_spans(cases[case_id]["text"], spans)]
     print(f"\nthe propagation step added {len(propagated)} masks: {', '.join(sorted(set(propagated)))}")
 
@@ -343,7 +356,7 @@ def main() -> int:
     amounts = {"found": 0, "masked": 0}
     for case_id in parents:
         text = cases[case_id]["text"]
-        spans = composed_spans(entities, cases, case_id)
+        spans = composed_spans(entities, cases, case_id, floor=floor)
         for match in AMOUNT.finditer(text):
             amounts["found"] += 1
             if any(span["start"] < match.end() and match.start() < span["end"] for span in spans):
@@ -358,8 +371,8 @@ def main() -> int:
     tail = cases[WINDOW_TAIL]
     window_end = parent["gliner_window_end_char"]
     gold = mapped_gold(parent)
-    one_call = returned_spans(entities, cases, WINDOW_CASE, sets=(FIRST_SET,), chunked=False)
-    composed = composed_spans(entities, cases, WINDOW_CASE)
+    one_call = returned_spans(entities, cases, WINDOW_CASE, sets=(FIRST_SET,), chunked=False, floor=floor)
+    composed = composed_spans(entities, cases, WINDOW_CASE, floor=floor)
     window = {
         "total": len(gold),
         "one_request": sum(1 for span in gold if covered(one_call, span)),
@@ -412,6 +425,8 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
         return 1
     print("\nReproduced: 26, 33, 41 and 45 of 45, 42 of 49 on gold, and 0 of 29 amounts masked.")
+    if args.floor_0:
+        print("Every figure holds with the floor removed, so it costs no coverage in this run.")
     return 0
 
 
