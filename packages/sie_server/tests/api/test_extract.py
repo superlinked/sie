@@ -745,6 +745,87 @@ class TestExtractHandlerSchemaForwarding:
         assert output.data == [{"name": "Ada"}]
         assert adapter.extract.call_args.kwargs["output_schema"] is schema
 
+    def test_run_inference_forwards_original_nested_options(self) -> None:
+        handler = ExtractHandler()
+        options = {
+            "label_groups": {"urgency": ["low", "high"], "topic": ["billing", "bug"]},
+            "examples": [{"text": "Refund me", "labels": ["topic.billing"]}],
+            "threshold": 0.2,
+        }
+        metadata = self._metadata({})
+        metadata.output_schema = None
+        metadata.options = options
+        adapter = MagicMock()
+        adapter.extract.return_value = ExtractOutput(entities=[[]])
+
+        handler.run_inference(
+            adapter, [Item(text="Charged twice")], handler.make_config_key(metadata), None, [metadata]
+        )
+
+        forwarded = adapter.extract.call_args.kwargs["options"]
+        assert forwarded == options
+        assert list(forwarded["label_groups"]) == ["urgency", "topic"]
+        assert isinstance(forwarded["examples"][0], dict)
+
+    def test_options_that_differ_only_in_key_order_do_not_share_a_batch(self) -> None:
+        handler = ExtractHandler()
+
+        def key(options: dict[str, Any]) -> tuple[Any, ...]:
+            metadata = self._metadata({})
+            metadata.output_schema = None
+            metadata.options = options
+            return handler.make_config_key(metadata)
+
+        urgency_first = {"label_groups": {"urgency": ["low", "high"], "topic": ["billing", "bug"]}}
+        topic_first = {"label_groups": {"topic": ["billing", "bug"], "urgency": ["low", "high"]}}
+        example_a = {"examples": [{"text": "x", "labels": {"urgency": "low", "topic": "bug"}}]}
+        example_b = {"examples": [{"text": "x", "labels": {"topic": "bug", "urgency": "low"}}]}
+
+        assert key(urgency_first) != key(topic_first)
+        assert key(example_a) != key(example_b)
+        assert key(dict(urgency_first)) == key(urgency_first)
+        assert len({key(urgency_first), key(topic_first), key(dict(topic_first))}) == 2
+
+    def test_schemas_that_differ_only_in_property_order_do_not_share_a_batch(self) -> None:
+        handler = ExtractHandler()
+        first = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}
+        second = {"type": "object", "properties": {"b": {"type": "string"}, "a": {"type": "string"}}}
+
+        assert handler.make_config_key(self._metadata(first)) != handler.make_config_key(self._metadata(second))
+
+    def test_run_inference_keeps_whisper_timestamp_granularities_a_list(self) -> None:
+        # Regression: rebuilding options from the batching key turned this list
+        # into a tuple, which Whisper's option parser rejects.
+        from sie_server.adapters.whisper.adapter import _parse_options
+
+        handler = ExtractHandler()
+        metadata = self._metadata({})
+        metadata.output_schema = None
+        metadata.options = {"timestamp_granularities": ["word", "segment"], "language": "en"}
+        adapter = MagicMock()
+        parsed: list[Any] = []
+
+        def extract(items: list[Item], **kwargs: Any) -> ExtractOutput:
+            parsed.append(_parse_options(kwargs["options"]))
+            return ExtractOutput(entities=[[] for _ in items])
+
+        adapter.extract.side_effect = extract
+
+        handler.run_inference(adapter, [Item(text="x")], handler.make_config_key(metadata), None, [metadata])
+
+        assert parsed == [("en", None, frozenset({"word", "segment"}))]
+
+    def test_run_inference_passes_none_for_absent_options(self) -> None:
+        handler = ExtractHandler()
+        metadata = self._metadata({})
+        metadata.output_schema = None
+        adapter = MagicMock()
+        adapter.extract.return_value = ExtractOutput(entities=[[]])
+
+        handler.run_inference(adapter, [Item(text="x")], handler.make_config_key(metadata), None, [metadata])
+
+        assert adapter.extract.call_args.kwargs["options"] is None
+
 
 class TestFormatOutput:
     """Tests for ExtractHandler.format_output classification behavior."""
