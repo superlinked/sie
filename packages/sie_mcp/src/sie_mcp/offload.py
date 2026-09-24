@@ -39,10 +39,11 @@ MIN_PII_SCORE = 0.3
 # Bounded windowing for the GLiNER extract/redact path. GLiNER reads only the
 # first ``max_len`` words of each text (384 for the default models) and silently
 # ignores the rest, where a word is a match of ``_GLINER_WORD``, so every
-# punctuation mark counts as one. A document is therefore split into overlapping
-# windows of EXTRACT_WINDOW_WORDS words, well under that limit so the label
-# prompt that shares the encoder input still fits, and the entities are merged
-# with offsets shifted back to the original text. The overlap is longer than the
+# punctuation mark counts as one. The label prompt does not count toward that
+# limit. A document is therefore split into overlapping windows of
+# EXTRACT_WINDOW_WORDS words, under the smallest ``max_len`` of the GLiNER models
+# in the catalog (296) so that any configured model reads each window whole, and
+# the entities are merged with offsets shifted back to the original text. The overlap is longer than the
 # longest span the default models predict (12 words), so an entity that
 # straddles a window edge is whole in at least one window; a detection that
 # touches an interior window edge (likely truncated) is dropped in favor of the
