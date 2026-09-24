@@ -113,11 +113,15 @@ a request whose `labels` are that group's labels would. The rows of a call
 share forward passes, so on a GPU, fp16 rounding can move a probability by a
 few thousandths against the one-group request. Batching several items into one
 call does the same. A call takes at most 64 groups, or 32 on models with a
-1,024-token window. Every group reads again the part of the document that fits
-in the model's window, so that part may span at most 524,288 characters divided
-by the number of groups: 8,192 at 64 groups. Ordinary prose fills a 512-token
-window in about 2,300 characters. A document whose readable part is longer
-comes back with an `INPUT_TOO_LONG` error, and the other items still succeed.
+1,024-token window. Every group reads the part of the document that fits in
+the model's window again, so that part may span at most 64 characters per token
+of the window: 32,768 characters on a 512-token model, 65,536 on a 1,024-token
+one. With few groups the bound is 524,288 characters divided by the number of
+groups, when that is larger. Prose fills a 512-token window in about 2,300
+characters, and text laid out with long runs of spaces in about 20,000. Text
+written without spaces between words is read whole, so the bound applies to
+the whole document. A document over the bound comes back with an
+`INPUT_TOO_LONG` error, and the other items still succeed.
 
 `options={"group_encoding": "joint"}` reads all the groups in one row per item
 instead: the document next to every group's labels, written as `group.label`.

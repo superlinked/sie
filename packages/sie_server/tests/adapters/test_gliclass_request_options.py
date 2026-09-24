@@ -896,12 +896,26 @@ class TestSeparateGroupEncoding:
         assert output.errors[1] is None
         assert {text for call in pipe.prepare_calls for text in call["texts"]} == {"short"}
 
-    def test_a_document_the_groups_cannot_all_afford_fails_alone(self) -> None:
-        # Whitespace carries no tokens here, so the part of this document the
-        # model reads spans 20,000 characters: more than 64 groups may each
-        # tokenize (8,192), though a labels request reads it whole.
+    def test_text_laid_out_with_whitespace_runs_is_read_at_64_groups(self) -> None:
+        # Whitespace carries no tokens here, as with DeBERTa tokenizers, and
+        # columns padded with spaces average about 42 characters per token:
+        # the part the model reads spans about 23,000 characters.
         adapter, _ = _adapter(lambda _text, label: 0.5)
-        sparse = "start" + " " * 20_000 + "end"
+        layout = "".join(f"{f'item{index}':<20}{index:>22}\n" for index in range(700))
+        groups = {f"q{index}": ["yes", "no"] for index in range(64)}
+
+        output = adapter.extract([Item(text=layout)], options={"label_groups": groups})
+
+        assert output.errors is None
+        assert output.data is not None
+        assert len(output.data[0]) == 64
+
+    def test_a_document_the_groups_cannot_all_afford_fails_alone(self) -> None:
+        # The part of this document the model reads spans 40,000 characters,
+        # more than a row may tokenize (64 per window token: 32,768), though a
+        # labels request reads it whole.
+        adapter, _ = _adapter(lambda _text, label: 0.5)
+        sparse = "start" + " " * 40_000 + "end"
         groups = {f"q{index}": ["yes", "no"] for index in range(64)}
 
         output = adapter.extract([Item(text=sparse), Item(text="short")], options={"label_groups": groups})
@@ -909,11 +923,22 @@ class TestSeparateGroupEncoding:
         assert output.errors is not None
         assert output.errors[0] is not None
         assert output.errors[0].code == "INPUT_TOO_LONG"
-        assert "8192 characters" in output.errors[0].message
+        assert "32768 characters" in output.errors[0].message
         assert output.errors[1] is None
         assert output.input_token_counts is not None
         assert output.input_token_counts[0] == 0
         assert adapter.extract([Item(text=sparse)], labels=["yes", "no"]).errors is None
+
+    def test_few_groups_share_a_larger_per_item_budget(self) -> None:
+        adapter, _ = _adapter(lambda _text, label: 0.5)
+        sparse = "start" + " " * 40_000 + "end"
+
+        # 524,288 characters per item among 4 groups is 131,072 per row.
+        output = adapter.extract(
+            [Item(text=sparse)], options={"label_groups": {f"q{i}": ["yes", "no"] for i in range(4)}}
+        )
+
+        assert output.errors is None
 
     def test_a_context_that_cannot_fit_is_refused_after_one_groups_worth_of_tokenizing(self) -> None:
         tokenizer = _MarkerAwareTokenizer()

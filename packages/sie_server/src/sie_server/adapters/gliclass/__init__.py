@@ -37,13 +37,17 @@ Usage counts, for every encoded row, the document tokens plus the instruction
 and example texts encoded with it. Label names are not counted. A separate-group
 request encodes the document once per group, so it counts it once per group.
 
-A document is cut, before anything tokenizes it, to a prefix whose first
-tokens are the ones the model reads (see ``_RequestTokens.visible``), so work
-does not grow with text the model never sees. Scores and usage are unchanged;
-the ``error`` overflow policy reports a lower bound on such a document's
-length. In a separate-group request that prefix may span at most
-``_MAX_ITEM_ROW_CHARS`` characters divided by the number of groups; a document
-needing more fails alone with ``INPUT_TOO_LONG``.
+A document is cut, before anything tokenizes it, to whole words whose tokens
+include every token the model reads (see ``_RequestTokens.visible``), so work
+does not grow with text the model never sees. This relies on what fast
+tokenizers guarantee: text is split into words at local boundaries, and each
+word is tokenized on its own. Scores and usage are unchanged. The ``error``
+overflow policy reports a lower bound on the length of a document it read
+only in part. A document without a word boundary early enough is read whole,
+tokenized once. In a separate-group request, the readable part may span at
+most ``_MAX_ROW_CHARS_PER_TOKEN`` characters per token of the window, or
+``_MAX_ITEM_ROW_CHARS`` divided by the number of groups when that is more; a
+document needing more fails alone with ``INPUT_TOO_LONG``.
 """
 
 from __future__ import annotations
@@ -124,12 +128,15 @@ _FIT_MARGIN_TOKENS = 8
 # A document is cut to the part the model reads before anything else tokenizes
 # it. The first cut tries this many characters per token the model can read...
 _PREFIX_CHARS_PER_TOKEN = 8
-# ...and is kept when it holds this many tokens past that part and its tokens
-# stay the same when the next stretch of the document follows.
+# ...and is kept when its whole words hold this many tokens past that part.
 _PREFIX_SLACK_TOKENS = 32
-# Separate group encoding tokenizes a document's prefix once per group. Its
-# characters per item are bounded like its row tokens: at most
-# ``_MAX_LABEL_CHARS_PER_TOKEN`` per row token, so 8,192 per group at 64 groups.
+# The search for a cut doubles up to this many characters per readable token.
+# Prose averages 4 to 5; text laid out with whitespace runs, which DeBERTa
+# tokenizers read as nothing, reaches about 40 (fixed-width logs, PDF layout).
+_MAX_ROW_CHARS_PER_TOKEN = 64
+# Separate group encoding tokenizes a document's readable part once per group.
+# A row may read up to ``_MAX_ROW_CHARS_PER_TOKEN`` characters per token of the
+# window, or this per-item budget shared by the groups when that is more.
 _MAX_ITEM_ROW_CHARS = _MAX_ITEM_ROW_TOKENS * _MAX_LABEL_CHARS_PER_TOKEN
 _ERR_ITEM_LABELS_TRUNCATED = (
     "The document pushes the labels out of the gliclass model's max sequence length. "
@@ -216,11 +223,23 @@ class _RequestTokens:
 
         The model reads at most ``visible_tokens`` tokens of a document, so
         any prefix whose first ``visible_tokens`` tokens are the document's
-        own gives the model the same input. A prefix is kept when it holds
-        ``_PREFIX_SLACK_TOKENS`` more tokens than that, and its first
-        ``visible_tokens`` tokens do not change when twice as much of the
-        document is tokenized: text after a cut only re-tokenizes near the
-        cut. Otherwise the cut doubles, up to the whole document.
+        own gives the model the same input. Fast tokenizers split text into
+        words (pre-tokens) at local boundaries and tokenize each word on its
+        own, so a prefix that ends where a word ends has the document's
+        tokens for every word in it. The cut drops the last, possibly
+        truncated, word of a stretch of the document and is kept when the
+        remaining whole words hold ``_PREFIX_SLACK_TOKENS`` more tokens than
+        the model reads, and their first tokens also match a stretch twice as
+        long. A single word can re-tokenize anywhere when it is cut: a
+        Unigram tokenizer segments a run of one repeated character by the
+        run's length. So a document with no word boundary early enough (text
+        written without spaces, a long run of one character) is not cut.
+
+        The search doubles the stretch up to ``char_limit`` characters, or
+        ``_MAX_ROW_CHARS_PER_TOKEN`` per readable token without one. A
+        document it cannot cut is then read whole: refused when it exceeds
+        ``char_limit``, and otherwise tokenized once, keeping only the tokens
+        anything reads.
         """
         if text not in self._prefixes:
             self._prefixes[text] = self._find_prefix(text, char_limit)
@@ -228,23 +247,53 @@ class _RequestTokens:
 
     def _find_prefix(self, text: str, char_limit: int | None) -> str | None:
         need = self.visible_tokens
-        if need is not None and getattr(self._tokenizer, "truncation_side", "right") == "right":
-            size = need * _PREFIX_CHARS_PER_TOKEN
-            while size < len(text):
-                if char_limit is not None:
-                    size = min(size, char_limit)
-                head = text[:size]
-                head_ids, longer = self._tokenizer([head, text[: 2 * size]], add_special_tokens=False)["input_ids"]
-                if len(head_ids) >= need + _PREFIX_SLACK_TOKENS and longer[:need] == head_ids[:need]:
-                    self._full[head] = head_ids
-                    self.shortened.add(head)
-                    return head
-                if char_limit is not None and size >= char_limit:
-                    return None
-                size *= 2
+        if need is None or getattr(self._tokenizer, "truncation_side", "right") != "right":
+            return text if char_limit is None or len(text) <= char_limit else None
+        limit = char_limit if char_limit is not None else _MAX_ROW_CHARS_PER_TOKEN * need
+        size = need * _PREFIX_CHARS_PER_TOKEN
+        if size >= len(text):
+            return text if len(text) <= limit else None
+        while True:
+            size = min(size, limit, len(text))
+            words = self._whole_words(text[:size])
+            if words is not None and words[1] >= need + _PREFIX_SLACK_TOKENS:
+                prefix = words[0]
+                prefix_ids, longer = self._tokenizer([prefix, text[: 2 * size]], add_special_tokens=False)["input_ids"]
+                if prefix_ids[:need] == longer[:need]:
+                    self._full[prefix] = prefix_ids
+                    self.shortened.add(prefix)
+                    return prefix
+            if size >= limit or size >= len(text):
+                break
+            size *= 2
         if char_limit is not None and len(text) > char_limit:
             return None
+        self._keep_readable(text)
         return text
+
+    def _whole_words(self, head: str) -> tuple[str, int] | None:
+        """``head`` without its last word, and how many tokens that leaves; None when unknown."""
+        try:
+            encoded = self._tokenizer(
+                [head], add_special_tokens=False, return_offsets_mapping=True, return_attention_mask=False
+            )
+            words = encoded.word_ids(0)
+            offsets = encoded["offset_mapping"][0]
+        except Exception:  # noqa: BLE001 -- a tokenizer without word alignment is simply not cut
+            return None
+        last = next((word for word in reversed(words) if word is not None), None)
+        if last is None:
+            return None
+        first_of_last = words.index(last)
+        return head[: offsets[first_of_last][0]], first_of_last
+
+    def _keep_readable(self, text: str) -> None:
+        """Tokenize a document that is read whole, once, keeping only the tokens anything reads."""
+        store = (self.visible_tokens or 0) + _PREFIX_SLACK_TOKENS
+        ids = self._tokenizer([text], add_special_tokens=False, truncation=True, max_length=store)["input_ids"][0]
+        self._full[text] = ids
+        if len(ids) >= store:
+            self.shortened.add(text)
 
     def full(self, texts: list[str]) -> list[list[int]]:
         missing = [text for text in dict.fromkeys(texts) if text not in self._full]
@@ -273,9 +322,14 @@ class _RequestTokens:
         return cut_ids
 
 
-def _row_char_limit(group_count: int) -> int:
-    """Characters of a document's readable prefix one separate-group row may tokenize."""
-    return max(1, _MAX_ITEM_ROW_CHARS // max(1, group_count))
+def _row_char_limit(group_count: int, window: int | None) -> int:
+    """Characters of a document's readable part one separate-group row may tokenize.
+
+    ``_MAX_ROW_CHARS_PER_TOKEN`` per token of the model window (32,768 at 512
+    tokens), or the per-item budget divided among the groups when that is more.
+    """
+    per_row = _MAX_ROW_CHARS_PER_TOKEN * window if window else 0
+    return max(1, per_row, _MAX_ITEM_ROW_CHARS // max(1, group_count))
 
 
 def _choice_confidence(probabilities: list[float]) -> float:
@@ -526,6 +580,11 @@ class GLiClassAdapter(BaseAdapter):
             raise RuntimeError(ERR_NOT_LOADED)
         return self._pipe
 
+    def _window(self) -> int | None:
+        """The model's max sequence length in tokens, special tokens included."""
+        window = self._max_seq_length or getattr(self._pipe, "max_length", None)
+        return window if isinstance(window, int) else None
+
     def _visible_tokens(self) -> int | None:
         """Most tokens of a document anything reads: the model window plus the fit check's margin.
 
@@ -699,7 +758,7 @@ class GLiClassAdapter(BaseAdapter):
         tokens = _RequestTokens(self._tokenizer, self._visible_tokens())
 
         if label_groups is not None and group_encoding == "separate":
-            char_limit = _row_char_limit(len(label_groups))
+            char_limit = _row_char_limit(len(label_groups), self._window())
             return self._extract_separate(
                 [tokens.visible(text, char_limit) for text in texts],
                 label_groups,
@@ -970,7 +1029,7 @@ class GLiClassAdapter(BaseAdapter):
         """
         group_examples = self._examples_by_group(examples, label_groups)
         item_count = len(texts)
-        sparse = _ERR_ITEM_DOCUMENT_TOO_SPARSE.format(limit=_row_char_limit(len(label_groups)))
+        sparse = _ERR_ITEM_DOCUMENT_TOO_SPARSE.format(limit=_row_char_limit(len(label_groups), self._window()))
         failures: list[str | None] = [None if text is not None else sparse for text in texts]
         counts: list[int] | None = [0] * item_count
         item_rows: list[list[str]] = [[] for _ in range(item_count)]

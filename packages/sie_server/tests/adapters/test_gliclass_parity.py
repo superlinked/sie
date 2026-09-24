@@ -327,3 +327,28 @@ def test_a_multi_megabyte_document_with_64_groups_stays_fast(rig: _Rig) -> None:
     assert output.data is not None
     # Tokenizing the whole document once per group took minutes.
     assert elapsed < 10.0
+
+
+@pytest.mark.parametrize("document", ["whitespace", "one-word"])
+@pytest.mark.parametrize("policy", ["default", "truncate_text"])
+def test_a_document_that_cannot_be_cut_costs_what_reading_it_whole_does(
+    rig: _Rig, document: str, policy: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Neither has a word boundary where the model's window ends: 1 MB of
+    # spaces (no tokens) before three words, and one 1 MB word.
+    text = " " * 1_000_000 + "the app crashes" if document == "whitespace" else "a" * 1_000_000
+    items = [Item(text=text)]
+    options = {"overflow_policy": policy}
+    seen = _counting_tokenizer_chars(monkeypatch)
+
+    searched = rig.adapter.extract(items, labels=_LABELS, options=options)
+    with_search = sum(seen)
+    seen.clear()
+    monkeypatch.setattr(rig.adapter, "_visible_tokens", lambda: None)
+    whole = rig.adapter.extract(items, labels=_LABELS, options=options)
+
+    assert _outputs(searched) == _outputs(whole)
+    # The search for a cut stops at 64 characters per readable token, and the
+    # document is then tokenized once for every check and for metering.
+    search_bound = 2 * 64 * (_MAX_LENGTH - 2 + 8)
+    assert with_search <= sum(seen) + search_bound
