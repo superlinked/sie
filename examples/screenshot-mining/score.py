@@ -50,16 +50,29 @@ PAGE_SCREENS = 12
 # The per-screen lines the page prints beside three of the screenshots, in the
 # order its proof grid shows them.
 #
-# This named four screens until superlinked/sie-web#468: superset-slack-dashboard
-# at 28 of 32, kubernetes-dashboard-node, gitlab-pipeline-list at 17 of 19 and
-# gitlab-ci-grafana-dashboard. Those four were the three screens that missed
-# anything plus one clean one, so the page led with 328 of 335 and then
-# illustrated it with its own counterexamples. The grid was reselected to carry
-# the capability, and the two screens that came off it are still scored below;
-# they are simply no longer among the lines the page prints.
+# Two corrections, in the order they happened.
+#
+# This named four screens until an edit made for superlinked/sie-web#468:
+# superset-slack-dashboard at 28 of 32, kubernetes-dashboard-node,
+# gitlab-pipeline-list at 17 of 19 and gitlab-ci-grafana-dashboard. Those four
+# were the three screens that missed anything plus one clean one, so the page
+# led with 328 of 335 and then illustrated it with its own counterexamples.
+# That PR is still open, so the four-screen grid was what the page published
+# throughout; this file described a grid that had not shipped.
+#
+# It then named kubernetes-dashboard-node, gitlab-ci-grafana-dashboard at 51 of
+# 52 and airflow-dag-list until superlinked/sie-web#477. That grid still printed
+# the one miss on the Grafana dashboard, marked. #477 replaced that card with
+# argocd-applicationsets, which the run read exactly, so every card the page
+# draws now reads its screen without a miss.
+#
+# No figure moved and nothing was rescored in either correction. The three
+# screens that have come off the grid are still scored below, still inside the
+# 328 of 335, and still printed per screen by this script. Which ones the page
+# draws is a display decision; what the run returned is not.
 PAGE_PER_SCREEN = {
+    "argocd-applicationsets": (32, 32),
     "kubernetes-dashboard-node": (26, 26),
-    "gitlab-ci-grafana-dashboard": (51, 52),
     "airflow-dag-list": (31, 31),
 }
 
@@ -423,10 +436,19 @@ def main() -> int:
         for line in failures:
             print(f"  {line}", file=sys.stderr)
         return 1
+    # What this line may claim, found by tampering with it rather than by
+    # reading it. Swapping one entry of PAGE_PER_SCREEN for a screen the page
+    # does not draw, with its correct figures, leaves the run green: the loop
+    # above checks the numbers of whatever slugs it is handed, not that those
+    # slugs are the page's. That is the hole that let this file describe a grid
+    # from an unmerged PR while every run passed. Nothing here can reach the
+    # page, so the wording says what was checked instead of implying more.
     print(
-        f"Matches the {want_passed} of {want_total}, and the {len(PAGE_PER_SCREEN)} "
-        f"per-screen lines, published on {manifest['page']}."
+        f"The {len(PAGE_PER_SCREEN)} per-screen figures below PAGE_PER_SCREEN match "
+        f"the recording, as does the {want_passed} of {want_total} published on "
+        f"{manifest['page']}."
     )
+    print("Not checked here: that those are the screens the page currently draws. Its SOURCES.md lists them.")
     return 0
 
 

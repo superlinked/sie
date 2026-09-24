@@ -1,8 +1,8 @@
 # Read the numbers off a dashboard that has no API
 
 Twelve screenshots of Superset, Argo CD, Airflow, the Kubernetes Dashboard,
-GitLab and Jaeger, one call each to `Qwen/Qwen3.8-27B-FP8` on SIE Cloud with a
-strict JSON-schema grammar, and a thirteenth call for the playground snippet.
+GitLab and Jaeger, one call each to `Qwen/Qwen3.8-27B-FP8` with a strict
+JSON-schema grammar, and a thirteenth call for the playground snippet.
 The extractions behind
 [superlinked.com/screenshot-mining](https://superlinked.com/screenshot-mining).
 
@@ -62,6 +62,13 @@ The playground call adds 4 of 4, for 332 of 339 over every recorded call
 `score.py` also checks the three per-screen figures the page prints beside its
 screenshots, and exits non-zero if any of them, or the headline, is not what it
 computes.
+
+It does not check that those three are the screens the page currently draws,
+and it cannot: nothing here reads the page. Tampering shows the gap. Change a
+figure and the run fails; swap the slug for another screen with its correct
+figures and the run stays green. That is how this file came to describe a grid
+from a pull request that had not merged. The page's `SOURCES.md` is where the
+selection is recorded.
 
 Look at a request without sending it:
 
@@ -162,18 +169,32 @@ starting point for that, not as a clearance.
   run tests a screenshot at a resolution where the text is genuinely unreadable.
 - Not reproducible against the live API. These are recordings. A rerun goes
   through a different served revision and unfixed sampling, so it will differ.
-- The page's proof grid shows three of the twelve screens: the Kubernetes
-  Dashboard node page at 26 of 26, the GitLab CI Grafana dashboard at 51 of 52
-  with its one miss marked, and the Airflow Dags list at 31 of 31. The hero
-  shows a fourth, the Argo CD Grafana dashboard, and the playground a fifth, the
-  GitLab DORA dashboard. All twelve are here, and so is the playground call,
-  which is scored separately and is not part of the 335.
+- The page's proof grid shows three of the twelve screens: the Argo CD
+  ApplicationSets page at 32 of 32, the Kubernetes Dashboard node page at 26 of
+  26, and the Airflow Dags list at 31 of 31. The hero shows a fourth, the Argo
+  CD Grafana dashboard, and the playground a fifth, the GitLab DORA dashboard.
+  All twelve are here, and so is the playground call, which is scored separately
+  and is not part of the 335.
 
-  This said "shows four of the twelve screens, chosen because those four include
-  every screen that missed anything" until superlinked/sie-web#468. That
-  selection was the defect the PR fixed: a page that leads with 328 of 335 and
+  This paragraph has been corrected twice, and neither correction moved a
+  figure or rescored a call.
+
+  It first said "shows four of the twelve screens, chosen because those four
+  include every screen that missed anything". That was the selection
+  superlinked/sie-web#468 set out to fix: a page that leads with 328 of 335 and
   then shows only the screens that missed illustrates its own claim with the
-  counterexamples. The grid now opens and closes on a screen that matched
-  everything. No figure moved. The Superset Slack Dashboard at 28 of 32 and the
-  GitLab pipeline list at 17 of 19 are still scored here, and the page's totals
-  line now names them as the screens carrying six of the seven misses.
+  counterexamples. #468 is still open, so the four-screen grid was what the page
+  published the whole time this file described the replacement.
+
+  It then said the grid was the Kubernetes node page, the GitLab CI Grafana
+  dashboard "at 51 of 52 with its one miss marked", and the Airflow Dags list,
+  and that the page's totals line named the Superset Slack Dashboard and the
+  GitLab pipeline list as the screens carrying six of the seven misses.
+  superlinked/sie-web#477 replaced the Grafana card with the Argo CD
+  ApplicationSets page, so no card on the page carries a miss, and its totals
+  line names no screen: it states 328 of 335 over all twelve, says the grid
+  draws three of them, and points at the page's SOURCES.md for the rest.
+
+  The Superset Slack Dashboard at 28 of 32, the GitLab pipeline list at 17 of 19
+  and the GitLab CI Grafana dashboard at 51 of 52 are all still scored here,
+  still inside the 328 of 335, and still printed per screen by `score.py`.
