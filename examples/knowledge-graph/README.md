@@ -16,7 +16,8 @@ they returned live in the public HuggingFace dataset
 pinned to one revision by `fetch.py`. Download it and you can re-derive the
 published counts with **no API key and no inference spend**. Those are the same
 values behind the figures on
-[superlinked.com/knowledge-graph](https://superlinked.com/knowledge-graph).
+[superlinked.com/knowledge-graph](https://superlinked.com/knowledge-graph), whose
+sources are in its [SOURCES.md](https://superlinked.com/reference/knowledge-graph/SOURCES.md).
 
 You cannot verify this by cloning alone. The clone gives you the code; the
 dataset gives you the evidence. Fetching it needs no account and no token.

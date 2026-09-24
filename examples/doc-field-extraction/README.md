@@ -3,7 +3,9 @@
 Eight scanned documents, one call each to `Qwen/Qwen3.8-27B-FP8` on SIE Cloud
 with a strict JSON-schema grammar, plus a ninth playground call on one of them.
 Then a second call over each of those eight answers. The extractions behind
-[superlinked.com/doc-field-extraction](https://superlinked.com/doc-field-extraction).
+[superlinked.com/doc-field-extraction](https://superlinked.com/doc-field-extraction),
+whose sources are in its
+[SOURCES.md](https://superlinked.com/reference/doc-field-extraction/SOURCES.md).
 
 180 of 223 expected field values came back exactly on the first call. A second
 call that sees the schema and the first answer, and never sees the page, took

@@ -1,7 +1,8 @@
 # Extract custom entities from primary sources
 
 The runnable example behind
-[superlinked.com/named-entities](https://superlinked.com/named-entities).
+[superlinked.com/named-entities](https://superlinked.com/named-entities). That
+page's sources are in its [SOURCES.md](https://superlinked.com/reference/named-entities/SOURCES.md).
 
 ## What this shows
 

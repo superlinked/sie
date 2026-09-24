@@ -3,7 +3,8 @@
 Twelve clips of Supreme Court arguments, simulated telehealth consultations and
 AMI meeting-room recordings, each sent twice to
 `openai/whisper-large-v3-turbo` on SIE Cloud. The transcripts behind
-[superlinked.com/speech-to-text](https://superlinked.com/speech-to-text).
+[superlinked.com/speech-to-text](https://superlinked.com/speech-to-text), whose
+sources are in its [SOURCES.md](https://superlinked.com/reference/speech-to-text/SOURCES.md).
 
 Across the twelve clips a search of the transcripts finds 56 of the 61 doses,
 figures, drug names and statute numbers that were registered before the run.

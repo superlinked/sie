@@ -1,6 +1,7 @@
 # Four guardrail models, twelve adversarial inputs, four different sets of mistakes
 
 The runnable example behind [superlinked.com/guardrails](https://superlinked.com/guardrails).
+That page's sources are in its [SOURCES.md](https://superlinked.com/reference/guardrails/SOURCES.md).
 
 ## What this shows
 

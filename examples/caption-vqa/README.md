@@ -2,7 +2,8 @@
 
 Twelve photographs and engineering drawings, one specific question each, one
 call per question to `Qwen/Qwen3.8-27B-FP8` on SIE Cloud. The answers behind
-[superlinked.com/caption-vqa](https://superlinked.com/caption-vqa).
+[superlinked.com/caption-vqa](https://superlinked.com/caption-vqa), whose sources
+are in its [SOURCES.md](https://superlinked.com/reference/caption-vqa/SOURCES.md).
 
 Ten of the twelve answers matched. The two that did not are both needle gauges,
 where the model read the dial wrong: a fire hose test gauge at 400 psi came back

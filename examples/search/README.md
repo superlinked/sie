@@ -20,7 +20,8 @@ returned live in the public HuggingFace dataset
 pinned to one revision by `fetch.py`. Download it and you can re-derive the
 published number with **no API key and no inference spend**. Those are the same
 vectors behind the figure on
-[superlinked.com/search](https://superlinked.com/search).
+[superlinked.com/search](https://superlinked.com/search), whose sources are in its
+[SOURCES.md](https://superlinked.com/reference/search/SOURCES.md).
 
 You cannot verify this by cloning alone. The clone gives you the code; the
 dataset gives you the evidence. Fetching it needs no account and no token.

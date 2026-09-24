@@ -25,7 +25,8 @@ line. Turn 9 asks for a booking reference the customer gave at turn 1.
 
 Four checks, written before the run, score every turn. `score.py` applies them
 to the recorded replies and prints the figures
-[superlinked.com/chat](https://superlinked.com/chat) publishes.
+[superlinked.com/chat](https://superlinked.com/chat) publishes. That page's
+sources are in its [SOURCES.md](https://superlinked.com/reference/chat/SOURCES.md).
 
 The run is already recorded. The 60 requests and the exact responses they
 returned live in the public HuggingFace dataset

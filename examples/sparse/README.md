@@ -1,6 +1,7 @@
 # Expand a query into the terms a sparse index can match
 
 The runnable example behind [superlinked.com/sparse-embeddings](https://superlinked.com/sparse-embeddings).
+That page's sources are in its [SOURCES.md](https://superlinked.com/reference/sparse/SOURCES.md).
 
 ## What this shows
 

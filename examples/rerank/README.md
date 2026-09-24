@@ -1,6 +1,7 @@
 # Rank by a relevance rule you write in the call
 
 The runnable example behind [superlinked.com/rerank](https://superlinked.com/rerank).
+That page's sources are in its [SOURCES.md](https://superlinked.com/reference/rerank/SOURCES.md).
 
 ## What this shows
 

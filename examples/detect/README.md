@@ -15,7 +15,8 @@ cover 52 of 88 hand-counted objects, with 3 of them landing on an object another
 box had already found. The gap is not evenly spread: `person` came back 8 of 8
 and 3 of 3, while `price tag` came back 0 of 11 and `yellow price sign` 1 of 7.
 `score.py` checks the 52 of 88 against the results table in the page's
-SOURCES.md, which is where a reader finds it.
+[SOURCES.md](https://superlinked.com/reference/detect/SOURCES.md), which is
+where a reader finds it.
 
 ## Where the evidence lives
 

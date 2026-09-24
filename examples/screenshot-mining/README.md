@@ -4,7 +4,9 @@ Twelve screenshots of Superset, Argo CD, Airflow, the Kubernetes Dashboard,
 GitLab and Jaeger, one call each to `Qwen/Qwen3.8-27B-FP8` with a strict
 JSON-schema grammar, and a thirteenth call for the playground snippet.
 The extractions behind
-[superlinked.com/screenshot-mining](https://superlinked.com/screenshot-mining).
+[superlinked.com/screenshot-mining](https://superlinked.com/screenshot-mining),
+whose sources are in its
+[SOURCES.md](https://superlinked.com/reference/screenshot-mining/SOURCES.md).
 
 Across the twelve screens, 328 of 335 expected values came back exactly as the
 screen shows them. Seven did not. Nine of the twelve screens were perfect,

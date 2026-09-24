@@ -3,7 +3,9 @@
 Sixteen VisA photographs of cashews, fryum wheels, snack tubes and gum pellets,
 scored against two plain-English labels each by
 `Qwen/Qwen3-VL-Reranker-2B` and `google/siglip2-base-patch16-224`. The scores
-behind [superlinked.com/image-classify](https://superlinked.com/image-classify).
+behind [superlinked.com/image-classify](https://superlinked.com/image-classify),
+whose sources are in its
+[SOURCES.md](https://superlinked.com/reference/image-classify/SOURCES.md).
 
 Over all sixteen, the reranker flagged 8 of the 8 damaged pieces and passed 7 of
 the 8 whole ones. The sixteenth, a fryum wheel, scored 0.562 on both labels, so

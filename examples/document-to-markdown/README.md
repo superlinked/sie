@@ -31,8 +31,12 @@ not pretend a form has one useful reading order.
 ## Verified result
 
 Recorded against SIE Cloud, `https://api.superlinked.com`, on September 16,
-2026. All 25 checks passed. Every request, response, model revision and timing
-is in the public Hugging Face dataset
+2026. All 25 checks passed. These conversions are published on
+[superlinked.com/doc-to-markdown](https://superlinked.com/doc-to-markdown), and
+that page's sources are in its
+[SOURCES.md](https://superlinked.com/reference/doc-to-markdown/SOURCES.md), a
+different file from the `SOURCES.md` in this directory. Every request,
+response, model revision and timing is in the public Hugging Face dataset
 [`superlinked/sie-task-evidence`](https://huggingface.co/datasets/superlinked/sie-task-evidence),
 so these numbers can be checked rather than taken on trust:
 

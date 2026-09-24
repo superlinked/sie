@@ -1,6 +1,7 @@
 # Fill a JSON Schema from a messy document
 
 The runnable example behind [superlinked.com/structured-output](https://superlinked.com/structured-output).
+That page's sources are in its [SOURCES.md](https://superlinked.com/reference/structured-output/SOURCES.md).
 
 ## What this shows
 

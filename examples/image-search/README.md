@@ -1,6 +1,7 @@
 # Search a picture catalogue with words it was never tagged with
 
 The runnable example behind [superlinked.com/image-search](https://superlinked.com/image-search).
+That page's sources are in its [SOURCES.md](https://superlinked.com/reference/image-search/SOURCES.md).
 
 ## What this shows
 

@@ -25,7 +25,11 @@ The run is already recorded. All 95 encode calls and the multivectors they
 returned live in the public HuggingFace dataset
 [superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence),
 pinned to one revision by `fetch.py`. Download it and you can re-derive both
-rankings with **no API key and no inference spend**.
+rankings with **no API key and no inference spend**. These rankings are
+published on
+[superlinked.com/visual-document-search](https://superlinked.com/visual-document-search),
+whose sources are in its
+[SOURCES.md](https://superlinked.com/reference/visual-document-search/SOURCES.md).
 
 You cannot verify this by cloning alone. The clone gives you the code; the
 dataset gives you the evidence. Fetching it needs no account and no token.

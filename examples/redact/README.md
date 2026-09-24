@@ -1,6 +1,7 @@
 # Get the exact character offsets to mask
 
 The runnable example behind [superlinked.com/redact](https://superlinked.com/redact).
+That page's sources are in its [SOURCES.md](https://superlinked.com/reference/redact/SOURCES.md).
 
 ## What this shows
 
