@@ -1,0 +1,23 @@
+sie_id: knowledgator/gliner-relex-large-v1.0
+hf_id: knowledgator/gliner-relex-large-v1.0
+hf_revision: 4aedc9226a5ac9e2f6b5ea3e91c1ee577c88a290
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 2048
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.gliner:GLiNERAdapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        # Model card: relation scores are most precise at 0.7-0.9.
+        relation_threshold: 0.7

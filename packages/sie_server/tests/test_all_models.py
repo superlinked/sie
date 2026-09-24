@@ -993,6 +993,32 @@ def test_knowledgator_gliner_pii_small_v1_0_extract() -> None:
     _assert_pii(_get_adapter("knowledgator/gliner-pii-small-v1.0"), {_PII_NAME, _PII_PHONE})
 
 
+_RELEX_TEXT = "Steve Jobs founded Apple in Cupertino."
+_RELEX_RELATIONS = ["founded", "located in"]
+
+
+def _assert_relex(adapter: Any) -> None:
+    entities_only = adapter.extract([Item(text=_RELEX_TEXT)], labels=_NER_LABELS)
+    assert entities_only.relations is None
+    assert {e["text"] for e in entities_only.entities[0]} >= {"Steve Jobs", "Apple"}
+
+    # relation_threshold 0.7 matches the served default.
+    output = adapter.extract(
+        [Item(text=_RELEX_TEXT)],
+        labels=_NER_LABELS,
+        options={"relation_labels": _RELEX_RELATIONS, "relation_threshold": 0.7},
+    )
+    assert output.relations is not None
+    entity_texts = {e["text"] for e in output.entities[0]}
+    triples = {(r["head"], r["relation"], r["tail"]) for r in output.relations[0]}
+    assert ("Steve Jobs", "founded", "Apple") in triples
+    assert all(r["head"] in entity_texts and r["tail"] in entity_texts for r in output.relations[0])
+
+
+def test_knowledgator_gliner_relex_large_v1_0_extract() -> None:
+    _assert_relex(_get_adapter("knowledgator/gliner-relex-large-v1.0"))
+
+
 def test_knowledgator_modern_gliner_bi_base_v1_0_extract() -> None:
     _assert_extract("knowledgator/modern-gliner-bi-base-v1.0", _NER_LABELS, ["location", "organization", "person"])
 

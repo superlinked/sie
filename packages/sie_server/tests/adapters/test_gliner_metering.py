@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from sie_server.adapters.gliner import GLiNERAdapter
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 
 
 class FakeEncoding:
@@ -142,7 +142,7 @@ def test_extract_rejects_blank_document_before_inference() -> None:
 def test_extract_rejects_prompt_that_leaves_no_document_subword() -> None:
     adapter = adapter_with_processor(FakeProcessor(tokenizer_word_limit=4))
 
-    with pytest.raises(ValueError, match="leaves no document tokens"):
+    with pytest.raises(InvalidInputError, match="leaves no document tokens"):
         adapter.extract([Item(text="represented")], labels=["entity"])
 
     adapter._model.inference.assert_not_called()

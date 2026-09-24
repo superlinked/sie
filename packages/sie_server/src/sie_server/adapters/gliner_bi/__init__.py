@@ -1,6 +1,8 @@
 import logging
+import math
 import threading
 from collections import OrderedDict
+from numbers import Real
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -10,15 +12,28 @@ from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import ExtractOutput
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 from sie_server.types.responses import Entity
 
 logger = logging.getLogger(__name__)
 
 _ERR_REQUIRES_LABELS = "GLiNER-bi requires labels parameter for extraction"
+_ERR_NO_RELATIONS = "GLiNER bi-encoder models do not extract relations; options.relation_labels is not supported"
 
 # Maximum number of distinct label-set embeddings to cache.
 _LABEL_CACHE_MAX_SIZE = 64
+
+
+def _validate_threshold(value: Any) -> None:
+    message = "GLiNER-bi threshold must be a finite number between 0 and 1"
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise InvalidInputError(message)
+    try:
+        threshold = float(value)
+    except OverflowError as exc:
+        raise InvalidInputError(message) from exc
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise InvalidInputError(message)
 
 
 class GLiNERBiAdapter(BaseAdapter):
@@ -187,11 +202,15 @@ class GLiNERBiAdapter(BaseAdapter):
         self._check_loaded()
 
         if not labels:
-            raise ValueError(_ERR_REQUIRES_LABELS)
+            raise InvalidInputError(_ERR_REQUIRES_LABELS)
+
+        opts = options or {}
+        if opts.get("relation_labels"):
+            raise InvalidInputError(_ERR_NO_RELATIONS)
+        _validate_threshold(opts.get("threshold", self._threshold))
 
         texts = [self._extract_text(item) for item in items]
 
-        opts = options or {}
         effective_threshold = opts.get("threshold", self._threshold)
         effective_flat_ner = opts.get("flat_ner", self._flat_ner)
         effective_multi_label = opts.get("multi_label", self._multi_label)
@@ -292,5 +311,5 @@ class GLiNERBiAdapter(BaseAdapter):
     def _extract_text(self, item: Item) -> str:
         """Extract text from an item."""
         if item.text is None:
-            raise ValueError(ERR_REQUIRES_TEXT.format(adapter_name="GLiNER-bi adapter"))
+            raise InvalidInputError(ERR_REQUIRES_TEXT.format(adapter_name="GLiNER-bi adapter"))
         return item.text
